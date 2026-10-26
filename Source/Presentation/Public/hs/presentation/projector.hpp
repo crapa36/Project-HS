@@ -2,7 +2,7 @@
 
 #include <hs/core/input.hpp>
 #include <hs/core/presentation_event.hpp>
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/domain_signal.hpp>
 #include <hs/game_domain/tick_read_view.hpp>
@@ -108,13 +108,15 @@ class EnemyAnimationState
     [[nodiscard]] std::optional<Float3> ReleaseDirection(std::uint64_t id) const;
     [[nodiscard]] std::optional<float> CancelProgress(std::uint64_t id) const;
     [[nodiscard]] std::span<const DeathPose> DeathPoses() const { return deaths_; }
+    [[nodiscard]] Sequence PlayerMotionEpoch() const noexcept { return player_motion_epoch_; }
 
   private:
     struct LivingPose { std::int32_t health{}; std::optional<Tick> recoil; std::optional<Tick> release; Float3 release_direction{}; bool seen{}; bool attacking{}; Tick attack_started{}, attack_resolve{}; std::optional<Tick> cancel_started; float cancel_progress{}; bool attack_recoil{}; };
     std::unordered_map<std::uint64_t, LivingPose> living_;
     std::vector<DeathPose> deaths_;
     Tick tick_{};
-    std::uint64_t seed_{};
+    std::uint64_t seed_{}, session_id_{};
+    Sequence player_motion_epoch_{};
     SessionPhase phase_{};
     bool initialized_{};
 };
@@ -127,6 +129,17 @@ class EnemyAnimationState
                                                  const SettingsData &settings,
                                                  Float2 cursor_normalized,
                                                  const GraphicsSettingsUiModel *graphics_ui = nullptr);
+[[nodiscard]] bool ProjectDynamicTick(const TickReadView &model,
+                                      RenderSnapshotStorage &snapshot,
+                                      std::shared_ptr<const StaticRenderScene> environment_scene,
+                                      const EnemyAnimationState *enemy_animations = nullptr);
+[[nodiscard]] bool ProjectTickUi(const TickReadView &model,
+                                 const PresentationCatalog &presentation,
+                                 const PresentationUiState &ui,
+                                 const SettingsData &settings,
+                                 RenderSnapshotStorage &snapshot,
+                                 std::uint8_t pending_rebind_slot = 0xFF,
+                                 const GraphicsSettingsUiModel *graphics_ui = nullptr);
 [[nodiscard]] bool ProjectTick(const TickReadView &model,
                                          const PresentationCatalog &presentation,
                                          const PresentationUiState &ui,

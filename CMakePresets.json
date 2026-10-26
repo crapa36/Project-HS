@@ -166,7 +166,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
+          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta|scene-sample)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {

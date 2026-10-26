@@ -5,12 +5,13 @@ namespace hs
 {
 
 Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_config,
-                                                  AllocationResource &lut)
+                                                  AllocationResource &lut,
+                                                  std::vector<AllocationResource> *upload_batch)
 {
     constexpr UINT extent = 128;
     constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    std::filesystem::path path;
-    if (auto resolved = lut_config.ResolveProduct("render/lighting/coated_ggx_dfg.dds", path);
+    RendererAssetSource path;
+    if (auto resolved = ResolveRendererAsset(lut_config, "render/lighting/coated_ggx_dfg.dds", path);
         !resolved) return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
@@ -27,8 +28,12 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
     }
     catch (const std::exception &error)
     { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
-    auto result = device.As(&environment_brdf_init_device);
-    if (FAILED(result)) return HResultFailure("Query BSDF initialization device", result);
+    HRESULT result = S_OK;
+    if (!upload_batch)
+    {
+        result = device.As(&environment_brdf_init_device);
+        if (FAILED(result)) return HResultFailure("Query BSDF initialization device", result);
+    }
 
     D3D12_RESOURCE_DESC texture{};
     texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -63,10 +68,13 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
     upload.resource->Unmap(0, nullptr);
 
     // Staging survives a failed drain; the immutable texture survives resize.
-    result = frames[0].allocator->Reset();
-    if (FAILED(result)) return HResultFailure("Reset BSDF integration allocator", result);
-    result = command_list->Reset(frames[0].allocator.Get(), nullptr);
-    if (FAILED(result)) return HResultFailure("Reset BSDF integration list", result);
+    if (!upload_batch)
+    {
+        result = frames[0].allocator->Reset();
+        if (FAILED(result)) return HResultFailure("Reset BSDF integration allocator", result);
+        result = command_list->Reset(frames[0].allocator.Get(), nullptr);
+        if (FAILED(result)) return HResultFailure("Reset BSDF integration list", result);
+    }
     if (enhanced)
         TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST,
             D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST);
@@ -81,6 +89,13 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
     TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    if (upload_batch)
+    {
+        upload_batch->push_back(std::move(upload));
+        lut.graph_access = Access::AllShaderRead;
+        lut.graph_queue = QueueHint::Direct;
+        return Result::Success();
+    }
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close BSDF integration list", result);
     environment_brdf_init_upload = std::move(upload);

@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -20,6 +21,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
+std::atomic<std::uint64_t> g_local_probe_generation{};
 constexpr std::array<std::string_view,2> kShaders{"render/shader/local_probe_sh_cs.dxil","render/shader/local_probe_ggx_cs.dxil"};
 constexpr std::uint32_t kBakeSrvCount=6;
 Result Failure(ErrorCode code,std::string message)
@@ -105,6 +107,7 @@ struct LocalProbeStorage
     ComPtr<ID3D12RootSignature> root; std::array<ComPtr<ID3D12PipelineState>,2> pipelines;
     CubeUpload raw_upload,ggx_upload,distance_upload;
     std::uint64_t sh_offset{},record_offset{},disabled_offset{},bytes{};
+    std::uint64_t generation{};
     std::uint32_t mip_count{},srv_stride{},rtv_stride{},captured_views{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
@@ -346,6 +349,7 @@ Result LocalProbeSystem::Commit(LocalProbeCandidate &&candidate,const Completion
     if(!candidate.storage_) return Failure(ErrorCode::InvalidArgument,"Local probe candidate is empty.");
     if(impl_->pending.graph || (impl_->storage && !impl_->storage->completion.IsSatisfiedBy(completed)))
         return Failure(ErrorCode::InvalidState,"Local probe replacement requires completed graph/resource leases.");
+    candidate.storage_->generation=g_local_probe_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->storage=std::move(candidate.storage_); return Result::Success();
 }
 
@@ -363,6 +367,7 @@ Result LocalProbeSystem::PrepareCapture(const ShaderReader &reader,const Complet
     for(auto *r:{&s->raw,&s->ggx,&s->sh,&s->distance,&s->records,&s->disabled_records,&s->depth,&s->upload,&s->constants})
         if(r->allocation) s->bytes+=r->allocation->GetSize();
     s->usable=true;
+    s->generation=g_local_probe_generation.fetch_add(1,std::memory_order_relaxed)+1;
     return Result::Success();
 }
 
@@ -542,62 +547,206 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
     return Result::Success();
 }
 
+Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,LocalProbeFramePlan &plan) const
+{
+    plan={};const auto s=impl_->storage;
+    if(!s||impl_->pending.graph||!s->usable)
+        return Failure(ErrorCode::InvalidState,"Local probes are unprepared, pending or require reset after failed submission.");
+    if((in.scene&&!ValidRevisions(in.revisions))||in.max_cube_views>6||
+        (!in.scene&&(in.max_cube_views||in.draw_static||in.revisions.environment||in.revisions.material||
+            in.revisions.light||in.revisions.static_layout)))
+        return Failure(ErrorCode::InvalidArgument,"Local probe record plan requires an immutable scene and at most six cube views.");
+    if(in.max_cube_views&&in.draw_static&&(in.scene_reads.empty()||!s->capture_ready))
+        return Failure(ErrorCode::InvalidState,"Local probe capture needs prepared resources and scene reads.");
+    for(const auto &read:in.scene_reads)
+        if(!read.version.resource||read.access==Access::Undefined||read.access==Access::Common||
+            read.access==Access::RenderTarget||read.access==Access::DepthWrite||
+            read.access==Access::UnorderedWrite||read.access==Access::CopyDest)
+            return Failure(ErrorCode::InvalidArgument,"Local probe scene dependency is not a valid graph read.");
+    plan.source=&in;plan.storage_generation=s->generation;
+    plan.requested_scene=in.scene;plan.requested_revisions=in.revisions;
+    plan.completed=in.completed;plan.max_cube_views=in.max_cube_views;
+    plan.scene_reads=in.scene_reads.data();plan.scene_read_count=in.scene_reads.size();
+    plan.draw_requested=bool(in.draw_static);plan.sampling_requested=bool(in.declare_material_sampling);
+    plan.before_scene=s->scene;plan.before_revisions=s->revisions;
+    plan.before_captured=s->captured_views;plan.before_uploaded=s->uploaded;
+    plan.before_bake_submitted=s->bake_submitted;plan.before_published=s->published;
+    plan.scene=s->scene;plan.revisions=s->revisions;
+    plan.capture_first=s->captured_views;plan.bake_submitted=s->bake_submitted;
+    plan.published=s->published;
+    if(!in.scene)
+    {
+        plan.published=false;
+        if(s->capture_completion.IsSatisfiedBy(in.completed))
+        {plan.scene.reset();plan.revisions={};plan.capture_first=0;plan.bake_submitted=false;}
+    }
+    if(plan.scene!=in.scene||plan.revisions!=in.revisions)
+    {
+        plan.published=false;
+        if(s->capture_completion.IsSatisfiedBy(in.completed))
+        {
+            const bool initial=!plan.scene;
+            plan.scene=in.scene;plan.revisions=in.revisions;
+            plan.capture_first=0;plan.bake_submitted=false;
+            if(initial&&s->package_baked&&s->description.revisions==in.revisions)
+                plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
+        }
+    }
+    if(in.scene&&plan.bake_submitted&&plan.scene==in.scene&&plan.revisions==in.revisions&&
+        s->bake_completion.IsSatisfiedBy(in.completed))plan.published=true;
+    plan.current=plan.scene==in.scene&&plan.revisions==in.revisions;
+    const auto total=static_cast<std::uint32_t>(s->probes.size()*6);
+    if(plan.current&&!plan.published&&!plan.bake_submitted&&plan.capture_first<total&&
+        in.max_cube_views&&in.draw_static)
+        plan.capture_count=std::min(in.max_cube_views,total-plan.capture_first);
+    plan.integrate=plan.capture_count&&
+        (plan.capture_first+plan.capture_count)/6>plan.capture_first/6;
+    plan.upload=!s->uploaded;
+    plan.import_cubes=plan.upload||plan.capture_count||(plan.published&&plan.current);
+    plan.finished_bake=(plan.upload&&plan.capture_first==total)||
+        (plan.integrate&&plan.capture_first+plan.capture_count==total);
+    plan.material_sampling=plan.capture_count&&bool(in.draw_static)&&bool(in.declare_material_sampling);
+    plan.valid=true;return Result::Success();
+}
 Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInputs &in,LocalProbeOutputs &out)
+{
+    LocalProbeFramePlan plan;
+    if(auto prepared=PrepareFrameRecordData(in,plan);!prepared)return prepared;
+    return RegisterImpl(graph,in,plan,out,nullptr,nullptr);
+}
+Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInputs &in,
+    const LocalProbeFramePlan &plan,LocalProbeOutputs &out,LocalProbeLayout *layout)
+{return RegisterImpl(graph,in,plan,out,layout,nullptr);}
+bool LocalProbeSystem::MatchesLayout(const LocalProbeInputs &in,const LocalProbeFramePlan &plan,
+    const LocalProbeLayout &layout) const noexcept
+{
+    const auto s=impl_->storage;
+    if(!s||!s->usable||!plan.valid||plan.source!=&in||plan.storage_generation!=s->generation||
+        plan.requested_scene!=in.scene||plan.requested_revisions!=in.revisions||
+        plan.max_cube_views!=in.max_cube_views||plan.scene_reads!=in.scene_reads.data()||
+        plan.scene_read_count!=in.scene_reads.size()||
+        plan.draw_requested!=bool(in.draw_static)||
+        plan.sampling_requested!=bool(in.declare_material_sampling)||
+        plan.completed.direct!=in.completed.direct||plan.completed.compute!=in.completed.compute||
+        plan.completed.copy!=in.completed.copy||
+        layout.storage_generation!=s->generation||layout.upload!=plan.upload||
+        layout.package_baked!=s->package_baked||layout.import_cubes!=plan.import_cubes||
+        layout.integrate!=plan.integrate||layout.material_sampling!=plan.material_sampling||
+        layout.published!=(plan.published&&plan.current)||layout.finished_bake!=plan.finished_bake||
+        layout.capture_first!=plan.capture_first||layout.capture_count!=plan.capture_count||
+        layout.scene_reads.size()!=in.scene_reads.size())return false;
+    for(std::size_t i=0;i<in.scene_reads.size();++i)
+        if(layout.scene_reads[i].version!=in.scene_reads[i].version||
+            layout.scene_reads[i].access!=in.scene_reads[i].access)return false;
+    return true;
+}
+Result LocalProbeSystem::BindRetained(RenderGraphBuilder &graph,const LocalProbeInputs &in,
+    const LocalProbeFramePlan &plan,const LocalProbeLayout &layout,LocalProbeOutputs &out)
+{return RegisterImpl(graph,in,plan,out,nullptr,&layout);}
+Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbeInputs &in,
+    const LocalProbeFramePlan &plan,LocalProbeOutputs &out,LocalProbeLayout *layout,
+    const LocalProbeLayout *retained)
 {
     out={}; auto s=impl_->storage;
     if(!s || impl_->pending.graph || !s->usable) return Failure(ErrorCode::InvalidState,"Local probes are unprepared, pending or require reset after failed submission.");
-    if((in.scene && !ValidRevisions(in.revisions)) || in.max_cube_views>6 ||
-        (!in.scene && (in.max_cube_views || in.draw_static || in.revisions.environment || in.revisions.material ||
-            in.revisions.light || in.revisions.static_layout)))
-        return Failure(ErrorCode::InvalidArgument,"Local probe registration needs an immutable scene, revisions and at most six cube views.");
-    if(in.max_cube_views && in.draw_static && in.scene_reads.empty())
-        return Failure(ErrorCode::InvalidArgument,"Native local probe capture requires explicit actual scene graph reads.");
-    if(in.max_cube_views && in.draw_static && !s->capture_ready)
-        return Failure(ErrorCode::InvalidState,"Native local probe capture resources are not prepared.");
-    for(const auto &read:in.scene_reads) if(!read.version.resource || read.access==Access::Undefined || read.access==Access::Common ||
-        read.access==Access::RenderTarget || read.access==Access::DepthWrite || read.access==Access::UnorderedWrite || read.access==Access::CopyDest)
-        return Failure(ErrorCode::InvalidArgument,"Local probe scene dependency is not a valid graph read.");
-    if(!in.scene)
+    if(!plan.valid||plan.source!=&in||plan.storage_generation!=s->generation||
+        plan.requested_scene!=in.scene||plan.requested_revisions!=in.revisions||
+        plan.max_cube_views!=in.max_cube_views||plan.scene_reads!=in.scene_reads.data()||
+        plan.scene_read_count!=in.scene_reads.size()||
+        plan.draw_requested!=bool(in.draw_static)||
+        plan.sampling_requested!=bool(in.declare_material_sampling)||
+        plan.completed.direct!=in.completed.direct||plan.completed.compute!=in.completed.compute||
+        plan.completed.copy!=in.completed.copy||
+        s->scene!=plan.before_scene||s->revisions!=plan.before_revisions||
+        s->captured_views!=plan.before_captured||s->uploaded!=plan.before_uploaded||
+        s->bake_submitted!=plan.before_bake_submitted||s->published!=plan.before_published)
+        return Failure(ErrorCode::InvalidState,"Local probe prepared frame record changed before registration.");
+    if(retained)
     {
-        s->published=false;
-        if(s->capture_completion.IsSatisfiedBy(in.completed))
-        { s->scene.reset(); s->revisions={}; s->captured_views=0; s->bake_submitted=false; }
-    }
-    const bool same=s->scene==in.scene && s->revisions==in.revisions;
-    if(!same)
-    {
-        s->published=false;
-        if(s->capture_completion.IsSatisfiedBy(in.completed))
+        if(!MatchesLayout(in,plan,*retained))
+            return Failure(ErrorCode::InvalidState,"Local probe retained topology changed.");
+        std::array<UINT,9> ids{};UINT count{};
+        if(plan.upload)ids[count++]=186;
+        for(UINT i=0;i<plan.capture_count;++i)ids[count++]=180+i;
+        if(plan.integrate){ids[count++]=187;ids[count++]=188;}
+        if(count!=retained->pass_count)return Failure(ErrorCode::InvalidState,"Local probe retained pass count changed.");
+        for(UINT i=0;i<count;++i)
+            if(retained->passes[i].id!=ids[i]||!graph.BindPass(retained->passes[i].index,ids[i]))
+                return Failure(ErrorCode::InvalidState,"Local probe retained pass sequence changed.");
+        const UINT imports=1+(plan.import_cubes?5:0)+(plan.upload?1:0)+(plan.capture_count?1:0);
+        for(UINT i=0;i<imports;++i)
+            if(!retained->imports[i]||retained->imports[i].value>graph.ResourceCount())
+                return Failure(ErrorCode::InvalidState,"Local probe retained import slot changed.");
+        UINT import_cursor=1;
+        if(retained->imports[0].kind!=ResourceKind::Buffer)
+            return Failure(ErrorCode::InvalidState,"Local probe metadata import type changed.");
+        if(plan.import_cubes)
         {
-            const bool initial=!s->scene;
-            s->scene=in.scene; s->revisions=in.revisions; s->captured_views=0; s->bake_submitted=false;
-            if(initial && s->package_baked && s->description.revisions==in.revisions)
-                s->captured_views=static_cast<std::uint32_t>(s->probes.size()*6);
+            for(auto kind:{ResourceKind::Texture,ResourceKind::Texture,ResourceKind::Buffer,
+                    ResourceKind::Texture,ResourceKind::Buffer})
+                if(retained->imports[import_cursor++].kind!=kind)
+                    return Failure(ErrorCode::InvalidState,"Local probe cube import type changed.");
         }
+        if(plan.upload&&retained->imports[import_cursor++].kind!=ResourceKind::Buffer)
+            return Failure(ErrorCode::InvalidState,"Local probe staging import type changed.");
+        if(plan.capture_count&&retained->imports[import_cursor].kind!=ResourceKind::Texture)
+            return Failure(ErrorCode::InvalidState,"Local probe depth import type changed.");
     }
-    if(in.scene && s->bake_submitted && s->scene==in.scene && s->revisions==in.revisions && s->bake_completion.IsSatisfiedBy(in.completed)) s->published=true;
-    Impl::Pending pending; pending.graph=&graph; pending.storage=s; pending.scene=s->scene; pending.revisions=s->revisions;
-    pending.captured_views=s->captured_views; pending.upload=!s->uploaded;
-    auto import=[&](AllocationResource &r,std::string_view name) {
-        const auto h=r.resource->GetDesc().Dimension==D3D12_RESOURCE_DIMENSION_BUFFER ?
-            graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name) :
-            graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name);
+    if(layout){*layout={};layout->storage_generation=s->generation;
+        layout->capture_first=plan.capture_first;layout->capture_count=plan.capture_count;
+        layout->upload=plan.upload;layout->package_baked=s->package_baked;
+        layout->import_cubes=plan.import_cubes;layout->integrate=plan.integrate;
+        layout->material_sampling=plan.material_sampling;
+        layout->published=plan.published&&plan.current;
+        layout->finished_bake=plan.finished_bake;
+        layout->scene_reads.assign(in.scene_reads.begin(),in.scene_reads.end());}
+    Impl::Pending pending;pending.graph=&graph;pending.storage=s;
+    pending.scene=plan.scene;pending.revisions=plan.revisions;
+    pending.captured_views=plan.capture_first;pending.upload=plan.upload;
+    for(auto *resource:{&s->disabled_records,&s->raw,&s->ggx,&s->sh,&s->distance,
+            &s->records,&s->upload,&s->depth})
+        if(resource->resource)
+            if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
+    UINT import_index{},pass_index{};bool imports_valid=true;
+    auto import=[&](AllocationResource &r,std::string_view name,bool buffer) {
+        const UINT index=import_index++;
+        const auto h=retained?retained->imports[index]:
+            (buffer?graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name):
+                graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name));
+        if(retained)imports_valid&=buffer?
+            graph.BindBuffer(h,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access):
+            graph.BindTexture(h,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access);
+        if(layout)layout->imports[index]=h;
         pending.imports.push_back({&r,h}); return graph.Version(h);
     };
-    auto disabled=import(s->disabled_records,"LocalProbe.ZeroCountMetadata");
-    ResourceVersion raw{},ggx{},sh{},distance{},records{};
+    const auto make_pass=[&](UINT id,std::string_view name)
+    {
+        const UINT index=pass_index++;
+        if(layout)layout->passes[index]={graph.PassCount(),id};
+        return retained?*graph.BindPass(retained->passes[index].index,id):
+            graph.AddPass(id,name,QueueHint::Direct);
+    };
+    const auto write=[&](PassBuilder &pass,ResourceVersion v,Access access)
+    {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access);};
+    const auto writeTexture=[&](PassBuilder &pass,ResourceVersion v,Access access,TextureSubresourceRange range)
+    {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access,range);};
+    const auto writeBuffer=[&](PassBuilder &pass,ResourceVersion v,Access access,BufferRange range)
+    {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access,range);};
+    auto disabled=import(s->disabled_records,"LocalProbe.ZeroCountMetadata",true);
+    ResourceVersion raw{},ggx{},sh{},distance{},records{},depth{};
     auto importCubes=[&]() {
         if(raw.resource) return;
-        raw=import(s->raw,"LocalProbe.RawRadiance"); ggx=import(s->ggx,"LocalProbe.GgxRadiance");
-        sh=import(s->sh,"LocalProbe.CosineSh9"); distance=import(s->distance,"LocalProbe.FirstHitDistance");
-        records=import(s->records,"LocalProbe.Records");
+        raw=import(s->raw,"LocalProbe.RawRadiance",false); ggx=import(s->ggx,"LocalProbe.GgxRadiance",false);
+        sh=import(s->sh,"LocalProbe.CosineSh9",true); distance=import(s->distance,"LocalProbe.FirstHitDistance",false);
+        records=import(s->records,"LocalProbe.Records",true);
     };
-    if(!s->uploaded)
+    if(plan.upload)
     {
-        importCubes(); const auto upload=import(s->upload,"LocalProbe.ImmutableStaging");
-        auto pass=graph.AddPass(186,"LocalProbePackageUpload",QueueHint::Direct); pass.Read(upload,Access::CopySource);
-        records=pass.Write(records,Access::CopyDest); disabled=pass.Write(disabled,Access::CopyDest);
-        if(s->package_baked) { raw=pass.Write(raw,Access::CopyDest); ggx=pass.Write(ggx,Access::CopyDest); sh=pass.Write(sh,Access::CopyDest); distance=pass.Write(distance,Access::CopyDest); }
+        importCubes();const auto upload=import(s->upload,"LocalProbe.ImmutableStaging",true);
+        auto pass=make_pass(186,"LocalProbePackageUpload");if(!retained)pass.Read(upload,Access::CopySource);
+        records=write(pass,records,Access::CopyDest);disabled=write(pass,disabled,Access::CopyDest);
+        if(s->package_baked){raw=write(pass,raw,Access::CopyDest);ggx=write(pass,ggx,Access::CopyDest);
+            sh=write(pass,sh,Access::CopyDest);distance=write(pass,distance,Access::CopyDest);}
         pass.SetExecuteChecked([s](RenderPassContext &context) {
             auto *c=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList()); if(!c) return Failure(ErrorCode::InvalidState,"Local probe upload requires a native list.");
             c->CopyBufferRegion(s->records.resource.Get(),0,s->upload.resource.Get(),s->record_offset,s->probes.size()*kLocalProbeGpuRecordStride);
@@ -617,28 +766,31 @@ Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInpu
             }
             return Result::Success();
         });
-        if(s->captured_views==s->probes.size()*6) pending.finished_bake=true;
+        if(plan.finished_bake)pending.finished_bake=true;
     }
-    const bool current=s->scene==in.scene && s->revisions==in.revisions;
-    s->current_request=current;
-    if(current && !s->published && !s->bake_submitted && s->captured_views<s->probes.size()*6 &&
-        in.max_cube_views && in.draw_static)
+    const bool current=plan.current;
+    if(plan.capture_count)
     {
-        importCubes(); auto depth=import(s->depth,"LocalProbe.CaptureDepth");
-        const auto count=std::min(in.max_cube_views,static_cast<std::uint32_t>(s->probes.size()*6)-s->captured_views);
+        importCubes();depth=import(s->depth,"LocalProbe.CaptureDepth",false);
+        const auto count=plan.capture_count;
         for(std::uint32_t i=0;i<count;++i)
         {
-            const auto flat=s->captured_views+i,probe=flat/6,face=flat%6;
-            auto view=CaptureView(s->scene,s->revisions,s->probes[probe],probe,face,s->description.edge);
+            const auto flat=plan.capture_first+i,probe=flat/6,face=flat%6;
+            auto view=CaptureView(plan.scene,plan.revisions,s->probes[probe],probe,face,s->description.edge);
             view.radiance_resource=s->raw.resource.Get(); view.distance_resource=s->distance.resource.Get(); view.depth_resource=s->depth.resource.Get();
             view.radiance_rtv=s->Cpu(s->rtvs.Get(),flat*2,s->rtv_stride); view.distance_rtv=s->Cpu(s->rtvs.Get(),flat*2+1,s->rtv_stride);
             view.depth_dsv=s->dsv->GetCPUDescriptorHandleForHeapStart();
-            auto pass=graph.AddPass(180+i,"LocalProbeStaticCubeCapture",QueueHint::Direct);
-            for(const auto &read:in.scene_reads) pass.Read(read.version,read.access);
-            if(in.draw_static && in.declare_material_sampling) in.declare_material_sampling(pass);
-            pass.Read(disabled,Access::AllShaderRead);
-            const TextureSubresourceRange range{0,1,flat,1,0,1}; raw=pass.Write(raw,Access::RenderTarget,range);
-            distance=pass.Write(distance,Access::RenderTarget,range); depth=pass.Write(depth,Access::DepthWrite);
+            auto pass=make_pass(180+i,"LocalProbeStaticCubeCapture");
+            if(!retained)
+            {
+                for(const auto &read:in.scene_reads)pass.Read(read.version,read.access);
+                if(plan.material_sampling)in.declare_material_sampling(pass);
+                pass.Read(disabled,Access::AllShaderRead);
+            }
+            const TextureSubresourceRange range{0,1,flat,1,0,1};
+            raw=writeTexture(pass,raw,Access::RenderTarget,range);
+            distance=writeTexture(pass,distance,Access::RenderTarget,range);
+            depth=write(pass,depth,Access::DepthWrite);
             pass.SetExecuteChecked([s,view,draw=in.draw_static](RenderPassContext &context) {
                 auto *c=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList()); if(!c) return Failure(ErrorCode::InvalidState,"Local probe capture requires native commands.");
                 const float clearRadiance[4]{0,0,0,1},clearDistance[4]{view.far_distance,0,0,0};
@@ -653,21 +805,23 @@ Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInpu
         // At most one probe finishes within a six-view budget. Convolve that
         // probe now rather than issuing an unbounded all-probe filter burst at
         // the end of the generation. Every cube/SH output stays unpublished.
-        if(pending.captured_views/6>s->captured_views/6)
+        if(plan.integrate)
         {
             const auto finishedProbe=pending.captured_views/6-1;
             const TextureSubresourceRange rawRange{0,1,finishedProbe*6,6,0,1},ggxRange{0,s->mip_count,finishedProbe*6,6,0,1};
             const auto constantBase=UINT64(finishedProbe)*s->mip_count*256;
-            auto shPass=graph.AddPass(187,"LocalProbeCosineShIntegration",QueueHint::Direct); shPass.Read(raw,Access::ComputeRead,rawRange);
-            sh=shPass.Write(sh,Access::UnorderedWrite,BufferRange{UINT64(finishedProbe)*9*16,9*16});
+            auto shPass=make_pass(187,"LocalProbeCosineShIntegration");
+            if(!retained)shPass.Read(raw,Access::ComputeRead,rawRange);
+            sh=writeBuffer(shPass,sh,Access::UnorderedWrite,BufferRange{UINT64(finishedProbe)*9*16,9*16});
             shPass.SetExecuteChecked([s,constantBase](RenderPassContext &context) {
                 auto *c=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList()); if(!c) return Failure(ErrorCode::InvalidState,"Local probe SH integration requires native commands.");
                 ID3D12DescriptorHeap *heaps[]{s->bake_descriptors.Get()}; c->SetDescriptorHeaps(1,heaps); c->SetComputeRootSignature(s->root.Get()); c->SetPipelineState(s->pipelines[0].Get());
                 c->SetComputeRootConstantBufferView(0,s->constants.resource->GetGPUVirtualAddress()+constantBase); c->SetComputeRootDescriptorTable(1,s->Gpu(0)); c->SetComputeRootDescriptorTable(2,s->Gpu(kBakeSrvCount));
                 c->Dispatch(9,1,1); return Result::Success();
             });
-            auto ggxPass=graph.AddPass(188,"LocalProbeGgxPrefilter",QueueHint::Direct); ggxPass.Read(raw,Access::ComputeRead,rawRange);
-            ggx=ggxPass.Write(ggx,Access::UnorderedWrite,ggxRange);
+            auto ggxPass=make_pass(188,"LocalProbeGgxPrefilter");
+            if(!retained)ggxPass.Read(raw,Access::ComputeRead,rawRange);
+            ggx=writeTexture(ggxPass,ggx,Access::UnorderedWrite,ggxRange);
             ggxPass.SetExecuteChecked([s,constantBase](RenderPassContext &context) {
                 auto *c=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList()); if(!c) return Failure(ErrorCode::InvalidState,"Local probe GGX integration requires native commands.");
                 ID3D12DescriptorHeap *heaps[]{s->bake_descriptors.Get()}; c->SetDescriptorHeaps(1,heaps); c->SetComputeRootSignature(s->root.Get()); c->SetPipelineState(s->pipelines[1].Get()); c->SetComputeRootDescriptorTable(1,s->Gpu(0));
@@ -681,12 +835,12 @@ Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInpu
             }); pending.finished_bake=pending.captured_views==s->probes.size()*6;
         }
     }
-    graph.SetFinalAccess(disabled,Access::AllShaderRead);
+    if(!retained)graph.SetFinalAccess(disabled,Access::AllShaderRead);
     for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(5+i);
     out.records=disabled; out.record_resource=s->disabled_records.resource.Get(); out.revisions=in.revisions;
     out.edge=s->description.edge; out.mip_count=s->mip_count; out.total_cube_views=static_cast<std::uint32_t>(s->probes.size()*6);
-    out.captured_cube_views=pending.captured_views; out.update_pending=!s->published;
-    if(s->published && current)
+    out.captured_cube_views=pending.captured_views; out.update_pending=!plan.published;
+    if(plan.published && current)
     {
         importCubes(); out.radiance=raw; out.prefiltered=ggx; out.irradiance=sh; out.first_hit_distance=distance; out.records=records;
         out.radiance_resource=s->raw.resource.Get(); out.prefiltered_resource=s->ggx.resource.Get(); out.irradiance_resource=s->sh.resource.Get();
@@ -698,13 +852,21 @@ Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInpu
     {
         // Preserve exact final states of all capture/import resources across
         // bounded updates. They are never exported before full publication.
-        if(pending.finished_bake || s->published)
+        if(pending.finished_bake || plan.published)
         {
-            graph.SetFinalAccess(raw,Access::AllShaderRead); graph.SetFinalAccess(ggx,Access::AllShaderRead);
-            graph.SetFinalAccess(sh,Access::AllShaderRead); graph.SetFinalAccess(distance,Access::AllShaderRead);
+            if(!retained){graph.SetFinalAccess(raw,Access::AllShaderRead);graph.SetFinalAccess(ggx,Access::AllShaderRead);
+                graph.SetFinalAccess(sh,Access::AllShaderRead);graph.SetFinalAccess(distance,Access::AllShaderRead);}
         }
-        graph.SetFinalAccess(records,Access::AllShaderRead);
+        if(!retained)graph.SetFinalAccess(records,Access::AllShaderRead);
     }
+    if(!imports_valid)return Failure(ErrorCode::InvalidState,"Local probe retained binding changed.");
+    const std::array<ResourceVersion,7> final_versions{raw,ggx,sh,distance,records,disabled,depth};
+    if(retained&&retained->outputs!=final_versions)
+        return Failure(ErrorCode::InvalidState,"Local probe retained output versions changed.");
+    if(layout){layout->pass_count=pass_index;layout->outputs=final_versions;}
+    s->scene=plan.scene;s->revisions=plan.revisions;s->captured_views=plan.capture_first;
+    s->bake_submitted=plan.bake_submitted;s->published=plan.published;
+    s->current_request=current;
     impl_->pending=std::move(pending); return Result::Success();
 }
 

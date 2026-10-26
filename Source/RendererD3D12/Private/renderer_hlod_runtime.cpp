@@ -29,11 +29,10 @@ std::string HlodDigest(std::span<const std::byte> bytes)
 }
 std::string ProductDigest(const RendererConfig &config, const std::string &id)
 {
-    const auto found = config.product_digests.find(id);
-    if (found == config.product_digests.end() || found->second.size() != 71 ||
-        !found->second.starts_with("sha256:"))
+    const auto digest = RendererProductDigest(config, id);
+    if (digest.size() != 71 || !digest.starts_with("sha256:"))
         throw std::runtime_error("selected Generation omits HLOD product digest: " + id);
-    return found->second;
+    return digest;
 }
 std::uint32_t MaterialOrdinal(const render_data::SceneHlod &scene, const render_data::SceneHlodProxy &proxy)
 {
@@ -121,19 +120,19 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         next->logical_id = config.scene_hlod_product_id;
         next->content_generation = resource_generation_id;
         next->generation = runtime.generation;
-        std::filesystem::path path;
-        if (auto result = config.ResolveProduct(next->logical_id, path); !result) return result;
+        RendererAssetSource path;
+        if (auto result = ResolveRendererAsset(config, next->logical_id, path); !result) return result;
         std::vector<std::byte> bytes;
         if (auto result = ReadBinary(path, bytes); !result) return result;
-        if (HlodDigest(bytes) != ProductDigest(config, next->logical_id))
+        if (!path.pack && HlodDigest(bytes) != ProductDigest(config, next->logical_id))
             return HlodFailure("SHL1 bytes differ from selected Generation digest.");
         next->scene = render_data::DecodeSceneHlod(bytes);
         if (next->scene.scene_asset_id.value != MakeAssetId(next->logical_id).value)
             return HlodFailure("SHL1 scene asset identity differs from selected product.");
         for (const auto &dependency : next->scene.dependencies)
         {
-            std::filesystem::path resolved;
-            if (auto result = config.ResolveProduct(dependency, resolved); !result) return result;
+            RendererAssetSource resolved;
+            if (auto result = ResolveRendererAsset(config, dependency, resolved); !result) return result;
             (void)ProductDigest(config, dependency);
         }
         next->page_base = static_cast<std::uint32_t>(runtime.cpu.pages.size());
@@ -141,9 +140,9 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
             return HlodFailure("Shared HLOD page directory exceeds32-bit addressing.");
         for (const auto &page : next->scene.pages)
         {
-            std::filesystem::path resolved;
-            if (auto result = config.ResolveProduct(page.logical_id, resolved); !result) return result;
-            next->page_paths.push_back(std::move(resolved));
+            RendererAssetSource resolved;
+            if (auto result = ResolveRendererAsset(config, page.logical_id, resolved); !result) return result;
+            next->page_sources.push_back(std::move(resolved));
             next->page_digests.push_back(ProductDigest(config, page.logical_id));
         }
         for (const auto &proxy : next->scene.proxies)
@@ -179,20 +178,31 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
             // hierarchy roots provide the mandatory complete fallback.
             stream.pinned = false;
             stream.source_id = hlod.logical_id; stream.logical_id = page.logical_id;
-            stream.path = hlod.page_paths[local];
-            stream.decode = [owner = hlod_runtime.get(), local](std::span<const std::byte> payload, render_data::GeometryData &output) {
+            stream.source = hlod.page_sources[local];
+            stream.development_catalog = resident_development_catalog;
+            if (config.packed_content)
+            {
+                const auto handle = FindRendererGeometry(config, MakeAssetId(stream.logical_id));
+                if (!handle) return HlodFailure("Compiled HLOD page descriptor is missing.");
+                stream.compiled = config.packed_geometry[handle.value];
+            }
+            stream.decode = [owner = hlod_runtime.get(), local,
+                development_catalog = stream.development_catalog](std::span<const std::byte> payload, render_data::GeometryData &output) {
                 try
                 {
                     const auto &value = *owner;
                     const auto &entry = value.scene.pages.at(local);
                     if (HlodDigest(payload) != value.page_digests.at(local))
                         return HlodFailure("HLOD page differs from selected Generation digest.");
-                    const auto package = render_data::ReadPackage(payload, MakeAssetId(entry.logical_id));
+                    const auto package = render_data::ReadPackage(payload, MakeAssetId(entry.logical_id),
+                        render_data::PackageReadMode::GeometryDecoderValidatesVertices);
                     if (package.dependencies != value.scene.dependencies)
                         return HlodFailure("HLOD page dependencies differ from its scene directory.");
-                    auto geometry = render_data::DecodeGeometryPagePayload(payload,
-                        MakeAssetId(entry.logical_id), entry.geometry_flags);
+                    auto geometry = render_data::DecodeGeometryPagePayload(package, entry.geometry_flags);
                     render_data::ValidateSceneHlodPage(value.scene, local, geometry);
+                    if (development_catalog)
+                        static_cast<void>(development_catalog->AdmitGeometry(
+                            MakeAssetId(entry.logical_id), payload, package, geometry));
                     output = std::move(geometry);
                     return Result::Success();
                 }
@@ -321,8 +331,8 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
         }
         HlodCandidate candidate;
         const auto reader = [this](std::string_view id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto result = config.ResolveProduct(std::string(id), path); !result) return result;
+            RendererAssetSource path;
+            if (auto result = ResolveRendererAsset(config, std::string(id), path); !result) return result;
             return ReadBinary(path, bytes);
         };
         if (auto result = view.system.Prepare(device.Get(), allocator, runtime.scene,
@@ -460,21 +470,17 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot, std::uint32_t active_view_mask,
-    ResourceVersion geometry_records, ResourceVersion static_scene, ResourceVersion static_refs,
-    HlodFrameGraph &state)
+Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(std::uint32_t frame_slot,std::uint32_t active_view_mask,
+    ResourceVersion geometry_records,ResourceVersion static_scene,ResourceVersion proxy_refs,
+    HlodRuntimeFrameRecordData &record)
 {
-    if (active_view_mask != 1u && active_view_mask != 15u)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "HLOD active view mask must select the camera or all shadow views.");
-    static_cast<void>(static_refs);
-    auto *context = ActiveHlodView();
-    if (!context || !context->frames.at(frame_slot).enabled) return Result::Success();
-    auto &view = *context; auto &native = view.frames[frame_slot];
-    state.view = context;
-    state.refs = graph.ImportBuffer({native.refs.resource.Get(), native.refs.graph_completion, native.refs.graph_queue},
-        native.refs.graph_access, "HlodImmutableStaticRefs");
-    HlodFrameInputs inputs;
+    record={};record.inputs.frame_slot=frame_slot;record.inputs.active_view_mask=active_view_mask;
+    if(active_view_mask!=1u&&active_view_mask!=15u)
+        return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","HLOD active view mask must select camera or all shadow views.");
+    auto *context=ActiveHlodView();
+    if(!context||!context->frames.at(frame_slot).enabled)return Result::Success();
+    record.view=context;
+    auto &view=*context;auto &native=view.frames[frame_slot];auto &inputs=record.inputs;
     inputs.frame_slot = frame_slot; inputs.active_view_mask = active_view_mask;
     inputs.rendered_frame_id = native.frame_id; inputs.static_scene_generation = static_gpu_scene->instance_generation;
     const auto &owner = *owned_views.at(active_view_id.value);
@@ -488,28 +494,89 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot, std::ui
     inputs.completed = graph_queue_executor.Completed(); inputs.content_generation_id = resource_generation_id;
     inputs.layout_abi = view.matching_scene->layout_abi; inputs.layout_digest = view.matching_scene->eligible_layout_digest;
     inputs.members = native.members; inputs.proxies = native.bindings; inputs.buckets = native.buckets; inputs.views = native.views;
-    inputs.static_scene = {static_gpu_scene->instances.resource.Get(), static_scene};
-    inputs.geometry_records = {frames[frame_slot].geometry_draw_records.resource.Get(), geometry_records};
-    inputs.proxy_refs = {native.refs.resource.Get(), graph.Version(state.refs)};
-    if (auto result = view.system.Register(graph, inputs, state.outputs); !result) return result;
-    state.registered = true; native.registered = true; native.outputs = state.outputs;
-    auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    descriptor.ptr += static_cast<SIZE_T>(frame_slot * kTextureDescriptorCount + kHlodDescriptorOffset) * srv_stride;
-    for (const auto source : state.outputs.srvs)
+    inputs.static_scene = {static_gpu_scene->instances.resource.Get(), static_scene,static_gpu_scene->instances.NativeContract()};
+    inputs.geometry_records = {frames[frame_slot].geometry_draw_records.resource.Get(), geometry_records,frames[frame_slot].geometry_draw_records.NativeContract()};
+    inputs.proxy_refs = {native.refs.resource.Get(), proxy_refs,native.refs.NativeContract()};
+    return view.system.PrepareFrameRecordData(inputs,record.selection);
+}
+
+bool D3D12Renderer::Impl::MatchesHlodFrameLayout(const HlodRuntimeFrameRecordData &record,
+    const HlodRuntimeFrameLayout &layout)const noexcept
+{
+    const auto *view=ActiveHlodView();
+    if(!layout.valid||layout.active!=bool(record.view))return false;
+    if(!record.view)return !view||!view->frames[record.inputs.frame_slot].enabled;
+    return record.view==view&&view->frames[record.inputs.frame_slot].enabled&&
+        record.inputs.proxy_refs.version==ResourceVersion{layout.refs,0}&&
+        view->system.MatchesLayout(record.inputs,record.selection,layout.selection);
+}
+
+Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uint32_t active_view_mask,
+    ResourceVersion geometry_records,ResourceVersion static_scene,ResourceVersion static_refs,
+    HlodFrameGraph &state,HlodRuntimeFrameLayout *capture,HlodRuntimeFrameRecordData *prepared,
+    const HlodRuntimeFrameLayout *retained)
+{
+    static_cast<void>(static_refs);state={};if(capture)*capture={};
+    if(active_view_mask!=1u&&active_view_mask!=15u)
+        return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","HLOD active view mask must select camera or all shadow views.");
+    auto *context=ActiveHlodView();
+    const bool active=context&&context->frames.at(frame_slot).enabled;
+    if(retained&&(!retained->valid||retained->active!=active))
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained active topology changed.");
+    if(!active){if(capture)capture->valid=true;return Result::Success();}
+    auto &view=*context;auto &native=view.frames[frame_slot];state.view=context;
+    if(auto checked=native.refs.EnsureNativeContract(device.Get());!checked)return checked;
+    state.refs=retained?retained->refs:graph.ImportBuffer({native.refs.resource.Get(),native.refs.graph_completion,
+        native.refs.graph_queue,{},native.refs.NativeContract()},native.refs.graph_access,"HlodImmutableStaticRefs");
+    if(retained&&!graph.BindBuffer(state.refs,{native.refs.resource.Get(),native.refs.graph_completion,
+        native.refs.graph_queue,{},native.refs.NativeContract()},native.refs.graph_access))
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained static refs binding failed.");
+    HlodRuntimeFrameRecordData local;
+    if(!prepared)
     {
-        device->CopyDescriptorsSimple(1, descriptor, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        descriptor.ptr += srv_stride;
+        if(auto result=PrepareHlodFrameRecordData(frame_slot,active_view_mask,geometry_records,static_scene,graph.Version(state.refs),local);!result)return result;
+        prepared=&local;
     }
-    state.readback = graph.ImportBuffer({native.readback.resource.Get(), native.readback.graph_completion, native.readback.graph_queue},
-        native.readback.graph_access, "HlodDemandStatusReadback");
-    auto copy = graph.AddPass(196u, "HlodDemandStatusReadback", QueueHint::Copy);
-    copy.Read(state.outputs.page_demand, Access::CopySource); copy.Read(state.outputs.status, Access::CopySource);
-    (void)copy.Write(graph.Version(state.readback), Access::CopyDest);
-    copy.SetExecute([frame = &native, bytes = hlod_runtime->scene.pages.size() * 4ull](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        if (bytes) list->CopyBufferRegion(frame->readback.resource.Get(), 0, frame->outputs.resources[5], 0, bytes);
-        list->CopyBufferRegion(frame->readback.resource.Get(), bytes, frame->outputs.resources[6], 0, 64u);
+    if(prepared->view!=context||prepared->inputs.frame_slot!=frame_slot||prepared->inputs.active_view_mask!=active_view_mask)
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD prepared runtime frame changed.");
+    // Logical slots can be assigned cold after the CPU plan was prepared.
+    prepared->inputs.geometry_records.version=geometry_records;prepared->inputs.static_scene.version=static_scene;
+    prepared->inputs.proxy_refs.version=graph.Version(state.refs);
+    if(retained&&!MatchesHlodFrameLayout(*prepared,*retained))
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained runtime layout changed.");
+    auto result=retained?view.system.BindRetained(graph,prepared->inputs,prepared->selection,retained->selection,state.outputs):
+        view.system.Register(graph,prepared->inputs,state.outputs,capture?&capture->selection:nullptr,&prepared->selection);
+    if(!result)return result;
+    state.registered=true;native.registered=true;native.outputs=state.outputs;
+    auto descriptor=srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    descriptor.ptr+=static_cast<SIZE_T>(frame_slot*kTextureDescriptorCount+kHlodDescriptorOffset)*srv_stride;
+    for(const auto source:state.outputs.srvs)
+    {
+        device->CopyDescriptorsSimple(1,descriptor,source,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        descriptor.ptr+=srv_stride;
+    }
+    if(auto checked=native.readback.EnsureNativeContract(device.Get());!checked)return checked;
+    state.readback=retained?retained->readback:graph.ImportBuffer({native.readback.resource.Get(),native.readback.graph_completion,
+        native.readback.graph_queue,{},native.readback.NativeContract()},native.readback.graph_access,"HlodDemandStatusReadback");
+    if(retained&&!graph.BindBuffer(state.readback,{native.readback.resource.Get(),native.readback.graph_completion,
+        native.readback.graph_queue,{},native.readback.NativeContract()},native.readback.graph_access))
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained demand readback binding failed.");
+    if(capture)capture->copy_pass=graph.PassCount();
+    auto copyBinding=retained?graph.BindPass(retained->copy_pass,196u):
+        std::optional<PassBuilder>{graph.AddPass(196u,"HlodDemandStatusReadback",QueueHint::Copy)};
+    if(!copyBinding)return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained demand copy pass is missing.");
+    auto &copy=*copyBinding;
+    if(!retained)
+    {
+        copy.Read(state.outputs.page_demand,Access::CopySource);copy.Read(state.outputs.status,Access::CopySource);
+        (void)copy.Write(graph.Version(state.readback),Access::CopyDest);
+    }
+    copy.SetExecute([frame=&native,bytes=hlod_runtime->scene.pages.size()*4ull](RenderPassContext &context){
+        auto *list=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        if(bytes)list->CopyBufferRegion(frame->readback.resource.Get(),0,frame->outputs.resources[5],0,bytes);
+        list->CopyBufferRegion(frame->readback.resource.Get(),bytes,frame->outputs.resources[6],0,64u);
     });
+    if(capture){capture->valid=true;capture->active=true;capture->refs=state.refs;capture->readback=state.readback;}
     return Result::Success();
 }
 

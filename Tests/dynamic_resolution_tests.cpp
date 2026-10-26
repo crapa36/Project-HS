@@ -141,6 +141,171 @@ void TestOrdinaryRateAndIgnoredSamples()
     config.enabled = false;
     Check(!controller.Select(view, config, slow_sample).sample_accepted, "disabled DRS ignores timing");
 }
+
+DynamicResolutionSample SourceSample(const ViewState &view, std::uint64_t frame)
+{
+    DynamicResolutionSample sample;
+    sample.completed = true;
+    sample.metric_kind = DynamicResolutionMetricKind::SourceOutputReady;
+    sample.view_id = view.view_id;
+    sample.source_frame_id = frame;
+    sample.metric_generation = view.metric_generation;
+    sample.quality_generation = view.quality_generation;
+    sample.provider_generation = view.provider_generation;
+    sample.render_active = view.render_active;
+    sample.calibration_valid = true;
+    return sample;
+}
+
+void TestQualifiedSourceTiming()
+{
+    const GpuClockCalibrationEvidence clock{1000, 2000, 17000, 18000, 1'000'000, 1'000'000};
+    Check(QualifiedGpuClockInterval(clock, 2000, 16000),
+          "monotonic bracketing calibration qualifies a GPU interval");
+    Check(!QualifiedGpuClockInterval(clock, 500, 16000) &&
+          !QualifiedGpuClockInterval({1000, 2000, 17000, 19000, 1'000'000, 1'000'000}, 2000, 16000),
+          "unbracketed or drifting calibration is rejected");
+    SourceTimingEndpoint previous;
+    previous.view_id = 1;
+    previous.source_frame_id = previous.source_frame_sequence = 1;
+    previous.metric_generation = 7;
+    previous.quality_generation = 3;
+    previous.provider_generation = 2;
+    previous.render_active = {1536, 864};
+    previous.completed = previous.main_view = previous.ready_valid = previous.clock_anchors_valid = true;
+    previous.ready_tick = 16000;
+    previous.ready_frequency = previous.qpc_frequency = 1'000'000;
+    previous.ready_qpc = 18000;
+    previous.clock = clock;
+    auto current = previous;
+    current.source_frame_id = current.source_frame_sequence = 2;
+    current.ready_tick = 32000;
+    current.ready_qpc = 34000;
+    current.clock = {17000, 18000, 33000, 34000, 1'000'000, 1'000'000};
+    current.gpu_backlog_proven = true;
+    current.cadence_exclusions_valid = true;
+    current.closure_span_valid = current.closure_clock_valid = true;
+    current.closure_gap_checked = true;
+    current.closure_span_ms = 10;
+    const auto qualified = QualifySourceTiming(current, &previous);
+    Check(qualified.cadence_valid && qualified.span_valid && qualified.gpu_backlog_proven &&
+          std::abs(qualified.source_ready_cadence_ms - 16.0) < 1e-6,
+          "consecutive same-view endpoints produce an independent cadence and span");
+    previous.render_active.width -= 8;
+    Check(!QualifySourceTiming(current, &previous).cadence_valid &&
+          QualifySourceTiming(current, &previous).span_valid,
+          "mixed render extents invalidate cadence without discarding current closure");
+    previous.render_active.width += 8;
+    current.closure_span_valid = false;
+    Check(QualifySourceTiming(current, &previous).cadence_valid &&
+          !QualifySourceTiming(current, &previous).span_valid,
+          "missing closure coverage cannot be inferred from two ready endpoints");
+    current.pacing_gap = true;
+    const auto paced = QualifySourceTiming(current, &previous);
+    Check(paced.cadence_valid && paced.cadence_gap && !paced.span_valid,
+          "pacing invalidates cadence eligibility without inventing closure headroom");
+    current.pacing_gap = false;
+    current.generated = true;
+    Check(QualifySourceTiming(current, &previous).generated,
+          "generated output retains its rejection identity");
+    ViewState view;
+    Check(UpdateViewState(view, {1920, 1080}, {1920, 1080}, {1536, 864}), "source view");
+    view.view_id = 1;
+    view.metric_generation = 7;
+    view.quality_generation = 3;
+    view.provider_generation = 2;
+    const DynamicResolutionConfig config{true, 60, 50, 100};
+    DynamicResolutionController controller;
+
+    auto slow = SourceSample(view, 1);
+    slow.cadence_valid = slow.gpu_backlog_proven = true;
+    slow.source_ready_cadence_ms = 30;
+    const auto down = controller.Select(view, config, slow);
+    Check(down.sample_accepted && down.changed && down.active_extent.width < view.render_active.width &&
+          down.metric_kind == DynamicResolutionMetricKind::SourceRenderReadyCadence,
+          "qualified GPU backlog cadence lowers scale");
+    Check(!controller.Select(view, config, slow).sample_accepted,
+          "one source frame is consumed only once");
+
+    auto other_view = view;
+    other_view.view_id = 2;
+    auto other = SourceSample(other_view, 100);
+    other.cadence_valid = other.gpu_backlog_proven = true;
+    other.source_ready_cadence_ms = 30;
+    Check(controller.Select(other_view, config, other).sample_accepted, "other view has its own consumer");
+    slow.source_frame_id = 2;
+    Check(controller.Select(view, config, slow).sample_accepted,
+          "other view's larger frame ID cannot discard a main-view sample");
+
+    auto stale = SourceSample(view, 3);
+    stale.cadence_valid = stale.gpu_backlog_proven = true;
+    stale.source_ready_cadence_ms = 30;
+    Check(UpdateViewState(view, view.output_extent, view.render_capacity, down.active_extent),
+          "apply selected source extent");
+    ++view.quality_generation;
+    Check(!controller.Select(view, config, stale).sample_accepted,
+          "old extent and quality cannot drive a new extent");
+
+    auto first = SourceSample(view, 3);
+    first.cadence_valid = first.gpu_backlog_proven = true;
+    first.source_ready_cadence_ms = 40;
+    Check(controller.Select(view, config, first).filtered_critical_path_ms == 40,
+          "new quality starts an independent cadence filter");
+    ++view.provider_generation;
+    first = SourceSample(view, 4);
+    first.cadence_valid = first.gpu_backlog_proven = true;
+    first.source_ready_cadence_ms = 45;
+    Check(controller.Select(view, config, first).filtered_critical_path_ms == 45,
+          "new provider starts an independent cadence filter");
+    Check(UpdateViewState(view, view.output_extent, view.render_capacity,
+                          {view.render_active.width - 8, view.render_active.height - 8}),
+          "change active extent without reallocating capacity");
+    first = SourceSample(view, 5);
+    first.cadence_valid = first.gpu_backlog_proven = true;
+    first.source_ready_cadence_ms = 50;
+    Check(controller.Select(view, config, first).filtered_critical_path_ms == 50,
+          "new active extent starts an independent cadence filter");
+
+    auto short_cadence = SourceSample(view, 6);
+    short_cadence.cadence_valid = short_cadence.gpu_backlog_proven = true;
+    short_cadence.source_ready_cadence_ms = 8;
+    Check(!controller.Select(view, config, short_cadence).changed,
+          "short cadence alone cannot claim upscale headroom");
+    short_cadence.source_frame_id = 7;
+    short_cadence.span_valid = true;
+    short_cadence.output_dependency_span_ms = 10;
+    const auto both_short = controller.Select(view, config, short_cadence);
+    Check(both_short.changed && both_short.active_extent.width > view.render_active.width &&
+          both_short.metric_kind == DynamicResolutionMetricKind::DisplayDependencySpan,
+          "independent short closure permits upscale when cadence is also short");
+    short_cadence.source_frame_id = 8;
+    short_cadence.closure_span_gap = true;
+    Check(!controller.Select(view, config, short_cadence).changed,
+          "short cadence with a closure gap cannot upscale");
+
+    auto recovery = SourceSample(view, 9);
+    recovery.span_valid = true;
+    recovery.output_dependency_span_ms = 10;
+    recovery.cadence_gap = true; // A supply gap between frames does not extend this closure.
+    const auto up = controller.Select(view, config, recovery);
+    Check(up.sample_accepted && up.changed && up.active_extent.width > view.render_active.width &&
+          up.metric_kind == DynamicResolutionMetricKind::DisplayDependencySpan,
+          "independently valid short closure recovers scale without cadence");
+    recovery.source_frame_id = 10;
+    recovery.closure_span_gap = true;
+    Check(!controller.Select(view, config, recovery).sample_accepted,
+          "a gap inside the closure cannot establish recovery headroom");
+    recovery.source_frame_id = 11;
+    recovery.closure_span_gap = false;
+    recovery.calibration_drift = true;
+    Check(!controller.Select(view, config, recovery).sample_accepted,
+          "clock drift invalidates both measurements");
+    recovery.source_frame_id = 12;
+    recovery.calibration_drift = false;
+    recovery.output_dependency_span_ms = 16;
+    Check(!controller.Select(view, config, recovery).sample_accepted,
+          "near-budget closure is not recovery headroom");
+}
 } // namespace
 
 int main()
@@ -150,6 +315,7 @@ int main()
         TestPreparedIntegerDomains();
         TestHardBoundsBeforeAlignmentAndRate();
         TestOrdinaryRateAndIgnoredSamples();
+        TestQualifiedSourceTiming();
         std::cout << "dynamic_resolution_tests passed\n";
         return 0;
     }

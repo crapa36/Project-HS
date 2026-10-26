@@ -69,6 +69,74 @@ bool ResolveDynamicResolutionExtent(ViewExtent output, double percent, ViewExten
     return true;
 }
 
+bool QualifiedGpuClockInterval(const GpuClockCalibrationEvidence &clock,
+                               std::uint64_t first_tick,
+                               std::uint64_t last_tick) noexcept
+{
+    if (!clock.gpu_frequency || !clock.cpu_frequency ||
+        clock.gpu_before >= first_tick || first_tick > last_tick ||
+        last_tick >= clock.gpu_after || clock.cpu_before >= clock.cpu_after)
+        return false;
+    const long double gpu_delta = static_cast<long double>(clock.gpu_after - clock.gpu_before);
+    const long double cpu_delta = static_cast<long double>(clock.cpu_after - clock.cpu_before);
+    const long double expected_cpu_delta = gpu_delta * clock.cpu_frequency / clock.gpu_frequency;
+    const long double tolerance = std::max(cpu_delta * 0.005L,
+                                           static_cast<long double>(clock.cpu_frequency) * 0.00005L);
+    return std::isfinite(expected_cpu_delta) &&
+           std::abs(expected_cpu_delta - cpu_delta) <= tolerance;
+}
+
+DynamicResolutionSample QualifySourceTiming(
+    const SourceTimingEndpoint &current, const SourceTimingEndpoint *previous) noexcept
+{
+    DynamicResolutionSample sample;
+    sample.metric_kind = DynamicResolutionMetricKind::SourceOutputReady;
+    sample.completed = current.completed && current.main_view;
+    sample.generated = current.generated;
+    sample.view_id = current.view_id;
+    sample.source_frame_id = current.source_frame_id;
+    sample.metric_generation = current.metric_generation;
+    sample.quality_generation = current.quality_generation;
+    sample.provider_generation = current.provider_generation;
+    sample.render_active = current.render_active;
+    sample.calibration_valid = current.clock_anchors_valid && current.ready_valid &&
+        QualifiedGpuClockInterval(current.clock, current.ready_tick, current.ready_tick);
+    sample.calibration_drift = current.clock_anchors_valid && !sample.calibration_valid;
+    sample.gpu_backlog_proven = current.gpu_backlog_proven;
+    sample.cadence_gap = current.cpu_supply_gap || current.pacing_gap;
+    sample.closure_span_gap = current.closure_span_gap;
+    sample.span_valid = sample.calibration_valid && current.closure_clock_valid &&
+        current.closure_gap_checked &&
+        current.closure_span_valid && std::isfinite(current.closure_span_ms) &&
+        current.closure_span_ms > 0.0;
+    if (sample.span_valid) sample.output_dependency_span_ms = current.closure_span_ms;
+
+    if (!sample.completed || sample.generated || !sample.calibration_valid || !previous ||
+        !previous->completed || !previous->main_view || previous->generated ||
+        !previous->ready_valid || !previous->clock_anchors_valid ||
+        !QualifiedGpuClockInterval(previous->clock, previous->ready_tick, previous->ready_tick) ||
+        previous->view_id != current.view_id ||
+        previous->metric_generation != current.metric_generation ||
+        previous->quality_generation != current.quality_generation ||
+        previous->provider_generation != current.provider_generation ||
+        previous->render_active != current.render_active ||
+        previous->source_frame_sequence == std::numeric_limits<std::uint64_t>::max() ||
+        previous->source_frame_sequence + 1 != current.source_frame_sequence ||
+        previous->source_frame_id >= current.source_frame_id ||
+        !current.ready_frequency || previous->ready_frequency != current.ready_frequency ||
+        !current.qpc_frequency || previous->qpc_frequency != current.qpc_frequency ||
+        previous->ready_qpc >= current.ready_qpc)
+        return sample;
+
+    sample.source_ready_cadence_ms = static_cast<double>(
+        static_cast<long double>(current.ready_qpc - previous->ready_qpc) *
+        1000.0L / current.qpc_frequency);
+    sample.cadence_valid = current.cadence_exclusions_valid &&
+        std::isfinite(sample.source_ready_cadence_ms) &&
+        sample.source_ready_cadence_ms > 0.0;
+    return sample;
+}
+
 bool UpdateViewState(ViewState &state, ViewExtent output,
                      ViewExtent capacity, ViewExtent active) noexcept
 {
@@ -91,17 +159,20 @@ void DynamicResolutionController::Reset() noexcept
     filtered_ms_ = 0.0;
     resize_epoch_ = 0;
     has_sample_ = false;
+    consumed_frames_.clear();
 }
 
 DynamicResolutionSelection DynamicResolutionController::Select(
     const ViewState &view, const DynamicResolutionConfig &config,
-    DynamicResolutionSample sample) noexcept
+    DynamicResolutionSample sample)
 {
     DynamicResolutionSelection selection{view.render_active, false, false, filtered_ms_};
     if (!ValidView(view) || !ValidConfig(config)) return selection;
-    if (resize_epoch_ != view.resize_epoch)
+    const bool source_ready = sample.metric_kind == DynamicResolutionMetricKind::SourceOutputReady;
+    if (!source_ready && resize_epoch_ != view.resize_epoch)
     {
-        Reset();
+        filtered_ms_ = 0.0;
+        has_sample_ = false;
         resize_epoch_ = view.resize_epoch;
         selection.filtered_critical_path_ms = 0.0;
     }
@@ -109,22 +180,71 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     {
         has_sample_ = false;
         filtered_ms_ = 0.0;
+        consumed_frames_.clear();
         selection.filtered_critical_path_ms = 0.0;
         return selection;
     }
-    if (sample.metric_kind != DynamicResolutionMetricKind::ReferenceGraphSpan ||
-        !sample.completed || sample.generated || !sample.gpu_limited ||
-        !std::isfinite(sample.render_critical_path_ms) || sample.render_critical_path_ms <= 0.0)
+    if (!sample.completed || sample.generated)
         return selection;
 
-    filtered_ms_ = has_sample_
-        ? std::lerp(filtered_ms_, sample.render_critical_path_ms, config.smoothing)
-        : sample.render_critical_path_ms;
-    has_sample_ = true;
-    selection.sample_accepted = true;
-    selection.filtered_critical_path_ms = filtered_ms_;
+    ConsumedFrame *consumer = nullptr;
+    if (source_ready)
+    {
+        if (sample.view_id != view.view_id || !sample.source_frame_id ||
+            sample.metric_generation != view.metric_generation ||
+            sample.quality_generation != view.quality_generation ||
+            sample.provider_generation != view.provider_generation ||
+            sample.render_active != view.render_active)
+            return selection;
+        auto &consumed = consumed_frames_[sample.view_id];
+        if (consumed.metric_generation != sample.metric_generation ||
+            consumed.resize_epoch != view.resize_epoch ||
+            consumed.quality_generation != sample.quality_generation ||
+            consumed.provider_generation != sample.provider_generation ||
+            consumed.render_active != sample.render_active)
+            consumed = {sample.metric_generation, view.resize_epoch, sample.quality_generation,
+                        sample.provider_generation, 0, sample.render_active};
+        if (sample.source_frame_id <= consumed.frame_id) return selection;
+        consumed.frame_id = sample.source_frame_id;
+        consumer = &consumed;
+        selection.filtered_critical_path_ms = consumed.filtered_ms;
+        if (!sample.calibration_valid || sample.calibration_drift) return selection;
+    }
+    else if (sample.metric_kind != DynamicResolutionMetricKind::ReferenceGraphSpan ||
+             !sample.gpu_limited || !std::isfinite(sample.render_critical_path_ms) ||
+             sample.render_critical_path_ms <= 0.0)
+        return selection;
 
     const double target_ms = 1000.0 / config.target_render_fps;
+    const bool cadence = source_ready && sample.cadence_valid && sample.gpu_backlog_proven &&
+        !sample.cadence_gap && std::isfinite(sample.source_ready_cadence_ms) &&
+        sample.source_ready_cadence_ms > 0.0;
+    const bool cadence_over_budget = cadence &&
+        sample.source_ready_cadence_ms > target_ms * (1.0 + config.hysteresis_fraction);
+    const bool recovery = source_ready && !cadence_over_budget && sample.span_valid && !sample.closure_span_gap &&
+        std::isfinite(sample.output_dependency_span_ms) && sample.output_dependency_span_ms > 0.0 &&
+        sample.output_dependency_span_ms < target_ms *
+            (1.0 - std::max(0.1, config.hysteresis_fraction * 2.0));
+    if (source_ready && !cadence_over_budget && !recovery) return selection;
+
+    if (!recovery)
+    {
+        const double measured_ms = source_ready ? sample.source_ready_cadence_ms : sample.render_critical_path_ms;
+        auto &filtered = source_ready ? consumer->filtered_ms : filtered_ms_;
+        auto &has_sample = source_ready ? consumer->has_sample : has_sample_;
+        filtered = has_sample ? std::lerp(filtered, measured_ms, config.smoothing) : measured_ms;
+        has_sample = true;
+    }
+    else
+        consumer->has_sample = false; // A recovery span must not seed the cadence filter.
+    const double filtered = source_ready ? consumer->filtered_ms : filtered_ms_;
+    selection.sample_accepted = true;
+    selection.filtered_critical_path_ms = filtered;
+    selection.metric_kind = source_ready
+        ? (recovery ? DynamicResolutionMetricKind::DisplayDependencySpan
+                    : DynamicResolutionMetricKind::SourceRenderReadyCadence)
+        : DynamicResolutionMetricKind::ReferenceGraphSpan;
+
     ViewExtent minimum, maximum;
     if (!ResolveDynamicResolutionExtent(view.output_extent, config.min_scale_percent, minimum) ||
         !ResolveDynamicResolutionExtent(view.output_extent, config.max_scale_percent, maximum)) return selection;
@@ -141,7 +261,7 @@ DynamicResolutionSelection DynamicResolutionController::Select(
         static_cast<double>(view.render_active.height) / view.output_extent.height);
     if (view.render_active.width >= minimum.width && view.render_active.width <= maximum.width &&
         view.render_active.height >= minimum.height && view.render_active.height <= maximum.height &&
-        std::abs(filtered_ms_ - target_ms) <= target_ms * config.hysteresis_fraction)
+        !recovery && std::abs(filtered - target_ms) <= target_ms * config.hysteresis_fraction)
         return selection;
 
     // Pixel work grows approximately with scale squared. Bound each accepted
@@ -150,8 +270,9 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     const double bounded_current = std::clamp(current_scale, minimum_scale, maximum_scale);
     const double lower_scale = std::max(minimum_scale, bounded_current - rate);
     const double upper_scale = std::min(maximum_scale, bounded_current + rate);
-    const double desired_scale = std::clamp(current_scale * std::sqrt(target_ms / filtered_ms_),
-                                            lower_scale, upper_scale);
+    const double desired_scale = recovery ? upper_scale :
+        std::clamp(current_scale * std::sqrt(target_ms / filtered), lower_scale,
+                   source_ready ? std::max(lower_scale, std::min(upper_scale, current_scale)) : upper_scale);
     selection.active_extent = {
         SelectDimension(view.output_extent.width, view.render_active.width, desired_scale,
             minimum.width, maximum.width, rate, config.extent_quantum),

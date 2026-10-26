@@ -89,17 +89,14 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
         return false;
     try
     {
-        const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-        if (result.at("action_id") != spec.action_id ||
-            result.at("action_key") != ap::ActionKey(spec) ||
-            result.at("products").size() != textures.size()) return false;
+        const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+        if (result.ActionId() != spec.action_id ||
+            result.ActionKeyValue() != ap::ActionKey(spec) ||
+            result.ProductCount() != textures.size()) return false;
         for (const auto &texture : textures)
         {
             ap::UpstreamProduct ignored;
-            fs::path package_path;
-            (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                       ProductId(texture), ignored, package_path);
-            const auto contents = ap::ReadBytes(package_path);
+            const auto contents = result.ReadProductBytes(ProductId(texture), ignored);
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto package = rd::ReadTexturePackage(bytes, hs::MakeAssetId(ProductId(texture)));
             const auto &actual = package.description;
@@ -125,15 +122,14 @@ void Produce(std::string_view mode, const fs::path &build_root)
     spec.recipe_id = "project-hs.render.texture.character.bc7-semantic-v1";
     spec.recipe_version = 2;
     spec.namespace_path = "render/texture/character/" + std::string(mode);
-    std::vector<fs::path> paths;
+    const ap::ActionResultSnapshot source_result(build_root, "character/" + std::string(mode));
+    std::vector<std::string> source_bytes;
+    source_bytes.reserve(textures.size());
     for (const auto &texture : textures)
     {
         ap::UpstreamProduct upstream;
-        fs::path path;
-        (void)ap::ReadActionResult(build_root, "character/" + std::string(mode),
-                                   SourceId(texture), upstream, path);
+        source_bytes.push_back(source_result.ReadProductBytes(SourceId(texture), upstream));
         spec.upstream.push_back(upstream);
-        paths.push_back(path);
     }
     std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);
     if (Current(build_root, spec, textures))
@@ -149,7 +145,7 @@ void Produce(std::string_view mode, const fs::path &build_root)
         for (std::size_t i = 0; i < textures.size(); ++i)
         {
             const auto &texture = textures[i];
-            const auto dds = ap::ReadBytes(paths[i]);
+            const auto &dds = source_bytes[i];
             const auto bytes = std::as_bytes(std::span(dds.data(), dds.size()));
             const auto payload = DdsPayload(bytes, texture.description);
             const std::array dependencies{SourceId(texture)};

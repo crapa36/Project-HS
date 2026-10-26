@@ -94,6 +94,7 @@ struct HlodExternalBuffer
 {
     ID3D12Resource *resource{};
     ResourceVersion version;
+    const NativeResourceContract *contract{};
 };
 
 struct HlodFrameInputs
@@ -128,6 +129,24 @@ struct HlodFrameOutputs
 };
 
 struct HlodStorage;
+// Ephemeral validation result, consumed with the same current input object.
+struct HlodFrameRecordData
+{
+    const HlodStorage *owner{};
+    const HlodFrameInputs *inputs{};
+    std::uint64_t rendered_frame_id{};
+    bool enabled{}, history{}, upload{}, read_geometry{}, read_refs{};
+    std::uint32_t slot{},previous{},bucket_count{};
+};
+struct HlodLayout
+{
+    bool valid{},history{},upload{},read_geometry{},read_refs{};
+    std::array<std::uint64_t,5> shape{};
+    std::array<ResourceVersion,3> guides{};
+    std::array<BufferHandle,16> imports{};
+    std::array<std::uint32_t,6> passes{};
+    std::array<ResourceVersion,11> outputs{};
+};
 class HlodCandidate
 {
 public:
@@ -154,7 +173,12 @@ public:
         std::uint32_t content_generation, std::uint32_t static_slot_capacity,
         std::uint32_t frame_slot_count, const ShaderReader &, HlodCandidate &) const;
     [[nodiscard]] Result Commit(HlodCandidate &&, const CompletionSet &completed);
-    [[nodiscard]] Result Register(RenderGraphBuilder &, const HlodFrameInputs &, HlodFrameOutputs &);
+    [[nodiscard]] Result PrepareFrameRecordData(const HlodFrameInputs &,HlodFrameRecordData &);
+    [[nodiscard]] bool MatchesLayout(const HlodFrameInputs &,const HlodFrameRecordData &,const HlodLayout &)const noexcept;
+    [[nodiscard]] Result Register(RenderGraphBuilder &, const HlodFrameInputs &, HlodFrameOutputs &,
+        HlodLayout *layout=nullptr,const HlodFrameRecordData *prepared=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const HlodFrameInputs &,
+        const HlodFrameRecordData &,const HlodLayout &,HlodFrameOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
@@ -162,6 +186,8 @@ public:
     // merges this set into its existing frame-slot wait before Register.
     [[nodiscard]] CompletionSet FrameCompletion(std::uint32_t frame_slot) const noexcept;
 private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const HlodFrameInputs &,HlodFrameOutputs &,
+        HlodLayout *,const HlodLayout *,const HlodFrameRecordData *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

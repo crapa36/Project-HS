@@ -2201,13 +2201,21 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             {
                 const GeometryPageGpu *page{};
                 std::span<const render_data::CharacterMaterialBinding> bindings;
-                const auto logical_page = hero_asset == 0u
+                const auto base_page = hero_asset == 0u
                     ? kArcherGeometryPage : kMonsterGeometryPage + hero_asset - 1u;
+                const auto reduced_page = hero_asset == 0u ? UINT32_MAX :
+                    kMonsterReducedGeometryPage + (hero_asset - 1u) * 2u;
+                if (geometry.page_slot != base_page &&
+                    (hero_asset == 0u ||
+                     (geometry.page_slot != reduced_page && geometry.page_slot != reduced_page + 1u)))
+                    return invalid(std::format(
+                        "Classified hero pixel {} page slot {} does not belong to mesh {}.",
+                        pixel, geometry.page_slot, geometry.mesh_id));
                 if (hero_asset == 0u)
                     bindings = impl_->archer_material_bindings;
                 else
                     bindings = impl_->monster_assets[hero_asset - 1u].material_bindings;
-                page = impl_->FindGeometryPage(logical_page);
+                page = impl_->FindGeometryPage(geometry.page_slot);
                 if (!page)
                     return invalid(std::format(
                         "Classified hero pixel {} mesh {} has no resident geometry page.",
@@ -2216,6 +2224,12 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     return invalid(std::format(
                         "Classified hero pixel {} page slot {} mismatches mesh {} resident page {}.",
                         pixel, geometry.page_slot, geometry.mesh_id, page->page_slot));
+                const auto expected_lod = geometry.page_slot == base_page ? 0u :
+                    geometry.page_slot == reduced_page ? 1u : 2u;
+                if(page->metadata.lod != expected_lod)
+                    return invalid(std::format(
+                        "Classified hero pixel {} page slot {} has LOD {} instead of {}.",
+                        pixel, geometry.page_slot, page->metadata.lod, expected_lod));
                 if (page->generation != geometry.geometry_generation)
                     return invalid(std::format(
                         "Classified hero pixel {} generation {} mismatches mesh {} resident page {}.",

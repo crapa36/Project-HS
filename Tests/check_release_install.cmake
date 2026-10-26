@@ -1,0 +1,147 @@
+cmake_minimum_required(VERSION 4.4)
+if(NOT IS_ABSOLUTE "${HS_TEST_WORK_ROOT}" OR NOT IS_ABSOLUTE "${HS_TEST_ALLOWED_ROOT}")
+    message(FATAL_ERROR "Release install test requires absolute work and allowed roots")
+endif()
+file(REAL_PATH "${HS_TEST_ALLOWED_ROOT}" allowed_root)
+if(EXISTS "${HS_TEST_WORK_ROOT}")
+    file(REAL_PATH "${HS_TEST_WORK_ROOT}" work_root)
+else()
+    set(work_root "${HS_TEST_WORK_ROOT}")
+endif()
+cmake_path(IS_PREFIX allowed_root "${work_root}" NORMALIZE inside_allowed_root)
+if(NOT inside_allowed_root OR work_root STREQUAL allowed_root)
+    message(FATAL_ERROR "Refusing release install test cleanup outside its build root: ${work_root}")
+endif()
+file(REMOVE_RECURSE "${work_root}")
+file(MAKE_DIRECTORY "${work_root}")
+get_filename_component(repo "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(fixture "${CMAKE_CURRENT_LIST_DIR}/release_install_fixture")
+set(binary "${work_root}/fixture-build")
+
+function(configure_fixture omit_native fail_verify interrupt)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -S "${fixture}" -B "${binary}"
+        -G "${HS_TEST_GENERATOR}" "-DCMAKE_MAKE_PROGRAM=${HS_TEST_MAKE_PROGRAM}"
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+        "-DHS_PROJECT_SOURCE=${repo}" "-DHS_FIXTURE_OMIT_NATIVE=${omit_native}"
+        "-DHS_FIXTURE_FAIL_VERIFY=${fail_verify}" "-DHS_FIXTURE_INTERRUPT=${interrupt}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "Fixture configure failed: ${output}${error}")
+    endif()
+endfunction()
+
+function(expect_install name result_kind expected_text)
+    set(prefix "${work_root}/${name}")
+    set(component_args --component Runtime)
+    if(ARGC GREATER 3 AND ARGV3 STREQUAL "all-components")
+        set(component_args)
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" --install "${binary}" --config Release
+        ${component_args} --prefix "${prefix}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${work_root}/${name}.log" "exit=${result}\n${output}${error}")
+    if(result_kind STREQUAL "pass")
+        if(NOT result STREQUAL "0")
+            message(FATAL_ERROR "${name} install failed: ${output}${error}")
+        endif()
+    elseif(result STREQUAL "0" OR NOT "${output}${error}" MATCHES "${expected_text}")
+        message(FATAL_ERROR "${name} did not fail as expected: ${output}${error}")
+    endif()
+endfunction()
+
+configure_fixture(OFF OFF OFF)
+execute_process(COMMAND "${CMAKE_COMMAND}" --build "${binary}" --config Release --target ProjectHS
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "Fixture verifier build failed: ${output}${error}")
+endif()
+
+file(MAKE_DIRECTORY "${work_root}/occupied")
+file(WRITE "${work_root}/occupied/sentinel.txt" "old")
+expect_install(occupied fail "not missing or empty")
+if(NOT EXISTS "${work_root}/occupied/sentinel.txt" OR EXISTS "${work_root}/.occupied.staging")
+    message(FATAL_ERROR "Nonempty destination changed or copying began")
+endif()
+file(MAKE_DIRECTORY "${work_root}/hidden-occupied")
+file(WRITE "${work_root}/hidden-occupied/.sentinel" "old")
+expect_install(hidden-occupied fail "not missing or empty")
+
+expect_install(success pass "")
+foreach(required IN ITEMS ProjectHS.exe Content/content.hsp D3D12/D3D12Core.dll
+        WinPixEventRuntime.dll Licenses/NotoSansKR-OFL.txt ThirdPartyNotices.txt)
+    if(NOT EXISTS "${work_root}/success/${required}")
+        message(FATAL_ERROR "Published Release is incomplete: ${required}")
+    endif()
+endforeach()
+if(EXISTS "${work_root}/.success.staging" OR EXISTS "${work_root}/.success.empty-before-publish")
+    message(FATAL_ERROR "Successful publication retained its temporary directories")
+endif()
+file(READ "${binary}/install_manifest_Runtime.txt" manifest)
+if(manifest MATCHES "\\.success\\.staging" OR NOT manifest MATCHES "/success/ProjectHS\\.exe")
+    message(FATAL_ERROR "Runtime install manifest did not follow the published directory")
+endif()
+
+file(MAKE_DIRECTORY "${work_root}/empty")
+expect_install(empty pass "")
+if(NOT EXISTS "${work_root}/empty/ProjectHS.exe" OR EXISTS "${work_root}/.empty.empty-before-publish")
+    message(FATAL_ERROR "Empty destination was not published cleanly")
+endif()
+expect_install(default-components pass "" all-components)
+if(NOT EXISTS "${work_root}/default-components/ProjectHS.exe")
+    message(FATAL_ERROR "Default component install lost the Release set")
+endif()
+file(MAKE_DIRECTORY "${work_root}/destdir")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env "DESTDIR=${work_root}/destdir"
+    "${CMAKE_COMMAND}" --install "${binary}" --config Release --component Runtime
+    --prefix /fixture-target
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+file(WRITE "${work_root}/destdir.log" "exit=${result}\n${output}${error}")
+if(NOT result STREQUAL "0" OR NOT EXISTS "${work_root}/destdir/fixture-target/ProjectHS.exe" OR
+        NOT EXISTS "${work_root}/destdir/fixture-target/Content/content.hsp")
+    message(FATAL_ERROR "DESTDIR Release install failed: ${output}${error}")
+endif()
+
+configure_fixture(ON OFF OFF)
+expect_install(missing-native fail "Incomplete staged Release: D3D12/D3D12Core.dll")
+if(EXISTS "${work_root}/missing-native" OR NOT EXISTS "${work_root}/.missing-native.staging")
+    message(FATAL_ERROR "Missing native file touched the destination or lost the staged set")
+endif()
+
+configure_fixture(OFF ON OFF)
+expect_install(bad-verifier fail "Staged Release content verification failed")
+if(EXISTS "${work_root}/bad-verifier" OR NOT EXISTS "${work_root}/.bad-verifier.staging")
+    message(FATAL_ERROR "Failed verifier published or lost the staged set")
+endif()
+
+configure_fixture(OFF OFF ON)
+file(MAKE_DIRECTORY "${work_root}/interrupted")
+expect_install(interrupted fail "simulated interruption before publication")
+if(EXISTS "${work_root}/interrupted/ProjectHS.exe" OR
+        NOT EXISTS "${work_root}/.interrupted.staging/ProjectHS.exe")
+    message(FATAL_ERROR "Interrupted install modified the target or lost the staged set")
+endif()
+expect_install(interrupted fail "Interrupted Release install left a sibling stage")
+
+configure_fixture(OFF OFF OFF)
+get_filename_component(cmake_bin "${CMAKE_COMMAND}" DIRECTORY)
+set(cpack "${cmake_bin}/cpack${CMAKE_EXECUTABLE_SUFFIX}")
+file(MAKE_DIRECTORY "${work_root}/package")
+execute_process(COMMAND "${cpack}" -G ZIP --config "${binary}/CPackConfig.cmake"
+    -B "${work_root}/package" WORKING_DIRECTORY "${work_root}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+file(WRITE "${work_root}/cpack.log" "exit=${result}\n${output}${error}")
+if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "CPack staging failed: ${output}${error}")
+endif()
+file(GLOB packages "${work_root}/package/*.zip")
+if(NOT packages)
+    message(FATAL_ERROR "CPack did not produce a ZIP")
+endif()
+list(GET packages 0 package)
+execute_process(COMMAND "${CMAKE_COMMAND}" -E tar tf "${package}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE archive_listing ERROR_VARIABLE error)
+if(NOT result STREQUAL "0" OR NOT archive_listing MATCHES "Content/content\\.hsp" OR
+        NOT archive_listing MATCHES "ProjectHS\\.exe")
+    message(FATAL_ERROR "CPack ZIP lacks the published Release pair: ${error}")
+endif()
+message(STATUS "Release install transaction cases passed")

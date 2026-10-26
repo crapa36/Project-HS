@@ -293,6 +293,9 @@ void TestEventRecoilRibbon()
     Check(hs::runtime_detail::BuildVfxEventRibbonInputs(delayed, events, 14).empty(),
           "delayed recoil source started before its knot interval");
     const auto onset = hs::runtime_detail::BuildVfxEventRibbonInputs(delayed, events, 15);
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(delayed, events, 14.5).empty() &&
+          hs::runtime_detail::BuildVfxEventRibbonInputs(delayed, events, 15.5).size() == 1,
+          "ribbon onset rounded fractional display time to a tick");
     Check(onset.size() == 1 && onset[0].position.z == 3.0f && onset[0].previous_position.z == 3.0f,
           "delayed recoil did not clamp its initial history to the event origin");
     Check(hs::runtime_detail::BuildVfxEventRibbonInputs(delayed, events, 45).empty(),

@@ -233,6 +233,9 @@ void TestTerminalVfxClock()
     Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
                                     start + hs::FixedStepClock::kFixedStep * 3) == 123,
           "terminal VFX clock did not advance at fixed-step real time");
+    Check(std::abs(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                  start + hs::FixedStepClock::kFixedStep * 3 + hs::FixedStepClock::kFixedStep / 2) - 123.5) < 0.000001,
+          "terminal VFX clock discarded the fractional display interval");
     Check(state.UpdateTerminalClock(120, hs::SessionPhase::Paused,
                                     start + hs::FixedStepClock::kFixedStep * 6) == 120,
           "paused VFX clock used terminal real time");
@@ -559,6 +562,20 @@ void TestShockwaveWavefrontBinding()
           ring.lifetime01 == 0.5f && ring.gap_half_width_degrees == 12.0f &&
           ring.gap_angles_degrees == std::vector<float>{359.0f, 119.0f, 239.0f},
           "wavefront payload changed actual annulus, gap rotation or owner age");
+    const std::array retained{visual};
+    const auto between = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, retained, retained, 120, nullptr, 0.5f);
+    Check(between.persistent.size() == 1 &&
+              std::abs(between.persistent.front().normalized_age - 19.5f / 40.0f) < 0.0001f,
+          "persistent age was rounded to a simulation endpoint");
+    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
+              program, {}, retained, {}, 120, nullptr, 0.5f).persistent.empty(),
+          "new owner appeared before its current endpoint");
+    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
+              program, {}, {}, retained, 120, nullptr, 0.5f).persistent.size() == 1 &&
+          hs::runtime_detail::BuildVfxTypedFrameInputs(
+              program, {}, {}, retained, 120).persistent.empty(),
+          "removed owner did not end at its current endpoint");
     visual.gap_count = 0; visual.gap_half_angle_degrees = 0;
     const auto continuous = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 100);
     Check(continuous.persistent.size() == 1 &&
@@ -1086,8 +1103,13 @@ void TestWarningOwnerRefresh()
     SetLifetime(owner, 120, 240);
     hs::PersistentVfxVisual unrelated = owner;
     unrelated.stable_id = 999;
-    std::vector events{line, sibling};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(events, std::array{owner, unrelated}, 130);
+    auto missing_owner = line;
+    missing_owner.geometry_owner_id = 123456;
+    std::vector events{missing_owner, line, sibling};
+    const std::array owners{owner, unrelated};
+    hs::runtime_detail::PreparedPairFacts facts;
+    facts.Prepare({}, {}, owners, {}, {});
+    hs::runtime_detail::RefreshVfxGroundEventOwners(events, owners, 130, &facts);
     Check(events.size() == 2 && events[1].geometry_owner_id == original_sibling.geometry_owner_id,
           "owner refresh removed or altered an unrelated event");
     const auto &updated_line = std::get<hs::VfxLinePayload>(events[0].payload);
@@ -1098,6 +1120,25 @@ void TestWarningOwnerRefresh()
               std::abs(updated_line.width - 1.2f) < 0.0001f &&
               events[0].geometry_start_tick == 120 && events[0].geometry_end_tick == 240,
           "line warning was not retargeted from its live owner");
+    auto prior_owner = owner;
+    prior_owner.position.x = 1.0f;
+    prior_owner.yaw = 3.0f;
+    prior_owner.radius = 0.2f;
+    auto next_owner = owner;
+    next_owner.yaw = -3.0f;
+    auto moving = events;
+    hs::runtime_detail::RefreshVfxGroundEventOwners(
+        moving, std::array{next_owner}, 131, nullptr, std::array{prior_owner}, 0.5f);
+    const auto &middle_line = std::get<hs::VfxLinePayload>(moving.front().payload);
+    Check(std::abs((middle_line.start.x + middle_line.end.x) * 0.5f - 3.0f) < 0.0001f &&
+              std::abs(middle_line.width - 0.8f) < 0.0001f && middle_line.direction.z < -0.99f,
+          "warning geometry did not share display interpolation or shortest-arc rotation");
+    auto retiring = events;
+    hs::runtime_detail::RefreshVfxGroundEventOwners(retiring, {}, 131, nullptr, owners, 0.5f);
+    Check(retiring.size() == 2, "warning owner vanished before its removal endpoint");
+    hs::runtime_detail::RefreshVfxGroundEventOwners(retiring, {}, 131);
+    Check(retiring.size() == 1 && retiring.front().geometry_owner_id == 0,
+          "warning owner survived its removal endpoint");
 
     hs::VfxEventInput future = line;
     future.event_tick = 500;
@@ -1447,7 +1488,7 @@ void TestLowHealthPulseClock()
     const auto emit = [&](hs::Tick tick, bool present = true) {
         Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedScreenCommands(
             program, {}, present ? std::span(&health, 1) : std::span<hs::VfxPersistentInput>{},
-            tick, hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
+            tick, static_cast<double>(tick), hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
     };
     emit(1000);
     Check(output.size() == 1 && output[0].envelope == 0 && pulse.phase == 0,
@@ -1464,6 +1505,9 @@ void TestLowHealthPulseClock()
     emit(1051);
     Check(std::abs(pulse.phase - std::fmod(prior_phase + frequency / 60.0, 1.0)) < 1e-12,
           "new HP frequency did not control subsequent tick integration");
+    Check(std::abs(pulse.PhaseAt(1050.5) - std::fmod(prior_phase + frequency / 120.0, 1.0)) < 1e-12 &&
+              pulse.PhaseAt(1051.0) == pulse.phase,
+          "display pulse did not sample the accepted observation interval");
     const auto paused = output[0];
     for (unsigned i = 0; i < 8; ++i) emit(1051);
     Check(output[0].gradient_age == paused.gradient_age && output[0].envelope == paused.envelope,
@@ -1471,13 +1515,13 @@ void TestLowHealthPulseClock()
     const auto retained_pulse = pulse;
     program.outputs[0].shape = Hash32("invalid_screen_shape");
     Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, std::span(&health, 1),
-              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              1052, 1052.0, hs::VfxQuality::High, pulse, output) && output.empty() &&
               pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
           "rejected output published a partial pulse clock update");
     program.outputs[0].shape = Hash32("screen_vignette");
     const std::array duplicate_health{health, health};
     Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, duplicate_health,
-              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              1052, 1052.0, hs::VfxQuality::High, pulse, output) && output.empty() &&
               pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
           "rejected later owner published a partial pulse clock update");
     emit(1052, false);
@@ -1485,7 +1529,7 @@ void TestLowHealthPulseClock()
     emit(1060);
     Check(pulse.phase == 0 && output[0].envelope == 0, "re-entry resumed an absent episode");
     emit(1069);
-    Check(pulse.EntryFade() == 1, "entry transition did not finish after nine ticks");
+    Check(pulse.EntryFade(static_cast<double>(pulse.last_tick)) == 1, "entry transition did not finish after nine ticks");
     health.stable_id = 12; emit(1070);
     Check(pulse.phase == 0 && pulse.entered_tick == 1070, "new owner inherited pulse history");
     emit(2);
@@ -1980,7 +2024,7 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
         .current_publication = 3, .quality = 1, .binding_revision = 5,
         .geometry_revision = 6};
     facts.Prepare(key, previous, current, instances, captures);
-    Check(facts.Previous(current_owner, previous)->position.x == 1.0f &&
+    Check(facts.Previous(current_owner.stable_id, current_owner.kind, previous)->position.x == 1.0f &&
           facts.Current(7, PersistentVfxKind::ProjectileHead, current)->position.x == 4.0f,
           "pair facts changed source-order first-match semantics");
     Check(facts.Instance(91, instances)->position.x == 3.0f &&
@@ -1992,7 +2036,7 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     key.previous_publication = 3;
     key.current_publication = 4;
     facts.Prepare(key, republished_previous, current, instances, captures);
-    Check(facts.Previous(current_owner, republished_previous)->position.x == 9.0f,
+    Check(facts.Previous(current_owner.stable_id, current_owner.kind, republished_previous)->position.x == 9.0f,
           "new publication pair reused stale adaptation indexes");
 }
 

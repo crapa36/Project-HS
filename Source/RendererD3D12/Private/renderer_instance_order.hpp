@@ -2,6 +2,8 @@
 
 #include "renderer_quality.hpp"
 #include <array>
+#include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -60,5 +62,59 @@ inline constexpr std::size_t kInstanceBucketCount = kInstanceOtherBucket + 1;
             source_indices[cursors[bucket_for(sources[index])]++] =
                 static_cast<std::uint32_t>(index);
     return ranges;
+}
+
+inline constexpr std::size_t kMonsterLodCount = 3;
+inline constexpr std::size_t kMonsterFamilyCount = kInstanceProjectileBucket - kInstanceMonsterBucketBegin;
+
+struct MonsterLodInstanceOrder
+{
+    std::array<std::pair<std::size_t, std::size_t>, kInstanceBucketCount> ranges{};
+    // Family-major, then LOD0/1/2. The three cuts still form each legacy
+    // family range, while source_indices retain their canonical identities.
+    std::array<std::pair<std::size_t, std::size_t>,
+        kMonsterFamilyCount * kMonsterLodCount> monster_lod_ranges{};
+};
+
+// The explicit LOD stream is indexed by canonical source index. Only monster
+// draw references are stably partitioned; every other bucket is unchanged.
+[[nodiscard]] inline std::optional<MonsterLodInstanceOrder> BuildRenderInstanceOrderWithMonsterLods(
+    std::span<const RenderInstance> sources, std::span<const std::uint16_t> selected_lods,
+    float foliage_density, std::vector<std::uint32_t> &source_indices)
+{
+    if (selected_lods.size() != sources.size()) return std::nullopt;
+    for (std::size_t index = 0; index < sources.size(); ++index)
+        if (sources[index].mesh >= RenderMesh::MonsterMelee &&
+            sources[index].mesh <= RenderMesh::BossFinal &&
+            selected_lods[index] >= kMonsterLodCount)
+            return std::nullopt;
+
+    MonsterLodInstanceOrder result;
+    result.ranges = BuildRenderInstanceOrder(sources, foliage_density, source_indices);
+    std::vector<std::uint32_t> scratch;
+    for (std::size_t family = 0; family < kMonsterFamilyCount; ++family)
+    {
+        const auto [begin, count] = result.ranges[kInstanceMonsterBucketBegin + family];
+        std::array<std::size_t, kMonsterLodCount> counts{};
+        for (std::size_t index = begin; index < begin + count; ++index)
+            ++counts[selected_lods[source_indices[index]]];
+        std::array<std::size_t, kMonsterLodCount> cursors{};
+        std::size_t next = begin;
+        for (std::size_t lod = 0; lod < kMonsterLodCount; ++lod)
+        {
+            result.monster_lod_ranges[family * kMonsterLodCount + lod] = {next, counts[lod]};
+            cursors[lod] = next - begin;
+            next += counts[lod];
+        }
+        scratch.resize(count);
+        for (std::size_t index = begin; index < begin + count; ++index)
+        {
+            const auto source_index = source_indices[index];
+            scratch[cursors[selected_lods[source_index]]++] = source_index;
+        }
+        for (std::size_t index = 0; index < count; ++index)
+            source_indices[begin + index] = scratch[index];
+    }
+    return result;
 }
 } // namespace hs

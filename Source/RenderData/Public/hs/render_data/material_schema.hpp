@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_asset_format.hpp>
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <array>
 #include <cstddef>
@@ -261,6 +261,7 @@ struct HeroMaterialPackageData
     std::span<const MaterialProgramSource> programs);
 [[nodiscard]] HeroMaterialPackageData ReadHeroMaterialPackage(
     std::span<const std::byte> bytes, std::string_view name);
+[[nodiscard]] HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std::string_view name);
 
 struct DecalMaterialPackageData
 {
@@ -275,6 +276,7 @@ struct DecalMaterialPackageData
     std::string_view shader_id, const DecalReceiverPolicy &receivers);
 [[nodiscard]] DecalMaterialPackageData ReadDecalMaterialPackage(
     std::span<const std::byte> bytes, std::string_view name);
+[[nodiscard]] DecalMaterialPackageData ReadDecalMaterialPackage(const PackageView &package, std::string_view name);
 
 [[nodiscard]] std::vector<std::byte> EncodeMaterialProgram(
     std::span<const std::string> dependencies, std::string_view shader_id);

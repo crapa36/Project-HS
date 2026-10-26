@@ -50,4 +50,5 @@ struct VolumeTexturePackageView
 // Every returned span refers to caller-owned package bytes.
 [[nodiscard]] VolumeTexturePackageView ReadVolumeTexturePackage(
     std::span<const std::byte> package_bytes, AssetId expected_asset_id);
+[[nodiscard]] VolumeTexturePackageView ReadVolumeTexturePackage(const PackageView &package);
 } // namespace hs::render_data

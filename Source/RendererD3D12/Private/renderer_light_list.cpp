@@ -368,9 +368,27 @@ Result LightListSystem::Commit(LightListCandidate &&candidate, const CompletionS
     return Result::Success();
 }
 
-Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInputs &inputs, LightListOutputs &outputs)
+Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInputs &inputs, LightListOutputs &outputs,LightListLayout *layout)
+{
+    return RegisterFrame(graph,inputs,outputs,layout,nullptr);
+}
+bool LightListSystem::MatchesLayout(const LightListLayout &layout)const noexcept
+{
+    const auto &s=impl_->targets;
+    return layout.valid&&s&&layout.capacity.width==s->capacity.width&&layout.capacity.height==s->capacity.height&&
+        layout.max_lights==s->max_lights&&layout.inline_capacity==s->inline_capacity&&layout.spill_capacity==s->spill_capacity;
+}
+Result LightListSystem::BindRetained(RenderGraphBuilder &graph,const LightListInputs &inputs,
+    const LightListLayout &layout,LightListOutputs &outputs)
+{
+    return RegisterFrame(graph,inputs,outputs,nullptr,&layout);
+}
+Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListInputs &inputs,LightListOutputs &outputs,
+    LightListLayout *capture,const LightListLayout *retained)
 {
     outputs = {};
+    if(capture)*capture={};
+    if(retained&&!MatchesLayout(*retained))return LightFailure(ErrorCode::InvalidState,"Light-list retained topology changed.");
     auto storage = impl_->targets;
     if (!storage || impl_->pending.graph || !storage->usable)
         return LightFailure(ErrorCode::InvalidState, "Light-list targets are absent, pending or a previous graph failed.");
@@ -486,12 +504,22 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
     for (std::uint32_t index = 0; index < 4; ++index)
     {
         auto &resource = frame.buffers[index];
-        const auto handle = graph.ImportBuffer({resource.resource.Get(), resource.graph_completion, resource.graph_queue}, resource.graph_access, names[index]);
+        if(auto checked=resource.EnsureNativeContract(storage->device.Get());!checked)return checked;
+        const auto handle = retained?retained->resources[index]:
+            graph.ImportBuffer({resource.resource.Get(), resource.graph_completion, resource.graph_queue, {}, resource.NativeContract()}, resource.graph_access, names[index]);
+        if(retained&&!graph.BindBuffer(handle,{resource.resource.Get(),resource.graph_completion,resource.graph_queue,{},resource.NativeContract()},resource.graph_access))
+            return LightFailure(ErrorCode::InvalidState,"Light-list retained buffer binding failed.");
+        if(capture)capture->resources[index]=handle;
         pending.imports[index] = {&resource, handle}; versions[index] = graph.Version(handle);
     }
-    auto upload = graph.AddPass(130, "LightListUpload", QueueHint::Direct);
-    versions[0] = upload.Write(versions[0], Access::CopyDest);
-    versions[1] = upload.Write(versions[1], Access::CopyDest);
+    if(capture)capture->passes[0]=graph.PassCount();
+    auto uploadBinding=retained?graph.BindPass(retained->passes[0],130):
+        std::optional<PassBuilder>{graph.AddPass(130,"LightListUpload",QueueHint::Direct)};
+    if(!uploadBinding)return LightFailure(ErrorCode::InvalidState,"Light-list retained upload pass is missing.");
+    auto &upload=*uploadBinding;
+    if(retained){versions[0]=retained->uploaded[0];versions[1]=retained->uploaded[1];}
+    else{versions[0]=upload.Write(versions[0],Access::CopyDest);versions[1]=upload.Write(versions[1],Access::CopyDest);}
+    if(capture)capture->uploaded={versions[0],versions[1]};
     upload.SetExecuteChecked([storage, slot, uploadOffset, recordBytes = UINT64(records.size()) * sizeof(GpuLightRecord)](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         const auto &buffers = storage->frames[slot].buffers;
@@ -499,11 +527,19 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
         commands->CopyBufferRegion(buffers[1].resource.Get(), 0, storage->upload.resource.Get(), uploadOffset, kHeaderBytes);
         return Result::Success();
     });
-    auto cluster = graph.AddPass(131, "LightListClusters", QueueHint::Direct);
-    cluster.Read(versions[0], Access::ComputeRead);
-    versions[1] = cluster.ReadWrite(versions[1], Access::UnorderedWrite);
-    versions[2] = cluster.Write(versions[2], Access::UnorderedWrite);
-    versions[3] = cluster.Write(versions[3], Access::UnorderedWrite);
+    if(capture)capture->passes[1]=graph.PassCount();
+    auto clusterBinding=retained?graph.BindPass(retained->passes[1],131):
+        std::optional<PassBuilder>{graph.AddPass(131,"LightListClusters",QueueHint::Direct)};
+    if(!clusterBinding)return LightFailure(ErrorCode::InvalidState,"Light-list retained cluster pass is missing.");
+    auto &cluster=*clusterBinding;
+    if(retained)versions=retained->outputs;
+    else
+    {
+        cluster.Read(versions[0],Access::ComputeRead);
+        versions[1]=cluster.ReadWrite(versions[1],Access::UnorderedWrite);
+        versions[2]=cluster.Write(versions[2],Access::UnorderedWrite);
+        versions[3]=cluster.Write(versions[3],Access::UnorderedWrite);
+    }
     cluster.SetExecuteChecked([storage, slot, uploadOffset, cells = constants.limits.w](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);
@@ -517,12 +553,18 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
     for (std::uint32_t index = 0; index < 4; ++index)
     {
         outputs.resources[index] = frame.buffers[index].resource.Get(); outputs.srvs[index] = storage->Cpu(slot, index, true);
-        graph.SetFinalAccess(versions[index], Access::AllShaderRead);
+        if(!retained)graph.SetFinalAccess(versions[index], Access::AllShaderRead);
     }
     outputs.lights = versions[0]; outputs.ranges = versions[1];
     outputs.inline_indices = versions[2]; outputs.spill_indices = versions[3];
     outputs.light_count = UINT(sorted.size()); outputs.directional_count = directionalCount;
     impl_->pending = std::move(pending);
+    if(capture)
+    {
+        capture->capacity=storage->capacity;capture->max_lights=storage->max_lights;
+        capture->inline_capacity=storage->inline_capacity;capture->spill_capacity=storage->spill_capacity;
+        capture->outputs=versions;capture->valid=true;
+    }
     return Result::Success();
 }
 

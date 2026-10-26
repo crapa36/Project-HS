@@ -2,6 +2,7 @@
 #include "d3d12_resources.hpp"
 #include <D3D12MemAlloc.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <string>
 #include <tuple>
@@ -13,6 +14,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t DescriptorCount = 11, SrvCount = 9;
+std::atomic<std::uint64_t> g_presentation_target_generation{};
 struct Constants
 {
     std::uint32_t render_width, render_height, output_width, output_height;
@@ -82,6 +84,7 @@ struct PresentationGuidesTargets
     SdkPresentationOwner provider{SdkPresentationOwner::None};
     std::uint32_t descriptor_stride{}, rtv_stride{};
     std::uint64_t bytes{};
+    std::uint64_t generation{};
     CompletionSet completion;
     bool usable{true};
     struct Slot
@@ -237,17 +240,59 @@ Result PresentationGuides::Commit(PresentationGuidesCandidate &&candidate, const
     if (impl_ && (impl_->pending.graph || (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))))
         return Failure(ErrorCode::InvalidState, "Complete all old graph uses and SDK presentation before replacing guides.");
     if (!impl_) impl_ = std::make_unique<Impl>();
+    candidate.targets_->generation=g_presentation_target_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->targets = std::move(candidate.targets_);
     return Result::Success();
 }
+bool PresentationGuides::MatchesLayout(const PresentationGuidesInputs &in,
+    std::uint32_t colorId,std::uint32_t guideId,std::uint32_t devtoolsId,
+    const PresentationGuidesLayout &layout) const noexcept
+{
+    if(!impl_||!impl_->targets||!impl_->targets->usable||
+        layout.target_generation!=impl_->targets->generation||
+        layout.pass_ids!=std::array<std::uint32_t,3>{devtoolsId,colorId,guideId}||
+        layout.transparent_guides!=in.transparent_guides_enabled)return false;
+    const std::array<ResourceVersion,8> current{in.display_linear.version,in.encoded_ui.version,
+        in.depth.version,in.motion.version,in.transparent_depth.version,in.transparent_motion.version,
+        in.transparent_classification.version,in.transparent_metadata.version};
+    for(std::size_t i=0;i<current.size();++i)
+        if((i<4||layout.transparent_guides)&&layout.inputs[i]!=current[i])return false;
+    return true;
+}
 Result PresentationGuides::Register(RenderGraphBuilder &graph, const PresentationGuidesInputs &input,
     PresentationGuidesOutputs &output, std::uint32_t colorPassId, std::uint32_t guidePassId,
-    std::uint32_t devtoolsPassId)
+    std::uint32_t devtoolsPassId,PresentationGuidesLayout *layout)
+{return RegisterImpl(graph,input,output,colorPassId,guidePassId,devtoolsPassId,layout,nullptr);}
+Result PresentationGuides::BindRetained(RenderGraphBuilder &graph,const PresentationGuidesInputs &input,
+    PresentationGuidesOutputs &output,const PresentationGuidesLayout &layout)
+{return RegisterImpl(graph,input,output,layout.pass_ids[1],layout.pass_ids[2],layout.pass_ids[0],nullptr,&layout);}
+Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const PresentationGuidesInputs &input,
+    PresentationGuidesOutputs &output, std::uint32_t colorPassId, std::uint32_t guidePassId,
+    std::uint32_t devtoolsPassId,PresentationGuidesLayout *layout,
+    const PresentationGuidesLayout *retained)
 {
     output = {};
     if (!impl_ || !impl_->targets || !impl_->targets->usable || impl_->pending.graph)
         return Failure(ErrorCode::InvalidState, "Presentation guides require completed reusable target storage.");
     auto storage = impl_->targets;
+    if(layout){*layout={};layout->target_generation=storage->generation;
+        layout->pass_ids={devtoolsPassId,colorPassId,guidePassId};
+        layout->transparent_guides=input.transparent_guides_enabled;
+        layout->inputs={input.display_linear.version,input.encoded_ui.version,input.depth.version,
+            input.motion.version,input.transparent_depth.version,input.transparent_motion.version,
+            input.transparent_classification.version,input.transparent_metadata.version};}
+    if(retained)
+    {
+        if(!MatchesLayout(input,colorPassId,guidePassId,devtoolsPassId,*retained))
+            return Failure(ErrorCode::InvalidState,"Presentation retained topology changed.");
+        for(UINT i=0;i<6;++i)
+            if(!retained->imports[i]||retained->imports[i].kind!=ResourceKind::Texture||
+                retained->imports[i].value>graph.ResourceCount())
+                return Failure(ErrorCode::InvalidState,"Presentation retained import slot changed.");
+        for(UINT i=0;i<3;++i)
+            if(!graph.BindPass(retained->pass_indices[i],retained->pass_ids[i]))
+                return Failure(ErrorCode::InvalidState,"Presentation retained pass changed.");
+    }
     if (!Extent(input.render_active) || input.render_active.width > storage->capacity.width ||
         input.render_active.height > storage->capacity.height || input.frame_slot >= storage->slots.size() ||
         !storage->slots[input.frame_slot].completion.IsSatisfiedBy(input.completed) || !colorPassId || !guidePassId || !devtoolsPassId ||
@@ -268,6 +313,8 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
          !Fits(input.transparent_metadata, input.render_active, DXGI_FORMAT_R32G32_UINT)))
         return Failure(ErrorCode::InvalidArgument, "Native transparent depth/motion requires the actual nearest surface classification and identity guides.");
     auto &slot = storage->slots[slotIndex];
+    for(auto *resource:{&slot.hudless,&slot.ui,&slot.composite,&slot.depth,&slot.motion,&slot.devtools})
+        if(auto certified=resource->EnsureNativeContract(storage->device.Get());!certified)return certified;
     storage->Srv(slotIndex, 0, input.display_linear.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Srv(slotIndex, 1, input.encoded_ui.resource, DXGI_FORMAT_B8G8R8A8_UNORM);
     storage->Srv(slotIndex, 2, input.depth.resource, DXGI_FORMAT_R32_FLOAT);
@@ -280,14 +327,23 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.slot = slotIndex;
     pending.active = input.render_active; pending.peak = input.peak_nits;
+    UINT import_index{};
+    bool imports_valid=true;
     const auto import = [&](AllocationResource &resource, std::string_view name) {
-        const auto handle = graph.ImportTexture({resource.resource.Get(), resource.graph_completion, resource.graph_queue}, resource.graph_access, name);
+        const UINT index=import_index++;
+        const auto current=ExternalTexture{resource.resource.Get(),resource.graph_completion,
+            resource.graph_queue,{},resource.NativeContract()};
+        const auto handle=retained?retained->imports[index]:
+            graph.ImportTexture(current,resource.graph_access,name);
+        if(retained)imports_valid&=graph.BindTexture(handle,current,resource.graph_access);
+        if(layout)layout->imports[index]=handle;
         pending.imports.push_back({&resource, handle});
         return PresentationGuideResource{graph.Version(handle), resource.resource.Get()};
     };
     auto hudless = import(slot.hudless, "SdkHudlessDisplay"), ui = import(slot.ui, "SdkUiDisplay"),
         composite = import(slot.composite, "SdkCompositeDisplay"), depth = import(slot.depth, "SdkUndilatedDepth"),
         motion = import(slot.motion, "SdkUndilatedMotionUv"), devtools = import(slot.devtools, "SdkDevToolsUi");
+    if(!imports_valid)return Failure(ErrorCode::InvalidState,"Presentation retained resource binding changed.");
     Constants constants{input.render_active.width, input.render_active.height, storage->output.width, storage->output.height,
         input.paper_white_nits, input.peak_nits, storage->color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ? 1U : 0U,
         input.motion_contains_sky ? 1U : 0U};
@@ -299,8 +355,10 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
     constants.jitter_uv[1] = input.camera.jitter_pixels[1] / input.render_active.height;
     constants.reset_history = input.camera.reset_history ? 1U : 0U;
     constants.transparent_enabled = input.transparent_guides_enabled ? 1U : 0U;
-    auto devtoolsPass = graph.AddPass(devtoolsPassId, "SDK DevTools UI", QueueHint::Direct);
-    devtools.version = devtoolsPass.Write(devtools.version, Access::RenderTarget);
+    if(layout)layout->pass_indices[0]=graph.PassCount();
+    auto devtoolsPass=retained?*graph.BindPass(retained->pass_indices[0],devtoolsPassId):
+        graph.AddPass(devtoolsPassId,"SDK DevTools UI",QueueHint::Direct);
+    devtools.version=retained?retained->outputs[5]:devtoolsPass.Write(devtools.version,Access::RenderTarget);
     devtoolsPass.SetExecuteOnOwner([storage, slotIndex, draw = input.draw_devtools](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         const auto rtv = storage->Rtv(slotIndex, 3);
@@ -309,12 +367,15 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
         commands->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         return draw ? draw(commands) : Result::Success();
     });
-    auto color = graph.AddPass(colorPassId, "SDK Display Guides", QueueHint::Direct);
+    if(layout)layout->pass_indices[1]=graph.PassCount();
+    auto color=retained?*graph.BindPass(retained->pass_indices[1],colorPassId):
+        graph.AddPass(colorPassId,"SDK Display Guides",QueueHint::Direct);
     const bool freshSlot = slot.completion.direct == 0 && slot.completion.compute == 0 && slot.completion.copy == 0;
-    color.Read(input.display_linear.version, Access::ShaderRead); color.Read(input.encoded_ui.version, Access::ShaderRead);
-    color.Read(devtools.version, Access::ShaderRead);
-    hudless.version = color.Write(hudless.version, Access::RenderTarget);
-    ui.version = color.Write(ui.version, Access::RenderTarget); composite.version = color.Write(composite.version, Access::RenderTarget);
+    if(!retained){color.Read(input.display_linear.version, Access::ShaderRead); color.Read(input.encoded_ui.version, Access::ShaderRead);
+        color.Read(devtools.version, Access::ShaderRead);}
+    hudless.version=retained?retained->outputs[0]:color.Write(hudless.version,Access::RenderTarget);
+    ui.version=retained?retained->outputs[1]:color.Write(ui.version,Access::RenderTarget);
+    composite.version=retained?retained->outputs[2]:color.Write(composite.version,Access::RenderTarget);
     color.SetExecuteChecked([storage, slotIndex, constants, freshSlot](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if (freshSlot)
@@ -336,12 +397,15 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
         commands->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); commands->DrawInstanced(3, 1, 0, 0);
         return Result::Success();
     });
-    auto guides = graph.AddPass(guidePassId, "SDK Undilated Guides", QueueHint::Direct);
-    guides.Read(input.depth.version, Access::ComputeRead); guides.Read(input.motion.version, Access::ComputeRead);
-    if (input.transparent_guides_enabled)
+    if(layout)layout->pass_indices[2]=graph.PassCount();
+    auto guides=retained?*graph.BindPass(retained->pass_indices[2],guidePassId):
+        graph.AddPass(guidePassId,"SDK Undilated Guides",QueueHint::Direct);
+    if(!retained){guides.Read(input.depth.version, Access::ComputeRead); guides.Read(input.motion.version, Access::ComputeRead);}
+    if (!retained&&input.transparent_guides_enabled)
         for (const auto &resource : {input.transparent_depth, input.transparent_motion, input.transparent_classification, input.transparent_metadata})
             guides.Read(resource.version, Access::ComputeRead);
-    depth.version = guides.Write(depth.version, Access::UnorderedWrite); motion.version = guides.Write(motion.version, Access::UnorderedWrite);
+    depth.version=retained?retained->outputs[3]:guides.Write(depth.version,Access::UnorderedWrite);
+    motion.version=retained?retained->outputs[4]:guides.Write(motion.version,Access::UnorderedWrite);
     guides.SetExecuteChecked([storage, slotIndex, constants](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);
@@ -353,24 +417,53 @@ Result PresentationGuides::Register(RenderGraphBuilder &graph, const Presentatio
         return Result::Success();
     });
     output = {hudless, ui, composite, depth, motion, storage};
+    if(layout)layout->outputs={hudless.version,ui.version,composite.version,
+        depth.version,motion.version,devtools.version};
     impl_->pending = std::move(pending);
     return Result::Success();
 }
-Result PresentationGuides::RegisterTagPass(RenderGraphBuilder &graph, const PresentationGuidesOutputs &output,
-    PresentationGuideResource backBuffer, SdkPresentationFrame frame, SdkPresentation &presentation, std::uint32_t passId)
+bool PresentationGuides::MatchesTagLayout(const PresentationGuidesOutputs &output,
+    PresentationGuideResource backBuffer,std::uint32_t passId,const PresentationTagLayout &layout) const noexcept
+{
+    return impl_&&impl_->targets&&impl_->targets->usable&&
+        layout.target_generation==impl_->targets->generation&&layout.pass_id==passId&&
+        layout.provider==impl_->targets->provider&&layout.back_buffer==backBuffer.version&&
+        layout.guides==std::array<ResourceVersion,4>{output.hudless.version,output.ui.version,
+            output.depth.version,output.motion.version};
+}
+Result PresentationGuides::RegisterTagPass(RenderGraphBuilder &graph,const PresentationGuidesOutputs &output,
+    PresentationGuideResource backBuffer,SdkPresentationFrame frame,SdkPresentation &presentation,
+    std::uint32_t passId,PresentationTagLayout *layout)
+{return RegisterTagImpl(graph,output,backBuffer,std::move(frame),presentation,passId,layout,nullptr);}
+Result PresentationGuides::BindRetainedTagPass(RenderGraphBuilder &graph,const PresentationGuidesOutputs &output,
+    PresentationGuideResource backBuffer,SdkPresentationFrame frame,SdkPresentation &presentation,
+    const PresentationTagLayout &layout)
+{return RegisterTagImpl(graph,output,backBuffer,std::move(frame),presentation,layout.pass_id,nullptr,&layout);}
+Result PresentationGuides::RegisterTagImpl(RenderGraphBuilder &graph,const PresentationGuidesOutputs &output,
+    PresentationGuideResource backBuffer,SdkPresentationFrame frame,SdkPresentation &presentation,
+    std::uint32_t passId,PresentationTagLayout *layout,const PresentationTagLayout *retained)
 {
     if (!impl_ || !impl_->pending.graph || impl_->pending.graph != &graph || impl_->pending.tagged ||
         !output.owner || output.owner.get() != impl_->targets.get() || !passId || !backBuffer.resource || !backBuffer.version.resource ||
         presentation.PresentationOwner() != impl_->targets->provider)
         return Failure(ErrorCode::InvalidState, "SDK tag pass must match one registered guide graph and its sole selected presentation owner.");
     auto storage = impl_->targets;
+    if(layout){*layout={};layout->target_generation=storage->generation;
+        layout->pass_id=passId;layout->provider=storage->provider;
+        layout->back_buffer=backBuffer.version;
+        layout->guides={output.hudless.version,output.ui.version,output.depth.version,output.motion.version};
+        layout->pass_index=graph.PassCount();}
+    if(retained&&(!MatchesTagLayout(output,backBuffer,passId,*retained)||
+        !graph.BindPass(retained->pass_index,passId)))
+        return Failure(ErrorCode::InvalidState,"Presentation retained tag topology changed.");
     if (!Fits(backBuffer, storage->output, storage->format))
         return Failure(ErrorCode::InvalidArgument, "Presentation backbuffer version/format/extent does not match the resolved native chain.");
-    auto tag = graph.AddPass(passId, "SDK Frame Generation Prepare", QueueHint::Direct);
+    auto tag=retained?*graph.BindPass(retained->pass_index,passId):
+        graph.AddPass(passId,"SDK Frame Generation Prepare",QueueHint::Direct);
     const bool intel = storage->provider == SdkPresentationOwner::Xess;
     const auto access = intel ? Access::CopySource : Access::ComputeRead;
-    for (const auto &resource : {output.hudless, output.ui, output.depth, output.motion}) tag.Read(resource.version, access);
-    tag.Read(backBuffer.version, Access::Present);
+    if(!retained){for (const auto &resource : {output.hudless, output.ui, output.depth, output.motion}) tag.Read(resource.version, access);
+        tag.Read(backBuffer.version, Access::Present);}
     frame.hudless = output.hudless.resource; frame.ui = output.ui.resource;
     frame.depth = output.depth.resource; frame.motion = output.motion.resource; frame.back_buffer = backBuffer.resource;
     frame.output_format = storage->format; frame.color_space = storage->color_space;

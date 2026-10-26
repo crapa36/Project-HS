@@ -1,6 +1,7 @@
 #include "../Source/Apps/AssetPipeline/action.hpp"
 
 #include <stdexcept>
+#include <sstream>
 
 void TestAssetActionSnapshot()
 {
@@ -25,6 +26,10 @@ void TestAssetActionSnapshot()
             throw std::runtime_error("snapshot product membership differs");
         ap::UpstreamProduct dependency;
         const auto owned = snapshot.ReadProductBytes("fixture/payload", dependency);
+        std::ostringstream copied;
+        snapshot.CopyProductBytesTo("fixture/payload", copied, dependency);
+        if(copied.str()!=original || snapshot.ProductIds()!=std::vector<std::string_view>{"fixture/payload"})
+            throw std::runtime_error("streamed product or snapshot IDs differ");
         if (owned != original || dependency.size != original.size() ||
             dependency.digest != ap::Sha256Bytes(bytes(original)))
             throw std::runtime_error("verified snapshot bytes or identity differ");
@@ -37,9 +42,12 @@ void TestAssetActionSnapshot()
             throw std::runtime_error("snapshot accepted corrupt or unbound product");
         };
         rejects([&] { (void)snapshot.ReadProductBytes("fixture/payload", dependency); });
+        rejects([&] { std::ostringstream out; snapshot.CopyProductBytesTo("fixture/payload",out,dependency); });
+        rejects([&] { std::ostringstream out; snapshot.CopyProductBytesTo("fixture/other",out,dependency); });
         rejects([&] { snapshot.ReadProduct("fixture/payload", dependency, path); });
         rejects([&] { (void)snapshot.ReadProductBytes("fixture/other", dependency); });
         ap::WriteBytes(path, bytes(original));
+        rejects([&] { std::ostringstream out; out.setstate(std::ios::badbit); snapshot.CopyProductBytesTo("fixture/payload",out,dependency); });
         if (snapshot.ReadProductBytes("fixture/payload", dependency) != original)
             throw std::runtime_error("repaired product did not reopen");
     }

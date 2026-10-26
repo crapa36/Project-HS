@@ -1,8 +1,8 @@
 #pragma once
 
 #include <hs/core/presentation_event.hpp>
-#include <hs/core/render_snapshot.hpp>
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 
 #include <cstdint>
@@ -42,7 +42,7 @@ class PreparedPairFacts
                  std::span<const RenderInstance> instances,
                  std::span<const CapturedRenderInstance> captures);
     [[nodiscard]] const PersistentVfxVisual *Previous(
-        const PersistentVfxVisual &visual, std::span<const PersistentVfxVisual> rows) const noexcept;
+        std::uint64_t stable_id, PersistentVfxKind kind, std::span<const PersistentVfxVisual> rows) const noexcept;
     [[nodiscard]] const PersistentVfxVisual *Current(
         std::uint64_t stable_id, PersistentVfxKind kind,
         std::span<const PersistentVfxVisual> rows) const noexcept;
@@ -92,7 +92,8 @@ class PreparedPairFacts
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
-    const PreparedPairFacts *pair_facts = nullptr);
+    const PreparedPairFacts *pair_facts = nullptr,
+    float interpolation = 1.0f);
 
 // Retain only the captured endpoints of a successful second retreat. The
 // movement is instantaneous in gameplay; fixed authored seconds own the fade.
@@ -103,7 +104,7 @@ class VfxUpgradeMovementState
     [[nodiscard]] std::vector<VfxPersistentInput> Emit(
         const VfxProgramView &cooked,
         std::span<const PresentationEvent> dispatched_events,
-        Tick current_tick);
+        Tick current_tick, float interpolation = 1.0f);
     void Clear() noexcept { owners_.clear(); }
     [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
                                      const VfxProgramView &next) noexcept;
@@ -123,7 +124,10 @@ class VfxUpgradeMovementState
 // owner. Events without owner metadata are preserved unchanged.
 void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
                                  std::span<const PersistentVfxVisual> owners,
-                                 Tick current_tick);
+                                 Tick current_tick,
+                                 const PreparedPairFacts *pair_facts = nullptr,
+                                 std::span<const PersistentVfxVisual> previous = {},
+                                 float interpolation = 1.0f);
 
 // Validate prepared owner-backed events against exact warning/sector recipes.
 // Events without owner metadata retain their already remapped handles.

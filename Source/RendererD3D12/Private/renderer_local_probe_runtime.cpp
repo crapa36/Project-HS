@@ -49,19 +49,18 @@ std::string Hash(std::span<const std::byte> bytes)
 }
 std::vector<std::byte> ReadProduct(const RendererConfig &config,std::string_view id)
 {
-    std::filesystem::path path; const auto resolved=config.ResolveProduct(id,path);
+    RendererAssetSource source; const auto resolved=ResolveRendererAsset(config,id,source);
     Require(static_cast<bool>(resolved),resolved.Message());
-    const auto found=config.product_digests.find(std::string(id));
-    Require(found!=config.product_digests.end(),"Generation omits required product digest: "+std::string(id));
+    const auto digest=RendererProductDigest(config,id);
+    Require(!digest.empty(),"Missing required product digest: "+std::string(id));
     renderer_detail::StartupOperationScope read_timing(RendererStartupOperation::CheckedBinaryRead);
-    std::ifstream stream(path,std::ios::binary|std::ios::ate);
-    Require(static_cast<bool>(stream),"Cannot open Generation probe/shader product: "+std::string(id));
-    const auto count=stream.tellg(); Require(count>0 && count<=256ll*1024*1024,"Invalid bounded probe/shader product size");
-    std::vector<std::byte> bytes(static_cast<std::size_t>(count)); stream.seekg(0);
-    Require(static_cast<bool>(stream.read(reinterpret_cast<char *>(bytes.data()),static_cast<std::streamsize>(bytes.size()))),
-        "Cannot read exact Generation probe/shader product bytes");
+    std::uint64_t count{}; const auto sized=source.ByteCount(count);
+    Require(static_cast<bool>(sized),sized.Message());
+    Require(count>0 && count<=256ull*1024*1024,"Invalid bounded probe/shader product size");
+    std::vector<std::byte> bytes; const auto read=source.Read(bytes,count);
+    Require(static_cast<bool>(read),read.Message());
     read_timing.Stop();
-    Require(Hash(bytes)==found->second,"Generation probe/shader digest mismatch: "+std::string(id)); return bytes;
+    if(!source.pack) Require(Hash(bytes)==digest,"Probe/shader digest mismatch: "+std::string(id)); return bytes;
 }
 class Identity
 {
@@ -219,14 +218,6 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
     XMFLOAT3 position; XMStoreFloat3(&position,eye);
     Require(std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z),"Static shadow camera exceeds finite coordinates");
     result.view.position={position.x,position.y,position.z}; return result;
-}
-bool MaterialIdentity(std::string_view id)
-{
-    if(id.starts_with("render/material/") || id.starts_with("render/texture/") ||
-        id.starts_with("render/shader/") || id.starts_with("render/geometry/") || id.starts_with("environment/")) return true;
-    for(auto name:rd::kEnvironmentMaterialNames)
-        if(id.starts_with("render/"+std::string(name))) return true;
-    return false;
 }
 void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::uint32_t generation)
 {
@@ -480,7 +471,8 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     { candidate.prepared_=true; return Result::Success(); }
     try
     {
-        Require(device && allocator && root && pipeline_cache && !config.content_generation_id.empty() && !scene_generation.empty(),
+        Require(device && allocator && root && pipeline_cache &&
+            (config.packed_content || (!config.content_generation_id.empty() && !scene_generation.empty())),
             "Active local probes need native owners, pipeline cache and selected/resident scene Generations");
         const auto bytes=ReadProduct(config,kProduct); const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct)); });
         auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
@@ -489,28 +481,41 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
         (void)renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadLightingProbePackage(environment,MakeAssetId(kEnvironment)); });
-        capture->environment.emplace(kEnvironment,config.product_digests.at(std::string(kEnvironment)));
+        capture->environment.emplace(kEnvironment,RendererProductDigest(config,kEnvironment));
         Require(Revision(rd::SceneProbeRevisionDomain::Environment,capture->environment)==capture->baseline.environment,
             "Local package baseline environment revision is stale for the selected Generation");
+        Identities dependency_digests;
         for(const auto &id:package.dependencies)
         {
-            std::filesystem::path path; const auto found=config.product_digests.find(id);
-            Require(found!=config.product_digests.end() && static_cast<bool>(config.ResolveProduct(id,path)),"Local package dependency is absent from Generation: "+id);
+            RendererAssetSource source;
+            auto digest=RendererProductDigest(config,id);
+            Require(config.packed_content ? !digest.empty() :
+                static_cast<bool>(ResolveRendererAsset(config,id,source)),"Local package dependency is absent: "+id);
+            dependency_digests.emplace(id,std::move(digest));
         }
         std::vector<rd::SceneProbeRevisionInput> source_inputs; source_inputs.reserve(package.dependencies.size());
         for(const auto &id:package.dependencies)
         {
-            const auto &digest=config.product_digests.at(id);
+            const auto &digest=dependency_digests.at(id);
             Require(digest.starts_with("sha256:") && digest.size()==71,"Invalid local-probe source dependency digest: "+id);
             source_inputs.push_back({id,std::string_view(digest).substr(7)});
         }
         capture->input_identity=rd::DeriveSceneProbeInputIdentity(package.description,package.probes,
             package.dependencies,source_inputs);
-        // Source-file light/layout identities are unavailable in RendererConfig.
         // Keep the four validated package baselines; native revisions below fold
         // real retained scene/lights/parameters/products rather than forging them.
-        for(const auto &[id,digest]:config.product_digests)
-            if(MaterialIdentity(id)) capture->material_products.emplace(id,digest);
+        if(config.packed_content)
+        {
+            for(const auto &source:config.packed_source_revisions)
+                if(rd::IsRendererMaterialRevisionProduct(source.product_id))
+                    capture->material_products.emplace(source.product_id, "sha256:"+Hex(source.digest));
+            for(const auto &entry:config.packed_revision_bulks)
+                if(rd::IsRendererMaterialRevisionProduct(entry.product_id))
+                    capture->material_products.emplace(entry.product_id,
+                        "sha256:"+Hex(config.packed_bulks[entry.bulk_index].range.expected_digest));
+        }
+        else for(const auto &[id,digest]:config.product_digests)
+            if(rd::IsRendererMaterialRevisionProduct(id)) capture->material_products.emplace(id,digest);
         capture->material_products["scene-probe/semantic-inputs"]=capture->input_identity;
         if(package.payload!=rd::SceneProbePayload::Baked)
             PrepareCapturePipelines(capture,config,pipeline_cache,true);
@@ -639,37 +644,135 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
+Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
+    LocalProbeRuntimeFramePlan &plan)
+{
+    plan={};plan.source=&in;plan.scene=in.scene;
+    plan.static_instance_generation=in.static_instance_generation;
+    plan.material_parameter_revision=in.material_parameter_revision;
+    plan.pipeline_revision=in.pipeline_revision;
+    plan.light_count=in.lights.size();plan.page_count=in.pages.size();
+    plan.scene_read_count=in.scene_reads.size();plan.max_cube_views=in.max_cube_views;
+    if(!impl_->capture)return Result::Success();
+    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
+    std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
+    plan.active=true;
+    if(!in.scene)return Result::Success();
+    if(auto qualified=CurrentRevisions(in,plan.revisions);!qualified)return qualified;
+    if(in.max_cube_views>6)return Failure("Capture cube-view budget exceeds six");
+    plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed);
+    if(!plan.capture)return Result::Success();
+    try
+    {
+        Require(in.config&&in.pipeline_cache,"Native probe capture needs the selected pipeline inputs");
+        if(!impl_->capture->sky)PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true);
+        const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result{
+            try{output=ReadProduct(*in.config,id);return Result::Success();}
+            catch(const std::exception &error){return Failure(error.what());}
+        };
+        if(auto prepared=impl_->service.PrepareCapture(reader,in.completed);!prepared)return prepared;
+        plan.shadow=impl_->capture->revision_shadow.enabled;
+        return Result::Success();
+    }
+    catch(const std::exception &error){return Failure(error.what());}
+}
 Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,LocalProbeOutputs &out)
 {
-    out={}; if(!impl_->capture) return Result::Success();
-    if(impl_->pending_graph) return Failure("Local-probe runtime already has pending graph work");
-    std::erase_if(impl_->retired_frames,[&](const auto &frame) { return frame->completion.IsSatisfiedBy(in.completed); });
+    LocalProbeRuntimeFramePlan plan;
+    if(auto prepared=PrepareFrameRecordData(in,plan);!prepared)return prepared;
+    return RegisterImpl(graph,in,plan,out,nullptr,nullptr);
+}
+Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,
+    const LocalProbeRuntimeFramePlan &plan,LocalProbeOutputs &out,LocalProbeRuntimeLayout *layout)
+{return RegisterImpl(graph,in,plan,out,layout,nullptr);}
+Result LocalProbeRuntime::BindRetained(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,
+    const LocalProbeRuntimeFramePlan &plan,const LocalProbeRuntimeLayout &layout,LocalProbeOutputs &out)
+{return RegisterImpl(graph,in,plan,out,nullptr,&layout);}
+bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
+    const LocalProbeRuntimeFramePlan &plan,const LocalProbeRuntimeLayout &layout) const
+{
+    if(plan.source!=&in||plan.scene!=in.scene||plan.active!=layout.active||
+        plan.capture!=layout.capture||plan.shadow!=layout.shadow||
+        plan.static_instance_generation!=in.static_instance_generation||
+        plan.material_parameter_revision!=in.material_parameter_revision||
+        plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
+        plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
+        plan.max_cube_views!=in.max_cube_views||layout.scene_reads.size()!=in.scene_reads.size()||
+        layout.shadow_sampling!=(plan.shadow&&bool(in.declare_shadow_sampling)))return false;
+    for(std::size_t i=0;i<in.scene_reads.size();++i)
+        if(layout.scene_reads[i].version!=in.scene_reads[i].version||
+            layout.scene_reads[i].access!=in.scene_reads[i].access)return false;
+    if(!plan.active)return true;
+    if(!plan.capture)
+    {
+        const LocalProbeInputs service_input{in.scene,plan.revisions,{},{},in.completed,0};
+        LocalProbeFramePlan service_plan;
+        return bool(impl_->service.PrepareFrameRecordData(service_input,service_plan))&&
+            impl_->service.MatchesLayout(service_input,service_plan,layout.service);
+    }
+    if(!layout.private_constants||layout.private_constants.kind!=ResourceKind::Buffer||
+        (plan.shadow&&(!layout.private_shadow||layout.private_shadow.kind!=ResourceKind::Texture)))return false;
+    std::vector<LocalProbeSceneRead> reads(in.scene_reads.begin(),in.scene_reads.end());
+    reads.push_back({{layout.private_constants,0},Access::AllShaderRead});
+    reads.push_back({in.static_version,Access::VertexShaderRead});
+    for(const auto &page:in.pages)reads.push_back({page.vertex_version,Access::VertexShaderRead});
+    if(reads.size()!=layout.shadow_reads.size())return false;
+    for(std::size_t i=0;i<reads.size();++i)
+        if(reads[i].version!=layout.shadow_reads[i].version||
+            reads[i].access!=layout.shadow_reads[i].access)return false;
+    if(plan.shadow)reads.push_back({layout.shadow_output,Access::ShaderRead});
+    const LocalProbeInputs service_input{in.scene,plan.revisions,reads,
+        [](RenderPassContext &,const LocalProbeCaptureView &){return Result::Success();},
+        in.completed,in.max_cube_views,in.declare_material_sampling};
+    LocalProbeFramePlan service_plan;
+    return bool(impl_->service.PrepareFrameRecordData(service_input,service_plan))&&
+        impl_->service.MatchesLayout(service_input,service_plan,layout.service);
+}
+Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,
+    const LocalProbeRuntimeFramePlan &plan,LocalProbeOutputs &out,LocalProbeRuntimeLayout *layout,
+    const LocalProbeRuntimeLayout *retained)
+{
+    out={};if(!plan.source||plan.source!=&in||plan.scene!=in.scene||
+        plan.static_instance_generation!=in.static_instance_generation||
+        plan.material_parameter_revision!=in.material_parameter_revision||
+        plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
+        plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
+        plan.max_cube_views!=in.max_cube_views)
+        return Failure("Local-probe frame record input changed before graph registration");
+    if(layout){*layout={};layout->active=plan.active;layout->capture=plan.capture;layout->shadow=plan.shadow;
+        layout->shadow_sampling=plan.shadow&&bool(in.declare_shadow_sampling);
+        layout->scene_reads.assign(in.scene_reads.begin(),in.scene_reads.end());}
+    if(retained&&!MatchesLayout(in,plan,*retained))return Failure("Local-probe retained topology changed");
+    if(!impl_->capture)return Result::Success();
+    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
     if(!in.scene)
     {
         // No substitute scene or revisions. The service uploads/exports its
         // real zero-count metadata and rejects prior scene publication.
         const LocalProbeInputs absent{nullptr,{}, {},{},in.completed,0};
-        if(auto registered=impl_->service.Register(graph,absent,out);!registered) return registered;
+        LocalProbeFramePlan service_plan;
+        if(auto prepared=impl_->service.PrepareFrameRecordData(absent,service_plan);!prepared)return prepared;
+        const auto registered=retained?impl_->service.BindRetained(graph,absent,service_plan,retained->service,out):
+            impl_->service.Register(graph,absent,service_plan,out,layout?&layout->service:nullptr);
+        if(!registered)return registered;
         impl_->pending_graph=&graph; return Result::Success();
     }
-    rd::SceneProbeRevisions revisions; if(auto qualified=CurrentRevisions(in,revisions);!qualified) return qualified;
-    if(in.max_cube_views>6) return Failure("Capture cube-view budget exceeds six");
-    if(!in.max_cube_views || !impl_->service.NativeCaptureRequired(in.scene,revisions,in.completed))
+    const auto revisions=plan.revisions;
+    if(!plan.capture)
     {
         const LocalProbeInputs publication{in.scene,revisions,{}, {},in.completed,0};
-        if(auto registered=impl_->service.Register(graph,publication,out);!registered) return registered;
+        LocalProbeFramePlan service_plan;
+        if(auto prepared=impl_->service.PrepareFrameRecordData(publication,service_plan);!prepared)return prepared;
+        const auto registered=retained?impl_->service.BindRetained(graph,publication,service_plan,retained->service,out):
+            impl_->service.Register(graph,publication,service_plan,out,layout?&layout->service:nullptr);
+        if(!registered)return registered;
         impl_->pending_graph=&graph; return Result::Success();
     }
     try
     {
         Require(in.config && in.pipeline_cache,"Native probe capture needs the selected pipeline inputs");
-        if(!impl_->capture->sky)
-            PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true);
-        const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
-            try { output=ReadProduct(*in.config,id); return Result::Success(); }
-            catch(const std::exception &error) { return Failure(error.what()); }
-        };
-        if(auto prepared=impl_->service.PrepareCapture(reader,in.completed);!prepared) return prepared;
+        Require(impl_->capture->sky&&impl_->capture->revision_shadow.enabled==plan.shadow,
+            "Local probe prepared capture pipelines or shadow branch changed");
         Require(in.frame_constants && in.static_instances && in.static_version.resource && in.frame_srv_heap && in.sampler_heap &&
             in.frame_srv_base.ptr && in.sampler_table.ptr && in.bind_graphics && in.restore_graphics && !in.scene_reads.empty(),
             "Capture requires actual static/shared bindings, graph reads and parent restore callback");
@@ -768,25 +871,61 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
             // a typed null to avoid an SRV/DSV alias while the map is written.
             device->CreateShaderResourceView(bank<kFaceCount?frame->shadow_map.resource.Get():nullptr,&shadow_srv,shadow_descriptor);
         }
-        frame->constants_handle=graph.ImportBuffer({frame->constants.resource.Get(),{},QueueHint::Direct},Access::AllShaderRead,"LocalProbe.PrivateFaceConstants");
+        if(auto certified=frame->constants.EnsureNativeContract(device);!certified)return certified;
+        if(frame->shadow.enabled)
+            if(auto certified=frame->shadow_map.EnsureNativeContract(device);!certified)return certified;
+        if(retained)
+        {
+            if(!retained->private_constants||retained->private_constants.kind!=ResourceKind::Buffer||
+                retained->private_constants.value>graph.ResourceCount()||
+                (plan.shadow&&(!retained->private_shadow||
+                    retained->private_shadow.kind!=ResourceKind::Texture||
+                    retained->private_shadow.value>graph.ResourceCount()||
+                    !graph.BindPass(retained->shadow_pass_index,177))))
+                return Failure("Local probe retained private import or shadow pass changed");
+        }
+        frame->constants_handle=retained?retained->private_constants:
+            graph.ImportBuffer({frame->constants.resource.Get(),{},QueueHint::Direct,{},frame->constants.NativeContract()},
+                Access::AllShaderRead,"LocalProbe.PrivateFaceConstants");
+        if(retained&&!graph.BindBuffer(frame->constants_handle,
+                {frame->constants.resource.Get(),{},QueueHint::Direct,{},frame->constants.NativeContract()},
+                Access::AllShaderRead))return Failure("Local probe retained face constants binding changed");
+        if(layout)layout->private_constants=frame->constants_handle;
         std::vector<LocalProbeSceneRead> reads(in.scene_reads.begin(),in.scene_reads.end());
         reads.push_back({graph.Version(frame->constants_handle),Access::AllShaderRead}); reads.push_back({in.static_version,Access::VertexShaderRead});
         for(const auto &page:frame->pages) { reads.push_back({page.vertex_version,Access::VertexShaderRead}); }
+        if(layout)layout->shadow_reads=reads;
         if(frame->shadow.enabled)
         {
-            frame->shadow_handle=graph.ImportTexture({frame->shadow_map.resource.Get(),{},QueueHint::Direct},Access::Common,"LocalProbe.PrivateStaticShadow");
-            auto shadow_pass=graph.AddPass(177,"LocalProbeStaticDirectionalShadow",QueueHint::Direct);
-            for(const auto &read:reads) shadow_pass.Read(read.version,read.access);
-            if(in.declare_shadow_sampling) in.declare_shadow_sampling(shadow_pass);
-            const auto shadow_version=shadow_pass.Write(graph.Version(frame->shadow_handle),Access::DepthWrite);
+            frame->shadow_handle=retained?retained->private_shadow:
+                graph.ImportTexture({frame->shadow_map.resource.Get(),{},QueueHint::Direct,{},frame->shadow_map.NativeContract()},
+                    Access::Common,"LocalProbe.PrivateStaticShadow");
+            if(retained&&!graph.BindTexture(frame->shadow_handle,
+                    {frame->shadow_map.resource.Get(),{},QueueHint::Direct,{},frame->shadow_map.NativeContract()},
+                    Access::Common))return Failure("Local probe retained private shadow binding changed");
+            if(layout){layout->private_shadow=frame->shadow_handle;layout->shadow_pass_index=graph.PassCount();}
+            auto shadow_pass=retained?*graph.BindPass(retained->shadow_pass_index,177):
+                graph.AddPass(177,"LocalProbeStaticDirectionalShadow",QueueHint::Direct);
+            if(!retained)
+            {
+                for(const auto &read:reads)shadow_pass.Read(read.version,read.access);
+                if(in.declare_shadow_sampling)in.declare_shadow_sampling(shadow_pass);
+            }
+            const auto shadow_version=retained?retained->shadow_output:
+                shadow_pass.Write(graph.Version(frame->shadow_handle),Access::DepthWrite);
+            if(layout)layout->shadow_output=shadow_version;
             shadow_pass.SetExecuteChecked([frame](RenderPassContext &context) { return frame->DrawShadow(context); });
             reads.push_back({shadow_version,Access::ShaderRead});
-            graph.SetFinalAccess(shadow_version,Access::ShaderRead);
+            if(!retained)graph.SetFinalAccess(shadow_version,Access::ShaderRead);
         }
         const LocalProbeInputs input{in.scene,revisions,reads,[frame](RenderPassContext &context,const LocalProbeCaptureView &view) {
             return frame->Draw(context,view);
         },in.completed,in.max_cube_views,in.declare_material_sampling};
-        if(auto registered=impl_->service.Register(graph,input,out);!registered) return registered;
+        LocalProbeFramePlan service_plan;
+        if(auto prepared=impl_->service.PrepareFrameRecordData(input,service_plan);!prepared)return prepared;
+        const auto registered=retained?impl_->service.BindRetained(graph,input,service_plan,retained->service,out):
+            impl_->service.Register(graph,input,service_plan,out,layout?&layout->service:nullptr);
+        if(!registered)return registered;
         impl_->pending_graph=&graph; impl_->pending_frame=std::move(frame); return Result::Success();
     }
     catch(const std::exception &error) { return Failure(error.what()); }
@@ -1017,7 +1156,7 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
                 if(found!=uploaded_textures.end()) texture=found->second;
                 else
                 {
-                    const auto bytes=ReadProduct(impl_->config,id); const auto package=rd::ReadTexturePackage(bytes,MakeAssetId(id));
+                    const auto bytes=ReadProduct(impl_->config,id); const auto package=ReadRendererTexturePackage(impl_->config,id,bytes);
                     const auto &source=package.description;
                     D3D12_RESOURCE_DESC description{}; description.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
                     description.Width=source.width; description.Height=source.height; description.DepthOrArraySize=static_cast<UINT16>(source.array_size);

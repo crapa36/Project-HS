@@ -2,7 +2,7 @@
 
 #include "render_graph.hpp"
 #include "view_state.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>
@@ -80,6 +80,16 @@ struct LightListOutputs
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> srvs{}; // t0..t3 / space19, in this order.
     std::uint32_t light_count{}, directional_count{};
 };
+struct LightListLayout
+{
+    bool valid{};
+    ViewExtent capacity{};
+    std::uint32_t max_lights{},inline_capacity{},spill_capacity{};
+    std::array<BufferHandle,4> resources{};
+    std::array<ResourceVersion,2> uploaded{};
+    std::array<ResourceVersion,4> outputs{};
+    std::array<std::uint32_t,2> passes{};
+};
 
 struct LightListTargets;
 struct AllocationResource;
@@ -116,7 +126,10 @@ class LightListSystem
         std::uint32_t cluster_capacity) const;
     [[nodiscard]] Result Commit(LightListCandidate &&candidate, const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &graph, const LightListInputs &inputs,
-        LightListOutputs &outputs);
+        LightListOutputs &outputs, LightListLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesLayout(const LightListLayout &)const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LightListInputs &,
+        const LightListLayout &,LightListOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
@@ -126,6 +139,8 @@ class LightListSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(LightListSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const LightListInputs &,LightListOutputs &,
+        LightListLayout *,const LightListLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

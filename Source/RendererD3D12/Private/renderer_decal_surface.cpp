@@ -123,10 +123,33 @@ Result DecalSurfaceSystem::Commit(DecalSurfaceCandidate &&candidate, const Compl
     targets_ = std::move(candidate.targets_); candidate.prepared_ = false; return Result::Success();
 }
 Result DecalSurfaceSystem::Register(RenderGraphBuilder &graph, const DecalSurfaceInputs &input,
-    DecalSurfaceConstants constants, DecalSurfaceOutputs &output)
+    DecalSurfaceConstants constants, DecalSurfaceOutputs &output,DecalSurfaceLayout *layout)
+{
+    return RegisterFrame(graph,input,constants,output,layout,nullptr);
+}
+bool DecalSurfaceSystem::MatchesLayout(const DecalSurfaceInputs &input,const DecalSurfaceLayout &layout)const noexcept
+{
+    if(!layout.valid||layout.active!=(input.command_count!=0))return false;
+    if(!layout.active)return true;
+    const auto &t=targets_;
+    return t&&layout.capacity.width==t->capacity.width&&layout.capacity.height==t->capacity.height&&
+        layout.frame_slots==t->slot_completion.size()&&layout.guides==std::array{
+            input.depth.version,input.metadata.version,input.base.version,input.normal.version,input.material.version,
+            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version};
+}
+Result DecalSurfaceSystem::BindRetained(RenderGraphBuilder &graph,const DecalSurfaceInputs &input,
+    DecalSurfaceConstants constants,const DecalSurfaceLayout &layout,DecalSurfaceOutputs &output)
+{
+    return RegisterFrame(graph,input,constants,output,nullptr,&layout);
+}
+Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSurfaceInputs &input,
+    DecalSurfaceConstants constants,DecalSurfaceOutputs &output,
+    DecalSurfaceLayout *capture,const DecalSurfaceLayout *retained)
 {
     output = {}; output.base = input.base; output.normal = input.normal; output.material = input.material;
-    if (!input.command_count) return Result::Success();
+    if(capture)*capture={};
+    if(retained&&!MatchesLayout(input,*retained))return Failure(ErrorCode::InvalidState,"Decal retained topology changed.");
+    if (!input.command_count){if(capture)capture->valid=true;return Result::Success();}
     const auto t = targets_;
     if (!t || !t->usable || pending_graph_ || !Valid(input.render_active) ||
         input.render_active.width > t->capacity.width || input.render_active.height > t->capacity.height ||
@@ -226,20 +249,35 @@ Result DecalSurfaceSystem::Register(RenderGraphBuilder &graph, const DecalSurfac
     for (std::uint32_t index = 0; index < handles.size(); ++index)
     {
         auto &target = t->outputs[index];
-        handles[index] = graph.ImportTexture({target.resource.Get(), target.graph_completion, target.graph_queue}, target.graph_access,
-            index == 0 ? "DecalSurface.Base" : index == 1 ? "DecalSurface.Normal" : index == 2 ? "DecalSurface.Material" : "DecalSurface.Emission");
+        if(auto checked=target.EnsureNativeContract(t->device.Get());!checked)return checked;
+        handles[index] = retained?retained->outputs[index]:
+            graph.ImportTexture({target.resource.Get(), target.graph_completion, target.graph_queue,{},target.NativeContract()}, target.graph_access,
+                index == 0 ? "DecalSurface.Base" : index == 1 ? "DecalSurface.Normal" : index == 2 ? "DecalSurface.Material" : "DecalSurface.Emission");
+        if(retained&&!graph.BindTexture(handles[index],{target.resource.Get(),target.graph_completion,target.graph_queue,{},target.NativeContract()},target.graph_access))
+            return Failure(ErrorCode::InvalidState,"Decal retained output binding failed.");
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{}; uav.Format = kOutputFormats[index]; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         t->device->CreateUnorderedAccessView(target.resource.Get(), nullptr, &uav, cpu(kDecalSurfaceUavOffset + index));
         t->device->CopyDescriptorsSimple(1, cpu(kDecalSurfaceExportOffset + index), t->Export(index), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         output.export_srvs[index] = t->Export(index);
     }
-    const auto constants_handle = graph.ImportBuffer({t->constants.resource.Get(), t->constants.graph_completion, t->constants.graph_queue},
-        Access::AllShaderRead, "DecalSurface.Constants");
-    auto pass = graph.AddPass(295, "MaterialIRDecalSurface", QueueHint::Direct);
-    for (const auto &guide : reads) pass.Read(guide.version, Access::ComputeRead);
-    pass.Read(graph.Version(constants_handle), Access::AllShaderRead);
-    for (std::size_t index = 0; index < handles.size(); ++index)
-        written[index] = pass.Write(graph.Version(handles[index]), Access::UnorderedWrite);
+    if(auto checked=t->constants.EnsureNativeContract(t->device.Get());!checked)return checked;
+    const auto constants_handle = retained?retained->constants:
+        graph.ImportBuffer({t->constants.resource.Get(), t->constants.graph_completion, t->constants.graph_queue,{},t->constants.NativeContract()},
+            Access::AllShaderRead, "DecalSurface.Constants");
+    if(retained&&!graph.BindBuffer(constants_handle,{t->constants.resource.Get(),t->constants.graph_completion,t->constants.graph_queue,{},t->constants.NativeContract()},Access::AllShaderRead))
+        return Failure(ErrorCode::InvalidState,"Decal retained constant binding failed.");
+    if(capture)capture->pass=graph.PassCount();
+    auto passBinding=retained?graph.BindPass(retained->pass,295):
+        std::optional<PassBuilder>{graph.AddPass(295,"MaterialIRDecalSurface",QueueHint::Direct)};
+    if(!passBinding)return Failure(ErrorCode::InvalidState,"Decal retained pass is missing.");
+    auto &pass=*passBinding;
+    if(retained)written=retained->written;
+    else
+    {
+        for(const auto &guide:reads)pass.Read(guide.version,Access::ComputeRead);
+        pass.Read(graph.Version(constants_handle),Access::AllShaderRead);
+        for(std::size_t index=0;index<handles.size();++index)written[index]=pass.Write(graph.Version(handles[index]),Access::UnorderedWrite);
+    }
     pass.SetExecute([t, heap = input.main_heap, table = input.main_table_gpu, extent = input.render_active](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ID3D12DescriptorHeap *heaps[]{heap}; list->SetDescriptorHeaps(1, heaps);
@@ -249,6 +287,14 @@ Result DecalSurfaceSystem::Register(RenderGraphBuilder &graph, const DecalSurfac
     output.base = {written[0], t->outputs[0].resource.Get()}; output.normal = {written[1], t->outputs[1].resource.Get()};
     output.material = {written[2], t->outputs[2].resource.Get()}; output.emission = {written[3], t->outputs[3].resource.Get()}; output.active = true;
     pending_graph_ = &graph; pending_outputs_ = handles; pending_constants_ = constants_handle; pending_slot_ = input.frame_slot;
+    if(capture)
+    {
+        capture->valid=true;capture->active=true;capture->capacity=t->capacity;
+        capture->frame_slots=static_cast<std::uint32_t>(t->slot_completion.size());
+        capture->guides={input.depth.version,input.metadata.version,input.base.version,input.normal.version,input.material.version,
+            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version};
+        capture->outputs=handles;capture->written=written;capture->constants=constants_handle;
+    }
     return Result::Success();
 }
 Result DecalSurfaceSystem::CompleteSubmission(const RenderGraphBuilder &graph, const CompletionSet &completion, bool success)

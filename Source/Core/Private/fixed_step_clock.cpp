@@ -46,7 +46,10 @@ FixedStepClock::AdvanceResult FixedStepClock::Advance(Clock::time_point now)
         debt_reported_ = false;
     }
 
-    return {tick_count, accumulator_, diagnostic_due};
+    const auto first_boundary = tick_count
+        ? now - accumulator_ - kFixedStep * (tick_count - 1)
+        : Clock::time_point{};
+    return {tick_count, accumulator_, diagnostic_due, first_boundary};
 }
 
 void FixedStepClock::Realign(Clock::time_point now) noexcept

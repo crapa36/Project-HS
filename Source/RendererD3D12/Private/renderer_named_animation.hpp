@@ -1,8 +1,9 @@
 #pragma once
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <hs/core/result.hpp>
 #include <hs/render_data/character_animation_extension.hpp>
+#include <hs/render_data/character_descriptor.hpp>
 
 #include <DirectXMath.h>
 #include <span>
@@ -18,6 +19,11 @@ namespace hs
 // advance an implicit clock.
 [[nodiscard]] Result SampleNamedCharacterAnimation(
     const render_data::CharacterAnimationExtensionData &animation,
+    const RenderInstance &instance,
+    std::span<DirectX::XMFLOAT4X4> transposed_skin_matrices);
+[[nodiscard]] Result SampleNamedCharacterAnimation(
+    const render_data::AnimationDescriptor &animation,
+    std::span<const render_data::PackedCharacterTransform> transforms,
     const RenderInstance &instance,
     std::span<DirectX::XMFLOAT4X4> transposed_skin_matrices);
 } // namespace hs

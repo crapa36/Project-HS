@@ -293,12 +293,49 @@ Result ScreenReflectionsSystem::Commit(ScreenReflectionsCandidate &&candidate, c
 }
 
 Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const ScreenReflectionsInputs &inputs,
-    ScreenReflectionsConstants constants, ScreenReflectionsOutputs &outputs)
+    ScreenReflectionsConstants constants, ScreenReflectionsOutputs &outputs, ScreenReflectionsLayout *layout)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
+}
+bool ScreenReflectionsSystem::MatchesLayout(const ScreenReflectionsInputs &inputs,const ScreenReflectionsLayout &layout)const noexcept
+{
+    const auto &s=impl_->targets;
+    if(!layout.valid||!s||layout.active!=(s->quality!=GraphicsOptionalQuality::Off))return false;
+    return !layout.active||(layout.history==(s->history_valid&&!inputs.reset_history&&inputs.frame_index==s->previous_frame+1)&&
+        layout.ambient==inputs.ambient_visibility_enabled&&layout.sidecars==inputs.sidecar_plane_count&&
+        layout.render_capacity.width==s->render_capacity.width&&layout.render_capacity.height==s->render_capacity.height&&
+        layout.trace_capacity.width==s->trace_capacity.width&&layout.trace_capacity.height==s->trace_capacity.height&&
+        layout.hierarchy_elements==s->hierarchy_elements&&
+        layout.guides==std::array{inputs.depth.version,inputs.base.version,inputs.normal.version,inputs.metadata.version,
+            inputs.material.version,inputs.motion.version,inputs.surface_history.version,inputs.opaque_hdr.version,
+            inputs.environment_specular.version,inputs.material_parameters.version,inputs.sidecars[0].version,
+            inputs.sidecars[1].version,inputs.ambient_visibility.version});
+}
+Result ScreenReflectionsSystem::BindRetained(RenderGraphBuilder &graph, const ScreenReflectionsInputs &inputs,
+    ScreenReflectionsConstants constants, const ScreenReflectionsLayout &layout, ScreenReflectionsOutputs &outputs)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, nullptr, &layout);
+}
+Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const ScreenReflectionsInputs &inputs,
+    ScreenReflectionsConstants constants, ScreenReflectionsOutputs &outputs,
+    ScreenReflectionsLayout *capture, const ScreenReflectionsLayout *retained)
 {
     outputs = {};
+    if (capture) *capture = {};
     auto storage = impl_->targets;
     if (!storage) return ReflectionFailure(ErrorCode::InvalidState, "Prepare and commit reflection targets before registration.");
-    if (storage->quality == GraphicsOptionalQuality::Off) return Result::Success();
+    const bool active_path = storage->quality != GraphicsOptionalQuality::Off;
+    const bool historyValid = storage->history_valid && !inputs.reset_history && inputs.frame_index == storage->previous_frame + 1;
+    if (retained && !MatchesLayout(inputs,*retained))
+        return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained topology has changed.");
+    if (capture)
+    {
+        capture->active = active_path; capture->history = historyValid;
+        capture->ambient = inputs.ambient_visibility_enabled; capture->sidecars = inputs.sidecar_plane_count;
+        capture->render_capacity=storage->render_capacity;capture->trace_capacity=storage->trace_capacity;
+        capture->hierarchy_elements=storage->hierarchy_elements;
+    }
+    if (!active_path) { if (capture) capture->valid = true; return Result::Success(); }
     if (impl_->pending.graph || !storage->usable)
         return ReflectionFailure(ErrorCode::InvalidState, "Reflection submission is pending or its previous graph failed.");
     const auto active = inputs.render_active;
@@ -313,6 +350,11 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
         !FitsTexture(inputs.environment_specular, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
         inputs.sidecar_plane_count > inputs.sidecars.size())
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection compact-surface or radiance input.");
+    const std::array guides{inputs.depth.version, inputs.base.version, inputs.normal.version,
+        inputs.metadata.version, inputs.material.version, inputs.motion.version, inputs.surface_history.version,
+        inputs.opaque_hdr.version, inputs.environment_specular.version, inputs.material_parameters.version,
+        inputs.sidecars[0].version, inputs.sidecars[1].version, inputs.ambient_visibility.version};
+    if (capture) capture->guides = guides;
     for (std::uint32_t index = 0; index < inputs.sidecar_plane_count; ++index)
         if (!FitsTexture(inputs.sidecars[index], active, DXGI_FORMAT_R32_UINT) &&
             !FitsTexture(inputs.sidecars[index], active, DXGI_FORMAT_R32G32_UINT) &&
@@ -341,7 +383,6 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection transforms, jitter or physical tracing parameters.");
     const auto traceActive = TraceExtent(active, storage->profile);
     const auto writeIndex = 1u - storage->read_index;
-    const bool historyValid = storage->history_valid && !inputs.reset_history && inputs.frame_index == storage->previous_frame + 1;
     constants.render_size = SizeConstants(active); constants.trace_size = SizeConstants(traceActive);
     constants.previous_trace_size = SizeConstants(historyValid ? storage->previous_active : traceActive);
     constants.previous_depth_parameters = historyValid ? storage->previous_depth_parameters : DirectX::XMFLOAT4{};
@@ -387,13 +428,25 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
     pending.slot = inputs.frame_slot; pending.write_index = writeIndex; pending.frame = inputs.frame_index;
     pending.jitter = {constants.jitter_uv.x, constants.jitter_uv.y};
     pending.depth_parameters = {constants.projection._33, constants.projection._34, constants.projection._43, constants.projection._44};
+    std::size_t import_index{};
+    Result binding_result = Result::Success();
     auto import = [&](AllocationResource &resource, std::string_view name) {
-        const auto description = resource.resource->GetDesc();
-        ResourceHandle handle;
-        if (description.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-            handle = graph.ImportBuffer({resource.resource.Get(), resource.graph_completion, resource.graph_queue}, resource.graph_access, name);
-        else
-            handle = graph.ImportTexture({resource.resource.Get(), resource.graph_completion, resource.graph_queue}, resource.graph_access, name);
+        if (auto checked = resource.EnsureNativeContract(storage->device.Get()); !checked)
+        { binding_result = checked; return ResourceVersion{}; }
+        const auto &description = resource.NativeContract()->description;
+        ResourceHandle handle = retained ? retained->resources[import_index] : ResourceHandle{};
+        if (retained)
+        {
+            const bool bound = description.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
+                ? graph.BindBuffer(handle, {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {}, resource.NativeContract()}, resource.graph_access)
+                : graph.BindTexture(handle, {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {}, resource.NativeContract()}, resource.graph_access);
+            if (!bound) binding_result = ReflectionFailure(ErrorCode::InvalidState, "Reflection retained resource binding failed.");
+        }
+        else if (description.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+            handle = graph.ImportBuffer({resource.resource.Get(), resource.graph_completion, resource.graph_queue, {}, resource.NativeContract()}, resource.graph_access, name);
+        else handle = graph.ImportTexture({resource.resource.Get(), resource.graph_completion, resource.graph_queue, {}, resource.NativeContract()}, resource.graph_access, name);
+        if (capture) capture->resources[import_index] = handle;
+        ++import_index;
         pending.imports.push_back({&resource, handle});
         return graph.Version(handle);
     };
@@ -404,6 +457,7 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
     auto current = import(storage->history[writeIndex], "SSR.CurrentRadiance");
     auto validation = import(storage->validation_history[writeIndex], "SSR.CurrentValidation");
     auto composed = import(storage->composed, "SSR.ComposedOpaqueHDR");
+    if (!binding_result) return binding_result;
     auto execute = [storage, inputs, hierarchyHandle = hierarchy.resource](std::uint32_t pipeline, ViewExtent extent) {
         return [storage, inputs, hierarchyHandle, pipeline, extent](RenderPassContext &context) -> Result {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -447,31 +501,60 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
         for (std::uint32_t index = 0; index < inputs.sidecar_plane_count; ++index)
             pass.Read(inputs.sidecars[index].version, Access::ComputeRead);
     };
-    auto trace = graph.AddPass(70, "SSRTrace", QueueHint::Direct);
-    readSurface(trace); trace.Read(inputs.opaque_hdr.version, Access::ComputeRead);
-    trace.Read(inputs.environment_specular.version, Access::ComputeRead);
-    if (inputs.ambient_visibility_enabled) trace.Read(inputs.ambient_visibility.version, Access::ComputeRead);
-    hierarchy = trace.Write(hierarchy, Access::UnorderedWrite); raw = trace.Write(raw, Access::UnorderedWrite);
-    trace.SetExecuteChecked(execute(2, traceActive));
-    auto temporal = graph.AddPass(71, "SSRTemporal", QueueHint::Direct);
-    readSurface(temporal); temporal.Read(raw, Access::UnorderedRead);
-    temporal.Read(inputs.motion.version, Access::ComputeRead); temporal.Read(inputs.surface_history.version, Access::ComputeRead);
-    if (historyValid)
+    const auto pass_binding = [&](std::size_t index, std::uint32_t id, std::string_view name) -> std::optional<PassBuilder> {
+        if (retained) return graph.BindPass(retained->passes[index], id);
+        if (capture) capture->passes[index] = graph.PassCount();
+        return graph.AddPass(id, name, QueueHint::Direct);
+    };
+    auto traceBinding = pass_binding(0,70,"SSRTrace");
+    if (!traceBinding) return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained trace pass is missing.");
+    auto &trace = *traceBinding;
+    if (retained) { hierarchy = retained->hierarchy; raw = retained->raw; }
+    else
     {
-        temporal.Read(previous, Access::UnorderedRead); temporal.Read(previousValidation, Access::UnorderedRead);
+        readSurface(trace); trace.Read(inputs.opaque_hdr.version, Access::ComputeRead);
+        trace.Read(inputs.environment_specular.version, Access::ComputeRead);
+        if (inputs.ambient_visibility_enabled) trace.Read(inputs.ambient_visibility.version, Access::ComputeRead);
+        hierarchy = trace.Write(hierarchy, Access::UnorderedWrite); raw = trace.Write(raw, Access::UnorderedWrite);
     }
-    current = temporal.Write(current, Access::UnorderedWrite); validation = temporal.Write(validation, Access::UnorderedWrite);
+    trace.SetExecuteChecked(execute(2, traceActive));
+    auto temporalBinding = pass_binding(1,71,"SSRTemporal");
+    if (!temporalBinding) return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained temporal pass is missing.");
+    auto &temporal = *temporalBinding;
+    if (retained) { current = retained->current; validation = retained->validation; }
+    else
+    {
+        readSurface(temporal); temporal.Read(raw, Access::UnorderedRead);
+        temporal.Read(inputs.motion.version, Access::ComputeRead); temporal.Read(inputs.surface_history.version, Access::ComputeRead);
+        if (historyValid)
+        {
+            temporal.Read(previous, Access::UnorderedRead); temporal.Read(previousValidation, Access::UnorderedRead);
+        }
+        current = temporal.Write(current, Access::UnorderedWrite); validation = temporal.Write(validation, Access::UnorderedWrite);
+    }
     temporal.SetExecuteChecked(execute(3, traceActive));
-    auto spatial = graph.AddPass(72, "SSRSpatialCompose", QueueHint::Direct);
-    readSurface(spatial); spatial.Read(current, Access::UnorderedRead); spatial.Read(validation, Access::UnorderedRead);
-    spatial.Read(inputs.opaque_hdr.version, Access::ComputeRead);
-    spatial.Read(inputs.environment_specular.version, Access::ComputeRead);
-    composed = spatial.Write(composed, Access::UnorderedWrite); spatial.SetExecuteChecked(execute(4, active));
-    graph.SetFinalAccess(current, Access::UnorderedRead); graph.SetFinalAccess(validation, Access::UnorderedRead);
-    graph.SetFinalAccess(composed, Access::ComputeRead);
+    auto spatialBinding = pass_binding(2,72,"SSRSpatialCompose");
+    if (!spatialBinding) return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained spatial pass is missing.");
+    auto &spatial = *spatialBinding;
+    if (retained) composed = retained->composed;
+    else
+    {
+        readSurface(spatial); spatial.Read(current, Access::UnorderedRead); spatial.Read(validation, Access::UnorderedRead);
+        spatial.Read(inputs.opaque_hdr.version, Access::ComputeRead);
+        spatial.Read(inputs.environment_specular.version, Access::ComputeRead);
+        composed = spatial.Write(composed, Access::UnorderedWrite);
+        graph.SetFinalAccess(current, Access::UnorderedRead); graph.SetFinalAccess(validation, Access::UnorderedRead);
+        graph.SetFinalAccess(composed, Access::ComputeRead);
+    }
+    spatial.SetExecuteChecked(execute(4, active));
     outputs = {composed, storage->composed.resource.Get(),
                storage->export_descriptors->GetCPUDescriptorHandleForHeapStart()};
     impl_->pending = std::move(pending);
+    if (capture)
+    {
+        capture->hierarchy = hierarchy; capture->raw = raw; capture->current = current;
+        capture->validation = validation; capture->composed = composed; capture->valid = true;
+    }
     return Result::Success();
 }
 

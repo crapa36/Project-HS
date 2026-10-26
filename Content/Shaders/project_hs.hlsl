@@ -2631,7 +2631,7 @@ OitOutput HeroOitTailPS(SceneOutput input,bool front:SV_IsFrontFace HS_HERO_WORK
     const HsSceneGradients gradients=RasterSceneGradients(input);
     HS_HERO_WORK_ENTRY(input.Position.xy);
     // The read-only opaque DSV rejects z <= opaque before this shader runs.
-    if(!front) { HS_HERO_WORK_COUNT(3u); discard; }
+    if(!front || input.InstanceKey.x==0u) { HS_HERO_WORK_COUNT(3u); discard; }
     [loop] for(uint layer=0u;layer<HeroLayerInfo.y;++layer)
         if(HsHeroSelectedFront(input,layer)) { HS_HERO_WORK_COUNT(10u); discard; }
     const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
@@ -2663,6 +2663,9 @@ HsSurfaceClosure HsHeroSelectedSurface(SceneOutput input,bool front,uint hsHeroC
     const HsSceneGradients gradients=RasterSceneGradients(input);
     HS_HERO_WORK_ENTRY(input.Position.xy);
     const uint layer=HeroLayerInfo.x;
+    // A cleared front has zero identity and cannot authorize a composite.
+    // Match the front peel's reserved-key rejection before its depth match.
+    if(input.InstanceKey.x==0u) discard;
 #ifdef HS_CAPTURE_HERO_WORK
     if(!front) { HsHeroWorkAdd(3u); discard; }
     if(input.Position.z!=HeroFrontDepth[layer].Load(int3(int2(input.Position.xy),0)))

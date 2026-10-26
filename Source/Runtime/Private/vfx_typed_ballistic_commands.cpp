@@ -1,5 +1,5 @@
 #include "vfx_typed_ballistic_commands.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -109,6 +109,12 @@ std::optional<Params> Parameters(const VfxProgramView &p,const VfxSourceRecord &
 std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxProgramView &p,std::span<const VfxEventInput> inputs)
 {
  std::vector<ParticleSpawnCommand> result;
+ BuildVfxTypedBallisticCommands(p, inputs, result);
+ return result;
+}
+void BuildVfxTypedBallisticCommands(const VfxProgramView &p,std::span<const VfxEventInput> inputs,
+    std::vector<ParticleSpawnCommand> &result)
+{
  for(const auto &input:inputs)
  {
   if(input.effect_handle==0||input.effect_handle>p.effects.size()||static_cast<std::uint32_t>(input.quality)>2)continue;
@@ -187,13 +193,20 @@ std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxProgra
    }
   }
  }
- return result;
 }
 
 std::vector<ParticleSpawnCommand> BuildVfxPersistentStatusShardCommands(
     const VfxProgramView &p,std::span<const VfxPersistentInput> inputs,Tick current_tick)
 {
  std::vector<ParticleSpawnCommand> result;
+ BuildVfxPersistentStatusShardCommands(p,inputs,current_tick,result);
+ return result;
+}
+
+void BuildVfxPersistentStatusShardCommands(const VfxProgramView &p,
+    std::span<const VfxPersistentInput> inputs,Tick current_tick,
+    std::vector<ParticleSpawnCommand> &result)
+{
  for(const auto &input:inputs)
  {
   const auto effect_id=StatusEffectId(input.source_visual_kind);
@@ -287,6 +300,5 @@ std::vector<ParticleSpawnCommand> BuildVfxPersistentStatusShardCommands(
    }
   }
  }
- return result;
 }
 }

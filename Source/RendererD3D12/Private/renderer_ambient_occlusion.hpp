@@ -68,6 +68,16 @@ struct AmbientOcclusionOutputs
     D3D12_CPU_DESCRIPTOR_HANDLE ao_srv{}, contact_srv{};
     bool adaptive_density_used{};
 };
+struct AmbientOcclusionLayout
+{
+    bool valid{}, ao{}, contact{}, adaptive{}, history{};
+    ViewExtent render_capacity{},ao_capacity{};
+    QueueHint queue{};
+    std::array<ResourceVersion, 6> guides{};
+    std::array<TextureHandle, 8> textures{};
+    std::array<std::uint32_t, 5> passes{};
+    ResourceVersion sparse, raw, history_output, metadata, resolved, contact_output;
+};
 
 struct AmbientOcclusionTargets;
 class AmbientOcclusionCandidate
@@ -100,7 +110,11 @@ class AmbientOcclusionSystem
     [[nodiscard]] Result Commit(AmbientOcclusionCandidate &&candidate,
                                 const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &graph, const AmbientOcclusionInputs &inputs,
-        AmbientOcclusionConstants constants, AmbientOcclusionOutputs &outputs);
+        AmbientOcclusionConstants constants, AmbientOcclusionOutputs &outputs,
+        AmbientOcclusionLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const AmbientOcclusionInputs &,
+        AmbientOcclusionConstants, const AmbientOcclusionLayout &, AmbientOcclusionOutputs &);
+    [[nodiscard]] bool MatchesLayout(const AmbientOcclusionInputs &,const AmbientOcclusionLayout &)const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;
@@ -112,6 +126,9 @@ class AmbientOcclusionSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(AmbientOcclusionSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const AmbientOcclusionInputs &,
+        AmbientOcclusionConstants, AmbientOcclusionOutputs &,
+        AmbientOcclusionLayout *, const AmbientOcclusionLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -27,6 +28,7 @@ constexpr std::array<std::string_view, kPhaseCount> kProducts{
     "render/shader/hdr_post_grade_cs.dxil"};
 constexpr std::array<DXGI_FORMAT, TargetCount> kFormats{
     kGuide, kColor, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT, kColor, kColor, kColor, DXGI_FORMAT_R16G16_FLOAT};
+std::atomic<std::uint64_t> g_hdr_post_target_generation{};
 static_assert(sizeof(HdrPostConstants) <= kConstantStride);
 static_assert(kConstantStride % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT == 0);
 Result Failure(ErrorCode code, std::string message)
@@ -137,6 +139,7 @@ struct HdrPostTargets
     ViewExtent render_capacity, output_capacity;
     HdrPostSettings settings;
     bool usable{true}, lut_initialized{};
+    std::uint64_t generation{};
     std::uint32_t frame_slot_count{}, descriptor_stride{};
     std::vector<CompletionSet> slot_completion;
     CompletionSet completion;
@@ -222,7 +225,9 @@ struct HdrPostSystem::Impl
         std::uint32_t slot{};
         bool geometry_registered{}, grade_registered{}, initializing_lut{};
     } pending;
-    Result Begin(RenderGraphBuilder &graph, const HdrPostInputs &inputs)
+    Result Begin(RenderGraphBuilder &graph, const HdrPostInputs &inputs,
+        std::array<ResourceHandle, TargetCount> *captured,
+        const std::array<ResourceHandle, TargetCount> *retained)
     {
         auto storage = targets;
         if (!storage) return Failure(ErrorCode::InvalidState, "Prepare and commit HDR post before registration.");
@@ -240,13 +245,22 @@ struct HdrPostSystem::Impl
                 return Failure(ErrorCode::InvalidState, "Complete the previous HDR post graph before registering another graph or frame slot.");
             return Result::Success();
         }
+        for (auto &allocation : storage->textures)
+            if (allocation.resource)
+                if (auto certified = allocation.EnsureNativeContract(storage->device.Get()); !certified)
+                    return certified;
         pending.graph = &graph; pending.targets = storage; pending.slot = inputs.frame_slot;
         for (std::uint32_t index = 0; index < TargetCount; ++index)
         {
             auto &allocation = storage->textures[index];
             if (!allocation.resource) continue;
-            const auto handle = graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue},
-                allocation.graph_access, "HdrPost.PersistentTarget");
+            const auto current = ExternalTexture{allocation.resource.Get(), allocation.graph_completion,
+                allocation.graph_queue, {}, allocation.NativeContract()};
+            const auto handle = retained ? (*retained)[index] :
+                graph.ImportTexture(current, allocation.graph_access, "HdrPost.PersistentTarget");
+            if (retained && !graph.BindTexture(handle, current, allocation.graph_access))
+                return Failure(ErrorCode::InvalidState, "HDR post retained target binding changed.");
+            if (captured) (*captured)[index] = handle;
             pending.imports.push_back({&allocation, handle}); pending.versions[index] = graph.Version(handle);
         }
         return Result::Success();
@@ -343,15 +357,69 @@ Result HdrPostSystem::Commit(HdrPostCandidate &&candidate, const CompletionSet &
     if (!candidate.targets_) return Failure(ErrorCode::InvalidArgument, "HDR post candidate is empty.");
     if (impl_->pending.graph || (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed)))
         return Failure(ErrorCode::InvalidState, "Complete and drain HDR post GPU uses before replacing its targets.");
+    candidate.targets_->generation = g_hdr_post_target_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->targets = std::move(candidate.targets_); return Result::Success();
 }
+bool HdrPostSystem::MatchesMotionLayout(const HdrPostInputs &in,
+    const HdrPostMotionLayout &layout) const noexcept
+{
+    const auto storage=impl_->targets;
+    if(!storage||!storage->usable||storage->generation!=layout.target_generation||
+        layout.enabled!=GeometryEffects(storage->settings)||
+        layout.motion!=(storage->settings.motion_blur!=GraphicsMotionBlur::Off)||
+        layout.dof!=storage->settings.depth_of_field||
+        (layout.enabled&&layout.transparent_guides!=in.transparent_guides_enabled))return false;
+    if(!layout.enabled)return true;
+    const std::array<ResourceVersion,9> versions{in.hdr.version,in.depth.version,in.motion.version,
+        in.surface_history.version,in.normal.version,in.transparent_depth.version,
+        in.transparent_motion.version,in.transparent_history.version,
+        in.transparent_classification.version};
+    for(std::size_t i=0;i<versions.size();++i)
+        if((i<4||(i==4&&layout.motion)||(i>=5&&layout.transparent_guides))&&
+            layout.inputs[i]!=versions[i])return false;
+    return true;
+}
 Result HdrPostSystem::RegisterMotionAndDoF(RenderGraphBuilder &graph, const HdrPostInputs &inputs,
-    HdrPostConstants constants, HdrPostOutputs &outputs)
+    HdrPostConstants constants, HdrPostOutputs &outputs,HdrPostMotionLayout *layout)
+{return RegisterMotionImpl(graph,inputs,constants,outputs,layout,nullptr);}
+Result HdrPostSystem::BindRetainedMotionAndDoF(RenderGraphBuilder &graph,const HdrPostInputs &inputs,
+    HdrPostConstants constants,const HdrPostMotionLayout &layout,HdrPostOutputs &outputs)
+{return RegisterMotionImpl(graph,inputs,constants,outputs,nullptr,&layout);}
+Result HdrPostSystem::RegisterMotionImpl(RenderGraphBuilder &graph, const HdrPostInputs &inputs,
+    HdrPostConstants constants, HdrPostOutputs &outputs,HdrPostMotionLayout *layout,
+    const HdrPostMotionLayout *retained)
 {
     outputs = {inputs.hdr.version, inputs.hdr.resource, {}};
     const auto storage = impl_->targets;
     if (!storage) return Failure(ErrorCode::InvalidState, "Prepare and commit HDR post before registration.");
+    if(layout){*layout={};layout->target_generation=storage->generation;
+        layout->enabled=GeometryEffects(storage->settings);
+        layout->motion=storage->settings.motion_blur!=GraphicsMotionBlur::Off;
+        layout->dof=storage->settings.depth_of_field;
+        layout->transparent_guides=inputs.transparent_guides_enabled;
+        layout->inputs={inputs.hdr.version,inputs.depth.version,inputs.motion.version,
+            inputs.surface_history.version,inputs.normal.version,inputs.transparent_depth.version,
+            inputs.transparent_motion.version,inputs.transparent_history.version,
+            inputs.transparent_classification.version};}
+    if(retained&&!MatchesMotionLayout(inputs,*retained))
+        return Failure(ErrorCode::InvalidState,"HDR motion retained topology changed.");
     if (!GeometryEffects(storage->settings)) return Result::Success();
+    if(retained)
+    {
+        for(UINT index=0;index<TargetCount;++index)
+            if(storage->textures[index].resource&&
+                (!retained->imports[index]||retained->imports[index].kind!=ResourceKind::Texture||
+                    retained->imports[index].value>graph.ResourceCount()))
+                return Failure(ErrorCode::InvalidState,"HDR motion retained import slot changed.");
+        std::array<std::uint32_t,4> ids{110,111,113,114};
+        UINT count=1+UINT(retained->motion)+2*UINT(retained->dof);
+        if(retained->pass_count!=count)return Failure(ErrorCode::InvalidState,"HDR motion retained pass count changed.");
+        UINT cursor{};
+        for(UINT id:ids)if(id==110||(id==111&&retained->motion)||
+            ((id==113||id==114)&&retained->dof))
+            if(!graph.BindPass(retained->pass_indices[cursor++],id))
+                return Failure(ErrorCode::InvalidState,"HDR motion retained pass changed.");
+    }
     if (impl_->pending.geometry_registered || impl_->pending.grade_registered)
         return Failure(ErrorCode::InvalidState, "Register HDR motion/DoF once, before grading.");
     if (!FitsDepth(inputs.depth, inputs.render_active) || !Fits(inputs.motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
@@ -378,30 +446,39 @@ Result HdrPostSystem::RegisterMotionAndDoF(RenderGraphBuilder &graph, const HdrP
     if (constants.frame_parameters.y > 0 && !std::isfinite((1.0f / 120.0f) / constants.frame_parameters.x))
         return Failure(ErrorCode::InvalidArgument, "HDR post render dt produces a nonfinite shutter ratio.");
     constants.camera_forward.x /= forwardLength; constants.camera_forward.y /= forwardLength; constants.camera_forward.z /= forwardLength;
-    if (auto started = impl_->Begin(graph, inputs); !started) return started;
+    if (auto started = impl_->Begin(graph, inputs,layout?&layout->imports:nullptr,
+            retained?&retained->imports:nullptr); !started) return started;
     auto &pending = impl_->pending; pending.geometry_registered = true;
     PopulateConstants(constants, storage->settings, inputs); pending.constants = constants;
+    UINT pass_cursor{};
+    const auto make_pass=[&](UINT id,std::string_view name)
+    {
+        const UINT index=pass_cursor++;
+        if(layout)layout->pass_indices[index]=graph.PassCount();
+        return retained?*graph.BindPass(retained->pass_indices[index],id):
+            graph.AddPass(id,name,QueueHint::Direct);
+    };
     storage->Table(inputs, constants, 0, inputs.hdr.resource, nullptr);
-    auto guide = graph.AddPass(110, "HdrPostNearestGuides", QueueHint::Direct);
-    for (const auto version : {inputs.depth.version, inputs.motion.version, inputs.surface_history.version}) guide.Read(version, Access::ComputeRead);
-    if (storage->settings.motion_blur != GraphicsMotionBlur::Off) guide.Read(inputs.normal.version, Access::ComputeRead);
-    if (inputs.transparent_guides_enabled)
+    auto guide = make_pass(110, "HdrPostNearestGuides");
+    if(!retained)for (const auto version : {inputs.depth.version, inputs.motion.version, inputs.surface_history.version}) guide.Read(version, Access::ComputeRead);
+    if (!retained && storage->settings.motion_blur != GraphicsMotionBlur::Off) guide.Read(inputs.normal.version, Access::ComputeRead);
+    if (!retained && inputs.transparent_guides_enabled)
         for (const auto version : {inputs.transparent_depth.version, inputs.transparent_motion.version, inputs.transparent_history.version,
                                   inputs.transparent_classification.version}) guide.Read(version, Access::ComputeRead);
-    pending.versions[Guide] = guide.Write(pending.versions[Guide], Access::UnorderedWrite);
+    pending.versions[Guide] = retained?retained->versions[Guide]:guide.Write(pending.versions[Guide], Access::UnorderedWrite);
     if (storage->settings.motion_blur != GraphicsMotionBlur::Off)
-        pending.versions[Normal] = guide.Write(pending.versions[Normal], Access::UnorderedWrite);
+        pending.versions[Normal] = retained?retained->versions[Normal]:guide.Write(pending.versions[Normal], Access::UnorderedWrite);
     if (storage->settings.depth_of_field)
-        pending.versions[CoC] = guide.Write(pending.versions[CoC], Access::UnorderedWrite);
+        pending.versions[CoC] = retained?retained->versions[CoC]:guide.Write(pending.versions[CoC], Access::UnorderedWrite);
     guide.SetExecute(storage->Execute(inputs.frame_slot, 0, inputs.output_active, storage));
     auto source = inputs.hdr.version; auto *sourceNative = inputs.hdr.resource;
     if (storage->settings.motion_blur != GraphicsMotionBlur::Off)
     {
         storage->Table(inputs, constants, 1, sourceNative, storage->textures[Motion].resource.Get());
-        auto pass = graph.AddPass(111, "HdrPostMotionBlur", QueueHint::Direct);
-        pass.Read(source, Access::ComputeRead); pass.Read(pending.versions[Guide], Access::ComputeRead);
-        pass.Read(pending.versions[Normal], Access::ComputeRead);
-        pending.versions[Motion] = pass.Write(pending.versions[Motion], Access::UnorderedWrite);
+        auto pass = make_pass(111, "HdrPostMotionBlur");
+        if(!retained){pass.Read(source, Access::ComputeRead); pass.Read(pending.versions[Guide], Access::ComputeRead);
+            pass.Read(pending.versions[Normal], Access::ComputeRead);}
+        pending.versions[Motion] = retained?retained->versions[Motion]:pass.Write(pending.versions[Motion], Access::UnorderedWrite);
         pass.SetExecute(storage->Execute(inputs.frame_slot, 1, inputs.output_active, storage));
         source = pending.versions[Motion]; sourceNative = storage->textures[Motion].resource.Get();
         outputs = {source, sourceNative, storage->Export(0)};
@@ -409,43 +486,97 @@ Result HdrPostSystem::RegisterMotionAndDoF(RenderGraphBuilder &graph, const HdrP
     if (storage->settings.depth_of_field)
     {
         storage->Table(inputs, constants, 2, sourceNative, nullptr);
-        auto dilate = graph.AddPass(113, "HdrPostForegroundDilation", QueueHint::Direct); dilate.Read(pending.versions[CoC], Access::ComputeRead);
-        pending.versions[Dilated] = dilate.Write(pending.versions[Dilated], Access::UnorderedWrite);
+        auto dilate = make_pass(113, "HdrPostForegroundDilation");
+        if(!retained)dilate.Read(pending.versions[CoC], Access::ComputeRead);
+        pending.versions[Dilated] = retained?retained->versions[Dilated]:dilate.Write(pending.versions[Dilated], Access::UnorderedWrite);
         dilate.SetExecute(storage->Execute(inputs.frame_slot, 2, inputs.output_active, storage));
         storage->Table(inputs, constants, 3, sourceNative, storage->textures[DoF].resource.Get());
-        auto pass = graph.AddPass(114, "HdrPostDepthOfField", QueueHint::Direct);
-        for (const auto version : {source, pending.versions[Guide], pending.versions[CoC], pending.versions[Dilated]}) pass.Read(version, Access::ComputeRead);
-        pending.versions[DoF] = pass.Write(pending.versions[DoF], Access::UnorderedWrite);
+        auto pass = make_pass(114, "HdrPostDepthOfField");
+        if(!retained)for (const auto version : {source, pending.versions[Guide], pending.versions[CoC], pending.versions[Dilated]}) pass.Read(version, Access::ComputeRead);
+        pending.versions[DoF] = retained?retained->versions[DoF]:pass.Write(pending.versions[DoF], Access::UnorderedWrite);
         pass.SetExecute(storage->Execute(inputs.frame_slot, 3, inputs.output_active, storage));
         outputs = {pending.versions[DoF], storage->textures[DoF].resource.Get(), storage->Export(1)};
     }
+    if(layout){layout->versions=pending.versions;layout->output=outputs.hdr;layout->pass_count=pass_cursor;}
     return Result::Success();
 }
-Result HdrPostSystem::RegisterGrade(RenderGraphBuilder &graph, const HdrPostInputs &inputs, HdrPostOutputs &outputs)
+bool HdrPostSystem::MatchesGradeLayout(const HdrPostInputs &in,
+    const HdrPostGradeLayout &layout,bool geometry_registered_before_grade) const noexcept
+{
+    const auto storage=impl_->targets;
+    return storage&&storage->usable&&storage->generation==layout.target_generation&&
+        layout.enabled==storage->settings.color_grading&&
+        (!layout.enabled||(layout.input==in.hdr.version&&
+            layout.initialize_lut==!storage->lut_initialized&&
+            layout.imports_in_grade==!geometry_registered_before_grade));
+}
+Result HdrPostSystem::RegisterGrade(RenderGraphBuilder &graph,const HdrPostInputs &inputs,
+    HdrPostOutputs &outputs,HdrPostGradeLayout *layout)
+{return RegisterGradeImpl(graph,inputs,outputs,layout,nullptr);}
+Result HdrPostSystem::BindRetainedGrade(RenderGraphBuilder &graph,const HdrPostInputs &inputs,
+    const HdrPostGradeLayout &layout,HdrPostOutputs &outputs)
+{return RegisterGradeImpl(graph,inputs,outputs,nullptr,&layout);}
+Result HdrPostSystem::RegisterGradeImpl(RenderGraphBuilder &graph, const HdrPostInputs &inputs,
+    HdrPostOutputs &outputs,HdrPostGradeLayout *layout,const HdrPostGradeLayout *retained)
 {
     outputs = {inputs.hdr.version, inputs.hdr.resource, {}};
     const auto storage = impl_->targets;
     if (!storage) return Failure(ErrorCode::InvalidState, "Prepare and commit HDR post before registration.");
+    if(layout){*layout={};layout->target_generation=storage->generation;
+        layout->enabled=storage->settings.color_grading;
+        layout->input=inputs.hdr.version;
+        layout->initialize_lut=!storage->lut_initialized;
+        layout->imports_in_grade=!impl_->pending.graph;}
+    if(retained&&!MatchesGradeLayout(inputs,*retained,impl_->pending.geometry_registered))
+        return Failure(ErrorCode::InvalidState,"HDR grade retained topology changed.");
     if (!storage->settings.color_grading) return Result::Success();
+    if(retained)
+    {
+        if(retained->pass_count!=1+UINT(retained->initialize_lut)||
+            (retained->imports_in_grade!=!impl_->pending.graph))
+            return Failure(ErrorCode::InvalidState,"HDR grade retained phase branch changed.");
+        if(retained->imports_in_grade)
+            for(UINT index=0;index<TargetCount;++index)
+                if(storage->textures[index].resource&&
+                    (!retained->imports[index]||retained->imports[index].kind!=ResourceKind::Texture||
+                        retained->imports[index].value>graph.ResourceCount()))
+                    return Failure(ErrorCode::InvalidState,"HDR grade retained import slot changed.");
+        UINT index{};
+        if(retained->initialize_lut&&!graph.BindPass(retained->pass_indices[index++],115))
+            return Failure(ErrorCode::InvalidState,"HDR LUT retained pass changed.");
+        if(!graph.BindPass(retained->pass_indices[index],116))
+            return Failure(ErrorCode::InvalidState,"HDR grade retained pass changed.");
+    }
     if (impl_->pending.grade_registered) return Failure(ErrorCode::InvalidState, "Register HDR grading once per graph.");
-    if (auto started = impl_->Begin(graph, inputs); !started) return started;
+    if (auto started = impl_->Begin(graph, inputs,
+            layout&&layout->imports_in_grade?&layout->imports:nullptr,
+            retained&&retained->imports_in_grade?&retained->imports:nullptr); !started) return started;
     auto &pending = impl_->pending; pending.grade_registered = true;
     auto constants = pending.constants;
     // Grade-only registration has no camera/depth dependency or shutter division.
     PopulateConstants(constants, storage->settings, inputs);
+    UINT pass_cursor{};
+    const auto make_pass=[&](UINT id,std::string_view name)
+    {
+        const UINT index=pass_cursor++;
+        if(layout)layout->pass_indices[index]=graph.PassCount();
+        return retained?*graph.BindPass(retained->pass_indices[index],id):
+            graph.AddPass(id,name,QueueHint::Direct);
+    };
     if (!storage->lut_initialized)
     {
         storage->Table(inputs, constants, 4, inputs.hdr.resource, nullptr);
-        auto init = graph.AddPass(115, "HdrPostLutInitialize", QueueHint::Direct);
-        pending.versions[Lut] = init.Write(pending.versions[Lut], Access::UnorderedWrite);
+        auto init = make_pass(115, "HdrPostLutInitialize");
+        pending.versions[Lut] = retained?retained->lut:init.Write(pending.versions[Lut], Access::UnorderedWrite);
         init.SetExecute(storage->Execute(inputs.frame_slot, 4, inputs.output_active, storage)); pending.initializing_lut = true;
     }
     storage->Table(inputs, constants, 5, inputs.hdr.resource, storage->textures[Grade].resource.Get());
-    auto grade = graph.AddPass(116, "HdrPostColorGrade", QueueHint::Direct);
-    grade.Read(inputs.hdr.version, Access::ComputeRead); grade.Read(pending.versions[Lut], Access::ComputeRead);
-    pending.versions[Grade] = grade.Write(pending.versions[Grade], Access::UnorderedWrite);
+    auto grade = make_pass(116, "HdrPostColorGrade");
+    if(!retained){grade.Read(inputs.hdr.version, Access::ComputeRead); grade.Read(pending.versions[Lut], Access::ComputeRead);}
+    pending.versions[Grade] = retained?retained->output:grade.Write(pending.versions[Grade], Access::UnorderedWrite);
     grade.SetExecute(storage->Execute(inputs.frame_slot, 5, inputs.output_active, storage));
     outputs = {pending.versions[Grade], storage->textures[Grade].resource.Get(), storage->Export(2)};
+    if(layout){layout->lut=pending.versions[Lut];layout->output=outputs.hdr;layout->pass_count=pass_cursor;}
     return Result::Success();
 }
 Result HdrPostSystem::CompleteSubmission(const RenderGraphBuilder &graph, const CompletionSet &completion, bool success)

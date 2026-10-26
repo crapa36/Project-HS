@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "renderer_development_catalog.hpp"
 #include "renderer_reconstruction_provider.hpp"
 
 namespace hs
@@ -254,8 +255,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     if (auto prepared = next->BuildAdaptiveMaterialPolicies(next->adaptive_material_policies); !prepared) return reject(prepared);
     next->texture_streaming_capabilities = texture_streaming_capabilities;
     if (auto prepared = next->CreatePipeline(next->config); !prepared) return reject(prepared);
-    if (auto prepared = next->CreateEnvironmentBrdfLut(next->config, next->environment_brdf_lut); !prepared)
-        return reject(prepared);
     if (auto prepared = PrepareResidentAssetData(*next); !prepared) return reject(prepared);
     if (auto prepared = next->PrepareHardwareTextureStreaming(&asset_io); !prepared) return reject(prepared);
     const std::array sprite_bindings{next->config.bleed_status_sprite, next->config.burn_status_sprite,
@@ -340,6 +339,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     swap(config, next->config);
     resource_generation_id.swap(next->resource_generation_id);
     swap(resident_generation_lease, next->resident_generation_lease);
+    swap(resident_development_catalog, next->resident_development_catalog);
     adopted = true;
     // Old futures/assets live inside next, with their original reader lease,
     // until destruction finishes after the already-proved queue drain.
@@ -394,6 +394,18 @@ Result D3D12Renderer::ReloadContentGeneration(
         return ResidentReloadFailure("Resident Generation adoption requires an active renderer and complete validated leased products.");
     if (generation_id == impl_->config.content_generation_id) return Result::Success();
     RendererConfig candidate = impl_->config;
+    // This API explicitly selects loose developer Generation products.
+    candidate.packed_content.reset();
+    candidate.packed_bulks = {};
+    candidate.packed_textures = {};
+    candidate.packed_geometry = {};
+    candidate.packed_materials = {};
+    candidate.packed_characters = {};
+    candidate.packed_animations = {};
+    candidate.packed_vfx_mesh_atlas = nullptr;
+    candidate.packed_source_revisions = {};
+    candidate.packed_revision_bulks = {};
+    candidate.selected_texture_feedback = false;
     candidate.content_generation_id = generation_id;
     candidate.content_generation_lease = std::move(reader_lease);
     candidate.product_paths = product_paths;
@@ -432,6 +444,15 @@ Result D3D12Renderer::ReloadContentGeneration(
     }
     if (!allow_resident_replacement)
         return ResidentReloadFailure("Scene dependency closure changed; resident adoption requires a newly projected scene.");
+    try
+    {
+        candidate.development_catalog = RendererDevelopmentCatalog::Build(candidate);
+        candidate.development_catalog->Bind(candidate);
+    }
+    catch (const std::exception &error)
+    {
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
+    }
     auto result = impl_->ReloadResidentGeneration(std::move(candidate));
     if (result && resident_replaced) *resident_replaced = true;
     return result;

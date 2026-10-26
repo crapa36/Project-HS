@@ -745,7 +745,14 @@ void ValidateDecalReceiverPolicy(const DecalReceiverPolicy &policy)
 DecalMaterialPackageData ReadDecalMaterialPackage(std::span<const std::byte> bytes, std::string_view name)
 {
     Require(std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end(), "unknown decal material name");
-    const auto package = ReadPackage(bytes, MakeAssetId("render/material/" + std::string(name) + "/material.rpkg"));
+    return ReadDecalMaterialPackage(ReadPackage(bytes, MakeAssetId("render/material/" + std::string(name) + "/material.rpkg")), name);
+}
+
+DecalMaterialPackageData ReadDecalMaterialPackage(const PackageView &package, std::string_view name)
+{
+    Require(std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end(), "unknown decal material name");
+    Require(package.asset_id.value == MakeAssetId("render/material/" + std::string(name) + "/material.rpkg").value,
+            "decal material package identity mismatch");
     Require(package.chunks.size() == 3 && std::ranges::all_of(package.chunks,
             [](const auto &chunk) { return chunk.required; }), "decal material requires three mandatory chunks");
     const auto find = [&](ChunkType type) -> const ChunkView & {
@@ -809,8 +816,14 @@ std::vector<std::byte> BuildDecalMaterialPackage(std::string_view name,
 HeroMaterialPackageData ReadHeroMaterialPackage(std::span<const std::byte> bytes, std::string_view name)
 {
     Require(std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end(), "unknown hero material name");
+    return ReadHeroMaterialPackage(ReadPackage(bytes, MakeAssetId("render/material/" + std::string(name) + "/material.rpkg")), name);
+}
+
+HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std::string_view name)
+{
+    Require(std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end(), "unknown hero material name");
     const auto id = "render/material/" + std::string(name) + "/material.rpkg";
-    const auto package = ReadPackage(bytes, MakeAssetId(id));
+    Require(package.asset_id.value == MakeAssetId(id).value, "hero material package identity mismatch");
     Require(package.chunks.size() == 3 && std::ranges::all_of(package.chunks,
             [](const auto &chunk) { return chunk.required; }), "hero material requires exactly three mandatory chunks");
     const auto find = [&](ChunkType type) -> const ChunkView & {

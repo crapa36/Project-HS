@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/core/render_view_input.hpp>
+#include <hs/render_data/render_view_input.hpp>
 
 #include <cstdint>
 #include <filesystem>

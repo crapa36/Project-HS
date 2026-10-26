@@ -1,5 +1,6 @@
 #include "renderer_impl.hpp"
 #include "renderer_options.hpp"
+#include "renderer_packed_assets.hpp"
 #include "renderer_xess_fg.hpp"
 #include "renderer_xell.hpp"
 
@@ -17,23 +18,23 @@ namespace hs
 
 Result D3D12Renderer::Impl::LoadQualityProfiles(const RendererConfig &source)
 {
-    std::filesystem::path path;
-    if (auto resolved = source.ResolveProduct(render_data::kQualityProfilesProduct, path); !resolved) return resolved;
+    RendererAssetSource path;
+    if (auto resolved = ResolveRendererAsset(source, render_data::kQualityProfilesProduct, path); !resolved) return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
     try
     {
-        const auto selected = source.product_digests.find(std::string(render_data::kQualityProfilesProduct));
-        if (selected == source.product_digests.end())
+        const auto selected = RendererProductDigest(source, render_data::kQualityProfilesProduct);
+        if (selected.empty())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected Generation omits quality product digest.");
         constexpr char hex[] = "0123456789abcdef";
         std::string digest = "sha256:";
-        for (const auto value : render_data::Sha256(bytes))
+        for (const auto value : path.pack ? path.range.expected_digest : render_data::Sha256(bytes))
         {
             const auto byte = std::to_integer<unsigned>(value);
             digest += hex[byte >> 4]; digest += hex[byte & 15];
         }
-        if (digest != selected->second)
+        if (digest != selected)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected quality product SHA256 differs from Generation.");
         quality_profiles = std::make_shared<const render_data::QualityProfiles>(render_data::DecodeQualityProfiles(bytes));
         return Result::Success();

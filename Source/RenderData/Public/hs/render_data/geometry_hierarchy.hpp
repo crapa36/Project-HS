@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace hs::render_data
@@ -102,4 +103,16 @@ void ValidateGeometryHierarchyPage(const GeometryHierarchy &hierarchy,
 // Reserved fields are zero; C++ object representations are never serialized.
 [[nodiscard]] std::vector<std::byte> EncodeGeometryHierarchy(const GeometryHierarchy &hierarchy);
 [[nodiscard]] GeometryHierarchy DecodeGeometryHierarchy(std::span<const std::byte> bytes);
+
+// Owns decoded, validated metadata and page-local cluster references for offline admission.
+class AdmittedGeometryHierarchy
+{
+public:
+    explicit AdmittedGeometryHierarchy(std::span<const std::byte> bytes);
+    [[nodiscard]] const GeometryHierarchy &Value() const noexcept { return hierarchy_; }
+    void ValidatePage(std::uint32_t page_index, const PreparedGeometryPage &page) const;
+private:
+    GeometryHierarchy hierarchy_;
+    std::vector<std::vector<std::pair<std::uint32_t, std::uint32_t>>> page_clusters_;
+};
 } // namespace hs::render_data

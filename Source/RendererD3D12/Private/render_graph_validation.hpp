@@ -65,12 +65,14 @@ struct CompiledSchedule
     std::vector<std::uint32_t> execution_order;
     std::array<std::vector<std::uint32_t>, 3> queue_orders;
     std::vector<QueueDependency> cross_queue_dependencies;
+    std::vector<std::vector<std::uint32_t>> predecessors;
 
     void Clear() noexcept
     {
         execution_order.clear();
         for (auto &order : queue_orders) order.clear();
         cross_queue_dependencies.clear();
+        predecessors.clear();
     }
 };
 

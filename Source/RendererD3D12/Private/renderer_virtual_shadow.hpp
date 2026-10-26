@@ -3,7 +3,7 @@
 #include "render_graph.hpp"
 #include "view_state.hpp"
 #include "renderer_shadow_guarantee.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>
 #include <array>
@@ -247,6 +247,19 @@ struct VirtualShadowFramePlan
     bool baked_static{}, fixed_root{}, prepared{};
     friend class VirtualShadowSystem;
 };
+struct VirtualShadowLayout
+{
+    struct Pass { std::uint32_t declaration_index{}, id{}; };
+    std::uint64_t target_generation{};
+    std::array<ResourceHandle,17> imports{};
+    std::array<ResourceVersion,10> outputs{};
+    std::array<Pass,16> passes{};
+    std::uint32_t pass_count{};
+    ResourceVersion depth{}, normal{};
+    std::vector<VirtualShadowNativeRead> native_reads;
+    bool fixed_root{}, baked_present{}, seed_upload{}, root_static_present{};
+    bool root_static_upload{}, root_dynamic_present{}, reset{}, material_sampling{};
+};
 class VirtualShadowCandidate
 {
   public:
@@ -280,7 +293,11 @@ class VirtualShadowSystem
     // may be supplied later. Register consumes this exact view/frame/slot plan.
     [[nodiscard]] Result PrepareFrame(const VirtualShadowInputs &, VirtualShadowFramePlan &);
     [[nodiscard]] Result Register(RenderGraphBuilder &,const VirtualShadowInputs &,
-        const VirtualShadowFramePlan &,VirtualShadowOutputs &);
+        const VirtualShadowFramePlan &,VirtualShadowOutputs &,VirtualShadowLayout *layout=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const VirtualShadowInputs &,
+        const VirtualShadowFramePlan &,const VirtualShadowLayout &,VirtualShadowOutputs &);
+    [[nodiscard]] bool MatchesLayout(const VirtualShadowInputs &,
+        const VirtualShadowFramePlan &,const VirtualShadowLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] VirtualShadowCacheStatus CacheStatus() const noexcept;
@@ -289,6 +306,9 @@ class VirtualShadowSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(VirtualShadowSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const VirtualShadowInputs &,
+        const VirtualShadowFramePlan &,VirtualShadowOutputs &,VirtualShadowLayout *,
+        const VirtualShadowLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

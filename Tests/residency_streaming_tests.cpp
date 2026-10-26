@@ -1,6 +1,8 @@
 #include "residency_manager.hpp"
 #include "renderer_asset_io.hpp"
+#include "renderer_content.hpp"
 #include "streaming_manager.hpp"
+#include <hs/core/sha256.hpp>
 
 #include <algorithm>
 #include <array>
@@ -48,7 +50,7 @@ void CheckAsyncAssetPreparation()
         const auto storage = residency.ReserveHost(contents.size() * 2);
         Check(request && storage, "async asset request reservation failed");
         bool submitted{};
-        const auto result = io.Enqueue({request, "generation", id, path, contents.size(),
+        const auto result = io.Enqueue({request, "generation", id, hs::RendererAssetSource{path}, contents.size(),
             std::make_shared<int>(1), std::move(prepare)}, streaming, residency, storage, submitted);
         Check(static_cast<bool>(result) && submitted, "async asset read was not submitted");
         return std::pair{request, storage};
@@ -110,6 +112,205 @@ void CheckAsyncAssetPreparation()
     const auto *failed_request = streaming.Find(failed);
     Check(failed_request && failed_request->state == hs::StreamingPageState::Cancelled,
         "failed preparation did not cancel its streaming request");
+}
+
+void CheckPackAssetReads(bool native)
+{
+    const auto path = std::filesystem::temp_directory_path() /
+        ("hs_stream_pack_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
+    auto old_path = path;
+    old_path += ".old";
+    struct RemoveFiles
+    {
+        std::filesystem::path path, old_path;
+        ~RemoveFiles()
+        {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+            std::filesystem::remove(old_path, ignored);
+        }
+    } cleanup{path, old_path};
+    const std::array<std::byte, 4> payload{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    std::array<std::byte, 68> pack_bytes{};
+    std::fill_n(pack_bytes.begin(), 64, std::byte{0x7a});
+    std::copy(payload.begin(), payload.end(), pack_bytes.begin() + 64);
+    const auto write = [&] {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char *>(pack_bytes.data()), static_cast<std::streamsize>(pack_bytes.size()));
+        file.close();
+        Check(bool(file), "could not write pack fixture");
+    };
+    write();
+    auto owner = std::make_shared<hs::ShippedContentOwner>();
+    auto unbound_owner = std::make_shared<hs::ShippedContentOwner>();
+    Check(bool(hs::ShippedContentOwner::Open(path, *owner)) &&
+        bool(hs::ShippedContentOwner::Open(path, *unbound_owner)), "could not open pack fixture");
+    const auto identity = owner->Identity();
+    hs::RendererAssetSource source{{}, owner, {64, payload.size(), {}, hs::Sha256(payload)}};
+    auto unbound = source;
+    unbound.pack = unbound_owner;
+    std::vector<std::byte> output;
+    Check(bool(source.Read(output, payload.size())) && std::equal(output.begin(), output.end(), payload.begin(), payload.end()),
+        "pack source did not read its nonzero-offset range");
+    const auto previous = output;
+    Check(!source.Read(output, payload.size() + 1) && output == previous,
+        "pack expected-size mismatch must preserve output");
+    auto corrupt = source;
+    corrupt.range.expected_digest[0] ^= std::byte{1};
+    Check(!corrupt.Read(output) && output == previous, "pack digest mismatch must preserve output");
+
+    const std::string shader_id = "render/shader/test.dxil";
+    const std::string feedback_id = "render/shader/test_feedback.dxil";
+    std::array shader_bulks{
+        hs::render_data::RendererBulkDescriptor{hs::MakeAssetId(shader_id),
+            {64, payload.size(), hs::render_data::RenderBulkFormat::ShaderDxil, hs::Sha256(payload)}},
+        hs::render_data::RendererBulkDescriptor{hs::MakeAssetId(feedback_id),
+            {0, 4, hs::render_data::RenderBulkFormat::ShaderDxil, hs::Sha256(std::span(pack_bytes).first(4))}}};
+    std::ranges::sort(shader_bulks, {}, [](const auto &bulk) { return bulk.asset_id.value; });
+    const auto base_index = static_cast<std::uint32_t>(std::ranges::find_if(shader_bulks,
+        [&](const auto &bulk) { return bulk.asset_id.value == hs::MakeAssetId(shader_id).value; }) - shader_bulks.begin());
+    hs::RendererConfig shader_config;
+    shader_config.packed_content = owner; shader_config.packed_bulks = shader_bulks;
+    hs::render_data::MaterialProgramDescriptor program{hs::render_data::MaterialProgramKind::OpaqueScenePS,
+        base_index, hs::MakeAssetId(shader_id), shader_id};
+    Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) && output == previous,
+        "dense material program did not read base shader");
+    const auto reject_program = [&](hs::render_data::MaterialProgramDescriptor invalid) {
+        const auto saved = output;
+        Check(!hs::ReadRendererMaterialProgram(shader_config, invalid, output) && output == saved,
+            "invalid dense program changed output");
+    };
+    auto invalid_program = program; invalid_program.bulk_index = UINT32_MAX; reject_program(invalid_program);
+    invalid_program = program; invalid_program.asset_id = hs::MakeAssetId(feedback_id); reject_program(invalid_program);
+    invalid_program = program; invalid_program.product_id = feedback_id; reject_program(invalid_program);
+    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
+    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
+    shader_bulks[base_index].range.expected_digest[0] ^= std::byte{1}; reject_program(program);
+    shader_bulks[base_index].range.expected_digest[0] ^= std::byte{1};
+    shader_config.selected_texture_feedback = true;
+    Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) &&
+        output == std::vector<std::byte>(pack_bytes.begin(), pack_bytes.begin() + 4), "dense shader feedback selection differs");
+    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
+    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
+    const auto feedback_index = 1u - base_index;
+    shader_bulks[feedback_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
+    shader_bulks[feedback_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
+    const std::array base_only{shader_bulks[base_index]};
+    shader_config.packed_bulks = base_only;
+    auto fallback_program = program; fallback_program.bulk_index = 0;
+    Check(bool(hs::ReadRendererMaterialProgram(shader_config, fallback_program, output)) && output == previous,
+        "absent feedback variant must fall back to base shader");
+    shader_config.packed_bulks = shader_bulks;
+    shader_config.selected_texture_feedback = false;
+    Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) && output == previous,
+        "disabled shader feedback must select base");
+
+    {
+        constexpr std::string_view source_id = "environment/provenance.meshbin";
+        std::array revisions{hs::render_data::RendererSourceRevision{hs::MakeAssetId(source_id), source_id, hs::Sha256(payload)}};
+        std::array bulk_revisions{hs::render_data::RendererRevisionBulk{shader_id, base_index},
+            hs::render_data::RendererRevisionBulk{feedback_id, feedback_index}};
+        auto config = shader_config;
+        config.packed_source_revisions = revisions; config.packed_revision_bulks = bulk_revisions;
+        config.product_paths[std::string(source_id)] = path;
+        config.product_digests[std::string(source_id)] = "wrong loose digest";
+        Check(bool(hs::ValidatePackedRevisionCatalog(config)), "valid revision catalog rejected");
+        const auto digest = hs::RendererProductDigest(config, source_id);
+        Check(digest == hs::RendererProductDigest(config, shader_id), "source digest differs from authenticated bulk digest");
+        hs::RendererAssetSource resolved;
+        auto development = config; development.packed_content.reset();
+        Check(bool(hs::ResolveRendererAsset(development, source_id, resolved)), "loose provenance fixture cannot resolve");
+        const auto saved_source = resolved;
+        Check(!hs::ResolveRendererAsset(config, source_id, resolved) && resolved == saved_source,
+            "packed missing payload fell back to loose path or changed output");
+        config.packed_source_revisions = {};
+        Check(hs::RendererProductDigest(config, source_id).empty(), "missing compiled revision used loose digest");
+        config.packed_source_revisions = revisions;
+        const auto original = revisions[0];
+        revisions[0].asset_id = hs::MakeAssetId("wrong/source");
+        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong source identity accepted");
+        revisions[0] = original; revisions[0].product_id = {};
+        revisions[0].asset_id = hs::MakeAssetId(revisions[0].product_id);
+        Check(!hs::ValidatePackedRevisionCatalog(config), "empty source identity accepted");
+        revisions[0] = {shader_bulks[base_index].asset_id, shader_id, original.digest};
+        Check(!hs::ValidatePackedRevisionCatalog(config), "source/bulk overlap accepted");
+        revisions[0] = original;
+        bulk_revisions[0].bulk_index = UINT32_MAX;
+        Check(!hs::ValidatePackedRevisionCatalog(config), "invalid revision bulk reference accepted");
+        bulk_revisions[0].bulk_index = feedback_index;
+        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong revision bulk identity accepted");
+        bulk_revisions[0].bulk_index = base_index;
+        bulk_revisions[0].product_id = "render/lighting/not-a-material.rpkg";
+        Check(!hs::ValidatePackedRevisionCatalog(config), "non-material revision bulk accepted");
+        bulk_revisions[0].product_id = shader_id;
+        shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package;
+        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong revision bulk format accepted");
+        shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
+        Check(hs::render_data::IsRendererMaterialRevisionProduct(source_id) &&
+            hs::render_data::IsRendererMaterialRevisionProduct(shader_id) &&
+            !hs::render_data::IsRendererMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
+            "material revision predicate changed domains");
+    }
+
+    hs::ResidencyManager residency;
+    constexpr std::uint32_t staging = 32u * 1024u * 1024u;
+    residency.UpdateBudget({true, 0, 0, 0, 0, true, staging + 1024u});
+    hs::StreamingManager streaming;
+    hs::RendererAssetIo io;
+    const auto initialized = io.Initialize(native, native ? staging : 0, residency);
+    if (native && !initialized)
+    {
+        std::cout << "SKIP native pack IO: " << initialized.Message() << '\n';
+        return;
+    }
+    Check(bool(initialized) && io.NativeEnabled() == native, "pack IO initialization mode mismatch");
+    io.SetWaitForReads(true);
+    unsigned sequence{};
+    const auto enqueue = [&](const hs::RendererAssetSource &input, std::function<void(std::span<const std::byte>)> prepare = {}) {
+        const auto id = "pack-" + std::to_string(++sequence);
+        const auto request = streaming.Request(id, id, "generation", 1);
+        const auto storage = residency.ReserveHost(payload.size() * 2);
+        Check(request && storage, "pack read reservation failed");
+        bool submitted{};
+        Check(bool(io.Enqueue({request, "generation", id, input, payload.size(), owner, std::move(prepare)},
+            streaming, residency, storage, submitted)) && submitted, "pack read was not submitted");
+        return std::pair{request, storage};
+    };
+    const auto read = [&](const hs::RendererAssetSource &input) {
+        const auto [request, storage] = enqueue(input);
+        hs::AssetReadCompletion completion;
+        Check(bool(io.Poll(request, streaming, residency, completion)) && completion.ready && !completion.cancelled &&
+            completion.bytes == previous, "pack IO returned incorrect range bytes");
+        Check(streaming.CompleteRead(request, "generation") && residency.ReleaseNow(completion.storage) &&
+            !residency.Contains(storage), "pack IO did not reclaim its completed reservation");
+    };
+    read(source); // Establish the native binding before replacing its pathname.
+    std::filesystem::rename(path, old_path);
+    pack_bytes[64] ^= std::byte{1};
+    write();
+    Check(owner->Identity() == identity && bool(source.Read(output)) && output == previous,
+        "retained CPU pack changed after pathname replacement");
+    read(source);
+    read(unbound); // A new native binding must fall back to this retained CPU file.
+
+    std::atomic_bool prepared{};
+    const auto [bad, bad_storage] = enqueue(corrupt, [&](std::span<const std::byte>) { prepared = true; });
+    hs::AssetReadCompletion failed;
+    Check(!io.Poll(bad, streaming, residency, failed) && !prepared && !failed.ready &&
+        !residency.Contains(bad_storage), "corrupt pack was prepared, published, or leaked storage");
+
+    const auto [cancelled, cancelled_storage] = enqueue(source);
+    io.Cancel(cancelled, streaming);
+    hs::AssetReadCompletion cancelled_output;
+    Check(bool(io.Poll(cancelled, streaming, residency, cancelled_output)) && cancelled_output.ready &&
+        cancelled_output.cancelled && cancelled_output.bytes.empty() && !residency.Contains(cancelled_storage),
+        "cancelled pack read published data or leaked storage");
+    const auto [drained, drained_storage] = enqueue(source);
+    Check(bool(io.DrainSubmitted(streaming, residency)) && !io.HasPendingReads() &&
+        !residency.Contains(drained_storage) && streaming.Find(drained)->state == hs::StreamingPageState::Cancelled,
+        "pack drain did not cancel and reclaim its pending read");
+    std::cout << (native ? "Core pack with optional DirectStorage transport" : "CPU pack")
+              << " range, replacement, digest and cancellation checks passed\n";
 }
 }
 
@@ -256,6 +457,8 @@ int main()
         Check(after_reset.value > cancelled.value && !streaming.BeginRead(geometry),
             "reset aliased an old asynchronous request identity");
         CheckAsyncAssetPreparation();
+        CheckPackAssetReads(false);
+        CheckPackAssetReads(true);
         std::cout << "residency budget, generation-aware streaming, async preparation and CompletionSet retirement passed\n";
         return EXIT_SUCCESS;
     }

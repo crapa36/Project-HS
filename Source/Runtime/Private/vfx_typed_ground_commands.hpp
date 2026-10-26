@@ -1,8 +1,8 @@
 #pragma once
 
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <span>
 #include <vector>
@@ -37,6 +37,6 @@ struct VfxTypedGroundCommand
 [[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
     const VfxProgramView &cooked,
     std::span<const VfxEventInput> inputs,
-    Tick current_tick);
+    double current_tick);
 
 } // namespace hs::runtime_detail

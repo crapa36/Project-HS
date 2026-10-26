@@ -6,7 +6,7 @@
 #include "renderer_local_shadow.hpp"
 #include "renderer_scene_geometry.hpp"
 #include <hs/core/graphics_settings.hpp>
-#include <hs/renderer/vfx_volume_input.hpp>
+#include <hs/render_data/vfx_volume_input.hpp>
 
 namespace hs
 {
@@ -124,6 +124,19 @@ struct VolumetricOutputs
     ViewExtent froxel_active,froxel_capacity;
     std::uint32_t slices{};
 };
+struct VolumetricLayout
+{
+    // Immutable graph declarations only. Native owners, descriptors and callbacks
+    // are supplied afresh for each submission.
+    std::uint64_t storage_generation{};
+    std::array<ResourceVersion, 22> input_versions{};
+    std::array<ResourceHandle, 14> imports{};
+    std::array<ResourceVersion, 6> output_versions{};
+    std::array<BufferRange, 3> read_ranges{}; // constants, volumes, heroes
+    std::array<std::uint32_t, 7> pass_index{}; // 170..175, optional 176
+    bool history{}, hero{}, shadows{}, local_shadows{}, compact_shadow{};
+    bool root_static{}, root_dynamic{};
+};
 struct VolumetricStorage;
 class RendererPipelineCache;
 class VolumetricCandidate
@@ -147,13 +160,24 @@ class VolumetricSystem
         const SceneShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
         bool hero_enabled=false) const;
     [[nodiscard]] Result Commit(VolumetricCandidate &&,const CompletionSet &completed);
-    [[nodiscard]] Result Register(RenderGraphBuilder &,const VolumetricInputs &,VolumetricOutputs &);
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const VolumetricInputs &,VolumetricOutputs &,
+        VolumetricLayout *layout=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const VolumetricInputs &,
+        const VolumetricLayout &,VolumetricOutputs &);
+    [[nodiscard]] bool MatchesLayout(const VolumetricInputs &,const VolumetricLayout &) const noexcept;
+    // Pre-restore comparison uses the current producers' planned resource
+    // presence before their graph output structs have been populated.
+    [[nodiscard]] bool MatchesProjectedLayout(const VolumetricInputs &,
+        const VolumetricLayout &,bool shadows,bool local_shadows,
+        bool root_static,bool root_dynamic) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     void ResetHistory() noexcept;
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     void SwapState(VolumetricSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const VolumetricInputs &,
+        VolumetricOutputs &,VolumetricLayout *,const VolumetricLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -64,4 +64,5 @@ struct TexturePackageView
 // alive and unmodified while using the returned view.
 [[nodiscard]] TexturePackageView ReadTexturePackage(
     std::span<const std::byte> package_bytes, AssetId expected_asset_id);
+[[nodiscard]] TexturePackageView ReadTexturePackage(const PackageView &package);
 } // namespace hs::render_data

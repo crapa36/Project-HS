@@ -13,6 +13,21 @@ struct TextureFeedbackGraphBinding
     TextureStreamId texture;
     ResourceVersion feedback;
 };
+struct TextureFeedbackLayout
+{
+    struct Owner
+    {
+        TextureStreamId texture;
+        TextureHandle imported{};
+        ResourceVersion cleared{}, sampled{};
+        std::uint32_t width{}, height{}, slices{}, mip_count{};
+    };
+    BufferHandle metadata{};
+    ResourceVersion metadata_version{};
+    std::vector<Owner> owners;
+    std::uint32_t clear_pass_index{}, clear_pass_id{};
+    std::uint32_t decode_pass_index{}, decode_pass_id{};
+};
 class RendererTextureFeedback
 {
   public:
@@ -30,16 +45,36 @@ class RendererTextureFeedback
     [[nodiscard]] Result WriteDescriptors(std::uint32_t, ID3D12DescriptorHeap *, ID3D12DescriptorHeap *,
         D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first, UINT stride);
     [[nodiscard]] ResourceVersion ImportMetadata(RenderGraphBuilder &, std::uint32_t frame) const;
+    [[nodiscard]] Result ImportMetadata(RenderGraphBuilder &, std::uint32_t frame,
+        ResourceVersion &, TextureFeedbackLayout *) const;
+    [[nodiscard]] Result BindRetainedMetadata(RenderGraphBuilder &, std::uint32_t frame,
+        const TextureFeedbackLayout &, ResourceVersion &) const;
     [[nodiscard]] Result AddClearPass(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, std::vector<TextureFeedbackGraphBinding> &);
+        std::uint32_t pass_id, std::vector<TextureFeedbackGraphBinding> &,
+        TextureFeedbackLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetainedClear(RenderGraphBuilder &, std::uint32_t frame,
+        std::uint32_t pass_id, const TextureFeedbackLayout &,
+        std::vector<TextureFeedbackGraphBinding> &);
     static void DeclareSampling(PassBuilder &, std::vector<TextureFeedbackGraphBinding> &);
     [[nodiscard]] Result AddDecodePass(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding>);
+        std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding>,
+        TextureFeedbackLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetainedDecode(RenderGraphBuilder &, std::uint32_t frame,
+        std::uint32_t pass_id, const TextureFeedbackLayout &,
+        std::span<const TextureFeedbackGraphBinding>);
+    [[nodiscard]] bool MatchesLayout(std::uint32_t frame, std::uint32_t clear_pass_id,
+        std::uint32_t decode_pass_id, const TextureFeedbackLayout &) const noexcept;
     void MarkSubmitted(std::uint32_t frame, const CompletionSet &) noexcept;
     [[nodiscard]] Result Consume(std::uint32_t frame, const CompletionSet &completed,
         std::uint64_t demand_frame, RendererTextureStreaming &);
     void SwapState(RendererTextureFeedback &) noexcept;
   private:
+    [[nodiscard]] Result AddClearPassImpl(RenderGraphBuilder &, std::uint32_t,
+        std::uint32_t, std::vector<TextureFeedbackGraphBinding> &,
+        TextureFeedbackLayout *, const TextureFeedbackLayout *);
+    [[nodiscard]] Result AddDecodePassImpl(RenderGraphBuilder &, std::uint32_t,
+        std::uint32_t, std::span<const TextureFeedbackGraphBinding>,
+        TextureFeedbackLayout *, const TextureFeedbackLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

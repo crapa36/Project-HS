@@ -54,10 +54,11 @@ Result Native(std::string_view name, HRESULT error)
         std::to_string(static_cast<std::int32_t>(error)) + ").");
 }
 std::uint64_t Align(std::uint64_t value) { return (value + 255u) & ~UINT64(255); }
-bool External(const HlodExternalBuffer &b, std::uint64_t minimum)
+bool ExternalShape(const HlodExternalBuffer &b, std::uint64_t minimum)
 {
-    return b.resource && b.version.resource && b.version.resource.kind == ResourceKind::Buffer &&
-        b.resource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && b.resource->GetDesc().Width >= minimum;
+    if(!b.resource||(b.contract&&b.contract->native_resource!=b.resource))return false;
+    const auto description=b.contract?b.contract->description:b.resource->GetDesc();
+    return description.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER&&description.Width>=minimum;
 }
 bool ValidView(const GpuHlodView &view)
 {
@@ -340,20 +341,21 @@ Result HlodSystem::Commit(HlodCandidate &&candidate, const CompletionSet &comple
     impl_->storage = std::move(candidate.storage_); return Result::Success();
 }
 
-Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &inputs, HlodFrameOutputs &outputs)
+Result HlodSystem::PrepareFrameRecordData(const HlodFrameInputs &inputs,HlodFrameRecordData &prepared)
 {
-    outputs = {}; auto storage = impl_->storage;
+    prepared = {}; auto storage = impl_->storage;
     if (!storage || impl_->pending.graph || !storage->usable)
         return Failure(ErrorCode::InvalidState, "HLOD storage is absent, pending or a previous submission failed.");
     if (inputs.frame_slot >= storage->frames.size() || !inputs.rendered_frame_id ||
-        !storage->frames[inputs.frame_slot].completion.IsSatisfiedBy(inputs.completed) || !External(inputs.static_scene, 64))
+        !storage->frames[inputs.frame_slot].completion.IsSatisfiedBy(inputs.completed) || !ExternalShape(inputs.static_scene, 64))
         return Failure(ErrorCode::InvalidArgument, "HLOD registration requires a completed frame slot and current static scene table.");
     const auto &scene = storage->scene;
+    const bool read_geometry=ExternalShape(inputs.geometry_records,64),read_refs=ExternalShape(inputs.proxy_refs,16);
     bool enabled = inputs.layout_abi == scene.layout_abi && inputs.layout_digest == scene.layout_digest &&
         inputs.content_generation_id == storage->content_id && inputs.static_scene_generation != 0 &&
         inputs.members.size() == scene.members.size() && inputs.proxies.size() == scene.proxies.size() &&
         inputs.buckets.size() <= scene.proxies.size() && (inputs.active_view_mask & ~15u) == 0u &&
-        (scene.proxies.empty() || (External(inputs.geometry_records, 64) && External(inputs.proxy_refs, 16) && !inputs.buckets.empty()));
+        (scene.proxies.empty() || (read_geometry && read_refs && !inputs.buckets.empty()));
     for (std::uint32_t view = 0; view < 4; ++view)
         if ((inputs.active_view_mask & (1u << view)) && !ValidView(inputs.views[view])) enabled = false;
     const auto bucket_count = inputs.buckets.size() <= scene.proxies.size() ? UINT(inputs.buckets.size()) : 0u;
@@ -399,8 +401,57 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
         history = previous.frame_id != UINT64_MAX && inputs.rendered_frame_id == previous.frame_id + 1 &&
             previous.static_generation == inputs.static_scene_generation && previous.history_generation == inputs.history_generation;
     }
-    const auto slot = inputs.frame_slot, previous_slot = history ? storage->history_slot : UINT32_MAX;
-    auto &frame = storage->frames[slot];
+    prepared.owner=storage.get();prepared.inputs=&inputs;
+    prepared.rendered_frame_id=inputs.rendered_frame_id;
+    prepared.enabled=enabled;prepared.history=history;prepared.upload=!storage->metadata_ready;
+    prepared.read_geometry=read_geometry;prepared.read_refs=read_refs;
+    prepared.slot=inputs.frame_slot;prepared.previous=history?storage->history_slot:UINT32_MAX;
+    prepared.bucket_count=bucket_count;return Result::Success();
+}
+
+bool HlodSystem::MatchesLayout(const HlodFrameInputs &inputs,const HlodFrameRecordData &prepared,const HlodLayout &layout)const noexcept
+{
+    const auto &s=impl_->storage;
+    return layout.valid&&s&&prepared.owner==s.get()&&prepared.inputs==&inputs&&prepared.rendered_frame_id==inputs.rendered_frame_id&&
+        layout.history==prepared.history&&layout.upload==prepared.upload&&prepared.upload==!s->metadata_ready&&
+        layout.read_geometry==prepared.read_geometry&&layout.read_refs==prepared.read_refs&&
+        layout.shape==std::array<std::uint64_t,5>{s->slot_capacity,s->scene.groups.size(),s->scene.proxies.size(),s->scene.pages.size(),s->scene.members.size()}&&
+        layout.guides==std::array{inputs.static_scene.version,inputs.geometry_records.version,inputs.proxy_refs.version};
+}
+
+Result HlodSystem::Register(RenderGraphBuilder &graph,const HlodFrameInputs &inputs,HlodFrameOutputs &outputs,
+    HlodLayout *capture,const HlodFrameRecordData *prepared)
+{
+    return RegisterFrame(graph,inputs,outputs,capture,nullptr,prepared);
+}
+Result HlodSystem::BindRetained(RenderGraphBuilder &graph,const HlodFrameInputs &inputs,
+    const HlodFrameRecordData &prepared,const HlodLayout &layout,HlodFrameOutputs &outputs)
+{
+    return RegisterFrame(graph,inputs,outputs,nullptr,&layout,&prepared);
+}
+Result HlodSystem::RegisterFrame(RenderGraphBuilder &graph,const HlodFrameInputs &inputs,HlodFrameOutputs &outputs,
+    HlodLayout *capture,const HlodLayout *retained,const HlodFrameRecordData *prepared)
+{
+    outputs={};if(capture)*capture={};
+    HlodFrameRecordData local;
+    if(!prepared){if(auto result=PrepareFrameRecordData(inputs,local);!result)return result;prepared=&local;}
+    auto storage=impl_->storage;
+    if(!storage||impl_->pending.graph||!storage->usable||prepared->owner!=storage.get()||prepared->inputs!=&inputs||
+        prepared->rendered_frame_id!=inputs.rendered_frame_id)
+        return Failure(ErrorCode::InvalidState,"HLOD prepared frame no longer matches current inputs or storage.");
+    if(retained&&!MatchesLayout(inputs,*prepared,*retained))
+        return Failure(ErrorCode::InvalidState,"HLOD retained topology changed.");
+    const auto bound=[&](const HlodExternalBuffer &buffer,bool required){
+        return !required||(buffer.version.resource&&buffer.version.resource.kind==ResourceKind::Buffer&&
+            graph.Resolve(buffer.version.resource)==buffer.resource);
+    };
+    if(!bound(inputs.static_scene,true)||!bound(inputs.geometry_records,prepared->read_geometry)||
+        !bound(inputs.proxy_refs,prepared->read_refs))
+        return Failure(ErrorCode::InvalidArgument,"HLOD graph inputs do not match prepared native buffers.");
+    const auto &scene=storage->scene;
+    const bool enabled=prepared->enabled,history=prepared->history;
+    const auto slot=prepared->slot,previous_slot=prepared->previous,bucket_count=prepared->bucket_count;
+    auto &frame=storage->frames[slot];
     const auto offset = storage->metadata_bytes + UINT64(slot) * storage->upload_stride;
     // Valid snapshots overwrite every active element; padding/bucket tails are
     // outside shader counts. Keep deterministic zero input for disabled paths.
@@ -427,8 +478,8 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
     const std::array<ID3D12Resource *, 6> srvs{
         previous ? previous->buffers[Choice].resource.Get() : nullptr, previous ? previous->buffers[Leaves].resource.Get() : nullptr,
         previous ? previous->buffers[Bindings].resource.Get() : nullptr, inputs.static_scene.resource,
-        External(inputs.geometry_records, 64) ? inputs.geometry_records.resource : nullptr,
-        External(inputs.proxy_refs, 16) ? inputs.proxy_refs.resource : nullptr};
+        prepared->read_geometry ? inputs.geometry_records.resource : nullptr,
+        prepared->read_refs ? inputs.proxy_refs.resource : nullptr};
     constexpr std::array<std::uint32_t, 6> strides{16, 16, 48, 0, 0, 16};
     for (std::uint32_t i = 0; i < srvs.size(); ++i)
         Srv(storage->device.Get(), srvs[i], strides[i], storage->Cpu(slot, 5 + i));
@@ -436,8 +487,17 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
     pending.previous = previous_slot; pending.frame_id = inputs.rendered_frame_id;
     pending.static_generation = inputs.static_scene_generation; pending.enabled = enabled; pending.uploaded = !storage->metadata_ready;
     pending.history_generation = inputs.history_generation;
+    std::size_t import_index{};
+    Result binding_result=Result::Success();
     const auto import = [&](AllocationResource &allocation, std::string_view name, std::uint32_t owner) {
-        const auto handle = graph.ImportBuffer({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue}, allocation.graph_access, name);
+        if(auto checked=allocation.EnsureNativeContract(storage->device.Get());!checked)
+        {binding_result=checked;return ResourceVersion{};}
+        const auto handle = retained?retained->imports[import_index]:
+            graph.ImportBuffer({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue,{},allocation.NativeContract()}, allocation.graph_access, name);
+        if(retained&&!graph.BindBuffer(handle,{allocation.resource.Get(),allocation.graph_completion,allocation.graph_queue,{},allocation.NativeContract()},allocation.graph_access))
+            binding_result=Failure(ErrorCode::InvalidState,"HLOD retained buffer binding failed.");
+        if(capture)capture->imports[import_index]=handle;
+        ++import_index;
         pending.imports.push_back({&allocation, handle, owner}); return graph.Version(handle);
     };
     auto groups = import(storage->groups, "Hlod.Groups", UINT32_MAX), proxies = import(storage->proxies, "Hlod.Proxies", UINT32_MAX);
@@ -452,9 +512,21 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
         previous_versions[1] = import(previous->buffers[Leaves], "Hlod.PreviousLeaves", previous_slot);
         previous_versions[2] = import(previous->buffers[Bindings], "Hlod.PreviousBindings", previous_slot);
     }
-    auto upload = graph.AddPass(190, "HlodUpload", QueueHint::Copy);
-    if (pending.uploaded) { groups = upload.Write(groups, Access::CopyDest); proxies = upload.Write(proxies, Access::CopyDest); }
-    for (const auto i : {Members, Bindings, Buckets}) versions[i] = upload.Write(versions[i], Access::CopyDest);
+    if(!binding_result)return binding_result;
+    const auto pass_binding=[&](std::size_t index,std::uint32_t id,std::string_view name,QueueHint queue)->std::optional<PassBuilder>{
+        if(retained)return graph.BindPass(retained->passes[index],id);
+        if(capture)capture->passes[index]=graph.PassCount();
+        return graph.AddPass(id,name,queue);
+    };
+    auto uploadBinding=pass_binding(0,190,"HlodUpload",QueueHint::Copy);
+    if(!uploadBinding)return Failure(ErrorCode::InvalidState,"HLOD retained upload pass is missing.");
+    auto &upload=*uploadBinding;
+    if(retained)versions=retained->outputs;
+    else
+    {
+        if(pending.uploaded){groups=upload.Write(groups,Access::CopyDest);proxies=upload.Write(proxies,Access::CopyDest);}
+        for(const auto i:{Members,Bindings,Buckets})versions[i]=upload.Write(versions[i],Access::CopyDest);
+    }
     upload.SetExecute([storage, slot, offset, metadata = pending.uploaded](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if (metadata)
@@ -478,35 +550,57 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
         pass.Read(groups, Access::ComputeRead); pass.Read(proxies, Access::ComputeRead);
         for (const auto i : {Members, Bindings, Buckets}) pass.Read(versions[i], Access::ComputeRead);
         pass.Read(inputs.static_scene.version, Access::ComputeRead);
-        if (External(inputs.geometry_records, 64)) pass.Read(inputs.geometry_records.version, Access::ComputeRead);
-        if (External(inputs.proxy_refs, 16)) pass.Read(inputs.proxy_refs.version, Access::ComputeRead);
+        if (prepared->read_geometry) pass.Read(inputs.geometry_records.version, Access::ComputeRead);
+        if (prepared->read_refs) pass.Read(inputs.proxy_refs.version, Access::ComputeRead);
         if (previous)
         {
             pass.Read(previous_versions[0], Access::ComputeRead); pass.Read(previous_versions[2], Access::ComputeRead);
             if (previous_leaf) pass.Read(previous_versions[1], Access::ComputeRead);
         }
     };
-    auto clear = graph.AddPass(191, "HlodClear", QueueHint::Compute);
-    clear.Read(inputs.static_scene.version, Access::ComputeRead);
-    for (std::uint32_t i = Choice; i < BufferCount; ++i) versions[i] = clear.Write(versions[i], Access::UnorderedWrite);
+    auto clearBinding=pass_binding(1,191,"HlodClear",QueueHint::Compute);
+    if(!clearBinding)return Failure(ErrorCode::InvalidState,"HLOD retained clear pass is missing.");
+    auto &clear=*clearBinding;
+    if(!retained)
+    {
+        clear.Read(inputs.static_scene.version,Access::ComputeRead);
+        for(std::uint32_t i=Choice;i<BufferCount;++i)versions[i]=clear.Write(versions[i],Access::UnorderedWrite);
+    }
     const auto clear_elements = std::max({storage->slot_capacity, UINT(scene.groups.size()), UINT(scene.proxies.size()), UINT(scene.pages.size()), bucket_count * 4});
     clear.SetExecute([bind, clear_elements](RenderPassContext &context) { bind(context, 0, clear_elements); });
-    auto select = graph.AddPass(192, "HlodSelect", QueueHint::Compute); read_tables(select, false);
-    for (const auto i : {Choice, Demand, Status}) versions[i] = select.ReadWrite(versions[i], Access::UnorderedWrite);
+    auto selectBinding=pass_binding(2,192,"HlodSelect",QueueHint::Compute);
+    if(!selectBinding)return Failure(ErrorCode::InvalidState,"HLOD retained select pass is missing.");
+    auto &select=*selectBinding;
+    if(!retained){read_tables(select,false);for(const auto i:{Choice,Demand,Status})versions[i]=select.ReadWrite(versions[i],Access::UnorderedWrite);}
     select.SetExecute([bind, count = UINT(scene.groups.size())](RenderPassContext &context) { bind(context, 1, count); });
-    auto emit = graph.AddPass(193, "HlodEmit", QueueHint::Compute); read_tables(emit, false);
-    emit.Read(versions[Choice], Access::UnorderedRead);
-    for (const auto i : {Leaves, Selection, Indexed, Mesh, Status}) versions[i] = emit.ReadWrite(versions[i], Access::UnorderedWrite);
+    auto emitBinding=pass_binding(3,193,"HlodEmit",QueueHint::Compute);
+    if(!emitBinding)return Failure(ErrorCode::InvalidState,"HLOD retained emit pass is missing.");
+    auto &emit=*emitBinding;
+    if(!retained)
+    {
+        read_tables(emit,false);emit.Read(versions[Choice],Access::UnorderedRead);
+        for(const auto i:{Leaves,Selection,Indexed,Mesh,Status})versions[i]=emit.ReadWrite(versions[i],Access::UnorderedWrite);
+    }
     emit.SetExecute([bind, count = UINT(std::max(scene.members.size(), scene.proxies.size()))](RenderPassContext &context) { bind(context, 2, count); });
-    auto publish = graph.AddPass(194, "HlodPublish", QueueHint::Compute);
-    publish.Read(versions[Status], Access::UnorderedRead); publish.Read(versions[Buckets], Access::ComputeRead);
-    if (previous) publish.Read(previous_versions[1], Access::ComputeRead);
-    for (const auto i : {Leaves, Selection, Counts}) versions[i] = publish.ReadWrite(versions[i], Access::UnorderedWrite);
+    auto publishBinding=pass_binding(4,194,"HlodPublish",QueueHint::Compute);
+    if(!publishBinding)return Failure(ErrorCode::InvalidState,"HLOD retained publish pass is missing.");
+    auto &publish=*publishBinding;
+    if(!retained)
+    {
+        publish.Read(versions[Status],Access::UnorderedRead);publish.Read(versions[Buckets],Access::ComputeRead);
+        if(previous)publish.Read(previous_versions[1],Access::ComputeRead);
+        for(const auto i:{Leaves,Selection,Counts})versions[i]=publish.ReadWrite(versions[i],Access::UnorderedWrite);
+    }
     publish.SetExecute([bind, count = std::max({storage->slot_capacity, UINT(scene.proxies.size()), bucket_count * 4})](RenderPassContext &context) { bind(context, 3, count); });
-    auto history_pass = graph.AddPass(195, "HlodHistory", QueueHint::Compute);
-    history_pass.Read(versions[Status], Access::UnorderedRead); history_pass.Read(versions[Selection], Access::UnorderedRead);
-    history_pass.Read(versions[Bindings], Access::ComputeRead);
-    for (const auto i : {Choice, Leaves}) versions[i] = history_pass.ReadWrite(versions[i], Access::UnorderedWrite);
+    auto historyBinding=pass_binding(5,195,"HlodHistory",QueueHint::Compute);
+    if(!historyBinding)return Failure(ErrorCode::InvalidState,"HLOD retained history pass is missing.");
+    auto &history_pass=*historyBinding;
+    if(!retained)
+    {
+        history_pass.Read(versions[Status],Access::UnorderedRead);history_pass.Read(versions[Selection],Access::UnorderedRead);
+        history_pass.Read(versions[Bindings],Access::ComputeRead);
+        for(const auto i:{Choice,Leaves})versions[i]=history_pass.ReadWrite(versions[i],Access::UnorderedWrite);
+    }
     history_pass.SetExecute([bind, count = UINT(std::max(scene.groups.size(), scene.proxies.size()))](RenderPassContext &context) { bind(context, 4, count); });
     constexpr std::array exported{Leaves, Selection, Indexed, Mesh, Counts, Demand, Status};
     for (std::uint32_t i = 0; i < exported.size(); ++i) outputs.resources[i] = frame.buffers[exported[i]].resource.Get();
@@ -516,7 +610,16 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
     outputs.srvs = {storage->Export(slot, 0), storage->Export(slot, 1)};
     outputs.static_slot_capacity = storage->slot_capacity; outputs.proxy_command_capacity = UINT(scene.proxies.size());
     outputs.bucket_count = bucket_count; outputs.page_count = UINT(scene.pages.size());
-    impl_->pending = std::move(pending); return Result::Success();
+    impl_->pending = std::move(pending);
+    if(capture)
+    {
+        capture->valid=true;capture->history=history;capture->upload=prepared->upload;
+        capture->read_geometry=prepared->read_geometry;capture->read_refs=prepared->read_refs;
+        capture->shape={storage->slot_capacity,scene.groups.size(),scene.proxies.size(),scene.pages.size(),scene.members.size()};
+        capture->guides={inputs.static_scene.version,inputs.geometry_records.version,inputs.proxy_refs.version};
+        capture->outputs=versions;
+    }
+    return Result::Success();
 }
 
 Result HlodSystem::CompleteSubmission(const RenderGraphBuilder &graph, const CompletionSet &completion, bool success)

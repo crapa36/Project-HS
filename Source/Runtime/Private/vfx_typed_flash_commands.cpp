@@ -1,6 +1,6 @@
 #include "vfx_typed_flash_commands.hpp"
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <algorithm>
 #include <array>
@@ -570,7 +570,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramView 
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
     const VfxProgramView &program, std::span<const VfxPersistentInput> inputs,
-    Tick current_tick)
+    double current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;
     const auto mix = [](std::uint32_t v) {
@@ -595,12 +595,11 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
             effect.payload_kind != Hash32("CircleAreaPayload") || !ValidRange(effect.sources, program.sources)) continue;
         const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60;
         const double duration_ticks = static_cast<double>(owner.source_duration_seconds) * 60;
-        if (elapsed_ticks > static_cast<double>(current_tick) || duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
-            std::abs(elapsed_ticks - std::round(elapsed_ticks)) > .01 ||
+        if (elapsed_ticks > current_tick + .01 || duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
             std::abs(duration_ticks - std::round(duration_ticks)) > .01) continue;
-        const auto elapsed = static_cast<std::uint64_t>(std::llround(elapsed_ticks));
+        const double elapsed = elapsed_ticks;
         const auto duration = static_cast<std::uint64_t>(std::llround(duration_ticks));
-        const Tick started = current_tick - elapsed;
+        const Tick started = static_cast<Tick>(std::llround(std::max(0.0, current_tick - elapsed)));
         for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
         {
             const auto &source = program.sources[si];

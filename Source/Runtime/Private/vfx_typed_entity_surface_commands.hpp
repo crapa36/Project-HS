@@ -1,7 +1,7 @@
 #pragma once
 
-#include <hs/renderer/vfx_entity_surface_input.hpp>
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_entity_surface_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 
 #include <span>
@@ -35,6 +35,6 @@ struct VfxEntitySurfacePersistentCapture
     const VfxProgramView &program,
     std::span<const VfxEntitySurfaceEventCapture> events,
     std::span<const VfxEntitySurfacePersistentCapture> persistent,
-    Tick current_tick,
-    Tick death_current_tick = 0);
+    double current_tick,
+    double death_current_tick = 0);
 } // namespace hs::runtime_detail

@@ -1,6 +1,6 @@
 #include "vfx_typed_ribbon_commands.hpp"
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -347,7 +347,7 @@ bool PickupCollectEffect(std::uint64_t id) noexcept
 
 std::optional<VfxRibbonSourceInput> PickupCollectRibbon(
     const VfxProgramView &cooked, const VfxEventInput &event,
-    const VfxEffectRecord &effect, const VfxLinkPayload &link, Tick current_tick)
+    const VfxEffectRecord &effect, const VfxLinkPayload &link, double current_tick)
 {
     if (effect.input_mode != 0 || effect.timing_kind != 0 ||
         effect.payload_kind != Hash32("SourceTargetPayload") ||
@@ -821,7 +821,7 @@ std::optional<VfxRibbonSourceInput> FixedEventRibbon(
     const VfxEventInput &event,
     const VfxEffectRecord &effect,
     std::uint64_t effect_id,
-    Tick current_tick)
+    double current_tick)
 {
     const auto expected_payload = effect_id == kExplosivePrePullEffect
         ? kCirclePayload : kPointPayload;
@@ -1088,7 +1088,7 @@ std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
 std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
     const VfxProgramView &cooked,
     std::span<const VfxEventInput> events,
-    Tick current_tick)
+    double current_tick)
 {
     std::vector<VfxRibbonSourceInput> result;
     for (const auto &event : events)

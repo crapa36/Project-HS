@@ -21,7 +21,7 @@ bool ExtentValid(ViewExtent e)
 }
 }
 
-Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input) const
+Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
 {
     if (input.views.empty()) return ViewFailure("A render frame requires at least one view.");
     if (input.delta_seconds && (!std::isfinite(*input.delta_seconds) || *input.delta_seconds < 0))
@@ -560,13 +560,21 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
             render_instances[index].stable_id, static_cast<std::uint32_t>(index))).second;
     if (!unique_sources)
         return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
-    std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> palette;
     for (const auto &instance : render_instances)
     {
         if (!instance.animation_clip_id.value) continue;
         if (instance.mesh != RenderMesh::Archer) return ViewFailure("Explicit named animation requires a loaded skeleton-bound character extension.");
-        if (auto r = SampleNamedCharacterAnimation(archer_named_animations, instance,
-            std::span(palette.data(), archer_bone_count)); !r) return r;
+        const auto index = static_cast<std::uint32_t>(&instance - render_instances.data());
+        const auto key = MakeRenderPoseKey(instance, FindLastRenderPose(snapshot.poses, index));
+        if (std::ranges::any_of(prepared_archer_palettes,
+                [&](const auto &entry) { return entry.key == key; })) continue;
+        auto &prepared = prepared_archer_palettes.emplace_back();
+        prepared.key = key;
+        const auto sampled = archer_compiled_animation
+            ? SampleNamedCharacterAnimation(*archer_compiled_animation, archer_named_packed_transforms, instance,
+                std::span(prepared.bones.data(), archer_bone_count))
+            : SampleNamedCharacterAnimation(archer_named_animations, instance, std::span(prepared.bones.data(), archer_bone_count));
+        if (!sampled) return sampled;
     }
     if (snapshot.static_scene && (!static_gpu_scene || static_gpu_scene->source != snapshot.static_scene))
     {
@@ -650,6 +658,10 @@ void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
     swap(dynamic_resolution_controller, view.dynamic_resolution_controller);
     swap(completed_gpu_timings, view.completed_gpu_timings);
     swap(dynamic_resolution_sample_id, view.dynamic_resolution_sample_id);
+    swap(timing_source_sequence, view.timing_source_sequence);
+    swap(timing_source_output_completion, view.timing_source_output_completion);
+    swap(timing_last_active, view.timing_last_active);
+    swap(timing_last_provider, view.timing_last_provider);
     swap(dynamic_lod_states, view.dynamic_lod_states);
     swap(lod_session_epoch, view.lod_session_epoch);
     swap(previous_volumetric_camera, view.previous_volumetric_camera);
@@ -789,8 +801,23 @@ Result D3D12Renderer::Impl::PrepareDecalSurface(const RendererConfig &candidate_
 {
     return decal_surface.Prepare(device.Get(), allocator, root_signature.Get(), pipeline_cache, capacity, kFrameCount,
         admitted_work, [&](std::string_view name, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto r = candidate_config.ResolveProduct("render/shader/" + std::string(name), path); !r) return r;
+            if (candidate_config.packed_content && name == "decal_surface_cs.dxil")
+            {
+                for (const auto &material : candidate_config.packed_materials)
+                {
+                    if (material.kind != render_data::MaterialKind::Decal) continue;
+                    const auto program = std::ranges::find(material.programs, render_data::MaterialProgramKind::DecalSurfaceCS,
+                        &render_data::MaterialProgramDescriptor::kind);
+                    if (program != material.programs.end() && program->product_id == "render/shader/decal_surface_cs.dxil")
+                    {
+                        StartupOperationScope timing(RendererStartupOperation::CheckedBinaryRead);
+                        return ReadRendererMaterialProgram(candidate_config, *program, bytes);
+                    }
+                }
+                return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing declared decal Surface program.");
+            }
+            RendererAssetSource path;
+            if (auto r = ResolveRendererAsset(candidate_config, "render/shader/" + std::string(name), path); !r) return r;
             return ReadBinary(path, bytes);
         }, candidate);
 }
@@ -1006,8 +1033,9 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
     return input;
 }
 
-Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult &frame_result)
+Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrameResult &frame_result)
 {
+    frame_result.render_history_committed = false;
     // Rejected preflight keeps the last frame evidence, with no new submission receipt.
     struct WorldStepReceipt
     {
@@ -1028,6 +1056,60 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
     std::chrono::steady_clock::duration view_render_time{};
     if (!impl_->initialized || impl_->frame_submission_faulted)
         return Result::Failure(ErrorCode::InvalidState, "hs_render_view", "Renderer is not available for frame submission.");
+    auto input = source_input;
+    impl_->render_package_time = input.sample_time.value_or(std::chrono::steady_clock::now());
+    if (input.simulation_time)
+    {
+        input.snapshots.current.header.simulation_time = *input.simulation_time;
+        input.snapshots.current.header.clock.mode = RenderClockMode::Scripted;
+    }
+    auto alpha = RenderSnapshotInterpolation(input.snapshots, impl_->render_package_time, impl_->config.interpolate);
+    auto &sample_header = input.snapshots.current.header;
+    const auto current_time = sample_header.simulation_time;
+    auto display_time = current_time;
+    if (input.snapshots.has_previous && alpha < 1.0f)
+    {
+        const auto previous_time = input.snapshots.previous.header.simulation_time;
+        display_time = previous_time + std::chrono::nanoseconds(static_cast<std::int64_t>(
+            static_cast<double>((current_time - previous_time).count()) * alpha));
+        // Explicit package time already owns caller-prepared VFX ages.
+        if (!input.sample_time)
+        {
+            for (const auto &view : input.views)
+            {
+                const auto found = impl_->owned_views.find(view.id.value);
+                if (found == impl_->owned_views.end() || view.camera_cut) continue;
+                const auto &history = *found->second;
+                if (history.has_rendered_sample && history.last_rendered_sample.session_id == sample_header.session_id &&
+                    history.last_rendered_sample.clock.epoch == sample_header.clock.epoch)
+                    display_time = std::min(current_time, std::max(display_time, history.last_rendered_sample.simulation_time));
+            }
+            alpha = static_cast<float>(static_cast<double>((display_time - previous_time).count()) /
+                static_cast<double>((current_time - previous_time).count()));
+        }
+    }
+    const auto previous_count = input.snapshots.has_previous && alpha < 1.0f
+        ? input.snapshots.previous.instances.size() : 0;
+    if (input.snapshots.current.instances.size() > UINT32_MAX ||
+        previous_count > UINT32_MAX - input.snapshots.current.instances.size())
+        return ViewFailure("Display sample exceeds native instance addressing.");
+    impl_->render_scene_sample.Prepare(input.snapshots, alpha,
+        [&](const RenderInstance &instance, CharacterAnimationClip clip) {
+            const auto index = static_cast<std::size_t>(clip);
+            if (instance.mesh == RenderMesh::Archer)
+                return index < impl_->archer_clips.size() && impl_->archer_clips[index].looping != 0;
+            if (instance.mesh >= RenderMesh::MonsterMelee && instance.mesh <= RenderMesh::BossFinal)
+            {
+                const auto &asset = impl_->monster_assets[static_cast<std::size_t>(instance.mesh) -
+                    static_cast<std::size_t>(RenderMesh::MonsterMelee)];
+                return index < asset.clip_meta.size() && asset.clip_meta[index].z != 0;
+            }
+            return false;
+        });
+    impl_->render_package_alpha = alpha;
+    input.snapshots.current = impl_->render_scene_sample.View(input.snapshots.current);
+    sample_header.simulation_time = display_time;
+    impl_->prepared_archer_palettes.clear();
     if (auto r = impl_->ValidateFrameInput(input); !r) return r;
     if (impl_->owned_views.empty())
     {
@@ -1121,14 +1203,13 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
     const auto saved_identity = impl_->sdk_frame_identity;
     const auto saved_input_phase = impl_->native_input_phase;
     impl_->active_render_package_id = impl_->render_package_id + 1;
-    impl_->render_package_time = std::chrono::steady_clock::now();
     if (auto r = impl_->BeginHlodViewPackage(input); !r) return r;
     impl_->explicit_frame = &input;
     Result result = Result::Success();
     RendererFrameResult main_result{};
     std::vector<RenderViewFrameResult> view_results;
     view_results.reserve(input.views.size());
-    bool rendered_main{}, rendered_any{};
+    bool rendered_main{}, rendered_any{}, failed_view_history_committed{};
     const auto main = std::ranges::find(input.views, RenderViewRole::Main, &RenderViewInput::role);
     auto next = input.views.begin();
     for (std::size_t ordinal = 0; ordinal < input.views.size(); ++ordinal)
@@ -1160,7 +1241,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         auto snapshots = input.snapshots;
         if (input.scene) { snapshots.current.static_scene = input.scene->lease; snapshots.has_current = true; }
         if (input.override_ui) { snapshots.current.ui = input.ui; snapshots.has_current = true; }
-        if (input.simulation_time) { snapshots.current.header.simulation_time = *input.simulation_time; snapshots.has_current = true; }
+        if (input.simulation_time) snapshots.has_current = true;
         const auto &v = input.vfx;
         RendererFrameResult rendered{};
         // Event spawns are scene simulation inputs and are consumed once; the
@@ -1180,24 +1261,19 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
             world_step_receipt.tick = rendered.vfx_world_tick;
             world_step_receipt.session = rendered.vfx_world_session_id;
         }
-        if (!result) break;
-        rendered_any = true;
-        if (view.camera_cut)
+        if (!result)
         {
-            ++impl_->owned_views.at(view.id.value)->history_generation;
-            // The successful cut frame starts the new history generation and
-            // remains eligible for the next render of this same view.
-            if (impl_->cluster_runtime && impl_->last_presented_index < kClusterRuntimeFrames)
-                impl_->cluster_runtime->frames[impl_->last_presented_index].history_generation =
-                    impl_->owned_views.at(view.id.value)->history_generation;
-            rendered.view_history_generation = impl_->owned_views.at(view.id.value)->history_generation;
+            failed_view_history_committed = rendered.render_history_committed;
+            frame_result.render_history_committed |= rendered.render_history_committed;
+            break;
         }
+        rendered_any = true;
         view_results.push_back({rendered.identity, impl_->rendered_submission_count, rendered.frame,
             rendered.view_history_generation, rendered.rendered_view, rendered.unjittered_view_projection});
         frame_result = rendered;
         if (view.role == RenderViewRole::Main) { rendered_main = true; main_result = rendered; }
     }
-    if (!result && impl_->explicit_view)
+    if (!result && impl_->explicit_view && !failed_view_history_committed)
     {
         impl_->temporal_history_valid = false;
         impl_->hzb_history_valid = false;

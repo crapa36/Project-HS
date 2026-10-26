@@ -6,8 +6,8 @@
 #include "vfx_typed_entity_surface_commands.hpp"
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_typed_screen_commands.hpp"
-#include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <algorithm>
 #include <array>
@@ -90,13 +90,18 @@ class ActiveEffectStore
     void Commit(Profile profile, std::span<const VfxEventInput> scratch)
     {
         auto &refs = profiles_[static_cast<std::size_t>(profile)];
-        std::vector<Row> surviving;
-        surviving.reserve(scratch.size());
+        if (scratch.empty()) { refs.clear(); return; }
+        scratch_rows_.clear();
+        scratch_rows_.reserve(scratch.size());
+        live_rows_.assign(rows_.size(), 0);
         for (const auto &input : scratch)
             if (const auto found = event_rows_.find(KeyFor(input)); found != event_rows_.end() &&
-                std::ranges::find(surviving, found->second) == surviving.end())
-                surviving.push_back(found->second);
-        refs.swap(surviving);
+                !live_rows_[found->second])
+            {
+                live_rows_[found->second] = 1;
+                scratch_rows_.push_back(found->second);
+            }
+        refs.swap(scratch_rows_);
     }
 
     void RebindRows(auto &&rebind, std::vector<RetainedVfxEntitySurfaceCapture> &captures)
@@ -131,22 +136,24 @@ class ActiveEffectStore
 
     void Compact(std::span<RetainedVfxEntitySurfaceCapture> captures = {})
     {
-        std::vector<std::uint8_t> live(rows_.size());
+        live_rows_.assign(rows_.size(), 0);
         for (const auto &profile : profiles_) for (const auto row : profile)
-            if (row < live.size()) live[row] = 1;
-        for (const auto &capture : captures) if (capture.row < live.size()) live[capture.row] = 1;
-        std::vector<Row> remap(rows_.size(), std::numeric_limits<Row>::max());
-        std::vector<StoredRow> compacted;
-        compacted.reserve(rows_.size());
+            if (row < live_rows_.size()) live_rows_[row] = 1;
+        for (const auto &capture : captures)
+            if (capture.row < live_rows_.size()) live_rows_[capture.row] = 1;
+        if (std::ranges::all_of(live_rows_, [](auto live) { return live != 0; })) return;
+        scratch_rows_.assign(rows_.size(), std::numeric_limits<Row>::max());
+        Row next{};
         for (std::size_t i = 0; i < rows_.size(); ++i)
-            if (live[i])
+            if (live_rows_[i])
             {
-                remap[i] = static_cast<Row>(compacted.size());
-                compacted.push_back(std::move(rows_[i]));
+                scratch_rows_[i] = next;
+                if (next != i) rows_[next] = std::move(rows_[i]);
+                ++next;
             }
-        for (auto &profile : profiles_) for (auto &row : profile) row = remap[row];
-        for (auto &capture : captures) capture.row = remap[capture.row];
-        rows_.swap(compacted);
+        for (auto &profile : profiles_) for (auto &row : profile) row = scratch_rows_[row];
+        for (auto &capture : captures) capture.row = scratch_rows_[capture.row];
+        rows_.resize(next);
         RebuildIndex();
     }
 
@@ -161,6 +168,7 @@ class ActiveEffectStore
     void Clear() noexcept
     {
         rows_.clear(); event_rows_.clear();
+        scratch_rows_.clear(); live_rows_.clear();
         for (auto &profile : profiles_) profile.clear();
     }
     void Swap(ActiveEffectStore &other) noexcept
@@ -208,6 +216,8 @@ class ActiveEffectStore
     std::vector<StoredRow> rows_;
     std::unordered_map<EventKey, Row, EventKeyHash> event_rows_;
     std::array<std::vector<Row>, static_cast<std::size_t>(Profile::Count)> profiles_;
+    std::vector<Row> scratch_rows_;
+    std::vector<std::uint8_t> live_rows_;
 };
 
 struct DecodedVfxState
@@ -295,9 +305,11 @@ struct VfxSessionState
             std::vector<Entry> entries;
         };
 
-        // std::push_heap uses a max-heap; invert the key for earliest due first.
+        // Session first lets future-session events wait without repeated pop/reinsert.
         static bool Later(const Entry &a, const Entry &b) noexcept
         {
+            if (a.event.session_id != b.event.session_id)
+                return a.event.session_id > b.event.session_id;
             if (a.event.tick != b.event.tick) return a.event.tick > b.event.tick;
             return a.ordinal > b.ordinal;
         }
@@ -319,21 +331,16 @@ struct VfxSessionState
         [[nodiscard]] const ReadyBatch &Prepare(Tick tick, std::uint64_t session)
         {
             if (!in_flight.entries.empty()) return in_flight;
-            std::vector<Entry> deferred;
             while (!pending.empty())
             {
-                if (pending.front().event.tick > tick) break;
+                const auto &next = pending.front().event;
+                if (next.session_id > session ||
+                    (next.session_id == session && next.tick > tick)) break;
                 std::pop_heap(pending.begin(), pending.end(), Later);
                 auto entry = std::move(pending.back());
                 pending.pop_back();
                 if (entry.event.session_id < session) continue;
-                if (entry.event.session_id > session) deferred.push_back(std::move(entry));
-                else in_flight.entries.push_back(std::move(entry));
-            }
-            for (auto &entry : deferred)
-            {
-                pending.push_back(std::move(entry));
-                std::push_heap(pending.begin(), pending.end(), Later);
+                in_flight.entries.push_back(std::move(entry));
             }
             return in_flight;
         }
@@ -402,7 +409,7 @@ struct VfxSessionState
     // Terminal simulation stops advancing after the final boss transition.
     // Keep only this presentation clock on real time; all other VFX clocks
     // remain tied to the authoritative snapshot tick.
-    Tick UpdateTerminalClock(Tick snapshot_tick, SessionPhase phase,
+    double UpdateTerminalClock(Tick snapshot_tick, SessionPhase phase,
                              FixedStepClock::Clock::time_point now) noexcept
     {
         const bool terminal = phase == SessionPhase::Victory || phase == SessionPhase::Defeat;
@@ -418,11 +425,14 @@ struct VfxSessionState
             return snapshot_tick;
         }
         if (now <= terminal_clock->started_at) return terminal_clock->source_tick;
-        const auto elapsed_ticks = (now - terminal_clock->started_at) / FixedStepClock::kFixedStep;
-        if (elapsed_ticks <= 0) return terminal_clock->source_tick;
+        const auto elapsed = now - terminal_clock->started_at;
+        const auto elapsed_ticks = elapsed / FixedStepClock::kFixedStep;
         const auto advance = static_cast<Tick>(elapsed_ticks);
         const auto remaining = std::numeric_limits<Tick>::max() - terminal_clock->source_tick;
-        return terminal_clock->source_tick + std::min(advance, remaining);
+        if (advance >= remaining) return static_cast<double>(std::numeric_limits<Tick>::max());
+        const double fraction = std::chrono::duration<double>(elapsed % FixedStepClock::kFixedStep).count() /
+            std::chrono::duration<double>(FixedStepClock::kFixedStep).count();
+        return static_cast<double>(terminal_clock->source_tick + advance) + fraction;
     }
 
     bool Synchronize(std::uint64_t current_session)

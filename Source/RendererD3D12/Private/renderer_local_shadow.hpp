@@ -97,6 +97,24 @@ struct LocalShadowInputs
         std::span<const VirtualShadowDrawBatch>)> draw;
     std::function<void(PassBuilder &)> declare_material_sampling;
 };
+struct LocalShadowLayout
+{
+    std::uint64_t storage_generation{};
+    std::array<ResourceHandle,9> imports{}; // upload, six frame buffers, two banks
+    std::array<ResourceVersion,8> outputs{}; // six buffers, static and dynamic banks
+    std::array<std::uint32_t,4> pass_indices{}; // 220..223
+    std::vector<VirtualShadowNativeRead> native_reads;
+    bool initialized{}, material_sampling{};
+    std::array<bool,2> sampled_layers{};
+};
+struct LocalShadowFramePlanData;
+struct LocalShadowFramePlan
+{
+    std::array<bool,2> has_batches{};
+  private:
+    std::shared_ptr<LocalShadowFramePlanData> data;
+    friend class LocalShadowSystem;
+};
 struct LocalShadowStorage;
 class LocalShadowCandidate
 {
@@ -125,7 +143,15 @@ class LocalShadowSystem
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,const LocalShadowProfile &,
         const ShaderReader &,LocalShadowCandidate &,RendererPipelineCache *cache=nullptr) const;
     [[nodiscard]] Result Commit(LocalShadowCandidate &&,const CompletionSet &completed);
-    [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalShadowInputs &,LocalShadowOutputs &);
+    [[nodiscard]] Result PrepareFrameRecordData(const LocalShadowInputs &,LocalShadowFramePlan &);
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalShadowInputs &,
+        LocalShadowOutputs &,LocalShadowLayout *layout=nullptr);
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalShadowInputs &,
+        LocalShadowFramePlan &,LocalShadowOutputs &,LocalShadowLayout *layout=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LocalShadowInputs &,
+        LocalShadowFramePlan &,const LocalShadowLayout &,LocalShadowOutputs &);
+    [[nodiscard]] bool MatchesLayout(const LocalShadowInputs &,
+        const LocalShadowFramePlan &,const LocalShadowLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
@@ -133,6 +159,9 @@ class LocalShadowSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(LocalShadowSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalShadowInputs &,
+        LocalShadowFramePlan &,LocalShadowOutputs &,LocalShadowLayout *,
+        const LocalShadowLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

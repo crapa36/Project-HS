@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -17,6 +18,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSrvCount = 17, kUavCount = 6, kDescriptorCount = kSrvCount + kUavCount, kConstantStride = 256;
+std::atomic<std::uint64_t> g_reconstruction_guide_generation{};
 constexpr std::array<std::string_view, 2> kShaderProducts{
     "render/shader/reconstruction_guides_cs.dxil", "render/shader/reconstruction_pre_exposure_cs.dxil"};
 Result GuideFailure(ErrorCode code, std::string message)
@@ -92,6 +94,7 @@ struct ReconstructionGuidesTargets
     std::vector<CompletionSet> slot_completion;
     CompletionSet completion;
     std::uint64_t bytes{};
+    std::uint64_t generation{};
     bool usable{true};
     ~ReconstructionGuidesTargets()
     {
@@ -251,19 +254,79 @@ Result ReconstructionGuidesSystem::Commit(ReconstructionGuidesCandidate &&candid
     if (!candidate.targets_) return GuideFailure(ErrorCode::InvalidArgument, "Reconstruction guide candidate was not prepared.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
         return GuideFailure(ErrorCode::InvalidState, "Old reconstruction guide targets remain in GPU use.");
+    candidate.targets_->generation=g_reconstruction_guide_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->targets = std::move(candidate.targets_);
     return Result::Success();
 }
 
+bool ReconstructionGuidesSystem::MatchesLayout(const ReconstructionGuidesInputs &in,bool external,
+    std::string_view provider,const ReconstructionGuidesLayout &layout) const noexcept
+{
+    const auto storage=impl_->targets;
+    if(!storage||!storage->usable||layout.target_generation!=storage->generation||
+        layout.external!=external||layout.provider_name!=provider||
+        layout.transparent_guides!=in.transparent_guides_enabled||
+        layout.screen_overlay!=bool(in.screen_overlay_alpha.version.resource)||
+        layout.composition!=bool(storage->composition.resource))return false;
+    const std::array<ResourceVersion,16> current{in.depth.version,in.motion.version,in.metadata.version,
+        in.surface_history.version,in.composite_hdr.version,in.opaque_hdr.version,
+        in.exposure.version,in.transparency_revealage.version,in.transparent_depth.version,
+        in.transparent_motion.version,in.transparent_history.version,in.transparent_classification.version,
+        in.transparent_metadata.version,in.transparent_overflow.version,in.transparent_transport.version,
+        in.screen_overlay_alpha.version};
+    for(std::size_t i=0;i<current.size();++i)
+        if((i<8||(i<15&&layout.transparent_guides)||(i==15&&layout.screen_overlay))&&
+            layout.inputs[i]!=current[i])return false;
+    return true;
+}
 Result ReconstructionGuidesSystem::Register(RenderGraphBuilder &graph, const ReconstructionGuidesInputs &inputs,
     ReconstructionGuidesConstants constants, SdkReconstructionFrame frame,
     ExecuteReconstruction executeReconstruction, std::string_view providerName, ReconstructionGuidesOutputs &outputs,
-    RegisterExternalReconstruction external)
+    RegisterExternalReconstruction external,ReconstructionGuidesLayout *layout)
+{return RegisterImpl(graph,inputs,constants,std::move(frame),std::move(executeReconstruction),
+    providerName,outputs,std::move(external),layout,nullptr);}
+Result ReconstructionGuidesSystem::BindRetained(RenderGraphBuilder &graph,const ReconstructionGuidesInputs &inputs,
+    ReconstructionGuidesConstants constants,SdkReconstructionFrame frame,
+    ExecuteReconstruction executeReconstruction,std::string_view providerName,
+    ReconstructionGuidesOutputs &outputs,const ReconstructionGuidesLayout &layout,
+    RegisterExternalReconstruction externalBind)
+{return RegisterImpl(graph,inputs,constants,std::move(frame),std::move(executeReconstruction),
+    providerName,outputs,std::move(externalBind),nullptr,&layout);}
+Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const ReconstructionGuidesInputs &inputs,
+    ReconstructionGuidesConstants constants,SdkReconstructionFrame frame,
+    ExecuteReconstruction executeReconstruction,std::string_view providerName,
+    ReconstructionGuidesOutputs &outputs,RegisterExternalReconstruction external,
+    ReconstructionGuidesLayout *layout,const ReconstructionGuidesLayout *retained)
 {
     outputs = {};
     auto storage = impl_->targets;
     if (!storage || !storage->usable || impl_->pending.graph || (!executeReconstruction && !external))
         return GuideFailure(ErrorCode::InvalidState, "Reconstruction guides require reusable targets and a configured native execution callback.");
+    if(layout){*layout={};layout->target_generation=storage->generation;
+        layout->external=bool(external);layout->provider_name=providerName;
+        layout->transparent_guides=inputs.transparent_guides_enabled;
+        layout->screen_overlay=bool(inputs.screen_overlay_alpha.version.resource);
+        layout->composition=bool(storage->composition.resource);
+        layout->inputs={inputs.depth.version,inputs.motion.version,inputs.metadata.version,
+            inputs.surface_history.version,inputs.composite_hdr.version,inputs.opaque_hdr.version,
+            inputs.exposure.version,inputs.transparency_revealage.version,inputs.transparent_depth.version,
+            inputs.transparent_motion.version,inputs.transparent_history.version,
+            inputs.transparent_classification.version,inputs.transparent_metadata.version,
+            inputs.transparent_overflow.version,inputs.transparent_transport.version,
+            inputs.screen_overlay_alpha.version};}
+    if(retained)
+    {
+        if(!MatchesLayout(inputs,bool(external),providerName,*retained))
+            return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction topology changed.");
+        for(UINT i=0;i<retained->imports.size();++i)
+            if((i<6||retained->composition)&&
+                (!retained->imports[i]||retained->imports[i].kind!=ResourceKind::Texture||
+                    retained->imports[i].value>graph.ResourceCount()))
+                return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction import slot changed.");
+        for(UINT i=0;i<3;++i)
+            if(!graph.BindPass(retained->pass_indices[i],i==0?49u:(i==1?9u:51u)))
+                return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction pass changed.");
+    }
     const auto active = inputs.render_active;
     if (!ValidExtent(active) || active.width > storage->render_capacity.width || active.height > storage->render_capacity.height ||
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
@@ -330,9 +393,21 @@ Result ReconstructionGuidesSystem::Register(RenderGraphBuilder &graph, const Rec
     storage->Uav(inputs.frame_slot, 5, storage->composition.resource.Get(), DXGI_FORMAT_R8_UNORM);
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.slot = inputs.frame_slot;
+    for(auto *allocation:{&storage->motion,&storage->depth,&storage->responsive,
+            &storage->exposure,&storage->raw_output,&storage->pre_exposed,&storage->composition})
+        if(allocation->resource)
+            if(auto certified=allocation->EnsureNativeContract(storage->device.Get());!certified)
+                return certified;
+    UINT import_index{};
+    bool imports_valid=true;
     auto import = [&](AllocationResource &allocation, std::string_view name) {
-        const auto handle = graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue},
-                                               allocation.graph_access, name);
+        const UINT index=import_index++;
+        const auto current=ExternalTexture{allocation.resource.Get(),allocation.graph_completion,
+            allocation.graph_queue,{},allocation.NativeContract()};
+        const auto handle=retained?retained->imports[index]:
+            graph.ImportTexture(current,allocation.graph_access,name);
+        if(retained)imports_valid&=graph.BindTexture(handle,current,allocation.graph_access);
+        if(layout)layout->imports[index]=handle;
         pending.imports.push_back({&allocation, handle});
         return graph.Version(handle);
     };
@@ -344,6 +419,7 @@ Result ReconstructionGuidesSystem::Register(RenderGraphBuilder &graph, const Rec
     auto preExposed = import(storage->pre_exposed, "Reconstruction.PreExposedOutput");
     ResourceVersion composition;
     if (storage->composition.resource) composition = import(storage->composition, "Reconstruction.CompositionCoverage");
+    if(!imports_valid)return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction binding changed.");
     auto execute = [storage, slot = inputs.frame_slot](std::uint32_t pipeline, ViewExtent extent) {
         return [storage, slot, pipeline, extent](RenderPassContext &context) -> Result {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -358,28 +434,32 @@ Result ReconstructionGuidesSystem::Register(RenderGraphBuilder &graph, const Rec
             return Result::Success();
         };
     };
-    auto guides = graph.AddPass(49, "Reconstruction Guides", QueueHint::Direct);
-    if (inputs.screen_overlay_alpha.version.resource)
+    if(layout)layout->pass_indices[0]=graph.PassCount();
+    auto guides=retained?*graph.BindPass(retained->pass_indices[0],49):
+        graph.AddPass(49,"Reconstruction Guides",QueueHint::Direct);
+    if (!retained&&inputs.screen_overlay_alpha.version.resource)
         guides.Read(inputs.screen_overlay_alpha.version, Access::ComputeRead);
-    for (const auto &guide : {inputs.depth, inputs.motion, inputs.metadata, inputs.surface_history,
+    if(!retained)for (const auto &guide : {inputs.depth, inputs.motion, inputs.metadata, inputs.surface_history,
          inputs.composite_hdr, inputs.opaque_hdr, inputs.exposure, inputs.transparency_revealage})
         guides.Read(guide.version, Access::ComputeRead);
-    if (inputs.transparent_guides_enabled)
+    if (!retained&&inputs.transparent_guides_enabled)
         for (const auto &guide : {inputs.transparent_depth, inputs.transparent_motion, inputs.transparent_history,
              inputs.transparent_classification, inputs.transparent_metadata, inputs.transparent_overflow,
              inputs.transparent_transport})
             guides.Read(guide.version, Access::ComputeRead);
-    motion = guides.Write(motion, Access::UnorderedWrite);
-    depth = guides.Write(depth, Access::UnorderedWrite);
-    responsive = guides.Write(responsive, Access::UnorderedWrite);
-    exposure = guides.Write(exposure, Access::UnorderedWrite);
-    if (composition.resource) composition = guides.Write(composition, Access::UnorderedWrite);
+    motion=retained?retained->outputs[2]:guides.Write(motion,Access::UnorderedWrite);
+    depth=retained?retained->outputs[5]:guides.Write(depth,Access::UnorderedWrite);
+    responsive=retained?retained->outputs[3]:guides.Write(responsive,Access::UnorderedWrite);
+    exposure=retained?retained->outputs[4]:guides.Write(exposure,Access::UnorderedWrite);
+    if(composition.resource)composition=retained?retained->outputs[6]:guides.Write(composition,Access::UnorderedWrite);
     guides.SetExecuteChecked(execute(0, active));
-    auto reconstruct = graph.AddPass(9, std::string(providerName) + " Reconstruction", external ? QueueHint::Compute : QueueHint::Direct);
-    for (const auto version : {inputs.composite_hdr.version, depth, motion, responsive, exposure})
+    if(layout)layout->pass_indices[1]=graph.PassCount();
+    auto reconstruct=retained?*graph.BindPass(retained->pass_indices[1],9):
+        graph.AddPass(9,std::string(providerName)+" Reconstruction",external?QueueHint::Compute:QueueHint::Direct);
+    if(!retained)for (const auto version : {inputs.composite_hdr.version, depth, motion, responsive, exposure})
         reconstruct.Read(version, Access::ComputeRead);
-    if (composition.resource) reconstruct.Read(composition, Access::ComputeRead);
-    raw = reconstruct.Write(raw, Access::UnorderedWrite);
+    if(!retained&&composition.resource)reconstruct.Read(composition,Access::ComputeRead);
+    raw=retained?retained->outputs[1]:reconstruct.Write(raw,Access::UnorderedWrite);
     // The adapter is owned by the central renderer. It remains initialized and
     // alive until all graph uses drain; the callback itself retains native targets.
     const auto fillFrame = [storage, inputs, constants](SdkReconstructionFrame frame) {
@@ -425,13 +505,16 @@ Result ReconstructionGuidesSystem::Register(RenderGraphBuilder &graph, const Rec
                 });
         });
     }
-    auto preExposure = graph.AddPass(51, "Reconstruction PreExposure", QueueHint::Direct);
-    preExposure.Read(raw, Access::ComputeRead); preExposure.Read(inputs.exposure.version, Access::ComputeRead);
-    preExposed = preExposure.Write(preExposed, Access::UnorderedWrite);
+    if(layout)layout->pass_indices[2]=graph.PassCount();
+    auto preExposure=retained?*graph.BindPass(retained->pass_indices[2],51):
+        graph.AddPass(51,"Reconstruction PreExposure",QueueHint::Direct);
+    if(!retained){preExposure.Read(raw,Access::ComputeRead);preExposure.Read(inputs.exposure.version,Access::ComputeRead);}
+    preExposed=retained?retained->outputs[0]:preExposure.Write(preExposed,Access::UnorderedWrite);
     preExposure.SetExecuteChecked(execute(1, storage->output_extent));
     outputs = {preExposed, raw, motion, responsive, exposure, depth, composition, storage->pre_exposed.resource.Get(),
                storage->export_descriptors->GetCPUDescriptorHandleForHeapStart(), storage->depth.resource.Get(),
                storage->motion.resource.Get(), storage};
+    if(layout)layout->outputs={preExposed,raw,motion,responsive,exposure,depth,composition};
     impl_->pending = std::move(pending);
     return Result::Success();
 }

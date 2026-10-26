@@ -183,7 +183,7 @@ Result AudioEngine::Initialize(const SettingsData &settings)
         return loaded;
     const auto initialized = Initialize(settings, generation.product_paths);
     if (initialized)
-        RetainGeneration(std::move(generation));
+        RetainGeneration(std::make_shared<const SelectedGeneration>(std::move(generation)));
     return initialized;
 }
 

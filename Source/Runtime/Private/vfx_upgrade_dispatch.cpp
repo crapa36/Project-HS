@@ -3,6 +3,7 @@
 #include <hs/game_domain/game_types.hpp>
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <string>
 #include <string_view>
@@ -24,9 +25,13 @@ Result Invalid(std::string_view message)
 }
 Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
                                 std::span<const PresentationEvent> events,
-                                std::vector<PresentationEvent> &output)
+                                std::vector<PresentationEvent> &output,
+                                std::vector<PresentationEvent> *staging)
 {
-    std::vector<PresentationEvent> dispatched;
+    std::vector<PresentationEvent> local;
+    auto &dispatched = staging ? *staging : local;
+    assert(&dispatched != &output);
+    dispatched.clear();
     dispatched.reserve(events.size());
     struct Activation
     {
@@ -317,7 +322,7 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
             dispatched.push_back(translated);
         }
     }
-    output=std::move(dispatched);
+    output.swap(dispatched);
     return Result::Success();
 }
 }

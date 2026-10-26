@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <ostream>
 #include <span>
 #include <string>
 #include <string_view>
@@ -64,6 +65,9 @@ class ActionResultSnapshot
     [[nodiscard]] std::string_view ActionId() const;
     [[nodiscard]] std::string_view ActionKeyValue() const;
     [[nodiscard]] std::size_t ProductCount() const;
+    [[nodiscard]] std::vector<std::string_view> ProductIds() const;
+    // On failure output may contain partial bytes; the caller must discard its staging output.
+    void CopyProductBytesTo(std::string_view product_id, std::ostream &output, UpstreamProduct &dependency) const;
     [[nodiscard]] bool HasProduct(std::string_view product_id) const;
     [[nodiscard]] const Json &ProductMetadata(std::string_view product_id) const;
     void ReadProduct(std::string_view product_id, UpstreamProduct &dependency,
@@ -84,6 +88,8 @@ class ActionResultSnapshot
     friend Json ReadActionResult(const fs::path &, std::string_view, std::string_view,
                                  UpstreamProduct &, fs::path &);
 };
+
+void AtomicPublishFile(const fs::path &temporary, const fs::path &destination);
 
 class Sha256Stream
 {

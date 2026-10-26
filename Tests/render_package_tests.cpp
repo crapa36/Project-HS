@@ -1,11 +1,20 @@
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/sha256.hpp>
+#include "../Source/RendererD3D12/Private/renderer_packed_assets.hpp"
 #include "../Source/RendererD3D12/Private/renderer_hlod_scene.hpp"
 #include "../Source/RendererD3D12/Private/renderer_hero_work_math.hpp"
+#include "../Source/RendererD3D12/Private/renderer_instance_order.hpp"
+#include "../Source/RendererD3D12/Private/renderer_monster_lod.hpp"
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/character_package.hpp>
+#include <hs/render_data/character_descriptor.hpp>
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
+#include <hs/render_data/geometry_descriptor.hpp>
+#include <hs/render_data/vfx_mesh_descriptor.hpp>
 #include <hs/render_data/dds_texture.hpp>
 #include "../Source/Apps/Content/character_texture_mips.hpp"
 #include "../Source/Apps/Content/character_bc7_coverage.hpp"
@@ -18,6 +27,8 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -47,6 +58,44 @@ std::vector<std::string> numeric_fixtures;
 void Require(bool condition, const char *reason)
 {
     if (!condition) throw std::runtime_error(reason);
+}
+
+void TestMonsterLodDrawOrder()
+{
+    std::array<hs::RenderInstance, 4> sources{};
+    sources[0].mesh = hs::RenderMesh::Archer;
+    sources[1].mesh = hs::RenderMesh::MonsterMelee;
+    sources[2].mesh = hs::RenderMesh::MonsterRanged;
+    sources[3].mesh = hs::RenderMesh::MonsterMelee;
+    const std::array<std::uint16_t, 4> lods{0, 2, 1, 0};
+    std::vector<std::uint32_t> indices;
+    const auto order = hs::BuildRenderInstanceOrderWithMonsterLods(sources, lods, 1.0f, indices);
+    Require(order.has_value() && indices == std::vector<std::uint32_t>{0, 3, 1, 2},
+        "monster LOD partition changed canonical draw identity");
+    Require(order->monster_lod_ranges[0] == std::pair<std::size_t, std::size_t>{1, 1} &&
+        order->monster_lod_ranges[2] == std::pair<std::size_t, std::size_t>{2, 1} &&
+        order->monster_lod_ranges[4] == std::pair<std::size_t, std::size_t>{3, 1},
+        "monster family LOD ranges are not contiguous");
+    auto invalid = lods;
+    invalid[1] = 3;
+    Require(!hs::BuildRenderInstanceOrderWithMonsterLods(sources, invalid, 1.0f, indices),
+        "unsupported monster LOD was accepted");
+
+    std::array<hs::render_data::GeometryMetadata, 3> pages{};
+    for (std::size_t lod = 0; lod < pages.size(); ++lod)
+    {
+        pages[lod].lod = static_cast<std::uint16_t>(lod);
+        pages[lod].flags = hs::render_data::kGeometryFlagSkinned;
+        pages[lod].error_method_abi = lod == 0 ? hs::render_data::kGeometryErrorMethodAbi
+            : hs::render_data::kSkinnedPoseErrorMethodAbi;
+    }
+    pages[1].geometric_error = 0.1f;
+    pages[2].geometric_error = 0.3f;
+    hs::MonsterLodProjection projection;
+    projection.Include(2.0, 1.0);
+    Require(hs::SelectMonsterLod(pages, 0b111u, 1.0f, projection) == 2 &&
+        hs::SelectMonsterLod(pages, 0b001u, 1.0f, projection) == 0,
+        "monster LOD ignored error or own resident mask");
 }
 
 template <typename Operation>
@@ -145,6 +194,34 @@ void TestExpandedVertexFields()
     rd::ValidateExpandedVertices(std::span(&vertex, 1));
     vertex.reserved = 1;
     reject_vertex();
+}
+
+void TestVfxMeshDescriptor()
+{
+    constexpr std::array<std::string_view, 7> names{
+        "arrowhead_mesh", "shard_mesh", "debris_shard_mesh", "small_shard_mesh",
+        "enemy_thorn_mesh", "boss_crest_lance_mesh", "needle_shard_mesh"};
+    std::vector<std::uint32_t> words(25 + 7 * 3 * 12);
+    words[0] = 0x4d565348u; words[1] = 1; words[2] = 7; words[3] = 21;
+    for (std::size_t mesh = 0; mesh < names.size(); ++mesh)
+    {
+        std::uint32_t hash = 2166136261u;
+        for (const auto character : names[mesh])
+            hash = (hash ^ static_cast<unsigned char>(character)) * 16777619u;
+        words[4 + mesh * 3] = hash;
+        words[5 + mesh * 3] = static_cast<std::uint32_t>(mesh * 3);
+        words[6 + mesh * 3] = 3;
+        words[25 + (mesh * 3) * 12] = std::bit_cast<std::uint32_t>(1.0f);
+        words[25 + (mesh * 3 + 1) * 12 + 2] = std::bit_cast<std::uint32_t>(1.0f);
+    }
+    const auto bytes = std::as_bytes(std::span(words));
+    const auto descriptor = rd::CompileVfxMeshAtlasDescriptor(bytes, hs::MakeAssetId("vfx/vfx_mesh_atlas.hsbin"));
+    for (const auto &mesh : descriptor.meshes)
+        Require(mesh.vertex_count == 3 && mesh.transverse_radius == 1 && mesh.minimum_z == 0 &&
+            mesh.widest_z == 0 && mesh.maximum_z == 1, "VFX mesh derived bounds differ");
+    words[25 + 3] = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity());
+    Reject([&] { (void)rd::CompileVfxMeshAtlasDescriptor(bytes, descriptor.asset_id); },
+        "nonfinite VFX mesh vertex accepted");
 }
 
 std::uint64_t Get64(const std::vector<std::byte> &bytes, std::size_t offset)
@@ -328,6 +405,129 @@ void TestQualityProfiles()
         static_cast<std::uint32_t>(rd::ChunkType::QualityProfiles), 1, true, old_rows, 4, 176}};
     Reject([&] { (void)rd::BuildPackage(asset, {}, old_chunks); },
            "legacy RT quality profile producer layout accepted");
+}
+
+void TestMaterialDescriptors()
+{
+    const auto scalar = [](std::string id, float value) {
+        rd::MaterialParameterDefinition p; p.id = std::move(id); p.type = rd::MaterialParameterType::Float;
+        p.default_words[0] = std::bit_cast<std::uint32_t>(value); return p;
+    };
+    const std::string env_id = "render/rock_0.rpkg";
+    const std::string env_parameters = rd::MaterialParametersProduct(env_id);
+    const std::array parameters{scalar("metallic", 0.25f), scalar("roughness_scale", 1.2f)};
+    const std::array definitions{
+        rd::MaterialTextureDefinition{"base", "render/texture/environment_test_base.rpkg", rd::MaterialTextureDimension::Texture2DArray, rd::MaterialTextureSemantic::BaseColor},
+        rd::MaterialTextureDefinition{"surface", "render/texture/environment_test_surface.rpkg", rd::MaterialTextureDimension::Texture2DArray, rd::MaterialTextureSemantic::Surface},
+        rd::MaterialTextureDefinition{"normal", "render/texture/environment_test_normal.rpkg", rd::MaterialTextureDimension::Texture2DArray, rd::MaterialTextureSemantic::Normal}};
+    std::vector<rd::TextureDescriptor> textures;
+    for (std::size_t i=0; i<definitions.size(); ++i)
+    {
+        rd::TextureDescriptor texture{}; texture.asset_id = hs::MakeAssetId(definitions[i].product_id);
+        texture.description = {4,4,1,1,i ? rd::kTextureFormatBc5 : rd::kTextureFormatRgba8Srgb};
+        textures.push_back(texture);
+    }
+    rd::TextureDescriptor decal_texture{};
+    decal_texture.asset_id = hs::MakeAssetId("render/texture/vfx_fracture_decal_array.rpkg");
+    decal_texture.description = {4,4,1,1,rd::kTextureFormatRgba8};
+    textures.push_back(decal_texture);
+    rd::RockMaterial rock;
+    rock.metallic = 0.25f; rock.roughness_scale = 1.2f;
+    std::vector<std::string> dependencies{env_parameters, "render/shader/rock_0_scene.dxil"};
+    for (std::size_t i=0;i<definitions.size();++i) { rock.textures[i]=definitions[i].product_id; dependencies.push_back(definitions[i].product_id); }
+    std::ranges::sort(dependencies);
+    const auto metadata = rd::EncodeRockMaterial(rock, dependencies);
+    const auto bindings = rd::EncodeMaterialBindings(dependencies, definitions);
+    const std::array program_sources{rd::MaterialProgramSource{"render/shader/rock_0_scene.dxil", rd::MaterialProgramKind::OpaqueScenePS}};
+    const auto programs = rd::EncodeMaterialPrograms(dependencies, program_sources);
+    const auto layout = rd::EncodeMaterialParameterLayout(parameters);
+    const rd::MaterialSurfaceLayout surface{1,0};
+    const auto surface_bytes = rd::EncodeMaterialSurfaceLayout(surface);
+    const std::array chunks{
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialMetadata),1,true,metadata,1,static_cast<std::uint32_t>(metadata.size())},
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialBindings),1,true,bindings,6,rd::kMaterialBindingStride},
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialProgram),1,true,programs,1,rd::kMaterialProgramStride},
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),1,true,layout,1,32},
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),1,true,surface_bytes,1,rd::kMaterialSurfaceLayoutStride}};
+    const auto material_bytes = rd::BuildPackage(hs::MakeAssetId(env_id), dependencies, chunks);
+    const auto parameter_bytes = rd::BuildMaterialParameterPackage(env_parameters, parameters);
+    const auto assets_for = [](std::string_view id, std::span<const std::string> dependencies) {
+        std::vector<hs::AssetId> assets{hs::MakeAssetId(id)};
+        for (const auto &dependency : dependencies) assets.push_back(hs::MakeAssetId(dependency));
+        std::ranges::sort(assets, {}, &hs::AssetId::value); return assets;
+    };
+    const auto bulk_index = [](std::span<const hs::AssetId> assets, std::string_view id) {
+        return static_cast<std::uint32_t>(std::ranges::find(assets, hs::MakeAssetId(id).value, &hs::AssetId::value)-assets.begin());
+    };
+    auto assets = assets_for(env_id, dependencies);
+    auto compiled = rd::CompileMaterialDescriptor(env_id, material_bytes, parameter_bytes, bulk_index(assets,env_id), assets, textures);
+    Require(compiled.View().surface == surface && compiled.value.metallic == rock.metallic && compiled.value.roughness_scale == rock.roughness_scale &&
+            compiled.value.kind == rd::MaterialKind::Environment && compiled.defaults.size() == parameters.size() &&
+            compiled.defaults[0].words == parameters[0].default_words && compiled.defaults[1].words == parameters[1].default_words &&
+            std::ranges::equal(compiled.value.parameter_layout,layout) && compiled.programs.size()==1 && compiled.textures.size()==3,
+            "environment descriptor differs from decoded material/defaults");
+    const auto retained_name = compiled.programs[0].product_id.data();
+    auto moved = std::move(compiled);
+    Require(moved.programs[0].product_id == program_sources[0].shader_id && moved.programs[0].product_id.data() == retained_name &&
+            moved.View().programs.data() == moved.programs.data(), "material storage move invalidated views");
+    auto invalid = moved.View(); invalid.programs = {};
+    Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted absent programs");
+    auto dead_program = moved.programs; dead_program[0].bulk_index=UINT32_MAX; invalid=moved.View(); invalid.programs=dead_program;
+    Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted dead program reference");
+    auto dead_texture = moved.textures; dead_texture[0].texture.value=UINT32_MAX; invalid=moved.View(); invalid.textures=dead_texture;
+    Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted dead texture reference");
+    auto changed = std::vector<rd::MaterialParameterDefinition>(parameters.begin(), parameters.end()); changed.push_back(scalar("extra",0));
+    const auto incompatible = rd::BuildMaterialParameterPackage(env_parameters,changed);
+    Reject([&] { (void)rd::CompileMaterialDescriptor(env_id,material_bytes,incompatible,bulk_index(assets,env_id),assets,textures); },
+           "material compiler accepted mismatched parameter layout");
+    Require(rd::IsMaterialDescriptorProduct(env_id) && rd::IsMaterialDescriptorProduct("render/material/terrain.rpkg") &&
+            !rd::IsMaterialDescriptorProduct("render/rock_0_lod1.rpkg") && !rd::IsMaterialDescriptorProduct("render/crate_intact.rpkg"),
+            "material descriptor selection included geometry-only products");
+
+    for (const std::string name : {"archer_skin", "monster_pbr"})
+    {
+        const auto id="render/material/"+name+"/material.rpkg";
+        const auto parameter_id=rd::MaterialParametersProduct(id);
+        std::array<std::string,4> ids{"render/shader/"+name+"_scene.dxil", "render/shader/"+name+"_visibility.dxil",
+            "render/shader/"+name+"_resolve.dxil", "render/shader/"+name+"_shadow.dxil"};
+        const std::array hero_programs{rd::MaterialProgramSource{ids[0],rd::MaterialProgramKind::HeroScenePS},
+            rd::MaterialProgramSource{ids[1],rd::MaterialProgramKind::HeroVisibilityPS},
+            rd::MaterialProgramSource{ids[2],rd::MaterialProgramKind::HeroSurfaceResolveCS},rd::MaterialProgramSource{ids[3],rd::MaterialProgramKind::HeroShadowPS}};
+        const auto hero_bytes=rd::BuildHeroMaterialPackage(name,parameters,surface,hero_programs);
+        const auto hero=rd::ReadHeroMaterialPackage(hero_bytes,name);
+        if(name=="monster_pbr") for(const auto *suffix:{"monster_basecolor","monster_emissive","monster_ram"}) {
+            rd::TextureDescriptor texture{};texture.asset_id=hs::MakeAssetId("render/texture/"+std::string(suffix)+".rpkg");
+            texture.description={512,512,1,10,std::string_view(suffix)=="monster_ram"?rd::kTextureFormatBc7:rd::kTextureFormatBc7Srgb};textures.push_back(texture);
+        }
+        const auto hero_assets=assets_for(id,hero.dependencies);
+        const auto hero_parameters=rd::BuildMaterialParameterPackage(parameter_id,parameters);
+        const auto descriptor=rd::CompileMaterialDescriptor(id,hero_bytes,hero_parameters,bulk_index(hero_assets,id),hero_assets,textures);
+        Require(descriptor.value.kind==rd::MaterialKind::Hero && descriptor.value.surface==hero.surface &&
+                descriptor.value.domain==hero.domain && descriptor.programs.size()==hero.programs.size() && descriptor.textures.empty(),
+                "Hero descriptor changed domain or claimed fixed adapter texture ownership");
+    }
+    const std::string decal_id="render/material/decal_fracture/material.rpkg";
+    const auto compile_decal = [&](std::span<const rd::MaterialParameterDefinition> defaults) {
+        const auto bytes=rd::BuildDecalMaterialPackage("decal_fracture",defaults,"render/texture/vfx_fracture_decal_array.rpkg",
+            "render/shader/decal_surface_cs.dxil",{});
+        const auto decoded=rd::ReadDecalMaterialPackage(bytes,"decal_fracture");
+        const auto decal_assets=assets_for(decal_id,decoded.dependencies);
+        const auto default_bytes=rd::BuildMaterialParameterPackage(rd::MaterialParametersProduct(decal_id),defaults);
+        return rd::CompileMaterialDescriptor(decal_id,bytes,default_bytes,bulk_index(decal_assets,decal_id),decal_assets,textures);
+    };
+    std::array decal_defaults{scalar("target_roughness",0.9f),scalar("roughness_blend",0.2f)};
+    const auto decal=compile_decal(decal_defaults);
+    Require(decal.value.kind==rd::MaterialKind::Decal && decal.value.receivers==rd::DecalReceiverPolicy{} &&
+            decal.textures.size()==1 && decal.textures[0].semantic==rd::MaterialTextureSemantic::DecalStructure &&
+            decal.defaults[1].words==decal_defaults[1].default_words, "decal descriptor parity failed");
+    Reject([&] { (void)compile_decal(std::span(decal_defaults).first(1)); }, "decal missing required float accepted");
+    decal_defaults[1]=scalar("roughness_blend",1.1f);
+    Reject([&] { (void)compile_decal(decal_defaults); }, "decal float outside unit interval accepted");
+    decal_defaults[1].type=rd::MaterialParameterType::Uint;decal_defaults[1].default_words[0]=1;
+    Reject([&] { (void)compile_decal(decal_defaults); }, "decal non-float default accepted");
+    decal_defaults[1]=scalar("roughness_blend",0.2f);
+    textures[3].dimension=rd::TextureDimension::Texture3D;
+    Reject([&] { (void)compile_decal(decal_defaults); }, "decal accepted a volume texture binding");
 }
 
 void TestDecalMaterialPackages()
@@ -2014,6 +2214,45 @@ rd::GeometryMetadata GeometryMetadataFixture(const rd::GeometryData&g)
 {
     rd::GeometryMetadata m;m.flags=g.flags;m.vertex_count=static_cast<std::uint32_t>(g.vertices.size());m.index_count=static_cast<std::uint32_t>(g.indices.size());m.submesh_count=static_cast<std::uint32_t>(g.submeshes.size());m.meshlet_count=static_cast<std::uint32_t>(g.meshlets.size());m.vertex_ref_count=static_cast<std::uint32_t>(g.meshlet_vertex_refs.size());m.max_material_index=1;m.bounds=g.bounds;m.page_dependency_index=2;m.fallback_dependency_index=0;m.terminal_fallback_dependency_index=1;return m;
 }
+void TestPackedRendererAssets()
+{
+    const auto path = std::filesystem::temp_directory_path() /
+        ("hs-renderer-bulk-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".hsp");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ignored; std::filesystem::remove(path, ignored); } } cleanup{path};
+    std::array<std::byte, 256> file;
+    for (std::size_t i = 0; i < file.size(); ++i) file[i] = static_cast<std::byte>(i);
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char *>(file.data()), file.size()); output.close();
+    Require(bool(output), "bulk fixture write failed");
+    hs::ShippedContentOwner owner;
+    Require(owner.Open(path, owner).Succeeded(), "bulk fixture open failed");
+    std::array<rd::RendererBulkDescriptor, 2> entries{{
+        {{11}, {64, 64, rd::RenderBulkFormat::Package, hs::Sha256(std::span(file).subspan(64, 64))}},
+        {{22}, {128, 16, rd::RenderBulkFormat::ShaderDxil, hs::Sha256(std::span(file).subspan(128, 16))}}}};
+    Require(hs::ValidatePackedRendererAssets(owner, entries).Succeeded(), "valid bulk table rejected");
+    std::vector<std::byte> bytes;
+    Require(hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes).Succeeded() &&
+        std::ranges::equal(bytes, std::span(file).subspan(64, 64)), "typed bulk read differs");
+    const auto accepted = bytes;
+    Require(!hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::ShaderDxil, bytes) &&
+        !hs::ReadPackedRendererAsset(owner, entries, {99}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
+        "wrong bulk type or identity accepted");
+    const auto second = entries[1].range;
+    entries[1].range = entries[0].range;
+    Require(hs::ValidatePackedRendererAssets(owner, entries).Succeeded(), "immutable bulk aliases must be allowed");
+    entries[1].range = second;
+    entries[0].range.expected_digest[0] ^= std::byte{1};
+    Require(!hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
+        "unverified bulk bytes published");
+    entries[0].range.offset = std::numeric_limits<std::uint64_t>::max();
+    Require(!hs::ValidatePackedRendererAssets(owner, entries) &&
+        !hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
+        "overflowing bulk range accepted");
+    entries[0].range.offset = 65;
+    Require(!hs::ValidatePackedRendererAssets(owner, entries), "unaligned bulk accepted");
+    entries[0].range.offset = 64; entries[1].asset_id = {11};
+    Require(!hs::ValidatePackedRendererAssets(owner, entries), "duplicate bulk identity accepted");
+}
 void TestGeometryPackage()
 {
     const std::vector<std::string>deps{"render/fixture_lod1.rpkg","render/fixture_lod2.rpkg","render/geometry/fixture.rpage"};
@@ -2022,6 +2261,12 @@ void TestGeometryPackage()
     const auto decoded_metadata=rd::DecodeGeometryMetadata(metadata,deps,"render/fixture.rpkg");
     const auto page_id=hs::MakeAssetId("render/geometry/fixture.rpage");const auto page=rd::BuildGeometryPage(page_id,{},g);
     const auto decoded=rd::DecodeGeometryPage(page,page_id,decoded_metadata);
+    const auto prepared=rd::PrepareGeometryPage(page,page_id,decoded_metadata);
+    Require(rd::BuildGeometryPage(page_id,{},prepared.geometry)==rd::BuildGeometryPage(page_id,{},decoded),
+        "prepared geometry differs from decode API");
+    for(const auto &chunk:prepared.package.chunks)
+        Require(chunk.bytes.data()>=page.data() && chunk.bytes.data()+chunk.bytes.size()<=page.data()+page.size(),
+            "prepared package must borrow original page bytes");
     Require(decoded.vertices.size()==6 && decoded.indices==g.indices && decoded.canonical_primitive_remap==g.canonical_primitive_remap && decoded.meshlets.size()==2,"geometry roundtrip/duplicate occurrences");
     Reject([&]{(void)rd::DecodeGeometryMetadata(metadata,deps,"render/other.rpkg");},"wrong page product accepted");
     auto reserved=metadata;reserved[88]=std::byte{1};Reject([&]{(void)rd::DecodeGeometryMetadata(reserved,deps,"render/fixture.rpkg");},"metadata reserved accepted");
@@ -2035,11 +2280,100 @@ void TestGeometryPackage()
     bad=g;bad.meshlets[0].sphere[3]=0;Reject([&]{rd::ValidateGeometryData(bad);},"undersized meshlet sphere accepted");
     bad=g;bad.meshlets[0].flags=rd::kGeometryMeshletConeValid;bad.meshlets[0].cone={0,0,1,0.5f};Reject([&]{rd::ValidateGeometryData(bad);},"two sided cone accepted");
     auto mismatch=m;++mismatch.index_count;Reject([&]{(void)rd::DecodeGeometryPage(page,page_id,mismatch);},"metadata/page counts accepted");
+    Reject([&]{(void)rd::PrepareGeometryPage(page,page_id,mismatch);},"prepared metadata mismatch accepted");
+    auto excluded=m;excluded.bounds.sphere[3]=0;
+    Reject([&]{(void)rd::PrepareGeometryPage(page,page_id,excluded);},"prepared metadata excludes vertices");
     const auto view=rd::ReadPackage(page,page_id);std::vector<rd::ChunkSource>chunks;for(const auto&c:view.chunks)chunks.push_back({static_cast<std::uint32_t>(c.type),c.version,c.required,c.bytes,c.count,c.stride});
     auto meshlet_bytes=std::vector<std::byte>(chunks[3].bytes.begin(),chunks[3].bytes.end());meshlet_bytes[56]=std::byte{1};chunks[3].bytes=meshlet_bytes;const auto malformed=rd::BuildPackage(page_id,{},chunks);Reject([&]{(void)rd::DecodeGeometryPage(malformed,page_id,m);},"meshlet reserved accepted");
+    Reject([&]{(void)rd::PrepareGeometryPage(malformed,page_id,m);},"prepared malformed payload accepted");
+    Reject([&]{(void)rd::DecodeGeometryPagePayload(malformed,page_id,m.flags);},"payload decode malformed meshlet accepted");
     chunks[3].bytes=view.chunks[3].bytes;chunks.erase(chunks.begin()+5);const auto missing=rd::BuildPackage(page_id,{},chunks);Reject([&]{(void)rd::DecodeGeometryPage(missing,page_id,m);},"missing required geometry array accepted");
     // Degenerate primitives still own referenced positions and cannot lose them.
     bad=g;bad.indices[1]=0;bad.meshlet_triangles[1]=0x020000;rd::ValidateGeometryData(bad);
+}
+
+void TestGeometryDescriptor()
+{
+    const auto geometry = GeometryFixture();
+    const auto metadata = GeometryMetadataFixture(geometry);
+    const auto id = hs::MakeAssetId("render/geometry/descriptor.rpage");
+    const std::vector<std::string> dependencies{"render/fixture.rpkg"};
+    const auto bytes = rd::BuildGeometryPage(id, dependencies, geometry);
+    const auto prepared = rd::PrepareGeometryPage(bytes, id, metadata);
+    const auto compiled = rd::CompileGeometryDescriptor(bytes, prepared, 13);
+    rd::ValidateGeometryDescriptor(compiled.View(), bytes.size());
+    rd::ValidateGeometryDescriptorMetadata(compiled.View(), metadata);
+    const auto bound = rd::BindGeometryDescriptor(bytes, compiled.View());
+    Require(compiled.asset_id.value == id.value && compiled.bulk_index == 13 && compiled.max_material_index == 1 &&
+            compiled.dependencies.size() == 1 && compiled.dependencies[0].value == hs::MakeAssetId(dependencies[0]).value,
+            "compiled geometry identity or typed dependencies differ");
+    Require(bound.submeshes.data() == compiled.submeshes.data() && bound.submeshes.size() == geometry.submeshes.size(),
+            "GPU geometry must borrow descriptor submeshes");
+    for (std::size_t i = 0; i < bound.chunks.size(); ++i)
+        Require(bound.chunks[i].data() == prepared.package.chunks[i].bytes.data() &&
+                std::ranges::equal(bound.chunks[i], prepared.package.chunks[i].bytes), "GPU geometry bytes or aliases differ");
+    for (std::size_t i = 0; i < bound.submeshes.size(); ++i)
+    {
+        const auto &a = bound.submeshes[i]; const auto &b = geometry.submeshes[i];
+        Require(a.first_index == b.first_index && a.index_count == b.index_count && a.first_meshlet == b.first_meshlet &&
+                a.meshlet_count == b.meshlet_count && a.material_index == b.material_index, "compiled geometry submesh differs");
+    }
+    const auto payload = rd::PrepareGeometryPagePayload(bytes, id, geometry.flags);
+    const auto old_payload = rd::DecodeGeometryPagePayload(bytes, id, geometry.flags);
+    Require(rd::BuildGeometryPage(id, dependencies, payload.geometry) == rd::BuildGeometryPage(id, dependencies, old_payload),
+            "prepared payload differs from legacy decoder");
+    auto wrong_metadata = metadata;
+    wrong_metadata.bounds.sphere[3] = std::nextafter(wrong_metadata.bounds.sphere[3], 2.0f);
+    Reject([&] { rd::ValidateGeometryDescriptorMetadata(compiled.View(), wrong_metadata); }, "direct geometry exact bounds mismatch accepted");
+    wrong_metadata = metadata; ++wrong_metadata.max_material_index;
+    Reject([&] { rd::ValidateGeometryDescriptorMetadata(compiled.View(), wrong_metadata); }, "geometry material maximum mismatch accepted");
+    auto invalid = compiled;
+    invalid.bounds.minimum[0] = std::numeric_limits<float>::quiet_NaN();
+    Reject([&] { rd::ValidateGeometryDescriptor(invalid.View(), bytes.size()); }, "descriptor nonfinite bounds accepted");
+    invalid = compiled; ++invalid.vertex_count;
+    Reject([&] { rd::ValidateGeometryDescriptor(invalid.View(), bytes.size()); }, "descriptor vertex byte count mismatch accepted");
+    invalid = compiled; invalid.asset_id.value = 0;
+    Reject([&] { rd::ValidateGeometryDescriptor(invalid.View(), bytes.size()); }, "descriptor empty identity accepted");
+    invalid = compiled; invalid.chunks[0].offset = UINT64_MAX;
+    Reject([&] { rd::ValidateGeometryDescriptor(invalid.View(), bytes.size()); }, "descriptor range overflow accepted");
+    Reject([&] { (void)rd::BindGeometryDescriptor(bytes, invalid.View()); }, "bound geometry range overflow accepted");
+    invalid = compiled; ++invalid.submeshes[1].first_index;
+    Reject([&] { rd::ValidateGeometryDescriptor(invalid.View(), bytes.size()); }, "descriptor submesh coverage gap accepted");
+    const auto end = compiled.chunks.back().offset + compiled.chunks.back().byte_count;
+    Reject([&] { rd::ValidateGeometryDescriptor(compiled.View(), end - 1); }, "descriptor truncated extent accepted");
+    Reject([&] { (void)rd::BindGeometryDescriptor(std::span(bytes).first(static_cast<std::size_t>(end - 1)), compiled.View()); },
+           "bound geometry truncation accepted");
+    auto copied_bytes = bytes;
+    Reject([&] { (void)rd::CompileGeometryDescriptor(copied_bytes, prepared, 13); }, "prepared geometry accepted unrelated byte owner");
+    copied_bytes[0] ^= std::byte{1};
+    const auto rebound = rd::BindGeometryDescriptor(copied_bytes, compiled.View());
+    Require(rebound.chunks[0].data() == copied_bytes.data() + compiled.chunks[0].offset,
+            "descriptor binding reparsed the package or copied GPU bytes");
+
+    auto skinned = geometry; skinned.flags |= rd::kGeometryFlagSkinned;
+    for (auto &vertex : skinned.vertices) { vertex.bone_weights[0] = 1; vertex.bone_indices[3] = 17; }
+    const auto skin_bytes = rd::BuildGeometryPage(id, {}, skinned);
+    auto skin_prepared = rd::PrepareGeometryPagePayload(skin_bytes, id, skinned.flags);
+    Require(rd::CompileGeometryDescriptor(skin_bytes, skin_prepared, 13).max_bone_index == 17,
+            "zero-weight bone index omitted from descriptor maximum");
+    skin_prepared.geometry.vertices[0].bone_weights[0] = 0;
+    Reject([&] { (void)rd::CompileGeometryDescriptor(skin_bytes, skin_prepared, 13); }, "unnormalized skinned descriptor accepted");
+    skin_prepared.geometry.vertices[0].bone_weights[0] = 1;
+    skin_prepared.geometry.vertices[0].reserved = 1;
+    Reject([&] { (void)rd::CompileGeometryDescriptor(skin_bytes, skin_prepared, 13); }, "skinned descriptor reserved field accepted");
+
+    rd::ExpandedVertex first;
+    first.position = {1, -0.25f + 0.12f, 2}; first.normal = {0, 1, 0}; first.uv = {0.2f, 0.3f};
+    first.tangent = {1, 0, 0, 1}; first.material_index = 5;
+    auto duplicate = first; duplicate.normal = {1, 0, 0}; duplicate.material_index = 7;
+    auto distinct_bone = first; distinct_bone.bone_indices[3] = 9;
+    auto distinct_weight = first; distinct_weight.bone_weights[0] = 1;
+    auto above = first; above.position[1] += 0.001f;
+    const std::array input{above, first, duplicate, distinct_bone, distinct_weight};
+    const std::array expected{first, distinct_bone, distinct_weight};
+    const auto support = rd::BuildGroundSupport(input, 0.25f);
+    Require(rd::EncodeExpandedVertices(support) == rd::EncodeExpandedVertices(expected),
+            "ground support changed cutoff, first occurrence, influence keys or retained vertex fields");
 }
 
 void TestCharacterPackage()
@@ -2100,7 +2434,102 @@ void TestCharacterPackage()
         asset,production_deps,source,gm,production_bindings);
     const auto character_metadata=rd::DecodeCharacterMetadataPackage(production,asset);
     rd::ValidateCharacterGeometry(character_metadata,geometry);
+    const auto character_page_id = hs::MakeAssetId(production_deps[0]);
+    const auto character_page = rd::BuildGeometryPage(character_page_id, {}, geometry);
+    const auto prepared_character = rd::PrepareGeometryPage(character_page, character_page_id, gm);
+    rd::ValidateCharacterGeometry(character_metadata, prepared_character);
+    auto wrong_character = character_metadata;
+    ++wrong_character.geometry.vertex_count;
+    Reject([&] { rd::ValidateCharacterGeometry(wrong_character, prepared_character); },
+           "prepared character accepted mismatched metadata");
     const auto production_view=rd::ReadPackage(production,asset);
+    // Descriptor compilation consumes already admitted data and retains wire samples as ranges.
+    std::vector<rd::RendererBulkDescriptor> descriptor_bulks{
+        {asset, {64, production.size(), rd::RenderBulkFormat::Package, hs::Sha256(production)}}};
+    auto descriptor_geometry = rd::CompileGeometryDescriptor(character_page, prepared_character, 1);
+    const std::array descriptor_pages{descriptor_geometry.View()};
+    rd::MaterialDescriptor descriptor_material;
+    descriptor_material.asset_id = hs::MakeAssetId(production_deps[1]);
+    descriptor_material.kind = rd::MaterialKind::Hero;
+    descriptor_material.domain = rd::HeroMaterialDomain::Opaque;
+    const std::array descriptor_materials{descriptor_material};
+    auto compiled_character = rd::CompileCharacterDescriptor(production, production_view, character_metadata,
+        0, descriptor_bulks, descriptor_pages, descriptor_materials);
+    auto compiled_view = compiled_character.View();
+    const auto transform_chunk = std::ranges::find(production_view.chunks,
+        rd::ChunkType::CharacterLocalTransforms, &rd::ChunkView::type);
+    Require(compiled_character.data.transforms.empty() && compiled_character.data.transforms.capacity() == 0 &&
+        compiled_view.transforms.offset == 64 + static_cast<std::size_t>(transform_chunk->bytes.data() - production.data()) &&
+        compiled_view.transforms.byte_count == source.transforms.size() * 40 &&
+        compiled_view.transforms.expected_digest == hs::Sha256(transform_chunk->bytes) &&
+        compiled_view.materials[0].value == 0 && compiled_view.geometry_page.value == 0,
+        "compiled character sample range and typed references");
+    std::vector<rd::PackedCharacterTransform> wire_samples(source.transforms.size());
+    std::memcpy(wire_samples.data(), transform_chunk->bytes.data(), transform_chunk->bytes.size());
+    for (std::size_t i = 0; i < wire_samples.size(); ++i)
+    {
+        const auto value = wire_samples[i].Value();
+        Require(value.translation == source.transforms[i].translation && value.rotation == source.transforms[i].rotation &&
+            value.scale == source.transforms[i].scale && value.translation_padding == 0 && value.scale_padding == 0,
+            "packed 40-byte transform conversion differs from decoded values");
+    }
+    auto bad_descriptor = compiled_view; bad_descriptor.transforms.offset = UINT64_MAX;
+    Reject([&] { rd::ValidateCharacterDescriptor(bad_descriptor, descriptor_bulks, descriptor_pages, descriptor_materials); },
+        "compiled character accepted overflowing range");
+    bad_descriptor = compiled_view; bad_descriptor.geometry_page = {99};
+    Reject([&] { rd::ValidateCharacterDescriptor(bad_descriptor, descriptor_bulks, descriptor_pages, descriptor_materials); },
+        "compiled character accepted dead geometry handle");
+    rd::CharacterAnimationExtensionData named;
+    named.character_asset_id = asset; named.sample_rate_hz = 60;
+    named.bone_names = {"root", "child"}; named.parents = source.parents;
+    named.inverse_bind_matrices = source.inverse_bind_matrices;
+    named.clips = {{hs::MakeAssetId("animation/test/idle"), "Idle", 0, 2, 1.0f, true}};
+    named.transforms.assign(source.transforms.begin(), source.transforms.begin() + 4);
+    named.sockets = {{"hand", 1, {}}};
+    const auto animation_id = hs::MakeAssetId("render/character/test_animation.rpkg");
+    const auto animation_bytes = rd::BuildCharacterAnimationExtension(animation_id, {}, named);
+    const auto animation_package = rd::ReadPackage(animation_bytes, animation_id);
+    descriptor_bulks.push_back({animation_id, {8192, animation_bytes.size(), rd::RenderBulkFormat::Package, hs::Sha256(animation_bytes)}});
+    auto compiled_animation = rd::CompileAnimationDescriptor(animation_bytes, animation_package,
+        rd::DecodeCharacterAnimationExtension(animation_package), 1, descriptor_bulks, {0}, compiled_character);
+    const std::array characters{compiled_character.View()};
+    rd::ValidateAnimationDescriptor(compiled_animation.View(), descriptor_bulks, characters);
+    const auto name_address = compiled_animation.View().clips[0].name.data();
+    auto moved_animation = std::move(compiled_animation);
+    Require(moved_animation.data.transforms.empty() && moved_animation.data.transforms.capacity() == 0 &&
+        moved_animation.View().clips[0].name.data() == name_address && moved_animation.View().bone_names[1] == "child" &&
+        moved_animation.View().transforms.byte_count == 160, "compiled animation move ownership or wire stride");
+    auto wrong_binding = named; wrong_binding.inverse_bind_matrices[0][0] += 1;
+    Reject([&] { (void)rd::CompileAnimationDescriptor(animation_bytes, animation_package, wrong_binding,
+        1, descriptor_bulks, {0}, compiled_character); }, "compiled animation accepted wrong ordered bind matrices");
+    auto bad_animation = moved_animation.View(); bad_animation.character = {99};
+    Reject([&] { rd::ValidateAnimationDescriptor(bad_animation, descriptor_bulks, characters); },
+        "compiled animation accepted dead character handle");
+    rd::MonsterCharacterData monster;
+    monster.bone_count = source.bone_count; monster.flags = rd::kMonsterBoundsPositionEnclosure;
+    monster.skeleton_binding[0] = std::byte{1}; monster.numerical_margin = 0.001f;
+    monster.lods = {gm}; monster.final_matrices.resize(source.transforms.size());
+    for (auto &matrix : monster.final_matrices) matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1;
+    for (const auto &clip : source.clips) for (std::uint32_t frame = 0; frame < clip.frame_count; ++frame)
+        monster.interval_bounds.push_back({0, clip.clip, frame, gm.bounds.minimum, gm.bounds.maximum});
+    const auto monster_bytes = rd::BuildCharacterMetadataPackage(asset, production_deps, source, gm, production_bindings, &monster);
+    const auto monster_package = rd::ReadPackage(monster_bytes, asset);
+    auto monster_bulks = descriptor_bulks;
+    monster_bulks[0].range = {64, monster_bytes.size(), rd::RenderBulkFormat::Package, hs::Sha256(monster_bytes)};
+    auto compiled_monster = rd::CompileCharacterDescriptor(monster_bytes, monster_package,
+        rd::DecodeCharacterMetadataPackage(monster_package), 0, monster_bulks, descriptor_pages, descriptor_materials);
+    const auto matrix_chunk = std::ranges::find(monster_package.chunks, rd::ChunkType::CharacterFinalMatrices, &rd::ChunkView::type);
+    Require(compiled_monster.data.monster->final_matrices.empty() && compiled_monster.data.monster->final_matrices.capacity() == 0 &&
+        compiled_monster.View().final_matrices.byte_count == monster.final_matrices.size() * 64 &&
+        compiled_monster.View().final_matrices.expected_digest == hs::Sha256(matrix_chunk->bytes) &&
+        compiled_monster.View().interval_bounds.size() == monster.interval_bounds.size() && !compiled_monster.View().transforms.byte_count,
+        "compiled monster must retain bounds and authenticated matrix range only");
+    std::vector<std::array<float, 16>> wire_matrices(monster.final_matrices.size());
+    std::memcpy(wire_matrices.data(), matrix_chunk->bytes.data(), matrix_chunk->bytes.size());
+    Require(wire_matrices == monster.final_matrices, "compiled monster matrix wire layout");
+    compiled_monster.data.monster->lods[0].geometric_error += 1;
+    Reject([&] { rd::ValidateCharacterDescriptor(compiled_monster.View(), monster_bulks, descriptor_pages, descriptor_materials); },
+        "compiled monster accepted differing direct LOD metadata");
     const auto production_binding = std::ranges::find(production_view.chunks,
         rd::ChunkType::CharacterMaterialBindings, &rd::ChunkView::type);
     Require(production_view.dependencies == production_deps && production_view.chunks.size()==8 &&
@@ -2119,6 +2548,16 @@ void TestCharacterPackage()
     Reject([&]{(void)rd::DecodeCharacterMetadataPackage(package,asset);},"production decoder accepted embedded package");
     Reject([&]{(void)rd::DecodeEmbeddedCharacterPackage(production,asset);},"embedded decoder accepted production package");
     auto invalid_skin=geometry;invalid_skin.vertices[0].bone_indices[0]=2;Reject([&]{rd::ValidateCharacterGeometry(character_metadata,invalid_skin);},"unique character bone range accepted");
+    const auto bad_skin_page = rd::BuildGeometryPage(character_page_id, {}, invalid_skin);
+    const auto prepared_bad_skin = rd::PrepareGeometryPage(bad_skin_page, character_page_id, gm);
+    Reject([&] { rd::ValidateCharacterGeometry(character_metadata, prepared_bad_skin); },
+           "prepared character bypassed bone range validation");
+    invalid_skin = geometry;
+    invalid_skin.vertices[0].bone_weights = {0, 0, 0, 0};
+    const auto bad_weight_page = rd::BuildGeometryPage(character_page_id, {}, invalid_skin);
+    const auto prepared_bad_weight = rd::PrepareGeometryPage(bad_weight_page, character_page_id, gm);
+    Reject([&] { rd::ValidateCharacterGeometry(character_metadata, prepared_bad_weight); },
+           "prepared character bypassed normalized skin validation");
 
     std::vector<rd::ChunkSource> chunks;
     for (const auto &chunk : view.chunks)
@@ -2150,7 +2589,7 @@ void TestHeroWorkRawDecoding()
 {
     hs::HeroWorkShaderLayout layout;
     Require(hs::HeroWorkMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
-        layout.contributor_bytes == 512 && layout.phase_bytes == 3072 && layout.total_bytes == 67584,
+        layout.contributor_bytes == 512 && layout.phase_bytes == 6144 && layout.total_bytes == 135168,
         "hero two exact bitmaps/header/aligned stride/slot total");
     Require(hs::HeroWorkMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
         layout.total_bytes <= hs::kHeroWorkShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
@@ -2710,6 +3149,91 @@ void TestTexturePackage()
             last.bytes[0] == payload[208],
             "texture subresource offset or pitch roundtrip");
 
+    const auto check_descriptor = [&](std::span<const std::byte> bytes, const rd::TexturePackageView &parsed) {
+        const auto compiled = rd::CompileTextureDescriptor(bytes, asset, 7);
+        const auto descriptor = compiled.View();
+        const auto directory = rd::ReadPackageDirectory(bytes.first(std::min<std::size_t>(bytes.size(), 16 * 1024)),
+            bytes.size(), asset);
+        const auto &metadata = directory.chunks.front();
+        const auto proof = rd::CompileTextureMetadataDescriptor(directory,
+            bytes.subspan(static_cast<std::size_t>(metadata.offset), static_cast<std::size_t>(metadata.byte_count)),
+            7, bytes.size());
+        Require(proof.description.width == compiled.description.width &&
+            proof.description.format == compiled.description.format &&
+            proof.subresources.size() == compiled.subresources.size() &&
+            proof.subresources.front().offset == compiled.subresources.front().offset,
+            "bounded texture metadata proof differs from full admission");
+        rd::ValidateTextureDescriptor(descriptor, bytes.size());
+        const auto bound = rd::BindTextureDescriptor(bytes, descriptor);
+        Require(descriptor.asset_id.value == asset.value && descriptor.bulk_index == 7 &&
+                descriptor.dimension == rd::TextureDimension::Texture2DArray && descriptor.depth == 1 &&
+                descriptor.dependencies.size() == 1 && descriptor.dependencies[0].value == hs::MakeAssetId(dependencies[0]).value &&
+                bound.dependencies.empty() && bound.subresources.size() == parsed.subresources.size() &&
+                bound.description.width == parsed.description.width && bound.description.height == parsed.description.height &&
+                bound.description.array_size == parsed.description.array_size &&
+                bound.description.mip_count == parsed.description.mip_count && bound.description.format == parsed.description.format,
+                "compiled texture descriptor metadata differs from parsed texture");
+        for (std::size_t i = 0; i < bound.subresources.size(); ++i)
+        {
+            const auto &a = bound.subresources[i];
+            const auto &b = parsed.subresources[i];
+            Require(a.array_slice == b.array_slice && a.mip_level == b.mip_level && a.width == b.width &&
+                    a.height == b.height && a.row_pitch == b.row_pitch && a.slice_pitch == b.slice_pitch &&
+                    a.bytes.data() == b.bytes.data() && a.bytes.size() == b.bytes.size() &&
+                    descriptor.subresources[i].byte_count == b.slice_pitch,
+                    "compiled texture binding changed layout or copied payload bytes");
+        }
+    };
+    check_descriptor(package, decoded);
+    const auto compiled = rd::CompileTextureDescriptor(package, asset, 7);
+    const auto payload_end = compiled.subresources.back().offset + compiled.subresources.back().slice_pitch;
+    Reject([&] { rd::ValidateTextureDescriptor(compiled.View(), payload_end - 1); },
+           "texture descriptor accepted truncated product extent");
+    Reject([&] { (void)rd::BindTextureDescriptor(std::span(package).first(static_cast<std::size_t>(payload_end - 1)), compiled.View()); },
+           "texture descriptor binding accepted truncated bytes");
+    auto invalid_descriptor = compiled;
+    invalid_descriptor.subresources[0].offset = UINT64_MAX;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted overflowing offset");
+    Reject([&] { (void)rd::BindTextureDescriptor(package, invalid_descriptor.View()); },
+           "texture binding accepted overflowing offset");
+    invalid_descriptor = compiled;
+    --invalid_descriptor.subresources[0].byte_count;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "2D descriptor accepted incorrect full byte count");
+    invalid_descriptor = compiled;
+    ++invalid_descriptor.subresources[0].row_pitch;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted invalid pitch");
+    invalid_descriptor = compiled;
+    ++invalid_descriptor.subresources[1].offset;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted noncontiguous subresources");
+    invalid_descriptor = compiled;
+    invalid_descriptor.description.mip_count = 0;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted invalid mip count");
+    invalid_descriptor = compiled;
+    invalid_descriptor.description.width = UINT32_MAX;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted invalid dimensions");
+    invalid_descriptor = compiled;
+    invalid_descriptor.description.format = UINT32_MAX;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted unknown format");
+    invalid_descriptor = compiled;
+    invalid_descriptor.subresources.pop_back();
+    Reject([&] { rd::ValidateTextureDescriptor(invalid_descriptor.View(), package.size()); },
+           "texture descriptor accepted incorrect subresource count");
+    auto authenticated_bytes = package;
+    authenticated_bytes[0] ^= std::byte{1}; // Binding uses admitted metadata, not the package header.
+    const auto rebound = rd::BindTextureDescriptor(authenticated_bytes, compiled.View());
+    const auto first_offset = static_cast<std::size_t>(compiled.subresources[0].offset);
+    authenticated_bytes[first_offset] ^= std::byte{1};
+    Require(rebound.subresources[0].bytes.data() == authenticated_bytes.data() + first_offset &&
+            rebound.subresources[0].bytes[0] == authenticated_bytes[first_offset],
+            "bound texture did not retain caller byte aliases");
+
     const auto base = rd::ReadPackage(package, asset);
     auto metadata = std::vector<std::byte>(base.chunks[0].bytes.begin(),
                                            base.chunks[0].bytes.end());
@@ -2722,6 +3246,8 @@ void TestTexturePackage()
     const auto bad_offset = rd::BuildPackage(asset, dependencies, malformed);
     Reject([&] { (void)rd::ReadTexturePackage(bad_offset, asset); },
            "invalid texture subresource offset accepted");
+    Reject([&] { (void)rd::CompileTextureDescriptor(bad_offset, asset, 7); },
+           "descriptor compilation bypassed malformed texture validation");
     Reject([&] { (void)rd::BuildTexturePackage(asset, dependencies, description,
                                                std::span(payload).first(208)); },
            "truncated BC7 payload accepted");
@@ -2737,6 +3263,7 @@ void TestTexturePackage()
         const auto encoded = rd::BuildTexturePackage(
             asset, dependencies, variant, variant_payload);
         const auto decoded_variant = rd::ReadTexturePackage(encoded, asset);
+        check_descriptor(encoded, decoded_variant);
         Require(decoded_variant.description.format == format &&
                 decoded_variant.subresources.size() == 8 &&
                 decoded_variant.subresources[0].row_pitch == 2 * block_bytes &&
@@ -2759,6 +3286,7 @@ void TestTexturePackage()
         const auto tiny_package = rd::BuildTexturePackage(asset, dependencies,
                                                            tiny, tiny_pixels);
         const auto tiny_view = rd::ReadTexturePackage(tiny_package, asset);
+        check_descriptor(tiny_package, tiny_view);
         Require(tiny_view.description.format == format &&
                 tiny_view.subresources.size() == 1 &&
                 tiny_view.subresources[0].row_pitch == 4 &&
@@ -2773,6 +3301,7 @@ void TestTexturePackage()
         const auto mip_package = rd::BuildTexturePackage(asset, dependencies,
                                                           mipmapped, pixels);
         const auto mip_view = rd::ReadTexturePackage(mip_package, asset);
+        check_descriptor(mip_package, mip_view);
         Require(mip_view.subresources.size() == 3 &&
                 mip_view.subresources[0].row_pitch == 16 &&
                 mip_view.subresources[0].slice_pitch == 64 &&
@@ -2782,6 +3311,87 @@ void TestTexturePackage()
                 mip_view.subresources[2].slice_pitch == 4,
                 "RGBA8 mip offsets and pitches");
     }
+}
+void TestVolumeTextureDescriptor()
+{
+    const auto asset = hs::MakeAssetId("render/texture/volume.rpkg");
+    const std::vector<std::string> dependencies{"environment/volume.raw"};
+    const rd::VolumeTextureDescription description{8, 4, 4, 4, rd::kTextureFormatRgba8};
+    std::vector<std::byte> payload(588);
+    for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = std::byte(i & 0xff);
+    const auto bytes = rd::BuildVolumeTexturePackage(asset, dependencies, description, payload);
+    const auto parsed = rd::ReadVolumeTexturePackage(bytes, asset);
+    const auto compiled = rd::CompileTextureDescriptor(bytes, asset, 11);
+    const auto directory = rd::ReadPackageDirectory(std::span(bytes).first(std::min<std::size_t>(bytes.size(), 16 * 1024)),
+        bytes.size(), asset);
+    const auto &metadata = directory.chunks.front();
+    const auto proof = rd::CompileVolumeTextureMetadataDescriptor(directory,
+        std::span(bytes).subspan(static_cast<std::size_t>(metadata.offset), static_cast<std::size_t>(metadata.byte_count)),
+        11, bytes.size());
+    Require(proof.depth == compiled.depth && proof.subresources.size() == compiled.subresources.size() &&
+        proof.subresources.front().offset == compiled.subresources.front().offset,
+        "bounded volume metadata proof differs from full admission");
+    rd::ValidateTextureDescriptor(compiled.View(), bytes.size());
+    const auto bound = rd::BindVolumeTextureDescriptor(bytes, compiled.View());
+    Require(compiled.dimension == rd::TextureDimension::Texture3D && compiled.depth == 4 &&
+            compiled.description.array_size == 1 && compiled.asset_id.value == asset.value && compiled.bulk_index == 11 &&
+            compiled.dependencies.size() == 1 && compiled.dependencies[0].value == hs::MakeAssetId(dependencies[0]).value &&
+            bound.dependencies.empty() && bound.description.width == parsed.description.width &&
+            bound.description.height == parsed.description.height && bound.description.depth == parsed.description.depth &&
+            bound.description.mip_count == parsed.description.mip_count && bound.description.format == parsed.description.format &&
+            bound.subresources.size() == parsed.subresources.size(), "volume descriptor metadata differs from package");
+    for (std::size_t i = 0; i < bound.subresources.size(); ++i)
+    {
+        const auto &a = bound.subresources[i];
+        const auto &b = parsed.subresources[i];
+        Require(a.mip_level == b.mip_level && a.width == b.width && a.height == b.height && a.depth == b.depth &&
+                a.row_pitch == b.row_pitch && a.slice_pitch == b.slice_pitch && a.volume_pitch == b.volume_pitch &&
+                a.bytes.data() == b.bytes.data() && a.bytes.size() == b.bytes.size() &&
+                compiled.subresources[i].byte_count == b.volume_pitch, "volume descriptor layout or aliases differ");
+    }
+    Require(compiled.subresources[0].slice_pitch == 128 && compiled.subresources[0].byte_count == 512,
+            "volume descriptor lost complete-volume extent");
+    Reject([&] { (void)rd::BindTextureDescriptor(bytes, compiled.View()); }, "volume bound as a 2D texture");
+    auto invalid = compiled;
+    invalid.depth = 0;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "zero-depth volume accepted");
+    invalid.depth = UINT32_MAX;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "overflowing volume depth accepted");
+    invalid = compiled;
+    invalid.subresources[0].byte_count = invalid.subresources[0].slice_pitch;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "volume accepted slice-only byte count");
+    invalid = compiled;
+    invalid.subresources[0].offset = UINT64_MAX;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "volume offset overflow accepted");
+    Reject([&] { (void)rd::BindVolumeTextureDescriptor(bytes, invalid.View()); }, "bound volume offset overflow accepted");
+    invalid = compiled;
+    invalid.dimension = rd::TextureDimension::Texture2DArray;
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "volume layout accepted as 2D");
+    Reject([&] { (void)rd::BindVolumeTextureDescriptor(bytes, invalid.View()); }, "2D descriptor bound as volume");
+    invalid.dimension = static_cast<rd::TextureDimension>(UINT32_MAX);
+    Reject([&] { rd::ValidateTextureDescriptor(invalid.View(), bytes.size()); }, "unknown texture dimension accepted");
+    const auto end = compiled.subresources.back().offset + compiled.subresources.back().byte_count;
+    Reject([&] { rd::ValidateTextureDescriptor(compiled.View(), end - 1); }, "truncated volume extent accepted");
+    Reject([&] { (void)rd::BindVolumeTextureDescriptor(std::span(bytes).first(static_cast<std::size_t>(end - 1)), compiled.View()); },
+           "truncated volume binding accepted");
+
+    const auto package = rd::ReadPackage(bytes, asset);
+    auto metadata = std::vector<std::byte>(package.chunks[0].bytes.begin(), package.chunks[0].bytes.end());
+    const auto malformed_package = [&] {
+        const std::array chunks{
+            rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureMetadata), 1, true,
+                metadata, 1, static_cast<std::uint32_t>(metadata.size())},
+            rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureSubresources), 1, true,
+                payload, payload.size(), 1}};
+        return rd::BuildPackage(asset, dependencies, chunks);
+    };
+    metadata[56] ^= std::byte{1}; // First mip's complete-volume pitch.
+    auto malformed = malformed_package();
+    Reject([&] { (void)rd::ReadVolumeTexturePackage(malformed, asset); }, "malformed volume pitch accepted");
+    Reject([&] { (void)rd::CompileTextureDescriptor(malformed, asset, 11); }, "volume compilation bypassed raw pitch validation");
+    metadata[0] = std::byte{};
+    malformed = malformed_package();
+    Reject([&] { (void)rd::CompileTextureDescriptor(malformed, asset, 11); }, "unknown texture metadata magic accepted");
 }
 } // namespace
 
@@ -2799,9 +3409,11 @@ int main(int argc, char **argv)
             dump_numeric_fixtures = true;
         }
         RunNamed("TestExpandedVertexFields", TestExpandedVertexFields);
+        RunNamed("TestVfxMeshDescriptor", TestVfxMeshDescriptor);
         RunNamed("TestPackage", TestPackage);
         RunNamed("TestQualityProfiles", TestQualityProfiles);
         RunNamed("TestDecalMaterialPackages", TestDecalMaterialPackages);
+        RunNamed("TestMaterialDescriptors", TestMaterialDescriptors);
         RunNamed("TestMaterialParameters", TestMaterialParameters);
         RunNamed("TestMaterialGraph", TestMaterialGraph);
         RunNamed("TestGenericMaterialOutputInputs", TestGenericMaterialOutputInputs);
@@ -2818,7 +3430,11 @@ int main(int argc, char **argv)
         RunNamed("TestLegacyMaterialContextLowering", TestLegacyMaterialContextLowering);
         RunNamed("TestCharacterPackage", TestCharacterPackage);
         RunNamed("TestGeometryPackage", TestGeometryPackage);
+        RunNamed("TestMonsterLodDrawOrder", TestMonsterLodDrawOrder);
+        RunNamed("TestGeometryDescriptor", TestGeometryDescriptor);
+        RunNamed("TestPackedRendererAssets", TestPackedRendererAssets);
         RunNamed("TestTexturePackage", TestTexturePackage);
+        RunNamed("TestVolumeTextureDescriptor", TestVolumeTextureDescriptor);
         RunNamed("TestDdsConsumerRoles", TestDdsConsumerRoles);
         RunNamed("TestCharacterSemanticMips", TestCharacterSemanticMips);
         RunNamed("TestCharacterBc7CoverageRepair", TestCharacterBc7CoverageRepair);

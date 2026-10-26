@@ -50,6 +50,7 @@ struct CharacterAnimationExtensionData
     const CharacterAnimationExtensionData &animation);
 [[nodiscard]] CharacterAnimationExtensionData DecodeCharacterAnimationExtension(
     std::span<const std::byte> bytes, AssetId expected_asset_id);
+[[nodiscard]] CharacterAnimationExtensionData DecodeCharacterAnimationExtension(const PackageView &package);
 
 // Exact ordered parent/inverse-bind comparison prevents a named clip product
 // from being played on a different skeleton with the same number of bones.

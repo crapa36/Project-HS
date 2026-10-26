@@ -166,7 +166,7 @@ Result Append(const VfxProgramView &program,const VfxEffectRecord &effect,std::u
 bool IsVfxTypedVolumeEffect(const VfxProgramView &program,VfxEffectHandle handle) noexcept
 {return Allowed(EffectId(program,handle));}
 Result BuildVfxTypedVolumeCommands(const VfxProgramView &program,std::span<const VfxEventInput> events,
-    std::span<const VfxPersistentInput> persistent,Tick current_tick,VfxQuality admission,std::vector<VfxVolumeInput> &output)
+    std::span<const VfxPersistentInput> persistent,double current_tick,VfxQuality admission,std::vector<VfxVolumeInput> &output)
 {
     output.clear();if(admission!=VfxQuality::High)return Result::Success();
     std::vector<VfxVolumeInput> commands;
@@ -176,8 +176,9 @@ Result BuildVfxTypedVolumeCommands(const VfxProgramView &program,std::span<const
         if(input.effect_handle==0||input.effect_handle>program.effects.size())return Invalid("LocalVolume event has an invalid effect handle.");
         const auto &effect=program.effects[input.effect_handle-1];
         if(effect.handle!=input.effect_handle||effect.input_mode!=0||effect.timing_kind!=0||
-           !std::isfinite(effect.seconds)||effect.seconds<=0||input.sequence==0||current_tick<input.event_tick)
+           !std::isfinite(effect.seconds)||effect.seconds<=0||input.sequence==0)
             return Invalid("LocalVolume event requires its actual sequence, fixed timing and source tick.");
+        if(current_tick<input.event_tick)continue;
         const float elapsed=float(current_tick-input.event_tick)/60.0f;if(elapsed>=effect.seconds)continue;
         float scale=0;
         if(id==kSpawn&&effect.payload_kind==Hash32("PointEventPayload"))

@@ -281,6 +281,10 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         for (const auto after : next)
             ++indegree[after];
     }
+    schedule.predecessors.resize(pass_count);
+    for (std::uint32_t before = 0; before < pass_count; ++before)
+        for (const auto after : successors[before])
+            schedule.predecessors[after].push_back(before);
     const auto later_id = [&](std::uint32_t left, std::uint32_t right) {
         return passes[left].id > passes[right].id;
     };

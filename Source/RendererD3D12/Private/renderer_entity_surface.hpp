@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/core/result.hpp>
-#include <hs/renderer/vfx_entity_surface_input.hpp>
+#include <hs/render_data/vfx_entity_surface_input.hpp>
 
 #include <cstddef>
 #include <cstdint>

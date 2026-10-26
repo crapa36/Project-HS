@@ -62,9 +62,15 @@ void TestShippedContentOwner()
     Write(path, expected);
 
     hs::ShippedContentOwner owner;
+    Check(!owner.Identity(), "unopened owner must have no file identity");
     Check(owner.Size() == 0 && !owner.ReadExact(0, {}).Succeeded(), "unopened owner must reject reads");
     Check(hs::ShippedContentOwner::Open(path, owner).Succeeded(), "content open failed");
     Check(owner.Size() == expected.size(), "content size differs from the opened file");
+    const auto original_identity = owner.Identity();
+    Check(original_identity.has_value(), "opened owner must have a file identity");
+    hs::ShippedContentOwner same_file;
+    Check(hs::ShippedContentOwner::Open(path, same_file).Succeeded() && same_file.Identity() == original_identity,
+          "independent owners of the same file must have equal identities");
     std::vector<std::byte> actual(expected.size());
     Check(owner.ReadExact(0, actual).Succeeded() && actual == expected, "full content bytes differ");
     const auto expected_digest = hs::Sha256(expected);
@@ -86,6 +92,7 @@ void TestShippedContentOwner()
     Check(!hs::ShippedContentOwner::Open(directory.path, owner).Succeeded(), "directory must not open as content");
     Check(owner.Size() == expected.size() && owner.ReadExact(0, actual).Succeeded() && actual == expected,
           "failed reopen must preserve the previous owner");
+    Check(owner.Identity() == original_identity, "failed reopen must preserve the file identity");
     const auto corrupt_path = directory.path / "corrupt.bin";
     auto corrupt = expected;
     corrupt[2048] ^= std::byte{1};
@@ -96,12 +103,14 @@ void TestShippedContentOwner()
           "same-size chunk corruption must fail before consumption");
 
     hs::ShippedContentOwner moved(std::move(owner));
+    Check(!owner.Identity() && moved.Identity() == original_identity, "move construction must transfer file identity");
     Check(owner.Size() == 0 && !owner.ReadExact(0, {}).Succeeded(), "moved-from owner must be empty");
     const auto empty_path = directory.path / "empty.bin";
     Write(empty_path, {});
     Check(hs::ShippedContentOwner::Open(empty_path, owner).Succeeded() && owner.Size() == 0 &&
               owner.ReadExact(0, {}).Succeeded(), "empty file must support empty exact reads");
     owner = std::move(moved);
+    Check(!moved.Identity() && owner.Identity() == original_identity, "move assignment must transfer file identity");
     Check(moved.Size() == 0 && owner.ReadExact(0, actual).Succeeded() && actual == expected,
           "move assignment must replace the prior file and retain exact bytes");
 
@@ -133,8 +142,12 @@ void TestShippedContentOwner()
     Write(path, replacement);
     Check(owner.ReadExact(0, actual).Succeeded() && actual == expected,
           "replacing a pathname must not change an existing owner's content");
+    Check(owner.Identity() == original_identity && same_file.Identity() == original_identity,
+          "replacing a pathname must not change retained file identities");
     Check(hs::ShippedContentOwner::Open(path, owner).Succeeded() && owner.Size() == replacement.size(),
           "successful reopen must adopt the newly published file");
+    Check(owner.Identity().has_value() && owner.Identity() != original_identity,
+          "successful reopen after replacement must adopt the new file identity");
     std::array<std::byte, 2> replaced{};
     Check(owner.ReadExact(0, replaced).Succeeded() && replaced == replacement, "reopened content bytes differ");
 #ifndef _WIN32

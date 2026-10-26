@@ -31,12 +31,13 @@ void EnemyAnimationState::Update(const TickReadView &model,
                                  std::span<const DomainSignal> signals)
 {
     const bool reset = initialized_ &&
-        (model.tick < tick_ || model.seed != seed_ ||
+        (model.tick < tick_ || model.seed != seed_ || model.session_id != session_id_ ||
          (model.session.phase == SessionPhase::MainMenu && phase_ != SessionPhase::MainMenu));
-    if (reset) { living_.clear(); deaths_.clear(); }
+    if (reset) { living_.clear(); deaths_.clear(); player_motion_epoch_ = 0; }
     initialized_ = true;
     tick_ = model.tick;
     seed_ = model.seed;
+    session_id_ = model.session_id;
     phase_ = model.session.phase;
     std::erase_if(deaths_, [&](const DeathPose &pose) {
         return model.tick < pose.started || model.tick - pose.started >= 48;
@@ -94,6 +95,16 @@ void EnemyAnimationState::Update(const TickReadView &model,
     });
     for (const auto &signal : signals)
     {
+        if (signal.kind == DomainSignalKind::UpgradeVisual &&
+            signal.upgrade_skill == static_cast<std::uint8_t>(SkillKind::RetreatShot) &&
+            signal.upgrade_index == 7 && signal.upgrade_stage == UpgradeVisualStage::Spawn &&
+            signal.upgrade_owner_id == kPlayerRenderId &&
+            signal.geometry.kind == DomainSignalGeometryKind::Line &&
+            signal.geometry.source_id == kPlayerRenderId &&
+            signal.geometry.start_tick == signal.tick && signal.geometry.end_tick == signal.tick &&
+            signal.session_id == model.session_id && signal.tick <= model.tick &&
+            signal.sequence > player_motion_epoch_)
+            player_motion_epoch_ = signal.sequence;
         if (signal.kind == DomainSignalKind::RangedEnemyReleased && signal.source_entity_id != 0)
         {
             if (auto it = living_.find(signal.source_entity_id); it != living_.end())
@@ -255,21 +266,17 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
 }
 } // namespace
 
-bool ProjectTick(const TickReadView &model,
-                           const PresentationCatalog &presentation,
-                           const PresentationUiState &ui,
-                           const SettingsData &settings,
-                           RenderSnapshotStorage &snapshot,
-                           std::shared_ptr<const StaticRenderScene> environment_scene,
-                           std::uint8_t pending_rebind_slot,
-                           const EnemyAnimationState *enemy_animations,
-                           const GraphicsSettingsUiModel *graphics_ui)
+bool ProjectDynamicTick(const TickReadView &model,
+                        RenderSnapshotStorage &snapshot,
+                        std::shared_ptr<const StaticRenderScene> environment_scene,
+                        const EnemyAnimationState *enemy_animations)
 {
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
     snapshot.header.checksum = model.checksum;
     snapshot.header.session_id = model.session_id;
     snapshot.camera.target = {model.player.position.x, 0.0f, model.player.position.y};
+    snapshot.camera.target_motion_epoch = enemy_animations ? enemy_animations->PlayerMotionEpoch() : 0;
 
     const auto grounded = [&](Float3 position) {
         if (model.arena_half_extent >= 14.0f)
@@ -437,6 +444,7 @@ bool ProjectTick(const TickReadView &model,
          std::atan2(model.player.facing.x, model.player.facing.y),
          {0.97174913f, 0.97174913f, 0.97174913f}, 0xFFFFFFFFu, RenderMesh::Archer,
          kPlayerRenderId};
+    player_instance.motion_epoch = snapshot.camera.target_motion_epoch;
     if (model.session.phase != SessionPhase::Defeat &&
         model.player.forced_move_skill == SkillKind::Trap &&
         model.player.active_animation_start <= model.tick &&
@@ -1438,7 +1446,18 @@ bool ProjectTick(const TickReadView &model,
     sun.unit = LightUnit::Lux;
     sun.shadow_flags = kLightShadowRequested;
     complete &= snapshot.AddLight(sun);
+    return complete;
+}
 
+bool ProjectTickUi(const TickReadView &model,
+                   const PresentationCatalog &presentation,
+                   const PresentationUiState &ui,
+                   const SettingsData &settings,
+                   RenderSnapshotStorage &snapshot,
+                   std::uint8_t pending_rebind_slot,
+                   const GraphicsSettingsUiModel *graphics_ui)
+{
+    bool complete = true;
     const auto &probe = model.session;
     const auto add_ui = [&](UiModel::Kind kind, Float2 anchor, Float2 size,
                             std::uint32_t color, std::string_view text,
@@ -2225,6 +2244,25 @@ bool ProjectTick(const TickReadView &model,
                "클릭: 메인 메뉴", 1.0f, 26);
     }
     return complete;
+}
+
+bool ProjectTick(const TickReadView &model,
+                 const PresentationCatalog &presentation,
+                 const PresentationUiState &ui,
+                 const SettingsData &settings,
+                 RenderSnapshotStorage &snapshot,
+                 std::shared_ptr<const StaticRenderScene> environment_scene,
+                 std::uint8_t pending_rebind_slot,
+                 const EnemyAnimationState *enemy_animations,
+                 const GraphicsSettingsUiModel *graphics_ui)
+{
+    const bool has_scene = static_cast<bool>(environment_scene);
+    const bool dynamic_complete = ProjectDynamicTick(model, snapshot,
+        std::move(environment_scene), enemy_animations);
+    if (!has_scene) return false;
+    const bool ui_complete = ProjectTickUi(model, presentation, ui, settings,
+        snapshot, pending_rebind_slot, graphics_ui);
+    return dynamic_complete && ui_complete;
 }
 
 bool ProjectRenderSnapshot(const GameReadModel &model,

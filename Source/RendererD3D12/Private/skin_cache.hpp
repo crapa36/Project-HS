@@ -2,7 +2,7 @@
 
 #include "renderer_scene_sample.hpp"
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <cstddef>
 #include <cstdint>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_sdk_presentation.hpp"
+#include <array>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -30,6 +31,23 @@ struct PresentationGuidesOutputs
     PresentationGuideResource hudless, ui, composite, depth, motion;
     std::shared_ptr<const void> owner;
 };
+struct PresentationGuidesLayout
+{
+    std::uint64_t target_generation{};
+    std::array<ResourceHandle,6> imports{};
+    std::array<ResourceVersion,6> outputs{};
+    std::array<ResourceVersion,8> inputs{};
+    std::array<std::uint32_t,3> pass_indices{},pass_ids{};
+    bool transparent_guides{};
+};
+struct PresentationTagLayout
+{
+    std::uint64_t target_generation{};
+    std::array<ResourceVersion,4> guides{};
+    ResourceVersion back_buffer{};
+    std::uint32_t pass_index{},pass_id{};
+    SdkPresentationOwner provider{SdkPresentationOwner::None};
+};
 struct PresentationGuidesTargets;
 class PresentationGuidesCandidate
 {
@@ -56,13 +74,22 @@ class PresentationGuides
     // completion alone does not permit reuse of SL/FSR SDK inputs.
     [[nodiscard]] Result Register(RenderGraphBuilder &, const PresentationGuidesInputs &,
         PresentationGuidesOutputs &, std::uint32_t color_pass_id, std::uint32_t guides_pass_id,
-        std::uint32_t devtools_pass_id);
+        std::uint32_t devtools_pass_id, PresentationGuidesLayout *layout=nullptr);
+    [[nodiscard]] bool MatchesLayout(const PresentationGuidesInputs &,std::uint32_t color_pass_id,
+        std::uint32_t guides_pass_id,std::uint32_t devtools_pass_id,const PresentationGuidesLayout &) const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const PresentationGuidesInputs &,
+        PresentationGuidesOutputs &,const PresentationGuidesLayout &);
     // First copy composite (SL/XeFG) or hudless (FSR) to the native backbuffer.
     // Then register this with that resulting backbuffer version. It declares
     // SDK states and runs native tagging/PrepareV2 once on the Direct owner.
     [[nodiscard]] Result RegisterTagPass(RenderGraphBuilder &, const PresentationGuidesOutputs &,
         PresentationGuideResource back_buffer, SdkPresentationFrame frame, SdkPresentation &,
-        std::uint32_t pass_id);
+        std::uint32_t pass_id,PresentationTagLayout *layout=nullptr);
+    [[nodiscard]] bool MatchesTagLayout(const PresentationGuidesOutputs &,PresentationGuideResource back_buffer,
+        std::uint32_t pass_id,const PresentationTagLayout &) const noexcept;
+    [[nodiscard]] Result BindRetainedTagPass(RenderGraphBuilder &,const PresentationGuidesOutputs &,
+        PresentationGuideResource back_buffer,SdkPresentationFrame,SdkPresentation &,
+        const PresentationTagLayout &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     // Drain and destroy SDK presentation first, so its retained owners have
     // actually retired, then complete all graph queues before calling reset.
@@ -71,6 +98,12 @@ class PresentationGuides
     // Called only after all old submissions have reliably completed.
     void SwapState(PresentationGuides &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const PresentationGuidesInputs &,
+        PresentationGuidesOutputs &,std::uint32_t,std::uint32_t,std::uint32_t,
+        PresentationGuidesLayout *,const PresentationGuidesLayout *);
+    [[nodiscard]] Result RegisterTagImpl(RenderGraphBuilder &,const PresentationGuidesOutputs &,
+        PresentationGuideResource,SdkPresentationFrame,SdkPresentation &,std::uint32_t,
+        PresentationTagLayout *,const PresentationTagLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

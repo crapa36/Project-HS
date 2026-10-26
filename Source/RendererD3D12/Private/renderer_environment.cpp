@@ -35,8 +35,28 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                                    : kAuthoredMaterialNames[ordinal];
             const std::string id = "render/material/" +
                 std::string(name) + "/parameters.rpkg";
-            std::filesystem::path path;
-            if (auto resolved = candidate.ResolveProduct(id, path); !resolved) return resolved;
+            const std::string material_id = hero ? "render/material/" + std::string(name) + "/material.rpkg"
+                : ordinal == kTerrainMaterialOrdinal
+                ? "render/material/terrain.rpkg"
+                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg"
+                : "render/" + std::string(kAuthoredMaterialNames[ordinal]) + ".rpkg";
+            if (candidate.packed_content || candidate.development_catalog)
+            {
+                const auto handle = FindRendererMaterial(candidate, MakeAssetId(material_id));
+                if (!handle) throw std::runtime_error("Missing compiled material parameters: " + material_id);
+                const auto &material = candidate.packed_materials[handle.value];
+                const auto layout = MaterialLayoutDigest(material);
+                const auto base = static_cast<std::uint32_t>(slots.size());
+                if (require_compatible_layout && (layout != material_parameter_layouts[ordinal] ||
+                    base != material_parameter_bases[ordinal]))
+                    throw std::runtime_error("Compiled material parameter reload changes the resident layout: " + material_id);
+                material_parameter_candidate_layouts[ordinal] = layout;
+                material_parameter_candidate_bases[ordinal] = base;
+                slots.insert(slots.end(), material.defaults.begin(), material.defaults.end());
+                continue;
+            }
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate, id, path); !resolved) return resolved;
             std::vector<std::byte> bytes;
             if (auto read = ReadBinary(path, bytes); !read) return read;
             const auto definitions = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadMaterialParameterPackage(bytes, MakeAssetId(id)); });
@@ -47,12 +67,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                         "Material parameter declaration is missing: " + std::string(required));
             material_parameter_candidate_layouts[ordinal] =
                 render_data::MaterialParameterLayoutHash(definitions);
-            const std::string material_id = hero ? "render/material/" + std::string(name) + "/material.rpkg"
-                : ordinal == kTerrainMaterialOrdinal
-                ? "render/material/terrain.rpkg"
-                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg"
-                : "render/" + std::string(kAuthoredMaterialNames[ordinal]) + ".rpkg";
-            if (auto resolved = candidate.ResolveProduct(material_id, path); !resolved) return resolved;
+            if (auto resolved = ResolveRendererAsset(candidate, material_id, path); !resolved) return resolved;
             std::vector<std::byte> material_bytes;
             if (auto read = ReadBinary(path, material_bytes); !read) return read;
             const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(material_bytes, MakeAssetId(material_id)); });
@@ -208,30 +223,30 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         environment_texture_descriptions[texture_index] = {
             spec.width, spec.height, spec.slices, spec.mips,
             static_cast<std::uint32_t>(spec.format)};
-        std::filesystem::path path;
-        if (auto resolved = config.ResolveProduct(logical_id, path); !resolved)
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(config, logical_id, path); !resolved)
             return resolved;
         std::vector<std::byte> storage;
         if (auto read = ReadBinary(path, storage); !read) return read;
         render_data::TexturePackageView package;
         auto invalid = [&] { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "Invalid environment texture: " + path.string()); };
+            "Invalid environment texture: " + path.path.string()); };
         {
             try
             {
-                package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(storage, MakeAssetId(logical_id)); });
+                package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, logical_id, storage); });
             }
             catch (const std::exception &error)
             {
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Invalid environment texture package " + path.string() + ": " + error.what());
+                    "Invalid environment texture package " + path.path.string() + ": " + error.what());
             }
             if (package.description.width != spec.width ||
                 package.description.height != spec.height ||
                 package.description.array_size != spec.slices ||
                 package.description.mip_count != spec.mips ||
                 package.description.format != static_cast<std::uint32_t>(spec.format) ||
-                package.dependencies.size() != 1 || package.dependencies[0] != source_id ||
+                !RendererTextureDependencyMatches(config, logical_id, package, source_id) ||
                 package.subresources.size() != spec.slices * spec.mips)
                 return invalid();
         }
@@ -324,11 +339,14 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         texture.graph_access = enhanced ? Access::Common : Access::AllShaderRead;
         if (texture_index == kStreamTextureIndex)
         {
-            environment_stream.path = path;
+            environment_stream.source = path;
             environment_stream.logical_id = logical_id;
             environment_stream.source_id = source_id;
         }
     }
+    if (auto prepared = MeasureStartupStep(RendererStartupStep::EnvironmentBrdfLut, [&] {
+            return CreateEnvironmentBrdfLut(config, environment_brdf_lut, &uploads);
+        }); !prepared) return prepared;
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close environment upload", result);
     if (auto waited = SubmitResidentUtilityUpload(command_list.Get(), frames[0].allocator.Get(), uploads); !waited)
@@ -376,7 +394,8 @@ void D3D12Renderer::Impl::WriteEnvironmentTextureDescriptor(
 
 Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
     const render_data::MaterialTextureDefinition &binding, std::uint32_t required_layer,
-    std::vector<AllocationResource> &uploads, std::uint32_t &texture_index)
+    std::vector<AllocationResource> &uploads, std::uint32_t &texture_index,
+    render_data::TextureHandle compiled_texture)
 {
     for (std::uint32_t index = 0; index < environment_texture_ids.size(); ++index)
         if (environment_texture_ids[index] == binding.product_id)
@@ -395,17 +414,36 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
             return Result::Success();
         }
 
-    std::filesystem::path path;
-    if (auto resolved = config.ResolveProduct(binding.product_id, path); !resolved)
-        return resolved;
+    RendererAssetSource path;
+    if (compiled_texture)
+    {
+        if ((!config.packed_content && !config.development_catalog) ||
+            compiled_texture.value >= config.packed_textures.size())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture handle is invalid.");
+        const auto &texture = config.packed_textures[compiled_texture.value];
+        if (auto resolved = ResolveRendererAsset(config, binding.product_id, path); !resolved) return resolved;
+        if (path.range.byte_count != config.packed_bulks[texture.bulk_index].range.byte_count)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture product handle differs.");
+    }
+    else if (auto resolved = ResolveRendererAsset(config, binding.product_id, path); !resolved) return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
-    const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(bytes, MakeAssetId(binding.product_id)); });
+    const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] {
+        return compiled_texture ? render_data::BindTextureDescriptor(bytes, config.packed_textures[compiled_texture.value]) :
+            ReadRendererTexturePackage(config, binding.product_id, bytes);
+    });
     render_data::ValidateMaterialTexturePackage(binding, package.description, required_layer);
-    for (const auto &dependency : package.dependencies)
+    if (config.development_catalog)
     {
-        std::filesystem::path dependency_path;
-        if (auto resolved = config.ResolveProduct(dependency, dependency_path); !resolved)
+        const auto descriptor = config.development_catalog->FindTexture(MakeAssetId(binding.product_id));
+        if (!descriptor || std::ranges::any_of(descriptor->dependencies, [&](AssetId asset) {
+                return !config.development_catalog->Contains(asset); }))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture dependency is absent.");
+    }
+    else if (!config.packed_content) for (const auto &dependency : package.dependencies)
+    {
+        RendererAssetSource dependency_path;
+        if (auto resolved = ResolveRendererAsset(config, dependency, dependency_path); !resolved)
             return resolved;
     }
     const auto &source_description = package.description;
@@ -448,7 +486,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
             static_cast<UINT64>(rows[subresource] - 1) * footprint.Footprint.RowPitch +
                 row_sizes[subresource] > upload_size - footprint.Offset)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Invalid material texture footprint: " + path.string());
+                                   "Invalid material texture footprint: " + path.path.string());
     }
     uploads.emplace_back();
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
@@ -561,27 +599,30 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Hardware asset streaming requires the actual resident Generation lease.");
     if (auto result = UpdateResidencyBudget(); !result) return result;
-    if (live_transport)
+    if (live_transport && live_transport->NativeEnabled() && !config.packed_content)
     {
         if (auto result = asset_io.ShareTransportFrom(*live_transport, residency); !result) return result;
     }
-    else if (auto result = asset_io.Initialize(HS_WITH_DIRECTSTORAGE != 0, 32u * 1024u * 1024u, residency); !result)
+    else if (auto result = asset_io.Initialize(HS_WITH_DIRECTSTORAGE != 0 && !config.packed_content, 32u * 1024u * 1024u, residency); !result)
         return result;
     if (auto result = texture_streaming.Initialize(device.Get(), allocator, config.texture_quality,
-        QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib, texture_streaming_capabilities, kFrameCount); !result) return result;
+        QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib, texture_streaming_capabilities, kFrameCount, config.packed_textures); !result) return result;
     if (auto result = texture_feedback.Initialize(device.Get(), allocator,
         texture_streaming_capabilities.sampler_feedback && texture_streaming_capabilities.tiled_resources,
         kFrameCount); !result) return result;
     const auto register_texture = [&](const std::string &id, const render_data::TextureDescription &description,
-        const AllocationResource &fallback, ResidencyTicket existing_ticket, TextureStreamId &stream_id) -> Result {
+        AllocationResource &fallback, ResidencyTicket existing_ticket, TextureStreamId &stream_id) -> Result {
         if (!fallback.resource || !fallback.allocation ||
             fallback.resource->GetDesc().MipLevels > description.mip_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected texture fallback is incomplete.");
+        if (auto checked = fallback.EnsureNativeContract(device.Get()); !checked) return checked;
         TextureStreamRegistration registration;
         registration.generation = resource_generation_id; registration.logical_id = id;
-        if (auto result = config.ResolveProduct(id, registration.path); !result) return result;
+        if (auto result = ResolveRendererAsset(config, id, registration.source); !result) return result;
         registration.generation_lease = resident_generation_lease; registration.description = description;
+        if (config.packed_content) registration.compiled_texture = FindRendererTexture(config, MakeAssetId(id));
         registration.fallback = fallback.resource;
+        registration.fallback_contract = *fallback.NativeContract();
         registration.fallback_graph_access = fallback.graph_access;
         registration.fallback_first_mip = description.mip_count - fallback.resource->GetDesc().MipLevels;
         registration.fallback_allocation_bytes = fallback.allocation->GetSize();
@@ -595,7 +636,7 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
     environment_material_texture_stream_ids.resize(environment_material_textures.size());
     for (std::size_t index = 0; index < environment_material_textures.size(); ++index)
     {
-        const auto &texture = environment_material_textures[index];
+        auto &texture = environment_material_textures[index];
         if (auto result = register_texture(texture.product_id, texture.description, texture.texture, {},
             environment_material_texture_stream_ids[index]); !result) return result;
     }
@@ -648,7 +689,7 @@ Result D3D12Renderer::Impl::UpdateResidencyBudget()
 
 Result D3D12Renderer::Impl::PrepareEnvironmentStreaming()
 {
-    if (environment_stream.path.empty() || environment_stream.logical_id.empty())
+    if (environment_stream.source.empty() || environment_stream.logical_id.empty())
         return Result::Success();
     if (resource_generation_id.empty())
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -659,7 +700,7 @@ Result D3D12Renderer::Impl::PrepareEnvironmentStreaming()
 Result D3D12Renderer::Impl::DemandEnvironmentTexture(std::uint32_t priority)
 {
     auto &stream = environment_stream;
-    if (stream.path.empty() || stream.logical_id.empty()) return Result::Success();
+    if (stream.source.empty() || stream.logical_id.empty()) return Result::Success();
     const auto error = std::bit_cast<float>(priority);
     if (priority && (!std::isfinite(error) || error <= 0.0f))
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Texture demand requires positive ordered error.");
@@ -740,9 +781,9 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     if (page->state == StreamingPageState::Requested)
     {
         if (!stream.priority || stream.last_demand_frame < frame_number) return Result::Success();
-        std::error_code error;
-        const auto file_bytes = std::filesystem::file_size(stream.path, error);
-        if (error || !file_bytes || file_bytes > UINT64_MAX / 3u ||
+        std::uint64_t file_bytes{};
+        if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
+        if (!file_bytes || file_bytes > UINT64_MAX / 3u ||
             file_bytes > std::numeric_limits<std::size_t>::max() ||
             file_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Texture stream read size overflow.");
@@ -759,7 +800,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
         stream.read_bytes = file_bytes;
         bool submitted{};
         const auto queued = asset_io.Enqueue({stream.request, resource_generation_id,
-                stream.logical_id, stream.path, file_bytes, resident_generation_lease},
+                stream.logical_id, stream.source, file_bytes, resident_generation_lease},
                 streaming, residency, stream.decoded_residency, submitted);
         if (!submitted)
         {
@@ -785,8 +826,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     render_data::TexturePackageView package;
     try
     {
-        package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(
-            stream.decoded_storage, MakeAssetId(environment_stream.logical_id)); });
+        package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, environment_stream.logical_id, stream.decoded_storage); });
     }
     catch (const std::exception &error)
     {
@@ -803,8 +843,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
         package.description.array_size != kArraySize ||
         package.description.mip_count != kMipCount ||
         package.description.format != static_cast<std::uint32_t>(DXGI_FORMAT_BC7_UNORM) ||
-        package.dependencies !=
-            std::vector<std::string>{environment_stream.source_id} ||
+        !RendererTextureDependencyMatches(config, environment_stream.logical_id, package, environment_stream.source_id) ||
         package.subresources.size() != kArraySize * kMipCount)
     {
         static_cast<void>(streaming.Cancel(environment_stream.request));

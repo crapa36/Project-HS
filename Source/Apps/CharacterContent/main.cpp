@@ -82,9 +82,12 @@ void AddCharacterInputs(ap::ActionSpec &spec, const fs::path &source_root,
 }
 
 std::vector<std::string> ProductNames(const std::string &output_name,
-                                      std::size_t material_count, bool named_animations)
+                                      std::size_t material_count, bool named_animations,
+                                      std::size_t reduced_lods = 0)
 {
     std::vector<std::string> names{output_name + ".rpkg", output_name + ".rpage"};
+    for(std::size_t lod=1;lod<=reduced_lods;++lod)
+        names.push_back(output_name+"_lod"+std::to_string(lod)+".rpage");
     for (std::size_t index = 0; index < material_count; ++index)
     {
         const auto suffix = std::to_string(index) + ".dds";
@@ -156,6 +159,21 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
             if (!hs::render_data::ReadPackage(page_bytes, hs::MakeAssetId(page_id)).dependencies.empty()) return false;
             hs::render_data::ValidateCharacterGeometry(metadata,
                 hs::render_data::DecodeGeometryPage(page_bytes, hs::MakeAssetId(page_id), metadata.geometry));
+            if(metadata.monster)
+                for(std::size_t lod=1;lod<metadata.monster->lods.size();++lod)
+                {
+                    const auto &entry=metadata.monster->lods[lod];
+                    const auto &lod_id=prepared.package.dependencies[entry.page_dependency_index];
+                    ap::UpstreamProduct dependency;
+                    fs::path lod_path;
+                    ap::ReadActionResult(build_root,spec.namespace_path,lod_id,dependency,lod_path);
+                    const auto content=ap::ReadBytes(lod_path);
+                    const auto lod_bytes=std::as_bytes(std::span(content.data(),content.size()));
+                    if(!hs::render_data::ReadPackage(lod_bytes,hs::MakeAssetId(lod_id)).dependencies.empty()) return false;
+                    auto view=metadata;view.geometry=entry;
+                    hs::render_data::ValidateCharacterGeometry(view,
+                        hs::render_data::DecodeGeometryPage(lod_bytes,hs::MakeAssetId(lod_id),entry));
+                }
             if (!source->named_animations.empty())
             {
                 if (animation_path.empty()) return false;
@@ -167,7 +185,8 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
                 if (named.sample_rate_hz != 60 || named.clips.size() != source->named_animations.size() || !named.sockets.empty()) return false;
             }
             expected = ProductNames(source->output_name, metadata.material_count,
-                                    !source->named_animations.empty());
+                                    !source->named_animations.empty(),
+                                    metadata.monster?metadata.monster->lods.size()-1:0);
         }
         else
             expected = {"monster_basecolor.dds", "monster_emissive.dds",
@@ -202,7 +221,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
     spec.action_id = "character." + std::string(mode);
     spec.recipe_id = "project-hs.character." + std::string(mode) + "." +
         hs::content::CharacterTextureCookRecipeIdentity();
-    spec.recipe_version = 5;
+    spec.recipe_version = 6;
     spec.namespace_path = "character/" + std::string(mode);
 
     hs::content::CharacterAssetSource character_source;
@@ -258,7 +277,11 @@ void Produce(std::string_view mode, const fs::path &source_root,
             for (const auto &product : final_products)
                 ap::WriteBytes(stage / product.filename, product.bytes);
             names = ProductNames(character_source.output_name, character.materials.size(),
-                                 !character_source.named_animations.empty());
+                                 !character_source.named_animations.empty(),
+                                 std::ranges::count_if(final_products,[&](const auto &product) {
+                                     return product.filename.starts_with(character_source.output_name+"_lod") &&
+                                         product.filename.ends_with(".rpage");
+                                 }));
         }
         std::vector<ap::Product> products;
         for (const auto &name : names)

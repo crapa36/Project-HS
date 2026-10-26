@@ -13,6 +13,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <map>
 
 namespace hs::content
 {
@@ -29,6 +30,184 @@ std::uint32_t HeroOrdinal(const std::string &name)
     const auto found = std::ranges::find(rd::kHeroMaterialNames, name);
     Require(found != rd::kHeroMaterialNames.end(), "unknown authored hero material: " + name);
     return static_cast<std::uint32_t>(found - rd::kHeroMaterialNames.begin());
+}
+
+void AppendMonsterIntervalBounds(rd::MonsterCharacterData &data,const CharacterIR &character,
+    const rd::GeometryData &geometry,std::uint16_t lod)
+{
+    // Each shader skin row is linear between two stored final matrices. The
+    // extrema of every vertex coordinate therefore occur at interval ends.
+    constexpr double u=0x1p-24;
+    constexpr double gamma=(64*u)/(1-64*u);
+    for(const auto &clip:character.clips)
+        for(std::uint32_t frame=0;frame<clip.frame_count;++frame)
+        {
+            rd::CharacterIntervalBound bound; bound.lod=lod;bound.clip=clip.clip;bound.frame=frame;
+            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
+            double position_l1{};
+            for(const auto &vertex:geometry.vertices)
+            {
+                position_l1=std::max(position_l1,std::abs(double(vertex.position[0]))+
+                    std::abs(double(vertex.position[1]))+std::abs(double(vertex.position[2])));
+                for(const auto endpoint:{frame,std::min(frame+1,clip.frame_count-1)})
+                    for(std::size_t row=0;row<3;++row)
+                    {
+                        double position{},absolute{};
+                        for(std::size_t column=0;column<4;++column)
+                        {
+                            double matrix{},matrix_absolute{};
+                            for(std::size_t lane=0;lane<4;++lane)
+                            {
+                                const auto &m=data.final_matrices[clip.first_transform+endpoint*character.bone_count+vertex.bone_indices[lane]];
+                                const double term=double(m[row*4+column])*vertex.bone_weights[lane];
+                                matrix+=term; matrix_absolute+=std::abs(term);
+                            }
+                            const double p=column==3?1.0:double(vertex.position[column]);
+                            position+=matrix*p;absolute+=matrix_absolute*std::abs(p);
+                        }
+                        low[row]=std::min(low[row],position);high[row]=std::max(high[row],position);
+                        magnitude[row]=std::max(magnitude[row],absolute);
+                    }
+            }
+            for(std::size_t row=0;row<3;++row)
+            {
+                const double margin=gamma*magnitude[row]+64*double(std::numeric_limits<float>::min())*(1+position_l1);
+                const double pad=margin+data.bubble_amplitude;
+                if(!std::isfinite(low[row]) || !std::isfinite(high[row]) ||
+                    magnitude[row]>=std::numeric_limits<float>::max()/128 ||
+                    std::max(std::abs(low[row]-pad),std::abs(high[row]+pad))>=std::numeric_limits<float>::max()/4)
+                {
+                    data.flags&=~rd::kMonsterBoundsPositionEnclosure;
+                    bound.minimum[row]=-std::numeric_limits<float>::max();
+                    bound.maximum[row]=std::numeric_limits<float>::max();
+                    continue;
+                }
+                data.numerical_margin=std::max(data.numerical_margin,
+                    std::nextafter(static_cast<float>(margin),std::numeric_limits<float>::infinity()));
+                bound.minimum[row]=std::nextafter(static_cast<float>(low[row]-pad),-std::numeric_limits<float>::infinity());
+                bound.maximum[row]=std::nextafter(static_cast<float>(high[row]+pad),std::numeric_limits<float>::infinity());
+            }
+            data.interval_bounds.push_back(bound);
+        }
+}
+
+std::vector<rd::ExpandedVertex> ExpandGeometry(const rd::GeometryData &geometry)
+{
+    std::vector<rd::ExpandedVertex> expanded;expanded.reserve(geometry.indices.size());
+    for(const auto index:geometry.indices) expanded.push_back(geometry.vertices[index]);
+    return expanded;
+}
+
+rd::GeometryMetadata DescribeGeometry(const rd::GeometryData &geometry,
+    std::uint16_t lod,std::uint16_t page_dependency,float error)
+{
+    rd::GeometryMetadata metadata;
+    metadata.flags=geometry.flags;
+    metadata.vertex_count=static_cast<std::uint32_t>(geometry.vertices.size());
+    metadata.index_count=static_cast<std::uint32_t>(geometry.indices.size());
+    metadata.submesh_count=static_cast<std::uint32_t>(geometry.submeshes.size());
+    metadata.meshlet_count=static_cast<std::uint32_t>(geometry.meshlets.size());
+    metadata.vertex_ref_count=static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());
+    metadata.bounds=geometry.bounds;metadata.lod=lod;
+    metadata.page_dependency_index=page_dependency;metadata.geometric_error=error;
+    metadata.error_method_abi=lod?rd::kSkinnedPoseErrorMethodAbi:rd::kGeometryErrorMethodAbi;
+    for(const auto &vertex:geometry.vertices)
+        metadata.max_material_index=std::max(metadata.max_material_index,std::uint32_t(vertex.material_index));
+    return metadata;
+}
+
+std::array<double,3> SkinPosition(const rd::ExpandedVertex &vertex,
+    std::span<const std::array<float,16>> palette)
+{
+    std::array<double,3> result{};
+    for(std::size_t row=0;row<3;++row)
+        for(std::size_t column=0;column<4;++column)
+        {
+            double matrix{};
+            for(std::size_t lane=0;lane<4;++lane)
+                matrix+=double(palette[vertex.bone_indices[lane]][row*4+column])*vertex.bone_weights[lane];
+            result[row]+=matrix*(column==3?1.0:double(vertex.position[column]));
+        }
+    return result;
+}
+
+struct SkinnedLodCertificate { double position{},uv{},normal{},tangent{}; };
+SkinnedLodCertificate CertifyMonsterLod(const CharacterIR &character,
+    const rd::MonsterCharacterData &monster,
+    std::span<const rd::ExpandedVertex> fine,std::span<const rd::ExpandedVertex> coarse)
+{
+    const auto forward=geometry_content::BuildSurfaceWitnesses(fine,coarse);
+    const auto reverse=geometry_content::BuildSurfaceWitnesses(coarse,fine);
+    SkinnedLodCertificate certificate;
+    const auto attributes=[&](std::span<const rd::ExpandedVertex> source,
+        std::span<const rd::ExpandedVertex> target,
+        std::span<const geometry_content::SurfaceWitness> witnesses) {
+        for(std::size_t triangle=0;triangle<witnesses.size();++triangle)
+        {
+            const auto &w=witnesses[triangle];
+            for(std::size_t corner=0;corner<3;++corner)
+            {
+                const auto &a=source[triangle*3+corner];
+                const auto *b=target.data()+w.target_triangle*3;
+                const auto &q=w.target_barycentric[corner];
+                double uv{},normal{},tangent{};
+                for(std::size_t axis=0;axis<2;++axis) {
+                    double blended{};for(std::size_t k=0;k<3;++k) blended+=q[k]*b[k].uv[axis];
+                    const double delta=double(a.uv[axis])-blended;uv+=delta*delta;
+                }
+                for(std::size_t axis=0;axis<4;++axis) {
+                    double bn{},bt{};for(std::size_t k=0;k<3;++k) {
+                        if(axis<3) bn+=q[k]*b[k].normal[axis];
+                        bt+=q[k]*b[k].tangent[axis];}
+                    if(axis<3)
+                    {const double delta=double(a.normal[axis])-bn;normal+=delta*delta;}
+                    const double delta=double(a.tangent[axis])-bt;tangent+=delta*delta;
+                }
+                certificate.uv=std::max(certificate.uv,std::sqrt(uv));
+                certificate.normal=std::max(certificate.normal,std::sqrt(normal));
+                certificate.tangent=std::max(certificate.tangent,std::sqrt(tangent));
+            }
+        }
+    };
+    attributes(fine,coarse,forward);attributes(coarse,fine,reverse);
+    std::vector<std::array<double,3>> posed_fine(fine.size()),posed_coarse(coarse.size());
+    const auto position=[&](std::span<const std::array<double,3>> source,
+        std::span<const std::array<double,3>> target,
+        std::span<const geometry_content::SurfaceWitness> witnesses) {
+        for(std::size_t triangle=0;triangle<witnesses.size();++triangle)
+        {
+            const auto &w=witnesses[triangle];
+            for(std::size_t corner=0;corner<3;++corner)
+            {
+                const auto &a=source[triangle*3+corner];
+                const auto *b=target.data()+w.target_triangle*3;
+                const auto &q=w.target_barycentric[corner];
+                double squared{};
+                for(std::size_t axis=0;axis<3;++axis) {
+                    double blended{};for(std::size_t k=0;k<3;++k) blended+=q[k]*b[k][axis];
+                    const double delta=a[axis]-blended;squared+=delta*delta;
+                }
+                certificate.position=std::max(certificate.position,std::sqrt(squared));
+            }
+        }
+    };
+    for(const auto &clip:character.clips)
+        for(std::uint32_t frame=0;frame<clip.frame_count;++frame)
+        {
+            const auto palette=std::span(monster.final_matrices).subspan(
+                clip.first_transform+std::size_t(frame)*character.bone_count,character.bone_count);
+            for(std::size_t i=0;i<fine.size();++i) posed_fine[i]=SkinPosition(fine[i],palette);
+            for(std::size_t i=0;i<coarse.size();++i) posed_coarse[i]=SkinPosition(coarse[i],palette);
+            position(posed_fine,posed_coarse,forward);
+            position(posed_coarse,posed_fine,reverse);
+        }
+    // The witness mapping is fixed per source triangle. Its barycentric
+    // interpolation makes the error affine over both triangle and palette
+    // time; norm convexity bounds the entire surface at interval endpoints.
+    certificate.position=std::nextafter(certificate.position+4.0*monster.numerical_margin+
+        2.0*monster.bubble_amplitude+
+        1e-5*std::max(1.0,double(monster.lods.front().bounds.sphere[3])),INFINITY);
+    return certificate;
 }
 } // namespace
 
@@ -105,65 +284,7 @@ render_data::MonsterCharacterData CookMonsterCharacterData(const CharacterIR &ch
             }
         }
     }
-    // For position, linear final-matrix interpolation is enclosed by its two
-    // exact endpoints. gamma64 covers FP32 multiply/add/lerp/dot rounding even
-    // without FMA; the absolute-product bound avoids cancellation assumptions.
-    // Bubble uses a normalized cofactor normal. Endpoints do not prove that
-    // every blended normal is nonsingular, so its rows remain reduction-only.
-    constexpr double u=0x1p-24;
-    constexpr double gamma=(64*u)/(1-64*u);
-    for(const auto &clip:character.clips)
-        for(std::uint32_t frame=0;frame<clip.frame_count;++frame)
-        {
-            rd::CharacterIntervalBound bound; bound.clip=clip.clip; bound.frame=frame;
-            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
-            double position_l1{};
-            for(const auto &vertex:geometry.vertices)
-            {
-                position_l1=std::max(position_l1,std::abs(double(vertex.position[0]))+
-                    std::abs(double(vertex.position[1]))+std::abs(double(vertex.position[2])));
-                for(const auto endpoint:{frame,std::min(frame+1,clip.frame_count-1)})
-                    for(std::size_t row=0;row<3;++row)
-                    {
-                        double position{},absolute{};
-                        for(std::size_t column=0;column<4;++column)
-                        {
-                            double matrix{},matrix_absolute{};
-                            for(std::size_t lane=0;lane<4;++lane)
-                            {
-                                const auto &m=data.final_matrices[clip.first_transform+endpoint*character.bone_count+vertex.bone_indices[lane]];
-                                const double term=double(m[row*4+column])*vertex.bone_weights[lane];
-                                matrix+=term; matrix_absolute+=std::abs(term);
-                            }
-                            const double p=column==3?1.0:double(vertex.position[column]);
-                            position+=matrix*p; absolute+=matrix_absolute*std::abs(p);
-                        }
-                        low[row]=std::min(low[row],position); high[row]=std::max(high[row],position);
-                        magnitude[row]=std::max(magnitude[row],absolute);
-                    }
-            }
-            for(std::size_t row=0;row<3;++row)
-            {
-                // Shader FTZ may drop a subnormal before a subsequent multiply
-                // by a large source position; a relative gamma bound alone is
-                // insufficient. Bound those absolute losses as well.
-                const double margin=gamma*magnitude[row]+64*double(std::numeric_limits<float>::min())*(1+position_l1);
-                const double pad=margin+data.bubble_amplitude;
-                if(!std::isfinite(low[row]) || !std::isfinite(high[row]) ||
-                    magnitude[row]>=std::numeric_limits<float>::max()/128 ||
-                    std::max(std::abs(low[row]-pad),std::abs(high[row]+pad))>=std::numeric_limits<float>::max()/4)
-                {
-                    data.flags&=~rd::kMonsterBoundsPositionEnclosure;
-                    bound.minimum[row]=-std::numeric_limits<float>::max();
-                    bound.maximum[row]=std::numeric_limits<float>::max();
-                    continue;
-                }
-                data.numerical_margin=std::max(data.numerical_margin,static_cast<float>(margin));
-                bound.minimum[row]=std::nextafter(static_cast<float>(low[row]-pad),-std::numeric_limits<float>::infinity());
-                bound.maximum[row]=std::nextafter(static_cast<float>(high[row]+pad),std::numeric_limits<float>::infinity());
-            }
-            data.interval_bounds.push_back(bound);
-        }
+    AppendMonsterIntervalBounds(data,character,geometry,0);
     return data;
 #endif
 }
@@ -223,7 +344,63 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     const auto metadata_id = "render/character/" + stem + ".rpkg";
     const auto page_id = "render/geometry/character/" + stem + ".rpage";
     const auto animation_id = "render/animation/" + stem + ".rpkg";
+    std::vector<rd::ExpandedVertex> expanded;
+    expanded.reserve(character.vertices.size());
+    for (const auto &v : character.vertices)
+        expanded.push_back({v.position, v.normal, v.bone_indices, v.bone_weights,
+            v.uv, v.tangent, v.material_index, v.reserved});
+    const auto geometry = geometry_content::CookGeometry(expanded, rd::kGeometryFlagSkinned);
+    std::vector<rd::GeometryData> lod_geometries;
+    std::vector<std::pair<double,float>> lod_errors;
+    std::optional<rd::MonsterCharacterData> monster;
+    if(stem!="archer")
+    {
+        monster=CookMonsterCharacterData(character,geometry,DescribeGeometry(geometry,0,0,0),stem=="enemy_suicide");
+        // Screen selection uses the certified absolute pose error. Generate
+        // candidates by error budget rather than an unconditional face ratio.
+        const auto fine=ExpandGeometry(geometry);
+        const double radius=geometry.bounds.sphere[3];
+        constexpr std::array<std::array<double,4>,2> attempts{{
+            {{0.0025,0.005,0.01,0.02}},{{0.01,0.02,0.035,0.05}}}};
+        constexpr std::array<double,2> pose_limits{0.025,0.06};
+        for(std::uint16_t lod=1;radius>0 && lod<=2;++lod)
+        {
+            std::optional<rd::GeometryData> selected;
+            std::optional<rd::MonsterCharacterData> selected_monster;
+            std::pair<double,float> selected_error{};
+            std::size_t best_indices=lod_geometries.empty()?geometry.indices.size():lod_geometries.back().indices.size();
+            for(const double fraction:attempts[lod-1])
+            {
+                const auto simplified=geometry_content::SimplifySkinnedGeometry(geometry,static_cast<float>(radius*fraction));
+                if(simplified.size()>=best_indices) continue;
+                auto candidate=geometry_content::CookGeometry(simplified,rd::kGeometryFlagSkinned);
+                if(candidate.indices.size()>=best_indices ||
+                    candidate.vertices.size()>=(lod_geometries.empty()?geometry.vertices.size():lod_geometries.back().vertices.size())) continue;
+                auto with_bounds=*monster;
+                AppendMonsterIntervalBounds(with_bounds,character,candidate,lod);
+                const auto coarse=ExpandGeometry(candidate);
+                const auto certificate=CertifyMonsterLod(character,with_bounds,fine,coarse);
+                // The same fixed surface witnesses bound the interpolated UV,
+                // normal and tangent fields. Their thresholds prevent a small
+                // geometric error from hiding a damaged material appearance.
+                if(!(certificate.position<=radius*pose_limits[lod-1] &&
+                     certificate.uv<=0.02 && certificate.normal<=0.25 &&
+                     certificate.tangent<=0.35)) continue;
+                if(stem!="enemy_suicide" &&
+                    !(with_bounds.flags&rd::kMonsterBoundsPositionEnclosure)) continue;
+                best_indices=candidate.indices.size();
+                selected_error={certificate.position,with_bounds.numerical_margin};
+                selected=std::move(candidate);selected_monster=std::move(with_bounds);
+            }
+            if(!selected) break;
+            monster=std::move(*selected_monster);
+            lod_geometries.push_back(std::move(*selected));
+            lod_errors.push_back(selected_error);
+        }
+    }
     std::vector<std::string> dependencies{page_id};
+    for(std::size_t lod=0;lod<lod_geometries.size();++lod)
+        dependencies.push_back("render/geometry/character/"+stem+"_lod"+std::to_string(lod+1)+".rpage");
     for (std::uint32_t slot = 0; slot < character.material_count; ++slot)
         for (const auto *semantic : {"diffuse", "normal"})
         {
@@ -261,32 +438,37 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     }
     (void)rd::EncodeCharacterMaterialBindings(bindings, dependencies, character.material_count);
 
-    std::vector<rd::ExpandedVertex> expanded;
-    expanded.reserve(character.vertices.size());
-    for (const auto &v : character.vertices)
-        expanded.push_back({v.position, v.normal, v.bone_indices, v.bone_weights,
-            v.uv, v.tangent, v.material_index, v.reserved});
-    const auto geometry = geometry_content::CookGeometry(expanded, rd::kGeometryFlagSkinned);
-    rd::GeometryMetadata metadata;
-    metadata.flags = geometry.flags;
-    metadata.vertex_count = static_cast<std::uint32_t>(geometry.vertices.size());
-    metadata.index_count = static_cast<std::uint32_t>(geometry.indices.size());
-    metadata.submesh_count = static_cast<std::uint32_t>(geometry.submeshes.size());
-    metadata.meshlet_count = static_cast<std::uint32_t>(geometry.meshlets.size());
-    metadata.vertex_ref_count = static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());
-    metadata.bounds = geometry.bounds;
-    for (const auto &v : geometry.vertices)
-        metadata.max_material_index = std::max(metadata.max_material_index, std::uint32_t(v.material_index));
-    metadata.page_dependency_index = static_cast<std::uint16_t>(
-        std::ranges::find(dependencies, page_id) - dependencies.begin());
+    const auto page_dependency=static_cast<std::uint16_t>(
+        std::ranges::find(dependencies,page_id)-dependencies.begin());
+    const auto metadata=DescribeGeometry(geometry,0,page_dependency,0);
     std::vector<CharacterProduct> products;
-    std::optional<rd::MonsterCharacterData> monster;
-    if(stem!="archer") monster=CookMonsterCharacterData(character,geometry,metadata,stem=="enemy_suicide");
+    if(monster)
+    {
+        monster->lods.front()=metadata;
+        for(std::size_t index=0;index<lod_geometries.size();++index)
+        {
+            const auto lod=static_cast<std::uint16_t>(index+1);
+            const auto id="render/geometry/character/"+stem+"_lod"+std::to_string(lod)+".rpage";
+            const auto dep=static_cast<std::uint16_t>(std::ranges::find(dependencies,id)-dependencies.begin());
+            const double final_error=lod_errors[index].first+
+                4.0*std::max(0.0,double(monster->numerical_margin)-lod_errors[index].second);
+            const auto rounded=std::nextafter(static_cast<float>(final_error),std::numeric_limits<float>::infinity());
+            monster->lods.push_back(DescribeGeometry(lod_geometries[index],lod,dep,
+                std::max(rounded,monster->lods.back().geometric_error)));
+        }
+    }
     products.push_back({metadata_id, stem + ".rpkg", dependencies,
         rd::BuildCharacterMetadataPackage(MakeAssetId(metadata_id), dependencies, character, metadata, bindings,
             monster?&*monster:nullptr)});
     products.push_back({page_id, stem + ".rpage", {},
         rd::BuildGeometryPage(MakeAssetId(page_id), {}, geometry)});
+    for(std::size_t index=0;index<lod_geometries.size();++index)
+    {
+        const auto lod=index+1;
+        const auto id="render/geometry/character/"+stem+"_lod"+std::to_string(lod)+".rpage";
+        products.push_back({id,stem+"_lod"+std::to_string(lod)+".rpage",{},
+            rd::BuildGeometryPage(MakeAssetId(id),{},lod_geometries[index])});
+    }
     if (!named.clips.empty())
         products.push_back({animation_id, stem + "_animation.rpkg", {},
             rd::BuildCharacterAnimationExtension(MakeAssetId(animation_id), {}, named)});
@@ -328,6 +510,17 @@ void ValidateCharacterProductBindings(const PreparedCharacterBinding &prepared,
     Require(rd::ReadPackage(page, MakeAssetId(page_id)).dependencies.empty(),
         "direct character geometry must not depend on a legacy exchange");
     rd::ValidateCharacterGeometry(character, rd::DecodeGeometryPage(page, MakeAssetId(page_id), character.geometry));
+    if(character.monster)
+        for(std::size_t lod=1;lod<character.monster->lods.size();++lod)
+        {
+            const auto &entry=character.monster->lods[lod];
+            const auto &id=package.dependencies[entry.page_dependency_index];
+            const auto payload=bytes(id);
+            Require(rd::ReadPackage(payload,MakeAssetId(id)).dependencies.empty(),
+                "skinned LOD page must be an immutable direct product");
+            auto view=character;view.geometry=entry;
+            rd::ValidateCharacterGeometry(view,rd::DecodeGeometryPage(payload,MakeAssetId(id),entry));
+        }
     if (stem == "archer")
     {
         constexpr std::string_view animation_id = "render/animation/archer.rpkg";

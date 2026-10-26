@@ -324,12 +324,50 @@ Result AmbientOcclusionSystem::Commit(AmbientOcclusionCandidate &&candidate, con
 }
 
 Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const AmbientOcclusionInputs &inputs,
-    AmbientOcclusionConstants constants, AmbientOcclusionOutputs &outputs)
+    AmbientOcclusionConstants constants, AmbientOcclusionOutputs &outputs, AmbientOcclusionLayout *layout)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
+}
+bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,const AmbientOcclusionLayout &layout)const noexcept
+{
+    const auto &s=impl_->targets;
+    if(!layout.valid||!s||layout.ao!=s->ao_enabled||layout.contact!=s->contact_enabled||
+        layout.adaptive!=s->adaptive_compute)return false;
+    return (!s->ao_enabled&&!s->contact_enabled)||
+        (layout.history==(s->history_valid&&!inputs.reset_history)&&layout.queue==inputs.queue&&
+         layout.render_capacity.width==s->render_capacity.width&&layout.render_capacity.height==s->render_capacity.height&&
+         layout.ao_capacity.width==s->ao_capacity.width&&layout.ao_capacity.height==s->ao_capacity.height&&
+         layout.guides==std::array{inputs.depth.version,inputs.normal.version,inputs.metadata.version,
+             inputs.motion.version,inputs.surface_history.version,inputs.adaptive_density.version});
+}
+Result AmbientOcclusionSystem::BindRetained(RenderGraphBuilder &graph, const AmbientOcclusionInputs &inputs,
+    AmbientOcclusionConstants constants, const AmbientOcclusionLayout &layout, AmbientOcclusionOutputs &outputs)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, nullptr, &layout);
+}
+Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const AmbientOcclusionInputs &inputs,
+    AmbientOcclusionConstants constants, AmbientOcclusionOutputs &outputs,
+    AmbientOcclusionLayout *capture, const AmbientOcclusionLayout *retained)
 {
     outputs = {};
+    if (capture) *capture = {};
     auto storage = impl_->targets;
     if (!storage) return AoFailure(ErrorCode::InvalidState, "Prepare and commit AO targets before registration.");
-    if (!storage->ao_enabled && !storage->contact_enabled) return Result::Success();
+    const bool historyValid = storage->history_valid && !inputs.reset_history;
+    if (retained && !MatchesLayout(inputs,*retained))
+        return AoFailure(ErrorCode::InvalidState, "AO retained topology has changed.");
+    if (capture)
+    {
+        capture->ao = storage->ao_enabled; capture->contact = storage->contact_enabled;
+        capture->adaptive = storage->adaptive_compute; capture->history = historyValid;
+        capture->queue = inputs.queue;
+        capture->render_capacity = storage->render_capacity; capture->ao_capacity = storage->ao_capacity;
+    }
+    if (!storage->ao_enabled && !storage->contact_enabled)
+    {
+        if (capture) capture->valid = true;
+        return Result::Success();
+    }
     if (impl_->pending.graph || !storage->usable)
         return AoFailure(ErrorCode::InvalidState, "AO submission is pending or its previous graph execution failed.");
     const auto active = inputs.render_active;
@@ -342,6 +380,9 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         (storage->ao_enabled && (!FitsGuide(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
                                 !FitsGuide(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT))))
         return AoFailure(ErrorCode::InvalidArgument, "AO guide resource, version, format or active extent is invalid.");
+    const std::array guides{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
+        inputs.motion.version, inputs.surface_history.version, inputs.adaptive_density.version};
+    if (capture) capture->guides = guides;
     const ViewExtent density_active{(active.width+7)/8,(active.height+7)/8};
     if(storage->adaptive_compute&&(!FitsGuide(inputs.adaptive_density,density_active,DXGI_FORMAT_R8_UINT)||
         graph.Resolve(inputs.adaptive_density.version.resource)!=inputs.adaptive_density.resource))
@@ -358,7 +399,6 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
     constants.gtao_parameters.w = SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f;
     const auto aoActive = AoExtent(active, storage->profile);
     const auto writeIndex = 1u - storage->read_index;
-    const bool historyValid = storage->history_valid && !inputs.reset_history;
     constants.render_size = SizeConstants(active); constants.ao_size = SizeConstants(aoActive);
     constants.history_size = SizeConstants(historyValid ? storage->previous_active : aoActive);
     constants.sample_counts = DirectX::XMUINT4{storage->profile.ao_directions, storage->profile.ao_steps,
@@ -401,9 +441,19 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
     pending.graph = &graph; pending.targets = storage; pending.active = aoActive;
     pending.slot = inputs.frame_slot; pending.write_index = writeIndex;
     pending.adaptive=storage->adaptive_compute;
+    std::size_t import_index{};
+    bool bound = true;
+    Result binding_result = Result::Success();
     auto import = [&](AllocationResource &allocation, std::string_view name) {
-        const auto handle = graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue},
-                                               allocation.graph_access, name);
+        if (auto checked = allocation.EnsureNativeContract(storage->device.Get()); !checked)
+        { binding_result = checked; return ResourceVersion{}; }
+        const auto handle = retained ? retained->textures[import_index] :
+            graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue, {}, allocation.NativeContract()},
+                allocation.graph_access, name);
+        if (retained) bound &= graph.BindTexture(handle, {allocation.resource.Get(),
+            allocation.graph_completion, allocation.graph_queue, {}, allocation.NativeContract()}, allocation.graph_access);
+        if (capture) capture->textures[import_index] = handle;
+        ++import_index;
         pending.imports.push_back({&allocation, handle});
         return graph.Version(handle);
     };
@@ -426,6 +476,12 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         pass.Read(inputs.normal.version, Access::ComputeRead);
         pass.Read(inputs.metadata.version, Access::ComputeRead);
     };
+    const auto pass_binding = [&](std::size_t index, std::uint32_t id,
+        std::string_view name, QueueHint queue) -> std::optional<PassBuilder> {
+        if (retained) return graph.BindPass(retained->passes[index], id);
+        if (capture) capture->passes[index] = graph.PassCount();
+        return graph.AddPass(id, name, queue);
+    };
     if (storage->ao_enabled)
     {
         auto raw = import(storage->raw, "AO.Raw");
@@ -435,52 +491,83 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         auto metadata = import(storage->metadata_history[writeIndex], "AO.CurrentMetadata");
         auto resolved = import(storage->resolved, "AO.Resolved");
         auto sparse=storage->adaptive_compute?import(storage->adaptive_sparse,"AO.AdaptiveSparse"):ResourceVersion{};
-        auto horizon = graph.AddPass(45, storage->adaptive_compute?"AdaptiveGTAOHorizon":"GTAOHorizon", inputs.queue);
-        readGuides(horizon);
+        if (!binding_result) return binding_result;
+        if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained texture binding failed.");
+        auto horizonBinding = pass_binding(0, 45, storage->adaptive_compute?"AdaptiveGTAOHorizon":"GTAOHorizon", inputs.queue);
+        if (!horizonBinding) return AoFailure(ErrorCode::InvalidState, "AO retained horizon pass is missing.");
+        auto &horizon = *horizonBinding;
+        if (!retained) readGuides(horizon);
         if(storage->adaptive_compute)
         {
-            horizon.Read(inputs.adaptive_density.version,Access::ComputeRead);sparse=horizon.Write(sparse,Access::UnorderedWrite);
+            if (retained) sparse = retained->sparse;
+            else { horizon.Read(inputs.adaptive_density.version,Access::ComputeRead);sparse=horizon.Write(sparse,Access::UnorderedWrite); }
+            if (capture) capture->sparse = sparse;
             horizon.SetExecute(execute(4,aoActive));
-            auto reconstruct=graph.AddPass(282,"AdaptiveGTAOCurrentGuideResolve",inputs.queue);
-            readGuides(reconstruct);reconstruct.Read(inputs.adaptive_density.version,Access::ComputeRead);
-            reconstruct.Read(sparse,Access::ComputeRead);raw=reconstruct.Write(raw,Access::UnorderedWrite);
+            auto reconstructBinding = pass_binding(1,282,"AdaptiveGTAOCurrentGuideResolve",inputs.queue);
+            if (!reconstructBinding) return AoFailure(ErrorCode::InvalidState, "AO retained reconstruct pass is missing.");
+            auto &reconstruct = *reconstructBinding;
+            if (retained) raw = retained->raw;
+            else { readGuides(reconstruct);reconstruct.Read(inputs.adaptive_density.version,Access::ComputeRead);
+                reconstruct.Read(sparse,Access::ComputeRead);raw=reconstruct.Write(raw,Access::UnorderedWrite); }
             reconstruct.SetExecute(execute(5,aoActive,1));outputs.adaptive_density_used=true;
         }
-        else{raw=horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
-        auto temporal = graph.AddPass(46, "GTAOTemporal", inputs.queue);
-        readGuides(temporal); temporal.Read(raw, Access::ComputeRead);
-        temporal.Read(inputs.motion.version, Access::ComputeRead);
-        temporal.Read(inputs.surface_history.version, Access::ComputeRead);
-        if (historyValid)
+        else{raw=retained?retained->raw:horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
+        if (capture) capture->raw = raw;
+        auto temporalBinding = pass_binding(2,46,"GTAOTemporal",inputs.queue);
+        if (!temporalBinding) return AoFailure(ErrorCode::InvalidState, "AO retained temporal pass is missing.");
+        auto &temporal = *temporalBinding;
+        if (retained) { history = retained->history_output; metadata = retained->metadata; }
+        else
         {
-            temporal.Read(previous, Access::ComputeRead);
-            temporal.Read(previousMetadata, Access::ComputeRead);
+            readGuides(temporal); temporal.Read(raw, Access::ComputeRead);
+            temporal.Read(inputs.motion.version, Access::ComputeRead);
+            temporal.Read(inputs.surface_history.version, Access::ComputeRead);
+            if (historyValid)
+            {
+                temporal.Read(previous, Access::ComputeRead);
+                temporal.Read(previousMetadata, Access::ComputeRead);
+            }
+            history = temporal.Write(history, Access::UnorderedWrite);
+            metadata = temporal.Write(metadata, Access::UnorderedWrite);
         }
-        history = temporal.Write(history, Access::UnorderedWrite);
-        metadata = temporal.Write(metadata, Access::UnorderedWrite);
+        if (capture) { capture->history_output = history; capture->metadata = metadata; }
         temporal.SetExecute(execute(1, aoActive));
-        auto bilateral = graph.AddPass(47, "GTAOBilateral", inputs.queue);
-        readGuides(bilateral); bilateral.Read(history, Access::ComputeRead);
-        resolved = bilateral.Write(resolved, Access::UnorderedWrite);
+        auto bilateralBinding = pass_binding(3,47,"GTAOBilateral",inputs.queue);
+        if (!bilateralBinding) return AoFailure(ErrorCode::InvalidState, "AO retained bilateral pass is missing.");
+        auto &bilateral = *bilateralBinding;
+        if (retained) resolved = retained->resolved;
+        else { readGuides(bilateral); bilateral.Read(history, Access::ComputeRead);
+            resolved = bilateral.Write(resolved, Access::UnorderedWrite); }
+        if (capture) capture->resolved = resolved;
         bilateral.SetExecute(execute(2, active));
         // The next graph imports the same physical histories; record a common
         // shader-read layout even when the current frame has no history consumer.
-        graph.SetFinalAccess(history, Access::ComputeRead);
-        graph.SetFinalAccess(metadata, Access::ComputeRead);
+        if (!retained)
+        {
+            graph.SetFinalAccess(history, Access::ComputeRead);
+            graph.SetFinalAccess(metadata, Access::ComputeRead);
+        }
         outputs.ao = resolved; outputs.ao_resource = storage->resolved.resource.Get();
         outputs.ao_srv = storage->export_descriptors->GetCPUDescriptorHandleForHeapStart();
     }
     if (storage->contact_enabled)
     {
         auto contact = import(storage->contact, "AO.ContactVisibility");
-        auto pass = graph.AddPass(48, "ContactShadows", QueueHint::Direct);
-        readGuides(pass); contact = pass.Write(contact, Access::UnorderedWrite);
+        if (!binding_result) return binding_result;
+        if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained contact binding failed.");
+        auto contactBinding = pass_binding(4,48,"ContactShadows",QueueHint::Direct);
+        if (!contactBinding) return AoFailure(ErrorCode::InvalidState, "AO retained contact pass is missing.");
+        auto &pass = *contactBinding;
+        if (retained) contact = retained->contact_output;
+        else { readGuides(pass); contact = pass.Write(contact, Access::UnorderedWrite); }
+        if (capture) capture->contact_output = contact;
         pass.SetExecute(execute(3, active));
         outputs.contact = contact; outputs.contact_resource = storage->contact.resource.Get();
         outputs.contact_srv = storage->export_descriptors->GetCPUDescriptorHandleForHeapStart();
         outputs.contact_srv.ptr += storage->descriptor_stride;
     }
     impl_->pending = std::move(pending);
+    if (capture) capture->valid = true;
     return Result::Success();
 }
 

@@ -1,8 +1,20 @@
 #pragma once
 
-#include <hs/core/render_view_input.hpp>
-#include <hs/core/render_scene_ref.hpp>
-#include <hs/renderer/renderer.hpp>
+#include <hs/render_data/render_view_input.hpp>
+#include <hs/render_data/render_scene_ref.hpp>
+#include <hs/render_data/devtools_frame_data.hpp>
+#include <hs/render_data/vfx_decal_input.hpp>
+#include <hs/render_data/vfx_distortion_input.hpp>
+#include <hs/render_data/vfx_entity_surface_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_fresnel_input.hpp>
+#include <hs/render_data/vfx_light_input.hpp>
+#include <hs/render_data/vfx_owned_mesh.hpp>
+#include <hs/render_data/vfx_ribbon_input.hpp>
+#include <hs/render_data/vfx_screen_input.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_volume_input.hpp>
+#include <hs/core/presentation_event.hpp>
 #include <cstdint>
 #include <optional>
 
@@ -32,7 +44,7 @@ struct RenderVfxFrameInput
 struct RenderFrameInput
 {
     std::span<const RenderViewInput> views;
-    RenderSnapshotExchange::ReadPair snapshots;
+    RenderSnapshotPair snapshots;
     std::span<const PresentationEvent> events;
     RenderVfxFrameInput vfx;
     DevToolsFrameData devtools;
@@ -46,5 +58,8 @@ struct RenderFrameInput
     // so publication boundaries depend on frames rather than wall-clock speed.
     bool wait_for_streaming{};
     std::uint64_t ui_packet_generation{};
+    // Capture before preparing effects so all package consumers sample one clock.
+    // Views do not retime this explicit sample; discontinuities reset their history.
+    std::optional<std::chrono::steady_clock::time_point> sample_time;
 };
 } // namespace hs

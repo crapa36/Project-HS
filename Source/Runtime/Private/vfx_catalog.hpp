@@ -3,7 +3,7 @@
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 #include <hs/runtime/vfx_image.hpp>
 #include <memory>
 

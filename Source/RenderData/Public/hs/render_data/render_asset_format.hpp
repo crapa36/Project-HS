@@ -119,11 +119,33 @@ struct PackageView
     std::vector<ChunkView> chunks;
 };
 
+// Bounded prefix proof for a leased developer product. It does not authenticate
+// chunk contents; consumers must admit the complete product at the payload read.
+struct PackageDirectoryChunk
+{
+    ChunkType type{};
+    std::uint16_t version{};
+    bool required{};
+    std::uint64_t offset{}, byte_count{}, count{};
+    std::uint32_t stride{};
+};
+struct PackageDirectory
+{
+    AssetId asset_id;
+    std::vector<std::string> dependencies;
+    std::vector<PackageDirectoryChunk> chunks;
+};
+// Shape/range proof only; authenticate the full product before binding payload bytes.
+[[nodiscard]] PackageDirectory ReadPackageDirectory(
+    std::span<const std::byte> prefix, std::uint64_t product_bytes, AssetId expected_asset_id);
+
 // Portable little-endian v1 package. Throws std::runtime_error on invalid input.
 [[nodiscard]] std::vector<std::byte> BuildPackage(
     AssetId asset_id, std::span<const std::string> dependencies,
     std::span<const ChunkSource> chunks);
+// The decoder mode requires immediate semantic vertex decoding before payload use.
+enum class PackageReadMode { FullValidation, GeometryDecoderValidatesVertices };
 [[nodiscard]] PackageView ReadPackage(std::span<const std::byte> bytes,
-                                      AssetId expected_asset_id);
+    AssetId expected_asset_id, PackageReadMode mode = PackageReadMode::FullValidation);
 [[nodiscard]] std::array<std::byte, 32> Sha256(std::span<const std::byte> bytes);
 } // namespace hs::render_data

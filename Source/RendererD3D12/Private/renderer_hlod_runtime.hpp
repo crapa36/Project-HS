@@ -1,11 +1,13 @@
 #pragma once
 
+#include "renderer_asset_source.hpp"
+
 #include "renderer_hlod.hpp"
 #include "renderer_hlod_scene.hpp"
 #include "d3d12_resources.hpp"
 #include "residency_manager.hpp"
-#include <hs/core/render_snapshot.hpp>
-#include <hs/core/render_view_input.hpp>
+#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_view_input.hpp>
 
 #include <array>
 #include <filesystem>
@@ -49,7 +51,7 @@ struct HlodRuntime
     render_data::SceneHlod scene;
     HlodScenePreparation prepared_scene;
     std::string logical_id, content_generation;
-    std::vector<std::filesystem::path> page_paths;
+    std::vector<RendererAssetSource> page_sources;
     std::vector<std::string> page_digests;
     std::vector<std::uint32_t> proxy_material_ordinals;
     // IO admission is a nonoverlapping forest frontier. Draw selection remains
@@ -68,5 +70,19 @@ struct HlodFrameGraph
     HlodFrameOutputs outputs;
     BufferHandle refs{}, readback{};
     bool registered{};
+};
+struct HlodRuntimeFrameLayout
+{
+    bool valid{},active{};
+    BufferHandle refs,readback;
+    std::uint32_t copy_pass{};
+    HlodLayout selection;
+};
+// Keep this input object in place between preparation and registration.
+struct HlodRuntimeFrameRecordData
+{
+    HlodViewRuntime *view{};
+    HlodFrameInputs inputs;
+    HlodFrameRecordData selection;
 };
 } // namespace hs

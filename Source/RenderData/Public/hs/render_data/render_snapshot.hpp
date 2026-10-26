@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -196,6 +197,8 @@ struct RenderInstance
     AssetId animation_clip_id{};
     double animation_time_seconds{};
     float animation_playback_rate{1.0f};
+    // Last instantaneous movement signal; independent of content and pose identity.
+    Sequence motion_epoch{};
 };
 
 struct AnimationPoseRef
@@ -309,6 +312,18 @@ struct CameraView
     float pitch_degrees{55.0f};
     float vertical_fov_degrees{45.0f};
     float distance{28.0f};
+    // Included in target.y; keep user zoom offset out of dynamic follow interpolation.
+    float target_height_offset{};
+    Sequence target_motion_epoch{};
+};
+
+enum class RenderClockMode : std::uint8_t { Scripted, RealtimeRunning, Frozen };
+
+struct RenderClockStamp
+{
+    std::uint64_t epoch{};
+    RenderClockMode mode{RenderClockMode::Scripted};
+    std::chrono::steady_clock::time_point current_boundary{};
 };
 
 struct RenderSnapshotHeader
@@ -317,6 +332,8 @@ struct RenderSnapshotHeader
     std::chrono::nanoseconds simulation_time{};
     GameplayChecksum checksum{};
     std::uint64_t session_id{};
+    RenderClockStamp clock;
+    std::uint64_t dynamic_pair_revision{};
 };
 
 // Immutable environment data shared by all snapshots for one arena/content layout.
@@ -414,6 +431,8 @@ class RenderSnapshotStorage
                           std::size_t light_capacity, std::size_t ui_capacity);
 
     void Clear() noexcept;
+    // Copies a different retained sample; UI belongs only to the current packet.
+    void CopyDynamicFrom(const RenderSnapshot &sample);
     [[nodiscard]] bool AddInstance(const RenderInstance &instance);
     [[nodiscard]] bool AddPose(const AnimationPoseRef &pose);
     [[nodiscard]] bool AddCapturedInstance(const CapturedRenderInstance &capture);
@@ -441,5 +460,46 @@ class RenderSnapshotStorage
     std::vector<PersistentVfxVisual> persistent_vfx_;
     std::shared_ptr<const StaticRenderScene> static_scene_;
 };
+
+struct RenderSnapshotPair
+{
+    RenderSnapshot previous{}, current{};
+    Sequence previous_publication_sequence{}, current_publication_sequence{};
+    bool has_previous{}, has_current{};
+};
+
+[[nodiscard]] inline CameraView InterpolateRenderCamera(const RenderSnapshotPair &pair, float alpha) noexcept
+{
+    auto camera = pair.current.camera;
+    if (!pair.has_previous || alpha >= 1.0f) return camera;
+    const auto &previous = pair.previous.camera;
+    if (previous.target_motion_epoch != camera.target_motion_epoch)
+    {
+        camera.target = {previous.target.x,
+            previous.target.y - previous.target_height_offset + camera.target_height_offset,
+            previous.target.z};
+        return camera;
+    }
+    camera.target = {std::lerp(previous.target.x, camera.target.x, alpha),
+        std::lerp(previous.target.y - previous.target_height_offset,
+                  camera.target.y - camera.target_height_offset, alpha) + camera.target_height_offset,
+        std::lerp(previous.target.z, camera.target.z, alpha)};
+    return camera;
+}
+
+[[nodiscard]] inline float RenderSnapshotInterpolation(const RenderSnapshotPair &pair,
+    std::chrono::steady_clock::time_point now, bool enabled) noexcept
+{
+    const auto &current = pair.current.header;
+    const auto &previous = pair.previous.header;
+    if (!enabled || !pair.has_previous || current.session_id != previous.session_id ||
+        current.clock.mode != RenderClockMode::RealtimeRunning ||
+        current.tick <= previous.tick ||
+        current.tick - previous.tick != 1 || current.simulation_time <= previous.simulation_time)
+        return 1.0f;
+    const auto step = std::chrono::duration<float>(current.simulation_time - previous.simulation_time).count();
+    return std::clamp(std::chrono::duration<float>(now - current.clock.current_boundary).count() / step,
+                      0.0f, 1.0f);
+}
 
 } // namespace hs

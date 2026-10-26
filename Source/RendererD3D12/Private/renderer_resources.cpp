@@ -3,10 +3,70 @@
 #include <hs/render_data/texture_package.hpp>
 
 #include <exception>
+#include <limits>
 #include <stdexcept>
 
 namespace hs
 {
+Result AllocationResource::EnsureNativeContract(ID3D12Device *device)
+{
+    if (!resource || !allocation || !device)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Native resource contract requires a resource, allocation and device.");
+    if (NativeContract())
+    {
+        if (device == contract_device_input) return Result::Success();
+        Microsoft::WRL::ComPtr<IUnknown> expected;
+        if (FAILED(device->QueryInterface(IID_PPV_ARGS(&expected))) ||
+            expected.Get() != native_contract.device_identity)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Native resource contract belongs to a different device.");
+        contract_device_input = device;
+        return Result::Success();
+    }
+    Microsoft::WRL::ComPtr<IUnknown> identity, actual_device, expected_device, heap_identity;
+    if (FAILED(resource->QueryInterface(IID_PPV_ARGS(&identity))) ||
+        FAILED(resource->GetDevice(IID_PPV_ARGS(&actual_device))) ||
+        FAILED(device->QueryInterface(IID_PPV_ARGS(&expected_device))) ||
+        actual_device.Get() != expected_device.Get())
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Native resource contract cannot prove resource and device identity.");
+    NativeResourceContract verified;
+    verified.native_resource = resource.Get();
+    verified.resource_identity = identity.Get();
+    verified.device_identity = actual_device.Get();
+    verified.description = resource->GetDesc();
+    verified.backing = NativeBackingKind::Allocation;
+    verified.generation = native_contract.generation + 1;
+    if (!verified.generation) ++verified.generation;
+    if (verified.description.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    {
+        D3D12_HEAP_PROPERTIES properties{};
+        D3D12_HEAP_FLAGS flags{};
+        if (FAILED(resource->GetHeapProperties(&properties, &flags)))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Native resource contract cannot query buffer heap properties.");
+        verified.buffer_heap = properties.Type == D3D12_HEAP_TYPE_UPLOAD ||
+            properties.Type == D3D12_HEAP_TYPE_READBACK ? properties.Type : D3D12_HEAP_TYPE_DEFAULT;
+    }
+    if (allocation && allocation->GetHeap())
+    {
+        if (FAILED(allocation->GetHeap()->QueryInterface(IID_PPV_ARGS(&heap_identity))) ||
+            !allocation->GetSize() ||
+            allocation->GetOffset() > std::numeric_limits<std::uint64_t>::max() - allocation->GetSize())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Native resource contract has an invalid placed allocation.");
+        verified.heap_identity = heap_identity.Get();
+        verified.heap_offset = allocation->GetOffset();
+        verified.heap_size = allocation->GetSize();
+    }
+    native_contract = verified;
+    contract_resource = resource.Get();
+    contract_allocation = allocation;
+    contract_device_input = device;
+    return Result::Success();
+}
+
 namespace
 {
 constexpr D3D12_RESOURCE_STATES kAllShaderRead =
@@ -54,6 +114,11 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
         static_cast<unsigned>(resource.Dimension), resource.Width, resource.Height, resource.MipLevels,
         static_cast<unsigned>(resource.Format), static_cast<unsigned>(resource.Flags),
         static_cast<unsigned>(allocation.HeapType)));
+    if (auto contract = output.EnsureNativeContract(device.Get()); !contract)
+    {
+        output.Reset();
+        return contract;
+    }
     RecordResidentAllocation(output, allocation.HeapType);
     return Result::Success();
 }
@@ -239,6 +304,8 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
     rtv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     auto handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    back_buffer_contracts = {};
+    back_buffer_contract_devices = {};
     for (std::uint32_t index = 0; index < kFrameCount; ++index)
     {
         result = swap_chain->GetBuffer(index, IID_PPV_ARGS(&back_buffers[index]));
@@ -1048,9 +1115,31 @@ Result D3D12Renderer::Impl::CreateGpuData()
     const auto load_character_geometry = [&](const std::string &logical_id,
         bool validate_upper_body_mask, render_data::CharacterMetadataPackageData &character,
         GeometryPageGpu &geometry_page, std::uint32_t page_slot,
-        std::vector<render_data::ExpandedVertex> *support_vertices = nullptr) -> Result {
-        std::filesystem::path metadata_path;
-        if (auto resolved = config.ResolveProduct(logical_id, metadata_path); !resolved)
+        std::vector<render_data::ExpandedVertex> *support_vertices = nullptr,
+        std::vector<std::string> *content_dependencies = nullptr) -> Result {
+        if (config.packed_content)
+        {
+            const auto handle = FindRendererCharacter(config, MakeAssetId(logical_id));
+            if (!handle) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Compiled character is missing");
+            const auto &descriptor = config.packed_characters[handle.value];
+            const auto page_id = "render/geometry/" + logical_id.substr(7, logical_id.size() - 12) + ".rpage";
+            const auto &compiled = config.packed_geometry[descriptor.geometry_page.value];
+            const auto &bulk = config.packed_bulks[compiled.bulk_index];
+            RendererAssetSource source;
+            if (auto resolved = ResolveRendererAsset(config, page_id, source); !resolved) return resolved;
+            std::vector<std::byte> bytes;
+            if (auto read = source.Read(bytes); !read) return read;
+            PreparedGeometryUpload preparation;
+            preparation.descriptor = &compiled; preparation.digest = bulk.range.expected_digest;
+            preparation.source_product = page_id;
+            if (auto created = CreateGeometryPage(geometry_page, descriptor.geometry, bytes, compiled.asset_id,
+                page_slot, command_list.Get(), geometry_uploads, &preparation); !created) return created;
+            if (support_vertices) support_vertices->assign(preparation.descriptor->ground_support.begin(),
+                preparation.descriptor->ground_support.end());
+            return Result::Success();
+        }
+        RendererAssetSource metadata_path;
+        if (auto resolved = ResolveRendererAsset(config, logical_id, metadata_path); !resolved)
             return resolved;
         std::vector<std::byte> metadata_bytes;
         if (auto read = ReadBinary(metadata_path, metadata_bytes); !read) return read;
@@ -1058,14 +1147,15 @@ Result D3D12Renderer::Impl::CreateGpuData()
         {
             const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(metadata_bytes, MakeAssetId(logical_id)); });
             character = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeCharacterMetadataPackage(package, validate_upper_body_mask); });
+            if(content_dependencies) *content_dependencies=package.dependencies;
+            std::vector<std::byte> extension_bytes;
             if (logical_id == "render/character/archer.rpkg")
             {
                 constexpr std::string_view extension_id = "render/animation/archer.rpkg";
                 if (std::ranges::find(package.dependencies, extension_id) == package.dependencies.end())
                     throw std::runtime_error("Archer metadata is missing its named-animation dependency; recook the character package.");
-                std::filesystem::path extension_path;
-                if (auto resolved = config.ResolveProduct(extension_id, extension_path); !resolved) return resolved;
-                std::vector<std::byte> extension_bytes;
+                RendererAssetSource extension_path;
+                if (auto resolved = ResolveRendererAsset(config, extension_id, extension_path); !resolved) return resolved;
                 if (auto read = ReadBinary(extension_path, extension_bytes); !read) return read;
                 auto extension = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return MeasureStartupOperation(RendererStartupOperation::AnimationPrepare, [&] { return render_data::DecodeCharacterAnimationExtension(extension_bytes, MakeAssetId(extension_id)); }); });
                 MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ValidateCharacterAnimationBinding(extension, character, MakeAssetId(logical_id)); });
@@ -1075,8 +1165,8 @@ Result D3D12Renderer::Impl::CreateGpuData()
             {
                 const auto name = render_data::kHeroMaterialNames[binding.hero_ordinal];
                 const auto &material_id = package.dependencies[binding.dependency_index];
-                std::filesystem::path material_path;
-                if (auto resolved = config.ResolveProduct(material_id, material_path); !resolved) return resolved;
+                RendererAssetSource material_path;
+                if (auto resolved = ResolveRendererAsset(config, material_id, material_path); !resolved) return resolved;
                 std::vector<std::byte> material_bytes;
                 if (auto read = ReadBinary(material_path, material_bytes); !read) return read;
                 const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadHeroMaterialPackage(material_bytes, name); });
@@ -1084,32 +1174,110 @@ Result D3D12Renderer::Impl::CreateGpuData()
                     throw std::runtime_error("character FBX slot binding disagrees with its material closure domain");
             }
             const auto &page_id = package.dependencies[character.geometry.page_dependency_index];
-            std::filesystem::path page_path;
-            if (auto resolved = config.ResolveProduct(page_id, page_path); !resolved) return resolved;
+            RendererAssetSource page_path;
+            if (auto resolved = ResolveRendererAsset(config, page_id, page_path); !resolved) return resolved;
             std::vector<std::byte> page_bytes;
             if (auto read = ReadBinary(page_path, page_bytes); !read) return read;
-            const auto page_package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(page_bytes, MakeAssetId(page_id)); });
-            if (!page_package.dependencies.empty())
-                throw std::runtime_error(
-                    "direct character geometry page has an unexpected intermediate dependency; recook the character product");
-            auto geometry = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryPage(
-                page_bytes, MakeAssetId(page_id), character.geometry); });
-            MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ValidateCharacterGeometry(character, geometry); });
+            PreparedGeometryUpload preparation;
+            if (auto prepared = PrepareReadGeometry(config, page_id, page_bytes, character.geometry, preparation); !prepared)
+                return prepared;
+            if (!preparation.page.package.dependencies.empty())
+                throw std::runtime_error("Direct character geometry has an unexpected intermediate dependency.");
+            MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] {
+                render_data::ValidateCharacterGeometry(character, preparation.page);
+            });
+            if (config.development_catalog)
+            {
+                static_cast<void>(config.development_catalog->AdmitCharacter(
+                    MakeAssetId(logical_id), metadata_bytes, package, character));
+                if (!extension_bytes.empty())
+                {
+                    const auto extension_id = MakeAssetId("render/animation/archer.rpkg");
+                    const auto extension_package = render_data::ReadPackage(extension_bytes, extension_id);
+                    static_cast<void>(config.development_catalog->AdmitAnimation(extension_id,
+                        extension_bytes, extension_package, archer_named_animations));
+                }
+            }
             if (auto created = MeasureStartupOperation(RendererStartupOperation::GeometryPrepare, [&] { return CreateGeometryPage(geometry_page, character.geometry, page_bytes,
-                    MakeAssetId(page_id), page_slot, command_list.Get(), geometry_uploads); }); !created)
+                    MakeAssetId(page_id), page_slot, command_list.Get(), geometry_uploads, &preparation); }); !created)
                 return created;
-            if (support_vertices) *support_vertices = std::move(geometry.vertices);
+            if (support_vertices)
+                *support_vertices = std::move(preparation.page.geometry.vertices);
         }
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Invalid character geometry " + metadata_path.string() + ": " + error.what());
+                "Invalid character geometry " + metadata_path.path.string() + ": " + error.what());
         }
         return Result::Success();
     };
 
     constexpr std::array<const char *, 6> monster_names{
         "enemy_melee", "enemy_ranged", "enemy_suicide", "boss_5m", "boss_10m", "boss_final"};
+    const auto load_reduced_monster = [&](std::size_t asset_index,const std::string &logical_id,
+        MonsterAsset &asset,const render_data::CharacterMetadataPackageData *loose_character,
+        std::span<const std::string> loose_dependencies) -> Result {
+        if(asset.geometry_lods.empty() || asset.geometry_lods.size()>3 ||
+            asset.geometry_lods.front().lod!=0)
+            return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
+                "Monster LOD directory is incomplete");
+        const render_data::CharacterDescriptor *descriptor{};
+        if(config.packed_content)
+        {
+            const auto handle=FindRendererCharacter(config,MakeAssetId(logical_id));
+            if(!handle) return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Compiled monster is missing");
+            descriptor=&config.packed_characters[handle.value];
+        }
+        else if(config.development_catalog)
+            descriptor=config.development_catalog->FindCharacter(MakeAssetId(logical_id));
+        for(std::size_t lod=1;lod<asset.geometry_lods.size();++lod)
+        {
+            const auto &metadata=asset.geometry_lods[lod];
+            const auto page_id="render/geometry/character/"+std::string(monster_names[asset_index])+"_lod"+
+                std::to_string(lod)+".rpage";
+            if(metadata.lod!=lod || metadata.error_method_abi!=render_data::kSkinnedPoseErrorMethodAbi ||
+                metadata.page_dependency_index >= (descriptor?descriptor->dependencies.size():loose_dependencies.size()) ||
+                (descriptor?descriptor->dependencies[metadata.page_dependency_index].value!=MakeAssetId(page_id).value:
+                    loose_dependencies[metadata.page_dependency_index]!=page_id))
+                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
+                    "Monster LOD page identity or error certificate differs from the selected catalog");
+            auto &page=monster_reduced_geometry[asset_index][lod-1];
+            page.fallback_page_slot=kMonsterGeometryPage+static_cast<std::uint32_t>(asset_index);
+            RendererAssetSource source;
+            if(auto resolved=ResolveRendererAsset(config,page_id,source);!resolved) return resolved;
+            std::vector<std::byte> bytes;
+            if(auto read=source.Read(bytes);!read) return read;
+            PreparedGeometryUpload preparation;
+            if(auto prepared=PrepareReadGeometry(config,page_id,bytes,metadata,preparation);!prepared) return prepared;
+            try
+            {
+                if(!preparation.page.geometry.vertices.empty() && loose_character)
+                {
+                    auto view=*loose_character;view.geometry=metadata;
+                    render_data::ValidateCharacterGeometry(view,preparation.page);
+                }
+                if(preparation.descriptor &&
+                    (!preparation.descriptor->payload_ready ||
+                     preparation.descriptor->max_bone_index>=asset.bone_count ||
+                     preparation.descriptor->max_material_index>=asset.material_count))
+                    throw std::runtime_error("Monster LOD payload exceeds its skeleton or material range");
+            }
+            catch(const std::exception &error)
+            {
+                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",error.what());
+            }
+            const auto slot=kMonsterReducedGeometryPage+static_cast<std::uint32_t>(asset_index*2+lod-1);
+            if(auto created=MeasureStartupOperation(RendererStartupOperation::GeometryPrepare,[&] {
+                return CreateGeometryPage(page,metadata,bytes,MakeAssetId(page_id),slot,
+                    command_list.Get(),geometry_uploads,&preparation);
+            });!created) return created;
+        }
+        for(std::size_t lod=asset.geometry_lods.size();lod<=2;++lod)
+            monster_reduced_geometry[asset_index][lod-1].fallback_page_slot=
+                kMonsterGeometryPage+static_cast<std::uint32_t>(asset_index);
+        asset.PrepareIntervalLookup();
+        return Result::Success();
+    };
     std::vector<DirectX::XMFLOAT4X4> skin_matrices;
     for (std::size_t asset_index = 0; asset_index < monster_names.size(); ++asset_index)
     {
@@ -1117,25 +1285,79 @@ Result D3D12Renderer::Impl::CreateGpuData()
         const std::string logical_id =
             std::string("render/character/") + monster_names[asset_index] + ".rpkg";
         render_data::CharacterMetadataPackageData character;
+        std::vector<std::string> character_dependencies;
         if (auto loaded = load_character_geometry(logical_id, false, character, asset,
-                kMonsterGeometryPage + static_cast<std::uint32_t>(asset_index)); !loaded)
+                kMonsterGeometryPage + static_cast<std::uint32_t>(asset_index),nullptr,
+                &character_dependencies); !loaded)
             return loaded;
-        asset.bone_count = character.bone_count;
-        asset.ground_offset = character.ground_offset;
-        asset.material_count = character.material_count;
-        asset.material_bindings = std::move(character.material_bindings);
+        if (config.development_catalog)
+        {
+            const auto *descriptor = config.development_catalog->FindCharacter(MakeAssetId(logical_id));
+            if (!descriptor || !character.monster)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Admitted monster descriptor or palette is absent");
+            asset.bone_count = descriptor->bone_count; asset.material_count = descriptor->material_count;
+            asset.ground_offset = descriptor->ground_offset; asset.material_bindings = descriptor->material_bindings;
+            asset.skin_offset = static_cast<std::uint32_t>(skin_matrices.size());
+            asset.skeleton_binding = descriptor->skeleton_binding; asset.deformation_flags = descriptor->deformation_flags;
+            asset.geometry_lods = descriptor->lods; asset.interval_bounds = descriptor->interval_bounds;
+            for (const auto &clip : descriptor->clips)
+                asset.clip_meta[static_cast<std::size_t>(clip.clip)] =
+                    {clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+            if (character.monster->final_matrices.size() !=
+                descriptor->final_matrices.byte_count / sizeof(DirectX::XMFLOAT4X4))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Admitted monster palette size differs");
+            for (const auto &matrix : character.monster->final_matrices)
+            {
+                auto &stored = skin_matrices.emplace_back();
+                std::memcpy(&stored, matrix.data(), sizeof(stored));
+            }
+            if(auto loaded=load_reduced_monster(asset_index,logical_id,asset,&character,
+                character_dependencies);!loaded) return loaded;
+            continue;
+        }
+        if (config.packed_content)
+        {
+            const auto &descriptor = config.packed_characters[FindRendererCharacter(config, MakeAssetId(logical_id)).value];
+            asset.bone_count = descriptor.bone_count; asset.material_count = descriptor.material_count;
+            asset.ground_offset = descriptor.ground_offset; asset.material_bindings = descriptor.material_bindings;
+            asset.skin_offset = static_cast<std::uint32_t>(skin_matrices.size());
+            asset.skeleton_binding = descriptor.skeleton_binding; asset.deformation_flags = descriptor.deformation_flags;
+            asset.geometry_lods = descriptor.lods; asset.interval_bounds = descriptor.interval_bounds;
+            for (const auto &clip : descriptor.clips)
+                asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+            const auto &range = descriptor.final_matrices;
+            if (skin_matrices.size() > UINT32_MAX || !range.byte_count || range.byte_count % sizeof(DirectX::XMFLOAT4X4) ||
+                range.byte_count / sizeof(DirectX::XMFLOAT4X4) > UINT32_MAX - skin_matrices.size())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Compiled palette size is invalid");
+            const auto first = skin_matrices.size();
+            skin_matrices.resize(first + static_cast<std::size_t>(range.byte_count / sizeof(DirectX::XMFLOAT4X4)));
+            RendererAssetSource sample_source;
+            if (auto resolved = ResolveRendererAsset(config, logical_id, sample_source); !resolved) return resolved;
+            if (auto read = sample_source.ReadRange(range.offset,
+                std::as_writable_bytes(std::span(skin_matrices).subspan(first)), range.expected_digest); !read) return read;
+            if(auto loaded=load_reduced_monster(asset_index,logical_id,asset,nullptr,{});!loaded) return loaded;
+            continue;
+        }
+        auto &owned = character;
+        asset.bone_count = owned.bone_count;
+        asset.ground_offset = owned.ground_offset;
+        asset.material_count = owned.material_count;
+        asset.owned_material_bindings = std::move(owned.material_bindings);
+        asset.material_bindings = asset.owned_material_bindings;
         asset.skin_offset = static_cast<std::uint32_t>(skin_matrices.size());
-        if (!character.monster)
+        if (!owned.monster)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Monster product is missing its cooked final palette; recook the character product.");
-        for (const auto &clip : character.clips)
+        for (const auto &clip : owned.clips)
             asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {
                 clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
-        auto &cooked = *character.monster;
+        auto &cooked = *owned.monster;
         asset.skeleton_binding = cooked.skeleton_binding;
         asset.deformation_flags = cooked.flags;
-        asset.geometry_lods = std::move(cooked.lods);
-        asset.interval_bounds = std::move(cooked.interval_bounds);
+        asset.owned_geometry_lods = std::move(cooked.lods);
+        asset.owned_interval_bounds = std::move(cooked.interval_bounds);
+        asset.geometry_lods = asset.owned_geometry_lods;
+        asset.interval_bounds = asset.owned_interval_bounds;
         StartupOperationScope palette_timing(RendererStartupOperation::AnimationPrepare);
         for (const auto &matrix : cooked.final_matrices)
         {
@@ -1143,73 +1365,62 @@ Result D3D12Renderer::Impl::CreateGpuData()
             static_assert(sizeof(stored) == sizeof(matrix));
             std::memcpy(&stored, matrix.data(), sizeof(stored));
         }
+        if(auto loaded=load_reduced_monster(asset_index,logical_id,asset,&character,
+            character_dependencies);!loaded) return loaded;
     }
     if (auto uploaded = upload_immutable(monster_skin_matrices, std::as_bytes(std::span(skin_matrices))); !uploaded)
         return uploaded;
 
     // The atlas is cooked from Blender-authored triangle-expanded meshes.
-    std::filesystem::path atlas_path;
-    if (auto resolved = config.ResolveProduct("vfx/vfx_mesh_atlas.hsbin", atlas_path);
+    RendererAssetSource atlas_path;
+    if (auto resolved = ResolveRendererAsset(config, "vfx/vfx_mesh_atlas.hsbin", atlas_path);
         !resolved)
         return resolved;
     StartupOperationScope atlas_read_timing(RendererStartupOperation::CheckedBinaryRead);
-    std::ifstream atlas_stream(atlas_path, std::ios::binary | std::ios::ate);
     const auto atlas_failure = [] {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid or missing VFX mesh atlas");
     };
-    if (!atlas_stream) return atlas_failure();
-    const auto atlas_size = atlas_stream.tellg();
+    std::uint64_t atlas_size{};
+    if (auto sized = atlas_path.ByteCount(atlas_size); !sized) return sized;
     if (atlas_size < 100 || atlas_size > 64 * 1024 * 1024) return atlas_failure();
     std::vector<std::uint32_t> atlas_words(static_cast<std::size_t>(atlas_size) / 4);
     if (static_cast<std::size_t>(atlas_size) % 4 != 0) return atlas_failure();
-    atlas_stream.seekg(0);
-    if (!atlas_stream.read(reinterpret_cast<char *>(atlas_words.data()), atlas_size)) return atlas_failure();
+    std::vector<std::byte> atlas_bytes;
+    if (auto read = atlas_path.Read(atlas_bytes, atlas_size); !read) return read;
+    std::memcpy(atlas_words.data(), atlas_bytes.data(), atlas_bytes.size());
     atlas_read_timing.Stop();
+    render_data::VfxMeshAtlasDescriptor developer_atlas;
+    const render_data::VfxMeshAtlasDescriptor *atlas = config.packed_vfx_mesh_atlas;
+    if (config.packed_content)
+    {
+        if (!atlas || atlas->asset_id.value != MakeAssetId("vfx/vfx_mesh_atlas.hsbin").value)
+            return atlas_failure();
+    }
+    else
+    {
+        try { developer_atlas = render_data::CompileVfxMeshAtlasDescriptor(
+            atlas_bytes, MakeAssetId("vfx/vfx_mesh_atlas.hsbin")); }
+        catch (const std::exception &) { return atlas_failure(); }
+        atlas = &developer_atlas;
+    }
+    std::uint64_t vertex_count{};
+    for (std::size_t mesh = 0; mesh < atlas->meshes.size(); ++mesh)
+    {
+        const auto &entry = atlas->meshes[mesh];
+        if (!entry.vertex_count || !std::isfinite(entry.transverse_radius) || entry.transverse_radius <= 0 ||
+            !std::isfinite(entry.minimum_z) || !std::isfinite(entry.widest_z) || !std::isfinite(entry.maximum_z) ||
+            entry.minimum_z >= entry.maximum_z || entry.widest_z < entry.minimum_z ||
+            entry.widest_z > entry.maximum_z || atlas_words[5 + mesh * 3] != vertex_count ||
+            atlas_words[6 + mesh * 3] != entry.vertex_count)
+            return atlas_failure();
+        vertex_count += entry.vertex_count;
+        vfx_mesh_vertex_counts[mesh] = entry.vertex_count;
+        vfx_mesh_transverse_radii[mesh] = entry.transverse_radius;
+        vfx_mesh_longitudinal_bounds[mesh] = {entry.minimum_z, entry.widest_z, entry.maximum_z};
+    }
     if (atlas_words[0] != 0x4d565348u || atlas_words[1] != 1 || atlas_words[2] != 7 ||
-        atlas_words.size() != 25ull + 12ull * atlas_words[3]) return atlas_failure();
-    constexpr std::array<std::string_view, 7> mesh_names{
-        "arrowhead_mesh", "shard_mesh", "debris_shard_mesh", "small_shard_mesh",
-        "enemy_thorn_mesh", "boss_crest_lance_mesh", "needle_shard_mesh"};
-    std::uint32_t next_vertex = 0;
-    for (std::size_t mesh = 0; mesh < 7; ++mesh)
-    {
-        std::uint32_t expected_hash = 2166136261u;
-        for (const auto character : mesh_names[mesh])
-            expected_hash = (expected_hash ^ static_cast<unsigned char>(character)) * 16777619u;
-        if (atlas_words[4 + mesh * 3] != expected_hash) return atlas_failure();
-        const auto first = atlas_words[5 + mesh * 3];
-        const auto count = atlas_words[6 + mesh * 3];
-        if (first != next_vertex || count == 0 || count % 3 != 0 ||
-            first > atlas_words[3] || count > atlas_words[3] - first) return atlas_failure();
-        vfx_mesh_vertex_counts[mesh] = count;
-        float transverse_radius{};
-        float minimum_z = std::numeric_limits<float>::infinity();
-        float maximum_z = -minimum_z, widest_z{};
-        for (std::uint32_t vertex = first; vertex < first + count; ++vertex)
-        {
-            float x{}, y{}, z{};
-            std::memcpy(&x, &atlas_words[25 + vertex * 12], sizeof(x));
-            std::memcpy(&y, &atlas_words[26 + vertex * 12], sizeof(y));
-            std::memcpy(&z, &atlas_words[27 + vertex * 12], sizeof(z));
-            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return atlas_failure();
-            minimum_z = std::min(minimum_z, z);
-            maximum_z = std::max(maximum_z, z);
-            const auto radius = std::hypot(x, y);
-            if (radius > transverse_radius) { transverse_radius = radius; widest_z = z; }
-        }
-        if (transverse_radius <= 0) return atlas_failure();
-        vfx_mesh_transverse_radii[mesh] = transverse_radius;
-        if (minimum_z >= maximum_z) return atlas_failure();
-        vfx_mesh_longitudinal_bounds[mesh] = {minimum_z, widest_z, maximum_z};
-        next_vertex += count;
-    }
-    if (next_vertex != atlas_words[3]) return atlas_failure();
-    for (std::size_t word = 25; word < atlas_words.size(); ++word)
-    {
-        float value{};
-        std::memcpy(&value, &atlas_words[word], sizeof(value));
-        if (!std::isfinite(value)) return atlas_failure();
-    }
+        vertex_count != atlas_words[3] || atlas_words.size() != 25ull + 12ull * vertex_count)
+        return atlas_failure();
     if (auto uploaded = upload_immutable(vfx_mesh_atlas, std::as_bytes(std::span(atlas_words))); !uploaded)
         return uploaded;
 
@@ -1219,28 +1430,74 @@ Result D3D12Renderer::Impl::CreateGpuData()
     if (auto loaded = load_character_geometry(archer_logical_id, true, archer_package,
             archer_geometry, kArcherGeometryPage, &cooked_vertices); !loaded)
         return loaded;
-    archer_clips = std::move(archer_package.clips);
-    archer_parents = std::move(archer_package.parents);
-    archer_inverse_bind_matrices = std::move(archer_package.inverse_bind_matrices);
-    archer_upper_body_weights = std::move(archer_package.upper_body_weights);
-    archer_transforms = std::move(archer_package.transforms);
-    archer_bone_count = archer_package.bone_count;
-    archer_ground_offset = archer_package.ground_offset;
-    archer_material_count = archer_package.material_count;
-    archer_material_bindings = std::move(archer_package.material_bindings);
-    archer_support_vertices.clear();
-    for (const auto &vertex : cooked_vertices)
+    if (config.packed_content)
     {
-        if (vertex.position[1] > -archer_ground_offset + 0.12f) continue;
-        const auto duplicate = std::ranges::any_of(archer_support_vertices, [&](const auto &existing) {
-            return existing.position == vertex.position &&
-                   existing.bone_indices == vertex.bone_indices &&
-                   existing.bone_weights == vertex.bone_weights;
-        });
-        if (!duplicate) archer_support_vertices.push_back({vertex.position, vertex.normal,
+        const auto &descriptor = config.packed_characters[FindRendererCharacter(config, MakeAssetId(archer_logical_id)).value];
+        archer_clips = descriptor.clips; archer_parents = descriptor.parents;
+        archer_inverse_bind_matrices = descriptor.inverse_bind_matrices; archer_upper_body_weights = descriptor.upper_body_weights;
+        archer_bone_count = descriptor.bone_count; archer_material_count = descriptor.material_count;
+        archer_ground_offset = descriptor.ground_offset; archer_material_bindings = descriptor.material_bindings;
+        const auto read_transforms = [&](std::string_view id, const render_data::BulkRange &range,
+            std::vector<render_data::PackedCharacterTransform> &output) -> Result {
+            if (!range.byte_count || range.byte_count % sizeof(render_data::PackedCharacterTransform) ||
+                range.byte_count / sizeof(render_data::PackedCharacterTransform) > output.max_size())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Compiled transform range is invalid");
+            output.resize(static_cast<std::size_t>(range.byte_count / sizeof(render_data::PackedCharacterTransform)));
+            RendererAssetSource sample_source;
+            if (auto resolved = ResolveRendererAsset(config, id, sample_source); !resolved) return resolved;
+            return sample_source.ReadRange(range.offset, std::as_writable_bytes(std::span(output)), range.expected_digest);
+        };
+        if (auto read = read_transforms(archer_logical_id, descriptor.transforms, archer_packed_transforms); !read) return read;
+        archer_compiled_animation = FindRendererAnimation(config, MakeAssetId("render/animation/archer.rpkg"));
+        if (!archer_compiled_animation || archer_compiled_animation->character_asset_id.value != descriptor.asset_id.value)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Compiled Archer animation is missing or mismatched");
+        if (auto read = read_transforms("render/animation/archer.rpkg", archer_compiled_animation->transforms,
+            archer_named_packed_transforms); !read) return read;
+    }
+    else if (config.development_catalog)
+    {
+        const auto *descriptor = config.development_catalog->FindCharacter(MakeAssetId(archer_logical_id));
+        const auto *animation = config.development_catalog->FindAnimation(MakeAssetId("render/animation/archer.rpkg"));
+        if (!descriptor || !animation || animation->character_asset_id.value != descriptor->asset_id.value)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Admitted Archer character or animation is absent");
+        archer_clips = descriptor->clips; archer_parents = descriptor->parents;
+        archer_inverse_bind_matrices = descriptor->inverse_bind_matrices;
+        archer_upper_body_weights = descriptor->upper_body_weights;
+        archer_bone_count = descriptor->bone_count; archer_material_count = descriptor->material_count;
+        archer_ground_offset = descriptor->ground_offset; archer_material_bindings = descriptor->material_bindings;
+        const auto copy_transforms = [](std::span<const CharacterLocalTransform> source,
+            std::vector<render_data::PackedCharacterTransform> &destination) {
+            destination.reserve(source.size());
+            for (const auto &transform : source)
+                destination.push_back({transform.translation, transform.rotation, transform.scale});
+        };
+        copy_transforms(archer_package.transforms, archer_packed_transforms);
+        copy_transforms(archer_named_animations.transforms, archer_named_packed_transforms);
+        if (archer_packed_transforms.size() != descriptor->transforms.byte_count /
+                sizeof(render_data::PackedCharacterTransform) ||
+            archer_named_packed_transforms.size() != animation->transforms.byte_count /
+                sizeof(render_data::PackedCharacterTransform))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Admitted Archer transform extent differs");
+        archer_compiled_animation = animation;
+        archer_named_animations = {};
+    }
+    else
+    {
+        archer_owned_character = std::move(archer_package);
+        archer_clips = archer_owned_character.clips; archer_parents = archer_owned_character.parents;
+        archer_inverse_bind_matrices = archer_owned_character.inverse_bind_matrices;
+        archer_upper_body_weights = archer_owned_character.upper_body_weights; archer_transforms = archer_owned_character.transforms;
+        archer_bone_count = archer_owned_character.bone_count; archer_ground_offset = archer_owned_character.ground_offset;
+        archer_material_count = archer_owned_character.material_count; archer_material_bindings = archer_owned_character.material_bindings;
+    }
+    archer_support_vertices.clear();
+    if (!config.packed_content)
+        cooked_vertices = render_data::BuildGroundSupport(cooked_vertices, archer_ground_offset);
+    archer_support_vertices.reserve(cooked_vertices.size());
+    for (const auto &vertex : cooked_vertices)
+        archer_support_vertices.push_back({vertex.position, vertex.normal,
             vertex.bone_indices, vertex.bone_weights, vertex.uv, vertex.tangent,
             vertex.material_index, vertex.reserved});
-    }
 
     const std::string projectile_logical_id = "render/character/enemy_gel_projectile.rpkg";
     render_data::CharacterMetadataPackageData projectile_package;
@@ -1336,20 +1593,19 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         {
             const auto source_id = "character/" + names[slice] + ".dds";
             const auto package_id = "render/texture/" + names[slice] + ".rpkg";
-            std::filesystem::path path;
-            if (auto resolved = config.ResolveProduct(package_id, path); !resolved)
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(config, package_id, path); !resolved)
                 return resolved;
             if (auto loaded = ReadBinary(path, sources[slice].storage); !loaded)
                 return loaded;
             try
             {
-                sources[slice].view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(
-                    sources[slice].storage, MakeAssetId(package_id)); });
+                sources[slice].view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, package_id, sources[slice].storage); });
             }
             catch (const std::exception &error)
             {
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Invalid character texture package " + path.string() + ": " +
+                    "Invalid character texture package " + path.path.string() + ": " +
                     error.what());
             }
             const auto &view = sources[slice].view;
@@ -1362,11 +1618,11 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                 view.description.format != (normal ?
                     render_data::kTextureFormatBc7 :
                     render_data::kTextureFormatBc7Srgb) ||
-                view.dependencies != std::vector<std::string>{source_id} ||
+                !RendererTextureDependencyMatches(config, package_id, view, source_id) ||
                 view.subresources.size() != mips)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Character texture package shape or dependency changed: " +
-                    path.string());
+                    path.path.string());
             if (slice && view.description.format != sources.front().view.description.format)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character texture array mixes native formats.");
         }
@@ -1493,8 +1749,8 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         const auto source_id = name == "vfx_masks"
             ? "vfx/vfx_masks.dds"
             : "vfx/Content/Textures/VFX/" + std::string(filename);
-        std::filesystem::path path;
-        if (auto resolved = config.ResolveProduct(package_id, path); !resolved)
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(config, package_id, path); !resolved)
             return resolved;
         std::vector<std::byte> storage;
         if (auto loaded = ReadBinary(path, storage); !loaded)
@@ -1502,12 +1758,12 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         render_data::TexturePackageView view;
         try
         {
-            view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(storage, MakeAssetId(package_id)); });
+            view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, package_id, storage); });
         }
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Invalid VFX texture package " + path.string() + ": " + error.what());
+                "Invalid VFX texture package " + path.path.string() + ": " + error.what());
         }
         const auto &shape = view.description;
         if (shape.width != expected_width ||
@@ -1517,11 +1773,11 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             shape.array_size > std::numeric_limits<UINT16>::max() ||
             shape.mip_count != expected_mips ||
             shape.format != static_cast<std::uint32_t>(format) ||
-            view.dependencies != std::vector<std::string>{source_id} ||
+            !RendererTextureDependencyMatches(config, package_id, view, source_id) ||
             view.subresources.size() !=
                 static_cast<std::size_t>(shape.array_size) * shape.mip_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "VFX texture package shape or dependency changed: " + path.string());
+                "VFX texture package shape or dependency changed: " + path.path.string());
 
         D3D12_RESOURCE_DESC description{};
         description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1554,7 +1810,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                     source.slice_pitch)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "VFX texture package subresource pitch differs from the GPU footprint: " +
-                    path.string());
+                    path.path.string());
         }
 
         uploads.emplace_back();

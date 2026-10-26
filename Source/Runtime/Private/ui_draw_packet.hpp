@@ -1,7 +1,7 @@
 #pragma once
 
-#include <hs/core/render_snapshot.hpp>
-#include <hs/core/render_view_input.hpp>
+#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_view_input.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/presentation/projector.hpp>
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 
 #include <cstdint>
 

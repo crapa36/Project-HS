@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "renderer_development_catalog.hpp"
 #include "renderer_resident_assets.hpp"
 
 #include <hs/render_data/geometry_hierarchy.hpp>
@@ -25,6 +26,28 @@ Result ResolveResidentClosure(const RendererConfig &config,
 {
     try
     {
+        // Compiled ranges are admitted once; actual consumers enforce their read/decode budgets.
+        // Do not reopen and decode the complete shipping dependency graph as a preflight.
+        if (config.packed_content)
+        {
+            if (auto result = ValidatePackedRendererAssets(*config.packed_content, config.packed_bulks); !result) return result;
+            if (auto result = ValidatePackedTextureCatalog(config); !result) return result;
+            if (auto result = ValidatePackedGeometryCatalog(config); !result) return result;
+            if (auto result = ValidatePackedMaterialCatalog(config); !result) return result;
+            if (auto result = ValidatePackedCharacterCatalog(config); !result) return result;
+            if (auto result = ValidatePackedVfxMeshCatalog(config); !result) return result;
+            return ValidatePackedRevisionCatalog(config);
+        }
+        if (config.development_catalog)
+        {
+            if (auto result = ValidatePackedTextureCatalog(config); !result) return result;
+            if (auto result = ValidatePackedGeometryCatalog(config); !result) return result;
+            if (auto result = ValidatePackedMaterialCatalog(config); !result) return result;
+            if (auto result = ValidatePackedCharacterCatalog(config); !result) return result;
+            // Loose products are staged at their actual reader, and shadow archives
+            // may be larger than a single bounded range request.
+            return Result::Success();
+        }
         if (config.content_generation_id.empty() || !config.content_generation_lease || config.product_paths.empty() ||
             config.product_paths.size() != config.product_digests.size())
             return ResidentFailure("Resident preparation requires complete leased Generation product maps.");
@@ -163,6 +186,7 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
         next.QualityProfileFor(particle_quality).decorative_particle_fraction));
     next.resource_generation_id = candidate_config.content_generation_id;
     next.resident_generation_lease = candidate_config.content_generation_lease;
+    next.resident_development_catalog = candidate_config.development_catalog;
     next.device = device;
     next.adapter = adapter;
     next.queue = queue;
@@ -236,6 +260,10 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
     if (auto result = seed(next.procedural_geometry, procedural_geometry); !result) return result;
     for (std::size_t index = 0; index < monster_assets.size(); ++index)
         if (auto result = seed(next.monster_assets[index], monster_assets[index]); !result) return result;
+    for(std::size_t asset=0;asset<monster_reduced_geometry.size();++asset)
+        for(std::size_t lod=0;lod<monster_reduced_geometry[asset].size();++lod)
+            if(auto result=seed(next.monster_reduced_geometry[asset][lod],
+                monster_reduced_geometry[asset][lod]);!result) return result;
     for (std::size_t index = 0; index < environment_meshes.size(); ++index)
         if (auto result = seed(next.environment_meshes[index], environment_meshes[index]); !result) return result;
     next.previous_geometry_page_versions = cluster_runtime ? cluster_runtime->physical_versions : previous_geometry_page_versions;
@@ -249,7 +277,7 @@ Result D3D12Renderer::Impl::PrepareResidentAssetData(Impl &candidate)
     if (!candidate.resident_preparation_accounting.enabled || candidate.resource_generation_id.empty() ||
         candidate.device.Get() != device.Get() || candidate.allocator != allocator ||
         candidate.srv_heap.Get() == srv_heap.Get() || !candidate.srv_cpu_heap ||
-        candidate.srv_cpu_heap.Get() == srv_cpu_heap.Get() || !candidate.environment_brdf_lut.resource)
+        candidate.srv_cpu_heap.Get() == srv_cpu_heap.Get())
         return ResidentFailure("Resident asset preparation requires the isolated active-device context.");
     if (auto result = candidate.CreateGpuData(); !result) return result;
     if (auto result = candidate.CreateCharacterTextures(); !result) return result;
@@ -280,16 +308,21 @@ Result D3D12Renderer::Impl::PrepareResidentAssetData(Impl &candidate)
             vector(header.bytes); vector(header.view.chunks); vector(header.view.dependencies);
             for (const auto &dependency : header.view.dependencies) text(dependency);
         }
-        vector(candidate.archer_clips); vector(candidate.archer_parents);
-        vector(candidate.archer_inverse_bind_matrices); vector(candidate.archer_transforms);
-        vector(candidate.archer_upper_body_weights); vector(candidate.archer_support_vertices);
-        vector(candidate.archer_material_bindings);
+        const auto character = [&](const render_data::CharacterMetadataPackageData &data) {
+            vector(data.clips); vector(data.parents); vector(data.inverse_bind_matrices); vector(data.transforms);
+            vector(data.upper_body_weights); vector(data.material_bindings);
+            if (data.monster) { vector(data.monster->final_matrices); vector(data.monster->lods); vector(data.monster->interval_bounds); }
+        };
+        character(candidate.archer_owned_character);
+        vector(candidate.archer_packed_transforms); vector(candidate.archer_named_packed_transforms);
+        vector(candidate.archer_support_vertices);
         for (const auto &monster : candidate.monster_assets)
         {
-            vector(monster.material_bindings);
-            vector(monster.geometry_lods);
-            vector(monster.interval_bounds);
+            vector(monster.owned_material_bindings); vector(monster.owned_geometry_lods); vector(monster.owned_interval_bounds);
+            vector(monster.submeshes);text(monster.source_product);
         }
+        for(const auto &asset:candidate.monster_reduced_geometry)
+            for(const auto &page:asset) {vector(page.submeshes);text(page.source_product);}
         const auto &animation = candidate.archer_named_animations;
         vector(animation.bone_names); vector(animation.parents); vector(animation.inverse_bind_matrices);
         vector(animation.clips); vector(animation.transforms); vector(animation.sockets);
@@ -368,8 +401,13 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(gel_projectile_geometry);
     HS_SWAP_RESIDENT(procedural_geometry);
     HS_SWAP_RESIDENT(monster_assets);
+    HS_SWAP_RESIDENT(monster_reduced_geometry);
     HS_SWAP_RESIDENT(monster_skin_matrices);
     HS_SWAP_RESIDENT(archer_clips);
+    HS_SWAP_RESIDENT(archer_owned_character);
+    HS_SWAP_RESIDENT(archer_compiled_animation);
+    HS_SWAP_RESIDENT(archer_packed_transforms);
+    HS_SWAP_RESIDENT(archer_named_packed_transforms);
     HS_SWAP_RESIDENT(archer_named_animations);
     HS_SWAP_RESIDENT(archer_parents);
     HS_SWAP_RESIDENT(archer_inverse_bind_matrices);

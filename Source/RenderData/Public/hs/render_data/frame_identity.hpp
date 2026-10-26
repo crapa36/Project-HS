@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/core/render_view_input.hpp>
+#include <hs/render_data/render_view_input.hpp>
 #include <hs/core/types.hpp>
 
 #include <cstdint>
@@ -9,7 +9,7 @@ namespace hs
 {
 
 // Frame identity keeps simulation, render, presentation, and provider cadence
-// distinct. The provider token is opaque to Core; known says whether value was
+// distinct. The provider token is opaque to RenderData; known says whether value was
 // supplied by the provider for this frame.
 struct FrameIdentity
 {

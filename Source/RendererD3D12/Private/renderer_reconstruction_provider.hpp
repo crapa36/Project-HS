@@ -29,6 +29,8 @@ class ReconstructionProvider
     [[nodiscard]] bool UsesExternalQueue() const noexcept { return kind_ == Kind::DirectSr; }
     [[nodiscard]] Result RegisterExternal(PassBuilder &, const SdkReconstructionFrame &, std::uint32_t frame_slot,
         std::span<const ExternalResourceAccess>, std::vector<std::shared_ptr<const void>> owners);
+    [[nodiscard]] Result BindExternal(PassBuilder &, const SdkReconstructionFrame &, std::uint32_t frame_slot,
+        std::span<const ExternalResourceAccess>, std::vector<std::shared_ptr<const void>> owners);
     [[nodiscard]] Result NativeJitter(ViewExtent active, std::uint64_t successful_frame,
                                      std::optional<DirectX::XMFLOAT2> &);
     [[nodiscard]] bool Initialized() const noexcept { return configured_; }

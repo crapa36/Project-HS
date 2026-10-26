@@ -17,6 +17,9 @@ inline constexpr std::uint32_t kGeometryPageCapacity = 256;
 inline constexpr std::uint32_t kGeometryBuffersPerPage = 4;
 inline constexpr std::uint32_t kGeometryDescriptorCount = 1 + kGeometryPageCapacity * kGeometryBuffersPerPage;
 inline constexpr std::uint32_t kGeometryErrorMethodAbi = 1;
+// A skinned LOD's absolute error encloses both directed animated surfaces
+// over every cooked linear palette interval, including numerical margin.
+inline constexpr std::uint32_t kSkinnedPoseErrorMethodAbi = 2;
 inline constexpr std::uint32_t kGeometryMetadataStride = 96;
 inline constexpr std::uint32_t kGeometrySubmeshStride = 20;
 inline constexpr std::uint32_t kGeometryMeshletStride = 64;
@@ -86,8 +89,18 @@ void ValidateGeometryPage(const GeometryMetadata &metadata, const GeometryData &
     const GeometryData &geometry);
 [[nodiscard]] GeometryData DecodeGeometryPage(
     std::span<const std::byte> bytes, AssetId page_asset_id, const GeometryMetadata &metadata);
+struct PreparedGeometryPage
+{
+    PackageView package;
+    GeometryData geometry;
+};
+// PackageView borrows bytes; the caller must retain their owner while using package.
+[[nodiscard]] PreparedGeometryPage PrepareGeometryPage(
+    std::span<const std::byte> bytes, AssetId page_asset_id, const GeometryMetadata &metadata);
 // Geometry pages contain seven topology chunks. Hierarchy consumers supply the
 // validated geometry flags; reference bounds are reconstructed from the payload.
 [[nodiscard]] GeometryData DecodeGeometryPagePayload(
     std::span<const std::byte> bytes, AssetId page_asset_id, std::uint32_t flags);
+[[nodiscard]] GeometryData DecodeGeometryPagePayload(
+    const PackageView &validated_package, std::uint32_t flags);
 } // namespace hs::render_data

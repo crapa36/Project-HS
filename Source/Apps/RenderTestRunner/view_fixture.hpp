@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/renderer/render_frame_input.hpp>
+#include <hs/render_data/render_frame_input.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -77,7 +77,7 @@ inline bool SameRejectedResultEvidence(const RendererFrameResult &a, const Rende
 // provider or manufactures a provider token. It performs exactly three frame
 // packages, three rejected preflights and two captures of persistent view output.
 inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
-    const RenderSnapshotExchange::ReadPair &snapshots, const std::filesystem::path &artifacts,
+    const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts,
     AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
 {
     using namespace owned_view_probe_detail;
@@ -222,6 +222,33 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const auto rejected_flash = renderer.Render(bad_flash_input, result);
             evidence.nonfinite_flash_history_rejected = !rejected_flash &&
                 rejected_flash.Code() == ErrorCode::InvalidArgument;
+            VfxLightInput bad_light{};
+            bad_light.radius = 1.0f;
+            bad_light.intensity = std::numeric_limits<float>::quiet_NaN();
+            VfxDecalInput bad_decal{};
+            bad_decal.radius = 1.0f;
+            bad_decal.alpha = std::numeric_limits<float>::quiet_NaN();
+            ParticleSpawnCommand bad_ballistic{};
+            bad_ballistic.authored_ballistic = true;
+            bad_ballistic.renderer = VfxRenderer::Mesh;
+            bad_ballistic.mesh_index = 1;
+            bad_ballistic.lifetime_min = bad_ballistic.lifetime_max = bad_ballistic.authored_hdr = 1.0f;
+            bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
+            ParticleSpawnCommand bad_selector{};
+            bad_selector.mesh_index = 8;
+            std::array<RenderFrameInput, 4> invalid_payloads;
+            for (auto &invalid : invalid_payloads) { invalid.views = views; invalid.snapshots = snapshots; }
+            invalid_payloads[0].vfx.lights = std::span(&bad_light, 1);
+            invalid_payloads[1].vfx.decals = std::span(&bad_decal, 1);
+            invalid_payloads[2].vfx.particle_spawns = std::span(&bad_ballistic, 1);
+            invalid_payloads[3].vfx.particle_spawns = std::span(&bad_selector, 1);
+            for (const auto &invalid : invalid_payloads)
+            {
+                const auto rejected = renderer.Render(invalid, result);
+                if (rejected || rejected.Code() != ErrorCode::InvalidArgument ||
+                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                    return Failure("VFX admission must reject malformed lights, decals, ballistics and selectors before any view submission.");
+            }
             evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
             evidence.rejected_outputs_unchanged = duplicate_preserved && nonfinite_preserved && SameRejectedResultEvidence(result, accepted) &&
                 evidence.submissions_after_bad_preflight == before;

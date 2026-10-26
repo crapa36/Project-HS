@@ -51,6 +51,7 @@ struct CombatState
     HitIndex cast_hit_index, area_hit_index;
     std::vector<std::uint64_t> live_area_ids;
     std::vector<CastRuntime> cast_runtimes;
+    std::unordered_map<std::uint64_t, std::size_t> cast_runtime_index;
     CastCleanupMembership cast_cleanup;
     std::vector<DomainSignal> domain_signals;
     // Presentation metadata only; intentionally excluded from the checksum.

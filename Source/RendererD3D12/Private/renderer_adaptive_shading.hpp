@@ -45,6 +45,16 @@ struct AdaptiveShadingOutputs
     std::uint32_t tile_size{kAdaptiveComputeTileSize};
     bool raster_ready{},compute_ready{};
 };
+struct AdaptiveShadingLayout
+{
+    bool valid{}, active{}, raster{}, compute{};
+    ViewExtent capacity{};
+    std::uint32_t native_tile_size{};
+    std::array<ResourceVersion, 6> guides{};
+    std::array<TextureHandle, 2> textures{};
+    std::array<ResourceVersion, 2> written{};
+    std::array<std::uint32_t, 2> passes{};
+};
 struct AdaptiveShadingStatus
 {
     bool raster_ready{},compute_ready{},raster_applied{},usable{true};
@@ -76,7 +86,11 @@ class AdaptiveShadingSystem
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,const AdaptiveShadingProfile &,
         const ShaderReader &,AdaptiveShadingCandidate &)const;
     [[nodiscard]] Result Commit(AdaptiveShadingCandidate &&,const CompletionSet &);
-    [[nodiscard]] Result Register(RenderGraphBuilder &,const AdaptiveShadingInputs &,AdaptiveShadingOutputs &);
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const AdaptiveShadingInputs &,AdaptiveShadingOutputs &,
+        AdaptiveShadingLayout *layout=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const AdaptiveShadingInputs &,
+        const AdaptiveShadingLayout &,AdaptiveShadingOutputs &);
+    [[nodiscard]] bool MatchesLayout(const AdaptiveShadingInputs &,const AdaptiveShadingLayout &)const noexcept;
     [[nodiscard]] Result BeginRaster(RenderPassContext &,const AdaptiveShadingOutputs &,AdaptiveShadingRasterScope &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
@@ -84,6 +98,9 @@ class AdaptiveShadingSystem
     [[nodiscard]] AdaptiveShadingStatus Status()const;
     [[nodiscard]] std::array<const AllocationResource *, 2> DiagnosticResources() const noexcept;
     void SwapState(AdaptiveShadingSystem &other)noexcept{impl_.swap(other.impl_);}
-  private:struct Impl;std::unique_ptr<Impl> impl_;
+  private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const AdaptiveShadingInputs &,
+        AdaptiveShadingOutputs &,AdaptiveShadingLayout *,const AdaptiveShadingLayout *);
+    struct Impl;std::unique_ptr<Impl> impl_;
 };
 } // namespace hs

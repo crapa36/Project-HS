@@ -23,6 +23,7 @@ class FixedStepClock
         std::uint32_t tick_count{};
         Duration debt{};
         bool debt_diagnostic_due{};
+        Clock::time_point first_tick_boundary{};
     };
 
     [[nodiscard]] AdvanceResult Advance(Clock::time_point now);

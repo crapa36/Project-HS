@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hs
 {
@@ -71,6 +72,26 @@ struct LocalProbeRuntimeFrameInputs
 };
 
 struct LocalProbeCaptureState;
+struct LocalProbeRuntimeFramePlan
+{
+    const LocalProbeRuntimeFrameInputs *source{};
+    render_data::SceneProbeRevisions revisions;
+    std::shared_ptr<const StaticRenderScene> scene;
+    std::uint64_t static_instance_generation{},material_parameter_revision{},pipeline_revision{};
+    std::size_t light_count{},page_count{},scene_read_count{};
+    std::uint32_t max_cube_views{};
+    bool active{},capture{},shadow{};
+};
+struct LocalProbeRuntimeLayout
+{
+    LocalProbeLayout service;
+    ResourceHandle private_constants{},private_shadow{};
+    ResourceVersion shadow_output{};
+    std::uint32_t shadow_pass_index{};
+    std::vector<LocalProbeSceneRead> scene_reads;
+    std::vector<LocalProbeSceneRead> shadow_reads;
+    bool active{},capture{},shadow{},shadow_sampling{};
+};
 class LocalProbeRuntimeCandidate
 {
   private:
@@ -96,6 +117,14 @@ class LocalProbeRuntime
     [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
         render_data::SceneProbeRevisions &) const;
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeRuntimeFrameInputs &, LocalProbeOutputs &);
+    [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &,
+        LocalProbeRuntimeFramePlan &);
+    [[nodiscard]] bool MatchesLayout(const LocalProbeRuntimeFrameInputs &,
+        const LocalProbeRuntimeFramePlan &,const LocalProbeRuntimeLayout &) const;
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalProbeRuntimeFrameInputs &,
+        const LocalProbeRuntimeFramePlan &,LocalProbeOutputs &,LocalProbeRuntimeLayout *);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LocalProbeRuntimeFrameInputs &,
+        const LocalProbeRuntimeFramePlan &,const LocalProbeRuntimeLayout &,LocalProbeOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success,
         const std::shared_ptr<const StaticRenderScene> &, render_data::SceneProbeRevisions);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
@@ -107,6 +136,9 @@ class LocalProbeRuntime
     // Called only after all old submissions have reliably completed.
     void SwapState(LocalProbeRuntime &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalProbeRuntimeFrameInputs &,
+        const LocalProbeRuntimeFramePlan &,LocalProbeOutputs &,LocalProbeRuntimeLayout *,
+        const LocalProbeRuntimeLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

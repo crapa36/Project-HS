@@ -161,9 +161,33 @@ Result ScreenOverlaySystem::Commit(ScreenOverlayCandidate &&candidate,const Comp
         return Failure(ErrorCode::InvalidState,"Drain screen overlay GPU uses before replacing its targets.");
     targets_=std::move(candidate.targets_);candidate.prepared_=false;return Result::Success();
 }
-Result ScreenOverlaySystem::RegisterMask(RenderGraphBuilder &graph,const ScreenOverlayInputs &input,ScreenOverlayOutputs &output)
+Result ScreenOverlaySystem::RegisterMask(RenderGraphBuilder &graph,const ScreenOverlayInputs &input,
+    ScreenOverlayOutputs &output,ScreenOverlayLayout *layout)
 {
-    output={};if(input.commands.empty()||input.intensity==0)return Result::Success();
+    return RegisterFrame(graph,input,output,layout,nullptr);
+}
+bool ScreenOverlaySystem::MatchesLayout(const ScreenOverlayInputs &input,const ScreenOverlayLayout &layout)const noexcept
+{
+    const bool active=input.intensity!=0&&std::ranges::any_of(input.commands,[](const auto &command){return command.alpha!=0;});
+    const auto &t=targets_;
+    return layout.valid&&layout.active==active&&(!active||(t&&
+        layout.capacity.width==t->capacity.width&&layout.capacity.height==t->capacity.height&&
+        layout.frame_slots==t->slot_completion.size()&&layout.gradient==input.gradient));
+}
+Result ScreenOverlaySystem::BindRetained(RenderGraphBuilder &graph,const ScreenOverlayInputs &input,
+    const ScreenOverlayLayout &layout,ScreenOverlayOutputs &output)
+{
+    return RegisterFrame(graph,input,output,nullptr,&layout);
+}
+Result ScreenOverlaySystem::RegisterFrame(RenderGraphBuilder &graph,const ScreenOverlayInputs &input,
+    ScreenOverlayOutputs &output,ScreenOverlayLayout *capture,const ScreenOverlayLayout *retained)
+{
+    output={};if(capture)*capture={};
+    if(retained&&!MatchesLayout(input,*retained))return Failure(ErrorCode::InvalidState,"Screen overlay retained layout changed.");
+    if(input.commands.empty()||input.intensity==0)
+    {
+        if(capture)capture->valid=true;return Result::Success();
+    }
     const auto t=targets_;
     if(!t||!t->usable||pending_graph_||input.frame_slot>=t->counts.size()||input.commands.size()>kMaximumCommands||
        !t->slot_completion[input.frame_slot].IsSatisfiedBy(input.completed)||!Valid(input.render_active)||!Valid(input.output_active)||
@@ -189,7 +213,8 @@ Result ScreenOverlaySystem::RegisterMask(RenderGraphBuilder &graph,const ScreenO
             {v.center_clear,v.edge_power,dot(v.source_direction,input.camera_right),-dot(v.source_direction,input.camera_up)},
             {std::uint32_t(v.shape),v.gradient_row,0,0}};
     }
-    t->counts[input.frame_slot]=count;if(!count)return Result::Success();
+    t->counts[input.frame_slot]=count;
+    if(!count){if(capture)capture->valid=true;return Result::Success();}
     t->output_extents[input.frame_slot]=input.output_active;
     const ScreenConstants constants{Size(input.render_active),Size(input.output_active),
         {count,std::bit_cast<std::uint32_t>(input.intensity),gradient.Height,0}};
@@ -199,17 +224,39 @@ Result ScreenOverlaySystem::RegisterMask(RenderGraphBuilder &graph,const ScreenO
     t->device->CreateShaderResourceView(input.gradient_resource,&srv,t->Cpu(input.frame_slot,0));
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=DXGI_FORMAT_R8_UNORM;uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
     t->device->CreateUnorderedAccessView(t->mask.resource.Get(),nullptr,&uav,t->Cpu(input.frame_slot,1));
-    const auto mask=graph.ImportTexture({t->mask.resource.Get(),t->mask.graph_completion,t->mask.graph_queue},t->mask.graph_access,"VfxScreen.Reactive");
-    const auto upload=graph.ImportBuffer({t->upload.resource.Get(),t->upload.graph_completion,t->upload.graph_queue},Access::AllShaderRead,"VfxScreen.Commands");
-    auto pass=graph.AddPass(290,"VfxScreenOverlayAlpha",QueueHint::Direct);
-    pass.Read(input.gradient,Access::ComputeRead);pass.Read(graph.Version(upload),Access::ComputeRead);
-    const auto reactive=pass.Write(graph.Version(mask),Access::UnorderedWrite);
+    if(auto checked=t->mask.EnsureNativeContract(t->device.Get());!checked)return checked;
+    if(auto checked=t->upload.EnsureNativeContract(t->device.Get());!checked)return checked;
+    const auto mask=retained?retained->mask:
+        graph.ImportTexture({t->mask.resource.Get(),t->mask.graph_completion,t->mask.graph_queue,{},t->mask.NativeContract()},t->mask.graph_access,"VfxScreen.Reactive");
+    const auto upload=retained?retained->upload:
+        graph.ImportBuffer({t->upload.resource.Get(),t->upload.graph_completion,t->upload.graph_queue,{},t->upload.NativeContract()},Access::AllShaderRead,"VfxScreen.Commands");
+    if(retained&&(!graph.BindTexture(mask,{t->mask.resource.Get(),t->mask.graph_completion,t->mask.graph_queue,{},t->mask.NativeContract()},t->mask.graph_access)||
+        !graph.BindBuffer(upload,{t->upload.resource.Get(),t->upload.graph_completion,t->upload.graph_queue,{},t->upload.NativeContract()},Access::AllShaderRead)))
+        return Failure(ErrorCode::InvalidState,"Screen overlay retained resource binding failed.");
+    if(capture)capture->pass=graph.PassCount();
+    auto passBinding=retained?graph.BindPass(retained->pass,290):
+        std::optional<PassBuilder>{graph.AddPass(290,"VfxScreenOverlayAlpha",QueueHint::Direct)};
+    if(!passBinding)return Failure(ErrorCode::InvalidState,"Screen overlay retained pass is missing.");
+    auto &pass=*passBinding;
+    ResourceVersion reactive;
+    if(retained)reactive=retained->reactive;
+    else
+    {
+        pass.Read(input.gradient,Access::ComputeRead);pass.Read(graph.Version(upload),Access::ComputeRead);
+        reactive=pass.Write(graph.Version(mask),Access::UnorderedWrite);
+    }
     pass.SetExecute([t,slot=input.frame_slot,extent=input.render_active](RenderPassContext &context){
         auto *list=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());t->Bind(list,slot,true);
         list->SetPipelineState(t->mask_pipeline.Get());list->Dispatch((extent.width+7)/8,(extent.height+7)/8,1);
     });
     pending_graph_=&graph;pending_mask_=mask;pending_upload_=upload;pending_slot_=input.frame_slot;
     output={reactive,graph.Version(upload),t->mask.resource.Get(),t->exports->GetCPUDescriptorHandleForHeapStart(),true};
+    if(capture)
+    {
+        capture->valid=true;capture->active=true;capture->gradient=input.gradient;
+        capture->capacity=t->capacity;capture->frame_slots=static_cast<std::uint32_t>(t->slot_completion.size());
+        capture->reactive=reactive;capture->mask=mask;capture->upload=upload;
+    }
     return Result::Success();
 }
 void ScreenOverlaySystem::Draw(ID3D12GraphicsCommandList *list,std::uint32_t slot,D3D12_CPU_DESCRIPTOR_HANDLE rtv) const

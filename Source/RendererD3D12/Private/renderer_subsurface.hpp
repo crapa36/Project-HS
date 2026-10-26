@@ -5,6 +5,7 @@
 
 #include <DirectXMath.h>
 #include <d3d12.h>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,15 @@ struct SubsurfaceOutputs
     ID3D12Resource *corrected_resource{};
     D3D12_CPU_DESCRIPTOR_HANDLE corrected_srv{};
 };
+struct SubsurfaceLayout
+{
+    bool valid{}, enabled{};
+    ViewExtent capacity{};
+    std::array<ResourceVersion, 6> guides{};
+    std::array<TextureHandle, 2> textures{};
+    std::array<ResourceVersion, 2> written{};
+    std::array<std::uint32_t, 2> passes{};
+};
 struct SubsurfaceTargets;
 class SubsurfaceCandidate
 {
@@ -69,7 +79,10 @@ class SubsurfaceSystem
         const ShaderReader &read_shader, SubsurfaceCandidate &candidate) const;
     [[nodiscard]] Result Commit(SubsurfaceCandidate &&candidate, const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &graph, const SubsurfaceInputs &inputs,
-        SubsurfaceConstants constants, SubsurfaceOutputs &outputs);
+        SubsurfaceConstants constants, SubsurfaceOutputs &outputs, SubsurfaceLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const SubsurfaceInputs &,
+        SubsurfaceConstants, const SubsurfaceLayout &, SubsurfaceOutputs &);
+    [[nodiscard]] bool MatchesLayout(const SubsurfaceInputs &, const SubsurfaceLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
@@ -77,6 +90,8 @@ class SubsurfaceSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(SubsurfaceSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const SubsurfaceInputs &,
+        SubsurfaceConstants, SubsurfaceOutputs &, SubsurfaceLayout *, const SubsurfaceLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -79,4 +79,16 @@ void ValidateSceneHlodPages(const SceneHlod &scene, std::span<const GeometryData
 // No object bytes, GPU ABI, or Presentation dependency are serialized.
 [[nodiscard]] std::vector<std::byte> EncodeSceneHlod(const SceneHlod &scene);
 [[nodiscard]] SceneHlod DecodeSceneHlod(std::span<const std::byte> bytes);
+
+// Owns decoded, validated metadata and page-local proxy references for offline admission.
+class AdmittedSceneHlod
+{
+public:
+    explicit AdmittedSceneHlod(std::span<const std::byte> bytes);
+    [[nodiscard]] const SceneHlod &Value() const noexcept { return scene_; }
+    void ValidatePage(std::uint32_t page_index, const PreparedGeometryPage &page) const;
+private:
+    SceneHlod scene_;
+    std::vector<std::vector<std::uint32_t>> page_proxies_;
+};
 } // namespace hs::render_data

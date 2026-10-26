@@ -1,7 +1,8 @@
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <bit>
 #include <array>
+#include <string_view>
 #include <type_traits>
 
 namespace hs
@@ -20,6 +21,54 @@ namespace
 {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+
+constexpr AssetId ProductAssetId(std::string_view path) noexcept
+{
+    auto hash = kFnvOffset;
+    for (const auto character : path)
+    {
+        hash ^= static_cast<std::uint8_t>(character);
+        hash *= kFnvPrime;
+    }
+    return {hash};
+}
+
+constexpr auto kArcherAsset = ProductAssetId("render/character/archer.rpkg");
+constexpr auto kMonsterMeleeAsset = ProductAssetId("render/character/enemy_melee.rpkg");
+constexpr auto kMonsterRangedAsset = ProductAssetId("render/character/enemy_ranged.rpkg");
+constexpr auto kMonsterSuicideAsset = ProductAssetId("render/character/enemy_suicide.rpkg");
+constexpr auto kBossFiveMinuteAsset = ProductAssetId("render/character/boss_5m.rpkg");
+constexpr auto kBossTenMinuteAsset = ProductAssetId("render/character/boss_10m.rpkg");
+constexpr auto kBossFinalAsset = ProductAssetId("render/character/boss_final.rpkg");
+constexpr auto kEnemyProjectileAsset = ProductAssetId("render/character/enemy_gel_projectile.rpkg");
+constexpr auto kMeadowGroundAsset = ProductAssetId("render/meadow_ground.rpkg");
+constexpr auto kMeadowWaterAsset = ProductAssetId("render/meadow_water.rpkg");
+constexpr auto kGroundDetailMaterial = ProductAssetId("render/material/ground_detail.rpkg");
+constexpr auto kTerrainMaterial = ProductAssetId("render/material/terrain.rpkg");
+
+constexpr std::array kTreeTrunks{
+    ProductAssetId("render/trunk_0.rpkg"), ProductAssetId("render/trunk_1.rpkg"),
+    ProductAssetId("render/trunk_2.rpkg")};
+constexpr std::array kTreeCanopies{
+    ProductAssetId("render/leaf_0.rpkg"), ProductAssetId("render/leaf_1.rpkg"),
+    ProductAssetId("render/leaf_2.rpkg")};
+constexpr std::array kRocks{
+    ProductAssetId("render/rock_0.rpkg"), ProductAssetId("render/rock_1.rpkg"),
+    ProductAssetId("render/rock_2.rpkg"), ProductAssetId("render/rock_3.rpkg")};
+constexpr std::array kGrasses{
+    ProductAssetId("render/grass_0.rpkg"), ProductAssetId("render/grass_1.rpkg"),
+    ProductAssetId("render/grass_2.rpkg"), ProductAssetId("render/grass_3.rpkg")};
+constexpr std::array<AssetId, kGroundDetailVariantCount> kGroundDetails{
+    ProductAssetId("render/flower_daisy.rpkg"), ProductAssetId("render/flower_buttercup.rpkg"),
+    ProductAssetId("render/flower_violet.rpkg"), ProductAssetId("render/clover_patch.rpkg"),
+    ProductAssetId("render/ground_leaves.rpkg"), ProductAssetId("render/twig_cluster.rpkg"),
+    ProductAssetId("render/fence_short.rpkg"), ProductAssetId("render/shrub_low.rpkg"),
+    ProductAssetId("render/stump_roots.rpkg"), ProductAssetId("render/crate_intact.rpkg"),
+    ProductAssetId("render/crate_broken.rpkg"), ProductAssetId("render/barrel_intact.rpkg"),
+    ProductAssetId("render/barrel_broken.rpkg"), ProductAssetId("render/cart_broken.rpkg"),
+    ProductAssetId("render/fence_broken.rpkg"), ProductAssetId("render/fence_splitrail.rpkg"),
+    ProductAssetId("render/sack_tied.rpkg"), ProductAssetId("render/fallen_log.rpkg"),
+    ProductAssetId("render/rock_mossy.rpkg")};
 
 void HashByte(std::uint64_t &hash, std::uint8_t value) noexcept
 {
@@ -42,52 +91,36 @@ void HashFloat(std::uint64_t &hash, float value) noexcept
 
 AssetId PackagedRenderAsset(RenderMesh mesh, std::uint32_t variant) noexcept
 {
-    constexpr std::array<std::string_view, 3> trunks{
-        "render/trunk_0.rpkg", "render/trunk_1.rpkg", "render/trunk_2.rpkg"};
-    constexpr std::array<std::string_view, 3> leaves{
-        "render/leaf_0.rpkg", "render/leaf_1.rpkg", "render/leaf_2.rpkg"};
-    constexpr std::array<std::string_view, 4> rocks{
-        "render/rock_0.rpkg", "render/rock_1.rpkg", "render/rock_2.rpkg",
-        "render/rock_3.rpkg"};
-    constexpr std::array<std::string_view, 4> grasses{
-        "render/grass_0.rpkg", "render/grass_1.rpkg", "render/grass_2.rpkg",
-        "render/grass_3.rpkg"};
-    constexpr std::array<std::string_view, kGroundDetailVariantCount> details{
-        "render/flower_daisy.rpkg", "render/flower_buttercup.rpkg", "render/flower_violet.rpkg",
-        "render/clover_patch.rpkg", "render/ground_leaves.rpkg", "render/twig_cluster.rpkg",
-        "render/fence_short.rpkg",
-        "render/shrub_low.rpkg", "render/stump_roots.rpkg", "render/crate_intact.rpkg",
-        "render/crate_broken.rpkg", "render/barrel_intact.rpkg", "render/barrel_broken.rpkg", "render/cart_broken.rpkg", "render/fence_broken.rpkg", "render/fence_splitrail.rpkg", "render/sack_tied.rpkg", "render/fallen_log.rpkg", "render/rock_mossy.rpkg"};
     switch (mesh)
     {
     case RenderMesh::Archer:
-        return MakeAssetId("render/character/archer.rpkg");
+        return kArcherAsset;
     case RenderMesh::MonsterMelee:
-        return MakeAssetId("render/character/enemy_melee.rpkg");
+        return kMonsterMeleeAsset;
     case RenderMesh::MonsterRanged:
-        return MakeAssetId("render/character/enemy_ranged.rpkg");
+        return kMonsterRangedAsset;
     case RenderMesh::MonsterSuicide:
-        return MakeAssetId("render/character/enemy_suicide.rpkg");
+        return kMonsterSuicideAsset;
     case RenderMesh::BossFiveMinute:
-        return MakeAssetId("render/character/boss_5m.rpkg");
+        return kBossFiveMinuteAsset;
     case RenderMesh::BossTenMinute:
-        return MakeAssetId("render/character/boss_10m.rpkg");
+        return kBossTenMinuteAsset;
     case RenderMesh::BossFinal:
-        return MakeAssetId("render/character/boss_final.rpkg");
+        return kBossFinalAsset;
     case RenderMesh::EnemyProjectile:
-        return MakeAssetId("render/character/enemy_gel_projectile.rpkg");
+        return kEnemyProjectileAsset;
     case RenderMesh::TreeTrunk:
-        return MakeAssetId(trunks[variant % trunks.size()]);
+        return kTreeTrunks[variant % kTreeTrunks.size()];
     case RenderMesh::TreeCanopy:
-        return MakeAssetId(leaves[variant % leaves.size()]);
+        return kTreeCanopies[variant % kTreeCanopies.size()];
     case RenderMesh::Rock:
-        return MakeAssetId(rocks[variant % rocks.size()]);
+        return kRocks[variant % kRocks.size()];
     case RenderMesh::Grass:
-        return MakeAssetId(grasses[variant % grasses.size()]);
+        return kGrasses[variant % kGrasses.size()];
     case RenderMesh::GroundDetail:
-        return MakeAssetId(details[variant % details.size()]);
+        return kGroundDetails[variant % kGroundDetails.size()];
     case RenderMesh::MeadowSurface:
-        return MakeAssetId(variant == 0 ? "render/meadow_ground.rpkg" : "render/meadow_water.rpkg");
+        return variant == 0 ? kMeadowGroundAsset : kMeadowWaterAsset;
     default:
         return {};
     }
@@ -103,8 +136,9 @@ void PopulateRenderInstanceIdentity(RenderInstance &instance) noexcept
     // asset before Generation publishes one.
     if (instance.material_id.value == 0 && instance.asset_id.value != 0)
         instance.material_id = instance.mesh == RenderMesh::GroundDetail
-            ? MakeAssetId("render/material/ground_detail.rpkg") : instance.mesh == RenderMesh::MeadowSurface
-            ? MakeAssetId(instance.environment_variant == 0 ? "render/material/terrain.rpkg" : "render/material/ground_detail.rpkg") : instance.asset_id;
+            ? kGroundDetailMaterial : instance.mesh == RenderMesh::MeadowSurface
+            ? (instance.environment_variant == 0 ? kTerrainMaterial : kGroundDetailMaterial)
+            : instance.asset_id;
 }
 
 RenderInstance::Revisions DeriveRenderInstanceRevisions(
@@ -193,6 +227,19 @@ void RenderSnapshotStorage::Clear() noexcept
     ui_.clear();
     persistent_vfx_.clear();
     static_scene_.reset();
+}
+
+void RenderSnapshotStorage::CopyDynamicFrom(const RenderSnapshot &sample)
+{
+    header = sample.header;
+    camera = sample.camera;
+    instances_.assign(sample.instances.begin(), sample.instances.end());
+    poses_.assign(sample.poses.begin(), sample.poses.end());
+    captured_instances_.assign(sample.captured_instances.begin(), sample.captured_instances.end());
+    lights_.assign(sample.lights.begin(), sample.lights.end());
+    persistent_vfx_.assign(sample.persistent_vfx.begin(), sample.persistent_vfx.end());
+    static_scene_ = sample.static_scene;
+    ui_.clear();
 }
 
 bool RenderSnapshotStorage::AddInstance(const RenderInstance &instance)

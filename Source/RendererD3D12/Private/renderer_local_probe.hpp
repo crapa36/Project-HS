@@ -1,7 +1,7 @@
 #pragma once
 
 #include "render_graph.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <hs/render_data/scene_probe.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>
@@ -79,6 +79,37 @@ struct LocalProbeOutputs
     std::uint32_t probe_count{}, edge{}, mip_count{}, captured_cube_views{}, total_cube_views{};
     bool enabled{}, update_pending{};
 };
+struct LocalProbeFramePlan
+{
+    const LocalProbeInputs *source{};
+    std::shared_ptr<const StaticRenderScene> requested_scene;
+    render_data::SceneProbeRevisions requested_revisions;
+    CompletionSet completed;
+    std::uint32_t max_cube_views{};
+    const LocalProbeSceneRead *scene_reads{};
+    std::size_t scene_read_count{};
+    bool draw_requested{},sampling_requested{};
+    std::shared_ptr<const StaticRenderScene> scene;
+    render_data::SceneProbeRevisions revisions;
+    std::shared_ptr<const StaticRenderScene> before_scene;
+    render_data::SceneProbeRevisions before_revisions;
+    std::uint64_t storage_generation{};
+    std::uint32_t before_captured{},capture_first{},capture_count{};
+    bool before_uploaded{},before_bake_submitted{},before_published{};
+    bool bake_submitted{},published{},current{},upload{},import_cubes{};
+    bool integrate{},finished_bake{},material_sampling{},valid{};
+};
+struct LocalProbeLayout
+{
+    struct Pass { std::uint32_t index{},id{}; };
+    std::uint64_t storage_generation{};
+    std::array<ResourceHandle,8> imports{};
+    std::array<ResourceVersion,7> outputs{}; // raw, GGX, SH, distance, records, disabled, depth
+    std::array<Pass,9> passes{};
+    std::vector<LocalProbeSceneRead> scene_reads;
+    std::uint32_t pass_count{},capture_first{},capture_count{};
+    bool upload{},package_baked{},import_cubes{},integrate{},material_sampling{},published{},finished_bake{};
+};
 
 struct LocalProbeStorage;
 class LocalProbeCandidate
@@ -105,6 +136,13 @@ class LocalProbeSystem
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeInputs &, LocalProbeOutputs &);
+    [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeInputs &,LocalProbeFramePlan &) const;
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalProbeInputs &,
+        const LocalProbeFramePlan &,LocalProbeOutputs &,LocalProbeLayout *);
+    [[nodiscard]] bool MatchesLayout(const LocalProbeInputs &,const LocalProbeFramePlan &,
+        const LocalProbeLayout &) const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LocalProbeInputs &,
+        const LocalProbeFramePlan &,const LocalProbeLayout &,LocalProbeOutputs &);
     // Lets the concrete draw adapter allocate private face bindings only while
     // actual capture can advance. Publication/pause frames need no such upload.
     [[nodiscard]] bool NativeCaptureRequired(const std::shared_ptr<const StaticRenderScene> &,
@@ -119,6 +157,8 @@ class LocalProbeSystem
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalProbeInputs &,
+        const LocalProbeFramePlan &,LocalProbeOutputs &,LocalProbeLayout *,const LocalProbeLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

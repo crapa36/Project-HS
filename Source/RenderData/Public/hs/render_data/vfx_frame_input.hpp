@@ -1,4 +1,5 @@
 #pragma once
+#include <hs/render_data/vfx_spawn_command.hpp>
 #include <hs/core/types.hpp>
 #include <array>
 #include <cstdint>
@@ -122,5 +123,17 @@ struct VfxPersistentInput
     float source_duration_seconds{};
     std::uint32_t state_flags{}, stable_seed{};
     VfxQuality quality{VfxQuality::High};
+};
+struct VfxGroundSpawnInput
+{
+    ParticleSpawnCommand command;
+    bool additive{};
+    std::uint64_t stable_id{};
+    VfxEffectHandle effect_handle{kInvalidVfxEffectHandle};
+    std::uint8_t source_visual_kind{0xff};
+    VfxGroundMotion motion;
+    std::uint32_t gradient_row{};
+    float hdr{};
+    VfxGroundGeometry geometry;
 };
 }

@@ -391,19 +391,19 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
         {
             if (stream.last_demand_epoch < runtime.epoch) continue;
             if (reading[stream.catalog]) continue;
-            std::error_code error;
-            const auto file_bytes = std::filesystem::file_size(stream.path, error);
-            if (error || !file_bytes || file_bytes > std::numeric_limits<std::size_t>::max() ||
+            std::uint64_t file_bytes{};
+            if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
+            if (!file_bytes || file_bytes > std::numeric_limits<std::size_t>::max() ||
                 file_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
                 return StreamFailure("Hierarchy page read size is invalid.");
-            if (file_bytes > UINT64_MAX / 3u)
+            const auto host_factor = stream.compiled ? 1u : 3u;
+            if (file_bytes > UINT64_MAX / host_factor)
                 return StreamFailure("Hierarchy read admission overflow.");
-            // Reserve the read plus the decoder's vector growth/validation
-            // peak before starting IO, so retained reads cannot starve decode.
-            if (!residency.CanStage(file_bytes * 3u)) continue;
+            // Development decoding reserves its vector growth before IO; compiled pages retain only authenticated bytes.
+            if (!residency.CanStage(file_bytes * host_factor)) continue;
             const auto ticket = residency.ReserveHost(file_bytes);
-            stream.decoded_residency = residency.ReserveHost(file_bytes * 2u);
-            if (!ticket || !stream.decoded_residency)
+            if (!stream.compiled) stream.decoded_residency = residency.ReserveHost(file_bytes * 2u);
+            if (!ticket || (!stream.compiled && !stream.decoded_residency))
             {
                 if (ticket) static_cast<void>(residency.ReleaseNow(ticket));
                 static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
@@ -411,14 +411,16 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
                 return StreamFailure("Could not begin/account hierarchy page read.");
             }
             stream.read_bytes = file_bytes;
-            stream.decoded_result = std::make_shared<render_data::GeometryData>();
+            if (!stream.compiled) stream.decoded_result = std::make_shared<render_data::GeometryData>();
             const auto decoded_result = stream.decoded_result;
             const auto decode = stream.decode;
+            const auto compiled = stream.compiled;
             bool submitted{};
             const auto queued = asset_io.Enqueue({stream.request, runtime.content_generation,
-                    stream.logical_id, stream.path, file_bytes, resident_generation_lease,
-                    [decoded_result, decode](std::span<const std::byte> bytes) {
-                        if (auto result = decode(bytes, *decoded_result); !result)
+                    stream.logical_id, stream.source, file_bytes, resident_generation_lease,
+                    [decoded_result, decode, compiled](std::span<const std::byte> bytes) {
+                        if (compiled) (void)render_data::BindGeometryDescriptor(bytes, *compiled);
+                        else if (auto result = decode(bytes, *decoded_result); !result)
                             throw std::runtime_error(std::string(result.Message()));
                     }},
                     streaming, residency, ticket, submitted);
@@ -448,12 +450,22 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
                 }
                 stream.read_storage = std::move(read.bytes);
                 stream.read_residency = read.storage;
-                if (!stream.decoded_result) return StreamFailure("Hierarchy decode result owner is missing.");
-                stream.decoded = std::move(*stream.decoded_result);
-                stream.decoded_result.reset();
+                if (!stream.compiled)
+                {
+                    if (!stream.decoded_result) return StreamFailure("Hierarchy decode result owner is missing.");
+                    if (stream.development_catalog)
+                        if (const auto *descriptor = stream.development_catalog->FindGeometry(MakeAssetId(stream.logical_id)))
+                        {
+                            stream.compiled = *descriptor;
+                            static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
+                            stream.decoded_residency = {};
+                        }
+                    if (!stream.compiled) stream.decoded = std::move(*stream.decoded_result);
+                    stream.decoded_result.reset();
+                }
             }
             const auto decoded_bytes = DecodedBytes(stream.decoded);
-            if (!residency.CommitHost(stream.decoded_residency, decoded_bytes) ||
+            if ((!stream.compiled && !residency.CommitHost(stream.decoded_residency, decoded_bytes)) ||
                 !streaming.CompleteRead(stream.request, runtime.content_generation))
                 return StreamFailure("Hierarchy decode accounting/Generation transition was rejected.");
             reading[stream.catalog] = false;
@@ -480,10 +492,7 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
             if (auto result = TryRelieveStreamingPressure(0u, stream.priority, true, stream.hlod_admitted); !result) return result;
             continue;
         }
-        const auto &data = stream.decoded;
-        const std::array<std::uint64_t, 4> sizes{data.vertices.size() * sizeof(render_data::ExpandedVertex),
-            data.indices.size() * 4u, data.meshlets.size() * render_data::kGeometryMeshletStride,
-            (data.meshlet_vertex_refs.size() + data.meshlet_triangles.size() + data.canonical_primitive_remap.size()) * 4u};
+        const auto sizes = stream.UploadSizes();
         std::uint64_t upload_bytes{}; std::array<std::uint64_t, 4> offsets{};
         if (!GeometryPageLayout(sizes, offsets, upload_bytes)) return StreamFailure("Hierarchy page allocation estimate overflow.");
         const auto resident_description = BufferDescription(upload_bytes);

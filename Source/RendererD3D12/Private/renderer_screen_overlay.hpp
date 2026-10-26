@@ -1,7 +1,7 @@
 #pragma once
 #include "d3d12_resources.hpp"
 #include "view_state.hpp"
-#include <hs/renderer/vfx_screen_input.hpp>
+#include <hs/render_data/vfx_screen_input.hpp>
 #include <DirectXMath.h>
 #include <functional>
 #include <memory>
@@ -38,6 +38,16 @@ struct ScreenOverlayOutputs
     D3D12_CPU_DESCRIPTOR_HANDLE reactive_srv{};
     bool active{};
 };
+struct ScreenOverlayLayout
+{
+    bool valid{}, active{};
+    ViewExtent capacity{};
+    std::uint32_t frame_slots{};
+    ResourceVersion gradient, reactive;
+    TextureHandle mask;
+    BufferHandle upload;
+    std::uint32_t pass{};
+};
 // The analytic alpha guide is generated before reconstruction. Color is drawn
 // after scene postprocessing and before UI, outside every temporal history.
 class ScreenOverlaySystem
@@ -47,13 +57,19 @@ class ScreenOverlaySystem
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ViewExtent,
         std::uint32_t,const ShaderReader &,bool enabled,RendererPipelineCache &,ScreenOverlayCandidate &) const;
     [[nodiscard]] Result Commit(ScreenOverlayCandidate &&,const CompletionSet &);
-    [[nodiscard]] Result RegisterMask(RenderGraphBuilder &,const ScreenOverlayInputs &,ScreenOverlayOutputs &);
+    [[nodiscard]] Result RegisterMask(RenderGraphBuilder &,const ScreenOverlayInputs &,ScreenOverlayOutputs &,
+        ScreenOverlayLayout *layout=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const ScreenOverlayInputs &,
+        const ScreenOverlayLayout &,ScreenOverlayOutputs &);
+    [[nodiscard]] bool MatchesLayout(const ScreenOverlayInputs &,const ScreenOverlayLayout &)const noexcept;
     void Draw(ID3D12GraphicsCommandList *,std::uint32_t,D3D12_CPU_DESCRIPTOR_HANDLE) const;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     void SwapState(ScreenOverlaySystem &other) noexcept { targets_.swap(other.targets_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const ScreenOverlayInputs &,
+        ScreenOverlayOutputs &,ScreenOverlayLayout *,const ScreenOverlayLayout *);
     std::shared_ptr<ScreenOverlayTargets> targets_;
     const RenderGraphBuilder *pending_graph_{};
     ResourceHandle pending_mask_,pending_upload_;

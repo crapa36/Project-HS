@@ -587,6 +587,21 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     for (auto &import_resource : plan_imports)
         Hr(f.device->CreateCommittedResource(&plan_heap, D3D12_HEAP_FLAG_NONE, &plan_buffer_desc,
             D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&import_resource)), "plan-cache import");
+    ComPtr<IUnknown> plan_device_identity;
+    Hr(f.device->QueryInterface(IID_PPV_ARGS(&plan_device_identity)), "plan-cache device identity");
+    std::array<ComPtr<IUnknown>, 8> plan_resource_identities;
+    std::array<hs::NativeResourceContract, 8> plan_contracts{};
+    for (std::size_t index = 0; index < plan_imports.size(); ++index)
+    {
+        Hr(plan_imports[index]->QueryInterface(IID_PPV_ARGS(&plan_resource_identities[index])),
+            "plan-cache resource identity");
+        plan_contracts[index].native_resource = plan_imports[index].Get();
+        plan_contracts[index].resource_identity = plan_resource_identities[index].Get();
+        plan_contracts[index].device_identity = plan_device_identity.Get();
+        plan_contracts[index].description = plan_buffer_desc;
+        plan_contracts[index].generation = 1;
+        plan_contracts[index].backing = hs::NativeBackingKind::Allocation;
+    }
     hs::RenderGraphBuilder plan_graph;
     const auto plan_compilations_before = hs::RenderGraphTestAccess::Compilations(plan_graph);
     const auto plan_reuses_before = hs::RenderGraphTestAccess::Reuses(plan_graph);
@@ -604,7 +619,8 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
             const auto import_base = cycle * 4;
             for (std::uint32_t index = 0; index < shape; ++index)
                 handles[index] = plan_graph.ImportBuffer(
-                    {plan_imports[import_base + index].Get()}, hs::Access::Common, "rotating plan import");
+                    {plan_imports[import_base + index].Get(), {}, hs::QueueHint::Direct,
+                     {}, &plan_contracts[import_base + index]}, hs::Access::Common, "rotating plan import");
             auto pass = plan_graph.AddPass(0, "rotating cached declaration", hs::QueueHint::Direct);
             for (std::uint32_t index = 0; index < shape; ++index)
                 pass.Read(plan_graph.Version(handles[index]), hs::Access::CopySource);
@@ -628,6 +644,88 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     Check(hs::RenderGraphTestAccess::Reuses(plan_graph) - plan_reuses_before == 4,
           "second cycle reuses all four retained exact plans");
     Check(fresh_callback_calls == 8, "cached plans invoke each current callback");
+    const auto restored_handle = plan_graph.PreparedPlan();
+    const auto restored_input_builds = hs::RenderGraphTestAccess::InputBuilds(plan_graph);
+    first.ResetClaims();
+    Check(plan_graph.RestorePlan(restored_handle), "restore retained plan before declarations");
+    Check(!plan_graph.BindPass(0, 99).has_value(), "restored pass requires its original id");
+    for (std::uint32_t index = 0; index < 4; ++index)
+        Check(plan_graph.BindBuffer({index + 1, hs::ResourceKind::Buffer},
+            {plan_imports[index].Get(), {}, hs::QueueHint::Direct, {}, &plan_contracts[index]},
+            hs::Access::Common), "bind current import to restored slot");
+    auto restored_pass = plan_graph.BindPass(0, 0);
+    Check(restored_pass.has_value(), "bind restored pass by declaration index");
+    restored_pass->SetExecute([&](hs::RenderPassContext &context) {
+        ++fresh_callback_calls;
+        Check(context.Resolve({1, hs::ResourceKind::Buffer}) == plan_imports[0].Get(),
+              "restored plan resolves current native import");
+    });
+    Check(plan_graph.Prepare(first).Succeeded() &&
+          hs::RenderGraphTestAccess::InputBuilds(plan_graph) == restored_input_builds,
+          "restored plan skips resource and pass declarations and compiler inputs");
+    Check(plan_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(), "execute restored plan");
+    f.Submit();
+    Check(fresh_callback_calls == 9, "restored plan invokes the current callback");
+    first.ResetClaims();
+    Check(plan_graph.RestorePlan(restored_handle), "restore plan to reject duplicate physical imports");
+    for (std::uint32_t index = 0; index < 4; ++index)
+        Check(plan_graph.BindBuffer({index + 1, hs::ResourceKind::Buffer},
+            {plan_imports[index == 1 ? 0 : index].Get(), {}, hs::QueueHint::Direct,
+             {}, &plan_contracts[index == 1 ? 0 : index]}, hs::Access::Common),
+            "bind duplicate physical import candidate");
+    auto duplicate_pass = plan_graph.BindPass(0, 0);
+    Check(duplicate_pass.has_value(), "bind duplicate candidate pass");
+    duplicate_pass->SetExecute([](hs::RenderPassContext &) {});
+    Check(!plan_graph.Prepare(first).Succeeded(), "restored plan rejects duplicate native identity");
+    ComPtr<ID3D12Resource> changed_import;
+    auto changed_desc = plan_buffer_desc;
+    changed_desc.Width = 2048;
+    Hr(f.device->CreateCommittedResource(&plan_heap, D3D12_HEAP_FLAG_NONE, &changed_desc,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&changed_import)), "changed plan import");
+    ComPtr<IUnknown> changed_identity;
+    Hr(changed_import->QueryInterface(IID_PPV_ARGS(&changed_identity)), "changed import identity");
+    auto changed_contract = plan_contracts[0];
+    changed_contract.native_resource = changed_import.Get();
+    changed_contract.resource_identity = changed_identity.Get();
+    changed_contract.description = changed_desc;
+    Check(plan_graph.RestorePlan(restored_handle), "failed binding preserves retained plan");
+    for (std::uint32_t index = 0; index < 4; ++index)
+        Check(plan_graph.BindBuffer({index + 1, hs::ResourceKind::Buffer},
+            {index == 0 ? changed_import.Get() : plan_imports[index].Get(), {}, hs::QueueHint::Direct,
+             {}, index == 0 ? &changed_contract : &plan_contracts[index]}, hs::Access::Common),
+            "bind changed descriptor candidate");
+    auto changed_pass = plan_graph.BindPass(0, 0);
+    Check(changed_pass.has_value(), "bind changed descriptor pass");
+    changed_pass->SetExecute([](hs::RenderPassContext &) {});
+    Check(!plan_graph.Prepare(first).Succeeded(), "restored plan rejects changed native descriptor");
+    ComPtr<IUnknown> first_identity, second_identity, device_identity;
+    Hr(plan_imports[0]->QueryInterface(IID_PPV_ARGS(&first_identity)), "first import identity");
+    Hr(plan_imports[1]->QueryInterface(IID_PPV_ARGS(&second_identity)), "second import identity");
+    Hr(f.device->QueryInterface(IID_PPV_ARGS(&device_identity)), "plan device identity");
+    hs::NativeResourceContract first_contract;
+    first_contract.native_resource = plan_imports[0].Get();
+    first_contract.resource_identity = first_identity.Get();
+    first_contract.device_identity = device_identity.Get();
+    first_contract.heap_identity = reinterpret_cast<void *>(std::uintptr_t{1});
+    first_contract.description = plan_buffer_desc;
+    first_contract.heap_offset = 0;
+    first_contract.heap_size = 1024;
+    first_contract.generation = 1;
+    first_contract.backing = hs::NativeBackingKind::Allocation;
+    auto second_contract = first_contract;
+    second_contract.native_resource = plan_imports[1].Get();
+    second_contract.resource_identity = second_identity.Get();
+    second_contract.heap_offset = 512;
+    plan_graph.Reset();
+    const auto placed_a = plan_graph.ImportBuffer({plan_imports[0].Get(), {}, hs::QueueHint::Direct,
+        {}, &first_contract}, hs::Access::Common, "placed A");
+    const auto placed_b = plan_graph.ImportBuffer({plan_imports[1].Get(), {}, hs::QueueHint::Direct,
+        {}, &second_contract}, hs::Access::Common, "placed B");
+    auto placed_reader = plan_graph.AddPass(0, "overlap candidate", hs::QueueHint::Direct);
+    placed_reader.Read(plan_graph.Version(placed_a), hs::Access::CopySource);
+    placed_reader.Read(plan_graph.Version(placed_b), hs::Access::CopySource);
+    placed_reader.SetExecute([](hs::RenderPassContext &) {});
+    Check(!plan_graph.Prepare(first).Succeeded(), "certified placed imports reject overlapping heap intervals");
     hs::RenderGraphBuilder contract_graph;
     const auto declare_contract = [&](hs::BufferRange range, hs::Access incoming = hs::Access::Common) {
         contract_graph.Reset();

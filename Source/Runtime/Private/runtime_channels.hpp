@@ -3,7 +3,7 @@
 #include <hs/core/bounded_spsc_queue.hpp>
 #include <hs/core/input.hpp>
 #include <hs/core/presentation_event.hpp>
-#include <hs/core/snapshot_exchange.hpp>
+#include <hs/presentation/snapshot_exchange.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/renderer/renderer.hpp>

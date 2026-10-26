@@ -4,6 +4,7 @@
 #include <hs/core/process_info.hpp>
 #include <hs/render_data/character_package.hpp>
 #include <hs/render_data/character_animation_extension.hpp>
+#include <hs/render_data/character_descriptor.hpp>
 #include <hs/render_data/geometry_package.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_sidecar.hpp>
@@ -11,7 +12,7 @@
 #include <hs/render_data/texture_package.hpp>
 #include <hs/render_data/quality_profiles.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/renderer/render_frame_input.hpp>
+#include <hs/render_data/render_frame_input.hpp>
 
 #include "renderer_options.hpp"
 #include "renderer_caster_storage.hpp"
@@ -30,6 +31,7 @@
 #include "skin_cache.hpp"
 #include "streaming_manager.hpp"
 #include "renderer_asset_io.hpp"
+#include "renderer_content.hpp"
 #include "renderer_startup.hpp"
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
@@ -51,6 +53,7 @@
 #include "renderer_subsurface.hpp"
 #include "renderer_reflections.hpp"
 #include "renderer_transparency.hpp"
+#include "renderer_post_subgraphs.hpp"
 #include "renderer_probe.hpp"
 #include "renderer_ltc.hpp"
 #include "renderer_hdr_post.hpp"
@@ -198,9 +201,11 @@ constexpr std::uint32_t kTextureDescriptorCount = kBrixelizerFrameTableOffset + 
 constexpr std::uint32_t kArcherGeometryPage =
     static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount);
 constexpr std::uint32_t kMonsterGeometryPage = kArcherGeometryPage + 1;
-constexpr std::size_t kGpuVisibilityBucketCount = kMonsterGeometryPage + 6;
+constexpr std::size_t kGpuVisibilityBucketCount = kMonsterGeometryPage + 18;
 constexpr std::uint32_t kProjectileGeometryPage = kMonsterGeometryPage + 6;
 constexpr std::uint32_t kProceduralGeometryPage = kProjectileGeometryPage + 1;
+constexpr std::uint32_t kMonsterReducedGeometryPage = kProceduralGeometryPage + 1;
+static_assert(kMonsterReducedGeometryPage + 12u < kGeometryPageCapacity);
 static_assert(render_data::kMaterialTextureSlots == 6);
 static_assert(kVisibilityVariantCount == 24);
 constexpr std::uint32_t kVfxDistortionDescriptorOffset =
@@ -361,7 +366,10 @@ struct GeometryPageGpu
 
 struct MonsterAsset : GeometryPageGpu
 {
-    std::vector<render_data::CharacterMaterialBinding> material_bindings;
+    std::vector<render_data::CharacterMaterialBinding> owned_material_bindings;
+    std::vector<render_data::GeometryMetadata> owned_geometry_lods;
+    std::vector<render_data::CharacterIntervalBound> owned_interval_bounds;
+    std::span<const render_data::CharacterMaterialBinding> material_bindings;
     std::uint32_t bone_count{};
     std::uint32_t material_count{};
     float ground_offset{};
@@ -369,14 +377,78 @@ struct MonsterAsset : GeometryPageGpu
     std::array<DirectX::XMUINT4, static_cast<std::size_t>(CharacterAnimationClip::Count)> clip_meta{};
     std::array<std::byte,32> skeleton_binding{};
     std::uint32_t deformation_flags{};
-    std::vector<render_data::GeometryMetadata> geometry_lods;
-    std::vector<render_data::CharacterIntervalBound> interval_bounds;
+    std::span<const render_data::GeometryMetadata> geometry_lods;
+    std::span<const render_data::CharacterIntervalBound> interval_bounds;
+    std::array<std::size_t, static_cast<std::size_t>(CharacterAnimationClip::Count)> interval_clip_offsets{};
+    std::size_t interval_rows_per_lod{};
+    std::array<double, 3> interval_maximum_extent{};
+    bool interval_lookup_valid{};
+
+    void PrepareIntervalLookup() noexcept
+    {
+        interval_lookup_valid = false;
+        interval_clip_offsets = {};
+        interval_rows_per_lod = 0;
+        interval_maximum_extent = {};
+        if (!bone_count || geometry_lods.empty() || geometry_lods.size() > 3) return;
+        bool gap{};
+        for (std::size_t clip = 0; clip < clip_meta.size(); ++clip)
+        {
+            const auto &meta = clip_meta[clip];
+            interval_clip_offsets[clip] = interval_rows_per_lod;
+            if (!meta.y) { gap = true; continue; }
+            if (gap || meta.y < 2 || meta.w != bone_count ||
+                interval_rows_per_lod > UINT32_MAX / bone_count ||
+                meta.x != interval_rows_per_lod * bone_count ||
+                interval_rows_per_lod > interval_bounds.size() ||
+                meta.y > interval_bounds.size() - interval_rows_per_lod)
+                return;
+            interval_rows_per_lod += meta.y;
+        }
+        if (interval_rows_per_lod == 0 ||
+            interval_rows_per_lod > interval_bounds.size() / geometry_lods.size() ||
+            interval_rows_per_lod * geometry_lods.size() != interval_bounds.size()) return;
+        for (std::size_t lod = 0; lod < geometry_lods.size(); ++lod)
+        {
+            if (geometry_lods[lod].lod != lod) return;
+            for (std::size_t clip = 0; clip < clip_meta.size(); ++clip)
+                for (std::uint32_t frame = 0; frame < clip_meta[clip].y; ++frame)
+                {
+                    const auto &bound = interval_bounds[lod * interval_rows_per_lod +
+                        interval_clip_offsets[clip] + frame];
+                    if (bound.lod != lod || static_cast<std::size_t>(bound.clip) != clip ||
+                        bound.frame != frame) return;
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                    {
+                        if (!std::isfinite(bound.minimum[axis]) ||
+                            !std::isfinite(bound.maximum[axis]) ||
+                            bound.minimum[axis] > bound.maximum[axis]) return;
+                        interval_maximum_extent[axis] = std::max(interval_maximum_extent[axis],
+                            std::max(std::abs(double(bound.minimum[axis])),
+                                std::abs(double(bound.maximum[axis]))));
+                    }
+                }
+        }
+        interval_lookup_valid = true;
+    }
+
+    [[nodiscard]] const render_data::CharacterIntervalBound *IntervalBound(
+        std::uint16_t lod, CharacterAnimationClip clip, std::uint32_t frame) const noexcept
+    {
+        const auto clip_index = static_cast<std::size_t>(clip);
+        if (!interval_lookup_valid || lod >= geometry_lods.size() ||
+            clip_index >= clip_meta.size() || frame >= clip_meta[clip_index].y) return nullptr;
+        return &interval_bounds[std::size_t(lod) * interval_rows_per_lod +
+            interval_clip_offsets[clip_index] + frame];
+    }
 
     void Reset() noexcept
     {
-        GeometryPageGpu::Reset(); material_bindings.clear(); geometry_lods.clear(); interval_bounds.clear();
+        GeometryPageGpu::Reset(); material_bindings = {}; geometry_lods = {}; interval_bounds = {};
+        owned_material_bindings.clear(); owned_geometry_lods.clear(); owned_interval_bounds.clear();
         bone_count=material_count=skin_offset=deformation_flags=0; ground_offset=0;
-        clip_meta={}; skeleton_binding={};
+        clip_meta={}; skeleton_binding={}; interval_clip_offsets={};
+        interval_rows_per_lod=0; interval_maximum_extent={}; interval_lookup_valid=false;
     }
 };
 
@@ -572,6 +644,14 @@ struct UiCpuSurface
     return ReadCheckedBinary(path, bytes, expected_bytes);
 }
 
+[[nodiscard]] inline Result ReadBinary(const RendererAssetSource &source,
+                                       std::vector<std::byte> &bytes,
+                                       std::optional<std::uint64_t> expected_bytes = std::nullopt)
+{
+    StartupOperationScope timing(RendererStartupOperation::CheckedBinaryRead);
+    return source.Read(bytes, expected_bytes);
+}
+
 struct DdsHeaderDx10
 {
     DXGI_FORMAT format;
@@ -607,6 +687,185 @@ constexpr std::array<Vertex, 36> kCubeVertices = {
 using namespace renderer_detail;
 
 struct StaticShadowBakeFrame;
+
+struct ExposureGraphLayout
+{
+    std::array<std::uint32_t, 4> pass_indices{};
+    ResourceVersion scene_work{}, histogram{}, exposure_write{};
+};
+
+struct FinalGraphLayout
+{
+    bool reference_timing{}, presentation{};
+    std::array<std::uint32_t, 2> pass_indices{};
+    ResourceVersion back_buffer{};
+};
+
+struct FrameUploadGraphLayout
+{
+    std::uint32_t pass_index{};
+    ResourceVersion dynamic_lod{}, static_lod{}, geometry_records{}, dynamic_instances{};
+    ResourceVersion static_instances{}, environment_stream{};
+    std::vector<ResourceVersion> geometry_streams;
+};
+
+struct ParticleGraphLayout
+{
+    std::uint32_t pass_index{};
+    std::array<ResourceVersion, 9> outputs{};
+};
+
+struct SingleOutputGraphLayout
+{
+    std::uint32_t pass_index{};
+    ResourceVersion output{};
+};
+
+struct DoubleOutputGraphLayout
+{
+    std::uint32_t pass_index{};
+    ResourceVersion first{}, second{};
+};
+
+struct InitialGraphLayout
+{
+    DoubleOutputGraphLayout exposure;
+    SingleOutputGraphLayout ui;
+    std::uint32_t temporal_pass_index{};
+    std::array<ResourceVersion, 6> temporal{};
+};
+
+struct VisibilityGraphLayout
+{
+    std::uint32_t pass_index{};
+    std::array<ResourceVersion, 9> outputs{};
+};
+
+struct RetestGraphLayout
+{
+    std::uint32_t pass_index{};
+    ResourceVersion records{}, refs{}, args{};
+};
+
+struct LightingGraphLayout
+{
+    std::uint32_t pass_index{};
+    std::array<ResourceVersion, 4> outputs{};
+};
+
+struct SurfacePassGraphLayout
+{
+    std::uint32_t pass_index{};
+    std::array<ResourceVersion, 10> versions{};
+    std::vector<ResourceVersion> sidecars;
+};
+
+struct FrameGraphLayout
+{
+    struct ResourceShape
+    {
+        D3D12_RESOURCE_DIMENSION dimension{D3D12_RESOURCE_DIMENSION_UNKNOWN};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        std::uint64_t width{};
+        std::uint32_t height{}, sample_count{}, sample_quality{};
+        std::uint16_t depth_or_array{}, mip_levels{};
+        D3D12_TEXTURE_LAYOUT layout{D3D12_TEXTURE_LAYOUT_UNKNOWN};
+        D3D12_RESOURCE_FLAGS flags{D3D12_RESOURCE_FLAG_NONE};
+        D3D12_HEAP_TYPE buffer_heap{D3D12_HEAP_TYPE_DEFAULT};
+        std::uint32_t alias_group{}; // Current equivalence pattern, never a retained pointer.
+        [[nodiscard]] bool operator==(const ResourceShape &) const noexcept = default;
+    };
+    struct ImportSlot
+    {
+        std::string name;
+        ResourceHandle handle;
+        D3D12_RESOURCE_DESC description{};
+        D3D12_HEAP_TYPE buffer_heap{D3D12_HEAP_TYPE_DEFAULT};
+        bool certified{};
+    };
+    struct PassSlot { std::uint32_t id{}, declaration_index{}; };
+    // Fast rejection only; helper variants, import descriptors and use ranges must also match.
+    struct EarlyKey
+    {
+        std::uint32_t frame_slot{}, render_width{}, render_height{}, output_width{}, output_height{};
+        std::uint32_t material_sidecar_planes{};
+        bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{};
+        bool exposure_initialization{}, ui_upload{}, temporal_initialization{}, offscreen_initialization{};
+        bool static_scene_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
+        bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{};
+        bool composite_gradient_read{};
+        bool dynamic_lod_initialized{}, static_lod_initialized{}, dynamic_lod_prefix{}, static_lod_prefix{};
+        bool visibility_target_initialization{}, csm{}, authored_material{}, masked_material{};
+        bool static_authored_material{}, static_masked_material{}, native_reconstruction{};
+        bool bloom{}, outline{}, fxaa_identity{}, post_target_initialization{};
+        bool screen_overlay_requested{}, entity_surface{}, decal_commands{};
+        bool hdr_motion{}, hdr_dof{}, hdr_grade{}, sdk_presentation{}, devtools_ui{};
+        bool software_gi{}, contact_shadows{}, adaptive_raster{}, adaptive_compute{}, overlap_ao_csm{};
+        GraphicsAoMode ao_mode{};
+        GraphicsGiMode gi_mode{};
+        GraphicsReflectionMode reflection_mode{};
+        GraphicsShadowMode shadow_mode{};
+        std::uint32_t geometry_upload_count{}, hero_work_source_mask{};
+        [[nodiscard]] bool operator==(const EarlyKey &) const noexcept = default;
+    } early;
+    RenderGraphBuilder::PlanHandle handle{};
+    std::uint64_t last_used{};
+    bool certified_imports{true};
+    std::vector<std::uint32_t> geometry_page_slots, software_scene_page_slots;
+    // One representative logical read pair per GI leaf source, indexed by
+    // resident page and vertex source kind. Actor multiplicity is frame data.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> brixelizer_leaf_keys;
+    std::vector<ResourceShape> direct_import_shapes;
+    std::vector<ImportSlot> imports;
+    std::vector<PassSlot> passes;
+    TextureStreamingLayout texture_streaming;
+    TextureFeedbackLayout texture_feedback;
+    TextureHandle distortion{}, bloom_half{}, bloom_quarter{}, bloom_combined{}, back_buffer{};
+    ExposureGraphLayout exposure;
+    InitialGraphLayout initial;
+    FinalGraphLayout final;
+    FrameUploadGraphLayout upload;
+    ParticleGraphLayout particle;
+    DoubleOutputGraphLayout skin;
+    VisibilityGraphLayout visibility;
+    SurfacePassGraphLayout visibility_discard, visibility_clear, gbuffer;
+    SingleOutputGraphLayout depth_pyramid, final_depth_pyramid;
+    RetestGraphLayout retest;
+    SurfacePassGraphLayout gbuffer_retest, surface_resolve;
+    SingleOutputGraphLayout raster_records, material_count;
+    DoubleOutputGraphLayout material_prefix, material_scatter;
+    LightingGraphLayout lighting;
+    SingleOutputGraphLayout cascaded_shadow;
+    SingleOutputGraphLayout devtools_ui, sdk_copy;
+    SingleOutputGraphLayout distortion_pass;
+    DoubleOutputGraphLayout transparent_pass;
+    SingleOutputGraphLayout composite_pass;
+    AdaptiveShadingLayout adaptive;
+    AmbientOcclusionLayout ambient;
+    SubsurfaceLayout subsurface;
+    ScreenReflectionsLayout reflections;
+    ScreenOverlayLayout screen_overlay;
+    VolumetricLayout volumetrics;
+    HeroTransparencyLayout hero;
+    PostSubgraphLayout post;
+    LightListLayout light_list;
+    LtcLutLayout ltc;
+    DecalSurfaceLayout decal_surface;
+    VirtualShadowLayout virtual_shadows;
+    LocalShadowLayout local_shadows;
+    HdrPostMotionLayout hdr_motion;
+    HdrPostGradeLayout hdr_grade;
+    ClusterGraphLayout cluster;
+    HlodRuntimeFrameLayout hlod;
+    ResourceVersion hlod_input_geometry_records{}, hlod_input_static_instances{};
+    LightingProbeLayout probe;
+    LocalProbeRuntimeLayout local_probe;
+    ReconstructionGuidesLayout reconstruction_guides;
+    PresentationGuidesLayout presentation_guides;
+    PresentationTagLayout presentation_tag;
+    SceneGeometryGraphLayout scene_geometry;
+    BrixelizerGraphLayout brixelizer;
+};
 
 struct D3D12Renderer::Impl
 {
@@ -708,8 +967,10 @@ struct D3D12Renderer::Impl
     {
         std::vector<GpuInstance> instances;
         std::vector<std::uint32_t> generations;
+        std::vector<Sequence> motion_epochs;
         RenderWorldPosition scene_origin;
         std::uint64_t package_id{};
+        RenderSnapshotHeader sample;
     };
     // Dormant views own their complete GPU/history state. All queues drain
     // before exchange because execution RTV/DSV banks are shared scratch.
@@ -754,10 +1015,16 @@ struct D3D12Renderer::Impl
         DynamicResolutionController dynamic_resolution_controller;
         GpuPassTimings completed_gpu_timings;
         std::uint64_t dynamic_resolution_sample_id{};
+        std::uint64_t timing_source_sequence{};
+        CompletionSet timing_source_output_completion;
+        ViewExtent timing_last_active;
+        const ReconstructionProvider *timing_last_provider{};
         SkinCache skin_history;
         ClusterViewRuntime cluster_view;
         std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation;
         std::shared_ptr<const SubmittedInstanceFrame> previous_instances;
+        RenderSnapshotHeader last_rendered_sample;
+        bool has_rendered_sample{};
         std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
         DirectX::XMFLOAT4 previous_grass_state{};
         std::shared_ptr<const StaticRenderScene> scene_lease;
@@ -803,7 +1070,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ResetOwnedViewAfterCompletion(OwnedView &);
     [[nodiscard]] Result ResetOwnedViewsAfterCompletion();
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
-    [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &) const;
+    [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &);
     [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &) const;
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
     struct StaticDrawData
@@ -844,15 +1111,18 @@ struct D3D12Renderer::Impl
         ResidencyTicket residency;
         CompletionSet completion{};
     };
-    struct PreparedEnvironmentGeometry
+    struct PreparedGeometryUpload
     {
-        render_data::GeometryData geometry;
-        render_data::PackageView package;
+        render_data::PreparedGeometryPage page;
+        const render_data::GeometryDescriptor *descriptor{};
+        std::string source_product;
         std::array<std::byte, 32> digest{};
     };
+    [[nodiscard]] Result PrepareReadGeometry(const RendererConfig &, std::string_view,
+        std::span<const std::byte>, const render_data::GeometryMetadata &, PreparedGeometryUpload &) const;
     struct EnvironmentTextureStream
     {
-        std::filesystem::path path;
+        RendererAssetSource source;
         std::string logical_id;
         std::string source_id;
         StreamingRequestId request;
@@ -885,7 +1155,7 @@ struct D3D12Renderer::Impl
 
         void ResetRuntime() noexcept
         {
-            path.clear();
+            source.clear();
             logical_id.clear();
             source_id.clear();
             request = {};
@@ -917,20 +1187,22 @@ struct D3D12Renderer::Impl
     };
     struct EnvironmentGeometryStream
     {
-        std::filesystem::path path;
+        RendererAssetSource source;
+        std::shared_ptr<const RendererDevelopmentCatalog> development_catalog;
         std::string logical_id;
         std::string source_id;
         std::string content_generation;
         StreamingRequestId request;
         std::future<std::vector<std::byte>> read_future;
         std::vector<std::byte> decoded_storage;
-        std::shared_ptr<PreparedEnvironmentGeometry> preparation;
+        std::shared_ptr<PreparedGeometryUpload> preparation;
         ResidencyTicket decoded_residency;
         ResidencyTicket decode_reservation;
         std::uint64_t read_bytes{}, last_demand_frame{};
         GeometryPageGpu candidate;
         AllocationResource upload;
         render_data::GeometryMetadata metadata;
+        render_data::GeometryHandle compiled_geometry;
         CompletionSet upload_completion{};
         CompletionSet prior_use{};
         CompletionSet retirement{};
@@ -950,7 +1222,7 @@ struct D3D12Renderer::Impl
 
         void ResetRuntime() noexcept
         {
-            path.clear();
+            source.clear();
             logical_id.clear();
             source_id.clear();
             content_generation.clear();
@@ -967,6 +1239,7 @@ struct D3D12Renderer::Impl
             upload.Reset();
             upload_completion = {};
             metadata = {};
+            compiled_geometry = {};
             prior_use = {};
             retirement = {};
             frame_generation = {1, 1, 1};
@@ -1069,7 +1342,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] DXGI_FORMAT MaterialSidecarFormat(std::size_t plane) const noexcept;
     void WriteMaterialSidecarDescriptors() noexcept;
     [[nodiscard]] Result CreateEnvironmentBrdfLut(const RendererConfig &lut_config,
-                                                AllocationResource &lut);
+                                                AllocationResource &lut,
+                                                std::vector<AllocationResource> *upload_batch = nullptr);
     void WriteEnvironmentBrdfLutDescriptors();
     [[nodiscard]] Result CreateEnvironmentMeshes();
     [[nodiscard]] Result CreateClusterResources(std::uint32_t generation_tag);
@@ -1105,7 +1379,17 @@ struct D3D12Renderer::Impl
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
     [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::span<const RenderInstance> &);
     [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &);
-    [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, std::uint32_t, ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &);
+    [[nodiscard]] Result PrepareHlodFrameRecordData(std::uint32_t frame_slot,
+        std::uint32_t active_view_mask, ResourceVersion geometry_records,
+        ResourceVersion static_scene, ResourceVersion proxy_refs,
+        HlodRuntimeFrameRecordData &);
+    [[nodiscard]] bool MatchesHlodFrameLayout(const HlodRuntimeFrameRecordData &,
+        const HlodRuntimeFrameLayout &) const noexcept;
+    [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, std::uint32_t,
+        ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &,
+        HlodRuntimeFrameLayout *capture = nullptr,
+        HlodRuntimeFrameRecordData *prepared = nullptr,
+        const HlodRuntimeFrameLayout *retained = nullptr);
     void ReadHlodFrame(PassBuilder &, const HlodFrameGraph &, bool) const;
     [[nodiscard]] Result DrawHlodGeometry(ID3D12GraphicsCommandList *, std::uint32_t, std::uint32_t);
     [[nodiscard]] Result CommitHlodFrameGraph(std::uint32_t, HlodFrameGraph &, const CompletionSet &);
@@ -1123,11 +1407,18 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareLightList(const RendererConfig &, ViewExtent, LightListCandidate &) const;
     [[nodiscard]] Result PrepareHeroBindings(ID3D12GraphicsCommandList *,
         std::vector<AllocationResource> &uploads);
+    [[nodiscard]] ClusterFrameRecordData PrepareClusterFrameRecordData(std::uint32_t frame_slot,
+        bool visibility) const;
+    [[nodiscard]] bool MatchesClusterGraphLayout(const ClusterFrameRecordData &,
+        const ClusterGraphLayout &) const noexcept;
     [[nodiscard]] Result AddClusterFramePasses(std::uint32_t frame_slot,
         ResourceVersion &geometry_records, ResourceVersion *raster_records,
-        ResourceVersion static_scene, ClusterFrameGraph &state);
+        ResourceVersion static_scene, ClusterFrameGraph &state,
+        const ClusterFrameRecordData &, ClusterGraphLayout *capture = nullptr,
+        const ClusterGraphLayout *retained = nullptr);
     [[nodiscard]] Result AddClusterOcclusionPass(std::uint32_t frame_slot,
-        ClusterFrameGraph &, ResourceVersion hzb, bool retest);
+        ClusterFrameGraph &, ResourceVersion hzb, bool retest,
+        ClusterGraphLayout *capture = nullptr, const ClusterGraphLayout *retained = nullptr);
     void ReadClusterFrame(PassBuilder &, const ClusterFrameGraph &, bool draw, bool retest = false) const;
     [[nodiscard]] Result DrawClusterGeometry(ID3D12GraphicsCommandList *,
         std::uint32_t frame_slot, std::uint32_t view, bool retest = false);
@@ -1156,7 +1447,8 @@ struct D3D12Renderer::Impl
         GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
         std::span<const std::byte> package_bytes, AssetId page_asset,
         std::uint32_t page_slot, ID3D12GraphicsCommandList *list,
-        std::vector<AllocationResource> &uploads);
+        std::vector<AllocationResource> &uploads,
+        PreparedGeometryUpload *preparation = nullptr);
     [[nodiscard]] Result CreateProceduralGeometry(
         ID3D12GraphicsCommandList *list, std::vector<AllocationResource> &uploads);
     [[nodiscard]] Result CreateVisibilityTargets();
@@ -1170,7 +1462,7 @@ struct D3D12Renderer::Impl
         GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
         std::span<const std::byte> package_bytes, AssetId page_asset,
         std::uint32_t page_slot, AllocationResource &upload,
-        PreparedEnvironmentGeometry *preparation = nullptr);
+        PreparedGeometryUpload *preparation = nullptr);
     void RecordGeometryPageUpload(ID3D12GraphicsCommandList *list,
         const GeometryPageGpu &page, const AllocationResource &upload) const;
     [[nodiscard]] const GeometryPageGpu *FindGeometryPage(std::uint32_t page_slot) const noexcept;
@@ -1222,7 +1514,8 @@ struct D3D12Renderer::Impl
                                            std::uint32_t array_size) const noexcept;
     [[nodiscard]] Result LoadEnvironmentMaterialTexture(
         const render_data::MaterialTextureDefinition &binding, std::uint32_t required_layer,
-        std::vector<AllocationResource> &uploads, std::uint32_t &texture_index);
+        std::vector<AllocationResource> &uploads, std::uint32_t &texture_index,
+        render_data::TextureHandle compiled_texture = {});
     void WriteEnvironmentMaterialTextureDescriptor(
         std::uint32_t frame_slot, std::uint32_t material, std::uint32_t slot,
         ID3D12Resource *resource) const noexcept;
@@ -1248,6 +1541,7 @@ struct D3D12Renderer::Impl
     RendererFeatureCapabilities feature_capabilities;
     std::string resource_generation_id;
     std::shared_ptr<const void> resident_generation_lease;
+    std::shared_ptr<const RendererDevelopmentCatalog> resident_development_catalog;
     std::shared_ptr<StaticShadowBakeFrame> pending_static_shadow_bake;
     ComPtr<IDXGIFactory7> factory;
     ComPtr<IDXGIAdapter4> adapter;
@@ -1300,7 +1594,6 @@ struct D3D12Renderer::Impl
     std::uint64_t static_scene_upload_count{};
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     AllocationResource dynamic_instances;
-    RenderInstanceLookup previous_instance_lookup;
     PersistentGpuSceneSlots dynamic_scene_slots;
     SkinCache skin_cache;
     std::vector<RetiredDynamicInstanceBuffer> retired_dynamic_instance_buffers;
@@ -1309,6 +1602,11 @@ struct D3D12Renderer::Impl
     bool dynamic_instances_shader_read{};
     std::ofstream dynamic_instance_upload_log;
     std::array<ComPtr<ID3D12Resource>, kFrameCount> back_buffers;
+    // DXGI owns these swapchain surfaces independently of application placed heaps.
+    // Identities are borrowed from the matching back_buffers entry and rebuilt on acquisition.
+    std::array<NativeResourceContract, kFrameCount> back_buffer_contracts{};
+    std::array<std::uint64_t, kFrameCount> back_buffer_contract_generations{};
+    std::array<ID3D12Device *, kFrameCount> back_buffer_contract_devices{};
     std::array<CompletionSet, kFrameCount> back_buffer_completion{};
     AllocationResource depth;
     AllocationResource shadow;
@@ -1319,6 +1617,7 @@ struct D3D12Renderer::Impl
     bool visibility_targets_initialized{};
     AllocationResource visibility_pixels, visibility_counts, visibility_dispatch_args;
     std::array<MonsterAsset, 6> monster_assets;
+    std::array<std::array<GeometryPageGpu, 2>, 6> monster_reduced_geometry;
     AllocationResource monster_skin_matrices;
     AllocationResource archer_diffuse;
     AllocationResource archer_normal;
@@ -1517,6 +1816,14 @@ struct D3D12Renderer::Impl
     std::uint64_t view_configuration_revision{1}, rendered_submission_count{}, render_package_id{}, active_render_package_id{};
     std::uint64_t view_session_id{};
     std::chrono::steady_clock::time_point render_package_time;
+    float render_package_alpha{1.0f};
+    RenderSceneSample render_scene_sample;
+    struct PreparedArcherPalette
+    {
+        RenderPoseKey key;
+        std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> bones{};
+    };
+    std::vector<PreparedArcherPalette> prepared_archer_palettes;
     std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation, canonical_skin_current;
     std::shared_ptr<const SubmittedInstanceFrame> previous_instances, canonical_instance_current;
     std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
@@ -1540,6 +1847,16 @@ struct D3D12Renderer::Impl
     DisplayState display_state;
     DynamicResolutionController dynamic_resolution_controller;
     GpuPassTimings completed_gpu_timings;
+    struct SourceTimingHistory
+    {
+        SourceTimingEndpoint latest;
+        DynamicResolutionSample qualified;
+    };
+    mutable std::unordered_map<std::uint32_t, SourceTimingHistory> timing_previous_source_endpoints;
+    std::uint64_t timing_source_sequence{};
+    CompletionSet timing_source_output_completion;
+    ViewExtent timing_last_active;
+    const ReconstructionProvider *timing_last_provider{};
     // Capture-only pending completion snapshots. Both frame count and pass count are bounded.
     mutable std::vector<GpuPassTimings> pending_gpu_timings;
     mutable std::size_t pending_gpu_timing_passes{};
@@ -1643,18 +1960,23 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> visibility_count_pipeline, visibility_prefix_pipeline;
     ComPtr<ID3D12PipelineState> visibility_scatter_pipeline;
     ComPtr<ID3D12CommandSignature> dispatch_signature;
-    std::vector<CharacterClipHeader> archer_clips;
+    render_data::CharacterMetadataPackageData archer_owned_character;
+    std::span<const CharacterClipHeader> archer_clips;
     render_data::CharacterAnimationExtensionData archer_named_animations;
-    std::vector<std::uint16_t> archer_parents;
-    std::vector<std::array<float, 16>> archer_inverse_bind_matrices;
-    std::vector<CharacterLocalTransform> archer_transforms;
-    std::vector<float> archer_upper_body_weights;
+    const render_data::AnimationDescriptor *archer_compiled_animation{};
+    std::vector<render_data::PackedCharacterTransform> archer_packed_transforms, archer_named_packed_transforms;
+    std::span<const std::uint16_t> archer_parents;
+    std::span<const std::array<float, 16>> archer_inverse_bind_matrices;
+    std::span<const CharacterLocalTransform> archer_transforms;
+    std::span<const float> archer_upper_body_weights;
     std::vector<SkinnedVertex> archer_support_vertices;
     std::uint32_t archer_bone_count{};
     std::uint32_t archer_material_count{};
-    std::vector<render_data::CharacterMaterialBinding> archer_material_bindings;
+    std::span<const render_data::CharacterMaterialBinding> archer_material_bindings;
     float archer_ground_offset{};
     RenderGraphBuilder graph;
+    std::array<FrameGraphLayout, 8> graph_layouts{};
+    std::uint64_t graph_layout_use_serial{};
     RenderGraphQueueExecutor graph_queue_executor;
     std::array<TransientResourcePool,kFrameCount> transient_pools;
     UINT rtv_stride{};
@@ -1672,8 +1994,6 @@ struct D3D12Renderer::Impl
     std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
     std::uint64_t validation_errors{};
     std::uint32_t last_particle_count{};
-    Tick observed_snapshot_tick{};
-    std::chrono::steady_clock::time_point snapshot_arrival{};
     bool enhanced{};
     bool mesh_shader_supported{};
     bool mesh_shader_enabled{};

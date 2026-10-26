@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 
 #include <span>
@@ -28,7 +28,7 @@ namespace hs::runtime_detail
 // schedule; each tongue ends at that interval's end, with no invented TTL.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
     const VfxProgramView &program, std::span<const VfxPersistentInput> inputs,
-    Tick current_tick);
+    double current_tick);
 
 struct VfxOwnedStatusTickFlashCommand
 {

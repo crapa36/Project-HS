@@ -1,7 +1,10 @@
 #pragma once
 
+#include "renderer_asset_source.hpp"
+
 #include "renderer_cluster_catalog.hpp"
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/geometry_descriptor.hpp>
 #include "d3d12_resources.hpp"
 #include "residency_manager.hpp"
 #include "streaming_manager.hpp"
@@ -11,6 +14,7 @@
 #include <functional>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 
 namespace hs
@@ -49,7 +53,9 @@ struct ClusterPageStream
     // Both mesh hierarchy and scene HLOD pages share this directory, pool,
     // request state machine and fence publication. The catalog after all environment geometries is scene HLOD.
     std::string source_id, logical_id;
-    std::filesystem::path path;
+    RendererAssetSource source;
+    std::shared_ptr<const RendererDevelopmentCatalog> development_catalog;
+    std::optional<render_data::GeometryDescriptor> compiled;
     std::function<Result(std::span<const std::byte>, render_data::GeometryData &)> decode;
     std::uint32_t physical_slot{UINT32_MAX}, version{};
     bool pinned{}, upload_pending{}, upload_submitted{}, retiring{};
@@ -67,6 +73,15 @@ struct ClusterPageStream
     std::unique_ptr<renderer_detail::GeometryPageGpu> page;
     AllocationResource upload;
     CompletionSet upload_completion{}, last_use{}, retirement{};
+    [[nodiscard]] std::array<std::uint64_t, 4> UploadSizes() const noexcept
+    {
+        if (compiled)
+            return {compiled->chunks[0].byte_count, compiled->chunks[1].byte_count, compiled->chunks[3].byte_count,
+                compiled->chunks[4].byte_count + compiled->chunks[5].byte_count + compiled->chunks[6].byte_count};
+        return {decoded.vertices.size() * sizeof(render_data::ExpandedVertex), decoded.indices.size() * 4u,
+            decoded.meshlets.size() * render_data::kGeometryMeshletStride,
+            (decoded.meshlet_vertex_refs.size() + decoded.meshlet_triangles.size() + decoded.canonical_primitive_remap.size()) * 4u};
+    }
 };
 struct ClusterCatalogRange
 {

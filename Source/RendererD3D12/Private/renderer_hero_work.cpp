@@ -149,6 +149,14 @@ Result HeroWorkCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *all
             if (impl_->status.readback_bytes + impl_->status.shader_gpu_bytes + impl_->status.shader_readback_bytes + impl_->status.shader_zero_upload_bytes > kHeroWorkShaderStorageLimit)
                 return Fail("Actual hero shader diagnostic allocation sizes exceed 512MiB.");
         }
+        for (auto *resource : {&slot->arguments, &slot->shader_zero})
+            if (auto certified = resource->EnsureNativeContract(device); !certified)
+                return certified;
+        for (UINT phase = 0; phase < kPhases; ++phase)
+            for (auto *resource : {&slot->readbacks[phase], &slot->shader_gpu[phase],
+                    &slot->shader_readbacks[phase]})
+                if (auto certified = resource->EnsureNativeContract(device); !certified)
+                    return certified;
         impl_->slots.push_back(std::move(slot));
     }
     return Result::Success();
@@ -182,7 +190,8 @@ void HeroWorkCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELIN
         out.blend_op_alpha[i] = blend.BlendOpAlpha; out.write_mask[i] = blend.RenderTargetWriteMask;
     }
 }
-Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyInputs &inputs)
+Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyInputs &inputs,
+    HeroWorkRetainedLayout *layout)
 {
     if (inputs.frame_slot >= impl_->slots.size() || inputs.work_contributors.size() > kContributors || !inputs.work_draw ||
         !inputs.direct_queue || !inputs.direct_timestamp_frequency || !inputs.submitted_frame)
@@ -206,6 +215,13 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
         std::uint64_t(inputs.render_active.width) * inputs.render_active.height > impl_->shader_layout.pixels)
         return Fail("Hero shader active extent exceeds the checked bitmap capacity.");
     slot.contributors.assign(inputs.work_contributors.begin(), inputs.work_contributors.end());
+    if (layout)
+    {
+        *layout = {};
+        layout->contributor_count = static_cast<std::uint32_t>(slot.contributors.size());
+        for (std::size_t index = 0; index < slot.contributors.size(); ++index)
+            layout->argument_versions[index] = slot.contributors[index].arguments;
+    }
     slot.queue = inputs.direct_queue; slot.frame = inputs.submitted_frame; slot.tick = inputs.tick;
     slot.view = inputs.view_id; slot.width = inputs.render_active.width; slot.height = inputs.render_active.height;
     slot.frequency = inputs.direct_timestamp_frequency; slot.success = false;
@@ -222,12 +238,23 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
     }
     const D3D12_RANGE zero_written{0, static_cast<SIZE_T>(impl_->shader_layout.phase_bytes)};
     slot.shader_zero.resource->Unmap(0, &zero_written);
+    for (auto *resource : {&slot.shader_zero, &slot.arguments})
+        if (auto certified = resource->EnsureNativeContract(impl_->device.Get()); !certified)
+            return certified;
     slot.shader_zero_handle = graph.ImportBuffer({slot.shader_zero.resource.Get(), slot.shader_zero.graph_completion,
-        slot.shader_zero.graph_queue}, slot.shader_zero.graph_access, "HeroWork.ShaderZeroUpload");
+        slot.shader_zero.graph_queue, {}, slot.shader_zero.NativeContract()},
+        slot.shader_zero.graph_access, "HeroWork.ShaderZeroUpload");
     // Query results and visible arguments are separate graph destinations. The
     // graph owns CopySource -> IndirectArgs hazards; no hand-written transitions.
     slot.arguments_handle = graph.ImportBuffer({slot.arguments.resource.Get(), slot.arguments.graph_completion,
-        slot.arguments.graph_queue}, slot.arguments.graph_access, "HeroWork.IndexedArgumentsReadback");
+        slot.arguments.graph_queue, {}, slot.arguments.NativeContract()},
+        slot.arguments.graph_access, "HeroWork.IndexedArgumentsReadback");
+    if (layout)
+    {
+        layout->zero_upload = slot.shader_zero_handle;
+        layout->arguments_readback = slot.arguments_handle;
+        layout->argument_copy_pass = graph.PassCount();
+    }
     auto pass = graph.AddPass(118, "HeroWorkCopyIndexedArguments", QueueHint::Direct);
     for (std::size_t i = 0; i < slot.contributors.size(); ++i)
     {
@@ -252,18 +279,27 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
     });
     return Result::Success();
 }
-void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass, std::uint32_t index, std::uint32_t phase)
+void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
+    std::uint32_t index, std::uint32_t phase, HeroWorkRetainedLayout *layout)
 {
     auto &slot = *impl_->slots.at(index); auto &readback = slot.readbacks.at(phase);
     if (slot.contributors.empty()) return;
     auto &handle = slot.phase_handles.at(phase);
-    handle = graph.ImportBuffer({readback.resource.Get(), readback.graph_completion, readback.graph_queue},
+    handle = graph.ImportBuffer({readback.resource.Get(), readback.graph_completion,
+        readback.graph_queue, {}, readback.NativeContract()},
         readback.graph_access, "HeroWork.NativeQueriesReadback");
+    if (layout) layout->native_readback[phase] = handle;
     const auto written = pass.Write(graph.Version(handle), Access::CopyDest);
     graph.SetFinalAccess(written, Access::CopyDest);
     auto &gpu = slot.shader_gpu.at(phase); auto &shader_readback = slot.shader_readbacks.at(phase);
     auto &gpu_handle = slot.shader_handles.at(phase);
-    gpu_handle = graph.ImportBuffer({gpu.resource.Get(), gpu.graph_completion, gpu.graph_queue}, gpu.graph_access, "HeroWork.ShaderCountersBitmap");
+    gpu_handle = graph.ImportBuffer({gpu.resource.Get(), gpu.graph_completion,
+        gpu.graph_queue, {}, gpu.NativeContract()}, gpu.graph_access, "HeroWork.ShaderCountersBitmap");
+    if (layout)
+    {
+        layout->shader_gpu[phase] = gpu_handle;
+        layout->shader_initialize_pass[phase] = graph.PassCount();
+    }
     auto initialize = graph.AddPass(0x48570000u + phase * 2, "HeroWorkInitializeShaderCounters", QueueHint::Direct);
     initialize.Read(graph.Version(slot.shader_zero_handle), Access::CopySource);
     const auto initialized = initialize.Write(graph.Version(gpu_handle), Access::CopyDest);
@@ -276,7 +312,13 @@ void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
     const auto counted = pass.ReadWrite(initialized, Access::UnorderedWrite);
     auto &shader_handle = slot.shader_readback_handles.at(phase);
     shader_handle = graph.ImportBuffer({shader_readback.resource.Get(), shader_readback.graph_completion,
-        shader_readback.graph_queue}, shader_readback.graph_access, "HeroWork.ShaderHeaderReadback");
+        shader_readback.graph_queue, {}, shader_readback.NativeContract()},
+        shader_readback.graph_access, "HeroWork.ShaderHeaderReadback");
+    if (layout)
+    {
+        layout->shader_readback[phase] = shader_handle;
+        layout->shader_copy_pass[phase] = graph.PassCount();
+    }
     auto resolve = graph.AddPass(0x48570001u + phase * 2, "HeroWorkCopyShaderCounters", QueueHint::Direct);
     resolve.Read(counted, Access::CopySource);
     const auto resolved = resolve.Write(graph.Version(shader_handle), Access::CopyDest);
@@ -289,6 +331,140 @@ void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
                 slot.shader_gpu[phase].resource.Get(), i * stride, kHeroWorkShaderHeaderBytes);
         slot.shader_copy_recorded[phase] = true;
     });
+}
+Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &graph,
+    const HeroTransparencyInputs &inputs, const HeroWorkRetainedLayout &layout)
+{
+    static_assert(kContributors == HeroWorkRetainedLayout::kMaxContributors);
+    if (inputs.frame_slot >= impl_->slots.size() || layout.contributor_count > kContributors ||
+        inputs.work_contributors.size() != layout.contributor_count ||
+        !inputs.work_draw || !inputs.direct_queue || !inputs.direct_timestamp_frequency ||
+        !inputs.submitted_frame ||
+        (layout.contributor_count &&
+            (layout.argument_copy_pass >= graph.PassCount() ||
+             graph.DeclaredPassId(layout.argument_copy_pass) != 118 ||
+             !graph.BindPass(layout.argument_copy_pass, 118))))
+        return Fail("Hero retained contributor layout or frame is invalid.");
+    auto &slot = *impl_->slots[inputs.frame_slot];
+    if (slot.pending || !slot.completion.IsSatisfiedBy(inputs.completed))
+        return Fail("Hero retained contributor slot is still in GPU use.");
+    if (!slot.shader_zero.NativeContract() || !slot.arguments.NativeContract())
+        return Fail("Hero retained contributor native owner changed.");
+    for (std::size_t index = 0; index < inputs.work_contributors.size(); ++index)
+    {
+        const auto &source = inputs.work_contributors[index];
+        const auto expected = layout.argument_versions[index];
+        if (!source.argument_resource || !source.arguments.resource ||
+            source.arguments.resource.kind != ResourceKind::Buffer ||
+            source.arguments.resource.value != expected.resource.value ||
+            source.arguments.ordinal != expected.ordinal)
+            return Fail("Hero retained contributor argument topology changed.");
+        const auto desc = source.argument_resource->GetDesc();
+        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || source.argument_offset % 4 ||
+            source.argument_offset > desc.Width || 24 > desc.Width - source.argument_offset)
+            return Fail("Hero retained indexed argument range is invalid.");
+    }
+    if (!inputs.render_active.width || !inputs.render_active.height ||
+        std::uint64_t(inputs.render_active.width) * inputs.render_active.height > impl_->shader_layout.pixels)
+        return Fail("Hero retained shader active extent exceeds bitmap capacity.");
+    slot.recorded.fill(false); slot.phase_handles.fill({});
+    slot.shader_handles.fill({}); slot.shader_readback_handles.fill({});
+    slot.shader_clear_recorded.fill(false); slot.shader_copy_recorded.fill(false);
+    slot.contributors.assign(inputs.work_contributors.begin(), inputs.work_contributors.end());
+    slot.queue = inputs.direct_queue; slot.frame = inputs.submitted_frame; slot.tick = inputs.tick;
+    slot.view = inputs.view_id; slot.width = inputs.render_active.width;
+    slot.height = inputs.render_active.height;
+    slot.frequency = inputs.direct_timestamp_frequency; slot.success = false;
+    if (slot.contributors.empty()) return Result::Success();
+    void *zero{}; const D3D12_RANGE no_read{0, 0};
+    const auto mapped = slot.shader_zero.resource->Map(0, &no_read, &zero);
+    if (FAILED(mapped)) return Native("Map retained hero shader zero upload", mapped);
+    std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
+    for (UINT contributor = 0; contributor < kContributors; ++contributor)
+    {
+        const std::array<UINT, 8> header{kHeroWorkShaderMagic, kHeroWorkShaderVersion,
+            slot.width, slot.height, impl_->shader_layout.bitmap_words,
+            impl_->shader_layout.pixels, 0, static_cast<UINT>(impl_->mode)};
+        std::memcpy(static_cast<std::byte *>(zero) + contributor *
+            impl_->shader_layout.contributor_bytes, header.data(), sizeof(header));
+    }
+    const D3D12_RANGE zero_written{0, static_cast<SIZE_T>(impl_->shader_layout.phase_bytes)};
+    slot.shader_zero.resource->Unmap(0, &zero_written);
+    if (!graph.BindBuffer(layout.zero_upload, {slot.shader_zero.resource.Get(),
+            slot.shader_zero.graph_completion, slot.shader_zero.graph_queue, {},
+            slot.shader_zero.NativeContract()},
+            slot.shader_zero.graph_access) ||
+        !graph.BindBuffer(layout.arguments_readback, {slot.arguments.resource.Get(),
+            slot.arguments.graph_completion, slot.arguments.graph_queue, {},
+            slot.arguments.NativeContract()},
+            slot.arguments.graph_access))
+        return Fail("Hero retained contributor imports changed.");
+    slot.shader_zero_handle = layout.zero_upload;
+    slot.arguments_handle = layout.arguments_readback;
+    auto pass = graph.BindPass(layout.argument_copy_pass, 118);
+    if (!pass) return Fail("Hero retained argument copy pass was already bound.");
+    pass->SetExecute([&slot](RenderPassContext &context) {
+        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (std::size_t index = 0; index < slot.contributors.size(); ++index)
+            list->CopyBufferRegion(slot.arguments.resource.Get(), index * 24,
+                slot.contributors[index].argument_resource,
+                slot.contributors[index].argument_offset, 24);
+    });
+    return Result::Success();
+}
+Result HeroWorkCapture::BindRetainedPhase(RenderGraphBuilder &graph, std::uint32_t index,
+    std::uint32_t phase, const HeroWorkRetainedLayout &layout)
+{
+    if (index >= impl_->slots.size() || phase >= kPhases)
+        return Fail("Hero retained phase slot is invalid.");
+    auto &slot = *impl_->slots[index];
+    if (slot.contributors.empty()) return Result::Success();
+    if (
+        !layout.native_readback[phase] || !layout.shader_gpu[phase] ||
+        !layout.shader_readback[phase] ||
+        !graph.BindPass(layout.shader_initialize_pass[phase], 0x48570000u + phase * 2) ||
+        !graph.BindPass(layout.shader_copy_pass[phase], 0x48570001u + phase * 2))
+        return Fail("Hero retained phase topology changed.");
+    auto &readback = slot.readbacks[phase];
+    auto &gpu = slot.shader_gpu[phase];
+    auto &shader_readback = slot.shader_readbacks[phase];
+    if (!readback.NativeContract() || !gpu.NativeContract() ||
+        !shader_readback.NativeContract())
+        return Fail("Hero retained phase native owner changed.");
+    if (!graph.BindBuffer(layout.native_readback[phase], {readback.resource.Get(),
+            readback.graph_completion, readback.graph_queue, {}, readback.NativeContract()},
+            readback.graph_access) ||
+        !graph.BindBuffer(layout.shader_gpu[phase], {gpu.resource.Get(),
+            gpu.graph_completion, gpu.graph_queue, {}, gpu.NativeContract()}, gpu.graph_access) ||
+        !graph.BindBuffer(layout.shader_readback[phase], {shader_readback.resource.Get(),
+            shader_readback.graph_completion, shader_readback.graph_queue, {},
+            shader_readback.NativeContract()},
+            shader_readback.graph_access))
+        return Fail("Hero retained phase imports changed.");
+    slot.phase_handles[phase] = layout.native_readback[phase];
+    slot.shader_handles[phase] = layout.shader_gpu[phase];
+    slot.shader_readback_handles[phase] = layout.shader_readback[phase];
+    const auto bytes = impl_->shader_layout.phase_bytes;
+    auto initialize = graph.BindPass(layout.shader_initialize_pass[phase], 0x48570000u + phase * 2);
+    auto resolve = graph.BindPass(layout.shader_copy_pass[phase], 0x48570001u + phase * 2);
+    if (!initialize || !resolve) return Fail("Hero retained phase passes were already bound.");
+    initialize->SetExecute([&slot, phase, bytes](RenderPassContext &context) {
+        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        list->CopyBufferRegion(slot.shader_gpu[phase].resource.Get(), 0,
+            slot.shader_zero.resource.Get(), 0, bytes);
+        slot.shader_clear_recorded[phase] = true;
+    });
+    const auto stride = impl_->shader_layout.contributor_bytes;
+    resolve->SetExecute([&slot, phase, stride](RenderPassContext &context) {
+        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (std::size_t contributor = 0; contributor < slot.contributors.size(); ++contributor)
+            list->CopyBufferRegion(slot.shader_readbacks[phase].resource.Get(),
+                contributor * kHeroWorkShaderHeaderBytes,
+                slot.shader_gpu[phase].resource.Get(), contributor * stride,
+                kHeroWorkShaderHeaderBytes);
+        slot.shader_copy_recorded[phase] = true;
+    });
+    return Result::Success();
 }
 void HeroWorkCapture::Record(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
     const HeroTransparencyInputs &inputs, HeroTransparencyPhase semantic, std::uint32_t layer, std::uint32_t phase,
@@ -374,7 +550,7 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
         }
         const auto count = std::count(slot.recorded.begin(), slot.recorded.end(), true);
         if (output.size() + count > kPendingLimit)
-        { impl_->status.overflowed = true; return Fail("Hero contributor capture exceeded its bounded 20160 pending rows; drain every frame."); }
+        { impl_->status.overflowed = true; return Fail("Hero contributor capture exceeded its bounded pending rows; drain every frame."); }
         UINT64 gpuAnchor{}, qpcAnchor{};
         const bool calibration = SUCCEEDED(slot.queue->GetClockCalibration(&gpuAnchor, &qpcAnchor));
         std::vector<RendererHeroWorkSample> ready;

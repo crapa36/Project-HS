@@ -32,12 +32,48 @@ void CheckSize(hs::runtime_detail::DecodedVfxState &state, std::size_t count)
         return ((retained.size() == count) && ...);
     }, Retained(state)), "every decoded retention category must transfer/reset");
 }
+
+void CheckActiveEffectRetention()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    Store effects;
+    hs::VfxEventInput a{}, b{}, c{}, missing{};
+    a.sequence = 10; b.sequence = 20; c.sequence = 30; missing.sequence = 40;
+    const auto ar = effects.Intern(a), br = effects.Intern(b), cr = effects.Intern(c);
+    Check(effects.Add(Store::Profile::Ground, ar) &&
+          effects.Add(Store::Profile::Ground, br) &&
+          effects.Add(Store::Profile::Ground, cr), "initial effect membership");
+    const auto *unchanged = effects.Get(ar);
+    effects.Compact();
+    Check(effects.Get(ar) == unchanged && effects.Find(c) == cr,
+          "unchanged membership must preserve rows and their indices");
+    const std::array survivors{c, a, c, missing};
+    effects.Commit(Store::Profile::Ground, survivors);
+    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> captures(1);
+    captures[0].row = br;
+    effects.Compact(captures);
+    Check(effects.Size() == 3 && captures[0].row == br,
+          "capture retains an effect after its profile expires");
+    captures.clear();
+    effects.Compact(captures);
+    std::vector<hs::VfxEventInput> materialized;
+    effects.Materialize(Store::Profile::Ground, materialized);
+    Check(effects.Size() == 2 && effects.Find(a) == 0 && effects.Find(c) == 1 &&
+          materialized.size() == 2 && materialized[0].sequence == 30 &&
+          materialized[1].sequence == 10,
+          "stable compaction remaps indices and preserves unique scratch order");
+    effects.Commit(Store::Profile::Ground, {});
+    effects.Compact();
+    Check(effects.Size() == 0 && !effects.Get(0), "last effect retirement clears rows");
+    Check(effects.Intern(b) == 0, "row storage is reusable after retirement");
+}
 }
 
 int main()
 {
     try
     {
+        CheckActiveEffectRetention();
         static_assert(noexcept(std::declval<hs::runtime_detail::VfxSessionState &>().SwapDecoded(
             std::declval<hs::runtime_detail::DecodedVfxState &>())));
         using hs::SessionPhase;
@@ -134,6 +170,22 @@ int main()
                   (ordered.entries[i-1].event.tick == ordered.entries[i].event.tick &&
                    ordered.entries[i-1].ordinal < ordered.entries[i].ordinal),
                   "due scheduler did not preserve due/insertion ordering");
+        scheduler.Acknowledge();
+        hs::PresentationEvent future;
+        future.session_id = 3; future.tick = 0; future.sequence = 3;
+        hs::PresentationEvent current = future;
+        current.session_id = 2; current.tick = 120; current.sequence = 2;
+        Check(scheduler.Enqueue(future) && scheduler.Enqueue(current), "cross-session enqueue");
+        const auto &current_batch = scheduler.Prepare(120, 2);
+        Check(current_batch.entries.size() == 1 && current_batch.entries[0].event.sequence == 2 &&
+              scheduler.pending.size() == 1 && scheduler.pending.front().event.session_id == 3,
+              "future session must neither block nor activate in the current session");
+        scheduler.Acknowledge();
+        Check(scheduler.Prepare(200, 2).entries.empty() && scheduler.pending.size() == 1,
+              "future session must retain ownership while the current session advances");
+        scheduler.DiscardBeforeSession(3);
+        Check(scheduler.Prepare(0, 3).entries.size() == 1,
+              "retained future event must activate when its session begins");
         scheduler.Acknowledge();
         std::puts("VFX session state tests passed.");
         return 0;

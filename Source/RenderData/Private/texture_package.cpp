@@ -1,4 +1,6 @@
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
+#include <hs/core/cooked_format.hpp>
 
 #include <algorithm>
 #include <array>
@@ -142,7 +144,11 @@ std::vector<std::byte> BuildTexturePackage(
 TexturePackageView ReadTexturePackage(
     std::span<const std::byte> package_bytes, AssetId expected_asset_id)
 {
-    const auto package = ReadPackage(package_bytes, expected_asset_id);
+    return ReadTexturePackage(ReadPackage(package_bytes, expected_asset_id));
+}
+
+TexturePackageView ReadTexturePackage(const PackageView &package)
+{
     Require(package.chunks.size() == 2 &&
             package.chunks[0].type == ChunkType::TextureMetadata &&
             package.chunks[1].type == ChunkType::TextureSubresources &&
@@ -181,6 +187,129 @@ TexturePackageView ReadTexturePackage(
                                      record.slice_pitch,
                                      payload.subspan(static_cast<std::size_t>(record.offset),
                                                      record.slice_pitch)});
+    }
+    return view;
+}
+TextureDescriptorStorage CompileTextureDescriptor(
+    std::span<const std::byte> bytes, AssetId asset_id, std::uint32_t bulk_index)
+{
+    const auto package = ReadPackage(bytes, asset_id);
+    Require(!package.chunks.empty() && package.chunks[0].type == ChunkType::TextureMetadata,
+            "texture metadata is absent");
+    const auto magic = Get(package.chunks[0].bytes, 0, 4);
+    TextureDescriptorStorage descriptor;
+    descriptor.asset_id = asset_id;
+    descriptor.bulk_index = bulk_index;
+    const auto retain_layout = [&](const auto &view) {
+        descriptor.subresources.reserve(view.subresources.size());
+        for (const auto &subresource : view.subresources)
+            descriptor.subresources.push_back({static_cast<std::uint64_t>(subresource.bytes.data() - bytes.data()),
+                subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size())});
+    };
+    if (magic == 0x31565854) // TXV1
+    {
+        const auto view = ReadVolumeTexturePackage(package);
+        const auto &volume = view.description;
+        descriptor.description = {volume.width, volume.height, 1, volume.mip_count, volume.format};
+        descriptor.dimension = TextureDimension::Texture3D;
+        descriptor.depth = volume.depth;
+        retain_layout(view);
+    }
+    else
+    {
+        Require(magic == kMetadataMagic, "unknown texture metadata kind");
+        const auto view = ReadTexturePackage(package);
+        descriptor.description = view.description;
+        retain_layout(view);
+    }
+    descriptor.dependencies.reserve(package.dependencies.size());
+    for (const auto &dependency : package.dependencies)
+        descriptor.dependencies.push_back(MakeAssetId(dependency));
+    return descriptor;
+}
+
+TextureDescriptorStorage CompileTextureMetadataDescriptor(const PackageDirectory &directory,
+    std::span<const std::byte> metadata, std::uint32_t bulk_index, std::uint64_t product_bytes)
+{
+    Require(directory.asset_id.value && directory.chunks.size() == 2 &&
+        directory.chunks[0].type == ChunkType::TextureMetadata &&
+        directory.chunks[1].type == ChunkType::TextureSubresources &&
+        directory.chunks[0].required && directory.chunks[1].required &&
+        metadata.size() == directory.chunks[0].byte_count && metadata.size() >= kMetadataHeader &&
+        Get(metadata, 0, 4) == kMetadataMagic && Get(metadata, 4, 4) == kMetadataVersion,
+        "invalid metadata-only texture proof");
+    TextureDescriptorStorage descriptor;
+    descriptor.asset_id = directory.asset_id;
+    descriptor.bulk_index = bulk_index;
+    descriptor.description.width = static_cast<std::uint32_t>(Get(metadata, 8, 4));
+    descriptor.description.height = static_cast<std::uint32_t>(Get(metadata, 12, 4));
+    descriptor.description.format = static_cast<std::uint32_t>(Get(metadata, 16, 4));
+    descriptor.description.array_size = static_cast<std::uint32_t>(Get(metadata, 20, 4));
+    descriptor.description.mip_count = static_cast<std::uint32_t>(Get(metadata, 24, 4));
+    const auto layout = Layout(descriptor.description);
+    const auto &payload = directory.chunks[1];
+    Require(Get(metadata, 28, 4) == layout.size() &&
+        metadata.size() == kMetadataHeader + layout.size() * kRecordStride &&
+        Get(metadata, 32, 8) == payload.byte_count &&
+        layout.back().offset + layout.back().slice_pitch == payload.byte_count,
+        "texture proof layout differs from directory");
+    for (std::size_t i = 0; i < layout.size(); ++i)
+    {
+        const auto entry = kMetadataHeader + i * kRecordStride;
+        const auto &record = layout[i];
+        Require(Get(metadata, entry, 8) == record.offset &&
+            Get(metadata, entry + 8, 4) == record.row_pitch &&
+            Get(metadata, entry + 12, 4) == record.slice_pitch,
+            "texture proof subresource layout mismatch");
+        descriptor.subresources.push_back({payload.offset + record.offset,
+            record.row_pitch, record.slice_pitch, record.slice_pitch});
+    }
+    for (const auto &dependency : directory.dependencies)
+        descriptor.dependencies.push_back(MakeAssetId(dependency));
+    ValidateTextureDescriptor(descriptor.View(), product_bytes);
+    return descriptor;
+}
+
+void ValidateTextureDescriptor(const TextureDescriptor &descriptor, std::uint64_t product_bytes)
+{
+    if (descriptor.dimension == TextureDimension::Texture3D)
+        return ValidateVolumeTextureDescriptor(descriptor, product_bytes);
+    Require(descriptor.dimension == TextureDimension::Texture2DArray && descriptor.depth == 1,
+            "invalid 2D texture dimension or depth");
+    Require(product_bytes <= std::numeric_limits<std::size_t>::max(), "texture product is not addressable");
+    const auto layout = Layout(descriptor.description);
+    Require(descriptor.subresources.size() == layout.size(), "texture descriptor subresource count mismatch");
+    const auto base = descriptor.subresources.front().offset;
+    for (std::size_t i = 0; i < layout.size(); ++i)
+    {
+        const auto &record = descriptor.subresources[i];
+        Require(record.offset <= product_bytes && record.byte_count <= product_bytes - record.offset,
+                "texture descriptor subresource exceeds product bounds");
+        Require(record.offset >= base && record.offset - base == layout[i].offset &&
+                record.row_pitch == layout[i].row_pitch && record.slice_pitch == layout[i].slice_pitch &&
+                record.byte_count == layout[i].slice_pitch,
+                "texture descriptor pitch or offset mismatch");
+    }
+}
+
+TexturePackageView BindTextureDescriptor(std::span<const std::byte> bytes, const TextureDescriptor &descriptor)
+{
+    Require(descriptor.dimension == TextureDimension::Texture2DArray, "cannot bind volume as 2D texture");
+    TexturePackageView view;
+    view.description = descriptor.description;
+    // Admission checks semantics; this guard keeps index arithmetic defined even for a bad caller.
+    Require(view.description.mip_count > 0 && view.description.mip_count <= 32, "invalid bound texture mip count");
+    view.subresources.reserve(descriptor.subresources.size());
+    for (std::size_t i = 0; i < descriptor.subresources.size(); ++i)
+    {
+        const auto &record = descriptor.subresources[i];
+        Require(record.offset <= bytes.size() && record.byte_count <= bytes.size() - record.offset,
+                "bound texture subresource exceeds bytes");
+        const auto mip = static_cast<std::uint32_t>(i % view.description.mip_count);
+        view.subresources.push_back({static_cast<std::uint32_t>(i / view.description.mip_count), mip,
+            std::max(1u, view.description.width >> mip), std::max(1u, view.description.height >> mip),
+            record.row_pitch, record.slice_pitch,
+            bytes.subspan(static_cast<std::size_t>(record.offset), record.byte_count)});
     }
     return view;
 }

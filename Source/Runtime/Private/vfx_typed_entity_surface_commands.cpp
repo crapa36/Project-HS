@@ -107,7 +107,7 @@ bool Parameters(const VfxProgramView &program, const VfxOutputRecord &output,
         std::isfinite(command.edge_width) && command.edge_width == (persistent ? .08f : .07f);
 }
 void Append(const VfxProgramView &program, const VfxEffectRecord &effect, bool persistent,
-            bool death, VfxQuality quality, Tick started, Tick until, Tick current,
+            bool death, VfxQuality quality, Tick started, Tick until, double current,
             const VfxEntitySurfaceCommand &owner, std::vector<VfxEntitySurfaceCommand> &result)
 {
     if (!Range(effect.sources, program.sources) || until <= started || current < started || current >= until ||
@@ -151,8 +151,8 @@ void Append(const VfxProgramView &program, const VfxEffectRecord &effect, bool p
 
 std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
     const VfxProgramView &program, std::span<const VfxEntitySurfaceEventCapture> events,
-    std::span<const VfxEntitySurfacePersistentCapture> persistent, Tick current_tick,
-    Tick death_current_tick)
+    std::span<const VfxEntitySurfacePersistentCapture> persistent, double current_tick,
+    double death_current_tick)
 {
     std::vector<VfxEntitySurfaceCommand> result;
     for (const auto &capture : events)
@@ -184,7 +184,7 @@ std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
             owner.has_retained_animation_pose = capture.has_animation_pose;
             if (capture.has_animation_pose) owner.retained_animation_pose = capture.animation_pose;
         }
-        const Tick event_current_tick = death
+        const double event_current_tick = death
             ? std::max(current_tick, death_current_tick)
             : current_tick;
         Append(program, effect, false, death, event.quality, event.event_tick,
@@ -200,11 +200,7 @@ std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
             input.effect_handle == 0 || input.effect_handle > program.effects.size() ||
             Identity(program, input.effect_handle) != kPersistent) continue;
         if (capture.owner_until_tick <= capture.owner_started_tick || current_tick < capture.owner_started_tick ||
-            current_tick >= capture.owner_until_tick ||
-            input.elapsed_seconds != static_cast<float>(current_tick - capture.owner_started_tick) / 60.0f ||
-            input.normalized_age != static_cast<float>(current_tick - capture.owner_started_tick) /
-                static_cast<float>(capture.owner_until_tick - capture.owner_started_tick) ||
-            entity->lifetime01 != input.normalized_age) continue;
+            current_tick >= capture.owner_until_tick) continue;
         const auto &effect = program.effects[input.effect_handle - 1];
         if (effect.handle != input.effect_handle || effect.input_mode != 1 || effect.timing_kind != 1 ||
             effect.payload_kind != Hash32("EntityAttachmentPayload")) continue;

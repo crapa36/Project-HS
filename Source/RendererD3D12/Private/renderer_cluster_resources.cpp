@@ -73,24 +73,32 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
         return ClusterFailure("Cluster page upload has an invalid logical/physical slot.");
     auto &runtime = *cluster_runtime;
     auto &stream = runtime.streams[logical_slot];
-    if (stream.decoded.vertices.empty() || stream.decoded.indices.empty() || stream.decoded.meshlets.empty() ||
+    if ((!stream.compiled && (stream.decoded.vertices.empty() || stream.decoded.indices.empty() || stream.decoded.meshlets.empty())) ||
         stream.read_storage.empty() || stream.page || stream.upload.resource || runtime.physical_owner[physical_slot] != UINT32_MAX ||
         runtime.physical_versions[physical_slot] == UINT32_MAX)
         return ClusterFailure("Cluster page upload destination is occupied or its version is exhausted.");
     std::array<std::span<const std::byte>, 6> chunks;
     try
     {
-        const auto package = render_data::ReadPackage(stream.read_storage,
-            MakeAssetId(stream.logical_id));
-        chunks[0] = PageChunk(package, render_data::ChunkType::GeometryVertices);
-        chunks[1] = PageChunk(package, render_data::ChunkType::GeometryIndices);
-        chunks[2] = PageChunk(package, render_data::ChunkType::GeometryMeshlets);
-        std::size_t auxiliary_index = 3;
-        for (const auto type : {render_data::ChunkType::GeometryMeshletVertexRefs,
-            render_data::ChunkType::GeometryMeshletTriangles,
-            render_data::ChunkType::GeometryCanonicalPrimitiveRemap})
+        if (stream.compiled)
         {
-            chunks[auxiliary_index++] = PageChunk(package, type);
+            const auto view = render_data::BindGeometryDescriptor(stream.read_storage, *stream.compiled);
+            chunks = {view.chunks[0], view.chunks[1], view.chunks[3], view.chunks[4], view.chunks[5], view.chunks[6]};
+        }
+        else
+        {
+            const auto package = render_data::ReadPackage(stream.read_storage,
+                MakeAssetId(stream.logical_id));
+            chunks[0] = PageChunk(package, render_data::ChunkType::GeometryVertices);
+            chunks[1] = PageChunk(package, render_data::ChunkType::GeometryIndices);
+            chunks[2] = PageChunk(package, render_data::ChunkType::GeometryMeshlets);
+            std::size_t auxiliary_index = 3;
+            for (const auto type : {render_data::ChunkType::GeometryMeshletVertexRefs,
+                render_data::ChunkType::GeometryMeshletTriangles,
+                render_data::ChunkType::GeometryCanonicalPrimitiveRemap})
+            {
+                chunks[auxiliary_index++] = PageChunk(package, type);
+            }
         }
     }
     catch (const std::exception &error) { return ClusterFailure(error.what()); }
@@ -138,11 +146,11 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
     page->residency = page_ticket;
     page->page_slot = physical_slot;
     page->generation = version;
-    page->vertex_count = static_cast<std::uint32_t>(stream.decoded.vertices.size());
-    page->index_count = static_cast<std::uint32_t>(stream.decoded.indices.size());
-    page->meshlet_count = static_cast<std::uint32_t>(stream.decoded.meshlets.size());
-    page->triangle_offset = static_cast<std::uint32_t>(stream.decoded.meshlet_vertex_refs.size() * 4u);
-    page->remap_offset = page->triangle_offset + static_cast<std::uint32_t>(stream.decoded.meshlet_triangles.size() * 4u);
+    page->vertex_count = stream.compiled ? stream.compiled->vertex_count : static_cast<std::uint32_t>(stream.decoded.vertices.size());
+    page->index_count = stream.compiled ? stream.compiled->index_count : static_cast<std::uint32_t>(stream.decoded.indices.size());
+    page->meshlet_count = stream.compiled ? stream.compiled->meshlet_count : static_cast<std::uint32_t>(stream.decoded.meshlets.size());
+    page->triangle_offset = static_cast<std::uint32_t>(chunks[3].size());
+    page->remap_offset = page->triangle_offset + static_cast<std::uint32_t>(chunks[4].size());
     page->vertex_view = {page->storage.resource->GetGPUVirtualAddress() + offsets[0], static_cast<UINT>(sizes[0]), sizeof(Vertex)};
     page->index_view = {page->storage.resource->GetGPUVirtualAddress() + offsets[1], static_cast<UINT>(sizes[1]), DXGI_FORMAT_R32_UINT};
     // Hierarchy pages have no authored whole-LOD metadata. Their payload and
@@ -171,7 +179,7 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
     auto next = std::make_unique<ClusterRuntimeState>();
     next->generation = generation_tag;
     next->content_generation = resource_generation_id;
-    next->first_physical_slot = kProceduralGeometryPage + 1u;
+    next->first_physical_slot = kMonsterReducedGeometryPage + 12u;
     next->physical_owner.fill(UINT32_MAX);
     next->physical_versions = previous_geometry_page_versions;
     try
@@ -209,9 +217,22 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
                 stream.pinned = catalog.Pages()[local].pinned;
                 stream.source_id = std::string(catalog.LogicalId());
                 stream.logical_id = catalog.Pages()[local].logical_id;
-                stream.path = catalog.Pages()[local].path;
-                stream.decode = [&catalog, local](std::span<const std::byte> bytes, render_data::GeometryData &data) {
-                    return catalog.DecodePage(local, bytes, data);
+                stream.source = catalog.Pages()[local].source;
+                stream.development_catalog = resident_development_catalog;
+                if (config.packed_content)
+                {
+                    const auto handle = FindRendererGeometry(config, MakeAssetId(stream.logical_id));
+                    if (!handle) return ClusterFailure("Compiled hierarchy page descriptor is missing.");
+                    stream.compiled = config.packed_geometry[handle.value];
+                }
+                stream.decode = [&catalog, local, development_catalog = stream.development_catalog,
+                    asset = MakeAssetId(stream.logical_id)](std::span<const std::byte> bytes, render_data::GeometryData &data) {
+                    return catalog.DecodePage(local, bytes, data,
+                        [development_catalog, asset, bytes](const render_data::PackageView &package,
+                            const render_data::GeometryData &geometry) {
+                            if (development_catalog)
+                                static_cast<void>(development_catalog->AdmitGeometry(asset, bytes, package, geometry));
+                        });
                 };
                 next->streams.push_back(std::move(stream));
             }
@@ -238,27 +259,29 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
     for (auto &stream : runtime.streams)
     {
         if (!stream.pinned) continue;
-        std::error_code error;
-        const auto file_bytes = std::filesystem::file_size(stream.path, error);
-        if (error || !file_bytes || file_bytes > UINT64_MAX / 3u || !residency.CanStage(file_bytes * 3u))
+        std::uint64_t file_bytes{};
+        if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
+        const auto host_factor = stream.compiled ? 1u : 3u;
+        if (!file_bytes || file_bytes > UINT64_MAX / host_factor || !residency.CanStage(file_bytes * host_factor))
             return ClusterFailure("Required pinned hierarchy root exceeds the host staging budget.");
-        if (auto result = ReadBinary(stream.path, stream.read_storage); !result) return result;
+        if (auto result = ReadBinary(stream.source, stream.read_storage); !result) return result;
         if (stream.read_storage.size() != file_bytes) return ClusterFailure("Pinned hierarchy root changed during read.");
         stream.read_bytes = stream.read_storage.size();
         stream.read_residency = residency.Register(ResidencyCategory::Staging, stream.read_bytes, false, ResidencyStorage::HostStaging);
         if (!stream.read_residency) return ClusterFailure("Could not account pinned root read storage.");
-        if (auto result = stream.decode(stream.read_storage, stream.decoded); !result) return result;
-        const auto &data = stream.decoded;
-        const auto decoded_bytes = data.vertices.capacity() * sizeof(render_data::ExpandedVertex) +
-            data.indices.capacity() * 4u + data.submeshes.capacity() * sizeof(render_data::GeometrySubmesh) +
-            data.meshlets.capacity() * sizeof(render_data::GeometryMeshlet) +
-            (data.meshlet_vertex_refs.capacity() + data.meshlet_triangles.capacity() + data.canonical_primitive_remap.capacity()) * 4u;
-        if (decoded_bytes > file_bytes * 2u) return ClusterFailure("Pinned root decode exceeds its host reservation.");
-        stream.decoded_residency = residency.Register(ResidencyCategory::Staging, decoded_bytes, false, ResidencyStorage::HostStaging);
-        if (!stream.decoded_residency) return ClusterFailure("Could not account pinned root decoded storage.");
-        const std::array<std::uint64_t, 4> sizes{data.vertices.size() * sizeof(render_data::ExpandedVertex),
-            data.indices.size() * 4u, data.meshlets.size() * render_data::kGeometryMeshletStride,
-            (data.meshlet_vertex_refs.size() + data.meshlet_triangles.size() + data.canonical_primitive_remap.size()) * 4u};
+        if (!stream.compiled)
+        {
+            if (auto result = stream.decode(stream.read_storage, stream.decoded); !result) return result;
+            const auto &data = stream.decoded;
+            const auto decoded_bytes = data.vertices.capacity() * sizeof(render_data::ExpandedVertex) +
+                data.indices.capacity() * 4u + data.submeshes.capacity() * sizeof(render_data::GeometrySubmesh) +
+                data.meshlets.capacity() * sizeof(render_data::GeometryMeshlet) +
+                (data.meshlet_vertex_refs.capacity() + data.meshlet_triangles.capacity() + data.canonical_primitive_remap.capacity()) * 4u;
+            if (decoded_bytes > file_bytes * 2u) return ClusterFailure("Pinned root decode exceeds its host reservation.");
+            stream.decoded_residency = residency.Register(ResidencyCategory::Staging, decoded_bytes, false, ResidencyStorage::HostStaging);
+            if (!stream.decoded_residency) return ClusterFailure("Could not account pinned root decoded storage.");
+        }
+        const auto sizes = stream.UploadSizes();
         std::uint64_t upload_bytes{}; std::array<std::uint64_t, 4> offsets{};
         if (!GeometryPageLayout(sizes, offsets, upload_bytes)) return ClusterFailure("Pinned root allocation estimate overflow.");
         const auto resident_description = BufferDescription(upload_bytes);

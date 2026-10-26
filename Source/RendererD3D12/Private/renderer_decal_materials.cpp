@@ -14,8 +14,45 @@ Result D3D12Renderer::Impl::PrepareDecalMaterialParameters(const RendererConfig 
         const std::string name(render_data::kDecalMaterialNames[ordinal]);
         const std::string parameter_id = "render/material/" + name + "/parameters.rpkg";
         const std::string material_id = "render/material/" + name + "/material.rpkg";
-        std::filesystem::path path;
-        if (auto resolved = candidate.ResolveProduct(parameter_id, path); !resolved) return resolved;
+        if (candidate.packed_content || candidate.development_catalog)
+        {
+            const auto handle = FindRendererMaterial(candidate, MakeAssetId(material_id));
+            if (!handle) throw std::runtime_error("Compiled decal material is missing");
+            const auto &descriptor = candidate.packed_materials[handle.value];
+            if (descriptor.kind != render_data::MaterialKind::Decal || descriptor.programs.size() != 1 || descriptor.textures.size() != 1)
+                throw std::runtime_error("Compiled decal program or texture shape is invalid");
+            render_data::DecalMaterialPackageData material;
+            material.parameter_layout_hash = MaterialLayoutDigest(descriptor);
+            material.receivers = descriptor.receivers;
+            material.dependencies = {parameter_id, std::string(descriptor.programs[0].product_id),
+                std::string(descriptor.textures[0].product_id)};
+            std::ranges::sort(material.dependencies);
+            material.program.kind = descriptor.programs[0].kind;
+            material.program.dependency_index = static_cast<std::uint16_t>(std::ranges::find(material.dependencies,
+                descriptor.programs[0].product_id) - material.dependencies.begin());
+            material.texture_dependency_index = static_cast<std::uint16_t>(std::ranges::find(material.dependencies,
+                descriptor.textures[0].product_id) - material.dependencies.begin());
+            const std::string_view texture_id = ordinal == 0 ? "render/texture/vfx_fracture_decal_array.rpkg"
+                : "render/texture/vfx_organic_decal_array.rpkg";
+            if (descriptor.textures[0].product_id != texture_id)
+                throw std::runtime_error("Compiled decal binding disagrees with its resident texture array");
+            const auto base = static_cast<std::uint32_t>(slots.size());
+            const auto count = static_cast<std::uint32_t>(descriptor.defaults.size());
+            if (require_compatible_layout && (material.parameter_layout_hash != decal_parameter_layouts[ordinal] ||
+                base != decal_parameter_bases[ordinal] || count != decal_parameter_counts[ordinal] ||
+                material.receivers != decal_material_policies[ordinal] ||
+                material.dependencies != decal_material_programs[ordinal].dependencies))
+                throw std::runtime_error("Compiled decal reload changes its resident layout, receiver policy or bindings");
+            decal_parameter_candidate_bases[ordinal] = base;
+            decal_parameter_candidate_counts[ordinal] = count;
+            decal_parameter_candidate_layouts[ordinal] = material.parameter_layout_hash;
+            decal_material_candidate_policies[ordinal] = material.receivers;
+            decal_material_candidate_programs[ordinal] = std::move(material);
+            slots.insert(slots.end(), descriptor.defaults.begin(), descriptor.defaults.end());
+            continue;
+        }
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate, parameter_id, path); !resolved) return resolved;
         std::vector<std::byte> bytes;
         if (auto read = ReadBinary(path, bytes); !read) return read;
         const auto definitions = render_data::ReadMaterialParameterPackage(bytes, MakeAssetId(parameter_id));
@@ -31,7 +68,7 @@ Result D3D12Renderer::Impl::PrepareDecalMaterialParameters(const RendererConfig 
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Decal material parameter default is outside [0,1]: " + std::string(id));
         }
-        if (auto resolved = candidate.ResolveProduct(material_id, path); !resolved) return resolved;
+        if (auto resolved = ResolveRendererAsset(candidate, material_id, path); !resolved) return resolved;
         if (auto read = ReadBinary(path, bytes); !read) return read;
         auto material = render_data::ReadDecalMaterialPackage(bytes, name);
         const auto layout = render_data::MaterialParameterLayoutHash(definitions);
@@ -47,7 +84,7 @@ Result D3D12Renderer::Impl::PrepareDecalMaterialParameters(const RendererConfig 
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Decal program binding disagrees with its resident texture array: " + material_id);
         for (const auto &dependency : material.dependencies)
-            if (auto resolved = candidate.ResolveProduct(dependency, path); !resolved) return resolved;
+            if (auto resolved = ResolveRendererAsset(candidate, dependency, path); !resolved) return resolved;
         const auto base = static_cast<std::uint32_t>(slots.size());
         const auto count = static_cast<std::uint32_t>(definitions.size());
         if (require_compatible_layout &&

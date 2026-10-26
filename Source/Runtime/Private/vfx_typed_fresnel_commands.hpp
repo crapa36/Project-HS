@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/renderer/vfx_fresnel_input.hpp>
+#include <hs/render_data/vfx_fresnel_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 
 #include <span>

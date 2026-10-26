@@ -140,12 +140,30 @@ Result LtcLutSystem::Commit(LtcLutCandidate &&candidate,const CompletionSet &com
         return Failure(ErrorCode::InvalidState,"LTC replacement requires completed GPU leases.");
     impl_->storage=std::move(candidate.storage_); return Result::Success();
 }
-Result LtcLutSystem::Register(RenderGraphBuilder &graph,const CompletionSet &completed,LtcLutOutputs &outputs)
+Result LtcLutSystem::Register(RenderGraphBuilder &graph,const CompletionSet &completed,LtcLutOutputs &outputs,LtcLutLayout *layout)
+{
+    return RegisterFrame(graph,completed,outputs,layout,nullptr);
+}
+bool LtcLutSystem::MatchesLayout(const LtcLutLayout &layout)const noexcept
+{
+    const auto &s=impl_->storage;
+    return layout.valid&&layout.active==bool(s)&&(!s||layout.upload==!s->uploaded);
+}
+Result LtcLutSystem::BindRetained(RenderGraphBuilder &graph,const CompletionSet &completed,
+    const LtcLutLayout &layout,LtcLutOutputs &outputs)
+{
+    return RegisterFrame(graph,completed,outputs,nullptr,&layout);
+}
+Result LtcLutSystem::RegisterFrame(RenderGraphBuilder &graph,const CompletionSet &completed,LtcLutOutputs &outputs,
+    LtcLutLayout *capture,const LtcLutLayout *retained)
 {
     outputs={}; auto storage=impl_->storage;
+    if(capture)*capture={};
+    if(retained&&!MatchesLayout(*retained))return Failure(ErrorCode::InvalidState,"LTC retained topology changed.");
+    if(capture){capture->active=bool(storage);capture->upload=storage&&!storage->uploaded;}
     if(impl_->pending.graph || (storage && !storage->usable))
         return Failure(ErrorCode::InvalidState,"LTC submission is pending or its previous graph failed.");
-    if(!storage) return Result::Success();
+    if(!storage){if(capture)capture->valid=true;return Result::Success();}
     if(storage->uploaded && storage->upload.resource && storage->upload_completion.IsSatisfiedBy(completed))
     {
         storage->bytes-=storage->upload.allocation->GetSize(); storage->upload.Reset();
@@ -155,18 +173,32 @@ Result LtcLutSystem::Register(RenderGraphBuilder &graph,const CompletionSet &com
     for(std::uint32_t i=0;i<2;++i)
     {
         auto &resource=storage->textures[i];
-        const auto handle=graph.ImportTexture({resource.resource.Get(),resource.graph_completion,resource.graph_queue},
-            resource.graph_access,i==0?"LtcMatrix":"LtcAmplitude");
+        if(auto checked=resource.EnsureNativeContract(storage->device.Get());!checked)return checked;
+        const auto handle=retained?retained->resources[i]:
+            graph.ImportTexture({resource.resource.Get(),resource.graph_completion,resource.graph_queue,{},resource.NativeContract()},
+                resource.graph_access,i==0?"LtcMatrix":"LtcAmplitude");
+        if(retained&&!graph.BindTexture(handle,{resource.resource.Get(),resource.graph_completion,resource.graph_queue,{},resource.NativeContract()},resource.graph_access))
+            return Failure(ErrorCode::InvalidState,"LTC retained texture binding failed.");
+        if(capture)capture->resources[i]=handle;
         pending.imports.push_back({&resource,handle}); versions[i]=graph.Version(handle);
     }
     if(!storage->uploaded)
     {
         if(!storage->upload.resource) return Failure(ErrorCode::InvalidState,"LTC staging is missing.");
         auto &resource=storage->upload;
-        const auto handle=graph.ImportBuffer({resource.resource.Get(),resource.graph_completion,resource.graph_queue},resource.graph_access,"LtcUploadStaging");
+        if(auto checked=resource.EnsureNativeContract(storage->device.Get());!checked)return checked;
+        const auto handle=retained?retained->resources[2]:
+            graph.ImportBuffer({resource.resource.Get(),resource.graph_completion,resource.graph_queue,{},resource.NativeContract()},resource.graph_access,"LtcUploadStaging");
+        if(retained&&!graph.BindBuffer(handle,{resource.resource.Get(),resource.graph_completion,resource.graph_queue,{},resource.NativeContract()},resource.graph_access))
+            return Failure(ErrorCode::InvalidState,"LTC retained staging binding failed.");
+        if(capture){capture->resources[2]=handle;capture->pass=graph.PassCount();}
         pending.imports.push_back({&resource,handle}); const auto upload=graph.Version(handle);
-        auto pass=graph.AddPass(140,"LtcLutUpload",QueueHint::Direct); pass.Read(upload,Access::CopySource);
-        for(auto &version:versions) version=pass.Write(version,Access::CopyDest);
+        auto passBinding=retained?graph.BindPass(retained->pass,140):
+            std::optional<PassBuilder>{graph.AddPass(140,"LtcLutUpload",QueueHint::Direct)};
+        if(!passBinding)return Failure(ErrorCode::InvalidState,"LTC retained upload pass is missing.");
+        auto &pass=*passBinding;
+        if(retained)versions=retained->outputs;
+        else{pass.Read(upload,Access::CopySource);for(auto &version:versions)version=pass.Write(version,Access::CopyDest);}
         pass.SetExecuteChecked([storage,versions,upload](RenderPassContext &context) {
             if(context.Resolve(upload.resource)!=storage->upload.resource.Get())
                 return Failure(ErrorCode::InvalidState,"LTC graph staging does not match prepared upload.");
@@ -185,10 +217,12 @@ Result LtcLutSystem::Register(RenderGraphBuilder &graph,const CompletionSet &com
             return Result::Success();
         });
     }
-    for(auto version:versions) graph.SetFinalAccess(version,Access::AllShaderRead);
+    if(!retained)for(auto version:versions)graph.SetFinalAccess(version,Access::AllShaderRead);
     outputs={versions[0],versions[1],storage->textures[0].resource.Get(),storage->textures[1].resource.Get(),
         {storage->Srv(0),storage->Srv(1)}};
-    impl_->pending=std::move(pending); return Result::Success();
+    impl_->pending=std::move(pending);
+    if(capture){capture->outputs=versions;capture->valid=true;}
+    return Result::Success();
 }
 Result LtcLutSystem::CompleteSubmission(const RenderGraphBuilder &graph,const CompletionSet &completion,bool success)
 {

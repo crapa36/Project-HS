@@ -53,6 +53,7 @@ struct ShippedContentOwner::Impl
     ~Impl() { if (file >= 0) close(file); }
 #endif
     std::uint64_t size{};
+    ContentFileIdentity identity{};
 };
 
 ShippedContentOwner::ShippedContentOwner() noexcept = default;
@@ -69,11 +70,16 @@ Result ShippedContentOwner::Open(const std::filesystem::path &path, ShippedConte
     if (candidate->file == INVALID_HANDLE_VALUE) return IoFailure("CreateFileW", GetLastError());
     if (GetFileType(candidate->file) != FILE_TYPE_DISK)
         return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "content must be a regular file");
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(candidate->file, &size)) return IoFailure("GetFileSizeEx", GetLastError());
-    if (size.QuadPart < 0)
-        return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "negative content file size");
-    candidate->size = static_cast<std::uint64_t>(size.QuadPart);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(candidate->file, &info))
+        return IoFailure("GetFileInformationByHandle", GetLastError());
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "content must be a regular file");
+    candidate->size = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+    if (candidate->size > static_cast<std::uint64_t>(std::numeric_limits<LONGLONG>::max()))
+        return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "content file size exceeds native range");
+    candidate->identity = {info.dwVolumeSerialNumber,
+                          (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow};
 #else
     // POSIX has no mandatory equivalent of Windows' write-sharing exclusion.
     // The immutable-publish contract is required here; pread never moves a
@@ -85,12 +91,18 @@ Result ShippedContentOwner::Open(const std::filesystem::path &path, ShippedConte
     if (!S_ISREG(info.st_mode) || info.st_size < 0)
         return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "content must be a regular file");
     candidate->size = static_cast<std::uint64_t>(info.st_size);
+    candidate->identity = {static_cast<std::uint64_t>(info.st_dev), static_cast<std::uint64_t>(info.st_ino)};
 #endif
     output.impl_ = std::move(candidate);
     return Result::Success();
 }
 
 std::uint64_t ShippedContentOwner::Size() const noexcept { return impl_ ? impl_->size : 0; }
+
+std::optional<ContentFileIdentity> ShippedContentOwner::Identity() const noexcept
+{
+    return impl_ ? std::optional{impl_->identity} : std::nullopt;
+}
 
 Result ShippedContentOwner::ReadExact(std::uint64_t offset, std::span<std::byte> output) const
 {

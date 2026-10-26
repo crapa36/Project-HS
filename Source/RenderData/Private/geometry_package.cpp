@@ -1,4 +1,6 @@
 #include <hs/render_data/geometry_package.hpp>
+#include <hs/render_data/geometry_descriptor.hpp>
+#include <hs/core/cooked_format.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -43,10 +45,17 @@ GeometryBounds PayloadBounds(std::span<const ExpandedVertex> vertices)
 }
 void Shape(const GeometryMetadata& m)
 {
-    Require(m.abi==kGeometryAbi && m.error_method_abi==kGeometryErrorMethodAbi && !(m.flags&~7u),"unsupported geometry ABI/flags");
+    Require(m.abi==kGeometryAbi && !(m.flags&~7u) &&
+        (m.error_method_abi==kGeometryErrorMethodAbi ||
+         ((m.flags&kGeometryFlagSkinned) && m.lod>0 && m.error_method_abi==kSkinnedPoseErrorMethodAbi)),
+        "unsupported geometry ABI/flags/error method");
     Require(m.vertex_count>0 && m.vertex_count<=kMaxGeometryVertices && m.index_count>0 && m.index_count<=kMaxGeometryIndices && m.index_count%3==0 && m.vertex_count<=m.index_count && m.submesh_count>0 && m.submesh_count<=m.index_count/3 && m.meshlet_count>0 && m.meshlet_count<=m.index_count/3 && m.vertex_ref_count>0 && m.vertex_ref_count<=m.index_count && m.max_material_index<=65535,"invalid geometry counts");
     Require(std::isfinite(m.geometric_error) && m.geometric_error>=0 && m.lod<=2 && (m.lod!=0 || m.geometric_error==0),"invalid LOD error");
-    Require((m.flags&kGeometryFlagSkinned)==0 || (m.lod==0 && m.fallback_dependency_index==kNoGeometryDependency && m.terminal_fallback_dependency_index==kNoGeometryDependency),"skinned fallback unsupported");
+    Require((m.flags&kGeometryFlagSkinned)==0 ||
+        (m.fallback_dependency_index==kNoGeometryDependency &&
+         m.terminal_fallback_dependency_index==kNoGeometryDependency &&
+         (m.lod==0 || m.error_method_abi==kSkinnedPoseErrorMethodAbi)),
+        "invalid skinned LOD/error certificate");
     Bounds(m.bounds);
 }
 void Dependencies(const GeometryMetadata& m,std::span<const std::string>d,std::string_view id)
@@ -92,7 +101,9 @@ GeometryMetadata DecodeGeometryMetadata(std::span<const std::byte>b,std::span<co
     m.page_dependency_index=std::uint16_t(Get(b,32,2));m.fallback_dependency_index=std::uint16_t(Get(b,34,2));m.lod=std::uint16_t(Get(b,36,2));m.terminal_fallback_dependency_index=std::uint16_t(Get(b,38,2));
     for(std::size_t i=0;i<3;++i){m.bounds.minimum[i]=GF(b,40+i*4);m.bounds.maximum[i]=GF(b,52+i*4);}for(std::size_t i=0;i<4;++i)m.bounds.sphere[i]=GF(b,64+i*4);m.geometric_error=GF(b,80);m.error_method_abi=Get(b,84);Shape(m);Dependencies(m,d,id);return m;
 }
-void ValidateGeometryData(const GeometryData&g)
+namespace
+{
+void ValidateGeometryTopology(const GeometryData&g)
 {
     Require(g.vertices.size()<=kMaxGeometryVertices && g.indices.size()<=kMaxGeometryIndices &&
             g.submeshes.size()<=kMaxGeometryIndices/3 && g.meshlets.size()<=kMaxGeometryIndices/3 &&
@@ -100,7 +111,6 @@ void ValidateGeometryData(const GeometryData&g)
             g.canonical_primitive_remap.size()<=kMaxGeometryIndices/3,"geometry allocation cap");
     GeometryMetadata m;m.flags=g.flags;m.vertex_count=static_cast<std::uint32_t>(g.vertices.size());m.index_count=static_cast<std::uint32_t>(g.indices.size());m.submesh_count=static_cast<std::uint32_t>(g.submeshes.size());m.meshlet_count=static_cast<std::uint32_t>(g.meshlets.size());m.vertex_ref_count=static_cast<std::uint32_t>(g.meshlet_vertex_refs.size());m.bounds=g.bounds;Shape(m);
     Require(g.meshlet_triangles.size()==g.indices.size()/3 && g.canonical_primitive_remap.size()==g.meshlet_triangles.size(),"primitive component counts disagree");
-    ValidateExpandedVertices(g.vertices);
     std::vector<bool>used(g.vertices.size()),seen(g.indices.size()/3);
     for(auto index:g.indices){Require(index<g.vertices.size(),"canonical index range");used[index]=true;}
     Require(std::ranges::all_of(used,[](bool v){return v;}),"unreferenced unique vertex");
@@ -136,10 +146,20 @@ void ValidateGeometryData(const GeometryData&g)
     }
     Require(next_index==g.indices.size() && next_meshlet==g.meshlets.size() && next_ref==g.meshlet_vertex_refs.size() && next_tri==g.meshlet_triangles.size() && std::ranges::all_of(seen,[](bool v){return v;}),"geometry ranges do not cover components");
 }
+void ValidateGeometryMetadataMatch(const GeometryMetadata&m,const GeometryData&g)
+{
+    std::uint32_t max_material=0;for(const auto&v:g.vertices)max_material=std::max(max_material,std::uint32_t(v.material_index));
+    Require(m.flags==g.flags && m.vertex_count==g.vertices.size() && m.index_count==g.indices.size() && m.submesh_count==g.submeshes.size() && m.meshlet_count==g.meshlets.size() && m.vertex_ref_count==g.meshlet_vertex_refs.size() && m.max_material_index==max_material && m.bounds.minimum==g.bounds.minimum && m.bounds.maximum==g.bounds.maximum && m.bounds.sphere==g.bounds.sphere,"page disagrees with metadata");
+}
+} // namespace
+void ValidateGeometryData(const GeometryData&g)
+{
+    ValidateExpandedVertices(g.vertices);
+    ValidateGeometryTopology(g);
+}
 void ValidateGeometryPage(const GeometryMetadata&m,const GeometryData&g)
 {
-    Shape(m);ValidateGeometryData(g);std::uint32_t max_material=0;for(const auto&v:g.vertices)max_material=std::max(max_material,std::uint32_t(v.material_index));
-    Require(m.flags==g.flags && m.vertex_count==g.vertices.size() && m.index_count==g.indices.size() && m.submesh_count==g.submeshes.size() && m.meshlet_count==g.meshlets.size() && m.vertex_ref_count==g.meshlet_vertex_refs.size() && m.max_material_index==max_material && m.bounds.minimum==g.bounds.minimum && m.bounds.maximum==g.bounds.maximum && m.bounds.sphere==g.bounds.sphere,"page disagrees with metadata");
+    Shape(m);ValidateGeometryData(g);ValidateGeometryMetadataMatch(m,g);
 }
 std::vector<std::byte> BuildGeometryPage(AssetId id,std::span<const std::string>d,const GeometryData&g)
 {
@@ -149,13 +169,184 @@ std::vector<std::byte> BuildGeometryPage(AssetId id,std::span<const std::string>
     for(std::size_t i=0;i<g.meshlets.size();++i){const auto&m=g.meshlets[i];const std::array w{m.first_vertex_ref,m.vertex_ref_count,m.first_triangle,m.triangle_count,m.submesh_index};for(std::size_t k=0;k<5;++k)Put(meshlets,i*64+k*4,w[k]);for(std::size_t k=0;k<4;++k){PF(meshlets,i*64+20+k*4,m.sphere[k]);PF(meshlets,i*64+36+k*4,m.cone[k]);}Put(meshlets,i*64+52,m.flags);}
     const std::array chunks{ChunkSource{14,1,true,vertices,g.vertices.size(),76},ChunkSource{15,1,true,indices,g.indices.size(),4},ChunkSource{16,1,true,submeshes,g.submeshes.size(),20},ChunkSource{17,1,true,meshlets,g.meshlets.size(),64},ChunkSource{18,1,true,refs,g.meshlet_vertex_refs.size(),4},ChunkSource{19,1,true,triangles,g.meshlet_triangles.size(),4},ChunkSource{20,1,true,remap,g.canonical_primitive_remap.size(),4}};return BuildPackage(id,d,chunks);
 }
+namespace
+{
+GeometryData UnpackGeometryPage(const PackageView&p,std::uint32_t flags)
+{
+    Require(!(flags&~7u),"unsupported geometry page flags");Require(p.chunks.size()==7,"unexpected geometry page chunks");std::array<const ChunkView*,21>c{};for(const auto&v:p.chunks){auto type=static_cast<std::uint32_t>(v.type);Require(type>=14 && type<=20 && v.required && v.version==1,"unsupported geometry page component");c[type]=&v;}for(unsigned t=14;t<=20;++t)Require(c[t]!=nullptr,"missing geometry component");
+    Require(c[19]->count==c[15]->count/3 && c[20]->count==c[15]->count/3,"page component count mismatch");GeometryData g;g.flags=flags;g.vertices=DecodeExpandedVertices(c[14]->bytes);g.indices=ReadWords(c[15]->bytes);g.meshlet_vertex_refs=ReadWords(c[18]->bytes);g.meshlet_triangles=ReadWords(c[19]->bytes);g.canonical_primitive_remap=ReadWords(c[20]->bytes);
+    for(std::size_t i=0;i<c[16]->count;++i){auto s=c[16]->bytes.subspan(i*20,20);g.submeshes.push_back({Get(s,0),Get(s,4),Get(s,8),Get(s,12),Get(s,16)});}
+    for(std::size_t i=0;i<c[17]->count;++i){auto s=c[17]->bytes.subspan(i*64,64);Require(Get(s,56)==0 && Get(s,60)==0,"meshlet reserved fields");GeometryMeshlet cl;cl.first_vertex_ref=Get(s,0);cl.vertex_ref_count=Get(s,4);cl.first_triangle=Get(s,8);cl.triangle_count=Get(s,12);cl.submesh_index=Get(s,16);for(std::size_t k=0;k<4;++k){cl.sphere[k]=GF(s,20+k*4);cl.cone[k]=GF(s,36+k*4);}cl.flags=Get(s,52);g.meshlets.push_back(cl);}return g;
+}
+} // namespace
 GeometryData DecodeGeometryPagePayload(std::span<const std::byte>b,AssetId id,std::uint32_t flags)
 {
-    Require(!(flags&~7u),"unsupported geometry page flags");auto p=ReadPackage(b,id);Require(p.chunks.size()==7,"unexpected geometry page chunks");std::array<const ChunkView*,21>c{};for(const auto&v:p.chunks){auto type=static_cast<std::uint32_t>(v.type);Require(type>=14 && type<=20 && v.required && v.version==1,"unsupported geometry page component");c[type]=&v;}for(unsigned t=14;t<=20;++t)Require(c[t]!=nullptr,"missing geometry component");
-    Require(c[19]->count==c[15]->count/3 && c[20]->count==c[15]->count/3,"page component count mismatch");GeometryData g;g.flags=flags;g.vertices=DecodeExpandedVertices(c[14]->bytes);g.bounds=PayloadBounds(g.vertices);g.indices=ReadWords(c[15]->bytes);g.meshlet_vertex_refs=ReadWords(c[18]->bytes);g.meshlet_triangles=ReadWords(c[19]->bytes);g.canonical_primitive_remap=ReadWords(c[20]->bytes);
-    for(std::size_t i=0;i<c[16]->count;++i){auto s=c[16]->bytes.subspan(i*20,20);g.submeshes.push_back({Get(s,0),Get(s,4),Get(s,8),Get(s,12),Get(s,16)});}
-    for(std::size_t i=0;i<c[17]->count;++i){auto s=c[17]->bytes.subspan(i*64,64);Require(Get(s,56)==0 && Get(s,60)==0,"meshlet reserved fields");GeometryMeshlet cl;cl.first_vertex_ref=Get(s,0);cl.vertex_ref_count=Get(s,4);cl.first_triangle=Get(s,8);cl.triangle_count=Get(s,12);cl.submesh_index=Get(s,16);for(std::size_t k=0;k<4;++k){cl.sphere[k]=GF(s,20+k*4);cl.cone[k]=GF(s,36+k*4);}cl.flags=Get(s,52);g.meshlets.push_back(cl);}ValidateGeometryData(g);return g;
+    return PrepareGeometryPagePayload(b,id,flags).geometry;
+}
+GeometryData DecodeGeometryPagePayload(const PackageView &package, std::uint32_t flags)
+{
+    auto geometry = UnpackGeometryPage(package, flags);
+    geometry.bounds = PayloadBounds(geometry.vertices);
+    ValidateGeometryTopology(geometry);
+    return geometry;
+}
+PreparedGeometryPage PrepareGeometryPagePayload(std::span<const std::byte>b,AssetId id,std::uint32_t flags)
+{
+    PreparedGeometryPage prepared;
+    prepared.package=ReadPackage(b,id,PackageReadMode::GeometryDecoderValidatesVertices);
+    prepared.geometry=DecodeGeometryPagePayload(prepared.package,flags);
+    return prepared;
+}
+PreparedGeometryPage PrepareGeometryPage(std::span<const std::byte>b,AssetId id,const GeometryMetadata&m)
+{
+    Shape(m);
+    PreparedGeometryPage prepared;
+    prepared.package=ReadPackage(b,id,PackageReadMode::GeometryDecoderValidatesVertices);
+    prepared.geometry=UnpackGeometryPage(prepared.package,m.flags);
+    prepared.geometry.bounds=m.bounds;
+    ValidateGeometryTopology(prepared.geometry);
+    ValidateGeometryMetadataMatch(m,prepared.geometry);
+    return prepared;
 }
 GeometryData DecodeGeometryPage(std::span<const std::byte>b,AssetId id,const GeometryMetadata&m)
-{ Shape(m);auto g=DecodeGeometryPagePayload(b,id,m.flags);g.bounds=m.bounds;ValidateGeometryPage(m,g);return g; }
+{ return PrepareGeometryPage(b,id,m).geometry; }
+
+GeometryDescriptorStorage CompileGeometryDescriptor(std::span<const std::byte> bytes,
+    const PreparedGeometryPage &prepared, std::uint32_t bulk_index)
+{ return CompileGeometryDescriptor(bytes, prepared.package, prepared.geometry, bulk_index); }
+
+GeometryDescriptorStorage CompileGeometryDescriptor(std::span<const std::byte> bytes,
+    const PackageView &package, const GeometryData &geometry, std::uint32_t bulk_index)
+{
+    GeometryDescriptorStorage descriptor;
+    descriptor.asset_id = package.asset_id;
+    descriptor.bulk_index = bulk_index;
+    descriptor.flags = geometry.flags;
+    descriptor.vertex_count = static_cast<std::uint32_t>(geometry.vertices.size());
+    descriptor.index_count = static_cast<std::uint32_t>(geometry.indices.size());
+    descriptor.meshlet_count = static_cast<std::uint32_t>(geometry.meshlets.size());
+    descriptor.vertex_ref_count = static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());
+    descriptor.bounds = geometry.bounds;
+    descriptor.submeshes = geometry.submeshes;
+    for (const auto &dependency : package.dependencies)
+        descriptor.dependencies.push_back(MakeAssetId(dependency));
+    Require(package.chunks.size() == descriptor.chunks.size(), "descriptor requires seven geometry chunks");
+    for (const auto &chunk : package.chunks)
+    {
+        const auto type = static_cast<std::uint32_t>(chunk.type);
+        Require(type >= 14 && type <= 20, "invalid descriptor chunk type");
+        const auto begin = reinterpret_cast<std::uintptr_t>(bytes.data());
+        const auto address = reinterpret_cast<std::uintptr_t>(chunk.bytes.data());
+        Require(address >= begin && address - begin <= bytes.size() && chunk.bytes.size() <= bytes.size() - (address - begin),
+                "prepared geometry does not borrow supplied bytes");
+        descriptor.chunks[type - 14] = {address - begin, chunk.bytes.size()};
+    }
+    for (const auto &vertex : geometry.vertices)
+    {
+        descriptor.max_material_index = std::max(descriptor.max_material_index, std::uint32_t(vertex.material_index));
+        float sum = 0.0f;
+        for (std::size_t lane = 0; lane < 4; ++lane)
+        {
+            descriptor.max_bone_index = std::max(descriptor.max_bone_index, std::uint32_t(vertex.bone_indices[lane]));
+            if (geometry.flags & kGeometryFlagSkinned)
+            {
+                Require(std::isfinite(vertex.bone_weights[lane]) && vertex.bone_weights[lane] >= 0.0f &&
+                        vertex.bone_weights[lane] <= 1.0f, "invalid descriptor skin weight");
+                sum += vertex.bone_weights[lane];
+            }
+        }
+        if (geometry.flags & kGeometryFlagSkinned)
+            Require(vertex.reserved == 0 && std::isfinite(sum) && std::abs(sum - 1.0f) <= 0.001f,
+                    "invalid descriptor skin normalization or reserved field");
+    }
+    return descriptor;
+}
+
+void ValidateGeometryDescriptor(const GeometryDescriptor &descriptor, std::uint64_t product_bytes)
+{
+    Require(descriptor.payload_ready && descriptor.asset_id.value != 0 && product_bytes <= std::numeric_limits<std::size_t>::max() &&
+            descriptor.max_bone_index <= UINT16_MAX && descriptor.submeshes.size() <= kMaxGeometryIndices / 3,
+            "invalid geometry descriptor identity or addressability");
+    GeometryMetadata metadata;
+    metadata.flags = descriptor.flags;
+    metadata.vertex_count = descriptor.vertex_count;
+    metadata.index_count = descriptor.index_count;
+    metadata.submesh_count = static_cast<std::uint32_t>(descriptor.submeshes.size());
+    metadata.meshlet_count = descriptor.meshlet_count;
+    metadata.vertex_ref_count = descriptor.vertex_ref_count;
+    metadata.max_material_index = descriptor.max_material_index;
+    metadata.bounds = descriptor.bounds;
+    Shape(metadata);
+    const std::array<std::uint64_t, 7> sizes{
+        std::uint64_t(descriptor.vertex_count) * kExpandedVertexStride,
+        std::uint64_t(descriptor.index_count) * 4,
+        std::uint64_t(descriptor.submeshes.size()) * kGeometrySubmeshStride,
+        std::uint64_t(descriptor.meshlet_count) * kGeometryMeshletStride,
+        std::uint64_t(descriptor.vertex_ref_count) * 4,
+        std::uint64_t(descriptor.index_count / 3) * 4,
+        std::uint64_t(descriptor.index_count / 3) * 4};
+    for (std::size_t i = 0; i < sizes.size(); ++i)
+    {
+        const auto &range = descriptor.chunks[i];
+        Require(range.byte_count == sizes[i] && range.offset <= product_bytes && range.byte_count <= product_bytes - range.offset,
+                "geometry descriptor chunk size or bounds mismatch");
+    }
+    std::uint32_t next_index = 0, next_meshlet = 0, max_material = 0;
+    for (std::size_t i = 0; i < descriptor.submeshes.size(); ++i)
+    {
+        const auto &run = descriptor.submeshes[i];
+        Require(run.first_index == next_index && run.index_count > 0 && run.index_count % 3 == 0 &&
+                Range(run.first_index, run.index_count, descriptor.index_count) && run.first_meshlet == next_meshlet &&
+                run.meshlet_count > 0 && run.meshlet_count <= run.index_count / 3 &&
+                Range(run.first_meshlet, run.meshlet_count, descriptor.meshlet_count) &&
+                run.material_index <= descriptor.max_material_index && (!i || descriptor.submeshes[i-1].material_index != run.material_index),
+                "invalid descriptor material run");
+        next_index += run.index_count;
+        next_meshlet += run.meshlet_count;
+        max_material = std::max(max_material, run.material_index);
+    }
+    Require(next_index == descriptor.index_count && next_meshlet == descriptor.meshlet_count &&
+            max_material == descriptor.max_material_index, "descriptor submeshes do not cover geometry");
+}
+
+void ValidateGeometryDescriptorMetadata(const GeometryDescriptor &descriptor, const GeometryMetadata &metadata)
+{
+    Shape(metadata);
+    Require(descriptor.flags == metadata.flags && descriptor.vertex_count == metadata.vertex_count &&
+            descriptor.index_count == metadata.index_count && descriptor.submeshes.size() == metadata.submesh_count &&
+            descriptor.meshlet_count == metadata.meshlet_count && descriptor.vertex_ref_count == metadata.vertex_ref_count &&
+            descriptor.max_material_index == metadata.max_material_index && descriptor.bounds.minimum == metadata.bounds.minimum &&
+            descriptor.bounds.maximum == metadata.bounds.maximum && descriptor.bounds.sphere == metadata.bounds.sphere,
+            "geometry descriptor disagrees with metadata");
+}
+
+GeometryGpuView BindGeometryDescriptor(std::span<const std::byte> bytes, const GeometryDescriptor &descriptor)
+{
+    Require(descriptor.payload_ready, "geometry metadata proof cannot bind payload bytes");
+    GeometryGpuView view;
+    view.submeshes = descriptor.submeshes;
+    for (std::size_t i = 0; i < view.chunks.size(); ++i)
+    {
+        const auto &range = descriptor.chunks[i];
+        Require(range.offset <= bytes.size() && range.byte_count <= bytes.size() - range.offset,
+                "bound geometry chunk exceeds bytes");
+        view.chunks[i] = bytes.subspan(static_cast<std::size_t>(range.offset), static_cast<std::size_t>(range.byte_count));
+    }
+    return view;
+}
+
+std::vector<ExpandedVertex> BuildGroundSupport(std::span<const ExpandedVertex> vertices, float ground_offset)
+{
+    std::vector<ExpandedVertex> support;
+    for (const auto &vertex : vertices)
+    {
+        if (vertex.position[1] > -ground_offset + 0.12f) continue;
+        const auto duplicate = std::ranges::any_of(support, [&](const auto &existing) {
+            return existing.position == vertex.position && existing.bone_indices == vertex.bone_indices &&
+                   existing.bone_weights == vertex.bone_weights;
+        });
+        if (!duplicate) support.push_back(vertex);
+    }
+    return support;
+}
 } // namespace hs::render_data

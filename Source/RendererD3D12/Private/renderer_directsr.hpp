@@ -26,6 +26,9 @@ class DirectSrReconstruction
     [[nodiscard]] Result RegisterExternal(PassBuilder &, const SdkReconstructionFrame &,
         std::uint32_t frame_slot, std::span<const ExternalResourceAccess>,
         std::vector<std::shared_ptr<const void>> owners);
+    [[nodiscard]] Result BindExternal(PassBuilder &, const SdkReconstructionFrame &,
+        std::uint32_t frame_slot, std::span<const ExternalResourceAccess>,
+        std::vector<std::shared_ptr<const void>> owners);
     [[nodiscard]] Result Jitter(ViewExtent active, std::uint64_t successful_frame,
                                 std::optional<DirectX::XMFLOAT2> &);
     [[nodiscard]] Result ResetAfterCompletion();
@@ -34,6 +37,9 @@ class DirectSrReconstruction
     [[nodiscard]] const DirectSrInputExtent &InputRange() const noexcept;
     [[nodiscard]] bool Initialized() const noexcept;
   private:
+    [[nodiscard]] Result RegisterExternalImpl(PassBuilder &,const SdkReconstructionFrame &,
+        std::uint32_t,std::span<const ExternalResourceAccess>,
+        std::vector<std::shared_ptr<const void>>,bool retained);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

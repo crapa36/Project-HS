@@ -831,6 +831,50 @@ const Json &ActionResultSnapshot::ProductMetadata(std::string_view product_id) c
             "upstream product is missing from ActionResult: " + std::string(product_id));
     return result_.at("products").at(found->second);
 }
+std::vector<std::string_view> ActionResultSnapshot::ProductIds() const
+{
+    std::vector<std::string_view> ids;
+    ids.reserve(product_indexes_.size());
+    for (const auto &[id, index] : product_indexes_) { (void)index; ids.push_back(id); }
+    return ids;
+}
+void ActionResultSnapshot::CopyProductBytesTo(std::string_view product_id, std::ostream &output,
+                                             UpstreamProduct &dependency) const
+{
+    fs::path path;
+    ResolveProduct(product_id, dependency, path);
+    RequireRegularFile(path);
+    std::ifstream input(NativeFilePath(path), std::ios::binary);
+    Require(input.is_open(), "cannot read product: " + path.string());
+    Sha256 hash;
+    std::vector<char> buffer(1024 * 1024);
+    std::uint64_t size{};
+    while (input)
+    {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = input.gcount();
+        if (count <= 0) break;
+        size = AddSize(size, static_cast<std::size_t>(count));
+        Require(size <= dependency.size, "upstream product exceeds declared size");
+        hash.Add(buffer.data(), static_cast<std::size_t>(count));
+        output.write(buffer.data(), count);
+        Require(static_cast<bool>(output), "cannot write streamed product");
+    }
+    Require(input.eof() && !input.bad() && size == dependency.size && hash.Finish() == dependency.digest,
+            "upstream product is missing or corrupt: " + std::string(product_id));
+}
+
+void AtomicPublishFile(const fs::path &temporary, const fs::path &destination)
+{
+    RequireRegularFile(temporary);
+    RejectReparseAncestors(destination);
+#ifdef _WIN32
+    Require(MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0,
+            "cannot atomically publish file: " + destination.string());
+#else
+    fs::rename(temporary, destination);
+#endif
+}
 
 void ActionResultSnapshot::ResolveProduct(std::string_view product_id,
                                        UpstreamProduct &dependency,

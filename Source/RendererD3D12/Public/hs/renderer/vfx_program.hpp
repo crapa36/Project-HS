@@ -1,4 +1,5 @@
 #pragma once
+#include <hs/render_data/vfx_program_values.hpp>
 #include <array>
 #include <cstdint>
 #include <cstddef>
@@ -10,33 +11,9 @@ namespace hs
 // Header: magic HSV4, format=5, schema, engine contract, minimum runtime,
 // section count, payload bytes, FNV1a payload checksum; directory entries: kind,count,offset,bytes.
 enum class VfxSourceType : std::uint32_t { Direct, ProjectileFollow, BallisticCollision, CurlMotes, ImpactSprite, HistoryRibbon, VolumeLocal };
-enum class VfxOutputProfile : std::uint32_t { SpriteSdfAdd, MeshEmissiveOit, SpriteAdd, RibbonAdd, GroundSdfSoft, GroundSdfAdd, Distortion, GroundSdfOit, SpriteFlameOit, Light, RibbonOit, LocalVolume, Decal, SpriteNoiseOit, ScreenOverlay, EntitySurface, FresnelShellOit, FresnelShellEmissive, SpriteSmoke6WayOit };
+
 enum class VfxParameterType : std::uint32_t { Float, Int, Bool, Enum, CurveRow };
-// Every authored motion string has a stable typed opcode. Unknown authored text
-// is rejected by the cooker; the renderer must never infer behavior from text.
-enum class VfxMotionKind : std::uint32_t {
-    ShardsLiftFall, BakedSixWayPlume, BallisticBurstGravitySpin, BoundaryPulseAccelerates,
-    BriefRadialResponse, BuoyantTurbulentSmoke, ChevronsDissipate, CompressSnapOutward,
-    CurvedLinkTravelingHead, CurvedRecoilArc, CurvesTowardCollector, DirectionalTurbulence,
-    FastExpansionSurface, FastStampBreakout, ParticlesPulledInward, FractureAtPeak,
-    FresnelShellContracts, ProceduralFlameTongue, GentleGreenPulse, HexSegmentsCollapse,
-    HistoryRibbonTearsBackward, HistoryRibbonTaperedFlow, InstantCompressionAxialSplit,
-    InstantExpansionCollapse, InstantPointFlash, InwardTeethPulse, LockedChevronsTowardImpact,
-    LockedSteadyRingPulse, NoiseEdgeFlowsUpward, OneTightPulse, OptionalTransientArc,
-    QuickHeatShock, QuickInwardFracture, RadialLobesUpward, RareInwardDrift,
-    ReverseFlowBow, RingContractsReleases, ScrollsAttackDirection, ShortBallisticFan,
-    ShortForwardShardFan, ShortLineIncomingVelocity, ShortRefractiveShock, ShortTurbulentWake,
-    ShortUpwardSpiral, SingleCappedLightPulse, SingleHighPriorityLightPulse,
-    SingleOutwardRefractivePulse, SingleShortPulse, SingleFrameSnapShrink,
-    SlowCounterRotationContraction, SlowCounterRotationStableFootprint, SlowInwardCurl,
-    SlowPulseStateLocked, SlowRadialFlow, SlowStableRotation, SlowUpwardHelix,
-    SnapsInwardUpward, SnapsOutwardAim, SoftWiderSheath, SparseRearwardSparks,
-    StableBoundaryInwardPulse, StaticProjectedResidue, StretchesProjectileDirection,
-    StrongSnapGameplayResolve, SubtleFresnelPulse, SurfaceNoiseThroughBoss,
-    ThinShardsForwardCone, TicksRotateLock, TightHeadDistortion, TwoPhaseNarrowWakes,
-    TwoFrameSnapPerpendicular, VelocityAligned, VelocityAlignedHeavyLance,
-    VelocityAlignedSharpHead, VeryShortLocalDrift
-};
+
 enum class VfxProgramSection : std::uint32_t { Effects=1, Sources, Outputs, Parameters, TextureBindings, SliceIndices, Curves, CurveKeys, EffectLookup, TextureResources, Strings, UpgradeBindings, UpgradeSequences };
 struct VfxRange { std::uint32_t first{}, count{}; };
 struct VfxEffectRecord {

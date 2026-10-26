@@ -1,4 +1,4 @@
-#include <hs/core/snapshot_exchange.hpp>
+#include <hs/presentation/snapshot_exchange.hpp>
 
 #include <limits>
 
@@ -58,8 +58,17 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
     return std::nullopt;
 }
 
-void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence) noexcept
+void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
+                                     const RenderSnapshot *previous_sample)
 {
+    auto &packet = slots_[slot.index];
+    const auto &current = packet.storage.header;
+    packet.has_previous = previous_sample &&
+        previous_sample->header.session_id == current.session_id &&
+        previous_sample->header.tick < current.tick &&
+        current.tick - previous_sample->header.tick == 1;
+    if (packet.has_previous) packet.previous.CopyDynamicFrom(*previous_sample);
+    else packet.previous.Clear();
     slots_[slot.index].publish_sequence.store(publish_sequence, std::memory_order_relaxed);
     slots_[slot.index].state.store(SlotState::Ready, std::memory_order_release);
 }
@@ -124,7 +133,6 @@ RenderSnapshotExchange::Consumer::Consumer(RenderSnapshotExchange &exchange) noe
 
 RenderSnapshotExchange::Consumer::~Consumer()
 {
-    exchange_->ReleaseRead(previous_);
     exchange_->ReleaseRead(current_);
 }
 
@@ -140,23 +148,18 @@ RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest
             exchange_->ReleaseRead(newest);
         else
         {
-            exchange_->ReleaseRead(previous_);
-            previous_ = current_;
+            exchange_->ReleaseRead(current_);
             current_ = newest;
         }
     }
 
     ReadPair pair;
-    if (previous_)
-    {
-        pair.previous = exchange_->slots_[*previous_].storage.View();
-        pair.previous_publication_sequence =
-            exchange_->slots_[*previous_].publish_sequence.load(std::memory_order_relaxed);
-        pair.has_previous = true;
-    }
     if (current_)
     {
-        pair.current = exchange_->slots_[*current_].storage.View();
+        const auto &packet = exchange_->slots_[*current_];
+        pair.current = packet.storage.View();
+        pair.has_previous = packet.has_previous;
+        if (pair.has_previous) pair.previous = packet.previous.View();
         pair.current_publication_sequence =
             exchange_->slots_[*current_].publish_sequence.load(std::memory_order_relaxed);
         pair.has_current = true;

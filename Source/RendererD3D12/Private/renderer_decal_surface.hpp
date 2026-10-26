@@ -69,6 +69,17 @@ struct DecalSurfaceOutputs
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> export_srvs{};
     bool active{};
 };
+struct DecalSurfaceLayout
+{
+    bool valid{}, active{};
+    ViewExtent capacity{};
+    std::uint32_t frame_slots{};
+    std::array<ResourceVersion,10> guides{};
+    std::array<TextureHandle,4> outputs{};
+    std::array<ResourceVersion,4> written{};
+    BufferHandle constants;
+    std::uint32_t pass{};
+};
 struct DecalSurfaceTargets;
 class DecalSurfaceCandidate
 {
@@ -92,12 +103,17 @@ class DecalSurfaceSystem
         const ShaderReader &, DecalSurfaceCandidate &) const;
     [[nodiscard]] Result Commit(DecalSurfaceCandidate &&, const CompletionSet &);
     [[nodiscard]] Result Register(RenderGraphBuilder &, const DecalSurfaceInputs &,
-        DecalSurfaceConstants, DecalSurfaceOutputs &);
+        DecalSurfaceConstants, DecalSurfaceOutputs &, DecalSurfaceLayout *layout=nullptr);
+    [[nodiscard]] bool MatchesLayout(const DecalSurfaceInputs &,const DecalSurfaceLayout &)const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const DecalSurfaceInputs &,
+        DecalSurfaceConstants,const DecalSurfaceLayout &,DecalSurfaceOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     void SwapState(DecalSurfaceSystem &other) noexcept { targets_.swap(other.targets_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const DecalSurfaceInputs &,
+        DecalSurfaceConstants,DecalSurfaceOutputs &,DecalSurfaceLayout *,const DecalSurfaceLayout *);
     std::shared_ptr<DecalSurfaceTargets> targets_;
     const RenderGraphBuilder *pending_graph_{};
     std::array<ResourceHandle, 4> pending_outputs_{};

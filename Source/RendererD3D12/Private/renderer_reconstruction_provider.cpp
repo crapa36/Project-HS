@@ -209,6 +209,14 @@ Result ReconstructionProvider::RegisterExternal(PassBuilder &pass, const SdkReco
         return ProviderFailure(ErrorCode::InvalidState, "External reconstruction requires the selected configured DirectSR provider.");
     return directsr_->RegisterExternal(pass, frame, frame_slot, accesses, std::move(owners));
 }
+Result ReconstructionProvider::BindExternal(PassBuilder &pass,const SdkReconstructionFrame &frame,
+    std::uint32_t frame_slot,std::span<const ExternalResourceAccess> accesses,
+    std::vector<std::shared_ptr<const void>> owners)
+{
+    if(!configured_||kind_!=Kind::DirectSr)
+        return ProviderFailure(ErrorCode::InvalidState,"Retained external reconstruction requires the selected configured DirectSR provider.");
+    return directsr_->BindExternal(pass,frame,frame_slot,accesses,std::move(owners));
+}
 
 Result ReconstructionProvider::NativeJitter(ViewExtent active, std::uint64_t frame,
     std::optional<DirectX::XMFLOAT2> &sample)

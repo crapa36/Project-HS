@@ -21,8 +21,19 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(const RendererConfig &can
             const std::string id = hero ? "render/material/" + name + "/material.rpkg"
                 : ordinal == kTerrainMaterialOrdinal ? "render/material/terrain.rpkg"
                 : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg" : "render/" + name + ".rpkg";
-            std::filesystem::path path;
-            if (auto resolved = candidate.ResolveProduct(id, path); !resolved) return resolved;
+            if (candidate.packed_content || candidate.development_catalog)
+            {
+                const auto handle = FindRendererMaterial(candidate, MakeAssetId(id));
+                if (!handle) throw std::runtime_error("Missing compiled material surface: " + id);
+                const auto &material = candidate.packed_materials[handle.value];
+                if (material.kind != (hero ? render_data::MaterialKind::Hero : render_data::MaterialKind::Environment))
+                    throw std::runtime_error("Compiled material surface has the wrong domain: " + id);
+                layouts[ordinal] = material.surface;
+                mask |= layouts[ordinal].varying_mask;
+                continue;
+            }
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate, id, path); !resolved) return resolved;
             auto &header = headers[ordinal];
             if (auto read = ReadBinary(path, header.bytes); !read) return read;
             header.view = render_data::ReadPackage(header.bytes, MakeAssetId(id));

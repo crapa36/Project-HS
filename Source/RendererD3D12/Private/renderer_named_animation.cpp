@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 
 namespace hs
 {
@@ -39,8 +40,9 @@ CharacterLocalTransform Blend(const CharacterLocalTransform &first,
 }
 } // namespace
 
-Result SampleNamedCharacterAnimation(
-    const render_data::CharacterAnimationExtensionData &animation,
+template<class Animation, class Transform>
+Result SampleNamedAnimation(
+    const Animation &animation, std::span<const Transform> transforms,
     const RenderInstance &instance,
     std::span<DirectX::XMFLOAT4X4> transposed_skin_matrices)
 {
@@ -60,8 +62,8 @@ Result SampleNamedCharacterAnimation(
         return Invalid(ErrorCode::InvalidArgument, "Selected named clip " +
             std::to_string(instance.animation_clip_id.value) + " is absent from this character's immutable animation product.");
     if (clip->frame_count < 2 || !std::isfinite(clip->duration_seconds) || clip->duration_seconds <= 0.0f ||
-        clip->first_transform > animation.transforms.size() ||
-        clip->frame_count > (animation.transforms.size() - clip->first_transform) / bones)
+        clip->first_transform > transforms.size() ||
+        clip->frame_count > (transforms.size() - clip->first_transform) / bones)
         return Invalid(ErrorCode::InvalidState, "Selected named animation has an invalid frame range or duration.");
 
     const double duration = clip->duration_seconds;
@@ -87,8 +89,12 @@ Result SampleNamedCharacterAnimation(
         if (parent != std::numeric_limits<std::uint16_t>::max() && parent >= bone)
             return Invalid(ErrorCode::InvalidState, "Named animation parent does not precede its child.");
         const auto base = static_cast<std::size_t>(clip->first_transform);
-        const auto transform = Blend(animation.transforms[base + first_frame * bones + bone],
-                                     animation.transforms[base + second_frame * bones + bone], weight);
+        const auto value = [&](std::size_t index) {
+            if constexpr (std::is_same_v<Transform, render_data::PackedCharacterTransform>) return transforms[index].Value();
+            else return transforms[index];
+        };
+        const auto transform = Blend(value(base + first_frame * bones + bone),
+                                     value(base + second_frame * bones + bone), weight);
         const auto local = DirectX::XMMatrixScaling(transform.scale[0], transform.scale[1], transform.scale[2]) *
             DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(
                 transform.rotation[0], transform.rotation[1], transform.rotation[2], transform.rotation[3])) *
@@ -108,4 +114,11 @@ Result SampleNamedCharacterAnimation(
     std::copy_n(staged_skin.begin(), bones, transposed_skin_matrices.begin());
     return Result::Success();
 }
+Result SampleNamedCharacterAnimation(const render_data::CharacterAnimationExtensionData &animation,
+    const RenderInstance &instance, std::span<DirectX::XMFLOAT4X4> output)
+{ return SampleNamedAnimation(animation, std::span<const CharacterLocalTransform>(animation.transforms), instance, output); }
+Result SampleNamedCharacterAnimation(const render_data::AnimationDescriptor &animation,
+    std::span<const render_data::PackedCharacterTransform> transforms,
+    const RenderInstance &instance, std::span<DirectX::XMFLOAT4X4> output)
+{ return SampleNamedAnimation(animation, transforms, instance, output); }
 } // namespace hs

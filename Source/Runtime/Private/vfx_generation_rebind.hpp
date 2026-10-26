@@ -1,8 +1,10 @@
 #pragma once
 
+#ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/asset_manifest/selected_generation.hpp>
+#endif
 #include <hs/core/cooked_format.hpp>
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 
 #include <algorithm>
@@ -27,6 +29,7 @@ struct VfxGenerationRebindCounts
     }
 };
 
+#ifdef HS_DEVELOPMENT_TOOLS
 // A retained capture owns the old generation lease. It may survive a catalog
 // reload only when the captured asset and every validated product reachable from
 // it still has the same digest and direct dependency edges in the candidate.
@@ -98,6 +101,8 @@ inline bool SameCapturedAssetClosure(const SelectedGeneration &previous,
     }
     return true;
 }
+
+#endif
 
 // Numeric handles belong to one cooked table. Only its stable effect identity
 // and matching input contract can transfer an existing authoritative payload.

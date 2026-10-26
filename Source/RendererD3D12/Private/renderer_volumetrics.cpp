@@ -232,6 +232,7 @@ struct VolumetricStorage
     Budget budget;
     std::byte *constant_map{},*volume_map{},*hero_map{};
     std::uint64_t previous_frame{},reset_epoch{};
+    std::uint64_t generation{};
     UINT max_volumes{},descriptor_stride{},read_index{};
     bool enabled{},hero_enabled{},history_valid{},usable{true};
     ~VolumetricStorage()
@@ -262,9 +263,70 @@ struct VolumetricStorage
         device->CreateUnorderedAccessView(resource,nullptr,&d,Cpu(slot,offset));
     }
 };
+namespace
+{
+std::array<ResourceVersion,22> InputVersions(const VolumetricInputs &in)
+{
+    return {in.depth.version,in.hdr.version,
+        in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices,
+        in.shadows.metadata,in.shadows.page_table,in.shadows.static_bank,
+        in.shadows.dynamic_bank,in.shadows.draw_records,in.shadows.root_static,
+        in.shadows.root_dynamic,in.local_shadows.metadata,in.local_shadows.records,
+        in.local_shadows.static_bank,in.local_shadows.dynamic_bank,
+        in.local_shadows.draw_records,in.compact_shadow.atlas.version,
+        in.hero_blue_noise.version,in.hero_gradient.version,in.hero_noise_volume.version};
+}
+bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &previous) noexcept
+{
+    if(inputs.size()!=previous.size())return false;
+    for(std::size_t index=0;index<inputs.size();++index)
+    {
+        const auto &in=inputs[index];
+        for(std::size_t earlier=0;earlier<index;++earlier)
+            if(inputs[earlier].identity==in.identity)return false;
+        const auto found=std::lower_bound(previous.begin(),previous.end(),in.identity,
+            [](const HeroState &state,const VfxVolumeIdentity &identity)
+            {return HeroKey(state.identity)<HeroKey(identity);});
+        if(found==previous.end()||found->identity!=in.identity)return false;
+        HeroState current{};current.identity=in.identity;
+        std::memcpy(&current.gpu.world_to_local,in.world_to_local.data(),sizeof(current.gpu.world_to_local));
+        const float density=in.density*in.alpha*in.source_envelope;
+        current.gpu.optical={density,in.extinction,in.anisotropy,in.elapsed_seconds};
+        current.gpu.albedo={in.scattering_albedo.x,in.scattering_albedo.y,
+            in.scattering_albedo.z,in.source_age};
+        current.gpu.emission={in.emission.x,in.emission.y,in.emission.z,float(in.gradient_row)};
+        current.gpu.sampling={in.steps,UINT(in.noise),in.stable_seed,UINT(in.shape)};
+        const auto &id=in.identity;
+        current.gpu.effect_source={UINT(id.effect_id),UINT(id.effect_id>>32),id.source_id,id.source_index};
+        current.gpu.owner_event={UINT(id.owner_id),UINT(id.owner_id>>32),UINT(id.event_sequence),UINT(id.event_sequence>>32)};
+        current.gpu.episode_output={UINT(id.episode_generation),UINT(id.episode_generation>>32),id.output_index,id.effect_handle};
+        current.local_to_world=in.local_to_world;
+        current.bounds={in.bounds_min.x,in.bounds_min.y,in.bounds_min.z,
+            in.bounds_max.x,in.bounds_max.y,in.bounds_max.z};
+        current.revisions={in.transform_revision,in.density_revision,in.appearance_revision};
+        if(!(current==*found))return false;
+    }
+    return true;
+}
+bool HistoryEligible(const VolumetricStorage &s,const VolumetricInputs &in) noexcept
+{
+    return s.history_valid&&!in.reset_history&&in.frame_index==s.previous_frame+1&&
+        in.revisions==s.previous_revisions&&HeroHistoryMatches(in.hero_volumes,s.previous_heroes)&&
+        (in.hero_volumes.empty()?s.previous_hero_gradient.Get()==nullptr:
+            s.previous_hero_gradient.Get()==in.hero_gradient.resource)&&
+        (in.hero_volumes.empty()?s.previous_hero_blue_noise.Get()==nullptr:
+            s.previous_hero_blue_noise.Get()==in.hero_blue_noise.resource)&&
+        (in.hero_volumes.empty()?s.previous_hero_noise_volume.Get()==nullptr:
+            s.previous_hero_noise_volume.Get()==in.hero_noise_volume.resource)&&
+        SameCamera(in.previous_camera,s.previous_camera);
+}
+bool SameRange(BufferRange a,BufferRange b) noexcept
+{return a.offset==b.offset&&a.size==b.size;}
+}
 struct VolumetricSystem::Impl
 {
     std::shared_ptr<VolumetricStorage> storage;
+    std::uint64_t next_generation{};
     struct Import { AllocationResource *allocation{};ResourceHandle handle; };
     struct Pending
     {
@@ -280,11 +342,21 @@ struct VolumetricSystem::Impl
         UINT slot{},write{};
         bool history{},registered{};
     } pending;
-    ResourceVersion ImportResource(RenderGraphBuilder &graph,AllocationResource &r,std::string_view name)
+    ResourceVersion ImportResource(RenderGraphBuilder &graph,AllocationResource &r,
+        std::string_view name,ResourceHandle saved,bool retained,bool &valid)
     {
-        const ResourceHandle h=r.resource->GetDesc().Dimension==D3D12_RESOURCE_DIMENSION_BUFFER?
-            ResourceHandle(graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name)):
-            ResourceHandle(graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name));
+        const bool buffer=r.NativeContract()->description.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER;
+        ResourceHandle h{};
+        if(retained)
+        {
+            h=saved;
+            valid&=buffer?
+                graph.BindBuffer(h,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access):
+                graph.BindTexture(h,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access);
+        }
+        else h=buffer?
+            ResourceHandle(graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name)):
+            ResourceHandle(graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name));
         pending.imports.push_back({&r,h});return graph.Version(h);
     }
 };
@@ -374,14 +446,79 @@ Result VolumetricSystem::Commit(VolumetricCandidate &&candidate,const Completion
     if(!candidate.storage_||impl_->pending.graph)return Fail(ErrorCode::InvalidState,"Volumetric candidate absent or a submission is pending.");
     if(impl_->storage&&(!impl_->storage->usable||!impl_->storage->completion.IsSatisfiedBy(completed)))
         return Fail(ErrorCode::InvalidState,"Volumetric replacement requires all old uses completed and usable storage.");
+    if(impl_->next_generation==UINT64_MAX)
+        return Fail(ErrorCode::InvalidState,"Volumetric storage generation is exhausted.");
+    candidate.storage_->generation=++impl_->next_generation;
     impl_->storage=std::move(candidate.storage_);return Result::Success();
 }
-Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInputs &in,VolumetricOutputs &out)
+bool VolumetricSystem::MatchesLayout(const VolumetricInputs &in,
+    const VolumetricLayout &layout) const noexcept
+{
+    return MatchesProjectedLayout(in,layout,in.shadows.resources[0]!=nullptr,
+        in.local_shadows.resources[0]!=nullptr,in.shadows.resources[5]!=nullptr,
+        in.shadows.resources[6]!=nullptr);
+}
+bool VolumetricSystem::MatchesProjectedLayout(const VolumetricInputs &in,
+    const VolumetricLayout &layout,bool shadows,bool local_shadows,
+    bool root_static,bool root_dynamic) const noexcept
+{
+    const auto s=impl_->storage;
+    if(!s||!s->enabled||!s->usable||!layout.storage_generation||
+        layout.storage_generation!=s->generation||in.frame_slot>=s->slots.size()||
+        in.volumes.size()>s->max_volumes||
+        in.hero_volumes.size()>s->max_volumes-in.volumes.size()||
+        layout.hero!=!in.hero_volumes.empty()||
+        layout.shadows!=shadows||
+        layout.local_shadows!=local_shadows||
+        layout.compact_shadow!=bool(in.compact_shadow.identity.w)||
+        layout.root_static!=root_static||
+        layout.root_dynamic!=root_dynamic||
+        layout.history!=HistoryEligible(*s,in))return false;
+    const auto versions=InputVersions(in);
+    for(std::size_t index=0;index<versions.size();++index)
+        if(!(versions[index]==layout.input_versions[index]))return false;
+    const std::array<BufferRange,3> ranges{{
+        {UINT64(in.frame_slot)*kConstantStride,kConstantStride},
+        {UINT64(in.frame_slot)*s->max_volumes*sizeof(VolumetricVolume),
+            UINT64(s->max_volumes)*sizeof(VolumetricVolume)},
+        {UINT64(in.frame_slot)*s->max_volumes*sizeof(VolumetricHeroVolume),
+            UINT64(s->max_volumes)*sizeof(VolumetricHeroVolume)}}};
+    for(std::size_t index=0;index<ranges.size();++index)
+        if(!SameRange(ranges[index],layout.read_ranges[index]))return false;
+    return true;
+}
+Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInputs &in,
+    VolumetricOutputs &out,VolumetricLayout *layout)
+{return RegisterImpl(graph,in,out,layout,nullptr);}
+Result VolumetricSystem::BindRetained(RenderGraphBuilder &graph,const VolumetricInputs &in,
+    const VolumetricLayout &layout,VolumetricOutputs &out)
+{return RegisterImpl(graph,in,out,nullptr,&layout);}
+Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const VolumetricInputs &in,
+    VolumetricOutputs &out,VolumetricLayout *layout,const VolumetricLayout *retained)
 {
     out={};auto s=impl_->storage;
     if(!s)return Fail(ErrorCode::InvalidState,"Volumetric service has not been committed.");
     if(!s->enabled)return Result::Success();
     if(!s->usable||impl_->pending.graph)return Fail(ErrorCode::InvalidState,"Volumetric storage faulted or its previous submission remains pending.");
+    if(retained)
+    {
+        if(!MatchesLayout(in,*retained))
+            return Fail(ErrorCode::InvalidState,"Volumetric retained topology variant changed.");
+        for(UINT stage=0;stage<6;++stage)
+            if(!graph.BindPass(retained->pass_index[stage],170+stage))
+                return Fail(ErrorCode::InvalidState,"Volumetric retained pass changed.");
+        if(retained->hero&&!graph.BindPass(retained->pass_index[6],176))
+            return Fail(ErrorCode::InvalidState,"Volumetric retained hero pass changed.");
+        for(UINT index=0;index<retained->imports.size();++index)
+        {
+            const bool used=index!=2||retained->hero;
+            const bool historyUsed=index<12||retained->history;
+            const auto handle=retained->imports[index];
+            if(used&&historyUsed&&(!handle||handle.value>graph.ResourceCount()||
+                handle.kind!=(index<3?ResourceKind::Buffer:ResourceKind::Texture)))
+                return Fail(ErrorCode::InvalidState,"Volumetric retained import slot changed.");
+        }
+    }
     if(!Extent(in.render_active)||in.render_active.width>s->render_capacity.width||in.render_active.height>s->render_capacity.height||
        in.frame_slot>=s->slots.size()||!s->slots[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!in.make_bindings||
        !DepthRead(graph,in.depth,in.render_active)||!TextureRead(graph,in.hdr,in.render_active,kHdr)||
@@ -451,26 +588,49 @@ Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInpu
     {next.hero_gradient=in.hero_gradient.resource;next.hero_blue_noise=in.hero_blue_noise.resource;
      next.hero_noise_volume=in.hero_noise_volume.resource;}
     next.write=1-s->read_index;next.reset_epoch=s->reset_epoch;
-    next.history=s->history_valid&&!in.reset_history&&in.frame_index==s->previous_frame+1&&in.revisions==s->previous_revisions&&
-        next.heroes_state==s->previous_heroes&&next.hero_gradient.Get()==s->previous_hero_gradient.Get()&&
+    next.history=s->history_valid&&!in.reset_history&&in.frame_index==s->previous_frame+1&&
+        in.revisions==s->previous_revisions&&next.heroes_state==s->previous_heroes&&
+        next.hero_gradient.Get()==s->previous_hero_gradient.Get()&&
         next.hero_blue_noise.Get()==s->previous_hero_blue_noise.Get()&&
         next.hero_noise_volume.Get()==s->previous_hero_noise_volume.Get()&&
         SameCamera(in.previous_camera,s->previous_camera);
+    if(layout)
+    {
+        *layout={};layout->storage_generation=s->generation;
+        layout->input_versions=InputVersions(in);
+        layout->history=next.history;layout->hero=!next.heroes_state.empty();
+        layout->shadows=shadows;layout->local_shadows=localShadows;
+        layout->compact_shadow=bool(in.compact_shadow.identity.w);
+        layout->root_static=in.shadows.resources[5]!=nullptr;
+        layout->root_dynamic=in.shadows.resources[6]!=nullptr;
+    }
+    for(auto *resource:s->Resources())if(resource->resource)
+        if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
     auto &lease=s->slots[next.slot];lease.binder={};lease.reads.clear();impl_->pending=std::move(next);auto &p=impl_->pending;
-    p.constants=impl_->ImportResource(graph,s->constants,"Volumetric.Constants");
-    p.volumes=impl_->ImportResource(graph,s->volumes,"Volumetric.VolumeRecords");
-    if(!p.heroes_state.empty())p.heroes=impl_->ImportResource(graph,s->heroes,"Volumetric.HeroVolumeMetadata");
-    p.medium=impl_->ImportResource(graph,s->medium,"Volumetric.Medium");p.phase=impl_->ImportResource(graph,s->phase,"Volumetric.Anisotropy");
-    p.raw=impl_->ImportResource(graph,s->raw,"Volumetric.RawScattering");p.current=impl_->ImportResource(graph,s->history[p.write],"Volumetric.CurrentScattering");
-    p.current_depth=impl_->ImportResource(graph,s->depth_history[p.write],"Volumetric.CurrentColumnDepth");
-    p.filtered=impl_->ImportResource(graph,s->filtered,"Volumetric.FilteredScattering");
-    p.luminance=impl_->ImportResource(graph,s->luminance,"Volumetric.CumulativeL");p.transmittance=impl_->ImportResource(graph,s->transmittance,"Volumetric.CumulativeT");
-    p.resolved=impl_->ImportResource(graph,s->resolved,"Volumetric.ResolvedOpaqueHDR");
+    bool imports_valid=true;
+    auto import=[&](AllocationResource &resource,std::string_view name,UINT index)
+    {
+        const auto version=impl_->ImportResource(graph,resource,name,
+            retained?retained->imports[index]:ResourceHandle{},retained!=nullptr,imports_valid);
+        if(layout)layout->imports[index]=version.resource;
+        return version;
+    };
+    p.constants=import(s->constants,"Volumetric.Constants",0);
+    p.volumes=import(s->volumes,"Volumetric.VolumeRecords",1);
+    if(!p.heroes_state.empty())p.heroes=import(s->heroes,"Volumetric.HeroVolumeMetadata",2);
+    p.medium=import(s->medium,"Volumetric.Medium",3);p.phase=import(s->phase,"Volumetric.Anisotropy",4);
+    p.raw=import(s->raw,"Volumetric.RawScattering",5);p.current=import(s->history[p.write],"Volumetric.CurrentScattering",6);
+    p.current_depth=import(s->depth_history[p.write],"Volumetric.CurrentColumnDepth",7);
+    p.filtered=import(s->filtered,"Volumetric.FilteredScattering",8);
+    p.luminance=import(s->luminance,"Volumetric.CumulativeL",9);
+    p.transmittance=import(s->transmittance,"Volumetric.CumulativeT",10);
+    p.resolved=import(s->resolved,"Volumetric.ResolvedOpaqueHDR",11);
     if(p.history)
     {
-        p.previous=impl_->ImportResource(graph,s->history[s->read_index],"Volumetric.PreviousScattering");
-        p.previous_depth=impl_->ImportResource(graph,s->depth_history[s->read_index],"Volumetric.PreviousColumnDepth");
+        p.previous=import(s->history[s->read_index],"Volumetric.PreviousScattering",12);
+        p.previous_depth=import(s->depth_history[s->read_index],"Volumetric.PreviousColumnDepth",13);
     }
+    if(!imports_valid)return Fail(ErrorCode::InvalidState,"Volumetric retained resource binding changed.");
     const auto &previous=p.history?s->previous_camera:in.camera;VolumetricConstants c;
     c.inverse_view_projection=in.camera.inverse_view_projection;c.world_to_view=in.camera.world_to_view;
     c.previous_view_projection=previous.view_projection;c.previous_world_to_view=previous.world_to_view;
@@ -533,8 +693,14 @@ Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInpu
     if(!p.heroes_state.empty()){retain(in.hero_blue_noise.resource);retain(in.hero_gradient.resource);
         retain(in.hero_noise_volume.resource);}
     const BufferRange constantsRange{UINT64(p.slot)*kConstantStride,kConstantStride};
-    const BufferRange volumesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricVolume),std::max(UINT64(in.volumes.size_bytes()),UINT64(sizeof(VolumetricVolume)))};
-    const BufferRange heroesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricHeroVolume),UINT64(p.heroes_state.size())*sizeof(VolumetricHeroVolume)};
+    // Whole per-slot capacity is a conservative dependency. Shader counts and
+    // uploaded bytes remain current-frame data, so changing active volumes
+    // does not force another graph declaration for the same allocation.
+    const BufferRange volumesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricVolume),
+        UINT64(s->max_volumes)*sizeof(VolumetricVolume)};
+    const BufferRange heroesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricHeroVolume),
+        UINT64(s->max_volumes)*sizeof(VolumetricHeroVolume)};
+    if(layout)layout->read_ranges={constantsRange,volumesRange,heroesRange};
     auto execute=[s,binder,froxel=p.froxel,active=p.active](UINT stage)
     {
         return [s,binder,froxel,active,stage](RenderPassContext &ctx)->Result
@@ -549,20 +715,35 @@ Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInpu
         };
     };
     auto constants=[&](PassBuilder &pass){pass.Read(p.constants,Access::ComputeRead,constantsRange);};
-    auto density=graph.AddPass(170,"VolumetricDensity",QueueHint::Direct);constants(density);
-    density.Read(in.depth.version,Access::ComputeRead);density.Read(p.volumes,Access::ComputeRead,volumesRange);
-    p.medium=density.Write(p.medium,Access::UnorderedWrite);p.phase=density.Write(p.phase,Access::UnorderedWrite);
-    p.current_depth=density.Write(p.current_depth,Access::UnorderedWrite);density.SetExecuteChecked(execute(0));
+    if(layout)layout->pass_index[0]=graph.PassCount();
+    auto density=retained?*graph.BindPass(retained->pass_index[0],170):
+        graph.AddPass(170,"VolumetricDensity",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(density);density.Read(in.depth.version,Access::ComputeRead);
+        density.Read(p.volumes,Access::ComputeRead,volumesRange);
+        p.medium=density.Write(p.medium,Access::UnorderedWrite);
+        p.phase=density.Write(p.phase,Access::UnorderedWrite);
+        p.current_depth=density.Write(p.current_depth,Access::UnorderedWrite);
+    }
+    density.SetExecuteChecked(execute(0));
     if(!p.heroes_state.empty())
     {
-        p.raw=density.Write(p.raw,Access::UnorderedWrite);
-        auto hero=graph.AddPass(176,"VolumetricHeroDensity",QueueHint::Direct);constants(hero);
-        hero.Read(p.heroes,Access::ComputeRead,heroesRange);hero.Read(p.current_depth,Access::ComputeRead);
-        hero.Read(in.hero_blue_noise.version,Access::ComputeRead);
-        hero.Read(in.hero_gradient.version,Access::ComputeRead);
-        hero.Read(in.hero_noise_volume.version,Access::ComputeRead);
-        p.medium=hero.ReadWrite(p.medium,Access::UnorderedWrite);p.phase=hero.ReadWrite(p.phase,Access::UnorderedWrite);
-        p.raw=hero.ReadWrite(p.raw,Access::UnorderedWrite);
+        if(!retained)p.raw=density.Write(p.raw,Access::UnorderedWrite);
+        if(layout)layout->pass_index[6]=graph.PassCount();
+        auto hero=retained?*graph.BindPass(retained->pass_index[6],176):
+            graph.AddPass(176,"VolumetricHeroDensity",QueueHint::Direct);
+        if(!retained)
+        {
+            constants(hero);hero.Read(p.heroes,Access::ComputeRead,heroesRange);
+            hero.Read(p.current_depth,Access::ComputeRead);
+            hero.Read(in.hero_blue_noise.version,Access::ComputeRead);
+            hero.Read(in.hero_gradient.version,Access::ComputeRead);
+            hero.Read(in.hero_noise_volume.version,Access::ComputeRead);
+            p.medium=hero.ReadWrite(p.medium,Access::UnorderedWrite);
+            p.phase=hero.ReadWrite(p.phase,Access::UnorderedWrite);
+            p.raw=hero.ReadWrite(p.raw,Access::UnorderedWrite);
+        }
         hero.SetExecuteChecked([s,binder,froxel=p.froxel](RenderPassContext &ctx)->Result
         {
             auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
@@ -572,30 +753,81 @@ Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInpu
             return Result::Success();
         });
     }
-    auto lighting=graph.AddPass(171,"VolumetricLighting",QueueHint::Direct);constants(lighting);
-    lighting.Read(p.medium,Access::ComputeRead);lighting.Read(p.phase,Access::ComputeRead);
-    for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
-    if(shadows)for(auto version:shadowVersions)lighting.Read(version,Access::AllShaderRead);
-    if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
-    if(in.compact_shadow.identity.w)lighting.Read(in.compact_shadow.atlas.version,Access::ComputeRead);
-    p.raw=p.heroes_state.empty()?lighting.Write(p.raw,Access::UnorderedWrite):lighting.ReadWrite(p.raw,Access::UnorderedWrite);
+    if(layout)layout->pass_index[1]=graph.PassCount();
+    auto lighting=retained?*graph.BindPass(retained->pass_index[1],171):
+        graph.AddPass(171,"VolumetricLighting",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(lighting);lighting.Read(p.medium,Access::ComputeRead);
+        lighting.Read(p.phase,Access::ComputeRead);
+        for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
+        if(shadows)for(auto version:shadowVersions)lighting.Read(version,Access::AllShaderRead);
+        if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
+        if(in.compact_shadow.identity.w)lighting.Read(in.compact_shadow.atlas.version,Access::ComputeRead);
+        p.raw=p.heroes_state.empty()?lighting.Write(p.raw,Access::UnorderedWrite):
+            lighting.ReadWrite(p.raw,Access::UnorderedWrite);
+    }
     lighting.SetExecuteChecked(execute(1));
-    auto temporal=graph.AddPass(172,"VolumetricTemporal",QueueHint::Direct);constants(temporal);
-    temporal.Read(p.raw,Access::ComputeRead);temporal.Read(p.current_depth,Access::ComputeRead);
-    if(p.history){temporal.Read(p.previous,Access::ComputeRead);temporal.Read(p.previous_depth,Access::ComputeRead);}
-    p.current=temporal.Write(p.current,Access::UnorderedWrite);temporal.SetExecuteChecked(execute(2));
-    auto spatial=graph.AddPass(173,"VolumetricSpatial",QueueHint::Direct);constants(spatial);
-    spatial.Read(p.current,Access::ComputeRead);spatial.Read(p.current_depth,Access::ComputeRead);
-    p.filtered=spatial.Write(p.filtered,Access::UnorderedWrite);spatial.SetExecuteChecked(execute(3));
-    auto integrate=graph.AddPass(174,"VolumetricIntegrate",QueueHint::Direct);constants(integrate);
-    integrate.Read(p.filtered,Access::ComputeRead);p.luminance=integrate.Write(p.luminance,Access::UnorderedWrite);
-    p.transmittance=integrate.Write(p.transmittance,Access::UnorderedWrite);integrate.SetExecuteChecked(execute(4));
-    auto resolve=graph.AddPass(175,"VolumetricResolve",QueueHint::Direct);constants(resolve);
-    resolve.Read(in.depth.version,Access::ComputeRead);resolve.Read(in.hdr.version,Access::ComputeRead);
-    for(auto version:{p.filtered,p.current_depth,p.luminance,p.transmittance})resolve.Read(version,Access::ComputeRead);
-    p.resolved=resolve.Write(p.resolved,Access::UnorderedWrite);resolve.SetExecuteChecked(execute(5));
-    for(auto version:{p.filtered,p.current_depth,p.luminance,p.transmittance,p.constants})graph.SetFinalAccess(version,Access::AllShaderRead);
-    graph.SetFinalAccess(p.current,Access::ComputeRead);graph.SetFinalAccess(p.resolved,Access::ComputeRead);
+    if(layout)layout->pass_index[2]=graph.PassCount();
+    auto temporal=retained?*graph.BindPass(retained->pass_index[2],172):
+        graph.AddPass(172,"VolumetricTemporal",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(temporal);temporal.Read(p.raw,Access::ComputeRead);
+        temporal.Read(p.current_depth,Access::ComputeRead);
+        if(p.history){temporal.Read(p.previous,Access::ComputeRead);temporal.Read(p.previous_depth,Access::ComputeRead);}
+        p.current=temporal.Write(p.current,Access::UnorderedWrite);
+    }
+    temporal.SetExecuteChecked(execute(2));
+    if(layout)layout->pass_index[3]=graph.PassCount();
+    auto spatial=retained?*graph.BindPass(retained->pass_index[3],173):
+        graph.AddPass(173,"VolumetricSpatial",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(spatial);spatial.Read(p.current,Access::ComputeRead);
+        spatial.Read(p.current_depth,Access::ComputeRead);
+        p.filtered=spatial.Write(p.filtered,Access::UnorderedWrite);
+    }
+    spatial.SetExecuteChecked(execute(3));
+    if(layout)layout->pass_index[4]=graph.PassCount();
+    auto integrate=retained?*graph.BindPass(retained->pass_index[4],174):
+        graph.AddPass(174,"VolumetricIntegrate",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(integrate);integrate.Read(p.filtered,Access::ComputeRead);
+        p.luminance=integrate.Write(p.luminance,Access::UnorderedWrite);
+        p.transmittance=integrate.Write(p.transmittance,Access::UnorderedWrite);
+    }
+    integrate.SetExecuteChecked(execute(4));
+    if(layout)layout->pass_index[5]=graph.PassCount();
+    auto resolve=retained?*graph.BindPass(retained->pass_index[5],175):
+        graph.AddPass(175,"VolumetricResolve",QueueHint::Direct);
+    if(!retained)
+    {
+        constants(resolve);resolve.Read(in.depth.version,Access::ComputeRead);
+        resolve.Read(in.hdr.version,Access::ComputeRead);
+        for(auto version:{p.filtered,p.current_depth,p.luminance,p.transmittance})resolve.Read(version,Access::ComputeRead);
+        p.resolved=resolve.Write(p.resolved,Access::UnorderedWrite);
+    }
+    resolve.SetExecuteChecked(execute(5));
+    if(!retained)
+    {
+        for(auto version:{p.filtered,p.current_depth,p.luminance,p.transmittance,p.constants})
+            graph.SetFinalAccess(version,Access::AllShaderRead);
+        graph.SetFinalAccess(p.current,Access::ComputeRead);
+        graph.SetFinalAccess(p.resolved,Access::ComputeRead);
+    }
+    else
+    {
+        p.luminance=retained->output_versions[0];
+        p.transmittance=retained->output_versions[1];
+        p.resolved=retained->output_versions[2];
+        p.filtered=retained->output_versions[3];
+        p.current_depth=retained->output_versions[4];
+        p.constants=retained->output_versions[5];
+    }
+    if(layout)layout->output_versions={p.luminance,p.transmittance,p.resolved,
+        p.filtered,p.current_depth,p.constants};
     out.scattering={p.luminance,s->luminance.resource.Get(),s->Cpu(p.slot,11)};
     out.transmittance={p.transmittance,s->transmittance.resource.Get(),s->Cpu(p.slot,12)};
     out.resolved={p.resolved,s->resolved.resource.Get(),s->Export(p.slot)};

@@ -4,8 +4,10 @@
 #ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/presentation/presentation_catalog_io.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
-#endif
 #include <hs/asset_manifest/selected_generation.hpp>
+#include "vfx_generation_rebind.hpp"
+#include "generation_reload_watch.hpp"
+#endif
 #include <hs/presentation/projector.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 
@@ -33,19 +35,17 @@
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_typed_ballistic_commands.hpp"
 #include "vfx_session_state.hpp"
-#include "vfx_generation_rebind.hpp"
 #include "renderer_settings_projection.hpp"
 #include "startup_graphics_settings.hpp"
 #include "window.hpp"
 #include "camera_pose.hpp"
-#include "generation_reload_watch.hpp"
 
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/renderer/render_frame_input.hpp>
+#include <hs/render_data/render_frame_input.hpp>
 #include <hs/runtime/audio_engine.hpp>
 #include <hs/runtime/playtest_recording.hpp>
 #include <hs/runtime/save_store.hpp>
@@ -634,6 +634,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Cannot resolve the executable directory.")};
     }
+    std::uint64_t content_hash{};
+#ifdef HS_DEVELOPMENT_TOOLS
     const auto generation_pointer = config.generation_pointer.empty()
         ? executable_directory / "GenerationState/runtime-full.json"
         : config.generation_pointer;
@@ -641,8 +643,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (auto loaded = LoadSelectedGeneration(generation_pointer, selected_generation);
         !loaded)
         return {loaded};
-    std::uint64_t content_hash{};
-#ifdef HS_DEVELOPMENT_TOOLS
+    const std::string deployment_id = selected_generation.id;
     std::filesystem::path cooked_particle_effects_path;
     std::filesystem::path cooked_vfx_program_path;
     for (const auto [id, path] : {
@@ -670,12 +671,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {loaded};
     }
 #else
-    ShippedContentOwner shipped_content;
-    if (auto opened = shipping::OpenImage(executable_directory, shipping::ImageInfo(), shipped_content); !opened)
+    auto shipped_content = std::make_shared<ShippedContentOwner>();
+    if (auto opened = shipping::OpenImage(executable_directory, shipping::ImageInfo(), *shipped_content); !opened)
         return {opened};
     const auto &presentation_catalog = shipping::Presentation();
     const auto &simulation_rules = shipping::Simulation();
     content_hash = shipping::ImageInfo().content_hash;
+    std::string deployment_id;
+    deployment_id.reserve(64);
+    constexpr char hex[] = "0123456789abcdef";
+    for (std::size_t i = 16; i != 48; ++i)
+    {
+        const auto byte = std::to_integer<unsigned>(shipping::ImageInfo().header[i]);
+        deployment_id += hex[byte >> 4]; deployment_id += hex[byte & 15];
+    }
 #endif
     const auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
     VfxCatalog vfx_catalog;
@@ -739,7 +748,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #ifdef HS_DEVELOPMENT_TOOLS
     if (auto initialized = audio.Initialize(settings, selected_generation.product_paths); !initialized)
 #else
-    if (auto initialized = audio.Initialize(settings, shipping::Audio(), shipped_content); !initialized)
+    if (auto initialized = audio.Initialize(settings, shipping::Audio(), *shipped_content); !initialized)
 #endif
     {
         return {initialized};
@@ -1045,7 +1054,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto &channels = render_ports;
         SetThreadName(L"HS Render");
         auto render_tasks = std::make_unique<TaskGroup>();
+#ifdef HS_DEVELOPMENT_TOOLS
         auto render_generation = std::make_shared<const SelectedGeneration>(selected_generation);
+#else
+        std::shared_ptr<const void> render_generation = shipped_content;
+#endif
         D3D12Renderer renderer;
         RendererConfig renderer_config = ProjectRendererConfig(initial_renderer_settings, startup_graphics);
         std::vector<std::byte> startup_font;
@@ -1058,7 +1071,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             startup_font.resize(static_cast<std::size_t>(font_file.Size()));
             return font_file.ReadExact(0, startup_font);
 #else
-            return shipping::ReadFont(shipped_content, shipping::ImageInfo(), startup_font);
+            return shipping::ReadFont(*shipped_content, shipping::ImageInfo(), startup_font);
 #endif
         }();
         if (!font_result)
@@ -1123,10 +1136,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.fire_area_sprite = initial_sprite_bindings.fire_area_sprite;
         renderer_config.barrier_mode = config.barrier_mode;
         renderer_config.artifact_directory = config.artifact_directory;
+#ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.content_generation_id = render_generation->id;
         renderer_config.content_generation_lease = render_generation;
         renderer_config.product_paths = render_generation->product_paths;
         renderer_config.product_digests = render_generation->product_digests;
+#else
+        renderer_config.content_generation_id = deployment_id;
+        renderer_config.content_generation_lease = shipped_content;
+        renderer_config.packed_content = shipped_content;
+        renderer_config.packed_bulks = shipping::RendererBulks();
+        renderer_config.packed_textures = shipping::RendererTextures();
+        renderer_config.packed_geometry = shipping::RendererGeometry();
+        renderer_config.packed_materials = shipping::RendererMaterials();
+        renderer_config.packed_characters = shipping::RendererCharacters();
+        renderer_config.packed_animations = shipping::RendererAnimations();
+        renderer_config.packed_vfx_mesh_atlas = &shipping::RendererVfxMeshAtlas();
+        renderer_config.packed_source_revisions = shipping::RendererSourceRevisions();
+        renderer_config.packed_revision_bulks = shipping::RendererRevisionBulks();
+#endif
 
         runtime_detail::DiagnosticSample renderer_startup{};
         runtime_detail::DiagnosticScope renderer_startup_scope(renderer_startup, capture_clock);
@@ -1298,6 +1326,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::PreparedPairFacts vfx_pair_facts;
+        std::vector<PresentationEvent> ready_events, frame_events, dispatched_event_scratch;
         auto &active_effects = vfx_session.active_effects;
         using VfxEventProfile = runtime_detail::ActiveEffectStore::Profile;
         runtime_detail::VfxPersistentSparkState persistent_sparks;
@@ -1349,9 +1378,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                     "Could not initialize performance capture files."));
             performance_lines.emplace(performance_file, true,
-                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us\n", capture_clock);
+                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_frontend_reused,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us,target_render_fps\n", capture_clock);
             gpu_live_lines.emplace(gpu_live_file, true,
-                "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated\n", capture_clock);
+                "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated,source_frame_id,source_frame_sequence,quality_generation,provider_generation,is_generated_frame,clock_gpu_before,clock_cpu_before,clock_gpu_after,clock_cpu_after,clock_gpu_frequency,clock_cpu_frequency,clock_anchors_valid,source_ready_cadence_ms,output_dependency_span_ms,calibration_valid,calibration_drift,cadence_valid,span_valid,gpu_backlog_proven,cadence_gap,closure_span_gap,cadence_exclusions_valid,cpu_supply_gap,pacing_gap,closure_clock_valid,closure_gap_checked\n", capture_clock);
         }
         bool gpu_drain_succeeded{true};
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1369,7 +1398,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (!performance_state.AcceptGpuFrame(gpu.completed_frame_id, !gpu.passes.empty(), gpu.fence_completed)) return;
             if (!gpu.valid) ++invalid_gpu_frames;
             for (const auto &pass : gpu.passes)
-                gpu_live_lines->Append(std::format(
+            {
+                auto gpu_row = std::format(
                     "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                     observed_frame,
                     gpu.completed_frame_id,
@@ -1407,7 +1437,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     gpu.metric_generation, gpu.resize_epoch, gpu.render_active.width, gpu.render_active.height,
                     static_cast<unsigned>(gpu.main_view), static_cast<unsigned>(gpu.frame_generation_enabled),
                     static_cast<unsigned>(gpu.output_ready_valid), gpu.output_ready_ticks, gpu.output_ready_frequency,
-                    gpu.output_ready_qpc, gpu.output_ready_qpc_frequency, static_cast<unsigned>(gpu.output_ready_clock_calibrated)));
+                    gpu.output_ready_qpc, gpu.output_ready_qpc_frequency, static_cast<unsigned>(gpu.output_ready_clock_calibrated));
+                gpu_row.insert(gpu_row.size() - 1, std::format(",{},{},{},{},{}",
+                    gpu.source_frame_id, gpu.source_frame_sequence, gpu.quality_generation,
+                    gpu.provider_generation, static_cast<unsigned>(gpu.generated_frame)));
+                gpu_row.insert(gpu_row.size() - 1, std::format(",{},{},{},{},{},{},{}",
+                    gpu.clock_gpu_before, gpu.clock_cpu_before, gpu.clock_gpu_after, gpu.clock_cpu_after,
+                    gpu.clock_gpu_frequency, gpu.clock_cpu_frequency, static_cast<unsigned>(gpu.clock_anchors_valid)));
+                gpu_row.insert(gpu_row.size() - 1, std::format(",{},{},{},{},{},{},{},{},{}",
+                    gpu.source_ready_cadence_ms, gpu.output_dependency_span_ms,
+                    static_cast<unsigned>(gpu.calibration_valid), static_cast<unsigned>(gpu.calibration_drift),
+                    static_cast<unsigned>(gpu.cadence_valid), static_cast<unsigned>(gpu.span_valid),
+                    static_cast<unsigned>(gpu.gpu_backlog_proven), static_cast<unsigned>(gpu.cadence_gap),
+                    static_cast<unsigned>(gpu.closure_span_gap)));
+                gpu_row.insert(gpu_row.size() - 1, std::format(",{},{},{},{},{}",
+                    static_cast<unsigned>(gpu.cadence_exclusions_valid),
+                    static_cast<unsigned>(gpu.cpu_supply_gap), static_cast<unsigned>(gpu.pacing_gap),
+                    static_cast<unsigned>(gpu.closure_clock_valid), static_cast<unsigned>(gpu.closure_gap_checked)));
+                gpu_live_lines->Append(gpu_row);
+            }
         };
         const auto collect_gpu_capture = [&](std::uint64_t observed_frame, bool drain) -> Result {
             if (!gpu_live_lines) return Result::Success();
@@ -1977,6 +2025,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             {
                 runtime_detail::DiagnosticScope session_scope(vfx_work[2], capture_clock);
                 const auto &current_snapshot = snapshots.current;
+                const auto sample_time = std::chrono::steady_clock::now();
+                const auto sample_alpha = RenderSnapshotInterpolation(snapshots, sample_time, realtime);
+                const double display_tick = static_cast<double>(current_snapshot.header.tick) -
+                    (snapshots.has_previous && sample_alpha < 1.0f ? 1.0 - sample_alpha : 0.0);
                 if (vfx_session.Synchronize(current_snapshot.header.session_id))
                 {
                     persistent_sparks.Clear();
@@ -1987,12 +2039,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 const auto &ready_batch = vfx_session.raw_events.Prepare(
                     current_snapshot.header.tick, vfx_session.session_id);
-                std::vector<PresentationEvent> ready_events;
+                ready_events.clear();
                 ready_events.reserve(ready_batch.entries.size());
                 for (const auto &entry : ready_batch.entries) ready_events.push_back(entry.event);
-                std::vector<PresentationEvent> frame_events;
                 if (auto dispatched = runtime_detail::DispatchVfxUpgradeEvents(
-                        vfx_catalog.Program(), ready_events, frame_events); !dispatched)
+                        vfx_catalog.Program(), ready_events, frame_events, &dispatched_event_scratch); !dispatched)
                 {
                     record_thread_failure(dispatched);
                     break;
@@ -2168,8 +2219,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 vfx_pair_facts.Prepare({
                     .session_id = snapshots.current.header.session_id,
                     .previous_publication = snapshots.has_previous
-                        ? snapshots.previous_publication_sequence : Sequence{},
-                    .current_publication = snapshots.current_publication_sequence,
+                        ? snapshots.previous.header.dynamic_pair_revision : Sequence{},
+                    .current_publication = snapshots.current.header.dynamic_pair_revision
+                        ? snapshots.current.header.dynamic_pair_revision : snapshots.current_publication_sequence,
                     .quality = static_cast<std::uint32_t>(active_vfx_quality),
                     .binding_revision = renderer.PipelineRevision(),
                     .geometry_revision = geometry_revision},
@@ -2189,43 +2241,63 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_catalog.Program(), frame_events,
                     current_vfx, previous_vfx,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    &vfx_pair_facts);
+                    &vfx_pair_facts, sample_alpha);
                 frame_adapter_scope.Stop();
                 runtime_detail::DiagnosticScope surface_scope(vfx_work[6], capture_clock);
                 const Tick surface_tick = snapshots.current.header.tick;
                 const auto &surface_program = vfx_catalog.Program();
-                const auto is_effect = [&](const VfxEventInput &input, std::string_view id) {
-                    return std::ranges::any_of(surface_program.effect_lookup, [&](const auto &entry) {
-                        return entry.handle == input.effect_handle && entry.effect_id == MakeAssetId(id).value;
-                    });
+                const auto effect_handle = [&](std::string_view id) {
+                    const auto asset = MakeAssetId(id).value;
+                    const auto found = std::find_if(surface_program.effect_lookup.begin(), surface_program.effect_lookup.end(),
+                        [&](const auto &entry) { return entry.effect_id == asset; });
+                    return found == surface_program.effect_lookup.end() ? 0u : found->handle;
+                };
+                const auto phase_effect = effect_handle("particle.boss.phase_change");
+                const auto death_effect = effect_handle("particle.boss.death");
+                const auto trap_effect = effect_handle("particle.skill.trap");
+                const auto is_effect = [](const VfxEventInput &input, std::uint32_t handle) {
+                    return handle != 0 && input.effect_handle == handle;
+                };
+                const auto surface_instance = [&](std::uint64_t id) -> const RenderInstance * {
+                    if (const auto *instance = vfx_pair_facts.Instance(id, snapshots.current.instances))
+                        return instance;
+                    if (sample_alpha < 1.0f && snapshots.has_previous)
+                    {
+                        const auto found = std::find_if(snapshots.previous.instances.begin(), snapshots.previous.instances.end(),
+                            [id](const auto &instance) { return instance.stable_id == id; });
+                        if (found != snapshots.previous.instances.end()) return &*found;
+                    }
+                    return nullptr;
                 };
                 for (const auto &input : typed_vfx.events)
                 {
-                    if (is_effect(input, "particle.boss.phase_change") || is_effect(input, "particle.boss.death"))
+                    if (is_effect(input, phase_effect) || is_effect(input, death_effect))
                         active_effects.Append(VfxEventProfile::EntitySurface, input,
                             vfx_session.decoded.entity_surface_events);
-                    if (is_effect(input, "particle.skill.trap"))
+                    if (is_effect(input, trap_effect))
                         active_effects.Append(VfxEventProfile::PointRate, input,
                             vfx_session.decoded.point_rate_events);
                 }
                 const auto terminal_phase = static_cast<SessionPhase>(
                     channels.session_phase.load(std::memory_order_acquire));
-                const Tick death_current_tick = vfx_session.UpdateTerminalClock(
-                    surface_tick, terminal_phase, FixedStepClock::Clock::now());
+                const auto terminal_tick = vfx_session.UpdateTerminalClock(
+                    surface_tick, terminal_phase, sample_time);
+                const double death_current_tick = terminal_phase == SessionPhase::Victory || terminal_phase == SessionPhase::Defeat
+                    ? static_cast<double>(terminal_tick) : display_tick;
                 std::erase_if(vfx_session.decoded.entity_surface_captures, [&](const auto &capture) {
                     const auto *input = active_effects.Get(capture.row);
                     if (!input || input->effect_handle == 0 || input->effect_handle > surface_program.effects.size())
                         return true;
                     const auto &effect = surface_program.effects[input->effect_handle - 1];
-                    const Tick current_tick = is_effect(*input, "particle.boss.death")
-                        ? death_current_tick : surface_tick;
+                    const double current_tick = is_effect(*input, death_effect)
+                        ? death_current_tick : display_tick;
                     return current_tick >= input->event_tick &&
                         static_cast<double>(current_tick - input->event_tick) >= static_cast<double>(effect.seconds) * 60.0;
                 });
                 std::erase_if(vfx_session.decoded.entity_surface_events, [&](const auto &input) {
                     const auto &effect = surface_program.effects[input.effect_handle - 1];
-                    const Tick current_tick = is_effect(input, "particle.boss.death")
-                        ? death_current_tick : surface_tick;
+                    const double current_tick = is_effect(input, death_effect)
+                        ? death_current_tick : display_tick;
                     if (current_tick >= input.event_tick &&
                         static_cast<double>(current_tick - input.event_tick) >= static_cast<double>(effect.seconds) * 60.0) return true;
                     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
@@ -2235,7 +2307,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (capture.row == std::numeric_limits<runtime_detail::ActiveEffectStore::Row>::max())
                         return false;
                     capture.generation_lease = render_generation;
-                    if (is_effect(input, "particle.boss.death"))
+                    if (is_effect(input, death_effect))
                     {
                         const auto *actual = vfx_pair_facts.Capture(
                             snapshots.current.header.session_id, input.sequence,
@@ -2248,8 +2320,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     else
                     {
-                        const auto *actual = vfx_pair_facts.Instance(
-                            (2ull << 60) | context->owner_id, snapshots.current.instances);
+                        const auto *actual = surface_instance((2ull << 60) | context->owner_id);
                         if (!actual) return false;
                         capture.instance = *actual;
                     }
@@ -2269,38 +2340,42 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (input.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::BossPhaseTransition)) continue;
                     const auto *entity = std::get_if<VfxEntityPayload>(&input.payload);
                     if (!entity) continue;
-                    const auto *actual = vfx_pair_facts.Instance(
-                        entity->render_instance_id, snapshots.current.instances);
+                    const auto *actual = surface_instance(entity->render_instance_id);
                     const auto *visual = vfx_pair_facts.Current(
                         input.stable_id, PersistentVfxKind::BossPhaseTransition, current_vfx);
+                    if (!visual || visual->status_episode_generation != input.status_episode_generation)
+                        visual = vfx_pair_facts.Previous(
+                            input.stable_id, PersistentVfxKind::BossPhaseTransition, previous_vfx);
+                    if (visual && visual->status_episode_generation != input.status_episode_generation)
+                        visual = nullptr;
                     if (actual && visual)
                         surface_persistent.push_back({input, *actual, visual->active_tick, visual->expires});
                 }
                 const auto typed_surfaces = runtime_detail::BuildVfxTypedEntitySurfaceCommands(surface_program,
-                    surface_capture_inputs, surface_persistent, surface_tick,
+                    surface_capture_inputs, surface_persistent, display_tick,
                     death_current_tick);
                 surface_scope.Stop();
                 runtime_detail::DiagnosticScope movement_scope(vfx_work[7], capture_clock);
                 const auto movement_owners = vfx_upgrade_movements.Emit(vfx_catalog.Program(), frame_events,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{});
+                    snapshots.has_current ? snapshots.current.header.tick : Tick{}, sample_alpha);
                 typed_vfx.persistent.insert(typed_vfx.persistent.end(), movement_owners.begin(), movement_owners.end());
                 movement_scope.Stop();
                 runtime_detail::DiagnosticScope ballistic_scope(vfx_work[8], capture_clock);
                 typed_vfx_unsupported_inputs += typed_vfx.unsupported_effect_ids.size();
                 for (const auto &input : typed_vfx.events)
                 {
-                    const auto ballistic = runtime_detail::BuildVfxTypedBallisticCommands(
-                        vfx_catalog.Program(), std::span(&input,1));
-                    if (ballistic.empty()) continue;
+                    const auto ballistic_first = pending_particle_spawns.size();
+                    runtime_detail::BuildVfxTypedBallisticCommands(
+                        vfx_catalog.Program(), std::span(&input,1), pending_particle_spawns);
+                    if (pending_particle_spawns.size() == ballistic_first) continue;
                     const auto &lookup = vfx_catalog.Program().effect_lookup;
                     const bool replaces_legacy_burst_shell = std::ranges::any_of(lookup, [&](const auto &entry) {
                         return entry.handle == input.effect_handle &&
                             entry.effect_id == MakeAssetId("particle.skill.explosive_arrow.main").value;
                     });
-                    for (auto &legacy : pending_particle_spawns)
+                    for (auto &legacy : std::span(pending_particle_spawns).first(ballistic_first))
                         if (!legacy.authored_ballistic && legacy.sequence == input.sequence && legacy.renderer == VfxRenderer::Mesh &&
                             (legacy.primitive != VfxPrimitive::ShockShell || replaces_legacy_burst_shell)) legacy.count = 0;
-                    pending_particle_spawns.insert(pending_particle_spawns.end(), ballistic.begin(), ballistic.end());
                 }
                 ballistic_scope.Stop();
                 runtime_detail::DiagnosticScope status_scope(vfx_work[9], capture_clock);
@@ -2318,11 +2393,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                         owner.source_visual_kind))
                         new_status_owners.push_back(owner);
                 }
-                const auto status_shards = runtime_detail::BuildVfxPersistentStatusShardCommands(
+                runtime_detail::BuildVfxPersistentStatusShardCommands(
                     vfx_catalog.Program(), new_status_owners,
-                    snapshots.current.header.tick);
-                pending_particle_spawns.insert(pending_particle_spawns.end(),
-                                               status_shards.begin(), status_shards.end());
+                    snapshots.current.header.tick, pending_particle_spawns);
                 status_scope.Stop();
                 runtime_detail::DiagnosticScope ground_scope(vfx_work[10], capture_clock);
                 auto ground_commands = runtime_detail::BuildVfxTypedGroundCommands(
@@ -2359,7 +2432,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         active_effects.Append(VfxEventProfile::Screen, input,
                             vfx_session.decoded.screen_events);
                 }
-                const auto light_tick = current_snapshot.header.tick;
+                const auto light_tick = display_tick;
                 std::erase_if(vfx_session.decoded.screen_events, [&](const VfxEventInput &input) {
                     const auto &effect = vfx_catalog.Program().effects[input.effect_handle - 1];
                     return light_tick >= input.event_tick &&
@@ -2368,7 +2441,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::DiagnosticScope screen_scope(vfx_work[18], capture_clock);
                 std::vector<VfxScreenInput> typed_screen;
                 if (auto converted = runtime_detail::BuildVfxTypedScreenCommands(vfx_catalog.Program(),
-                        vfx_session.decoded.screen_events, typed_vfx.persistent, light_tick,
+                        vfx_session.decoded.screen_events, typed_vfx.persistent, current_snapshot.header.tick, display_tick,
                         active_vfx_quality, vfx_session.low_health_pulse, typed_screen); !converted)
                 {
                     record_thread_failure(converted);
@@ -2396,18 +2469,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
                         (light_tick >= input.event_tick && static_cast<double>(light_tick-input.event_tick)/60.0 >= effect.seconds);
                 };
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.light_events,current_snapshot.persistent_vfx,light_tick);
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.light_events,current_snapshot.persistent_vfx,current_snapshot.header.tick,&vfx_pair_facts,previous_vfx,sample_alpha);
                 std::erase_if(vfx_session.decoded.light_events, owner_event_expired);
                 runtime_detail::DiagnosticScope light_scope(vfx_work[20], capture_clock);
                 const auto typed_lights=runtime_detail::BuildVfxTypedLightCommands(vfx_catalog.Image(),vfx_session.decoded.light_events,light_tick);
                 light_scope.Stop();
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.distortion_events,current_snapshot.persistent_vfx,light_tick);
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.distortion_events,current_snapshot.persistent_vfx,current_snapshot.header.tick,&vfx_pair_facts,previous_vfx,sample_alpha);
                 std::erase_if(vfx_session.decoded.distortion_events, owner_event_expired);
                 runtime_detail::DiagnosticScope distortion_scope(vfx_work[21], capture_clock);
                 const auto typed_distortions=runtime_detail::BuildVfxTypedDistortionCommands(
                     vfx_catalog.Program(),vfx_session.decoded.distortion_events,typed_vfx.persistent,light_tick);
                 distortion_scope.Stop();
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.decal_events,current_snapshot.persistent_vfx,light_tick);
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.decal_events,current_snapshot.persistent_vfx,current_snapshot.header.tick,&vfx_pair_facts,previous_vfx,sample_alpha);
                 std::erase_if(vfx_session.decoded.decal_events, owner_event_expired);
                 runtime_detail::DiagnosticScope decal_scope(vfx_work[22], capture_clock);
                 const auto typed_decals=runtime_detail::BuildVfxTypedDecalCommands(
@@ -2508,16 +2581,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 const Tick ground_tick = snapshots.current.header.tick;
                 runtime_detail::RefreshVfxGroundEventOwners(active_vfx_ground_events,
-                    snapshots.current.persistent_vfx, ground_tick);
+                    snapshots.current.persistent_vfx, ground_tick, &vfx_pair_facts, previous_vfx, sample_alpha);
                 std::erase_if(active_vfx_ground_events, [&](const VfxEventInput &input) {
                     if (input.geometry_owner_id != 0)
-                        return ground_tick >= input.geometry_end_tick;
+                        return display_tick >= input.geometry_end_tick;
                     const auto seconds = vfx_catalog.Program().effects[input.effect_handle - 1].seconds;
-                    return ground_tick >= input.event_tick &&
-                        static_cast<double>(ground_tick - input.event_tick) / 60.0 >= seconds;
+                    return display_tick >= input.event_tick &&
+                        (display_tick - input.event_tick) / 60.0 >= seconds;
                 });
                 auto event_ground = runtime_detail::BuildVfxTypedEventGroundCommands(
-                    vfx_catalog.Program(), active_vfx_ground_events, ground_tick);
+                    vfx_catalog.Program(), active_vfx_ground_events, display_tick);
                 ground_commands.insert(ground_commands.end(), event_ground.begin(), event_ground.end());
                 ground_event_scope.Stop();
                 runtime_detail::DiagnosticScope flash_scope(vfx_work[13], capture_clock);
@@ -2569,19 +2642,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_catalog.Program(), unpaired_mote_events);
                 active_vfx_flashes.insert(active_vfx_flashes.end(), new_motes.begin(), new_motes.end());
                 const auto born_sparks = persistent_sparks.Emit(
-                    vfx_catalog.Program(), typed_vfx.persistent, ground_tick);
+                    vfx_catalog.Program(), typed_vfx.persistent, ground_tick, sample_alpha);
                 active_vfx_flashes.insert(active_vfx_flashes.end(),
                                           born_sparks.begin(), born_sparks.end());
-                const Tick flash_tick = snapshots.has_current
-                    ? snapshots.current.header.tick : Tick{};
+                const double flash_tick = display_tick;
                 std::vector<VfxFlashSpawnInput> visible_flashes;
                 visible_flashes.reserve(active_vfx_flashes.size());
                 std::erase_if(active_vfx_flashes, [&](const VfxFlashSpawnInput &flash) {
                     if (flash_tick < flash.event_tick) return false;
-                    const auto elapsed = flash_tick >= flash.event_tick
-                        ? std::chrono::duration<float>(FixedStepClock::kFixedStep).count() *
-                              static_cast<float>(flash_tick - flash.event_tick)
-                        : 0.0f;
+                    const auto elapsed = static_cast<float>((flash_tick - flash.event_tick) / 60.0);
                     if (elapsed >= flash.delay + flash.lifetime) return true;
                     if (elapsed < flash.delay) return false;
                     auto visible = flash;
@@ -2591,21 +2660,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return false;
                 });
                 std::erase_if(vfx_session.decoded.point_rate_events, [&](const auto &input) {
-                    return ground_tick >= input.event_tick && ground_tick - input.event_tick >= 39;
+                    return display_tick >= input.event_tick && display_tick - input.event_tick >= 39;
                 });
                 const auto point_motes = runtime_detail::BuildVfxOwnedMoteCommands(
-                    vfx_catalog.Program(), vfx_session.decoded.point_rate_events, ground_tick);
+                    vfx_catalog.Program(), vfx_session.decoded.point_rate_events, display_tick);
                 visible_flashes.insert(visible_flashes.end(), point_motes.begin(), point_motes.end());
                 const auto owned_motes = runtime_detail::BuildVfxOwnedMoteCommands(
-                    vfx_catalog.Program(), active_vfx_ground_events, ground_tick);
+                    vfx_catalog.Program(), active_vfx_ground_events, display_tick);
                 visible_flashes.insert(visible_flashes.end(), owned_motes.begin(), owned_motes.end());
                 const auto persistent_motes = runtime_detail::BuildVfxPersistentMoteCommands(
                     vfx_catalog.Program(), typed_vfx.persistent,
-                    vfx_session.persistent_mote_births, ground_tick);
+                    vfx_session.persistent_mote_births, ground_tick, sample_alpha);
                 visible_flashes.insert(visible_flashes.end(), persistent_motes.begin(),
                                        persistent_motes.end());
                 const auto fire_flames = runtime_detail::BuildVfxPersistentFireFlameCommands(
-                    vfx_catalog.Program(), typed_vfx.persistent, ground_tick);
+                    vfx_catalog.Program(), typed_vfx.persistent, display_tick);
                 visible_flashes.insert(visible_flashes.end(), fire_flames.begin(), fire_flames.end());
                 const auto status_stamps = runtime_detail::BuildVfxPersistentStatusStampCommands(
                     vfx_catalog.Program(), typed_vfx.persistent);
@@ -2645,13 +2714,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 std::erase_if(active_vfx_ribbon_events, [&](const VfxEventInput &input) {
                     const auto seconds = vfx_catalog.Program().effects[input.effect_handle - 1].seconds;
-                    return ground_tick >= input.event_tick &&
-                        static_cast<double>(ground_tick - input.event_tick) / 60.0 >= seconds;
+                    return display_tick >= input.event_tick &&
+                        (display_tick - input.event_tick) / 60.0 >= seconds;
                 });
                 auto ribbon_sources = runtime_detail::BuildVfxTypedRibbonInputs(
                     vfx_catalog.Program(), typed_vfx.persistent);
                 auto event_ribbons = runtime_detail::BuildVfxEventRibbonInputs(
-                    vfx_catalog.Program(), active_vfx_ribbon_events, ground_tick);
+                    vfx_catalog.Program(), active_vfx_ribbon_events, display_tick);
                 ribbon_sources.insert(ribbon_sources.end(), std::make_move_iterator(event_ribbons.begin()),
                                       std::make_move_iterator(event_ribbons.end()));
                 const VfxRibbonFrameInput typed_ribbons{ribbon_sources, vfx_catalog_generation};
@@ -2672,7 +2741,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
-                const std::array views{renderer.MainViewInput(snapshots.current.camera)};
+                const std::array views{renderer.MainViewInput(InterpolateRenderCamera(snapshots, sample_alpha))};
                 const RenderFrameInput render_input{
                     .views = views,
                     .snapshots = snapshots,
@@ -2710,6 +2779,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
                     .wait_for_streaming = config.smoke_render_lockstep,
                     .ui_packet_generation = snapshots.current_publication_sequence,
+                    .sample_time = sample_time,
                 };
                 // GPU completion is delayed; offline attribution joins this revision through its own frame ID.
                 // Simulation/input can enter Pause or a menu after this loop's
@@ -2788,6 +2858,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         cpu.graph_prepare_us,
                         cpu.descriptors_us,
                         cpu.graph_plan_us,
+                        static_cast<unsigned>(cpu.graph_frontend_reused),
                         cpu.graph_record_us,
                         cpu.graph_submit_us,
                         cpu.post_submit_us,
@@ -2874,6 +2945,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     performance_row += std::format(",{},{},{},{},{},{}",
                         cpu.scene_skin_prepare_us, cpu.scene_shadow_prepare_us, cpu.scene_cluster_prepare_us,
                         cpu.scene_geometry_demand_us, cpu.scene_texture_prepare_us, cpu.scene_upload_plan_us);
+                    performance_row += std::format(",{}", active_graphics.target_render_fps);
                     performance_row += '\n';
                     performance_lines->Append(performance_row);
                     // The sampler waits for nonempty performance.csv before opening GPU counters.
@@ -3397,11 +3469,55 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         (void)clock.Advance(now);
         std::uint64_t observed_focus_epoch{};
         Sequence publish_sequence{};
+        RenderSnapshotStorage dynamic_previous(1'024, 256, 4, 0);
+        RenderSnapshotStorage dynamic_current(1'024, 256, 4, 0);
+        bool has_dynamic_sample{};
+        bool has_previous_dynamic_sample{};
+        std::uint64_t display_clock_epoch{};
+        RenderClockMode display_clock_mode{RenderClockMode::Scripted};
+        std::uint64_t dynamic_pair_revision{};
         std::array<ActionEdge, 256> action_storage{};
         std::array<UiAction, 64> ui_action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
         EnemyAnimationState enemy_animations;
-        runtime_detail::ProcessSceneFactory environment_cache(selected_generation.id);
+        runtime_detail::ProcessSceneFactory environment_cache(deployment_id);
+        const auto configure_dynamic_camera = [&](const TickReadView &model) {
+            const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
+            const auto pose = ComputeRuntimeCameraPose(presentation_catalog.camera.distance_m,
+                presentation_catalog.camera.pitch_degrees, zoom_percent);
+            dynamic_current.camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
+            dynamic_current.camera.pitch_degrees = pose.pitch_degrees;
+            dynamic_current.camera.vertical_fov_degrees = presentation_catalog.camera.vertical_fov_degrees;
+            dynamic_current.camera.distance = pose.distance_m;
+            dynamic_current.camera.target_height_offset = pose.target_height_m;
+            dynamic_current.camera.target.y = pose.target_height_m +
+                (model.arena_half_extent >= 14.0f ? MeadowGroundHeight({dynamic_current.camera.target.x,
+                    dynamic_current.camera.target.z}) : 0.0f);
+        };
+        {
+            auto read_scope = simulation.BorrowTickReadView();
+            const auto &model = read_scope.View();
+            // Seed the preceding endpoint without consuming or replaying pending events.
+            enemy_animations.Update(model, {});
+            if (!ProjectDynamicTick(model, dynamic_current, environment_cache.Resolve(model), &enemy_animations))
+            {
+                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
+                    "Initial dynamic render sample could not be projected."));
+                channels.simulation_done.store(true, std::memory_order_release);
+                return;
+            }
+            configure_dynamic_camera(model);
+            now = FixedStepClock::Clock::now();
+            clock.Realign(now);
+            display_clock_epoch = 1;
+            display_clock_mode = !realtime ? RenderClockMode::Scripted
+                : model.session.phase == SessionPhase::Playing ? RenderClockMode::RealtimeRunning
+                                                               : RenderClockMode::Frozen;
+            dynamic_current.header.clock = {display_clock_epoch, display_clock_mode,
+                realtime ? now : FixedStepClock::Clock::time_point{}};
+            dynamic_current.header.dynamic_pair_revision = ++dynamic_pair_revision;
+            has_dynamic_sample = true;
+        }
         std::vector<PresentationEvent> record_events;
         std::size_t next_timeline_action{};
         std::size_t replay_frame_index{};
@@ -3417,12 +3533,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (channels.stop_requested.load(std::memory_order_acquire)) break;
             std::uint32_t tick_count = 1;
             FixedStepClock::Duration simulation_debt{};
+            FixedStepClock::Clock::time_point first_tick_boundary{};
             if (realtime)
             {
                 now = FixedStepClock::Clock::now();
                 const auto advanced = clock.Advance(now);
                 tick_count = advanced.tick_count;
                 simulation_debt = advanced.debt;
+                first_tick_boundary = advanced.first_tick_boundary;
                 if (tick_count == 0)
                 {
                     if (native_token) { native_input_frame.Simulated(native_token); continue; }
@@ -3431,9 +3549,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
             }
 
+            bool stop_remaining_admitted_steps{};
             for (std::uint32_t local_tick = 0;
                  local_tick < tick_count &&
-                 !smoke_finished;
+                 !smoke_finished && !stop_remaining_admitted_steps;
                  ++local_tick)
             {
                 std::array<runtime_detail::DiagnosticSample, kSimulationTaskNames.size()> simulation_work{};
@@ -3444,6 +3563,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 SessionProbe captured_probe{};
                 std::uint64_t captured_session{}, captured_signals{};
                 bool snapshot_published{};
+                bool forced_dynamic_refresh{};
                 SettingsData updated_presentation_settings;
                 while (channels.presentation_settings.TryPop(
                     updated_presentation_settings))
@@ -3587,6 +3707,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                        config.timeline_actions[next_timeline_action].target_tick ==
                            input.target_tick)
                 {
+                    forced_dynamic_refresh = true;
                     const auto &scheduled = config.timeline_actions[next_timeline_action++];
                     if (auto applied = simulation.ApplyDebugCommand(
                             {static_cast<DebugCommandKind>(scheduled.kind), scheduled.value,
@@ -3600,6 +3721,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (config.boss_phase2_capture && config.smoke && !replaying &&
                     input.target_tick == 10)
                 {
+                    forced_dynamic_refresh = true;
                     if (auto damaged = simulation.ApplyDebugCommand(
                             {DebugCommandKind::DamageFinalBoss, 2250}); !damaged)
                     {
@@ -3612,6 +3734,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 DebugCommand debug_command;
                 while (channels.debug_commands.TryPop(debug_command))
                 {
+                    forced_dynamic_refresh = true;
                     if (auto applied = simulation.ApplyDebugCommand(debug_command); !applied)
                     {
                         record_thread_failure(applied);
@@ -3726,118 +3849,161 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
 
-                    runtime_detail::DiagnosticScope wait_scope(simulation_work[8], capture_clock);
-                    auto slot = channels.snapshots.TryBeginWrite();
-                    // The terminal snapshot must reach the renderer.  Waiting
-                    // here only applies to exchange backpressure for that final
-                    // frame; it never advances the simulation another tick.
-                    while (!slot && final_smoke_frame &&
-                           !channels.stop_requested.load(std::memory_order_acquire))
+                    const auto next_clock_mode = !realtime ? RenderClockMode::Scripted
+                        : tick.phase == SessionPhase::Playing ? RenderClockMode::RealtimeRunning
+                                                            : RenderClockMode::Frozen;
+                    const bool new_session = !has_dynamic_sample ||
+                        dynamic_current.header.session_id != model.session_id;
+                    const bool tick_changed = !has_dynamic_sample ||
+                        dynamic_current.header.tick != model.tick;
+                    auto current_boundary = first_tick_boundary + FixedStepClock::kFixedStep * local_tick;
+                    if (realtime && has_dynamic_sample &&
+                        (new_session || model.tick < dynamic_current.header.tick ||
+                         (display_clock_mode != RenderClockMode::RealtimeRunning &&
+                          next_clock_mode == RenderClockMode::RealtimeRunning)))
                     {
-                        std::this_thread::yield();
-                        slot = channels.snapshots.TryBeginWrite();
+                        current_boundary = FixedStepClock::Clock::now();
+                        clock.Realign(current_boundary);
+                        simulation_debt = {};
+                        stop_remaining_admitted_steps = true;
                     }
-                    wait_scope.Stop();
-                    if (slot)
+                    if (new_session || next_clock_mode != display_clock_mode ||
+                        (has_dynamic_sample && model.tick < dynamic_current.header.tick))
+                        ++display_clock_epoch;
+                    display_clock_mode = next_clock_mode;
+                    if (new_session || tick_changed)
+                    {
+                        has_previous_dynamic_sample = has_dynamic_sample && !new_session &&
+                            model.tick > dynamic_current.header.tick &&
+                            model.tick - dynamic_current.header.tick == 1;
+                        std::swap(dynamic_previous, dynamic_current);
+                    }
+                    const bool project_dynamic = new_session || tick_changed || forced_dynamic_refresh || harness_added != 0;
+                    if (project_dynamic) dynamic_current.Clear();
                     {
                         runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
-                        const auto graphics_ui = channels.presentation_graphics_ui.load(std::memory_order_acquire);
-                        const PresentationUiState ui_draw_state{
-                            static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire)),
-                            channels.collection_skill.load(std::memory_order_acquire),
-                            channels.character_skill.load(std::memory_order_acquire),
-                            channels.loadout_source.load(std::memory_order_acquire),
-                            channels.settings_group.load(std::memory_order_acquire),
-                            channels.settings_page.load(std::memory_order_acquire),
-                            channels.character_details_page.load(std::memory_order_acquire)};
-                        const auto modal_phase = display_modal_phase.load(std::memory_order_acquire);
-                        slot->storage->camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
-                        const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
-                        const auto pose = ComputeRuntimeCameraPose(presentation_catalog.camera.distance_m, presentation_catalog.camera.pitch_degrees, zoom_percent);
-                        slot->storage->camera.pitch_degrees = pose.pitch_degrees;
-                        slot->storage->camera.vertical_fov_degrees =
-                            presentation_catalog.camera.vertical_fov_degrees;
-                        slot->storage->camera.distance = pose.distance_m;
-                        if (ProjectTick(model, presentation_catalog, ui_draw_state,
-                                                  projection_settings,
-                                                  *slot->storage,
-                                                   environment_cache.Resolve(model),
-                                                   channels.pending_rebind_slot.load(
-                                                       std::memory_order_acquire),
-                                                   &enemy_animations,
-                                                   graphics_ui.get()))
+                        if (project_dynamic &&
+                            !ProjectDynamicTick(model, dynamic_current, environment_cache.Resolve(model), &enemy_animations))
                         {
-                            const auto page = ui_draw_state.page;
-                            if (page == UiPage::MainMenuSettings ||
-                                page == UiPage::PauseSettings)
-                            {
-                                if (modal_phase != GraphicsUiPhase::Applied)
-                                {
-                                    UiModel backdrop;
-                                    backdrop.kind = UiModel::Kind::Panel;
-                                    backdrop.anchor_pixels = {550, 360};
-                                    backdrop.size_pixels = {820, 360};
-                                    backdrop.color_rgba = 0xF0202430u;
-                                    const auto title = SettingsStatusText(
-                                        modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation
-                                            ? "화면 모드를 유지하시겠습니까? (15초 안에 확인)"
-                                            : modal_phase == GraphicsUiPhase::RestoringDisplay
-                                                ? "이전 화면 모드로 복원 중..."
-                                                : "화면 모드 적용 중...", {620, 440});
-                                    bool modal_complete = slot->storage->AddUi(backdrop) &&
-                                        slot->storage->AddUi(title);
-                                    if (modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation)
-                                        modal_complete = modal_complete &&
-                                            slot->storage->AddUi(SettingsConfirmButton("유지", {650, 600})) &&
-                                            slot->storage->AddUi(SettingsConfirmButton("취소", {1010, 600}));
-                                    if (!modal_complete)
-                                    {
-                                        channels.snapshots.Abandon(*slot);
-                                        record_thread_failure(Result::Failure(
-                                            ErrorCode::InvalidState, "hs_runtime",
-                                            "Display confirmation UI capacity exceeded."));
-                                        break;
-                                    }
-                                }
-                            }
-                            if (channels.ui_input_rejected.load(std::memory_order_acquire))
-                                (void)slot->storage->AddUi(SettingsStatusText(
-                                    "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
-                                    {500, 1000}, 0xFF80C0FFu));
-                            slot->storage->camera.target.y = pose.target_height_m +
-                                (model.arena_half_extent >= 14.0f
-                                    ? MeadowGroundHeight({slot->storage->camera.target.x,
-                                                          slot->storage->camera.target.z}) : 0.0f);
-                            project_scope.Stop();
-                            runtime_detail::DiagnosticScope publication_scope(simulation_work[10], capture_clock);
-                            const auto ui_generation = publish_sequence + 1;
-                            runtime_detail::UiDrawPacketFacts ui_facts;
-                            ui_facts.generation = ui_generation;
-                            ui_facts.session_id = model.session_id;
-                            ui_facts.selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
-                            ui_facts.session = model.session;
-                            ui_facts.ui = ui_draw_state;
-                            ui_facts.settings = projection_settings;
-                            ui_facts.graphics_model = graphics_ui;
-                            ui_facts.modal_phase = static_cast<std::uint8_t>(modal_phase);
-                            channels.ui_packets.StageUiPacket(slot->index, std::move(ui_facts));
-                            channels.snapshots.Publish(*slot, ++publish_sequence);
-                            snapshot_published = true;
-                        }
-                        else
-                        {
-                            channels.snapshots.Abandon(*slot);
                             record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
-                                                        "Render snapshot capacity exceeded."));
+                                "Dynamic render sample could not be projected."));
                             break;
                         }
                     }
-                    else if (final_smoke_frame || config.smoke_render_lockstep)
+                    if (project_dynamic) ++dynamic_pair_revision;
+                    dynamic_current.header.checksum = model.checksum;
+                    dynamic_current.header.dynamic_pair_revision = dynamic_pair_revision;
+                    dynamic_current.header.clock = {display_clock_epoch, display_clock_mode,
+                        realtime ? current_boundary
+                                 : FixedStepClock::Clock::time_point{}};
+                    configure_dynamic_camera(model);
+                    has_dynamic_sample = true;
+
+                    // Retain every actual dynamic sample, but publish UI only once after catch-up.
+                    if (local_tick + 1 == tick_count || stop_remaining_admitted_steps ||
+                        final_smoke_frame || config.smoke_render_lockstep)
                     {
-                        record_thread_failure(Result::Failure(
-                            ErrorCode::InvalidState, "hs_gameplay",
-                            "Smoke render snapshot could not be published."));
-                        break;
+                        runtime_detail::DiagnosticScope wait_scope(simulation_work[8], capture_clock);
+                        auto slot = channels.snapshots.TryBeginWrite();
+                        // The terminal snapshot must reach the renderer.  Waiting
+                        // here only applies to exchange backpressure for that final
+                        // frame; it never advances the simulation another tick.
+                        while (!slot && final_smoke_frame &&
+                               !channels.stop_requested.load(std::memory_order_acquire))
+                        {
+                            std::this_thread::yield();
+                            slot = channels.snapshots.TryBeginWrite();
+                        }
+                        wait_scope.Stop();
+                        if (slot)
+                        {
+                            runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
+                            const auto graphics_ui = channels.presentation_graphics_ui.load(std::memory_order_acquire);
+                            const PresentationUiState ui_draw_state{
+                                static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire)),
+                                channels.collection_skill.load(std::memory_order_acquire),
+                                channels.character_skill.load(std::memory_order_acquire),
+                                channels.loadout_source.load(std::memory_order_acquire),
+                                channels.settings_group.load(std::memory_order_acquire),
+                                channels.settings_page.load(std::memory_order_acquire),
+                                channels.character_details_page.load(std::memory_order_acquire)};
+                            const auto modal_phase = display_modal_phase.load(std::memory_order_acquire);
+                            slot->storage->CopyDynamicFrom(dynamic_current.View());
+                            if (ProjectTickUi(model, presentation_catalog, ui_draw_state,
+                                              projection_settings, *slot->storage,
+                                              channels.pending_rebind_slot.load(std::memory_order_acquire),
+                                              graphics_ui.get()))
+                            {
+                                const auto page = ui_draw_state.page;
+                                if (page == UiPage::MainMenuSettings ||
+                                    page == UiPage::PauseSettings)
+                                {
+                                    if (modal_phase != GraphicsUiPhase::Applied)
+                                    {
+                                        UiModel backdrop;
+                                        backdrop.kind = UiModel::Kind::Panel;
+                                        backdrop.anchor_pixels = {550, 360};
+                                        backdrop.size_pixels = {820, 360};
+                                        backdrop.color_rgba = 0xF0202430u;
+                                        const auto title = SettingsStatusText(
+                                            modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation
+                                                ? "화면 모드를 유지하시겠습니까? (15초 안에 확인)"
+                                                : modal_phase == GraphicsUiPhase::RestoringDisplay
+                                                    ? "이전 화면 모드로 복원 중..."
+                                                    : "화면 모드 적용 중...", {620, 440});
+                                        bool modal_complete = slot->storage->AddUi(backdrop) &&
+                                            slot->storage->AddUi(title);
+                                        if (modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation)
+                                            modal_complete = modal_complete &&
+                                                slot->storage->AddUi(SettingsConfirmButton("유지", {650, 600})) &&
+                                                slot->storage->AddUi(SettingsConfirmButton("취소", {1010, 600}));
+                                        if (!modal_complete)
+                                        {
+                                            channels.snapshots.Abandon(*slot);
+                                            record_thread_failure(Result::Failure(
+                                                ErrorCode::InvalidState, "hs_runtime",
+                                                "Display confirmation UI capacity exceeded."));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (channels.ui_input_rejected.load(std::memory_order_acquire))
+                                    (void)slot->storage->AddUi(SettingsStatusText(
+                                        "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
+                                        {500, 1000}, 0xFF80C0FFu));
+                                project_scope.Stop();
+                                runtime_detail::DiagnosticScope publication_scope(simulation_work[10], capture_clock);
+                                const auto ui_generation = publish_sequence + 1;
+                                runtime_detail::UiDrawPacketFacts ui_facts;
+                                ui_facts.generation = ui_generation;
+                                ui_facts.session_id = model.session_id;
+                                ui_facts.selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
+                                ui_facts.session = model.session;
+                                ui_facts.ui = ui_draw_state;
+                                ui_facts.settings = projection_settings;
+                                ui_facts.graphics_model = graphics_ui;
+                                ui_facts.modal_phase = static_cast<std::uint8_t>(modal_phase);
+                                channels.ui_packets.StageUiPacket(slot->index, std::move(ui_facts));
+                                const auto previous_sample = dynamic_previous.View();
+                                channels.snapshots.Publish(*slot, ++publish_sequence,
+                                    has_previous_dynamic_sample ? &previous_sample : nullptr);
+                                snapshot_published = true;
+                            }
+                            else
+                            {
+                                channels.snapshots.Abandon(*slot);
+                                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
+                                                            "Render snapshot capacity exceeded."));
+                                break;
+                            }
+                        }
+                        else if (final_smoke_frame || config.smoke_render_lockstep)
+                        {
+                            record_thread_failure(Result::Failure(
+                                ErrorCode::InvalidState, "hs_gameplay",
+                                "Smoke render snapshot could not be published."));
+                            break;
+                        }
                     }
                 } // Read borrows end before clearing signals or the next mutation.
                 simulation.ClearDomainSignals();

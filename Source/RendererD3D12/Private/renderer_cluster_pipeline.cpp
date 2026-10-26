@@ -43,8 +43,8 @@ Result D3D12Renderer::Impl::CreateClusterPipelines(const RendererConfig &pipelin
         std::pair{"cluster_occlusion_cs.dxil", std::addressof(cluster_occlusion_pipeline)},
         std::pair{"cluster_retest_cs.dxil", std::addressof(cluster_retest_pipeline)}})
     {
-        std::filesystem::path path;
-        if (auto resolved = pipeline_config.ResolveProduct("render/shader/" + std::string(name), path); !resolved)
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/" + std::string(name), path); !resolved)
             return resolved;
         std::vector<std::byte> bytes;
         if (auto read = ReadBinary(path, bytes); !read) return read;

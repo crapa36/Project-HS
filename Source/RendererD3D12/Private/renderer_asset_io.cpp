@@ -1,5 +1,6 @@
 #include "renderer_asset_io.hpp"
 #include "checked_binary_read.hpp"
+#include <hs/core/sha256.hpp>
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -172,16 +173,23 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     const auto *page = streaming.Find(input.request);
     if (!impl_->initialized || !page || page->state != StreamingPageState::Requested ||
         page->asset_id != input.logical_id || page->content_generation != input.generation ||
-        input.logical_id.empty() || input.path.empty() || !input.generation_lease || !input.expected_bytes ||
+        input.logical_id.empty() || input.source.empty() || !input.generation_lease || !input.expected_bytes ||
         input.expected_bytes > std::numeric_limits<std::size_t>::max() ||
         input.expected_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
         !storage || !residency.Contains(storage) || impl_->reads.contains(input.request.value))
         return IoFailure("Immutable asset read identity, lease or reservation is invalid.");
+    if (input.source.range.byte_count)
+    {
+        std::uint64_t bytes{};
+        if (auto result = input.source.ByteCount(bytes); !result) return result;
+        if (bytes != input.expected_bytes) return IoFailure("Immutable pack range differs from its reservation.");
+    }
     auto read = std::make_unique<ReadOwner>();
     read->input = std::move(input);
     read->storage = storage;
 #if HS_WITH_DIRECTSTORAGE
-    if (impl_->transport)
+    // DirectStorage's file handle denies atomic replacement; packed input already owns its native Core file.
+    if (impl_->transport && !read->input.source.pack)
     {
         auto &transport = *impl_->transport;
         const auto chunks = (read->input.expected_bytes - 1u) / transport.chunk_bytes + 1u;
@@ -193,7 +201,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         if (free_status == transport.occupied.end() || chunks + 2u > info.EmptySlotCount)
             return Result::Success(); // Requested remains eligible for the next pump.
         if (transport.next_tag == UINT64_MAX) return IoFailure("DirectStorage cancellation tag exhausted.");
-        auto hr = transport.factory->OpenFile(read->input.path.c_str(), IID_PPV_ARGS(&read->file));
+        auto hr = transport.factory->OpenFile(read->input.source.path.c_str(), IID_PPV_ARGS(&read->file));
         BY_HANDLE_FILE_INFORMATION file_info{};
         if (SUCCEEDED(hr)) hr = read->file->GetFileInformation(&file_info);
         const auto actual_size = (static_cast<std::uint64_t>(file_info.nFileSizeHigh) << 32u) | file_info.nFileSizeLow;
@@ -234,7 +242,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         return Result::Success();
     }
 #endif
-    const auto path = read->input.path;
+    const auto source = read->input.source;
     const auto expected = read->input.expected_bytes;
     const auto key = read->input.request.value;
     auto *retained = read.get();
@@ -245,9 +253,9 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     {
         const auto prepare = retained->input.prepare;
         const auto cancellation = retained->cancellation;
-        retained->future = std::async(std::launch::async, [path, expected, prepare, cancellation] {
+        retained->future = std::async(std::launch::async, [source, expected, prepare, cancellation] {
             std::vector<std::byte> bytes;
-            if (auto result = ReadCheckedBinary(path, bytes, expected); !result)
+            if (auto result = source.Read(bytes, expected); !result)
                 throw std::runtime_error(std::string(result.Message()));
             if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes);
             return bytes;
@@ -298,6 +306,9 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             if (event_result == WAIT_TIMEOUT) return Result::Success();
             if (event_result != WAIT_OBJECT_0) return IoFailure("DirectStorage completion event wait failed.");
         }
+        if (SUCCEEDED(hr) && !read.cancelled && read.input.source.range.byte_count &&
+            Sha256(read.bytes) != read.input.source.range.expected_digest)
+            hr = E_FAIL;
         if (SUCCEEDED(hr) && !read.cancelled && read.input.prepare)
         {
             if (!read.prepare_future.valid())

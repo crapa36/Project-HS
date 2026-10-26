@@ -4,6 +4,7 @@
 #include <d3d12.h>
 #include <DirectXMath.h>
 #include <functional>
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <span>
@@ -97,6 +98,32 @@ struct SceneGeometryOutputs
     std::vector<SceneGeometryRecord> geometries;
     std::shared_ptr<const void> owner; // actual service allocations, retained by native SDF registrations
 };
+struct SceneGeometryReadToken
+{
+    ResourceVersion version{};
+    Access access{};
+    bool operator==(const SceneGeometryReadToken &) const noexcept = default;
+};
+// Graph topology and physical range inputs only. Native resources, binders and
+// completion leases are rebuilt from the current frame.
+struct SceneGeometryRecordData
+{
+    std::uint32_t frame_slot{};
+    std::uint64_t record_count{}, deformed_position_bytes{};
+    std::array<std::uint64_t,6> import_widths{};
+    std::vector<SceneGeometryReadToken> reads;
+    bool operator==(const SceneGeometryRecordData &) const noexcept = default;
+};
+struct SceneGeometryGraphLayout
+{
+    SceneGeometryRecordData record;
+    std::array<BufferHandle,6> imports{};
+    ResourceVersion records{}, instances{}, positions{};
+    std::uint32_t upload_pass{UINT32_MAX}, deform_pass{UINT32_MAX};
+    bool valid{};
+};
+[[nodiscard]] bool MatchesSceneGeometryGraphLayout(const SceneGeometryRecordData &,
+    const SceneGeometryGraphLayout &) noexcept;
 struct SceneGeometryStorage;
 class SceneGeometryCandidate
 {
@@ -111,13 +138,20 @@ class SceneGeometrySystem
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ID3D12RootSignature *,
         bool enabled,std::uint32_t frame_slots,const SceneShaderReader &,SceneGeometryCandidate &) const;
     [[nodiscard]] Result Commit(SceneGeometryCandidate &&,const CompletionSet &);
-    [[nodiscard]] Result Register(RenderGraphBuilder &,const SceneGeometryInputs &,SceneGeometryOutputs &);
+    [[nodiscard]] SceneGeometryRecordData PrepareRecordData(const SceneGeometryInputs &) const;
+    [[nodiscard]] Result PreviewPreparedOutputs(const SceneGeometryInputs &,SceneGeometryOutputs &);
+    [[nodiscard]] Result Register(RenderGraphBuilder &,const SceneGeometryInputs &,SceneGeometryOutputs &,
+        SceneGeometryGraphLayout *capture=nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const SceneGeometryInputs &,
+        const SceneGeometryGraphLayout &,SceneGeometryOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(SceneGeometrySystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterCore(RenderGraphBuilder &,const SceneGeometryInputs &,
+        SceneGeometryOutputs &,SceneGeometryGraphLayout *,const SceneGeometryGraphLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

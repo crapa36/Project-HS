@@ -181,9 +181,35 @@ Result AdaptiveShadingSystem::Commit(AdaptiveShadingCandidate &&candidate,const 
         return Failure(ErrorCode::InvalidState,"Adaptive replacement needs prepared storage and completed old readers.");
     impl_->storage=std::move(candidate.storage_);impl_->status=std::move(candidate.status_);candidate.prepared_=false;return Result::Success();
 }
-Result AdaptiveShadingSystem::Register(RenderGraphBuilder &graph,const AdaptiveShadingInputs &in,AdaptiveShadingOutputs &out)
+Result AdaptiveShadingSystem::Register(RenderGraphBuilder &graph,const AdaptiveShadingInputs &in,
+    AdaptiveShadingOutputs &out,AdaptiveShadingLayout *layout)
 {
-    out={};auto s=impl_->storage;if(!s)return Result::Success();
+    return RegisterFrame(graph,in,out,layout,nullptr);
+}
+bool AdaptiveShadingSystem::MatchesLayout(const AdaptiveShadingInputs &in,const AdaptiveShadingLayout &layout)const noexcept
+{
+    const auto &s=impl_->storage;
+    return layout.valid&&layout.active==bool(s)&&(!s||
+        (layout.raster==s->profile.raster_enabled&&layout.compute==s->profile.compute_enabled&&
+         layout.capacity.width==s->profile.render_capacity.width&&layout.capacity.height==s->profile.render_capacity.height&&
+         layout.native_tile_size==s->hardware.vrs_tile_size&&
+         layout.guides==std::array{in.depth.version,in.normal.version,in.base.version,
+             in.material.version,in.metadata.version,in.motion.version}));
+}
+Result AdaptiveShadingSystem::BindRetained(RenderGraphBuilder &graph,const AdaptiveShadingInputs &in,
+    const AdaptiveShadingLayout &layout,AdaptiveShadingOutputs &out)
+{
+    return RegisterFrame(graph,in,out,nullptr,&layout);
+}
+Result AdaptiveShadingSystem::RegisterFrame(RenderGraphBuilder &graph,const AdaptiveShadingInputs &in,
+    AdaptiveShadingOutputs &out,AdaptiveShadingLayout *capture,const AdaptiveShadingLayout *retained)
+{
+    out={};if(capture)*capture={};auto s=impl_->storage;
+    if(retained&&!MatchesLayout(in,*retained))
+        return Failure(ErrorCode::InvalidState,"Adaptive retained topology has changed.");
+    if(capture){capture->active=bool(s);if(s){capture->raster=s->profile.raster_enabled;capture->compute=s->profile.compute_enabled;
+        capture->capacity=s->profile.render_capacity;capture->native_tile_size=s->hardware.vrs_tile_size;}}
+    if(!s){if(capture)capture->valid=true;return Result::Success();}
     if(!s->usable||impl_->pending.graph)return Failure(ErrorCode::InvalidState,"Adaptive graph failed or remains pending.");
     if(!Extent(in.render_active)||in.render_active.width>s->profile.render_capacity.width||in.render_active.height>s->profile.render_capacity.height||
         in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||in.material_policy.size()>s->profile.maximum_materials)
@@ -202,14 +228,35 @@ Result AdaptiveShadingSystem::Register(RenderGraphBuilder &graph,const AdaptiveS
     std::memcpy(frame.mapped,&constants,sizeof(constants));if(!in.material_policy.empty())
         std::memcpy(frame.mapped+256,in.material_policy.data(),in.material_policy.size_bytes());
     const AmbientOcclusionGuide guides[]{in.depth,in.normal,in.base,in.material,in.metadata,in.motion};
+    for(std::size_t i=0;i<6;++i)
+    {
+        if(capture)capture->guides[i]=guides[i].version;
+    }
     const DXGI_FORMAT formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R8G8B8A8_UNORM,
         DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32G32_UINT,DXGI_FORMAT_R16G16_FLOAT};
     for(UINT i=0;i<6;++i)s->Srv(in.frame_slot,i,guides[i].resource,formats[i]);
-    auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;
+    Impl::Pending pending;pending.graph=&graph;pending.slot=in.frame_slot;
+    std::size_t import_index{};bool bound=true;Result binding_result=Result::Success();
     auto import=[&](AllocationResource &r,std::string_view name)
-    {const auto h=graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name);pending.imports.push_back({&r,h});return graph.Version(h);};
-    auto density=import(frame.density,"Adaptive.ComputeDensity");auto classify=graph.AddPass(280,"Adaptive.ClassifyActualGuides",QueueHint::Direct);
-    for(const auto guide:guides)classify.Read(guide.version,Access::ComputeRead);density=classify.Write(density,Access::UnorderedWrite);
+    {
+        if(auto checked=r.EnsureNativeContract(s->device.Get());!checked){binding_result=checked;return ResourceVersion{};}
+        const auto h=retained?retained->textures[import_index]:
+            graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name);
+        if(retained)bound&=graph.BindTexture(h,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access);
+        if(capture)capture->textures[import_index]=h;
+        ++import_index;pending.imports.push_back({&r,h});return graph.Version(h);
+    };
+    auto density=import(frame.density,"Adaptive.ComputeDensity");
+    if(!binding_result)return binding_result;
+    if(!bound)return Failure(ErrorCode::InvalidState,"Adaptive retained density binding failed.");
+    if(capture)capture->passes[0]=graph.PassCount();
+    auto classifyBinding=retained?graph.BindPass(retained->passes[0],280):
+        std::optional<PassBuilder>{graph.AddPass(280,"Adaptive.ClassifyActualGuides",QueueHint::Direct)};
+    if(!classifyBinding)return Failure(ErrorCode::InvalidState,"Adaptive retained classify pass is missing.");
+    auto &classify=*classifyBinding;
+    if(retained)density=retained->written[0];
+    else{for(const auto guide:guides)classify.Read(guide.version,Access::ComputeRead);density=classify.Write(density,Access::UnorderedWrite);}
+    if(capture)capture->written[0]=density;
     auto execute=[s,slot=in.frame_slot](UINT pipeline,ViewExtent groups)
     {return [s,slot,pipeline,groups](RenderPassContext &context)
         {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());ID3D12DescriptorHeap *heaps[]{s->descriptors.Get()};
@@ -220,12 +267,22 @@ Result AdaptiveShadingSystem::Register(RenderGraphBuilder &graph,const AdaptiveS
     out.density={density,frame.density.resource.Get()};out.compute_ready=s->profile.compute_enabled;
     if(s->profile.raster_enabled)
     {
-        auto rate=import(frame.rate,"Adaptive.NativeRateImage");auto reduce=graph.AddPass(281,"Adaptive.ReduceNativeVrsTiles",QueueHint::Direct);
-        reduce.Read(density,Access::ComputeRead);rate=reduce.Write(rate,Access::UnorderedWrite);
+        auto rate=import(frame.rate,"Adaptive.NativeRateImage");
+        if(!binding_result)return binding_result;
+        if(!bound)return Failure(ErrorCode::InvalidState,"Adaptive retained VRS binding failed.");
+        if(capture)capture->passes[1]=graph.PassCount();
+        auto reduceBinding=retained?graph.BindPass(retained->passes[1],281):
+            std::optional<PassBuilder>{graph.AddPass(281,"Adaptive.ReduceNativeVrsTiles",QueueHint::Direct)};
+        if(!reduceBinding)return Failure(ErrorCode::InvalidState,"Adaptive retained reduce pass is missing.");
+        auto &reduce=*reduceBinding;
+        if(retained)rate=retained->written[1];
+        else{reduce.Read(density,Access::ComputeRead);rate=reduce.Write(rate,Access::UnorderedWrite);}
+        if(capture)capture->written[1]=rate;
         reduce.SetExecute(execute(1,Tiles(Tiles(s->profile.render_capacity,s->hardware.vrs_tile_size),8)));
         out.rate={rate,frame.rate.resource.Get()};out.raster_ready=true;
     }
-    frame.owners=in.owners;return Result::Success();
+    frame.owners=in.owners;impl_->pending=std::move(pending);
+    if(capture)capture->valid=true;return Result::Success();
 }
 Result AdaptiveShadingSystem::BeginRaster(RenderPassContext &context,const AdaptiveShadingOutputs &out,AdaptiveShadingRasterScope &scope)
 {

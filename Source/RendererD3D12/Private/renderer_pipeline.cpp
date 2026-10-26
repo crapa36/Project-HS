@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "renderer_development_catalog.hpp"
 
 namespace hs
 {
@@ -9,8 +10,8 @@ Result D3D12Renderer::Impl::PreparePresentationGuides(const RendererConfig &cand
     return presentation_guides.Prepare(device.Get(), allocator, capacity, output, display.format, display.color_space,
         sdk_presentation.PresentationOwner(), kFrameCount,
         [&](std::string_view logical, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate.ResolveProduct(logical, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate, logical, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, guides);
 }
@@ -18,8 +19,10 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
     RendererConfig &selected) const
 {
     selected = request;
+    if (request.packed_content) selected.selected_texture_feedback = false;
     if (!texture_streaming_capabilities.sampler_feedback || !texture_streaming_capabilities.tiled_resources)
         return Result::Success();
+    // Resolve both physical variants before enabling compiled-pack selection.
     for (const std::string_view name : kAuthoredMaterialNames)
     {
         const bool masked = name.starts_with("leaf_") || name.starts_with("grass_");
@@ -28,17 +31,25 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
             if (!masked && (family == "visibility" || family == "shadow" || family == "probe_shadow")) continue;
             const auto baseline = "render/shader/" + std::string(name) + "_" + std::string(family) + ".dxil";
             const auto feedback = "render/shader/" + std::string(name) + "_" + std::string(family) + "_feedback.dxil";
-            std::filesystem::path path;
-            if (auto resolved = request.ResolveProduct(feedback, path); !resolved) return resolved;
+            if (request.packed_content)
+            {
+                if (!FindRendererBulk(selected, baseline) || !FindRendererBulk(selected, feedback))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Selected feedback shader or its baseline has no compiled bulk: " + feedback);
+                continue;
+            }
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(request, feedback, path); !resolved) return resolved;
             const auto digest = request.product_digests.find(feedback);
             if (digest == request.product_digests.end() || !selected.product_paths.contains(baseline) ||
                 !selected.product_digests.contains(baseline))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Selected feedback shader or its baseline has no immutable product identity: " + feedback);
-            selected.product_paths.at(baseline) = std::move(path);
+            selected.product_paths.at(baseline) = std::move(path.path);
             selected.product_digests.at(baseline) = digest->second;
         }
     }
+    if (request.packed_content) selected.selected_texture_feedback = true;
     return Result::Success();
 }
 Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
@@ -469,10 +480,29 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         !registered) return registered;
 
     const auto read_shader = [&](std::string_view name, std::vector<std::byte> &bytes) {
-        std::filesystem::path path;
-        if (auto resolved = pipeline_config.ResolveProduct("render/shader/" + std::string(name), path);
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/" + std::string(name), path);
             !resolved) return resolved;
         return ReadBinary(path, bytes);
+    };
+    const auto read_material_shader = [&](std::string_view material_id, render_data::MaterialProgramKind kind,
+        std::string_view loose_name, std::vector<std::byte> &bytes) {
+        if (!pipeline_config.packed_content && !pipeline_config.development_catalog)
+            return read_shader(loose_name, bytes);
+        const auto handle = FindRendererMaterial(pipeline_config, MakeAssetId(material_id));
+        if (!handle) return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing shader material descriptor.");
+        const auto &material = pipeline_config.packed_materials[handle.value];
+        const auto program = std::ranges::find(material.programs, kind, &render_data::MaterialProgramDescriptor::kind);
+        if (program == material.programs.end())
+            return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing declared material program.");
+        if (pipeline_config.development_catalog)
+        {
+            if (program->product_id != "render/shader/" + std::string(loose_name))
+                return Result::Failure(ErrorCode::InvalidState, "RendererDevelopmentCatalog", "Material program identity differs from selected shader.");
+            return read_shader(loose_name, bytes);
+        }
+        StartupOperationScope timing(RendererStartupOperation::CheckedBinaryRead);
+        return ReadRendererMaterialProgram(pipeline_config, *program, bytes);
     };
     std::vector<std::byte> scene_vertex;
     std::vector<std::byte> cluster_vertex, cluster_shadow_vertex;
@@ -592,22 +622,25 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     }
     // Direct evaluation and the sampled LUT are pinned to the same immutable
     // selected Generation, including during development Generation reload.
-    std::filesystem::path deferred_path;
-    if (auto resolved = pipeline_config.ResolveProduct("render/shader/deferred_ps.dxil", deferred_path);
+    RendererAssetSource deferred_path;
+    if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/deferred_ps.dxil", deferred_path);
         !resolved) return resolved;
     if (auto read = ReadBinary(deferred_path, deferred_pixel); !read) return read;
-    for (auto [name, bytes] : {
-        std::pair{"archer_skin_shadow.dxil", &hero_shadow_pixel},
-        std::pair{"slime_body_translucent.dxil", &hero_translucent_pixel}})
-        if (auto read = read_shader(name, *bytes); !read) return read;
+    if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
+        render_data::MaterialProgramKind::HeroShadowPS, "archer_skin_shadow.dxil", hero_shadow_pixel); !read) return read;
+    if (auto read = read_material_shader("render/material/slime_body/material.rpkg",
+        render_data::MaterialProgramKind::HeroTranslucentPS, "slime_body_translucent.dxil", hero_translucent_pixel); !read) return read;
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
     {
-        if (auto read = read_shader("archer_skin_scene.dxil", hero_scene_pixel); !read) return read;
+        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
+            render_data::MaterialProgramKind::HeroScenePS, "archer_skin_scene.dxil", hero_scene_pixel); !read) return read;
     }
     else
     {
-        if (auto read = read_shader("archer_skin_visibility.dxil", hero_visibility_pixel); !read) return read;
-        if (auto read = read_shader("archer_skin_resolve.dxil", hero_resolve_compute); !read) return read;
+        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
+            render_data::MaterialProgramKind::HeroVisibilityPS, "archer_skin_visibility.dxil", hero_visibility_pixel); !read) return read;
+        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
+            render_data::MaterialProgramKind::HeroSurfaceResolveCS, "archer_skin_resolve.dxil", hero_resolve_compute); !read) return read;
     }
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
         if (auto read = read_shader("scene_ps.dxil", scene_pixel); !read) return read;
@@ -615,23 +648,20 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     {
         const std::string base = "render/shader/" +
             std::string(kAuthoredMaterialNames[i]);
+        const auto material_id = (i == kTerrainMaterialOrdinal || i == render_data::kGroundDetailMaterialOrdinal
+            ? "render/material/" : "render/") + std::string(kAuthoredMaterialNames[i]) + ".rpkg";
+        const bool masked = base.starts_with("render/shader/leaf_") || base.starts_with("render/shader/grass_");
         if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
         {
-            std::filesystem::path shader_path;
-            if (auto resolved = pipeline_config.ResolveProduct(base + "_scene.dxil", shader_path);
-                !resolved)
-                return resolved;
-            if (auto read = ReadBinary(shader_path, material_scene_pixels[i]); !read)
+            if (auto read = read_material_shader(material_id, masked ? render_data::MaterialProgramKind::MaskedScenePS :
+                render_data::MaterialProgramKind::OpaqueScenePS, std::string(kAuthoredMaterialNames[i]) + "_scene.dxil", material_scene_pixels[i]); !read)
                 return read;
         }
         if (base.starts_with("render/shader/leaf_") ||
             base.starts_with("render/shader/grass_"))
         {
-            std::filesystem::path shader_path;
-            if (auto resolved = pipeline_config.ResolveProduct(base + "_shadow.dxil", shader_path);
-                !resolved)
-                return resolved;
-            if (auto read = ReadBinary(shader_path, material_shadow_pixels[i]); !read)
+            if (auto read = read_material_shader(material_id, render_data::MaterialProgramKind::MaskedShadowPS,
+                std::string(kAuthoredMaterialNames[i]) + "_shadow.dxil", material_shadow_pixels[i]); !read)
                 return read;
         }
         if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer)
@@ -640,8 +670,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                      std::pair{base + "_visibility.dxil", &material_visibility_pixels[i]},
                      std::pair{base + "_resolve.dxil", &material_resolve_compute[i]}})
             {
-                std::filesystem::path shader_path;
-                if (auto resolved = pipeline_config.ResolveProduct(logical_id, shader_path); !resolved)
+                RendererAssetSource shader_path;
+                if (auto resolved = ResolveRendererAsset(pipeline_config, logical_id, shader_path); !resolved)
                     return resolved;
                 if (auto read = ReadBinary(shader_path, *bytes); !read)
                     return read;
@@ -1354,9 +1384,30 @@ Result D3D12Renderer::ReloadShaderGeneration(
                                    "Shader Generation changes resident content: " + id);
     }
     RendererConfig candidate = impl_->config;
+    // This API explicitly selects loose developer Generation products.
+    candidate.packed_content.reset();
+    candidate.packed_bulks = {};
+    candidate.packed_textures = {};
+    candidate.packed_geometry = {};
+    candidate.packed_materials = {};
+    candidate.packed_characters = {};
+    candidate.packed_animations = {};
+    candidate.packed_vfx_mesh_atlas = nullptr;
+    candidate.packed_source_revisions = {};
+    candidate.packed_revision_bulks = {};
+    candidate.selected_texture_feedback = false;
     candidate.content_generation_id = generation_id;
     candidate.product_paths = product_paths;
     candidate.product_digests = product_digests;
+    try
+    {
+        candidate.development_catalog = RendererDevelopmentCatalog::Build(candidate);
+        candidate.development_catalog->Bind(candidate);
+    }
+    catch (const std::exception &error)
+    {
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
+    }
     if (parameters_changed)
         if (auto prepared = impl_->PrepareMaterialParameters(candidate, true); !prepared)
         {
@@ -1434,18 +1485,16 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
             virtual_shadows); !prepared) return prepared;
     LightingProbeCandidate probe;
     constexpr std::string_view probe_id = "render/lighting/default_probe.rpkg";
-    const auto candidate_probe = candidate_config.product_digests.find(std::string(probe_id));
-    const auto resident_probe = config.product_digests.find(std::string(probe_id));
-    const bool replace_probe = candidate_probe != candidate_config.product_digests.end() &&
-        (resident_probe == config.product_digests.end() || candidate_probe->second != resident_probe->second);
+    const auto candidate_probe = RendererProductDigest(candidate_config, probe_id);
+    const auto resident_probe = RendererProductDigest(config, probe_id);
+    const bool replace_probe = !candidate_probe.empty() && candidate_probe != resident_probe;
     if (replace_probe)
         if (auto prepared = PrepareLightingProbe(candidate_config, probe); !prepared) return prepared;
     LtcLutCandidate ltc;
     constexpr std::string_view ltc_id = "render/lighting/default_ltc.rpkg";
-    const auto candidate_ltc = candidate_config.product_digests.find(std::string(ltc_id));
-    const auto resident_ltc = config.product_digests.find(std::string(ltc_id));
-    const bool replace_ltc = candidate_ltc != candidate_config.product_digests.end() &&
-        (resident_ltc == config.product_digests.end() || candidate_ltc->second != resident_ltc->second);
+    const auto candidate_ltc = RendererProductDigest(candidate_config, ltc_id);
+    const auto resident_ltc = RendererProductDigest(config, ltc_id);
+    const bool replace_ltc = !candidate_ltc.empty() && candidate_ltc != resident_ltc;
     if (replace_ltc)
         if (auto prepared = PrepareLtcLut(candidate_config, ltc); !prepared) return prepared;
     if (auto prepared = PrepareAmbientOcclusion(candidate_config, view_state.render_capacity, ambient,

@@ -865,6 +865,43 @@ void TestEnemyAnimationStateSignals()
     Check(state.DeathPoses().empty(), "corpse expires after 48 ticks");
 }
 
+void TestPlayerInstantMotionSignal()
+{
+    hs::GameReadModelStorage storage;
+    storage.session_id = 23;
+    hs::EnemyAnimationState state;
+    state.Update(storage.View(), {});
+    hs::DomainSignal signal{};
+    signal.kind = hs::DomainSignalKind::RetreatMoved;
+    signal.sequence = 4;
+    signal.tick = storage.tick = 1;
+    signal.session_id = storage.session_id;
+    state.Update(storage.View(), std::span(&signal, 1));
+    Check(state.PlayerMotionEpoch() == 0, "ordinary retreat movement remains continuous");
+    signal.kind = hs::DomainSignalKind::UpgradeVisual;
+    signal.sequence = 5;
+    signal.upgrade_skill = static_cast<std::uint8_t>(hs::SkillKind::RetreatShot);
+    signal.upgrade_index = 7;
+    signal.upgrade_stage = hs::UpgradeVisualStage::Spawn;
+    signal.upgrade_owner_id = signal.geometry.source_id = 1ull << 60;
+    signal.geometry.kind = hs::DomainSignalGeometryKind::Line;
+    signal.geometry.start_tick = signal.geometry.end_tick = signal.tick;
+    state.Update(storage.View(), std::span(&signal, 1));
+    state.Update(storage.View(), std::span(&signal, 1));
+    Check(state.PlayerMotionEpoch() == 5, "repeated same-tick signal keeps one movement epoch");
+    storage.tick = 3;
+    state.Update(storage.View(), {});
+    Check(state.PlayerMotionEpoch() == 5, "skipped publications retain the last movement epoch");
+    hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
+    Check(hs::ProjectDynamicTick(storage.View(), snapshot, {}, &state) &&
+              snapshot.View().camera.target_motion_epoch == 5 &&
+              snapshot.View().instances.front().motion_epoch == 5,
+          "player and camera publish the same movement boundary");
+    storage.session_id = 24;
+    state.Update(storage.View(), {});
+    Check(state.PlayerMotionEpoch() == 0, "new session clears movement history");
+}
+
 void TestSlimeAttackPoseTransitions()
 {
     hs::GameReadModelStorage model;
@@ -2224,6 +2261,7 @@ void RunGameplayPresentationTests()
     TestProjectileProjectionCarriesAuthoritativeOwner();
     TestProjectileUpgradeAttachmentEpisodes();
     TestEnemyAnimationStateSignals();
+    TestPlayerInstantMotionSignal();
     TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();
     TestStaticEnvironmentSceneLease();

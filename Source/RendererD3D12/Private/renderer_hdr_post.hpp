@@ -6,6 +6,7 @@
 
 #include <DirectXMath.h>
 #include <d3d12.h>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -60,6 +61,28 @@ struct HdrPostOutputs
     ID3D12Resource *hdr_resource{};
     D3D12_CPU_DESCRIPTOR_HANDLE hdr_srv{};
 };
+// Saved graph declarations only. Native targets, completions, descriptors and
+// executable callbacks are always supplied by the current frame.
+struct HdrPostMotionLayout
+{
+    std::uint64_t target_generation{};
+    std::array<ResourceHandle, 8> imports{};
+    std::array<ResourceVersion, 8> versions{};
+    std::array<ResourceVersion, 9> inputs{};
+    ResourceVersion output{};
+    std::array<std::uint32_t, 4> pass_indices{};
+    std::uint32_t pass_count{};
+    bool enabled{}, motion{}, dof{}, transparent_guides{};
+};
+struct HdrPostGradeLayout
+{
+    std::uint64_t target_generation{};
+    std::array<ResourceHandle, 8> imports{};
+    ResourceVersion input{}, lut{}, output{};
+    std::array<std::uint32_t, 2> pass_indices{};
+    std::uint32_t pass_count{};
+    bool enabled{}, imports_in_grade{}, initialize_lut{};
+};
 struct HdrPostTargets;
 class HdrPostCandidate
 {
@@ -83,15 +106,27 @@ class HdrPostSystem
     [[nodiscard]] Result Commit(HdrPostCandidate &&, const CompletionSet &completed);
     // Pre-exposed output-resolution HDR. These passes never write temporal history.
     [[nodiscard]] Result RegisterMotionAndDoF(RenderGraphBuilder &, const HdrPostInputs &,
-        HdrPostConstants, HdrPostOutputs &);
+        HdrPostConstants, HdrPostOutputs &, HdrPostMotionLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesMotionLayout(const HdrPostInputs &, const HdrPostMotionLayout &) const noexcept;
+    [[nodiscard]] Result BindRetainedMotionAndDoF(RenderGraphBuilder &, const HdrPostInputs &,
+        HdrPostConstants, const HdrPostMotionLayout &, HdrPostOutputs &);
     // Invoke after bloom, on the same graph. Grade-only can be the first registration.
-    [[nodiscard]] Result RegisterGrade(RenderGraphBuilder &, const HdrPostInputs &, HdrPostOutputs &);
+    [[nodiscard]] Result RegisterGrade(RenderGraphBuilder &, const HdrPostInputs &, HdrPostOutputs &,
+        HdrPostGradeLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesGradeLayout(const HdrPostInputs &, const HdrPostGradeLayout &,
+        bool geometry_registered_before_grade) const noexcept;
+    [[nodiscard]] Result BindRetainedGrade(RenderGraphBuilder &, const HdrPostInputs &,
+        const HdrPostGradeLayout &, HdrPostOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(HdrPostSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterMotionImpl(RenderGraphBuilder &, const HdrPostInputs &,
+        HdrPostConstants, HdrPostOutputs &, HdrPostMotionLayout *, const HdrPostMotionLayout *);
+    [[nodiscard]] Result RegisterGradeImpl(RenderGraphBuilder &, const HdrPostInputs &,
+        HdrPostOutputs &, HdrPostGradeLayout *, const HdrPostGradeLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

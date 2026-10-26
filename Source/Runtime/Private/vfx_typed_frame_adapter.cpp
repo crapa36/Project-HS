@@ -7,6 +7,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -397,7 +398,7 @@ void Diagnose(VfxTypedFrameInputs &result, std::uint64_t effect_id)
 }
 
 std::optional<float> Lifetime(const PersistentVfxVisual &visual,
-                             Tick current_tick) noexcept
+                             double current_tick) noexcept
 {
     if (visual.kind == PersistentVfxKind::PickupXpMagnetTrail)
     {
@@ -450,7 +451,7 @@ const PersistentVfxVisual *FindPrevious(
     const PersistentVfxVisual &visual,
     const PreparedPairFacts *pair_facts) noexcept
 {
-    if (pair_facts) return pair_facts->Previous(visual, previous);
+    if (pair_facts) return pair_facts->Previous(visual.stable_id, visual.kind, previous);
     const auto found = std::find_if(previous.begin(), previous.end(),
         [&visual](const PersistentVfxVisual &candidate) {
             return candidate.stable_id == visual.stable_id &&
@@ -668,7 +669,7 @@ bool IsPickupCollectEffect(std::uint64_t effect_id) noexcept
         effect_id == kPickupRelicCollectEffect;
 }
 
-bool FiniteWarningOwner(const PersistentVfxVisual &owner, Tick current_tick) noexcept
+bool FiniteWarningOwner(const PersistentVfxVisual &owner, double current_tick) noexcept
 {
     return owner.active_tick <= current_tick && current_tick < owner.expires &&
         owner.expires > owner.active_tick && Finite(owner.position) &&
@@ -722,10 +723,10 @@ void PreparedPairFacts::Prepare(Key key,
 }
 
 const PersistentVfxVisual *PreparedPairFacts::Previous(
-    const PersistentVfxVisual &visual,
+    std::uint64_t stable_id, PersistentVfxKind kind,
     std::span<const PersistentVfxVisual> rows) const noexcept
 {
-    const auto found = previous_.find({visual.stable_id, visual.kind});
+    const auto found = previous_.find({stable_id, kind});
     return found != previous_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
 }
 
@@ -758,8 +759,10 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
-    const PreparedPairFacts *pair_facts)
+    const PreparedPairFacts *pair_facts, float interpolation)
 {
+    const double display_tick = static_cast<double>(current_tick) -
+        (current_tick != 0 ? 1.0 - interpolation : 0.0);
     VfxTypedFrameInputs result;
     result.events.reserve(events.size());
     result.persistent.reserve(current.size());
@@ -948,8 +951,44 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         result.events.push_back(std::move(input));
     }
 
-    for (const auto &visual : current)
+    for (unsigned endpoint = 0; endpoint < (interpolation < 1.0f ? 2u : 1u); ++endpoint)
+    for (const auto &source_visual : endpoint == 0 ? current : previous)
     {
+        const PersistentVfxVisual *display_previous{};
+        if (interpolation < 1.0f)
+        {
+            if (endpoint == 0)
+            {
+                display_previous = FindPrevious(previous, source_visual, pair_facts);
+                if (!display_previous) continue;
+                if (display_previous->status_episode_generation == source_visual.status_episode_generation)
+                    display_previous = nullptr;
+            }
+            else
+            {
+                const auto *present = pair_facts
+                    ? pair_facts->Current(source_visual.stable_id, source_visual.kind, current) : nullptr;
+                if (!pair_facts)
+                {
+                    const auto found = std::find_if(current.begin(), current.end(), [&](const auto &row) {
+                        return row.stable_id == source_visual.stable_id && row.kind == source_visual.kind;
+                    });
+                    if (found != current.end()) present = &*found;
+                }
+                if (present) continue;
+                display_previous = &source_visual;
+            }
+        }
+        std::optional<PersistentVfxVisual> retained_visual;
+        if (display_previous)
+        {
+            retained_visual = *display_previous;
+            retained_visual->projectile_previous_position = retained_visual->projectile_current_position;
+        }
+        const auto &visual = retained_visual ? *retained_visual : source_visual;
+        if (display_tick < visual.active_tick ||
+            (visual.projectile_owner_id != 0 && display_tick < visual.projectile_spawned_tick))
+            continue;
         if (visual.kind == PersistentVfxKind::WaveTimer)
         {
             constexpr auto id = Hash64("particle.session.wave_warning");
@@ -960,10 +999,10 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 !std::isfinite(effect->seconds) || effect->seconds <= 0 || effect->seconds > 60 ||
                 visual.effect_asset.value != id || visual.stable_id == 0 ||
                 !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0 ||
-                visual.active_tick > current_tick || visual.source_horizon_tick <= current_tick)
+                visual.active_tick > display_tick || visual.source_horizon_tick <= display_tick)
             { Diagnose(result, id); continue; }
             const auto window = static_cast<Tick>(std::ceil(effect->seconds * 60.0f));
-            if (visual.source_horizon_tick - current_tick > window) continue;
+            if (visual.source_horizon_tick - display_tick > window) continue;
             const auto start = visual.source_horizon_tick > window
                 ? visual.source_horizon_tick - window : Tick{};
             VfxPersistentInput input{};
@@ -971,7 +1010,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             input.effect_handle = effect->handle;
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
             input.current_transform = input.previous_transform = Transform(visual.position, 0);
-            input.elapsed_seconds = static_cast<float>(current_tick - start) / 60.0f;
+            input.elapsed_seconds = static_cast<float>(display_tick - start) / 60.0f;
             input.normalized_age = input.elapsed_seconds / effect->seconds;
             if (input.normalized_age >= 1) continue;
             input.source_duration_seconds = effect->seconds;
@@ -995,7 +1034,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 visual.effect_asset.value != kArrowRainIncomingEffect ||
                 visual.skill != kArrowRainSkill || visual.source_upgrade != 0 ||
                 visual.stable_id == 0 || visual.projectile_owner_id == 0 || visual.cast_id == 0 ||
-                visual.active_tick > current_tick || visual.expires <= visual.active_tick ||
+                visual.active_tick > display_tick || visual.expires <= visual.active_tick ||
                 !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0)
             {
                 Diagnose(result, kArrowRainIncomingEffect);
@@ -1008,7 +1047,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 std::ceil(static_cast<double>(effect->seconds) * 60.0));
             const auto started = std::max(visual.active_tick,
                 visual.expires > window_ticks ? visual.expires - window_ticks : Tick{});
-            if (current_tick < started || current_tick >= visual.expires) continue;
+            if (display_tick < started || display_tick >= visual.expires) continue;
             const auto duration_ticks = visual.expires - started;
             const auto height = visual.radius * 2.0f;
             const auto position_at = [&](Tick sample_tick) {
@@ -1025,7 +1064,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             input.effect_handle = effect->handle;
             input.current_transform = Transform(position, 0);
             input.previous_transform = Transform(previous_position, 0);
-            input.elapsed_seconds = static_cast<float>(current_tick - started) / 60.0f;
+            input.elapsed_seconds = static_cast<float>(display_tick - started) / 60.0f;
             input.normalized_age = std::clamp(input.elapsed_seconds / effect->seconds, 0.0f, 1.0f);
             input.stable_seed = PersistentSeed(visual.projectile_owner_id, effect->handle);
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
@@ -1054,7 +1093,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             if (!lookup || !effect || effect->input_mode != 1 ||
                 effect->payload_kind != kProjectilePayload ||
                 visual.projectile_owner_id == 0 ||
-                visual.projectile_spawned_tick > current_tick)
+                visual.projectile_spawned_tick > display_tick)
             {
                 Diagnose(result, visual.effect_asset.value);
                 continue;
@@ -1075,7 +1114,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 visual.projectile_previous_position,
                 std::atan2(visual.projectile_velocity.x,
                            visual.projectile_velocity.z));
-            input.elapsed_seconds = static_cast<float>(current_tick -
+            input.elapsed_seconds = static_cast<float>(display_tick -
                                                        visual.projectile_spawned_tick) /
                                     60.0f;
             input.normalized_age = 0.0f;
@@ -1125,7 +1164,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             visual.kind == PersistentVfxKind::EmpoweredReady;
         const auto age = fixed_status_stamp
             ? std::optional<float>{0.0f}
-            : Lifetime(visual, current_tick);
+            : Lifetime(visual, display_tick);
         const bool pickup_motion = visual.kind == PersistentVfxKind::PickupXpMagnetTrail;
         if (!lookup || !effect || effect->input_mode != (pickup_motion ? 0u : 1u) ||
             effect->payload_kind != binding.payload_kind || !age)
@@ -1191,7 +1230,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
              visual.kind == PersistentVfxKind::BasicArrowReturn ||
              visual.kind == PersistentVfxKind::RicochetBleedExtend) &&
             (visual.projectile_owner_id == 0 ||
-             visual.expires <= visual.active_tick || current_tick >= visual.expires ||
+             visual.expires <= visual.active_tick || display_tick >= visual.expires ||
              visual.projectile_spawned_tick > visual.active_tick))
         {
             Diagnose(result, binding.effect_id);
@@ -1271,13 +1310,13 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                                    visual.projectile_velocity.z))
             : (prior ? Transform(prior->position, prior->yaw) : input.current_transform);
         input.elapsed_seconds = visual.projectile_owner_id != 0 && !fixed_status_stamp
-            ? static_cast<float>(current_tick - visual.projectile_spawned_tick) / 60.0f
-            : static_cast<float>(current_tick > visual.active_tick
-                                    ? current_tick - visual.active_tick : 0) / 60.0f;
+            ? static_cast<float>(display_tick - visual.projectile_spawned_tick) / 60.0f
+            : static_cast<float>(display_tick > visual.active_tick
+                                    ? display_tick - visual.active_tick : 0) / 60.0f;
         input.normalized_age = *age;
         if (fixed_status_stamp)
         {
-            if (current_tick < visual.active_tick || effect->timing_kind != 0 ||
+            if (display_tick < visual.active_tick || effect->timing_kind != 0 ||
                 !std::isfinite(effect->seconds) || effect->seconds <= 0.0f ||
                 input.elapsed_seconds >= effect->seconds)
             {
@@ -1316,7 +1355,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         {
             const float length = std::hypot(std::hypot(visual.link_target_position.x - visual.position.x,
                 visual.link_target_position.z - visual.position.z), visual.link_target_position.y - visual.position.y);
-            geometry_ok = effect->timing_kind == 1 && visual.active_tick <= current_tick && current_tick < visual.expires &&
+            geometry_ok = effect->timing_kind == 1 && visual.active_tick <= display_tick && display_tick < visual.expires &&
                 visual.expires > visual.active_tick && Finite(visual.position) && Finite(visual.link_target_position) &&
                 std::isfinite(length) && length > .0001f && std::isfinite(visual.link_width) && visual.link_width > 0;
             if (geometry_ok)
@@ -1333,7 +1372,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             geometry_ok=(fixed_status_stamp ? effect->timing_kind == 0 &&
                 std::isfinite(effect->seconds) && effect->seconds > 0.0f
                 : effect->timing_kind == 1) && visual.effect_asset.value==binding.effect_id&&
-                visual.active_tick<=current_tick&&Finite(visual.position)&&std::isfinite(visual.yaw)&&
+                visual.active_tick<=display_tick&&Finite(visual.position)&&std::isfinite(visual.yaw)&&
                 std::isfinite(visual.radius)&&visual.radius>0&&std::isfinite(visual.entity_health_fraction)&&
                 visual.entity_health_fraction>=0&&visual.entity_health_fraction<=1&&
                 visual.entity_render_id != 0 &&
@@ -1343,7 +1382,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                   visual.projectile_hitbox_radius > 0.0f)) &&
                 (visual.kind != PersistentVfxKind::ChargedOverchargeLoop ||
                  (visual.skill == 3 && visual.source_upgrade == 0 &&
-                  visual.expires > visual.active_tick && current_tick < visual.expires &&
+                  visual.expires > visual.active_tick && display_tick < visual.expires &&
                   std::isfinite(visual.charge_ratio) && visual.charge_ratio >= 0.0f &&
                   visual.charge_ratio <= 1.0f));
             if(geometry_ok) {
@@ -1362,7 +1401,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 input.payload = VfxContextPayload{visual.entity_render_id, {}, visual.entity_health_fraction, 0.0f, 0.0f};
             // Low-health presence is renewed each snapshot. Its pulse follows
             // the advancing simulation phase, not that one-tick presence start.
-            input.elapsed_seconds = static_cast<float>(current_tick) / 60.0f;
+            input.elapsed_seconds = static_cast<float>(display_tick) / 60.0f;
         }
         else if (binding.payload_kind == kCirclePayload)
             geometry_ok = MakeCircle(visual, *age, input.payload);
@@ -1465,8 +1504,8 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             visual.stable_id, supplement->effect_id);
         if (supplement->fixed_duration)
         {
-            const auto elapsed_ticks = current_tick >= visual.active_tick
-                ? current_tick - visual.active_tick : 0;
+            const auto elapsed_ticks = display_tick >= visual.active_tick
+                ? display_tick - visual.active_tick : 0;
             supplemental_input.elapsed_seconds =
                 static_cast<float>(elapsed_ticks) / 60.0f;
             if (supplemental_input.elapsed_seconds >= supplement_effect->seconds)
@@ -1506,11 +1545,13 @@ std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
 std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
     const VfxProgramView &cooked,
     std::span<const PresentationEvent> dispatched_events,
-    Tick current_tick)
+    Tick current_tick, float interpolation)
 {
-    std::erase_if(owners_, [current_tick](const Owner &owner) {
-        return current_tick < owner.started ||
-            static_cast<float>(current_tick - owner.started) / 60.0f >= owner.seconds;
+    const double display_tick = static_cast<double>(current_tick) -
+        (current_tick != 0 ? 1.0 - interpolation : 0.0);
+    std::erase_if(owners_, [current_tick, display_tick](const Owner &owner) {
+        return current_tick < owner.started || (display_tick >= owner.started &&
+            (display_tick - owner.started) / 60.0 >= owner.seconds);
     });
     for (const auto &event : dispatched_events)
     {
@@ -1531,7 +1572,7 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
             effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
             !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
             !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
-            static_cast<float>(current_tick - event.tick) / 60.0f >= effect->seconds)
+            (display_tick >= event.tick && (display_tick - event.tick) / 60.0 >= effect->seconds))
             continue;
         const auto end = event.geometry.end_position;
         const Float3 delta{end.x - event.position.x, end.y - event.position.y,
@@ -1569,8 +1610,9 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
     result.reserve(owners_.size());
     for (const auto &owner : owners_)
     {
+        if (display_tick < owner.started) continue;
         auto input = owner.input;
-        input.elapsed_seconds = static_cast<float>(current_tick - owner.started) / 60.0f;
+        input.elapsed_seconds = static_cast<float>((display_tick - owner.started) / 60.0);
         input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
         if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
             line->lifetime01 = input.normalized_age;
@@ -1583,34 +1625,88 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
 
 void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
                                  std::span<const PersistentVfxVisual> owners,
-                                 Tick current_tick)
+                                 Tick current_tick,
+                                 const PreparedPairFacts *pair_facts,
+                                 std::span<const PersistentVfxVisual> previous, float interpolation)
 {
-    std::vector<VfxEventInput> refreshed;
-    refreshed.reserve(events.size());
+    const double display_tick = static_cast<double>(current_tick) -
+        (current_tick != 0 ? 1.0 - interpolation : 0.0);
+    std::size_t retained{};
+    const auto retain = [&](VfxEventInput &event) {
+        if (&events[retained] != &event) events[retained] = std::move(event);
+        ++retained;
+    };
     for (auto &event : events)
     {
         if (event.geometry_owner_id == 0)
         {
-            refreshed.push_back(std::move(event));
+            retain(event);
             continue;
         }
-        if (event.event_tick > current_tick)
+        if (event.event_tick > display_tick)
         {
-            refreshed.push_back(std::move(event));
+            retain(event);
             continue;
         }
         const auto binding = WarningBinding(event.geometry_effect_id);
         if (!binding || !WarningShapeMatches(*binding, event.payload)) continue;
         const bool line = binding->payload_kind == kLinePayload;
         const auto expected_kind = binding->kind;
-        const auto found = std::find_if(owners.begin(), owners.end(),
-            [&](const PersistentVfxVisual &owner) {
-                return owner.stable_id == event.geometry_owner_id &&
-                    owner.kind == expected_kind;
-            });
-        if (found == owners.end() || !FiniteWarningOwner(*found, current_tick)) continue;
+        const PersistentVfxVisual *found{};
+        if (pair_facts) found = pair_facts->Current(event.geometry_owner_id, expected_kind, owners);
+        else
+        {
+            const auto row = std::find_if(owners.begin(), owners.end(),
+                [&](const PersistentVfxVisual &owner) {
+                    return owner.stable_id == event.geometry_owner_id && owner.kind == expected_kind;
+                });
+            if (row != owners.end()) found = &*row;
+        }
+        std::optional<PersistentVfxVisual> sampled_owner;
+        if (interpolation < 1.0f)
+        {
+            const PersistentVfxVisual *prior = pair_facts
+                ? pair_facts->Previous(event.geometry_owner_id, expected_kind, previous) : nullptr;
+            if (!pair_facts)
+            {
+                const auto row = std::find_if(previous.begin(), previous.end(), [&](const auto &owner) {
+                    return owner.stable_id == event.geometry_owner_id && owner.kind == expected_kind;
+                });
+                if (row != previous.end()) prior = &*row;
+            }
+            if (!prior)
+            {
+                event.geometry_start_tick = current_tick;
+                retain(event);
+                continue;
+            }
+            if (!found || prior->status_episode_generation != found->status_episode_generation ||
+                prior->active_tick != found->active_tick || prior->cast_id != found->cast_id ||
+                prior->gap_count != found->gap_count || prior->effect_asset.value != found->effect_asset.value)
+                found = prior;
+            else
+            {
+                sampled_owner = *prior;
+                auto &sample = *sampled_owner;
+                sample.position = {std::lerp(prior->position.x, found->position.x, interpolation),
+                    std::lerp(prior->position.y, found->position.y, interpolation),
+                    std::lerp(prior->position.z, found->position.z, interpolation)};
+                sample.yaw = prior->yaw + std::remainder(found->yaw - prior->yaw,
+                    2.0f * std::numbers::pi_v<float>) * interpolation;
+                sample.radius = std::lerp(prior->radius, found->radius, interpolation);
+                sample.length = std::lerp(prior->length, found->length, interpolation);
+                sample.ring_inner_radius = std::lerp(prior->ring_inner_radius, found->ring_inner_radius, interpolation);
+                sample.ring_outer_radius = std::lerp(prior->ring_outer_radius, found->ring_outer_radius, interpolation);
+                sample.gap_half_angle_degrees = std::lerp(prior->gap_half_angle_degrees, found->gap_half_angle_degrees, interpolation);
+                sample.gap_offset_degrees = prior->gap_offset_degrees +
+                    std::remainder(found->gap_offset_degrees - prior->gap_offset_degrees, 360.0f) * interpolation;
+                sample.cone_half_angle_degrees = std::lerp(prior->cone_half_angle_degrees, found->cone_half_angle_degrees, interpolation);
+                found = &sample;
+            }
+        }
+        if (!found || !FiniteWarningOwner(*found, display_tick)) continue;
         const auto &owner = *found;
-        const float age = static_cast<float>(current_tick - owner.active_tick) /
+        const float age = static_cast<float>(display_tick - owner.active_tick) /
             static_cast<float>(owner.expires - owner.active_tick);
         if (!std::isfinite(age) || age < 0.0f || age >= 1.0f) continue;
         event.world_transform = Transform(owner.position, owner.yaw);
@@ -1660,9 +1756,9 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
             payload.half_angle_degrees = owner.cone_half_angle_degrees;
             payload.lifetime01 = age;
         }
-        refreshed.push_back(std::move(event));
+        retain(event);
     }
-    events = std::move(refreshed);
+    events.resize(retained);
 }
 
 void RebindVfxGroundEventOwners(const VfxProgramView &cooked,

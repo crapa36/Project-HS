@@ -20,7 +20,9 @@ This document describes the module graph enforced by the current build and `Test
               Gameplay
 ```
 
-Runtime composes Core, Jobs, Gameplay, Presentation, and RendererD3D12. Apps are executable entry points and composition targets.
+RenderData's native-free value target also feeds Presentation. Its package codecs
+remain a separate conditional target. Runtime composes Core, Jobs, Gameplay,
+Presentation, and RendererD3D12. Apps are executable entry points and composition targets.
 
 CombatSim consumes Gameplay's scoped public tick view for targeting. Its combat and
 progression loops do not depend on Presentation or construct render snapshots.
@@ -29,14 +31,14 @@ progression loops do not depend on Presentation or construct render snapshots.
 |---|---|---|
 | Core | Foundation types and shared low-level contracts | none |
 | AssetManifest | Selected Generation manifest parsing and product path lookup | Core |
-| RenderData | Versioned CPU render packages and material metadata | Core |
+| RenderData | Native-free render values; separate versioned package/codec target | Core |
 | Jobs | Task-system integration | Core |
 | GameDomain | Stable domain/read-model contracts | Core |
 | GameRules | Rules independent of mutable simulation state | Core, GameDomain |
 | Gameplay | Deterministic mutable simulation | Core, GameDomain, GameRules |
-| Presentation | Domain/read-model projection | Core, GameDomain |
+| Presentation | Domain/read-model projection and concrete snapshot exchange | Core, GameDomain, RenderData values |
 | RendererD3D12 | Concrete Windows/D3D12 backend | Core, RenderData |
-| Runtime | Concrete subsystem composition and orchestration | Core, Jobs, Gameplay, Presentation, AssetManifest, RendererD3D12 |
+| Runtime | Concrete subsystem composition and orchestration | Core, Jobs, Gameplay, Presentation, AssetManifest, RenderData, RendererD3D12 |
 | Apps | Argument handling and entry-point composition | approved public libraries |
 
 ## Forbidden dependencies
@@ -49,6 +51,9 @@ progression loops do not depend on Presentation or construct render snapshots.
 - Presentation must not depend on Jobs, GameRules, Gameplay, RendererD3D12, or Runtime.
 - AssetManifest must not depend on Jobs, game, presentation, RenderData, renderer, or runtime modules.
 - RenderData must not depend on Jobs, game, presentation, renderer, or runtime modules.
+- The unconditional `hs_render_data_values` target depends only on Core. It does
+  not pull package codecs, content tools, DXC or native renderer prerequisites into
+  low-level builds. Presentation links this value target, not `hs_render_data`.
 - RendererD3D12 must not depend on Jobs, game, presentation, or runtime modules.
 - Production modules must not include another module's `Private` headers.
 
@@ -79,6 +84,11 @@ same canonical state hash on demand without enabling automatic capture.
 
 Presentation projects stable GameDomain contracts. It does not execute rules or reach into Gameplay implementation state.
 
+RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotPair,
+VFX frame inputs and RenderFrameInput. Presentation owns RenderSnapshotExchange;
+Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
+so it has no dependency on Presentation's exchange or producer lifecycle.
+
 Presentation prepares an immutable ProcessSceneLayout for the actual launch seed,
 generation and environment geometry. Runtime retains that owner across session
 restarts with the same layout. Render packets share its read-only Core
@@ -94,6 +104,12 @@ Release Runtime binds the content-linker's compiled const tables; developer
 Runtime retains the selected-Generation loaders. Simulation's canonical byte
 writer and C++ emitter share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
+Single-config Release can build with HS_BUILD_CONTENT_TOOLS=OFF using an existing
+Shipping/content.generated.cpp and Content/content.hsp in the build directory.
+This path has no content-producer or Generation-verification dependency. Missing
+files fail configuration; Runtime still verifies that their identities match.
+DXC, ImGui and a loose font binary are not required for this runtime-only build;
+native renderer dependencies and the font license remain required.
 The linker atomically replaces Content/content.hsp before updating its generated
 compile input. These two files are not a transaction: Runtime rejects an interrupted
 pair by matching the compiled 64-byte header and file extent. An already opened
@@ -169,6 +185,30 @@ and format constraints. Character color and normal/roughness products use full
 BC7 mip chains with semantic mip generation at cook time. Runtime consumes the
 prepared subresources directly.
 
+The shipping linker closes renderer bulk inputs from the explicit runtime result
+list, streams payloads into content.hsp, and emits AssetId-sorted const BulkRange
+descriptors. Table indices are deployment-local; stable save/replay IDs are unchanged.
+Range offsets, sizes, formats and digests participate in the deployment identity.
+Core exposes the identity of the opened file without interpreting pack headers.
+Renderer validates its packed directory once and reads individual ranges through
+the retained bounded owner. Texture descriptors supply admitted subresource ranges;
+geometry descriptors supply the seven GPU chunks, submeshes and ground support.
+Material descriptors supply defaults, surface/domain policies and typed program/
+texture references. These tables reuse the original product identities and payload
+bytes. Packed consumers bind those values without repeating the package decoders;
+developer Generation loading keeps its explicit decoding boundary. Character and
+named-animation descriptors retain small skeleton/clip/binding tables and verified
+subranges of the original products. Packed TRS rows occupy 40 bytes; their sampling
+adapter returns Core's padded value only for accessed rows. Monster palette rows
+read directly into the existing upload vector in their cooked transposed order.
+The remaining W01 provenance and deployment cutover is still pending.
+
+Geometry page preparation returns its parsed package view and validated geometry
+together. Startup, streaming and GPU upload reuse that result. Package views borrow
+the read bytes through the final CPU copy; GPU staging retains its copy until the
+existing upload completion. Metadata-backed reads do not recompute payload bounds
+or repeat topology and vertex validation after decoding.
+
 Developer Hero work capture selects five separate diagnostic pixel shaders and
 owns bounded per-slot/per-phase query, counter and coverage storage. Runtime
 writes completed samples through its existing diagnostic output; the normal
@@ -194,6 +234,20 @@ There is no parallel semantic history-resource registry: resources and history
 generation owned by each view are authoritative. Main renders first; auxiliary
 views retain packet order and share canonical scene simulation. Shared descriptor
 banks still require completion before view exchange.
+Runtime supplies a package sample timestamp captured before effect preparation;
+direct renderer callers may omit it to sample at entry. Explicit timestamps are not
+retimed by individual view history; backward samples invalidate motion history.
+Event light, distortion,
+decal and volume lifetimes use fractional display ticks from that timestamp.
+Actual particle world-step scheduling and submission receipts remain tick-based.
+
+Each rendered package evaluates one display sample from the producer's actual
+adjacent tick pair. Transforms, poses and endpoint lifetime transitions share that
+sample across views; package-owned Archer palettes also serve preflight and draws.
+Each view records its successful sample time independently of retired GPU resources.
+Instance history is prepared before submission and accepted after successful graph
+and service submissions, before Present. A later Present failure preserves this
+history; a partial/pre-commit failure does not advance the display-clock record.
 Capture callers use `Capture(request)` with a view ID. Legacy format-specific
 capture helpers are private, so callers cannot bypass submitted-frame ownership
 checks. Shared geometry/visibility diagnostics require a retained submission

@@ -1,5 +1,7 @@
 #include "renderer_impl.hpp"
+#include "renderer_development_catalog.hpp"
 #include "renderer_reconstruction.hpp"
+#include "renderer_packed_assets.hpp"
 #include <new>
 #include <tuple>
 
@@ -55,8 +57,8 @@ Result D3D12Renderer::Impl::PrepareScreenOverlay(const RendererConfig &candidate
 {
     return screen_overlay.Prepare(device.Get(), allocator, capacity, kFrameCount,
         [&](std::string_view name, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct("render/shader/" + std::string(name), path);
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, "render/shader/" + std::string(name), path);
                     !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate_config.screen_overlay_intensity > 0, pipeline_cache, candidate);
@@ -77,6 +79,20 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
                                "Renderer already initialized.");
     }
     StartupCapture startup(impl_->startup_timings, config.capture_timing_stream);
+    if (config.packed_content)
+    {
+        if (auto valid = ValidatePackedRendererAssets(*config.packed_content, config.packed_bulks); !valid) return valid;
+        if (auto valid = ValidatePackedTextureCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedGeometryCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedMaterialCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedCharacterCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedVfxMeshCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedRevisionCatalog(config); !valid) return valid;
+    }
+    else if (!config.packed_bulks.empty() || !config.packed_textures.empty() || !config.packed_geometry.empty() ||
+        !config.packed_materials.empty() || !config.packed_characters.empty() || !config.packed_animations.empty() ||
+        config.packed_vfx_mesh_atlas || !config.packed_source_revisions.empty() || !config.packed_revision_bulks.empty())
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererPack", "Catalog requires its opened pack owner.");
     if (!config.window)
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
@@ -86,6 +102,22 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->auto_fg_cadence_sample_id = 0;
     if (auto loaded = MeasureStartupStep(RendererStartupStep::QualityProfiles, [&] { return impl_->LoadQualityProfiles(config); }); !loaded) return loaded;
     RendererConfig native_config = config;
+    if (!native_config.packed_content)
+    {
+        try
+        {
+            native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
+            native_config.development_catalog->Bind(native_config);
+        }
+        catch (const std::exception &error)
+        {
+            return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
+        }
+        if (auto valid = ValidatePackedTextureCatalog(native_config); !valid) return valid;
+        if (auto valid = ValidatePackedGeometryCatalog(native_config); !valid) return valid;
+        if (auto valid = ValidatePackedMaterialCatalog(native_config); !valid) return valid;
+        if (auto valid = ValidatePackedCharacterCatalog(native_config); !valid) return valid;
+    }
     if (config.requested_graphics)
     {
         if (!ValidateGraphicsSettings(*config.requested_graphics).empty())
@@ -124,6 +156,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     }
     impl_->resource_generation_id = native_config.content_generation_id;
     impl_->resident_generation_lease = native_config.content_generation_lease;
+    impl_->resident_development_catalog = native_config.development_catalog;
     if (auto result = MeasureStartupStep(RendererStartupStep::MaterialSurfaceProfile, [&] { return impl_->LoadMaterialSurfaceProfile(impl_->config); }); !result) return result;
     if (auto result = MeasureStartupStep(RendererStartupStep::AdaptiveMaterialPolicies, [&] { return impl_->BuildAdaptiveMaterialPolicies(impl_->adaptive_material_policies); }); !result) return result;
     for (auto &pool : impl_->transient_pools)
@@ -158,10 +191,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         return result;
     }
     if (auto result = MeasureStartupStep(RendererStartupStep::EnvironmentTextures, [&] { return impl_->CreateEnvironmentTextures(); }); !result)
-    {
-        return result;
-    }
-    if (auto result = MeasureStartupStep(RendererStartupStep::EnvironmentBrdfLut, [&] { return impl_->CreateEnvironmentBrdfLut(impl_->config, impl_->environment_brdf_lut); }); !result)
     {
         return result;
     }
@@ -282,11 +311,21 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    const auto imgui_font_path =
-        (CurrentExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf").string();
-    ImGui::GetIO().Fonts->AddFontFromFileTTF(
-        imgui_font_path.c_str(), 16.0f, nullptr,
-        ImGui::GetIO().Fonts->GetGlyphRangesKorean());
+    if (config.font_bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    {
+        ImGui::DestroyContext();
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_devtools", "Font exceeds Dear ImGui byte limit.");
+    }
+    auto *font_data = ImGui::MemAlloc(config.font_bytes.size());
+    if (!font_data)
+    {
+        ImGui::DestroyContext();
+        return Result::Failure(ErrorCode::InvalidState, "hs_devtools", "Cannot allocate Dear ImGui font data.");
+    }
+    std::memcpy(font_data, config.font_bytes.data(), config.font_bytes.size());
+    // The atlas owns its copy; caller font storage may expire after initialization.
+    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font_data, static_cast<int>(config.font_bytes.size()),
+        16.0f, nullptr, ImGui::GetIO().Fonts->GetGlyphRangesKorean());
     ImGui::StyleColorsDark();
     if (!ImGui_ImplWin32_Init(static_cast<HWND>(config.window)))
     {
@@ -464,8 +503,12 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     // DXGI requires all direct back-buffer references to be released before
     // ResizeBuffers. Keep every other active resource until the new buffers
     // have been acquired; a failed ResizeBuffers leaves those resources valid.
-    for (auto &back_buffer : impl_->back_buffers)
-        back_buffer.Reset();
+    for (std::size_t index = 0; index < impl_->back_buffers.size(); ++index)
+    {
+        impl_->back_buffers[index].Reset();
+        impl_->back_buffer_contracts[index] = {};
+        impl_->back_buffer_contract_devices[index] = nullptr;
+    }
 
     const auto write_back_buffer_rtvs = [&] {
         auto handle = impl_->rtv_heap->GetCPUDescriptorHandleForHeapStart();
@@ -1138,6 +1181,12 @@ std::vector<RendererCharacterAnimationClip> D3D12Renderer::GetCharacterAnimation
 {
     std::vector<RendererCharacterAnimationClip> clips;
     if (!impl_) return clips;
+    if (impl_->archer_compiled_animation)
+    {
+        for (const auto &clip : impl_->archer_compiled_animation->clips)
+            clips.push_back({clip.id, std::string(clip.name), clip.duration_seconds, clip.frame_count, clip.looping});
+        return clips;
+    }
     for (const auto &clip : impl_->archer_named_animations.clips)
         clips.push_back({clip.id, clip.name, clip.duration_seconds, clip.frame_count, clip.looping});
     return clips;
@@ -1279,6 +1328,11 @@ Result D3D12Renderer::Shutdown()
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     impl_->volumetric_media.clear();
     impl_->archer_named_animations = {};
+    impl_->archer_compiled_animation = nullptr;
+    impl_->archer_packed_transforms = {}; impl_->archer_named_packed_transforms = {};
+    impl_->archer_clips = {}; impl_->archer_parents = {}; impl_->archer_inverse_bind_matrices = {};
+    impl_->archer_transforms = {}; impl_->archer_upper_body_weights = {}; impl_->archer_material_bindings = {};
+    impl_->archer_owned_character = {};
     if (auto cleared = impl_->local_probes.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     if (auto cleared = impl_->virtual_shadows.Commit(VirtualShadowCandidate{},
@@ -1407,6 +1461,8 @@ Result D3D12Renderer::Shutdown()
     impl_->vfx_distortion_pipeline.Reset();
     for (auto &asset : impl_->monster_assets)
         asset.Reset();
+    for(auto &asset:impl_->monster_reduced_geometry)
+        for(auto &page:asset) page.Reset();
     impl_->monster_skin_matrices.Reset();
     impl_->archer_diffuse.Reset();
     impl_->archer_normal.Reset();

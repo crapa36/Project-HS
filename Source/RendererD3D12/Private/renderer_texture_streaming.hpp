@@ -3,6 +3,7 @@
 #include "renderer_asset_io.hpp"
 #include "d3d12_resources.hpp"
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
 
 #include <filesystem>
 #include <cstdint>
@@ -25,15 +26,17 @@ struct TextureStreamingCapabilities
 struct TextureStreamRegistration
 {
     std::string generation, logical_id;
-    std::filesystem::path path;
+    RendererAssetSource source;
     std::shared_ptr<const void> generation_lease;
     render_data::TextureDescription description;
+    render_data::TextureHandle compiled_texture;
     Microsoft::WRL::ComPtr<ID3D12Resource> fallback;
     std::uint32_t fallback_first_mip{};
     std::uint64_t fallback_allocation_bytes{};
     ResidencyTicket fallback_residency;
     Access fallback_graph_access{Access::Undefined};
     bool pinned{};
+    NativeResourceContract fallback_contract{};
 };
 struct TextureStreamView
 {
@@ -49,6 +52,23 @@ struct TextureStreamingGraphBinding
 {
     TextureStreamId texture;
     ResourceVersion sampled;
+};
+struct TextureStreamingLayout
+{
+    struct Entry
+    {
+        TextureHandle sampled{}, candidate{};
+        ResourceVersion sampled_version{};
+        render_data::TextureDescription description{};
+        std::uint32_t first_mip{}, resident_min_mip{}, target_mip{};
+        std::uint32_t map_count{}, unmap_count{}, pass_index{}, pass_id{};
+        std::vector<std::uint32_t> mapped_mips, unmapped_mips;
+        Access access{Access::Undefined};
+        bool pending{}, separate_target{}, reserved{}, copy_upload{};
+    };
+    std::vector<Entry> entries;
+    std::uint32_t first_pass_id{};
+    QueueHint queue{QueueHint::Copy};
 };
 // uint4 GPU ABI, indexed by the actual material texture binding slot.
 struct TextureMipMetadata
@@ -80,7 +100,7 @@ class RendererTextureStreaming
     RendererTextureStreaming &operator=(const RendererTextureStreaming &) = delete;
     [[nodiscard]] Result Initialize(ID3D12Device *, D3D12MA::Allocator *,
         GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities &,
-        std::uint32_t frame_count);
+        std::uint32_t frame_count, std::span<const render_data::TextureDescriptor> texture_catalog);
     [[nodiscard]] Result Register(TextureStreamRegistration, ResidencyManager &, TextureStreamId &);
     [[nodiscard]] Result ValidateConfiguration(GraphicsQuality, std::uint32_t budget_mib) const;
     [[nodiscard]] Result Configure(GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib);
@@ -91,7 +111,13 @@ class RendererTextureStreaming
     // Owns map/unmap, copy commands, and their retained backing. The graph
     // bridges completion onto its existing owned Copy queue timeline.
     [[nodiscard]] Result AddPendingPasses(RenderGraphBuilder &, ExternalQueueBinding,
-        std::uint32_t first_pass_id, std::vector<TextureStreamingGraphBinding> &);
+        std::uint32_t first_pass_id, std::vector<TextureStreamingGraphBinding> &,
+        TextureStreamingLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesLayout(std::uint32_t first_pass_id,
+        const TextureStreamingLayout &) const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, ExternalQueueBinding,
+        std::uint32_t first_pass_id, const TextureStreamingLayout &,
+        std::vector<TextureStreamingGraphBinding> &);
     void MarkSubmitted(const CompletionSet &, StreamingManager &) noexcept;
     [[nodiscard]] bool HasStartedWork() const noexcept;
     [[nodiscard]] TextureStreamView View(TextureStreamId) const noexcept;
@@ -106,6 +132,9 @@ class RendererTextureStreaming
     [[nodiscard]] TextureStreamingProductStatus ProductStatus(std::string_view logical_id,
         const StreamingManager &, const CompletionSet &) const noexcept;
   private:
+    [[nodiscard]] Result AddPendingPassesImpl(RenderGraphBuilder &, ExternalQueueBinding,
+        std::uint32_t, std::vector<TextureStreamingGraphBinding> &,
+        TextureStreamingLayout *, const TextureStreamingLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

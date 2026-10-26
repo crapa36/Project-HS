@@ -49,7 +49,7 @@ double Coord(V a,int k){return k==0?a.x:(k==1?a.y:a.z);}
 V Min(V a,V b){return {std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)};}
 V Max(V a,V b){return {std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};}
 void Require(bool condition,const char* why){if(!condition)throw std::runtime_error(why);}
-struct T { std::array<V,3> p; unsigned material{}; };
+struct T { std::array<V,3> p; unsigned material{}, source_triangle{}; };
 struct Box {
     V lo{INFINITY,INFINITY,INFINITY},hi{-INFINITY,-INFINITY,-INFINITY};
     void Add(V v){lo=Min(lo,v);hi=Max(hi,v);}
@@ -222,7 +222,7 @@ std::vector<T> Surface(std::span<const render_data::ExpandedVertex> vertices,
     std::vector<T> out;out.reserve(vertices.size()/3);
     for(std::size_t i=0;i<vertices.size();i+=3){
         const auto source_material=vertices[i].material_index;
-        T t;
+        T t; t.source_triangle=static_cast<unsigned>(i/3);
         for(std::size_t k=0;k<3;++k){Require(vertices[i+k].material_index==source_material,"mixed error surface material");const auto p=vertices[i+k].position;Require(std::isfinite(p[0])&&std::isfinite(p[1])&&std::isfinite(p[2]),"nonfinite error surface");t.p[k]={p[0],p[1],p[2]};}
         if(material_mapping.empty())t.material=source_material;
         else{Require(source_material<material_mapping.size(),"error surface material mapping index out of range");t.material=material_mapping[source_material];}
@@ -230,6 +230,87 @@ std::vector<T> Surface(std::span<const render_data::ExpandedVertex> vertices,
     }return out;
 }
 } // namespace
+std::vector<SurfaceWitness> BuildSurfaceWitnesses(
+    std::span<const render_data::ExpandedVertex> source,
+    std::span<const render_data::ExpandedVertex> target)
+{
+    const auto a=Surface(source,{}),b=Surface(target,{});
+    Box extent;for(const auto &triangle:b) for(const auto point:triangle.p) extent.Add(point);
+    const double scale=std::max(1e-6,std::sqrt(Norm2(extent.hi-extent.lo)));
+    std::map<unsigned,std::vector<T>> groups;
+    for(const auto &triangle:b) groups[triangle.material].push_back(triangle);
+    std::map<unsigned,Bvh> surfaces;
+    for(auto &[material,triangles]:groups) surfaces.emplace(material,Bvh(std::move(triangles)));
+    const auto barycentric=[](V p,const T &triangle) {
+        const V x=triangle.p[0],y=triangle.p[1],z=triangle.p[2];
+        const V ab=y-x,ac=z-x,ap=p-x;
+        const double d1=Dot(ab,ap),d2=Dot(ac,ap);
+        if(d1<=0 && d2<=0) return std::array<double,3>{1,0,0};
+        const V bp=p-y; const double d3=Dot(ab,bp),d4=Dot(ac,bp);
+        if(d3>=0 && d4<=d3) return std::array<double,3>{0,1,0};
+        const double vc=d1*d4-d3*d2;
+        if(vc<=0 && d1>=0 && d3<=0 && d1!=d3) { const double v=d1/(d1-d3); return std::array<double,3>{1-v,v,0}; }
+        const V cp=p-z; const double d5=Dot(ab,cp),d6=Dot(ac,cp);
+        if(d6>=0 && d5<=d6) return std::array<double,3>{0,0,1};
+        const double vb=d5*d2-d1*d6;
+        if(vb<=0 && d2>=0 && d6<=0 && d2!=d6) { const double w=d2/(d2-d6); return std::array<double,3>{1-w,0,w}; }
+        const double va=d3*d6-d5*d4;
+        if(va<=0 && d4-d3>=0 && d5-d6>=0 && d4-d3+d5-d6!=0) { const double w=(d4-d3)/(d4-d3+d5-d6); return std::array<double,3>{0,1-w,w}; }
+        const double denom=va+vb+vc;
+        if(denom>0) { const double v=vb/denom,w=vc/denom; return std::array<double,3>{1-v-w,v,w}; }
+        // Degenerate target faces use the closest point on one of their edges.
+        std::array<double,3> best{1,0,0}; double distance=INFINITY;
+        for(unsigned edge=0;edge<3;++edge) {
+            const unsigned next=(edge+1)%3; const V delta=triangle.p[next]-triangle.p[edge];
+            const double denominator=Norm2(delta);
+            const double t=denominator>0?std::clamp(Dot(p-triangle.p[edge],delta)/denominator,0.0,1.0):0.0;
+            const V point=triangle.p[edge]+delta*t; const double candidate=Norm2(p-point);
+            if(candidate<distance) { distance=candidate; best={0,0,0}; best[edge]=1-t;best[next]=t; }
+        }
+        return best;
+    };
+    std::vector<SurfaceWitness> result;result.reserve(a.size());
+    for(const auto &triangle:a) {
+        const auto surface=surfaces.find(triangle.material);
+        Require(surface!=surfaces.end(),"skinned LOD removes a material surface");
+        std::array<const T*,4> candidates{};
+        candidates[0]=surface->second.Closest((triangle.p[0]+triangle.p[1]+triangle.p[2])*(1.0/3)).triangle;
+        for(unsigned corner=0;corner<3;++corner) candidates[corner+1]=surface->second.Closest(triangle.p[corner]).triangle;
+        double best=INFINITY; SurfaceWitness witness{};
+        for(const T *candidate:candidates) {
+            SurfaceWitness choice;choice.target_triangle=candidate->source_triangle;
+            double error=0;
+            for(unsigned corner=0;corner<3;++corner) {
+                choice.target_barycentric[corner]=barycentric(triangle.p[corner],*candidate);
+                auto &q=choice.target_barycentric[corner];
+                for(auto &value:q) value=std::clamp(value,0.0,1.0);
+                const double sum=q[0]+q[1]+q[2];
+                Require(sum>0 && std::isfinite(sum),"invalid surface witness barycentric");
+                for(auto &value:q) value/=sum;
+                V point{}; for(unsigned lane=0;lane<3;++lane) point=point+candidate->p[lane]*choice.target_barycentric[corner][lane];
+                const auto &src=source[triangle.source_triangle*3+corner];
+                const auto *dst=target.data()+candidate->source_triangle*3;
+                double uv{},normal{},tangent{};
+                for(unsigned axis=0;axis<2;++axis) {
+                    double value{};for(unsigned lane=0;lane<3;++lane) value+=q[lane]*dst[lane].uv[axis];
+                    const double delta=double(src.uv[axis])-value;uv+=delta*delta;
+                }
+                for(unsigned axis=0;axis<4;++axis) {
+                    double n{},t{};for(unsigned lane=0;lane<3;++lane) {
+                        if(axis<3) n+=q[lane]*dst[lane].normal[axis];
+                        t+=q[lane]*dst[lane].tangent[axis];}
+                    if(axis<3) {const double delta=double(src.normal[axis])-n;normal+=delta*delta;}
+                    const double delta=double(src.tangent[axis])-t;tangent+=delta*delta;
+                }
+                error=std::max(error,Norm2(triangle.p[corner]-point)+
+                    scale*scale*(uv+0.05*normal+0.02*tangent));
+            }
+            if(error<best) { best=error;witness=choice; }
+        }
+        result.push_back(witness);
+    }
+    return result;
+}
 GeometryErrorBounds MeasureGeometryError(std::span<const render_data::ExpandedVertex> fine,std::span<const render_data::ExpandedVertex> coarse,std::span<const std::uint16_t> material_mapping,std::uint64_t refinement_budget,GeometryErrorChecks checks) {
     const auto a=Surface(fine,material_mapping),b=Surface(coarse,material_mapping);Box box;for(const auto&t:a)for(auto p:t.p)box.Add(p);const double tolerance=std::sqrt(Norm2(box.hi-box.lo))*0.005;
     const bool qualified=checks.mode==GeometryErrorCheckMode::Normal && Qualified(checks.qualification,a,b);

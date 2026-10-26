@@ -98,22 +98,32 @@ void VfxLowHealthPulseState::Advance(std::uint64_t stable,std::uint64_t owner,Ti
 {
     if(stable_id!=stable||owner_id!=owner||tick<last_tick)
     {
-        Clear();stable_id=stable;owner_id=owner;last_tick=entered_tick=tick;
+        Clear();stable_id=stable;owner_id=owner;last_tick=entered_tick=previous_tick=tick;
+    }
+    if(tick>last_tick)
+    {
+        previous_tick=last_tick;previous_phase=phase;previous_frequency=frequency;
     }
     // A newly observed HP value changes future speed, never the accrued phase.
     phase=std::fmod(phase+double(tick-last_tick)*double(frequency)/60.0,1.0);
     last_tick=tick;
     frequency=2.0f-ratio/0.35f;
 }
-float VfxLowHealthPulseState::EntryFade() const noexcept
+double VfxLowHealthPulseState::PhaseAt(double display_tick) const noexcept
+{
+    if(display_tick>=last_tick)return phase;
+    const double elapsed=std::max(0.0,display_tick-static_cast<double>(previous_tick));
+    return std::fmod(previous_phase+elapsed*previous_frequency/60.0,1.0);
+}
+float VfxLowHealthPulseState::EntryFade(double display_tick) const noexcept
 {
     // Nine simulation ticks soften re-entry without delaying the HP snapshot.
-    return std::min(float(last_tick-entered_tick)/9.0f,1.0f);
+    return static_cast<float>(std::clamp((display_tick-static_cast<double>(entered_tick))/9.0,0.0,1.0));
 }
 bool IsVfxTypedScreenEffect(const VfxProgramView &p,VfxEffectHandle handle) noexcept
 { const auto id=EffectId(p,handle);return id==kHit||id==kHealth; }
 Result BuildVfxTypedScreenCommands(const VfxProgramView &p,std::span<const VfxEventInput> events,
-    std::span<const VfxPersistentInput> persistent,Tick tick,VfxQuality admission,
+    std::span<const VfxPersistentInput> persistent,Tick observation_tick,double display_tick,VfxQuality admission,
     VfxLowHealthPulseState &pulse,std::vector<VfxScreenInput> &output)
 {
     output.clear();std::vector<VfxScreenInput> commands;
@@ -126,8 +136,8 @@ Result BuildVfxTypedScreenCommands(const VfxProgramView &p,std::span<const VfxEv
         if(!c||!v.sequence||e.input_mode!=0||e.timing_kind!=0||e.payload_kind!=Hash32("PresentationContextPayload")||
            !std::isfinite(e.seconds)||e.seconds<=0||!std::isfinite(c->direction.x)||!std::isfinite(c->direction.y)||
            !std::isfinite(c->direction.z))return Invalid("Screen hit requires an actual timed damage context.");
-        if(tick<v.event_tick)continue;
-        const float elapsed=float(tick-v.event_tick)/60.0f;if(elapsed>=e.seconds)continue;
+        if(display_tick<v.event_tick)continue;
+        const float elapsed=float(display_tick-v.event_tick)/60.0f;if(elapsed>=e.seconds)continue;
         if(auto r=Append(p,e,*c,elapsed,elapsed/e.seconds,false,admission,v.sequence,0,commands);!r)return r;
     }
     bool health_present=false;
@@ -140,8 +150,8 @@ Result BuildVfxTypedScreenCommands(const VfxProgramView &p,std::span<const VfxEv
            !std::isfinite(c->ratio01)||c->ratio01<0||c->ratio01>0.35f||
            !std::isfinite(v.elapsed_seconds)||v.elapsed_seconds<0)return Invalid("Screen health requires its live low-health owner and tick clock.");
         health_present=true;
-        next_pulse.Advance(v.stable_id,c->owner_id,tick,c->ratio01);
-        if(auto r=Append(p,e,*c,float(next_pulse.phase),v.normalized_age,true,admission,0,v.stable_id,commands,next_pulse.EntryFade());!r)return r;
+        next_pulse.Advance(v.stable_id,c->owner_id,observation_tick,c->ratio01);
+        if(auto r=Append(p,e,*c,float(next_pulse.PhaseAt(display_tick)),v.normalized_age,true,admission,0,v.stable_id,commands,next_pulse.EntryFade(display_tick));!r)return r;
     }
     if(!health_present)next_pulse.Clear();
     pulse=next_pulse;

@@ -1,28 +1,36 @@
 #pragma once
 
-#include <hs/core/render_view_input.hpp>
-#include <hs/core/frame_identity.hpp>
+#include <hs/render_data/render_view_input.hpp>
+#include <hs/render_data/frame_identity.hpp>
 #include <hs/core/graphics_settings_request.hpp>
 #include <hs/renderer/capture_request.hpp>
 #include <hs/renderer/hero_work.hpp>
-#include <hs/renderer/vfx_light_input.hpp>
-#include <hs/renderer/vfx_distortion_input.hpp>
-#include <hs/renderer/vfx_decal_input.hpp>
-#include <hs/renderer/vfx_owned_mesh.hpp>
-#include <hs/renderer/vfx_fresnel_input.hpp>
-#include <hs/renderer/vfx_ribbon_input.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_light_input.hpp>
+#include <hs/render_data/vfx_distortion_input.hpp>
+#include <hs/render_data/vfx_decal_input.hpp>
+#include <hs/render_data/vfx_owned_mesh.hpp>
+#include <hs/render_data/vfx_fresnel_input.hpp>
+#include <hs/render_data/vfx_ribbon_input.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <hs/core/result.hpp>
-#include <hs/core/snapshot_exchange.hpp>
+#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/devtools_frame_data.hpp>
 #include <hs/core/types.hpp>
-#include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_volume_input.hpp>
-#include <hs/renderer/vfx_screen_input.hpp>
-#include <hs/renderer/vfx_entity_surface_input.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/render_bulk.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
+#include <hs/render_data/geometry_descriptor.hpp>
+#include <hs/render_data/material_descriptor.hpp>
+#include <hs/render_data/character_descriptor.hpp>
+#include <hs/render_data/render_revision.hpp>
+#include <hs/render_data/vfx_mesh_descriptor.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_volume_input.hpp>
+#include <hs/render_data/vfx_screen_input.hpp>
+#include <hs/render_data/vfx_entity_surface_input.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <cstdint>
 #include <array>
@@ -38,6 +46,8 @@
 
 namespace hs
 {
+class ShippedContentOwner;
+class RendererDevelopmentCatalog;
 namespace render_data { struct StaticShadowArchiveDescription; }
 struct RenderFrameInput;
 struct ViewId;
@@ -60,18 +70,8 @@ struct RendererDisplayOutput
 // 16 hex digits>:<UTF-8 DXGI DeviceName>. No OS display/HDR mode is changed.
 [[nodiscard]] Result EnumerateRendererDisplays(std::vector<RendererDisplayOutput> &outputs);
 
-struct VfxGroundSpawnInput
-{
-    ParticleSpawnCommand command;
-    bool additive{};
-    std::uint64_t stable_id{};
-    VfxEffectHandle effect_handle{kInvalidVfxEffectHandle};
-    std::uint8_t source_visual_kind{0xff};
-    VfxGroundMotion motion;
-    std::uint32_t gradient_row{};
-    float hdr{};
-    VfxGroundGeometry geometry;
-};
+
+
 
 // Runtime owns worker scheduling. Each submission group is joined before graph
 // submission or return, so frame captures and snapshot leases stay valid.
@@ -396,6 +396,18 @@ struct RendererConfig
     std::string scene_hlod_product_id{"render/hlod/arena.shl1"};
     std::unordered_map<std::string, std::filesystem::path> product_paths;
     std::unordered_map<std::string, std::string> product_digests;
+    std::shared_ptr<const ShippedContentOwner> packed_content;
+    std::shared_ptr<const RendererDevelopmentCatalog> development_catalog;
+    std::span<const render_data::RendererBulkDescriptor> packed_bulks;
+    std::span<const render_data::TextureDescriptor> packed_textures;
+    std::span<const render_data::GeometryDescriptor> packed_geometry;
+    std::span<const render_data::MaterialDescriptor> packed_materials;
+    std::span<const render_data::CharacterDescriptor> packed_characters;
+    std::span<const render_data::AnimationDescriptor> packed_animations;
+    const render_data::VfxMeshAtlasDescriptor *packed_vfx_mesh_atlas{};
+    std::span<const render_data::RendererSourceRevision> packed_source_revisions;
+    std::span<const render_data::RendererRevisionBulk> packed_revision_bulks;
+    bool selected_texture_feedback{};
     RenderTaskExecutor task_executor;
 
     [[nodiscard]] Result ResolveProduct(std::string_view logical_id,
@@ -425,6 +437,7 @@ struct RendererCpuTimings
     std::uint64_t wait_us{}, streaming_us{}, scene_prepare_us{}, ui_us{};
     std::uint64_t constants_upload_us{}, graph_build_us{}, graph_prepare_us{}, descriptors_us{};
     std::uint64_t graph_plan_us{}, graph_record_us{}, graph_submit_us{};
+    bool graph_frontend_reused{}; // RestorePlan selected before producer declarations.
     std::uint64_t post_submit_us{}, present_us{}, diagnostics_us{}, wrapper_us{};
     // Capture-only QPC interval around frame-slot completion admission.
     std::uint64_t frame_slot_wait_begin_qpc{}, frame_slot_wait_end_qpc{};
@@ -484,22 +497,14 @@ struct RendererFrameResult
     std::uint64_t vfx_world_session_id{};
     // Main Present accepted this UI packet; this is not a display scanout timestamp.
     std::uint64_t presented_ui_packet_generation{};
+    // At least one view accepted its graph/service submissions, even if Present failed.
+    bool render_history_committed{};
 };
 
 struct RendererOptions;
 
-struct DevToolsFrameData
-{
-    std::uint32_t worker_count{};
-    std::uint32_t input_queue_depth{};
-    std::uint32_t presentation_queue_depth{};
-    std::uint32_t particle_queue_depth{};
-    std::uint32_t resize_queue_depth{};
-    std::uint32_t debug_queue_depth{};
-    std::uint64_t dropped_input{};
-    std::uint64_t dropped_presentation{};
-    std::uint64_t dropped_particles{};
-};
+
+
 
 struct NativeWindowMessage
 {
@@ -551,10 +556,24 @@ struct GpuPassTimings
     GpuFrameTimingKind metric_kind{GpuFrameTimingKind::Unavailable};
     std::uint64_t metric_generation{}, resize_epoch{};
     ViewExtent render_active;
-    bool main_view{}, frame_generation_enabled{};
+    bool main_view{}, frame_generation_enabled{}, generated_frame{};
     // A source-output endpoint, not a cadence or a measured dependency span.
     std::uint64_t output_ready_ticks{}, output_ready_frequency{}, output_ready_qpc{}, output_ready_qpc_frequency{};
     bool output_ready_valid{}, output_ready_clock_calibrated{};
+    // W12 qualification is supplied only by completed native producer evidence.
+    // A single output-ready endpoint leaves all of these validity flags false.
+    std::uint64_t source_frame_id{}, source_frame_sequence{};
+    std::uint64_t quality_generation{}, provider_generation{};
+    // Direct queue calibration anchors bracketing the source-ready timestamp.
+    std::uint64_t clock_gpu_before{}, clock_cpu_before{}, clock_gpu_after{}, clock_cpu_after{};
+    std::uint64_t clock_gpu_frequency{}, clock_cpu_frequency{};
+    bool clock_anchors_valid{};
+    double source_ready_cadence_ms{}, output_dependency_span_ms{};
+    bool calibration_valid{}, calibration_drift{};
+    bool cadence_valid{}, span_valid{}, gpu_backlog_proven{};
+    bool cadence_gap{}, closure_span_gap{};
+    bool cadence_exclusions_valid{}, cpu_supply_gap{}, pacing_gap{};
+    bool closure_clock_valid{}, closure_gap_checked{};
 };
 
 struct RendererQueueStats
@@ -793,7 +812,7 @@ class D3D12Renderer
     [[nodiscard]] Result CaptureVisibilityDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result ApplyOptions(const RendererOptions &options);
     [[nodiscard]] Result InitializeGraphicsSettings(const GraphicsSettings &);
-    [[nodiscard]] Result Render(const RenderSnapshotExchange::ReadPair &snapshots,
+    [[nodiscard]] Result Render(const RenderSnapshotPair &snapshots,
                                 std::span<const PresentationEvent> events,
                                 std::span<const ParticleSpawnCommand> particle_spawns,
                                 std::span<const VfxLineSpawnCommand> effect_lines,

@@ -1,5 +1,7 @@
 #include "simulation_world.hpp"
 
+#include <cassert>
+
 namespace hs
 {
 
@@ -30,6 +32,7 @@ GameSimulation::SimulationWorld::SimulationWorld()
     combat_state->cast_hit_index.reserve(1'024);
     combat_state->area_hit_index.reserve(1'024);
     combat_state->cast_runtimes.reserve(512);
+    combat_state->cast_runtime_index.reserve(512);
     telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
@@ -360,6 +363,7 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->cast_hit_index.clear();
     combat_state->area_hit_index.clear();
     combat_state->cast_runtimes.clear();
+    combat_state->cast_runtime_index.clear();
     combat_state->domain_signals.clear();
     combat_state->visual_links.clear();
     combat_state->visual_links_pruned_tick.reset();
@@ -639,11 +643,19 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
     live_casts.Prepare(combat_state->cast_runtimes, next_cast_id);
     if (!live_casts.entries.empty())
         for (const auto &projectile : actors->projectiles) live_casts.Observe(projectile.combat.cast_id);
-    std::erase_if(combat_state->cast_runtimes, [this, &live_casts](const CastRuntime &runtime) {
-        if (!IsOldCast(runtime.cast_id, next_cast_id)) return false;
-        if (runtime.cooldown_ticks_saved == 0) return true;
-        return !live_casts.Contains(runtime.cast_id);
-    });
+    const auto removed_casts = std::erase_if(
+        combat_state->cast_runtimes, [this, &live_casts](const CastRuntime &runtime) {
+            if (!IsOldCast(runtime.cast_id, next_cast_id)) return false;
+            if (runtime.cooldown_ticks_saved == 0) return true;
+            return !live_casts.Contains(runtime.cast_id);
+        });
+    if (removed_casts != 0)
+    {
+        combat_state->cast_runtime_index.clear();
+        for (std::size_t i = 0; i < combat_state->cast_runtimes.size(); ++i)
+            combat_state->cast_runtime_index.emplace(combat_state->cast_runtimes[i].cast_id, i);
+        assert(combat_state->cast_runtime_index.size() == combat_state->cast_runtimes.size());
+    }
     auto &live_areas = combat_state->live_area_ids;
     live_areas.clear();
     if (!combat_state->area_hits.empty())

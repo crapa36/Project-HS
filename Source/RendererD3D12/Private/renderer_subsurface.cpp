@@ -254,12 +254,42 @@ Result SubsurfaceSystem::Commit(SubsurfaceCandidate &&candidate, const Completio
 }
 
 Result SubsurfaceSystem::Register(RenderGraphBuilder &graph, const SubsurfaceInputs &inputs,
-    SubsurfaceConstants constants, SubsurfaceOutputs &outputs)
+    SubsurfaceConstants constants, SubsurfaceOutputs &outputs, SubsurfaceLayout *layout)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
+}
+
+bool SubsurfaceSystem::MatchesLayout(const SubsurfaceInputs &inputs, const SubsurfaceLayout &layout) const noexcept
+{
+    const auto &storage = impl_->targets;
+    if (!layout.valid || !storage || layout.enabled != storage->enabled) return false;
+    return !storage->enabled || (layout.capacity.width==storage->capacity.width&&layout.capacity.height==storage->capacity.height&&
+        layout.guides == std::array{inputs.depth.version, inputs.normal.version,
+            inputs.metadata.version, inputs.material_parameters.version, inputs.diffuse.version, inputs.hdr.version});
+}
+
+Result SubsurfaceSystem::BindRetained(RenderGraphBuilder &graph, const SubsurfaceInputs &inputs,
+    SubsurfaceConstants constants, const SubsurfaceLayout &layout, SubsurfaceOutputs &outputs)
+{
+    return RegisterFrame(graph, inputs, constants, outputs, nullptr, &layout);
+}
+
+Result SubsurfaceSystem::RegisterFrame(RenderGraphBuilder &graph, const SubsurfaceInputs &inputs,
+    SubsurfaceConstants constants, SubsurfaceOutputs &outputs,
+    SubsurfaceLayout *capture, const SubsurfaceLayout *retained)
 {
     outputs = {};
+    if (capture) *capture = {};
     auto storage = impl_->targets;
     if (!storage) return SssFailure(ErrorCode::InvalidState, "Prepare and commit subsurface targets before registration.");
-    if (!storage->enabled) return Result::Success();
+    if (retained && !MatchesLayout(inputs, *retained))
+        return SssFailure(ErrorCode::InvalidState, "Subsurface retained topology has changed.");
+    if (capture) { capture->enabled = storage->enabled; capture->capacity = storage->capacity; }
+    if (!storage->enabled)
+    {
+        if (capture) capture->valid = true;
+        return Result::Success();
+    }
     if (impl_->pending.graph || !storage->usable)
         return SssFailure(ErrorCode::InvalidState, "Subsurface submission is pending or its previous graph execution failed.");
     const auto active = inputs.render_active;
@@ -272,6 +302,9 @@ Result SubsurfaceSystem::Register(RenderGraphBuilder &graph, const SubsurfaceInp
         !FitsGuide(inputs.diffuse, active, kColorFormat) || !FitsGuide(inputs.hdr, active, kColorFormat) ||
         !FitsParameters(inputs.material_parameters))
         return SssFailure(ErrorCode::InvalidArgument, "Subsurface guide resource, version, format or active extent is invalid.");
+    const std::array guides{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
+        inputs.material_parameters.version, inputs.diffuse.version, inputs.hdr.version};
+    if (capture) capture->guides = guides;
     for (const auto &row : constants.inverse_view_projection.m)
         for (const auto value : row)
             if (!std::isfinite(value))
@@ -290,14 +323,27 @@ Result SubsurfaceSystem::Register(RenderGraphBuilder &graph, const SubsurfaceInp
 
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.slot = inputs.frame_slot;
+    std::size_t import_index{};
+    bool bound = true;
+    Result binding_result = Result::Success();
     auto import = [&](AllocationResource &allocation, std::string_view name) {
-        const auto handle = graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue},
-                                               allocation.graph_access, name);
+        if (auto checked = allocation.EnsureNativeContract(storage->device.Get()); !checked)
+        { binding_result = checked; return ResourceVersion{}; }
+        const auto handle = retained ? retained->textures[import_index] :
+            graph.ImportTexture({allocation.resource.Get(), allocation.graph_completion, allocation.graph_queue, {}, allocation.NativeContract()},
+                allocation.graph_access, name);
+        if (retained)
+            bound &= graph.BindTexture(handle, {allocation.resource.Get(), allocation.graph_completion,
+                allocation.graph_queue, {}, allocation.NativeContract()}, allocation.graph_access);
+        if (capture) capture->textures[import_index] = handle;
+        ++import_index;
         pending.imports.push_back({&allocation, handle});
         return graph.Version(handle);
     };
     auto horizontal = import(storage->horizontal, "Subsurface.HorizontalDiffuse");
     auto corrected = import(storage->corrected, "Subsurface.CorrectedHDR");
+    if (!binding_result) return binding_result;
+    if (!bound) return SssFailure(ErrorCode::InvalidState, "Subsurface retained texture binding failed.");
     const auto parameterAddress = inputs.material_parameters.resource->GetGPUVirtualAddress();
     auto execute = [storage, slot = inputs.frame_slot, active, parameterAddress](std::uint32_t pipeline) {
         return [storage, slot, active, parameterAddress, pipeline](RenderPassContext &context) {
@@ -320,19 +366,38 @@ Result SubsurfaceSystem::Register(RenderGraphBuilder &graph, const SubsurfaceInp
         pass.Read(inputs.material_parameters.version, Access::ComputeRead);
         pass.Read(inputs.diffuse.version, Access::ComputeRead);
     };
-    auto horizontalPass = graph.AddPass(60, "SubsurfaceHorizontal", QueueHint::Direct);
-    readGuides(horizontalPass);
-    horizontal = horizontalPass.Write(horizontal, Access::UnorderedWrite);
+    if (capture) capture->passes[0] = graph.PassCount();
+    auto horizontalBinding = retained ? graph.BindPass(retained->passes[0], 60) :
+        std::optional<PassBuilder>{graph.AddPass(60, "SubsurfaceHorizontal", QueueHint::Direct)};
+    if (!horizontalBinding) return SssFailure(ErrorCode::InvalidState, "Subsurface retained horizontal pass is missing.");
+    auto &horizontalPass = *horizontalBinding;
+    if (retained) horizontal = retained->written[0];
+    else
+    {
+        readGuides(horizontalPass);
+        horizontal = horizontalPass.Write(horizontal, Access::UnorderedWrite);
+    }
+    if (capture) capture->written[0] = horizontal;
     horizontalPass.SetExecute(execute(0));
-    auto verticalPass = graph.AddPass(61, "SubsurfaceVertical", QueueHint::Direct);
-    readGuides(verticalPass);
-    verticalPass.Read(horizontal, Access::ComputeRead);
-    verticalPass.Read(inputs.hdr.version, Access::ComputeRead);
-    corrected = verticalPass.Write(corrected, Access::UnorderedWrite);
+    if (capture) capture->passes[1] = graph.PassCount();
+    auto verticalBinding = retained ? graph.BindPass(retained->passes[1], 61) :
+        std::optional<PassBuilder>{graph.AddPass(61, "SubsurfaceVertical", QueueHint::Direct)};
+    if (!verticalBinding) return SssFailure(ErrorCode::InvalidState, "Subsurface retained vertical pass is missing.");
+    auto &verticalPass = *verticalBinding;
+    if (retained) corrected = retained->written[1];
+    else
+    {
+        readGuides(verticalPass);
+        verticalPass.Read(horizontal, Access::ComputeRead);
+        verticalPass.Read(inputs.hdr.version, Access::ComputeRead);
+        corrected = verticalPass.Write(corrected, Access::UnorderedWrite);
+    }
+    if (capture) capture->written[1] = corrected;
     verticalPass.SetExecute(execute(1));
     outputs.corrected = corrected; outputs.corrected_resource = storage->corrected.resource.Get();
     outputs.corrected_srv = storage->export_descriptors->GetCPUDescriptorHandleForHeapStart();
     impl_->pending = std::move(pending);
+    if (capture) capture->valid = true;
     return Result::Success();
 }
 

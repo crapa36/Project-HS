@@ -27,6 +27,10 @@ struct AllocationResource
     Access graph_access{Access::Undefined};
     QueueHint graph_queue{QueueHint::Direct};
     CompletionSet graph_completion{};
+    NativeResourceContract native_contract{};
+    ID3D12Resource *contract_resource{};
+    D3D12MA::Allocation *contract_allocation{};
+    ID3D12Device *contract_device_input{};
 
     AllocationResource() = default;
     ~AllocationResource() { Reset(); }
@@ -36,7 +40,11 @@ struct AllocationResource
         : resource(std::move(other.resource)),
           allocation(std::exchange(other.allocation, nullptr)),
           graph_access(std::exchange(other.graph_access, Access::Undefined)),
-          graph_queue(other.graph_queue), graph_completion(other.graph_completion)
+          graph_queue(other.graph_queue), graph_completion(other.graph_completion),
+          native_contract(other.native_contract),
+          contract_resource(std::exchange(other.contract_resource, nullptr)),
+          contract_allocation(std::exchange(other.contract_allocation, nullptr)),
+          contract_device_input(std::exchange(other.contract_device_input, nullptr))
     {
     }
     AllocationResource &operator=(AllocationResource &&other) noexcept
@@ -49,6 +57,10 @@ struct AllocationResource
             graph_access = std::exchange(other.graph_access, Access::Undefined);
             graph_queue = other.graph_queue;
             graph_completion = other.graph_completion;
+            native_contract = other.native_contract;
+            contract_resource = std::exchange(other.contract_resource, nullptr);
+            contract_allocation = std::exchange(other.contract_allocation, nullptr);
+            contract_device_input = std::exchange(other.contract_device_input, nullptr);
         }
         return *this;
     }
@@ -58,12 +70,23 @@ struct AllocationResource
         graph_access = Access::Undefined;
         graph_queue = QueueHint::Direct;
         graph_completion = {};
+        native_contract = {};
+        contract_resource = nullptr;
+        contract_allocation = nullptr;
+        contract_device_input = nullptr;
         resource.Reset();
         if (allocation)
         {
             allocation->Release();
             allocation = nullptr;
         }
+    }
+
+    [[nodiscard]] Result EnsureNativeContract(ID3D12Device *device);
+    [[nodiscard]] const NativeResourceContract *NativeContract() const noexcept
+    {
+        return resource && contract_resource == resource.Get() && contract_allocation == allocation
+            ? &native_contract : nullptr;
     }
 };
 
@@ -107,8 +130,20 @@ struct FrameContext
     std::uint32_t submitted_view_id{};
     GpuFrameTimingKind timing_kind{GpuFrameTimingKind::Unavailable};
     std::uint64_t timing_generation{}, timing_resize_epoch{};
+    std::uint64_t timing_source_sequence{}, timing_quality_generation{}, timing_provider_generation{};
     ViewExtent timing_render_active;
     bool timing_main_view{}, timing_frame_generation_enabled{};
+    struct ClockAnchor
+    {
+        std::uint64_t gpu{}, cpu{}, gpu_frequency{}, cpu_frequency{};
+        bool valid{};
+    };
+    std::array<ClockAnchor, 3> timing_clock_before{};
+    std::vector<std::uint32_t> timing_closure_slots;
+    bool timing_closure_imports_ready{};
+    std::uint64_t timing_execute_begin_qpc{}, timing_execute_end_qpc{};
+    CompletionSet timing_prior_output_completion;
+    bool timing_backlog_at_submit{};
     std::uint64_t cpu_qpc_frequency{};
     mutable std::uint64_t timing_stream_published_frame_id{};
     float cpu_recording_ms{};

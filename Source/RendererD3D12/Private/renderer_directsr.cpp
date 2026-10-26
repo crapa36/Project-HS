@@ -304,6 +304,12 @@ Result DirectSrReconstruction::Jitter(ViewExtent active, std::uint64_t frame, st
 
 Result DirectSrReconstruction::RegisterExternal(PassBuilder &pass, const SdkReconstructionFrame &frame, std::uint32_t frame_slot,
     std::span<const ExternalResourceAccess> accesses, std::vector<std::shared_ptr<const void>> owners)
+{return RegisterExternalImpl(pass,frame,frame_slot,accesses,std::move(owners),false);}
+Result DirectSrReconstruction::BindExternal(PassBuilder &pass,const SdkReconstructionFrame &frame,std::uint32_t frame_slot,
+    std::span<const ExternalResourceAccess> accesses,std::vector<std::shared_ptr<const void>> owners)
+{return RegisterExternalImpl(pass,frame,frame_slot,accesses,std::move(owners),true);}
+Result DirectSrReconstruction::RegisterExternalImpl(PassBuilder &pass, const SdkReconstructionFrame &frame, std::uint32_t frame_slot,
+    std::span<const ExternalResourceAccess> accesses, std::vector<std::shared_ptr<const void>> owners,bool retained)
 {
 #if HS_WITH_DIRECTSR
     if (!Initialized() || owners.empty() || accesses.empty()) return Failure(ErrorCode::InvalidState, "DirectSR external execution requires live native state and backing allocation owners.");
@@ -334,7 +340,7 @@ Result DirectSrReconstruction::RegisterExternal(PassBuilder &pass, const SdkReco
     for (const auto &boundary : accesses) if (boundary.incoming != Access::Common || boundary.outgoing != Access::Common)
         return Failure(ErrorCode::InvalidArgument, "DirectSR queue boundaries must publish whole-resource COMMON.");
     ExternalQueueBinding binding{std::shared_ptr<void>(state, state->queue.Get()), QueueHint::Compute, lease};
-    pass.SetExternalExecute(std::move(binding), accesses, [lease](RenderExternalPassContext &context, ExternalQueueCompletion &completion) -> Result {
+    auto callback=[lease](RenderExternalPassContext &context, ExternalQueueCompletion &completion) -> Result {
         auto state = lease->state; auto &slot = state->slots[lease->slot]; const auto &frame = lease->frame;
         if (context.NativeCommandQueue() != state->queue.Get() || !state->usable) return Failure(ErrorCode::InvalidState, "DirectSR external callback has an invalid queue or native state.");
         if (state->fence->GetCompletedValue() < slot.completion) return Failure(ErrorCode::InvalidState, "DirectSR frame boundary allocators are still in flight.");
@@ -378,7 +384,9 @@ Result DirectSrReconstruction::RegisterExternal(PassBuilder &pass, const SdkReco
         completion = {std::shared_ptr<void>(state, state->fence.Get()), value, lease};
         if (FAILED(result)) { state->usable = false; state->reset = true; auto failure = Native("DirectSR Execute", result); state->failure = failure.Message(); return failure; }
         state->reset = false; return Result::Success();
-    });
+    };
+    if(retained)pass.BindExternalExecute(std::move(binding),std::move(callback));
+    else pass.SetExternalExecute(std::move(binding),accesses,std::move(callback));
     return Result::Success();
 #else
     return Failure(ErrorCode::InvalidState, std::string(FailureReason()));

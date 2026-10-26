@@ -1,4 +1,6 @@
 #include "simulation_world.hpp"
+
+#include <cassert>
 #include <limits>
 #include <set>
 #include <tuple>
@@ -1979,11 +1981,19 @@ std::uint8_t GameSimulation::SimulationWorld::IncrementAreaHit(std::uint64_t are
 
 CastRuntime &GameSimulation::SimulationWorld::FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill)
 {
-    const auto iterator = std::ranges::find(combat_state->cast_runtimes, cast,
-                                            &CastRuntime::cast_id);
-    if (iterator != combat_state->cast_runtimes.end()) return *iterator;
+    const auto [found, inserted] = combat_state->cast_runtime_index.try_emplace(
+        cast, combat_state->cast_runtimes.size());
+    if (!inserted) return combat_state->cast_runtimes[found->second];
     combat_state->cast_runtimes.push_back({cast, skill});
     return combat_state->cast_runtimes.back();
+}
+
+CastRuntime *GameSimulation::SimulationWorld::FindCastRuntime(std::uint64_t cast) noexcept
+{
+    const auto found = combat_state->cast_runtime_index.find(cast);
+    if (found == combat_state->cast_runtime_index.end()) return nullptr;
+    assert(combat_state->cast_runtimes[found->second].cast_id == cast);
+    return &combat_state->cast_runtimes[found->second];
 }
 
 bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
@@ -4038,14 +4048,9 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyRow enemy)
     }
     RecordUpgradeEffect(enemy.cold.last_damage_skill, enemy.cold.last_damage_upgrade,
                         UpgradeEffectMetric::Kills);
-    CastRuntime *runtime{};
-    if (enemy.cold.last_damage_cast != 0)
-    {
-        const auto iterator = std::ranges::find(combat_state->cast_runtimes,
-                                                enemy.cold.last_damage_cast,
-                                                &CastRuntime::cast_id);
-        if (iterator != combat_state->cast_runtimes.end()) runtime = &*iterator;
-    }
+    CastRuntime *runtime = enemy.cold.last_damage_cast != 0
+                               ? FindCastRuntime(enemy.cold.last_damage_cast)
+                               : nullptr;
     const auto xp = EnemyExperience(enemy);
     if (xp)
     {

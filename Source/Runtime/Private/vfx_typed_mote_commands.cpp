@@ -1,6 +1,6 @@
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_generation_rebind.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -248,10 +248,10 @@ Float3 SparkDirection(Float3 velocity, float cone_degrees, std::uint32_t seed)
 template<class Input>
 void AppendRateMotes(const VfxProgramView &program, const Input &owner,
                           Float3 position, float extent, const VfxEffectRecord &effect,
-                          std::uint64_t effect_id, std::int64_t current_ticks,
+                          std::uint64_t effect_id, double current_ticks,
                           double duration_ticks, std::vector<VfxFlashSpawnInput> &result,
                           VfxPersistentMoteBirthWindow *birth_window = nullptr,
-                          Tick global_current_tick = 0,
+                          double global_current_tick = 0,
                           std::uint64_t owner_id = 0,
                           std::uint64_t episode_generation = 0)
 {
@@ -326,9 +326,9 @@ void AppendRateMotes(const VfxProgramView &program, const Input &owner,
             const auto mote_seed = Mix(source_seed ^
                 Mix(static_cast<std::uint32_t>(ordinal + 1u)));
             Tick global_birth_tick{};
-            const auto local_birth_age = static_cast<Tick>(current_ticks - *birth);
+            const double local_birth_age = current_ticks - *birth;
             if (global_current_tick >= local_birth_age)
-                global_birth_tick = global_current_tick - local_birth_age;
+                global_birth_tick = static_cast<Tick>(std::llround(global_current_tick - local_birth_age));
             const auto unit = birth_window
                 ? birth_window->GetOrCreate(owner_id, episode_generation, effect_id,
                     source.stable_id, static_cast<std::uint32_t>(ordinal), global_birth_tick, mote_seed)
@@ -380,7 +380,7 @@ void AppendPersistentTrapMotes(const VfxProgramView &program,
                                const VfxCirclePayload &circle,
                                std::vector<VfxFlashSpawnInput> &result,
                                VfxPersistentMoteBirthWindow *birth_window = nullptr,
-                               Tick global_current_tick = 0)
+                               double global_current_tick = 0)
 {
     if (owner.stable_id == 0 || owner.effect_handle == 0 ||
         owner.effect_handle > program.effects.size() ||
@@ -421,10 +421,9 @@ void AppendPersistentTrapMotes(const VfxProgramView &program,
 
     const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
     if (!std::isfinite(elapsed_ticks) ||
-        elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2) ||
-        std::abs(elapsed_ticks - std::round(elapsed_ticks)) > 0.01)
+        elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2))
         return;
-    const auto current_ticks = static_cast<std::int64_t>(std::llround(elapsed_ticks));
+    const double current_ticks = elapsed_ticks;
     const double duration_ticks = owner.normalized_age > 0.0f
         ? elapsed_ticks / static_cast<double>(owner.normalized_age)
         : std::numeric_limits<double>::infinity();
@@ -691,7 +690,7 @@ std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &program,
-    std::span<const VfxEventInput> inputs, Tick current_tick)
+    std::span<const VfxEventInput> inputs, double current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;
     constexpr double lifetime_ticks = 39.0;
@@ -711,7 +710,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
                 !Range(effect.sources, program.sources) || std::count_if(program.effect_lookup.begin(), program.effect_lookup.end(),
                     [&](const auto &v) { return v.handle == effect.handle && v.effect_id == id; }) != 1) continue;
             AppendRateMotes(program, input, point->position, point->authored_scale, effect, id,
-                static_cast<std::int64_t>(current_tick - input.event_tick), 39.0, result);
+                (current_tick - input.event_tick), 39.0, result);
             continue;
         }
         if (const auto *circle = std::get_if<VfxCirclePayload>(&input.payload))
@@ -737,9 +736,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
             // attack-telegraph owner, which RefreshVfxGroundEventOwners retires.
             const auto elapsed = current_tick - input.geometry_start_tick;
             const auto duration = input.geometry_end_tick - input.geometry_start_tick;
-            if (elapsed > static_cast<Tick>(std::numeric_limits<std::int64_t>::max())) continue;
             AppendRateMotes(program, input, circle->center, circle->radius, effect, input.geometry_effect_id,
-                                  static_cast<std::int64_t>(elapsed), static_cast<double>(duration), result);
+                                  elapsed, static_cast<double>(duration), result);
             continue;
         }
         const auto *sector = std::get_if<VfxSafeSectorPayload>(&input.payload);
@@ -816,7 +814,7 @@ namespace
 {
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
     const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
-    VfxPersistentMoteBirthWindow *birth_window, Tick current_tick)
+    VfxPersistentMoteBirthWindow *birth_window, double current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;
     constexpr double lifetime_ticks = kPersistentMoteLifetimeTicks;
@@ -867,9 +865,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
 
         const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
         if (!std::isfinite(elapsed_ticks) ||
-            elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2) ||
-            std::abs(elapsed_ticks - std::round(elapsed_ticks)) > 0.01) continue;
-        const auto current_ticks = static_cast<std::int64_t>(std::llround(elapsed_ticks));
+            elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2)) continue;
+        const double current_ticks = elapsed_ticks;
         // Pickup presence has normalized_age == 0 for its whole live interval.
         // It has no expiry: use indexed births from owner age and the existing
         // 39-tick visible window. Never multiply a normalized knot by infinity.
@@ -949,8 +946,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
                 const auto mote_seed = Mix(source_seed ^
                     Mix(static_cast<std::uint32_t>(ordinal + 1u)));
                 Tick global_birth_tick{};
-                const auto local_birth_age = static_cast<Tick>(current_ticks - *birth);
-                if (current_tick >= local_birth_age) global_birth_tick = current_tick - local_birth_age;
+                const double local_birth_age = current_ticks - *birth;
+                if (current_tick >= local_birth_age) global_birth_tick = static_cast<Tick>(std::llround(current_tick - local_birth_age));
                 const auto unit = birth_window
                     ? birth_window->GetOrCreate(owner.stable_id, owner.status_episode_generation,
                         lookup->effect_id, source.stable_id, static_cast<std::uint32_t>(ordinal),
@@ -1038,10 +1035,12 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
     const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
-    VfxPersistentMoteBirthWindow &births, Tick current_tick)
+    VfxPersistentMoteBirthWindow &births, Tick current_tick, float interpolation)
 {
     births.Prune(current_tick);
-    return BuildVfxPersistentMoteCommandsImpl(program, owners, &births, current_tick);
+    const double display_tick = static_cast<double>(current_tick) -
+        (current_tick != 0 ? 1.0 - interpolation : 0.0);
+    return BuildVfxPersistentMoteCommandsImpl(program, owners, &births, display_tick);
 }
 
 std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
@@ -1092,7 +1091,7 @@ std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
 
 std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
     const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
-    Tick current_tick)
+    Tick current_tick, float interpolation)
 {
     std::vector<VfxFlashSpawnInput> result;
     // Keep a short tombstone through the authored expiry. A transiently absent
@@ -1114,7 +1113,8 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
         const float speed = std::sqrt(projectile->velocity.x*projectile->velocity.x +
             projectile->velocity.y*projectile->velocity.y +
             projectile->velocity.z*projectile->velocity.z);
-        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
+        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0 +
+            (current_tick != 0 ? 1.0 - interpolation : 0.0);
         if (!Finite(position) || !std::isfinite(speed) || speed <= .0001f ||
             !std::isfinite(elapsed_ticks) ||
             elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2) ||

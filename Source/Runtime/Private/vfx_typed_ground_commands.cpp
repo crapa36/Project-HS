@@ -1,6 +1,6 @@
 #include "vfx_typed_ground_commands.hpp"
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -1508,7 +1508,7 @@ void AppendPersistentChevronOutputs(const VfxProgramView &cooked,
     }
 }
 void AppendSafeSector(const VfxProgramView &cooked, const VfxEventInput &input,
-                      Tick tick, std::vector<VfxTypedGroundCommand> &result)
+                      double tick, std::vector<VfxTypedGroundCommand> &result)
 {
     if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size()) return;
     const auto &effect = cooked.effects[input.effect_handle - 1];
@@ -1709,7 +1709,7 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
 std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
     const VfxProgramView &cooked,
     std::span<const VfxEventInput> inputs,
-    Tick current_tick)
+    double current_tick)
 {
     std::vector<VfxTypedGroundCommand> result;
     for (const auto &input : inputs)

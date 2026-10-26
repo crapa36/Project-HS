@@ -406,7 +406,84 @@ std::vector<std::byte> BuildPackage(AssetId asset_id,
     return bytes;
 }
 
-PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset_id)
+PackageDirectory ReadPackageDirectory(std::span<const std::byte> prefix,
+    std::uint64_t product_bytes, AssetId expected_asset_id)
+{
+    Require(product_bytes >= kHeaderSize && product_bytes <= kMaxPackageBytes &&
+            prefix.size() >= kHeaderSize && prefix.size() <= product_bytes,
+            "invalid directory proof extent");
+    Require(std::equal(kMagic.begin(), kMagic.end(), prefix.begin()) &&
+            Get(prefix, 8, 2) == kRenderPackageVersion &&
+            Get(prefix, 10, 2) == kLittleEndian &&
+            Get(prefix, 12, 4) == kHeaderSize, "directory proof header mismatch");
+    const AssetId asset{Get(prefix, 16, 8)};
+    Require(asset.value && asset.value == expected_asset_id.value &&
+            Get(prefix, 84, 4) == 0 && Get(prefix, 88, 8) == product_bytes,
+            "directory proof identity or total size mismatch");
+    const auto directory_offset = Get(prefix, 56, 8);
+    const auto count = Get(prefix, 64, 4);
+    const auto stride = Get(prefix, 68, 4);
+    const auto dependency_offset = Get(prefix, 72, 8);
+    const auto dependency_count = Get(prefix, 80, 4);
+    Require(count > 0 && count <= kMaxChunks && stride == kDirectoryStride &&
+            dependency_count <= kMaxDependencies && dependency_offset == kHeaderSize &&
+            directory_offset <= prefix.size(), "invalid directory proof metadata");
+    const auto directory_end = CheckedAdd(directory_offset, CheckedMul(count, stride));
+    Require(directory_end <= prefix.size(), "directory proof prefix is truncated");
+    PackageDirectory proof{asset};
+    std::uint64_t cursor = dependency_offset;
+    std::string previous;
+    for (std::uint64_t i = 0; i < dependency_count; ++i)
+    {
+        Require(cursor <= directory_offset && directory_offset - cursor >= 2, "truncated directory dependency");
+        const auto length = Get(prefix, cursor, 2);
+        cursor = CheckedAdd(cursor, 2);
+        Require(length > 0 && length <= 128 && length <= directory_offset - cursor,
+                "invalid directory dependency length");
+        std::string id(reinterpret_cast<const char *>(prefix.data() + cursor),
+                       static_cast<std::size_t>(length));
+        Require(ValidId(id) && (previous.empty() || previous < id), "invalid directory dependency order");
+        proof.dependencies.push_back(std::move(id));
+        previous = proof.dependencies.back();
+        cursor = CheckedAdd(cursor, length);
+    }
+    Require(cursor == directory_offset, "directory dependency range mismatch");
+    std::uint64_t previous_end = directory_end;
+    std::array<bool, static_cast<std::size_t>(kLastKnownChunk) + 1> saw_known{};
+    for (std::uint64_t i = 0; i < count; ++i)
+    {
+        const auto entry = directory_offset + i * stride;
+        const auto type = static_cast<std::uint32_t>(Get(prefix, entry, 4));
+        const auto version = static_cast<std::uint16_t>(Get(prefix, entry + 4, 2));
+        const auto flags = Get(prefix, entry + 6, 2);
+        const auto offset = Get(prefix, entry + 8, 8);
+        const auto stored_size = Get(prefix, entry + 16, 8);
+        const auto raw_size = Get(prefix, entry + 24, 8);
+        const auto item_count = Get(prefix, entry + 32, 8);
+        const auto item_stride = static_cast<std::uint32_t>(Get(prefix, entry + 40, 4));
+        Require(flags <= 1 && Get(prefix, entry + 44, 4) == 0 && offset >= previous_end &&
+                stored_size > 0 && stored_size <= kMaxChunkBytes && raw_size <= kMaxChunkBytes &&
+                item_count > 0 && item_stride > 0 && CheckedMul(item_count, item_stride) == raw_size &&
+                CheckedAdd(offset, stored_size) <= product_bytes,
+                "invalid directory chunk range");
+        previous_end = CheckedAdd(offset, stored_size);
+        if (!Known(type) || version != (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
+                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1))
+        {
+            Require(flags == 0, "unsupported required directory chunk");
+            continue;
+        }
+        Require(stored_size == raw_size && !saw_known[type], "compressed or duplicate directory chunk");
+        ValidateKnown(type, version, raw_size, item_count, item_stride);
+        saw_known[type] = true;
+        proof.chunks.push_back({static_cast<ChunkType>(type), version, flags == 1,
+            offset, stored_size, item_count, item_stride});
+    }
+    Require(previous_end == product_bytes, "directory proof leaves trailing bytes");
+    return proof;
+}
+
+PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset_id, PackageReadMode mode)
 {
     Require(bytes.size() >= kHeaderSize && bytes.size() <= kMaxPackageBytes,
             "invalid package size");
@@ -487,7 +564,8 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
         ValidateKnown(type, version, raw_size, item_count, item_stride);
         Require(!saw_known[type], "duplicate known chunk");
         saw_known[type] = true;
-        if (type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || type == 14)
+        if ((type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || type == 14) &&
+            mode == PackageReadMode::FullValidation)
             ValidateEncodedVertices(chunk_bytes);
         else if (type == static_cast<std::uint32_t>(ChunkType::MaterialMetadata))
             (void)DecodeRockMaterial(chunk_bytes, view.dependencies);

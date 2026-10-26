@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <array>
 #include <atomic>
@@ -21,15 +21,7 @@ class RenderSnapshotExchange
         RenderSnapshotStorage *storage{};
     };
 
-    struct ReadPair
-    {
-        RenderSnapshot previous{};
-        RenderSnapshot current{};
-        Sequence previous_publication_sequence{};
-        Sequence current_publication_sequence{};
-        bool has_previous{};
-        bool has_current{};
-    };
+    using ReadPair = RenderSnapshotPair;
 
     class Consumer
     {
@@ -46,7 +38,6 @@ class RenderSnapshotExchange
 
       private:
         RenderSnapshotExchange *exchange_{};
-        std::optional<std::size_t> previous_;
         std::optional<std::size_t> current_;
     };
 
@@ -56,7 +47,8 @@ class RenderSnapshotExchange
     [[nodiscard]] std::optional<WriteSlot> TryBeginWrite() noexcept;
     // One producer supplies increasing publication sequences independently of
     // simulation ticks. Reset/wrap requires a new exchange and consumer.
-    void Publish(WriteSlot slot, Sequence publish_sequence) noexcept;
+    void Publish(WriteSlot slot, Sequence publish_sequence,
+                 const RenderSnapshot *previous_sample = nullptr);
     void Abandon(WriteSlot slot) noexcept;
     [[nodiscard]] std::uint64_t DroppedPublishes() const noexcept;
 
@@ -73,11 +65,14 @@ class RenderSnapshotExchange
     {
         Slot(std::size_t instance_capacity, std::size_t pose_capacity, std::size_t light_capacity,
              std::size_t ui_capacity)
-            : storage(instance_capacity, pose_capacity, light_capacity, ui_capacity)
+            : storage(instance_capacity, pose_capacity, light_capacity, ui_capacity),
+              previous(0, 0, 0, 0)
         {
         }
 
         RenderSnapshotStorage storage;
+        RenderSnapshotStorage previous;
+        bool has_previous{};
         std::atomic<SlotState> state{SlotState::Free};
         std::atomic<Sequence> publish_sequence{};
     };

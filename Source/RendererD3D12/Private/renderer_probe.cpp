@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -22,6 +23,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::string_view kProduct="render/lighting/default_probe.rpkg";
+std::atomic<std::uint64_t> g_lighting_probe_generation{};
 Result Failure(ErrorCode code,std::string message)
 {
     return Result::Failure(code,"hs_renderer_probe",std::move(message));
@@ -84,6 +86,7 @@ struct LightingProbeStorage
     ComPtr<ID3D12DescriptorHeap> descriptors;
     UploadCube raw_upload,ggx_upload;
     std::uint64_t sh_offset{},bytes{};
+    std::uint64_t generation{};
     std::uint32_t descriptor_stride{};
     DirectX::XMFLOAT4 options{};
     CompletionSet completion,upload_completion;
@@ -191,26 +194,67 @@ Result LightingProbeSystem::Commit(LightingProbeCandidate &&candidate,const Comp
     if(impl_->pending.graph) return Failure(ErrorCode::InvalidState,"Complete the registered probe graph before replacement.");
     if(impl_->storage && !impl_->storage->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState,"Probe replacement requires completed GPU leases.");
+    candidate.storage_->generation=g_lighting_probe_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->storage=std::move(candidate.storage_); return Result::Success();
 }
-Result LightingProbeSystem::Register(RenderGraphBuilder &graph,const CompletionSet &completed,LightingProbeOutputs &outputs)
+bool LightingProbeSystem::MatchesLayout(const LightingProbeLayout &layout) const noexcept
+{
+    const auto storage=impl_->storage;
+    return storage&&storage->usable&&layout.storage_generation==storage->generation&&
+        layout.upload==!storage->uploaded&&(!layout.upload||bool(storage->upload.resource));
+}
+Result LightingProbeSystem::Register(RenderGraphBuilder &graph,const CompletionSet &completed,
+    LightingProbeOutputs &outputs,LightingProbeLayout *layout)
+{return RegisterImpl(graph,completed,outputs,layout,nullptr);}
+Result LightingProbeSystem::BindRetained(RenderGraphBuilder &graph,const CompletionSet &completed,
+    const LightingProbeLayout &layout,LightingProbeOutputs &outputs)
+{return RegisterImpl(graph,completed,outputs,nullptr,&layout);}
+Result LightingProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const CompletionSet &completed,
+    LightingProbeOutputs &outputs,LightingProbeLayout *layout,const LightingProbeLayout *retained)
 {
     outputs={}; auto storage=impl_->storage;
     if(!storage) return Failure(ErrorCode::InvalidState,"No lighting probe is prepared.");
     if(impl_->pending.graph || !storage->usable)
         return Failure(ErrorCode::InvalidState,"Probe submission is pending or its previous graph failed.");
+    if(retained)
+    {
+        if(!MatchesLayout(*retained))return Failure(ErrorCode::InvalidState,"Lighting probe retained topology changed.");
+        for(UINT i=0;i<4;++i)
+            if((i<3||retained->upload)&&
+                (!retained->imports[i]||retained->imports[i].value>graph.ResourceCount()||
+                    retained->imports[i].kind!=(i<2?ResourceKind::Texture:ResourceKind::Buffer)))
+                return Failure(ErrorCode::InvalidState,"Lighting probe retained import slot changed.");
+        if(retained->upload&&!graph.BindPass(retained->upload_pass_index,80))
+            return Failure(ErrorCode::InvalidState,"Lighting probe retained upload pass changed.");
+    }
+    if(layout){*layout={};layout->storage_generation=storage->generation;
+        layout->upload=!storage->uploaded;}
     if(storage->uploaded && storage->upload.resource && storage->upload_completion.IsSatisfiedBy(completed))
     {
         storage->bytes-=storage->upload.allocation->GetSize(); storage->upload.Reset();
         storage->raw_upload={}; storage->ggx_upload={};
     }
     Impl::Pending pending; pending.graph=&graph; pending.storage=storage; pending.upload=!storage->uploaded;
+    for(auto *resource:{&storage->radiance,&storage->prefiltered,&storage->irradiance,&storage->upload})
+        if(resource->resource)
+            if(auto certified=resource->EnsureNativeContract(storage->device.Get());!certified)return certified;
+    UINT import_index{};bool imports_valid=true;
     auto texture=[&](AllocationResource &resource,std::string_view name) {
-        const auto handle=graph.ImportTexture({resource.resource.Get(),resource.graph_completion,resource.graph_queue},resource.graph_access,name);
+        const UINT index=import_index++;
+        const auto current=ExternalTexture{resource.resource.Get(),resource.graph_completion,
+            resource.graph_queue,{},resource.NativeContract()};
+        const auto handle=retained?retained->imports[index]:graph.ImportTexture(current,resource.graph_access,name);
+        if(retained)imports_valid&=graph.BindTexture(handle,current,resource.graph_access);
+        if(layout)layout->imports[index]=handle;
         pending.imports.push_back({&resource,handle}); return graph.Version(handle);
     };
     auto buffer=[&](AllocationResource &resource,std::string_view name) {
-        const auto handle=graph.ImportBuffer({resource.resource.Get(),resource.graph_completion,resource.graph_queue},resource.graph_access,name);
+        const UINT index=import_index++;
+        const auto current=ExternalBuffer{resource.resource.Get(),resource.graph_completion,
+            resource.graph_queue,{},resource.NativeContract()};
+        const auto handle=retained?retained->imports[index]:graph.ImportBuffer(current,resource.graph_access,name);
+        if(retained)imports_valid&=graph.BindBuffer(handle,current,resource.graph_access);
+        if(layout)layout->imports[index]=handle;
         pending.imports.push_back({&resource,handle}); return graph.Version(handle);
     };
     auto raw=texture(storage->radiance,"ProbeRawCube"),ggx=texture(storage->prefiltered,"ProbeGgxCube");
@@ -219,8 +263,13 @@ Result LightingProbeSystem::Register(RenderGraphBuilder &graph,const CompletionS
     {
         if(!storage->upload.resource) return Failure(ErrorCode::InvalidState,"Probe upload staging is missing.");
         const auto upload=buffer(storage->upload,"ProbeUploadStaging");
-        auto pass=graph.AddPass(80,"LightingProbeUpload",QueueHint::Direct); pass.Read(upload,Access::CopySource);
-        raw=pass.Write(raw,Access::CopyDest); ggx=pass.Write(ggx,Access::CopyDest); sh=pass.Write(sh,Access::CopyDest);
+        if(layout)layout->upload_pass_index=graph.PassCount();
+        auto pass=retained?*graph.BindPass(retained->upload_pass_index,80):
+            graph.AddPass(80,"LightingProbeUpload",QueueHint::Direct);
+        if(!retained)pass.Read(upload,Access::CopySource);
+        raw=retained?retained->outputs[0]:pass.Write(raw,Access::CopyDest);
+        ggx=retained?retained->outputs[1]:pass.Write(ggx,Access::CopyDest);
+        sh=retained?retained->outputs[2]:pass.Write(sh,Access::CopyDest);
         pass.SetExecuteChecked([storage,raw,ggx,sh,upload](RenderPassContext &context) {
             if(context.Resolve(raw.resource)!=storage->radiance.resource.Get() ||
                context.Resolve(ggx.resource)!=storage->prefiltered.resource.Get() ||
@@ -244,7 +293,9 @@ Result LightingProbeSystem::Register(RenderGraphBuilder &graph,const CompletionS
             return Result::Success();
         });
     }
-    graph.SetFinalAccess(raw,Access::AllShaderRead); graph.SetFinalAccess(ggx,Access::AllShaderRead); graph.SetFinalAccess(sh,Access::AllShaderRead);
+    if(!imports_valid)return Failure(ErrorCode::InvalidState,"Lighting probe retained binding changed.");
+    if(!retained){graph.SetFinalAccess(raw,Access::AllShaderRead); graph.SetFinalAccess(ggx,Access::AllShaderRead); graph.SetFinalAccess(sh,Access::AllShaderRead);}
+    if(layout)layout->outputs={raw,ggx,sh};
     outputs={raw,ggx,sh,storage->radiance.resource.Get(),storage->prefiltered.resource.Get(),storage->irradiance.resource.Get(),
         {storage->Srv(0),storage->Srv(1),storage->Srv(2)},storage->options};
     impl_->pending=std::move(pending); return Result::Success();

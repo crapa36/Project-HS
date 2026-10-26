@@ -270,38 +270,63 @@ void ValidateSceneHlod(const SceneHlod &s)
     }
 }
 
+namespace
+{
+void ValidatePageDirectory(const SceneHlodPage &directory, const GeometryData &page)
+{
+    Require(page.flags == directory.geometry_flags && page.vertices.size() == directory.vertex_count &&
+            page.indices.size() == directory.index_count &&
+            page.meshlets.size() == directory.meshlet_count, "page directory mismatch");
+}
+void ValidateProxyPagePayload(const SceneHlodProxy &p, const GeometryData &page)
+{
+    Require(Range(p.first_index, p.index_count, page.indices.size()) &&
+            Range(p.first_meshlet, p.meshlet_count, page.meshlets.size()), "payload range mismatch");
+    for (std::uint32_t i = p.first_index; i < p.first_index + p.index_count; ++i)
+    {
+        const auto &vertex = page.vertices[page.indices[i]];
+        Require(vertex.material_index == p.atlas_selector, "proxy atlas mismatch"); VertexIn(p.bounds, vertex);
+    }
+    for (std::uint32_t m = p.first_meshlet; m < p.first_meshlet + p.meshlet_count; ++m)
+    {
+        const auto &meshlet = page.meshlets[m];
+        Require(page.submeshes[meshlet.submesh_index].material_index == p.atlas_selector, "meshlet atlas mismatch");
+        for (std::uint32_t t = meshlet.first_triangle; t < meshlet.first_triangle + meshlet.triangle_count; ++t)
+        {
+            const auto index = page.canonical_primitive_remap[t] * 3;
+            Require(index >= p.first_index && index < p.first_index + p.index_count, "proxy meshlet parity mismatch");
+        }
+    }
+}
+} // namespace
+
 void ValidateSceneHlodPage(const SceneHlod &s, std::uint32_t id, const GeometryData &page)
 {
     Require(id < s.pages.size(), "page ID range"); ValidateGeometryData(page);
-    const auto &d = s.pages[id];
-    Require(page.flags == d.geometry_flags && page.vertices.size() == d.vertex_count &&
-            page.indices.size() == d.index_count && page.meshlets.size() == d.meshlet_count, "page directory mismatch");
-    for (const auto &p : s.proxies)
-    {
-        if (p.page_index != id) continue;
-        Require(Range(p.first_index, p.index_count, page.indices.size()) &&
-                Range(p.first_meshlet, p.meshlet_count, page.meshlets.size()), "payload range mismatch");
-        for (std::uint32_t i = p.first_index; i < p.first_index + p.index_count; ++i)
-        {
-            const auto &vertex = page.vertices[page.indices[i]];
-            Require(vertex.material_index == p.atlas_selector, "proxy atlas mismatch"); VertexIn(p.bounds, vertex);
-        }
-        for (std::uint32_t m = p.first_meshlet; m < p.first_meshlet + p.meshlet_count; ++m)
-        {
-            const auto &meshlet = page.meshlets[m];
-            Require(page.submeshes[meshlet.submesh_index].material_index == p.atlas_selector, "meshlet atlas mismatch");
-            for (std::uint32_t t = meshlet.first_triangle; t < meshlet.first_triangle + meshlet.triangle_count; ++t)
-            {
-                const auto index = page.canonical_primitive_remap[t] * 3;
-                Require(index >= p.first_index && index < p.first_index + p.index_count, "proxy meshlet parity mismatch");
-            }
-        }
-    }
+    ValidatePageDirectory(s.pages[id], page);
+    for (const auto &proxy : s.proxies)
+        if (proxy.page_index == id) ValidateProxyPagePayload(proxy, page);
 }
 void ValidateSceneHlodPages(const SceneHlod &s, std::span<const GeometryData> pages)
 {
     ValidateSceneHlod(s); Require(pages.size() == s.pages.size(), "page component count");
     for (std::size_t page = 0; page < pages.size(); ++page) ValidateSceneHlodPage(s, Count(page), pages[page]);
+}
+
+AdmittedSceneHlod::AdmittedSceneHlod(std::span<const std::byte> bytes)
+    : scene_(DecodeSceneHlod(bytes)), page_proxies_(scene_.pages.size())
+{
+    for (std::size_t index = 0; index < scene_.proxies.size(); ++index)
+        page_proxies_[scene_.proxies[index].page_index].push_back(Count(index));
+}
+
+void AdmittedSceneHlod::ValidatePage(std::uint32_t page_index,
+    const PreparedGeometryPage &page) const
+{
+    Require(page_index < scene_.pages.size(), "page ID range");
+    ValidatePageDirectory(scene_.pages[page_index], page.geometry);
+    for (const auto proxy_index : page_proxies_[page_index])
+        ValidateProxyPagePayload(scene_.proxies[proxy_index], page.geometry);
 }
 
 std::vector<std::byte> EncodeSceneHlod(const SceneHlod &s)

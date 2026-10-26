@@ -102,4 +102,33 @@ render_data::GeometryData CookGeometry(std::span<const rd::ExpandedVertex>source
     }
     rd::ValidateGeometryData(g);return g;
 }
+
+std::vector<rd::ExpandedVertex> SimplifySkinnedGeometry(const rd::GeometryData &fine,float absolute_error)
+{
+    Require((fine.flags&rd::kGeometryFlagSkinned)!=0 && std::isfinite(absolute_error) && absolute_error>0,
+        "invalid skinned simplification budget");
+    // Bone IDs are categorical. The simplifier returns only indices into the
+    // original buffer; survivors keep exact weights, UVs, normals and tangents.
+    using Attributes=std::array<float,9>;
+    std::vector<Attributes> attributes;attributes.reserve(fine.vertices.size());
+    for(const auto &vertex:fine.vertices)
+        attributes.push_back({vertex.normal[0],vertex.normal[1],vertex.normal[2],
+            vertex.uv[0],vertex.uv[1],vertex.tangent[0],vertex.tangent[1],vertex.tangent[2],vertex.tangent[3]});
+    const float radius=std::max(fine.bounds.sphere[3],0.0001f);
+    const std::array<float,9> weights{radius*0.25f,radius*0.25f,radius*0.25f,
+        radius,radius,radius*0.125f,radius*0.125f,radius*0.125f,radius*0.125f};
+    std::vector<rd::ExpandedVertex> output;output.reserve(fine.indices.size());
+    for(const auto &submesh:fine.submeshes)
+    {
+        std::vector<unsigned> simplified(submesh.index_count);
+        const auto count=meshopt_simplifyWithAttributes(simplified.data(),
+            fine.indices.data()+submesh.first_index,submesh.index_count,
+            fine.vertices.front().position.data(),fine.vertices.size(),sizeof(fine.vertices.front()),
+            attributes.front().data(),sizeof(attributes.front()),weights.data(),weights.size(),nullptr,
+            3,absolute_error,meshopt_SimplifyErrorAbsolute|meshopt_SimplifyRegularize,nullptr);
+        Require(count>0 && count<=submesh.index_count && count%3==0,"invalid skinned simplifier output");
+        for(std::size_t i=0;i<count;++i) output.push_back(fine.vertices[simplified[i]]);
+    }
+    return output;
+}
 }

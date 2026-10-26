@@ -2,6 +2,7 @@
 #include <hs/render_data/static_shadow.hpp>
 #include "renderer_quality.hpp"
 #include "renderer_instance_order.hpp"
+#include "renderer_monster_lod.hpp"
 #include "renderer_grass_benders.hpp"
 #include "visibility_encoding.hpp"
 #include "renderer_caster_storage.hpp"
@@ -12,10 +13,12 @@
 #include "renderer_brixelizer_scene.hpp"
 #include "renderer_entity_surface.hpp"
 #include <DirectXPackedVector.h>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cfloat>
 #include <limits>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -23,14 +26,130 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace hs
 {
 
+namespace
+{
+struct ExposureFrameRecordData
+{
+    std::array<std::move_only_function<void(RenderPassContext &)>, 4> record;
+};
 
-Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
+Result BuildExposureGraph(RenderGraphBuilder &graph, ResourceVersion composite_hdr,
+                          ResourceVersion exposure_read, ResourceVersion scene_work,
+                          ResourceVersion histogram, ResourceVersion exposure_write,
+                          ExposureFrameRecordData records, ExposureGraphLayout &layout,
+                          bool restore)
+{
+    constexpr std::array ids{33u, 34u, 35u, 36u};
+    constexpr std::array names{"PreExposure", "ExposureHistogramClear",
+                               "ExposureHistogramBuild", "ExposureReduce"};
+    constexpr std::array queues{QueueHint::Direct, QueueHint::Compute,
+                                QueueHint::Compute, QueueHint::Compute};
+    for (std::size_t index = 0; index < ids.size(); ++index)
+    {
+        if (restore)
+        {
+            auto pass = graph.BindPass(layout.pass_indices[index], ids[index]);
+            if (!pass)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Exposure pass does not match the retained graph plan.");
+            pass->SetExecute(std::move(records.record[index]));
+            continue;
+        }
+        layout.pass_indices[index] = graph.PassCount();
+        auto pass = graph.AddPass(ids[index], names[index], queues[index]);
+        switch (index)
+        {
+        case 0:
+            pass.Read(composite_hdr, Access::ShaderRead);
+            pass.Read(exposure_read, Access::ShaderRead);
+            scene_work = pass.Write(scene_work, Access::RenderTarget);
+            break;
+        case 1:
+            histogram = pass.Write(histogram, Access::UnorderedWrite);
+            break;
+        case 2:
+            pass.Read(scene_work, Access::ComputeRead);
+            pass.Read(exposure_read, Access::ComputeRead);
+            histogram = pass.ReadWrite(histogram, Access::UnorderedWrite);
+            break;
+        case 3:
+            pass.Read(exposure_read, Access::ComputeRead);
+            histogram = pass.ReadWrite(histogram, Access::UnorderedWrite);
+            exposure_write = pass.Write(exposure_write, Access::UnorderedWrite);
+            break;
+        }
+        pass.SetExecute(std::move(records.record[index]));
+    }
+    if (!restore)
+    {
+        layout.scene_work = scene_work;
+        layout.histogram = histogram;
+        layout.exposure_write = exposure_write;
+    }
+    return Result::Success();
+}
+
+Result BuildFinalGraph(RenderGraphBuilder &graph, ResourceVersion back_buffer,
+                       bool reference_timing, bool presentation,
+                       FinalGraphLayout &layout, bool restore)
+{
+    if (restore)
+    {
+        if (layout.reference_timing != reference_timing || layout.presentation != presentation ||
+            layout.back_buffer != back_buffer)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Final pass does not match the retained graph plan.");
+        for (std::uint32_t index = 0; index < (reference_timing ? 2u : 1u); ++index)
+        {
+            auto pass = graph.BindPass(layout.pass_indices[index], reference_timing ? 37u + index : 38u);
+            if (!pass)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Final pass binding is missing from the retained graph plan.");
+            pass->SetExecute([](RenderPassContext &) {});
+        }
+        return Result::Success();
+    }
+    layout.reference_timing = reference_timing;
+    layout.presentation = presentation;
+    layout.back_buffer = back_buffer;
+    if (reference_timing)
+    {
+        layout.pass_indices[0] = graph.PassCount();
+        auto begin = graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
+        begin.SetExecute([](RenderPassContext &) {});
+        layout.pass_indices[1] = graph.PassCount();
+        auto end = graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
+        end.SetExecute([](RenderPassContext &) {});
+        for (std::uint32_t pass = 0; pass < graph.PassCount(); ++pass)
+        {
+            const auto id = graph.DeclaredPassId(pass);
+            if (id == 37 || id == 38) continue;
+            graph.AddOrderingDependency(37, id);
+            graph.AddOrderingDependency(id, 38);
+        }
+    }
+    else
+    {
+        layout.pass_indices[0] = graph.PassCount();
+        auto ready = graph.AddPass(38, "SourceRenderOutputReady", QueueHint::Direct);
+        ready.Read(back_buffer, Access::Present);
+        ready.SetExecute([](RenderPassContext &) {});
+        // Tagging reads only guide producers; unrelated streaming/readback stays separate.
+        if (presentation) graph.AddOrderingDependency(904, 38);
+    }
+    return Result::Success();
+}
+}
+
+
+Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                              std::span<const PresentationEvent> events,
                              std::span<const ParticleSpawnCommand> particle_spawns,
                              std::span<const VfxLineSpawnCommand> effect_lines,
@@ -144,6 +263,20 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 found->second->completed_gpu_timings = std::move(completed);
         }
     }
+    impl_->view_state.view_id = impl_->active_view_id.value;
+    impl_->view_state.metric_generation = impl_->view_configuration_revision;
+    if (!impl_->view_state.quality_generation ||
+        impl_->timing_last_active != impl_->view_state.render_active)
+    {
+        ++impl_->view_state.quality_generation;
+        impl_->timing_last_active = impl_->view_state.render_active;
+    }
+    if (!impl_->view_state.provider_generation ||
+        impl_->timing_last_provider != impl_->reconstruction_provider.get())
+    {
+        ++impl_->view_state.provider_generation;
+        impl_->timing_last_provider = impl_->reconstruction_provider.get();
+    }
     if (const auto &timing = impl_->completed_gpu_timings;
         timing.completed_frame_id > impl_->dynamic_resolution_sample_id)
     {
@@ -156,11 +289,35 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             timing.metric_generation == impl_->view_configuration_revision &&
             timing.resize_epoch == impl_->view_state.resize_epoch &&
             timing.render_active == impl_->view_state.render_active;
-        auto selected = impl_->dynamic_resolution_controller.Select(impl_->view_state,
-            resolution_config, {current_timing && timing.critical_path_valid, false,
+        DynamicResolutionSample sample;
+        if (timing.metric_kind == GpuFrameTimingKind::SourceOutputReady)
+        {
+            sample.completed = current_timing && timing.fence_completed;
+            sample.generated = timing.generated_frame;
+            sample.metric_kind = DynamicResolutionMetricKind::SourceOutputReady;
+            sample.view_id = timing.view_id;
+            sample.source_frame_id = timing.source_frame_id;
+            sample.metric_generation = timing.metric_generation;
+            sample.quality_generation = timing.quality_generation;
+            sample.provider_generation = timing.provider_generation;
+            sample.render_active = timing.render_active;
+            sample.calibration_valid = timing.calibration_valid;
+            sample.calibration_drift = timing.calibration_drift;
+            sample.cadence_valid = timing.cadence_valid;
+            sample.span_valid = timing.span_valid;
+            sample.gpu_backlog_proven = timing.gpu_backlog_proven;
+            sample.cadence_gap = timing.cadence_gap;
+            sample.closure_span_gap = timing.closure_span_gap;
+            sample.source_ready_cadence_ms = timing.source_ready_cadence_ms;
+            sample.output_dependency_span_ms = timing.output_dependency_span_ms;
+        }
+        else
+            sample = {current_timing && timing.critical_path_valid, timing.generated_frame,
                 timing.gpu_limited, timing.critical_path_ms,
                 timing.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan
-                    ? DynamicResolutionMetricKind::ReferenceGraphSpan : DynamicResolutionMetricKind::Unavailable});
+                    ? DynamicResolutionMetricKind::ReferenceGraphSpan : DynamicResolutionMetricKind::Unavailable};
+        auto selected = impl_->dynamic_resolution_controller.Select(
+            impl_->view_state, resolution_config, sample);
         if (impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized())
         {
             const auto &plan = impl_->reconstruction_plan;
@@ -174,6 +331,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {
             (void)UpdateViewState(impl_->view_state, impl_->view_state.output_extent,
                                   impl_->view_state.render_capacity, selected.active_extent);
+            ++impl_->view_state.quality_generation;
+            impl_->timing_last_active = selected.active_extent;
             impl_->render_width = selected.active_extent.width;
             impl_->render_height = selected.active_extent.height;
             impl_->hzb_layout = MakeHzbLayout(impl_->render_width, impl_->render_height);
@@ -233,9 +392,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         Tick tick;
         std::uint64_t session;
         bool submitted{};
+        bool history_committed{};
         std::uint64_t presented_ui_generation{};
         ~WorldStepReceipt()
         {
+            output.render_history_committed = history_committed;
             output.presented_ui_packet_generation = presented_ui_generation;
             if (!submitted) return;
             output.vfx_world_step_submitted = true;
@@ -246,39 +407,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (!impl_->legacy_frame_bridge) snapshot.camera.vertical_fov_degrees = view_input.camera.vertical_fov_degrees;
     const bool scene_new_session = snapshot.header.session_id != impl_->render_session_id;
     const bool new_session = scene_new_session || snapshot.header.session_id != impl_->view_session_id;
-    if (new_session)
+    const auto *last_sample = impl_->previous_instances.get();
+    const bool clock_discontinuity = last_sample &&
+        (last_sample->sample.clock.epoch != snapshot.header.clock.epoch ||
+         last_sample->sample.clock.mode != snapshot.header.clock.mode ||
+         snapshot.header.simulation_time < last_sample->sample.simulation_time);
+    const bool motion_history_reset = new_session || clock_discontinuity;
+    if (motion_history_reset)
     {
         if (scene_new_session) impl_->particles_initialized = false;
         impl_->temporal_history_valid = false;
         impl_->hzb_history_valid = false;
+        impl_->previous_origins_valid = false;
     }
     // A rewound simulation clock starts a fresh shared particle schedule/pool.
     if (impl_->particles_initialized && snapshot.header.tick < impl_->last_particle_tick)
         impl_->particles_initialized = false;
-    const bool same_previous_session = snapshots.has_previous &&
-        snapshots.previous.header.session_id == snapshot.header.session_id;
-    impl_->previous_instance_lookup.Update(same_previous_session
-        ? snapshots.previous.instances : std::span<const RenderInstance>{});
     std::unordered_map<std::uint64_t, const AnimationPoseRef *> pose_by_id;
     pose_by_id.reserve(snapshot.poses.size());
+    std::vector<const AnimationPoseRef *> pose_by_source(snapshot.instances.size());
     for (const auto &pose : snapshot.poses)
         if (pose.instance_index < snapshot.instances.size())
         {
+            pose_by_source[pose.instance_index] = &pose;
             const auto stable_id = snapshot.instances[pose.instance_index].stable_id;
             if (stable_id != 0) pose_by_id.insert_or_assign(stable_id, &pose);
         }
     const auto now = impl_->render_package_time;
-    if (scene_new_session || snapshot.header.tick != impl_->observed_snapshot_tick)
-    {
-        impl_->observed_snapshot_tick = snapshot.header.tick;
-        impl_->snapshot_arrival = now;
-    }
-    const auto interpolation =
-        impl_->config.interpolate && same_previous_session
-            ? std::clamp(
-                  std::chrono::duration<float>(now - impl_->snapshot_arrival).count() * 60.0f,
-                  0.0f, 1.0f)
-            : 1.0f;
+    const auto interpolation = impl_->render_package_alpha;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
                                                   snapshot.instances.end());
     const auto retained_vfx_start = capture_clock();
@@ -310,23 +466,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Boss surface effects require the actual monster emission sidecar.");
     cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
-    for (auto &instance : render_instances)
-    {
-        if (instance.animation_clip_id.value != 0)
-        {
-            if (instance.mesh != RenderMesh::Archer)
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                    "Explicit named animation requires a loaded skeleton-bound character extension.");
-            if (const auto *previous = impl_->previous_instance_lookup.Find(instance.stable_id);
-                previous &&
-                previous->animation_clip_id.value == instance.animation_clip_id.value &&
-                previous->animation_playback_rate == instance.animation_playback_rate &&
-                previous->animation_time_seconds <= instance.animation_time_seconds)
-                instance.animation_time_seconds = std::lerp(
-                    previous->animation_time_seconds, instance.animation_time_seconds,
-                    static_cast<double>(interpolation));
-        }
-    }
     // Replace the compatibility area body only when its authored fill is
     // actually present. Other area shapes and their gameplay warnings remain.
     if (impl_->config.slime_family_preview_count == 0 && !typed_ground_spawns.empty())
@@ -611,6 +750,120 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     // fallback identities based on this canonical source index.
     auto canonical_instances = std::move(render_instances);
     for (auto &source : canonical_instances) PopulateRenderInstanceIdentity(source);
+    std::vector<std::uint16_t> selected_monster_lods(canonical_instances.size());
+    const double lod_shadow_distance = impl_->config.shadow_distance_m;
+    const std::array<double, 3> lod_cascade_extents{
+        lod_shadow_distance * (18.0 / 160.0),
+        lod_shadow_distance * (48.0 / 160.0), lod_shadow_distance};
+    const double lod_shadow_resolution = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
+    const MonsterLodProjectionInputs monster_projection_inputs{
+        impl_->legacy_frame_bridge ? std::span<const RenderViewInput>{}
+            : std::span<const RenderViewInput>{impl_->explicit_frame->views},
+        snapshot.lights, view_input.scene_origin,
+        {lod_cascade_extents[0] / lod_shadow_resolution,
+         lod_cascade_extents[1] / lod_shadow_resolution,
+         lod_cascade_extents[2] / lod_shadow_resolution},
+        {lod_cascade_extents[0] / (32.0 * kVirtualShadowInner),
+         lod_cascade_extents[1] / (8.0 * kVirtualShadowInner),
+         lod_cascade_extents[2] / (8.0 * kVirtualShadowInner)},
+        impl_->brixelizer_gi.FinestVoxelSizeMeters(),
+        impl_->QualityProfileFor(impl_->config.geometry_quality).geometry_screen_error_px,
+        impl_->QualityProfileFor(impl_->config.shadow_quality).local_shadow_resolution,
+        true, impl_->virtual_shadows.AllocatedBytes() != 0,
+        impl_->local_shadows.AllocatedBytes() != 0,
+        active_features.software_gi_enabled, !impl_->legacy_frame_bridge, true};
+    const auto monster_consumers = PrepareMonsterLodConsumers(monster_projection_inputs);
+    std::array<std::uint32_t, 6> monster_own_resident_masks{};
+    for (std::size_t family = 0; family < monster_own_resident_masks.size(); ++family)
+    {
+        const auto &asset = impl_->monster_assets[family];
+        auto &mask = monster_own_resident_masks[family];
+        mask = 1u;
+        for (std::size_t lod = 1; lod < asset.geometry_lods.size() && lod <= 2; ++lod)
+        {
+            const auto &page = impl_->monster_reduced_geometry[family][lod - 1u];
+            const auto &expected = asset.geometry_lods[lod];
+            if (page.page_slot == kMonsterReducedGeometryPage + family * 2u + lod - 1u &&
+                page.storage.resource && page.residency && impl_->residency.Contains(page.residency) &&
+                page.generation != 0 && page.metadata.lod == lod &&
+                page.metadata.error_method_abi == expected.error_method_abi &&
+                page.vertex_count == expected.vertex_count && page.index_count == expected.index_count &&
+                page.source_asset.value != 0)
+                mask |= 1u << lod;
+        }
+    }
+    for (std::size_t source_index = 0; source_index < canonical_instances.size(); ++source_index)
+    {
+        const auto &source = canonical_instances[source_index];
+        if (!is_monster(source.mesh)) continue;
+        const auto family = static_cast<std::size_t>(source.mesh) -
+            static_cast<std::size_t>(RenderMesh::MonsterMelee);
+        const auto &asset = impl_->monster_assets[family];
+        if (asset.geometry_lods.size() < 2 || asset.geometry_lods.size() > 3 ||
+            !asset.interval_lookup_valid ||
+            asset.deformation_flags != render_data::kMonsterBoundsPositionEnclosure) continue;
+        AnimationPoseRef preview_pose;
+        const AnimationPoseRef *pose = nullptr;
+        if (impl_->config.monster_preview_asset < 6 || family_preview)
+        {
+            preview_pose.clip = static_cast<CharacterAnimationClip>(
+                std::min(impl_->config.monster_preview_clip, 4u));
+            preview_pose.normalized_time = impl_->config.monster_preview_time;
+            pose = &preview_pose;
+        }
+        else if (const auto found = pose_by_id.find(source.stable_id);
+                 found != pose_by_id.end()) pose = found->second;
+        if (source.animation_clip_id.value != 0 ||
+            (pose && (pose->secondary_weight != 0.0f || pose->upper_body_weight != 0.0f)))
+            continue;
+        const auto clip = pose ? pose->clip : CharacterAnimationClip::Idle;
+        const float time = pose ? pose->normalized_time : 0.0f;
+        const auto clip_index = static_cast<std::size_t>(clip);
+        if (clip_index >= asset.clip_meta.size() || !std::isfinite(time) ||
+            !std::isfinite(source.scale.x) || !std::isfinite(source.scale.y) ||
+            !std::isfinite(source.scale.z)) continue;
+        const auto meta = asset.clip_meta[clip_index];
+        if (meta.y == 0 || meta.w != asset.bone_count || asset.bone_count == 0 ||
+            meta.x % asset.bone_count != 0) continue;
+        const auto frame_position = std::clamp(time, 0.0f, 1.0f) * float(meta.y - 1u);
+        const auto frame_index = std::min(static_cast<std::uint32_t>(std::floor(frame_position)), meta.y - 1u);
+        const auto &extent = asset.interval_maximum_extent;
+        const bool bounds_qualified = asset.IntervalBound(0, clip, frame_index) != nullptr;
+        // All certified clip rows enclose the current and last submitted poses.
+        const double world_scale = std::max({std::abs(double(source.scale.x)),
+            std::abs(double(source.scale.y)), std::abs(double(source.scale.z))});
+        const double radius = std::hypot(extent[0] * std::abs(double(source.scale.x)),
+            extent[1] * std::abs(double(source.scale.y)),
+            extent[2] * std::abs(double(source.scale.z))) * 1.0011 + 0.001;
+        const MonsterLodWorldSphere sphere{{view_input.scene_origin.x + source.position.x,
+            view_input.scene_origin.y + source.position.y + asset.ground_offset * source.scale.y,
+            view_input.scene_origin.z + source.position.z}, radius, bounds_qualified};
+        auto projection = PrepareMonsterLodProjection(sphere, monster_consumers);
+        if (!std::isfinite(world_scale) || world_scale <= 0) projection.valid = false;
+        auto selected = SelectMonsterLod(asset.geometry_lods, monster_own_resident_masks[family],
+            static_cast<float>(world_scale), projection);
+        const auto key = MakeRenderSceneInstanceKey(source.stable_id,
+            static_cast<std::uint32_t>(source_index));
+        if (selected && impl_->previous_skin_deformation)
+        {
+            std::uint16_t previous_lod{};
+            if (const auto *previous = impl_->previous_skin_deformation->vertex_ranges.Find(key))
+                for (std::uint16_t lod = 1; lod < asset.geometry_lods.size(); ++lod)
+                {
+                    const auto &page = impl_->monster_reduced_geometry[family][lod - 1u];
+                    if (previous->geometry_identity ==
+                        ((std::uint64_t(page.generation) << 32u) | page.page_slot))
+                        previous_lod = lod;
+                }
+            if (selected > previous_lod)
+            {
+                projection.maximum_normalized_projection *= 1.25;
+                selected = SelectMonsterLod(asset.geometry_lods, monster_own_resident_masks[family],
+                    static_cast<float>(world_scale), projection);
+            }
+        }
+        selected_monster_lods[source_index] = selected;
+    }
     struct EnvironmentLod { float threshold{1.0f}; bool complement{}; };
     std::vector<RenderInstance> ordered_instances;
     std::vector<std::uint32_t> ordered_source_indices;
@@ -619,12 +872,19 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     ordered_source_indices.reserve(canonical_instances.size());
     ordered_lods.reserve(canonical_instances.size());
     const auto foliage_density = impl_->QualityProfileFor(impl_->config.foliage_quality).foliage_density;
-    const auto instance_ranges = BuildRenderInstanceOrder(
-        canonical_instances, foliage_density, ordered_source_indices);
+    const auto lod_order = BuildRenderInstanceOrderWithMonsterLods(
+        canonical_instances, selected_monster_lods, foliage_density, ordered_source_indices);
+    if (!lod_order) return Result::Failure(ErrorCode::InvalidState,
+        "hs_renderer_d3d12", "Monster LOD draw order is invalid.");
+    const auto &instance_ranges = lod_order->ranges;
+    const auto &monster_lod_ranges = lod_order->monster_lod_ranges;
+    std::vector<std::uint16_t> ordered_monster_lods;
+    ordered_monster_lods.reserve(ordered_source_indices.size());
     for (const auto source_index : ordered_source_indices)
     {
         ordered_instances.push_back(canonical_instances[source_index]);
         ordered_lods.emplace_back();
+        ordered_monster_lods.push_back(selected_monster_lods[source_index]);
     }
     constexpr std::size_t kEnvironmentVisibilityBucketCount = kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount;
     constexpr std::size_t kArcherVisibilityBucket = kEnvironmentVisibilityBucketCount;
@@ -903,7 +1163,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto [dynamic_terrain_begin, dynamic_terrain_count] =
         instance_ranges[kInstanceTerrainBucket];
     render_instances = std::move(ordered_instances);
-    const auto previous_instance_snapshot = !new_session && !view_input.camera_cut ? impl_->previous_instances : nullptr;
+    const auto previous_instance_snapshot = !motion_history_reset && !view_input.camera_cut ? impl_->previous_instances : nullptr;
     std::vector<GpuInstance> previous_gpu_instances;
     if (previous_instance_snapshot)
     {
@@ -919,6 +1179,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     }
     std::array<std::pair<std::size_t, std::size_t>, 6> monster_ranges{};
+    std::array<std::pair<std::size_t, std::size_t>, 18> monster_bucket_ranges{};
     const auto actor_range = [&](std::size_t bucket) {
         return instance_ranges[bucket].second != 0 ? instance_ranges[bucket]
             : std::pair<std::size_t, std::size_t>{};
@@ -926,7 +1187,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto archer_range = actor_range(kInstanceArcherBucket);
     const auto projectile_range = actor_range(kInstanceProjectileBucket);
     for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+    {
         monster_ranges[asset] = actor_range(kInstanceMonsterBucketBegin + asset);
+        monster_bucket_ranges[asset] = monster_lod_ranges[asset * 3];
+        monster_bucket_ranges[6 + asset * 2] = monster_lod_ranges[asset * 3 + 1];
+        monster_bucket_ranges[7 + asset * 2] = monster_lod_ranges[asset * 3 + 2];
+    }
     if (archer_range.second != 0)
     {
         dynamic_output_begins[kArcherVisibilityBucket] = static_cast<std::uint32_t>(archer_range.first);
@@ -937,14 +1203,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             static_cast<std::uint32_t>(kGpuVisibilityBucketCount)};
         dynamic_visibility_ref_count += archer_range.second;
     }
-    for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+    for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
     {
-        const auto [begin, count] = monster_ranges[asset];
+        const auto [begin, count] = monster_bucket_ranges[asset];
         dynamic_output_begins[kMonsterVisibilityBucketBegin + asset] = static_cast<std::uint32_t>(begin);
         if (count == 0) continue;
         dynamic_visibility_ranges[kMonsterVisibilityBucketBegin + asset] = {
             static_cast<std::uint32_t>(begin), static_cast<std::uint32_t>(count),
-            impl_->monster_assets[asset].index_count,
+            asset < 6 ? impl_->monster_assets[asset].index_count
+                : impl_->monster_reduced_geometry[(asset - 6) / 2][(asset - 6) % 2].index_count,
             static_cast<std::uint32_t>(kGpuVisibilityBucketCount)};
         dynamic_visibility_ref_count += count;
     }
@@ -989,19 +1256,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     };
     for (std::size_t bucket = 0; bucket < kGpuVisibilityBucketCount; ++bucket)
     {
+        const auto monster_bucket = bucket - kMonsterVisibilityBucketBegin;
         const auto page_slot = bucket < kEnvironmentVisibilityBucketCount ? static_cast<std::uint32_t>(bucket)
             : bucket == kArcherVisibilityBucket ? kArcherGeometryPage
-            : kMonsterGeometryPage + static_cast<std::uint32_t>(bucket - kMonsterVisibilityBucketBegin);
+            : monster_bucket < 6 ? kMonsterGeometryPage + static_cast<std::uint32_t>(monster_bucket)
+            : kMonsterReducedGeometryPage + static_cast<std::uint32_t>(monster_bucket - 6);
         const auto *page = impl_->FindGeometryPage(page_slot);
         if (!page)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Geometry bucket has no resident page or terminal fallback.");
+        if (bucket >= kMonsterVisibilityBucketBegin + 6 &&
+            dynamic_visibility_ranges[bucket].count != 0 && page->page_slot != page_slot)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Selected monster LOD resolved to a fallback page.");
         bucket_pages[bucket] = page;
         auto *pipeline = bucket < kEnvironmentVisibilityBucketCount ? environment_pipeline(bucket, false)
             : (use_visibility ? impl_->hero_visibility_pipeline.Get() : impl_->hero_scene_pipeline.Get());
         // Depth peeling uses indexed SceneVS for both slime and water layers.
         if (impl_->hero_transparency.AllocatedBytes() != 0 &&
-            ((bucket >= kMonsterVisibilityBucketBegin && bucket < kMonsterVisibilityBucketBegin + 3) ||
+            ((bucket >= kMonsterVisibilityBucketBegin &&
+              (monster_bucket < 3 || (monster_bucket >= 6 && (monster_bucket - 6) / 2 < 3))) ||
              (bucket < kEnvironmentVisibilityBucketCount &&
               bucket / 3 == render_data::kMeadowWaterGeometry)))
             pipeline = nullptr;
@@ -1009,7 +1283,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ? static_cast<std::uint32_t>(render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(bucket / 3)))
             : bucket == kArcherVisibilityBucket ? static_cast<std::uint32_t>(RenderMesh::Archer)
             : static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
-                  static_cast<std::uint32_t>(bucket - kMonsterVisibilityBucketBegin);
+                  static_cast<std::uint32_t>(monster_bucket < 6 ? monster_bucket : (monster_bucket - 6) / 2);
         if (auto result = prepare_geometry_range(visibility_ranges[bucket], *page,
                 pipeline, visible_ref_stride, static_output_begins[bucket], mesh_id,
                 static_geometry_passes[bucket], 1u, true); !result)
@@ -2078,6 +2352,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::size_t asset_index{};
         std::size_t command_index{};
         bool archer{};
+        std::uint16_t lod{};
         std::uint32_t geometry_pass{};
     };
     std::vector<FresnelDraw> fresnel_draws;
@@ -2094,6 +2369,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         });
         if (match == render_instances.end()) continue;
         const auto instance_index = static_cast<std::size_t>(match - render_instances.begin());
+        if (instance_index >= ordered_monster_lods.size() || ordered_monster_lods[instance_index] >= 3u)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Fresnel owner has no valid selected LOD.");
+        const auto lod = ordered_monster_lods[instance_index];
         const auto asset_index = player ? 0 : static_cast<std::size_t>(match->mesh) -
             static_cast<std::size_t>(RenderMesh::MonsterMelee);
         auto &target = gpu_fresnels[index];
@@ -2113,12 +2392,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                            static_cast<std::uint32_t>(source.stable_id >> 32)};
         std::uint32_t geometry_pass{};
         const GeometryPageGpu &page = player ? impl_->archer_geometry
-            : static_cast<const GeometryPageGpu &>(impl_->monster_assets[asset_index]);
+            : lod == 0 ? static_cast<const GeometryPageGpu &>(impl_->monster_assets[asset_index])
+            : impl_->monster_reduced_geometry[asset_index][lod - 1u];
         if (auto result = impl_->AddGeometryDrawRecord(back_buffer_index, page,
                 static_cast<std::uint32_t>(instance_index), 1, kGeometryGpuSceneRefs, 0,
                 static_cast<std::uint32_t>(render_instances[instance_index].mesh), geometry_pass); !result)
             return result;
-        fresnel_draws.push_back({instance_index, asset_index, index, player, geometry_pass});
+        fresnel_draws.push_back({instance_index, asset_index, index, player, lod, geometry_pass});
     }
     std::uint32_t owner_mesh_count{};
     if (impl_->config.slime_family_preview_count == 0)
@@ -2861,7 +3141,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         source != snapshot.instances.end())
     {
         const auto source_index = static_cast<std::uint32_t>(source - snapshot.instances.begin());
-        if (const auto *selected = FindLastRenderPose(snapshot.poses, source_index)) pose = *selected;
+        if (const auto *selected = pose_by_source[source_index]) pose = *selected;
     }
     bool preview_pose_override = false;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -2921,10 +3201,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto frame_position = normalized * static_cast<float>(found->frame_count - 1);
         const auto first_frame = static_cast<std::uint32_t>(frame_position);
         const auto second_frame = std::min(first_frame + 1, found->frame_count - 1);
-        const auto &first = impl_->archer_transforms[
-            found->first_transform + first_frame * impl_->archer_bone_count + bone_index];
-        const auto &second = impl_->archer_transforms[
-            found->first_transform + second_frame * impl_->archer_bone_count + bone_index];
+        const auto first_index = found->first_transform + first_frame * impl_->archer_bone_count + bone_index;
+        const auto second_index = found->first_transform + second_frame * impl_->archer_bone_count + bone_index;
+        const auto first = impl_->archer_packed_transforms.empty() ? impl_->archer_transforms[first_index]
+            : impl_->archer_packed_transforms[first_index].Value();
+        const auto second = impl_->archer_packed_transforms.empty() ? impl_->archer_transforms[second_index]
+            : impl_->archer_packed_transforms[second_index].Value();
         output = blend_transform(first, second,
                                  frame_position - static_cast<float>(first_frame));
         return true;
@@ -2936,8 +3218,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 if (const auto found = pose_by_id.find(instance.stable_id); found != pose_by_id.end())
                     return *found->second;
             const auto ordered = static_cast<std::size_t>(&instance - render_instances.data());
-            if (ordered < ordered_source_indices.size())
-                if (const auto *candidate = FindLastRenderPose(snapshot.poses, ordered_source_indices[ordered]))
+            if (ordered < ordered_source_indices.size() &&
+                ordered_source_indices[ordered] < pose_by_source.size())
+                if (const auto *candidate = pose_by_source[ordered_source_indices[ordered]])
                     return *candidate;
         }
         return pose;
@@ -3026,21 +3309,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Success();
     };
     const auto palette_prepare_start = capture_clock();
-    // Keep the legacy frame constant populated for compatibility with the existing
-    // shader ABI. Cached Archer draws use their per-instance upload below.
-    for (const auto &instance : render_instances)
-        if (instance.mesh == RenderMesh::Archer && instance.animation_clip_id.value == 0)
-        {
-            if (auto sampled = sample_legacy_pose(pose_for_archer(instance),
-                                                  std::span(constants->archer_bones)); !sampled)
-                return sampled;
-            break;
-        }
+    // Legacy constants and all views consume the same package-owned palette.
+    bool legacy_palette_copied{};
     using ArcherPaletteKey = RenderPoseKey;
     std::vector<ArcherPaletteKey> palette_keys;
     std::vector<std::uint32_t> archer_palette_slots(instance_count,
                                                      std::numeric_limits<std::uint32_t>::max());
-    std::vector<DirectX::XMFLOAT4X4> palette(kMaxCharacterBones);
     std::size_t palette_count{};
     for (std::size_t index = 0; index < render_instances.size(); ++index)
     {
@@ -3058,19 +3332,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (slot >= archer_instance_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Archer palette count exceeded prepared frame capacity.");
-        if (instance.animation_clip_id.value != 0)
+        auto prepared = std::ranges::find_if(impl_->prepared_archer_palettes,
+            [&](const auto &entry) { return entry.key == key; });
+        if (prepared == impl_->prepared_archer_palettes.end())
         {
-            if (auto sampled = SampleNamedCharacterAnimation(
-                    impl_->archer_named_animations, instance,
-                    std::span(palette.data(), impl_->archer_bone_count)); !sampled)
+            auto &next = impl_->prepared_archer_palettes.emplace_back();
+            next.key = key;
+            const auto output = std::span(next.bones.data(), impl_->archer_bone_count);
+            if (instance.animation_clip_id.value != 0)
+            {
+                const auto sampled = impl_->archer_compiled_animation
+                    ? SampleNamedCharacterAnimation(*impl_->archer_compiled_animation,
+                        impl_->archer_named_packed_transforms, instance, output)
+                    : SampleNamedCharacterAnimation(impl_->archer_named_animations, instance, output);
+                if (!sampled) return sampled;
+            }
+            else if (auto sampled = sample_legacy_pose(instance_pose, output); !sampled)
                 return sampled;
+            prepared = std::prev(impl_->prepared_archer_palettes.end());
         }
-        else if (auto sampled = sample_legacy_pose(instance_pose,
-                                                   std::span(palette.data(), impl_->archer_bone_count));
-                 !sampled)
-            return sampled;
         std::memcpy(frame.mapped + archer_palette_data_offset + slot * archer_palette_stride,
-                    palette.data(), archer_palette_stride);
+                    prepared->bones.data(), archer_palette_stride);
+        if (!legacy_palette_copied && instance.animation_clip_id.value == 0)
+        {
+            std::memcpy(constants->archer_bones, prepared->bones.data(), archer_palette_stride);
+            legacy_palette_copied = true;
+        }
         palette_keys.push_back(key);
         archer_palette_slots[index] = static_cast<std::uint32_t>(slot);
     }
@@ -3141,7 +3428,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         grass_visibility_radius += 0.105f *
             std::max(constants->grass_benders[index].w, 0.1f);
     const auto skin_prepare_start = capture_clock();
-    impl_->skin_cache.BeginFrame(new_session);
+    impl_->skin_cache.BeginFrame(motion_history_reset);
     static_assert(sizeof(Vertex) == 76 && SkinVertexRanges::kVertexBytes == 36);
     constants->skin_cache_options = {};
     SkinVertexRanges skin_vertex_ranges;
@@ -3149,34 +3436,113 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::vector<std::uint32_t> dynamic_previous_skin_offsets(instance_count);
     std::vector<std::uint32_t> dynamic_skin_vertex_counts(instance_count);
     std::vector<std::uint64_t> dynamic_skin_geometry_ids(instance_count);
-    auto *previous_skin_frame = !new_session && !view_input.camera_cut
+    auto *previous_skin_frame = !motion_history_reset && !view_input.camera_cut
         ? impl_->previous_skin_deformation.get() : nullptr;
     const bool previous_skin_frame_valid = previous_skin_frame && previous_skin_frame->skin_cache_valid &&
         previous_skin_frame->skin_cache_vertices.resource;
     std::vector<std::uint32_t> dynamic_pose_flags(instance_count);
     std::vector<float> dynamic_pose_times(instance_count, 1.0f);
     std::vector<std::uint8_t> dynamic_skin_history(instance_count);
+    std::vector<std::uint8_t> dynamic_cooked_skin_bounds(instance_count);
+    std::vector<std::uint8_t> dynamic_skin_needed(instance_count);
     std::vector<GpuSceneCanonicalInputs> dynamic_canonical_inputs(instance_count);
     std::vector<std::uint32_t> dynamic_skin_slots(
         instance_count, std::numeric_limits<std::uint32_t>::max());
+    const bool non_view_skin_consumer =
+        active_features.software_gi_enabled || !typed_volumes.empty() ||
+        !monster_consumers.baseline.valid;
+    const auto intersects_package_view = [&](Float3 center, float vertical_offset, float radius) {
+        if (impl_->legacy_frame_bridge ||
+            !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+            !std::isfinite(radius) || impl_->explicit_frame->views.empty() ||
+            !std::isfinite(shadow_distance) || shadow_distance <= 0) return true;
+        for (const auto &consumer : impl_->explicit_frame->views)
+        {
+            if (consumer.render_active.width == 0 || consumer.render_active.height == 0 ||
+                !std::isfinite(consumer.near_plane) || !std::isfinite(consumer.far_plane) ||
+                consumer.near_plane <= 0 || consumer.far_plane <= consumer.near_plane)
+                return true;
+            using Vec = std::array<double, 3>;
+            const auto dot = [](Vec a, Vec b) {
+                return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            };
+            const auto cross = [](Vec a, Vec b) -> Vec {
+                return {a[1] * b[2] - a[2] * b[1],
+                    a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+            };
+            const Vec eye{consumer.camera.position.x, consumer.camera.position.y,
+                consumer.camera.position.z};
+            const Vec target{consumer.camera.target.x, consumer.camera.target.y,
+                consumer.camera.target.z};
+            const Vec up{consumer.camera.up.x, consumer.camera.up.y, consumer.camera.up.z};
+            const Vec point{consumer.scene_origin.x + center.x,
+                consumer.scene_origin.y + center.y + vertical_offset,
+                consumer.scene_origin.z + center.z};
+            const Vec delta{point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
+            Vec forward{target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]};
+            const double forward_length = std::sqrt(dot(forward, forward));
+            if (!std::isfinite(forward_length) || forward_length <= 0) return true;
+            for (auto &value : forward) value /= forward_length;
+            Vec right = cross(up, forward);
+            const double right_length = std::sqrt(dot(right, right));
+            if (!std::isfinite(right_length) || right_length <= 0) return true;
+            for (auto &value : right) value /= right_length;
+            const Vec vertical = cross(forward, right);
+            const double depth = dot(delta, forward);
+            const double x = dot(delta, right), y = dot(delta, vertical);
+            const double safe_radius = double(radius) + 2.0 +
+                0.0001 * std::sqrt(dot(delta, delta));
+            const double tangent_y = std::tan(double(consumer.camera.vertical_fov_degrees) *
+                std::numbers::pi / 360.0);
+            const double tangent_x = tangent_y * double(consumer.render_active.width) /
+                double(consumer.render_active.height);
+            if (!std::isfinite(safe_radius) || !std::isfinite(tangent_x) ||
+                !std::isfinite(tangent_y) || tangent_x <= 0 || tangent_y <= 0) return true;
+            const bool camera_outside = depth + safe_radius < consumer.near_plane ||
+                depth - safe_radius > consumer.far_plane ||
+                std::abs(x) > depth * tangent_x + safe_radius * std::hypot(1.0, tangent_x) ||
+                std::abs(y) > depth * tangent_y + safe_radius * std::hypot(1.0, tangent_y);
+            if (!camera_outside) return true;
+            // Without virtual shadows this view still records three CSM cuts.
+            // Their largest snapped square can admit offscreen casters; ignore
+            // the light-space depth limit here to keep this test conservative.
+            Vec sun{light.direction.x, light.direction.y, light.direction.z};
+            const double sun_length = std::sqrt(dot(sun, sun));
+            if (!std::isfinite(sun_length) || sun_length <= 0) return true;
+            for (auto &value : sun) value /= sun_length;
+            const Vec sun_up = std::abs(sun[1]) > 0.99 ? Vec{0, 0, 1} : Vec{0, 1, 0};
+            Vec sun_right = cross(sun_up, sun);
+            const double sun_right_length = std::sqrt(dot(sun_right, sun_right));
+            if (!std::isfinite(sun_right_length) || sun_right_length <= 0) return true;
+            for (auto &value : sun_right) value /= sun_right_length;
+            const Vec sun_vertical = cross(sun, sun_right);
+            const Vec shadow_delta{point[0] - target[0], point[1] - target[1],
+                point[2] - target[2]};
+            const double half_extent = double(shadow_distance) * 0.5 + safe_radius + 2.0 +
+                double(shadow_distance) / std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
+            if (!std::isfinite(half_extent) || half_extent <= 0 ||
+                (std::abs(dot(shadow_delta, sun_right)) <= half_extent &&
+                 std::abs(dot(shadow_delta, sun_vertical)) <= half_extent))
+                return true;
+        }
+        const std::array<double, 3> world_center{
+            view_input.scene_origin.x + center.x,
+            view_input.scene_origin.y + center.y + vertical_offset,
+            view_input.scene_origin.z + center.z};
+        for (const auto &light : monster_consumers.local_lights)
+        {
+            const double distance = std::hypot(world_center[0] - light.center[0],
+                world_center[1] - light.center[1], world_center[2] - light.center[2]);
+            if (!std::isfinite(distance) || distance <= light.far_plane + radius + light.emitter_bound)
+                return true;
+        }
+        return false;
+    };
     for (std::size_t index = 0; index < instance_count; ++index)
     {
         const auto &source = render_instances[index];
         auto position = source.position;
         auto yaw_value = source.yaw;
-        if (snapshots.has_previous && source.stable_id != 0)
-        {
-            if (const auto *previous = impl_->previous_instance_lookup.Find(source.stable_id))
-            {
-                const auto &previous_instance = *previous;
-                position.x = std::lerp(previous_instance.position.x, source.position.x, interpolation);
-                position.y = std::lerp(previous_instance.position.y, source.position.y, interpolation);
-                position.z = std::lerp(previous_instance.position.z, source.position.z, interpolation);
-                const auto yaw_delta = std::remainder(source.yaw - previous_instance.yaw,
-                                                      2.0f * DirectX::XM_PI);
-                yaw_value = previous_instance.yaw + yaw_delta * interpolation;
-            }
-        }
         const auto vertical_offset = is_environment_mesh(source.mesh) ? 0.0f : source.mesh == RenderMesh::Archer
                                          ? impl_->archer_ground_offset * source.scale.y
                                          : is_monster(source.mesh)
@@ -3193,6 +3559,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ? std::bit_cast<float>(source.environment_seed) : 0.0f;
         AnimationPoseRef resolved_skin_pose;
         const AnimationPoseRef *skin_pose = nullptr;
+        RenderPoseKey pose_key{};
         if (source.mesh == RenderMesh::Archer) skin_pose = &pose_for_archer(source);
         if (is_monster(source.mesh))
         {
@@ -3224,36 +3591,105 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const auto skin = impl_->skin_cache.Resolve(
                 key, source, skin_pose,
                 source.mesh == RenderMesh::Archer ? 1.75f : 1.5f);
+            pose_key = skin.current_pose;
             conservative_radius = skin.conservative_radius;
+            const auto monster_family = static_cast<std::uint32_t>(source.mesh) -
+                static_cast<std::uint32_t>(RenderMesh::MonsterMelee);
+            const auto selected_lod = ordered_monster_lods[index];
             const GeometryPageGpu *skin_geometry = source.mesh == RenderMesh::Archer
                 ? &impl_->archer_geometry
-                : &impl_->monster_assets[static_cast<std::uint32_t>(source.mesh) -
-                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee)];
+                : selected_lod == 0 ? static_cast<const GeometryPageGpu *>(&impl_->monster_assets[monster_family])
+                : &impl_->monster_reduced_geometry[monster_family][selected_lod - 1u];
             const auto vertex_count = skin_geometry->vertex_count;
             const auto geometry_identity = (std::uint64_t(skin_geometry->generation) << 32u) | skin_geometry->page_slot;
-            SkinVertexRange range;
-            if (vertex_count >= (1u << 20u) || !skin_vertex_ranges.Resolve(key, vertex_count, range, geometry_identity))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                    "Skin cache vertex range exceeds shader addressing or conflicts with its instance.");
-            dynamic_skin_offsets[index] = range.offset;
-            dynamic_skin_vertex_counts[index] = range.count;
             dynamic_skin_geometry_ids[index] = geometry_identity;
-            const auto *previous_range = previous_skin_frame_valid
-                ? previous_skin_frame->vertex_ranges.Find(key) : nullptr;
-            dynamic_skin_history[index] = skin.history_valid && previous_range &&
-                previous_range->count == vertex_count &&
-                previous_range->geometry_identity == geometry_identity &&
-                SkinVertexRangeFits(previous_range->offset, vertex_count, previous_skin_frame->vertex_stride,
-                    previous_skin_frame->skin_cache_vertices.resource->GetDesc().Width) ? 1u : 0u;
-            if (dynamic_skin_history[index])
-                dynamic_previous_skin_offsets[index] = previous_range->offset;
             if (is_monster(source.mesh))
             {
                 dynamic_pose_flags[index] =
                     static_cast<std::uint32_t>(skin.current_clip) << 8u;
                 dynamic_pose_times[index] = skin.current_time;
+                const auto &asset = impl_->monster_assets[static_cast<std::uint32_t>(source.mesh) -
+                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee)];
+                const auto clip = static_cast<std::size_t>(skin.current_clip);
+                if (asset.deformation_flags == render_data::kMonsterBoundsPositionEnclosure &&
+                    source.animation_clip_id.value == 0 &&
+                    (!skin_pose || (skin_pose->secondary_weight == 0.0f &&
+                        skin_pose->upper_body_weight == 0.0f)) &&
+                    selected_lod < asset.geometry_lods.size() &&
+                    asset.geometry_lods[selected_lod].lod == selected_lod &&
+                    (asset.geometry_lods[selected_lod].flags & render_data::kGeometryFlagSkinned) != 0 &&
+                    asset.geometry_lods[selected_lod].vertex_count == skin_geometry->vertex_count &&
+                    asset.bone_count != 0 && clip < asset.clip_meta.size() &&
+                    std::isfinite(skin.current_time) &&
+                    std::isfinite(source.scale.x) && std::isfinite(source.scale.y) &&
+                    std::isfinite(source.scale.z))
+                {
+                    const auto meta = asset.clip_meta[clip];
+                    if (meta.y != 0 && meta.w == asset.bone_count &&
+                        meta.x % asset.bone_count == 0)
+                    {
+                        const auto frame_position = std::clamp(skin.current_time, 0.0f, 1.0f) *
+                            static_cast<float>(meta.y - 1u);
+                        const auto frame_index = std::min(static_cast<std::uint32_t>(std::floor(frame_position)), meta.y - 1u);
+                        const auto *bound = asset.IntervalBound(selected_lod, skin.current_clip, frame_index);
+                        if (bound)
+                        {
+                            if (bound->lod == selected_lod && bound->clip == skin.current_clip && bound->frame == frame_index)
+                            {
+                                std::array<double, 3> extent{};
+                                const std::array<double, 3> scale{source.scale.x, source.scale.y, source.scale.z};
+                                for (std::size_t axis = 0; axis < 3; ++axis)
+                                    extent[axis] = std::max(std::abs(double(bound->minimum[axis])),
+                                        std::abs(double(bound->maximum[axis]))) *
+                                        std::abs(scale[axis]);
+                                const double radius = std::hypot(extent[0], extent[1], extent[2]) * 1.0011 + 0.001;
+                                if (std::isfinite(radius) && radius < FLT_MAX / 2)
+                                {
+                                    conservative_radius = std::max(conservative_radius,
+                                        std::nextafter(static_cast<float>(radius), FLT_MAX));
+                                    dynamic_cooked_skin_bounds[index] = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            const bool attached_skin_consumer = source.stable_id != 0 &&
+                (std::ranges::any_of(typed_fresnels, [&](const auto &effect) {
+                    return effect.render_instance_id == source.stable_id;
+                }) || std::ranges::any_of(typed_entity_surfaces, [&](const auto &effect) {
+                    return effect.render_instance_id == source.stable_id;
+                }));
+            const bool needed = !dynamic_cooked_skin_bounds[index] || non_view_skin_consumer ||
+                attached_skin_consumer ||
+                intersects_package_view(position, vertical_offset, conservative_radius);
+#ifndef NDEBUG
+            if (!needed)
+                assert(is_monster(source.mesh) && dynamic_cooked_skin_bounds[index] &&
+                    !non_view_skin_consumer && !attached_skin_consumer);
+#endif
+            if (needed)
+            {
+                dynamic_skin_needed[index] = 1;
+                SkinVertexRange range;
+                if (vertex_count >= (1u << 20u) ||
+                    !skin_vertex_ranges.Resolve(key, vertex_count, range, geometry_identity))
+                    return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                        "Skin cache vertex range exceeds shader addressing or conflicts with its instance.");
+                dynamic_skin_offsets[index] = range.offset;
+                dynamic_skin_vertex_counts[index] = range.count;
+                const auto *previous_range = previous_skin_frame_valid
+                    ? previous_skin_frame->vertex_ranges.Find(key) : nullptr;
+                dynamic_skin_history[index] = skin.history_valid && previous_range &&
+                    previous_range->count == vertex_count &&
+                    previous_range->geometry_identity == geometry_identity &&
+                    SkinVertexRangeFits(previous_range->offset, vertex_count, previous_skin_frame->vertex_stride,
+                        previous_skin_frame->skin_cache_vertices.resource->GetDesc().Width) ? 1u : 0u;
+                if (dynamic_skin_history[index])
+                    dynamic_previous_skin_offsets[index] = previous_range->offset;
             }
         }
+        else pose_key = MakeRenderPoseKey(source, nullptr);
         instances[index] = {{position.x, position.y + vertical_offset, position.z,
                              conservative_radius},
                             {source.scale.x, source.scale.y, source.scale.z, 1.0f},
@@ -3262,7 +3698,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                             yaw_value,
                             animation_time};
         dynamic_canonical_inputs[index] = {
-            MakeRenderPoseKey(source, skin_pose), MakeRenderContentKey(source),
+            pose_key, MakeRenderContentKey(source),
             dynamic_skin_geometry_ids[index], source.revisions.transform,
             source.revisions.material, source.status_visual_mask};
     }
@@ -3284,7 +3720,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto &source = render_instances[index];
         const auto environment = is_environment_mesh(source.mesh);
         const auto monster = is_monster(source.mesh);
-        const auto skinned = source.mesh == RenderMesh::Archer || monster;
+        const auto skinned = dynamic_skin_needed[index] != 0;
         GpuSceneMetadata scene_metadata{
             source.asset_id.value,
             source.material_id.value,
@@ -3303,20 +3739,30 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "A stable render instance produced conflicting persistent GPU payloads.");
         if (skinned) dynamic_skin_slots[index] = slot.index;
+        const bool previous_slot_valid = previous_instance_snapshot &&
+            slot.index < previous_gpu_instances.size() &&
+            slot.index < previous_instance_snapshot->generations.size() &&
+            previous_instance_snapshot->generations[slot.index] == slot.generation;
+        const bool continuous_motion = previous_slot_valid &&
+            slot.index < previous_instance_snapshot->motion_epochs.size() &&
+            previous_instance_snapshot->motion_epochs[slot.index] == source.motion_epoch;
+        if (previous_slot_valid && !continuous_motion)
+        {
+            // The prior GPU slot is still addressed by this draw, but cannot
+            // supply a transform across an instantaneous movement boundary.
+            previous_gpu_instances[slot.index] = next_draw_instances[index];
+            std::memcpy(frame.mapped + previous_instance_data_offset +
+                slot.index * sizeof(GpuInstance), &next_draw_instances[index], sizeof(GpuInstance));
+        }
         auto draw_flags = environment
             ? (ordered_lods[index].complement ? 0x20000u : 0u)
             : dynamic_pose_flags[index];
         if (skinned) draw_flags |= kCachedSkinFlag;
-        if (HasEnvironmentWind(source.mesh, source.environment_variant) && previous_instance_snapshot &&
-            slot.index < previous_gpu_instances.size() &&
-            slot.index < previous_instance_snapshot->generations.size() &&
-            previous_instance_snapshot->generations[slot.index] == slot.generation &&
+        if (dynamic_cooked_skin_bounds[index]) draw_flags |= 0x400000u;
+        if (HasEnvironmentWind(source.mesh, source.environment_variant) && continuous_motion &&
             previous_gpu_instances[slot.index].mesh == next_draw_instances[index].mesh)
             draw_flags |= 0x200000u;
-        if (skinned && dynamic_skin_history[index] &&
-            slot.index < previous_gpu_instances.size() && previous_instance_snapshot &&
-            slot.index < previous_instance_snapshot->generations.size() &&
-            previous_instance_snapshot->generations[slot.index] == slot.generation)
+        if (skinned && dynamic_skin_history[index] && continuous_motion)
             draw_flags |= kCachedSkinHistoryFlag;
         dynamic_draw_refs[index] = {
             slot.index,
@@ -3326,6 +3772,23 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             slot.generation};
     }
     impl_->dynamic_scene_slots.EndFrame();
+    if (impl_->render_scene_inputs || !impl_->canonical_instance_current || impl_->canonical_instance_current->package_id != impl_->active_render_package_id)
+    {
+        auto submitted = std::make_shared<Impl::SubmittedInstanceFrame>();
+        const auto instances = impl_->dynamic_scene_slots.Instances();
+        const auto metadata = impl_->dynamic_scene_slots.Metadata();
+        submitted->instances.assign(instances.begin(), instances.end());
+        submitted->generations.reserve(metadata.size());
+        for (const auto &slot : metadata) submitted->generations.push_back(slot.generation);
+        submitted->motion_epochs.resize(metadata.size());
+        for (std::size_t index = 0; index < dynamic_draw_refs.size(); ++index)
+            submitted->motion_epochs[dynamic_draw_refs[index].instance_index] =
+                render_instances[index].motion_epoch;
+        submitted->scene_origin = view_input.scene_origin;
+        submitted->package_id = impl_->active_render_package_id;
+        submitted->sample = snapshot.header;
+        impl_->canonical_instance_current = std::move(submitted);
+    }
     const auto scene_changes = impl_->dynamic_scene_slots.Changes();
     cpu_timings.scene_reconcile_us = capture_elapsed(scene_reconcile_start);
 
@@ -3361,6 +3824,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             append_skin_identity(&dynamic_skin_offsets[index], sizeof(dynamic_skin_offsets[index]));
             append_skin_identity(&dynamic_skin_vertex_counts[index], sizeof(dynamic_skin_vertex_counts[index]));
             append_skin_identity(&dynamic_skin_geometry_ids[index], sizeof(dynamic_skin_geometry_ids[index]));
+            append_skin_identity(&dynamic_cooked_skin_bounds[index], sizeof(dynamic_cooked_skin_bounds[index]));
+            append_skin_identity(&instances[index].position.w, sizeof(instances[index].position.w));
             append_skin_identity(&render_instances[index].mesh, sizeof(render_instances[index].mesh));
         }
     append_skin_identity(palette_keys.data(), palette_keys.size() * sizeof(ArcherPaletteKey));
@@ -3725,10 +4190,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera skin receiver time is nonfinite.");
                 const float frame_position=std::clamp(dynamic_pose_times[dynamic_index],0.0f,1.0f)*float(meta.y-1u);
                 const auto frame0=std::min(static_cast<UINT>(std::floor(frame_position)),meta.y-1u);
-                const auto row=std::size_t(meta.x/asset.bone_count)+frame0;
-                if(row>=asset.interval_bounds.size()) { camera_receiver_domain_closed=false;return Result::Success(); }
-                const auto &bounds=asset.interval_bounds[row];
-                if(bounds.lod!=0||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
+                const auto selected_lod=dynamic_index<ordered_monster_lods.size()?ordered_monster_lods[dynamic_index]:0u;
+                const auto *found=asset.IntervalBound(selected_lod,
+                    static_cast<CharacterAnimationClip>(clip),frame0);
+                if(!found) { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto &bounds=*found;
+                if(bounds.lod!=selected_lod||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
                 { camera_receiver_domain_closed=false;return Result::Success(); }
                 for(unsigned axis=0;axis<3;++axis) { lo[axis]=bounds.minimum[axis];hi[axis]=bounds.maximum[axis]; }
             }
@@ -3776,9 +4243,17 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const bool environment = is_environment_mesh(source.mesh);
             const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
             const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
+            if (!immutable && is_monster(source.mesh) &&
+                (ref_index >= ordered_monster_lods.size() || ordered_monster_lods[ref_index] >= 3u))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Monster shadow reference has no valid selected LOD.");
+            const auto monster_lod = !immutable && is_monster(source.mesh)
+                ? ordered_monster_lods[ref_index] : 0u;
+            const auto monster_family = static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee);
             const std::uint32_t bucket = environment ? static_cast<UINT>(environment_mesh_index(source) * 3 + 2)
                 : source.mesh == RenderMesh::Archer ? kArcherVisibilityBucket
-                : is_monster(source.mesh) ? kMonsterVisibilityBucketBegin + static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee)
+                : is_monster(source.mesh) ? kMonsterVisibilityBucketBegin +
+                    (monster_lod == 0 ? monster_family : 6u + 2u * monster_family + monster_lod - 1u)
                 : UINT32_MAX;
             const auto *page = bucket != UINT32_MAX ? bucket_pages[bucket] : &impl_->procedural_geometry;
             const auto pass = bucket != UINT32_MAX
@@ -4635,33 +5110,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             end - graph_substage_start).count());
         graph_substage_start = end;
     };
-    impl_->graph.Reset();
-    std::vector<TextureStreamingGraphBinding> texture_bindings;
-    auto copy_queue = std::make_shared<ComPtr<ID3D12CommandQueue>>(
-        impl_->graph_queue_executor.NativeQueue(QueueHint::Copy));
-    ExternalQueueBinding texture_copy_queue{std::shared_ptr<void>(copy_queue, copy_queue->Get()), QueueHint::Copy, {}};
-    if (auto result = impl_->texture_streaming.AddPendingPasses(impl_->graph, std::move(texture_copy_queue),
-            1000, texture_bindings); !result) return result;
-    std::unordered_map<ID3D12Resource *, ResourceHandle> canonical_textures;
-    for (const auto &binding : texture_bindings)
-        canonical_textures.emplace(impl_->texture_streaming.View(binding.texture).resource, binding.sampled.resource);
-    const auto texture_metadata = impl_->texture_feedback.ImportMetadata(impl_->graph, back_buffer_index);
-    std::vector<TextureFeedbackGraphBinding> feedback_bindings;
-    if (auto result = impl_->texture_feedback.AddClearPass(impl_->graph, back_buffer_index,
-            1200, feedback_bindings); !result) return result;
-    ResourceVersion entity_surface_noise_version, entity_surface_gradient_version, entity_surface_stbn_version;
-    const auto read_material_sampling = [&](PassBuilder &pass, bool feedback_writer,
-                                           Access sampling = Access::AllShaderRead) {
-        for (const auto &binding : texture_bindings) pass.Read(binding.sampled, sampling);
-        pass.Read(texture_metadata, sampling);
-        if (entity_surface_noise_version.resource)
-        {
-            pass.Read(entity_surface_noise_version, sampling);
-            pass.Read(entity_surface_gradient_version, sampling);
-            pass.Read(entity_surface_stbn_version, sampling);
-        }
-        if (feedback_writer) RendererTextureFeedback::DeclareSampling(pass, feedback_bindings);
-    };
+    std::size_t hero_candidate_count{};
+    for (const auto &range : std::span(monster_ranges).first(3))
+        hero_candidate_count += range.second;
+    if (impl_->static_gpu_scene)
+        hero_candidate_count += static_environment_ranges[render_data::kMeadowWaterGeometry * 3].second;
+    const bool have_hero_contributors = hero_candidate_count != 0;
+    const bool hero_occupancy_topology = have_hero_contributors && hero_candidate_count <= 2 &&
+        !impl_->config.capture_hero_work;
+    std::uint32_t hero_work_source_mask{};
+    if (impl_->config.capture_hero_work && have_hero_contributors)
+    {
+        for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
+            if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
+                if (monster_bucket_ranges[asset].second)
+                    hero_work_source_mask |= 1u << (asset < 3 ? asset : asset - 3);
+        if (impl_->static_gpu_scene)
+            for (std::size_t lod = 0; lod < 3; ++lod)
+                if (static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second)
+                    hero_work_source_mask |= 1u << (lod + 9);
+    }
+    const bool composite_gradient_read = flash_add_count || ground_add_count ||
+        std::ranges::any_of(ribbon_outputs, [](const GpuRibbonOutput &output) {
+            return (output.metadata[3] & 1u) == 0;
+        });
+    const auto screen_intensity = impl_->explicit_frame->screen_overlay_intensity
+        ? *impl_->explicit_frame->screen_overlay_intensity : impl_->config.screen_overlay_intensity;
+    const bool fxaa_identity = constants->temporal_options.x > 0.5f ||
+        (constants->lod_clock.w & 2u) != 0;
     const auto authored_source = [&](const RenderInstance &source) {
         return is_environment_mesh(source.mesh) || source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
     };
@@ -4678,25 +5154,1028 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::ranges::any_of(static_scene->instances, authored_source);
     const bool has_static_masked_material_draw = static_scene &&
         std::ranges::any_of(static_scene->instances, masked_source);
+    const auto cluster_record = impl_->PrepareClusterFrameRecordData(back_buffer_index, use_visibility);
+    const auto ao_csm_adaptive_status = impl_->adaptive_shading.Status();
+    const bool overlap_ao_csm = presented_view &&
+        impl_->explicit_frame->views.size() == 1 && !impl_->config.environment_preview &&
+        !impl_->mesh_shader_enabled && !use_visibility && impl_->enhanced &&
+        active_features.ao_mode == GraphicsAoMode::GTAO &&
+        active_features.gi_mode == GraphicsGiMode::Probe &&
+        active_features.reflection_mode == GraphicsReflectionMode::ScreenSpace &&
+        active_features.shadow_mode == GraphicsShadowMode::Raster &&
+        !active_features.software_gi_enabled &&
+        active_features.adaptive_compute_enabled && ao_csm_adaptive_status.compute_ready &&
+        ao_csm_adaptive_status.usable && impl_->ambient_occlusion.AdaptiveComputeApplied() &&
+        !(impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized()) &&
+        !impl_->sdk_presentation.IsEnabled() &&
+        impl_->sdk_presentation.LatencyOwner() == SdkLatencyOwner::None;
+    std::uint64_t brixelizer_light_epoch{};
+    if (active_features.software_gi_enabled)
+    {
+        brixelizer_light_epoch = impl_->pipeline_revision ^ (impl_->material_parameter_revision * 1099511628211ull);
+        if (const auto digest = RendererProductDigest(impl_->config, "render/lighting/default_probe.rpkg"); !digest.empty())
+            brixelizer_light_epoch ^= MakeAssetId(digest).value;
+        if (impl_->brixelizer_history_valid && (new_session ||
+                !(impl_->temporal_history_valid || impl_->hzb_history_valid) ||
+                impl_->brixelizer_gi.Status().light_revision != brixelizer_light_epoch))
+        {
+            if (auto drained = impl_->WaitForGpu(); !drained) return drained;
+            if (auto reset = impl_->brixelizer_gi.ResetHistoryAfterCompletion(
+                    impl_->graph_queue_executor.Completed(), impl_->view_state.render_active, new_session); !reset) return reset;
+            impl_->brixelizer_history_valid = false;
+        }
+    }
+    if (constants->vfx_decal_count.x && !impl_->decal_surface.AllocatedBytes())
+    {
+        DecalSurfaceCandidate candidate;
+        if (auto prepared = impl_->PrepareDecalSurface(impl_->config,
+                impl_->view_state.render_capacity, true, candidate); !prepared) return prepared;
+        auto transition = impl_->DiagnosticsMemory();
+        transition.renderer_view_bytes += candidate.AllocatedBytes();
+        impl_->diagnostics.ObserveTransition(transition);
+        if (auto committed = impl_->decal_surface.Commit(std::move(candidate),
+                impl_->graph_queue_executor.Completed()); !committed) return committed;
+    }
+    if (!typed_screen.empty() && screen_intensity > 0 && !impl_->screen_overlay.AllocatedBytes())
+    {
+        auto overlay_config = impl_->config;
+        overlay_config.screen_overlay_intensity = screen_intensity;
+        ScreenOverlayCandidate candidate;
+        if (auto prepared = impl_->PrepareScreenOverlay(overlay_config,
+                impl_->view_state.render_capacity, candidate); !prepared) return prepared;
+        if (auto committed = impl_->screen_overlay.Commit(std::move(candidate),
+                impl_->graph_queue_executor.Completed()); !committed) return committed;
+    }
+    bool devtools_ui_hook{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    devtools_ui_hook = imgui_draw_data && !impl_->sdk_presentation.IsEnabled();
+#endif
+    LocalShadowInputs local_shadow_input;
+    LocalShadowFramePlan local_shadow_plan;
+    const bool local_shadow_planned = impl_->local_shadows.AllocatedBytes() != 0;
+    if (local_shadow_planned)
+    {
+        if (!static_shadow_batch)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Local shadows have no prepared caster batch.");
+        local_shadow_input.lights = frame_lights;
+        local_shadow_input.camera_position = lod_eye;
+        local_shadow_input.rendered_frame_id = impl_->frame_number;
+        local_shadow_input.frame_slot = back_buffer_index;
+        local_shadow_input.completed = impl_->graph_queue_executor.Completed();
+        local_shadow_input.reset_cache = new_session;
+        local_shadow_input.casters = ShadowCasterRange{static_shadow_batch->records, casters};
+        local_shadow_input.draw_groups = groups;
+        // Planning uses current lights/casters/groups. Native reads and callbacks
+        // are attached to this same object after logical graph slots are known.
+        local_shadow_input.draw = [](RenderPassContext &, const LocalShadowOutputs &,
+                                     std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
+        local_shadow_input.declare_material_sampling = [](PassBuilder &) {};
+        if (auto prepared = impl_->local_shadows.PrepareFrameRecordData(
+                local_shadow_input, local_shadow_plan); !prepared) return prepared;
+    }
+    const FrameGraphLayout::EarlyKey early_key{
+        back_buffer_index, impl_->render_width, impl_->render_height, impl_->width, impl_->height,
+        impl_->material_sidecar_layout.plane_count,
+        presented_view, use_visibility, impl_->enhanced, have_skinned_instances,
+        previous_skin_frame_valid, !impl_->exposure_initialized, impl_->ui_dirty[back_buffer_index],
+        initialize_temporal_targets, initialize_offscreen_output,
+        upload_static_scene, upload_dynamic_scene, upload_environment_stream,
+        upload_environment_geometry, !frame.geometry_draw_records_cpu.empty(),
+        have_hero_contributors, hero_occupancy_topology, impl_->config.capture_hero_work,
+        composite_gradient_read,
+        impl_->dynamic_lod_states.initialized,
+        impl_->static_gpu_scene && impl_->static_gpu_scene->lod_states.initialized,
+        static_cast<bool>(impl_->dynamic_lod_states.prefix_source.resource),
+        impl_->static_gpu_scene && static_cast<bool>(impl_->static_gpu_scene->lod_states.prefix_source.resource),
+        use_visibility && !impl_->visibility_targets_initialized, csm_required,
+        has_authored_material_draw, has_masked_material_draw,
+        has_static_authored_material_draw, has_static_masked_material_draw,
+        use_native_reconstruction, impl_->config.bloom, impl_->config.outline,
+        fxaa_identity, !impl_->view_targets_initialized,
+        !typed_screen.empty() && screen_intensity > 0, !entity_surface_frame.Bytes().empty(),
+        constants->vfx_decal_count.x != 0,
+        impl_->config.motion_blur != GraphicsMotionBlur::Off, impl_->config.depth_of_field,
+        impl_->config.color_grading, presented_view && impl_->sdk_presentation.IsEnabled(),
+        devtools_ui_hook,
+        active_features.software_gi_enabled, impl_->config.contact_shadows,
+        active_features.adaptive_raster_enabled, active_features.adaptive_compute_enabled,
+        overlap_ao_csm,
+        active_features.ao_mode, active_features.gi_mode,
+        active_features.reflection_mode, active_features.shadow_mode,
+        static_cast<std::uint32_t>(std::ranges::count_if(impl_->environment_geometry_streams,
+            [](const auto &stream) { return stream.upload_pending; })),
+        hero_work_source_mask};
+    std::vector<std::uint32_t> geometry_page_slots;
+    std::array<bool, kMonsterReducedGeometryPage + 12u> geometry_page_seen{};
+    for (const auto &record : frame.geometry_draw_records_cpu)
+    {
+        if (record.page_slot >= geometry_page_seen.size() || !record.geometry_generation ||
+            geometry_page_seen[record.page_slot]) continue;
+        geometry_page_seen[record.page_slot] = true;
+        geometry_page_slots.push_back(record.page_slot);
+    }
+    std::ranges::sort(geometry_page_slots);
+    std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
+    std::vector<SceneGeometryRecord> software_scene_jobs;
+    std::vector<SceneDrawInstance> software_scene_draws;
+    std::vector<const GeometryPageGpu *> software_scene_pages;
+    std::vector<const RenderInstance *> software_scene_sources;
+    if (active_features.software_gi_enabled)
+    {
+        const auto append_scene = [&](const RenderInstance &source, const GpuInstance &draw,
+                std::uint32_t stable_slot, std::uint32_t generation, std::uint32_t skin_slot,
+                std::uint16_t selected_lod) -> Result {
+            const bool environment = is_environment_mesh(source.mesh);
+            const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
+            const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
+            const auto geometry_ordinal = environment
+                ? static_cast<std::uint32_t>(environment_mesh_index(source)) : UINT32_MAX;
+            const auto ordinal = environment
+                ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)
+                : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
+            const auto page_slot = environment
+                ? geometry_ordinal * render_data::kEnvironmentGeometryLodCount
+                : source.mesh == RenderMesh::Archer ? kArcherGeometryPage
+                : is_monster(source.mesh)
+                    ? (selected_lod == 0 ? kMonsterGeometryPage +
+                        static_cast<std::uint32_t>(source.mesh) - static_cast<std::uint32_t>(RenderMesh::MonsterMelee)
+                        : kMonsterReducedGeometryPage + 2u *
+                            (static_cast<std::uint32_t>(source.mesh) - static_cast<std::uint32_t>(RenderMesh::MonsterMelee)) +
+                            selected_lod - 1u)
+                    : source.mesh == RenderMesh::EnemyProjectile ? kProjectileGeometryPage
+                        : kProceduralGeometryPage;
+            if (selected_lod >= 3u) return Result::Failure(ErrorCode::InvalidState,
+                "hs_renderer_d3d12", "Software scene monster LOD is invalid.");
+            const auto *page = impl_->FindGeometryPage(page_slot);
+            if (!page || (is_monster(source.mesh) && selected_lod != 0 && page->page_slot != page_slot))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Software scene candidate has no complete resident geometry page.");
+            const bool masked = environment && render_data::ClassifyEnvironmentMaterial(
+                impl_->environment_meshes[geometry_ordinal * 3].material) ==
+                    render_data::EnvironmentMaterialVariant::MaskedTwoSided;
+            const bool builtin = page->page_slot == kProceduralGeometryPage;
+            std::uint32_t flags = hero ? SceneGeometryCachedSkin : 0u;
+            if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
+                flags |= SceneGeometryTwoSided;
+            if (builtin) flags |= SceneGeometryBuiltin;
+            if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant)))
+                flags |= SceneGeometryDeformed;
+            if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
+            const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
+                2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
+                0u, sizeof(Vertex), page->vertex_count, 0u, stable_slot, generation,
+                skin_slot, static_cast<std::uint32_t>(source.mesh), ordinal, flags};
+            const SceneDrawInstance instance{draw.position, draw.scale, draw.color, draw.mesh,
+                draw.yaw, draw.padding};
+            if (environment && !hero)
+            {
+                const auto capabilities = ordinal < kAuthoredMaterialNames.size()
+                    ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
+                const auto domain = ClassifyBrixelizerDomain(capabilities,
+                    (flags & SceneGeometryTwoSided) != 0, (flags & SceneGeometryTransmissive) != 0);
+                if (domain != BrixelizerGeometryDomain::Opaque &&
+                    domain != BrixelizerGeometryDomain::AuthoredCoverage)
+                {
+                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
+                    auto &count = domain == BrixelizerGeometryDomain::UnsupportedMasked
+                        ? excluded_masked_count
+                        : domain == BrixelizerGeometryDomain::UnsupportedThin
+                            ? excluded_thin_count : excluded_translucent_count;
+                    return AddBrixelizerExcludedCount(count, page->submeshes.size());
+                }
+            }
+            software_scene_jobs.push_back(job);
+            software_scene_draws.push_back(instance);
+            software_scene_pages.push_back(page);
+            software_scene_sources.push_back(&source);
+            return Result::Success();
+        };
+        std::vector<bool> included(persistent_instances.size());
+        for (std::size_t index = 0; index < render_instances.size(); ++index)
+        {
+            const auto &reference = dynamic_draw_refs[index];
+            if (included[reference.instance_index]) continue;
+            included[reference.instance_index] = true;
+            if (auto appended = append_scene(render_instances[index],
+                    persistent_instances[reference.instance_index], reference.instance_index,
+                    reference.instance_generation, dynamic_skin_slots[index],
+                    ordered_monster_lods[index]); !appended) return appended;
+        }
+        if (static_scene && impl_->static_gpu_scene)
+            for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
+            {
+                const auto &source = static_scene->instances[index];
+                if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
+                const bool environment = is_environment_mesh(source.mesh);
+                const GpuInstance draw{{source.position.x,
+                    source.position.y + (environment ? 0.0f : source.scale.y * 0.5f),
+                    source.position.z, 0}, {source.scale.x, source.scale.y, source.scale.z, 1},
+                    source.color_rgba, static_cast<std::uint32_t>(source.mesh) |
+                    (environment ? kEnvironmentMeshFlag : 0u) |
+                    (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
+                    source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
+                        ? 0.0f : std::bit_cast<float>(source.environment_seed)};
+                if (auto appended = append_scene(source, draw,
+                        0x80000000u | static_cast<std::uint32_t>(index),
+                        impl_->static_gpu_scene->instance_generation, UINT32_MAX, 0u); !appended) return appended;
+            }
+    }
+    SceneGeometryOutputs software_scene_preview;
+    if (!software_scene_jobs.empty())
+    {
+        const SceneGeometryInputs preview_inputs{software_scene_jobs, software_scene_draws, {}, {},
+            back_buffer_index, impl_->graph_queue_executor.Completed()};
+        if (auto previewed = impl_->scene_geometry.PreviewPreparedOutputs(
+                preview_inputs, software_scene_preview); !previewed) return previewed;
+        if (software_scene_preview.geometries.size() != software_scene_jobs.size())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Software GI scene geometry preview did not cover every current job.");
+    }
+    const SceneGeometryInputs scene_shape_inputs{software_scene_jobs, software_scene_draws,
+        {}, {}, back_buffer_index, impl_->graph_queue_executor.Completed()};
+    const auto scene_shape = impl_->scene_geometry.PrepareRecordData(scene_shape_inputs);
+    std::vector<std::uint32_t> software_scene_page_slots;
+    software_scene_page_slots.reserve(software_scene_pages.size());
+    for (const auto *page : software_scene_pages)
+        if (std::ranges::find(software_scene_page_slots, page->page_slot) ==
+            software_scene_page_slots.end()) software_scene_page_slots.push_back(page->page_slot);
+    std::ranges::sort(software_scene_page_slots);
+    bool direct_contract_failed{};
+    const auto shape_of = [&](AllocationResource *resource,
+                              std::unordered_map<ID3D12Resource *, std::uint32_t> &aliases) {
+        FrameGraphLayout::ResourceShape shape;
+        if (resource && resource->resource)
+        {
+            if (resource->allocation)
+                if (auto certified = resource->EnsureNativeContract(impl_->device.Get()); !certified)
+                    direct_contract_failed = true;
+            const auto *contract = resource->NativeContract();
+            const auto desc = contract ? contract->description : resource->resource->GetDesc();
+            shape.dimension = desc.Dimension; shape.format = desc.Format;
+            shape.width = desc.Width; shape.height = desc.Height;
+            shape.depth_or_array = desc.DepthOrArraySize; shape.mip_levels = desc.MipLevels;
+            shape.sample_count = desc.SampleDesc.Count; shape.sample_quality = desc.SampleDesc.Quality;
+            shape.layout = desc.Layout; shape.flags = desc.Flags;
+            const auto alias = aliases.try_emplace(
+                resource->resource.Get(), static_cast<std::uint32_t>(aliases.size() + 1)).first;
+            shape.alias_group = alias->second;
+            if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+                shape.buffer_heap = contract ? contract->buffer_heap : D3D12_HEAP_TYPE_DEFAULT;
+        }
+        return shape;
+    };
+    const auto visit_direct_imports = [&](const auto &append_shape) {
+    for (auto *resource : {&frame.upload, &frame.ui_upload, &frame.geometry_draw_records,
+            &frame.skin_cache_vertices, &frame.skin_cache_bounds, &frame.static_visible_refs,
+            &frame.static_draw_args, &frame.static_rejected_refs, &frame.static_rejected_args,
+            &frame.static_retest_refs, &frame.static_retest_args, &frame.dynamic_visible_refs,
+            &frame.dynamic_draw_args, &frame.ribbon_arguments}) append_shape(resource);
+    append_shape(previous_skin_frame ? &previous_skin_frame->skin_cache_vertices : nullptr);
+    for (auto *resource : {&impl_->environment_brdf_lut, &impl_->material_parameters,
+            &impl_->hero_material_bindings_gpu, &impl_->dynamic_lod_states.states,
+            &impl_->dynamic_lod_states.prefix_source, &impl_->ribbon_history,
+            &impl_->ribbon_previous, &impl_->particles, &impl_->particle_dead,
+            &impl_->particle_counters, &impl_->indirect_arguments, &impl_->dynamic_instances,
+            &impl_->depth, &impl_->shadow, &impl_->gbuffer_base, &impl_->gbuffer_normal,
+            &impl_->gbuffer_metadata, &impl_->gbuffer_material, &impl_->gbuffer_motion,
+            &impl_->gbuffer_surface_history, &impl_->hdr_color, &impl_->subsurface_diffuse,
+            &impl_->environment_specular, &impl_->indirect_diffuse,
+            &impl_->oit_accumulation, &impl_->oit_revealage, &impl_->post_a, &impl_->post_b,
+            &impl_->scene_work, &impl_->display_linear, &impl_->composite_hdr,
+            &impl_->exposure_histogram, &impl_->initial_exposure,
+            &impl_->visibility_ids, &impl_->visibility_front_face, &impl_->visibility_pixels,
+            &impl_->visibility_counts, &impl_->visibility_dispatch_args,
+            &impl_->vfx_gradient, &impl_->vfx_noise_volume, &impl_->vfx_stbn_scalar,
+            &impl_->vfx_fracture_decals, &impl_->vfx_organic_decals,
+            &impl_->archer_diffuse, &impl_->archer_normal, &impl_->monster_basecolor,
+            &impl_->monster_emissive, &impl_->monster_ram, &impl_->family_diffuse,
+            &impl_->family_normal}) append_shape(resource);
+    for (auto &resource : impl_->particle_alive) append_shape(&resource);
+    for (auto &resource : impl_->material_sidecars) append_shape(&resource);
+    for (auto &resource : impl_->temporal_history) append_shape(&resource);
+    for (auto &resource : impl_->temporal_normal_history) append_shape(&resource);
+    for (auto &resource : impl_->temporal_material_history) append_shape(&resource);
+    for (auto &resource : impl_->exposure_values) append_shape(&resource);
+    for (auto &resource : impl_->hzb_history) append_shape(&resource);
+    for (auto &resource : impl_->ui_textures) append_shape(&resource);
+    append_shape(&visibility_frame.raster_records);
+    append_shape(impl_->static_gpu_scene ? &impl_->static_gpu_scene->instances : nullptr);
+    append_shape(impl_->static_gpu_scene ? &impl_->static_gpu_scene->lod_states.states : nullptr);
+    append_shape(impl_->static_gpu_scene ? &impl_->static_gpu_scene->lod_states.prefix_source : nullptr);
+    append_shape(&impl_->environment_stream.candidate);
+    for (auto &stream : impl_->environment_geometry_streams)
+        if (stream.upload_pending) append_shape(&stream.candidate.storage);
+    for (const auto page_slot : geometry_page_slots)
+        if (const auto *page = impl_->FindGeometryPage(page_slot))
+            append_shape(&const_cast<GeometryPageGpu *>(page)->storage);
+    for (const auto page_slot : software_scene_page_slots)
+        if (const auto *page = impl_->FindGeometryPage(page_slot))
+            append_shape(&const_cast<GeometryPageGpu *>(page)->storage);
+    };
+    const auto matches_direct_shapes = [&](const std::vector<FrameGraphLayout::ResourceShape> &saved) {
+        std::unordered_map<ID3D12Resource *, std::uint32_t> aliases;
+        aliases.reserve(160);
+        std::size_t index{};
+        bool matches = true;
+        visit_direct_imports([&](AllocationResource *resource) {
+            const auto current = shape_of(resource, aliases);
+            if (index >= saved.size() || !(saved[index] == current)) matches = false;
+            ++index;
+        });
+        return matches && index == saved.size() && !direct_contract_failed;
+    };
+    // A value-only first gate precedes the stateful GI and probe record
+    // preparation. Later guide and import checks must also qualify a restore.
+    const auto matches_target_shapes = [&](const FrameGraphLayout &saved) {
+        AdaptiveShadingInputs adaptive;
+        adaptive.depth.version = saved.adaptive.guides[0];
+        adaptive.normal.version = saved.adaptive.guides[1];
+        adaptive.base.version = saved.adaptive.guides[2];
+        adaptive.material.version = saved.adaptive.guides[3];
+        adaptive.metadata.version = saved.adaptive.guides[4];
+        adaptive.motion.version = saved.adaptive.guides[5];
+        if (!impl_->adaptive_shading.MatchesLayout(adaptive, saved.adaptive)) return false;
+
+        AmbientOcclusionInputs ambient;
+        ambient.depth.version = saved.ambient.guides[0];
+        ambient.normal.version = saved.ambient.guides[1];
+        ambient.metadata.version = saved.ambient.guides[2];
+        ambient.motion.version = saved.ambient.guides[3];
+        ambient.surface_history.version = saved.ambient.guides[4];
+        ambient.adaptive_density.version = saved.ambient.guides[5];
+        ambient.reset_history = !(impl_->temporal_history_valid || impl_->hzb_history_valid) || new_session;
+        ambient.queue = overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct;
+        if (!impl_->ambient_occlusion.MatchesLayout(ambient, saved.ambient)) return false;
+
+        SubsurfaceInputs subsurface;
+        subsurface.depth.version = saved.subsurface.guides[0];
+        subsurface.normal.version = saved.subsurface.guides[1];
+        subsurface.metadata.version = saved.subsurface.guides[2];
+        subsurface.material_parameters.version = saved.subsurface.guides[3];
+        subsurface.diffuse.version = saved.subsurface.guides[4];
+        subsurface.hdr.version = saved.subsurface.guides[5];
+        if (!impl_->subsurface.MatchesLayout(subsurface, saved.subsurface)) return false;
+
+        ScreenReflectionsInputs reflection;
+        reflection.depth.version = saved.reflections.guides[0];
+        reflection.base.version = saved.reflections.guides[1];
+        reflection.normal.version = saved.reflections.guides[2];
+        reflection.metadata.version = saved.reflections.guides[3];
+        reflection.material.version = saved.reflections.guides[4];
+        reflection.motion.version = saved.reflections.guides[5];
+        reflection.surface_history.version = saved.reflections.guides[6];
+        reflection.opaque_hdr.version = saved.reflections.guides[7];
+        reflection.environment_specular.version = saved.reflections.guides[8];
+        reflection.material_parameters.version = saved.reflections.guides[9];
+        reflection.sidecars[0].version = saved.reflections.guides[10];
+        reflection.sidecars[1].version = saved.reflections.guides[11];
+        reflection.ambient_visibility.version = saved.reflections.guides[12];
+        reflection.ambient_visibility_enabled = saved.ambient.ao;
+        reflection.sidecar_plane_count = impl_->material_sidecar_layout.plane_count;
+        reflection.frame_index = impl_->frame_number;
+        reflection.reset_history = !(impl_->temporal_history_valid || impl_->hzb_history_valid) || new_session;
+        if (!impl_->screen_reflections.MatchesLayout(reflection, saved.reflections)) return false;
+
+        if (constants->vfx_decal_count.x)
+        {
+            DecalSurfaceInputs decal;
+            decal.command_count = constants->vfx_decal_count.x;
+            decal.depth.version = saved.decal_surface.guides[0];
+            decal.metadata.version = saved.decal_surface.guides[1];
+            decal.base.version = saved.decal_surface.guides[2];
+            decal.normal.version = saved.decal_surface.guides[3];
+            decal.material.version = saved.decal_surface.guides[4];
+            decal.commands.version = saved.decal_surface.guides[5];
+            decal.parameters.version = saved.decal_surface.guides[6];
+            decal.gradient.version = saved.decal_surface.guides[7];
+            decal.textures[0].version = saved.decal_surface.guides[8];
+            decal.textures[1].version = saved.decal_surface.guides[9];
+            if (!impl_->decal_surface.MatchesLayout(decal, saved.decal_surface)) return false;
+        }
+        if (!typed_screen.empty() && screen_intensity > 0)
+        {
+            ScreenOverlayInputs overlay;
+            overlay.commands = typed_screen;
+            overlay.intensity = screen_intensity;
+            overlay.gradient = saved.screen_overlay.gradient;
+            if (!impl_->screen_overlay.MatchesLayout(overlay, saved.screen_overlay)) return false;
+        }
+        PostSubgraphInputs post;
+        post.bloom = impl_->config.bloom;
+        post.outline = impl_->config.outline;
+        const auto &versions = saved.post.inputs;
+        post.scene_hdr = versions[0]; post.composite_hdr = versions[1];
+        post.depth = versions[2]; post.normal = versions[3]; post.metadata = versions[4];
+        post.motion = versions[5]; post.surface_history = versions[6];
+        post.temporal_history = versions[7]; post.ui = versions[8];
+        post.temporal_normal_history = versions[9]; post.temporal_material_history = versions[10];
+        post.exposure = versions[11]; post.external_temporal = versions[12];
+        std::copy_n(versions.begin() + 13, post.transparent_guides.size(),
+            post.transparent_guides.begin());
+        post.screen_overlay_alpha = versions[20]; post.screen_overlay_upload = versions[21];
+        post.screen_overlay_gradient = versions[22]; post.reactive_composite_hdr = versions[23];
+        post.fxaa_identity = fxaa_identity;
+        post.initialize_post_targets = !impl_->view_targets_initialized;
+        const auto present_hook = [](RenderGraphBuilder &, ResourceVersion, ResourceVersion &) {
+            return Result::Success();
+        };
+        if (impl_->config.motion_blur != GraphicsMotionBlur::Off || impl_->config.depth_of_field)
+            post.pre_bloom = present_hook;
+        if (impl_->config.color_grading) post.pre_tone_map = present_hook;
+        if (devtools_ui_hook) post.devtools_ui = present_hook;
+        if (post.pre_bloom)
+        {
+            HdrPostInputs motion;
+            motion.hdr.version = saved.hdr_motion.inputs[0];
+            motion.depth.version = saved.hdr_motion.inputs[1];
+            motion.motion.version = saved.hdr_motion.inputs[2];
+            motion.surface_history.version = saved.hdr_motion.inputs[3];
+            motion.normal.version = saved.hdr_motion.inputs[4];
+            motion.transparent_depth.version = saved.hdr_motion.inputs[5];
+            motion.transparent_motion.version = saved.hdr_motion.inputs[6];
+            motion.transparent_history.version = saved.hdr_motion.inputs[7];
+            motion.transparent_classification.version = saved.hdr_motion.inputs[8];
+            motion.transparent_guides_enabled = have_hero_contributors &&
+                impl_->hero_transparency.AllocatedBytes() != 0;
+            if (!impl_->hdr_post.MatchesMotionLayout(motion, saved.hdr_motion)) return false;
+        }
+        if (post.pre_tone_map)
+        {
+            HdrPostInputs grade;
+            grade.hdr.version = saved.hdr_grade.input;
+            if (!impl_->hdr_post.MatchesGradeLayout(grade, saved.hdr_grade,
+                    static_cast<bool>(post.pre_bloom))) return false;
+        }
+        const PostSubgraphTargets post_targets{versions[24], versions[25], versions[26],
+            versions[27], versions[28], versions[29], versions[30], versions[31],
+            versions[32], versions[33]};
+        if (!MatchesPostSubgraphLayout(post, post_targets, saved.post)) return false;
+        if (use_native_reconstruction)
+        {
+            ReconstructionGuidesInputs guide;
+            const auto &v = saved.reconstruction_guides.inputs;
+            guide.depth.version = v[0]; guide.motion.version = v[1];
+            guide.metadata.version = v[2]; guide.surface_history.version = v[3];
+            guide.composite_hdr.version = v[4]; guide.opaque_hdr.version = v[5];
+            guide.exposure.version = v[6]; guide.transparency_revealage.version = v[7];
+            guide.transparent_depth.version = v[8]; guide.transparent_motion.version = v[9];
+            guide.transparent_history.version = v[10]; guide.transparent_classification.version = v[11];
+            guide.transparent_metadata.version = v[12]; guide.transparent_overflow.version = v[13];
+            guide.transparent_transport.version = v[14]; guide.screen_overlay_alpha.version = v[15];
+            guide.transparent_guides_enabled = have_hero_contributors &&
+                impl_->hero_transparency.AllocatedBytes() != 0;
+            if (!impl_->reconstruction_guides.MatchesLayout(guide,
+                    impl_->reconstruction_provider->UsesExternalQueue(),
+                    impl_->reconstruction_plan.effective_provider.value,
+                    saved.reconstruction_guides)) return false;
+        }
+        if (presented_view && impl_->sdk_presentation.IsEnabled())
+        {
+            PresentationGuidesInputs guide;
+            const auto &v = saved.presentation_guides.inputs;
+            guide.display_linear.version = v[0]; guide.encoded_ui.version = v[1];
+            guide.depth.version = v[2]; guide.motion.version = v[3];
+            guide.transparent_depth.version = v[4]; guide.transparent_motion.version = v[5];
+            guide.transparent_classification.version = v[6]; guide.transparent_metadata.version = v[7];
+            guide.transparent_guides_enabled = !use_native_reconstruction &&
+                have_hero_contributors && impl_->hero_transparency.AllocatedBytes() != 0;
+            if (!impl_->presentation_guides.MatchesLayout(guide, 900, 901, 902,
+                    saved.presentation_guides)) return false;
+            PresentationGuidesOutputs outputs;
+            outputs.hudless.version = saved.presentation_tag.guides[0];
+            outputs.ui.version = saved.presentation_tag.guides[1];
+            outputs.depth.version = saved.presentation_tag.guides[2];
+            outputs.motion.version = saved.presentation_tag.guides[3];
+            if (!impl_->presentation_guides.MatchesTagLayout(outputs,
+                    {saved.presentation_tag.back_buffer, nullptr}, 904,
+                    saved.presentation_tag)) return false;
+        }
+        return true;
+    };
+    FrameGraphLayout *source_candidate{};
+    for (auto &saved : impl_->graph_layouts)
+    {
+        if (!saved.handle || !saved.certified_imports || saved.early != early_key ||
+            saved.geometry_page_slots != geometry_page_slots ||
+            saved.software_scene_page_slots != software_scene_page_slots ||
+            !matches_direct_shapes(saved.direct_import_shapes) ||
+            (software_scene_jobs.empty()
+                ? saved.scene_geometry.valid && saved.scene_geometry.record.record_count != 0
+                : !saved.scene_geometry.valid ||
+                    saved.scene_geometry.record.frame_slot != scene_shape.frame_slot ||
+                    (saved.scene_geometry.record.deformed_position_bytes != 0) !=
+                        (scene_shape.deformed_position_bytes != 0) ||
+                    saved.scene_geometry.record.import_widths != scene_shape.import_widths) ||
+            !impl_->texture_streaming.MatchesLayout(1000, saved.texture_streaming) ||
+            !impl_->texture_feedback.MatchesLayout(back_buffer_index, 1200, 1201,
+                saved.texture_feedback) ||
+            !impl_->light_list.MatchesLayout(saved.light_list) ||
+            !impl_->ltc_lut.MatchesLayout(saved.ltc) ||
+            !impl_->lighting_probe.MatchesLayout(saved.probe) ||
+            !impl_->MatchesClusterGraphLayout(cluster_record, saved.cluster) ||
+            !matches_target_shapes(saved)) continue;
+        if (primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0)
+        {
+            inputs.depth = saved.virtual_shadows.depth;
+            inputs.normal = saved.virtual_shadows.normal;
+            inputs.native_reads = saved.virtual_shadows.native_reads;
+            inputs.draw = [](RenderPassContext &, const VirtualShadowOutputs &,
+                             std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
+            inputs.declare_material_sampling = [](PassBuilder &) {};
+            if (!impl_->virtual_shadows.MatchesLayout(inputs, shadow_plan,
+                    saved.virtual_shadows)) continue;
+        }
+        else if (saved.virtual_shadows.target_generation) continue;
+        if (local_shadow_planned)
+        {
+            local_shadow_input.native_reads = saved.local_shadows.native_reads;
+            if (!impl_->local_shadows.MatchesLayout(local_shadow_input, local_shadow_plan,
+                    saved.local_shadows)) continue;
+        }
+        else if (saved.local_shadows.storage_generation) continue;
+        if (have_hero_contributors)
+        {
+            if (!saved.hero.target_generation) continue;
+            HeroTransparencyInputs hero_match;
+            hero_match.opaque_depth.version = saved.hero.inputs[0];
+            hero_match.hdr.version = saved.hero.inputs[1];
+            hero_match.accumulation.version = saved.hero.inputs[2];
+            hero_match.revealage.version = saved.hero.inputs[3];
+            hero_match.use_occupancy_queries = hero_occupancy_topology;
+            hero_match.peel_reads = std::span<const HeroTransparencySceneRead>(saved.hero.peel_reads);
+            hero_match.scene_reads = std::span<const HeroTransparencySceneRead>(saved.hero.scene_reads);
+            std::array<HeroWorkContributorInput, HeroWorkRetainedLayout::kMaxContributors> work{};
+            std::size_t work_count{};
+            for (std::uint32_t bit = 0; bit < 12; ++bit)
+                if (hero_work_source_mask & (1u << bit))
+                {
+                    work[work_count].arguments = saved.hero.work.argument_versions[work_count];
+                    ++work_count;
+                }
+            hero_match.work_contributors = std::span<const HeroWorkContributorInput>(work.data(), work_count);
+            if (!impl_->hero_transparency.MatchesLayout(hero_match,
+                    HeroTransparencyGuide{saved.hero.background, nullptr}, saved.hero)) continue;
+        }
+        else if (saved.hero.target_generation) continue;
+        if (!source_candidate || saved.last_used > source_candidate->last_used)
+            source_candidate = &saved;
+    }
+    HlodRuntimeFrameRecordData hlod_record;
+    if (auto prepared = impl_->PrepareHlodFrameRecordData(back_buffer_index,
+            active_view_mask,
+            source_candidate ? source_candidate->hlod_input_geometry_records : ResourceVersion{},
+            source_candidate ? source_candidate->hlod_input_static_instances : ResourceVersion{},
+            source_candidate ? ResourceVersion{source_candidate->hlod.refs, 0} : ResourceVersion{},
+            hlod_record); !prepared) return prepared;
+    if (source_candidate && !impl_->MatchesHlodFrameLayout(hlod_record, source_candidate->hlod))
+        source_candidate = nullptr;
+    std::vector<SoftwareSceneGeometry> brixelizer_geometries;
+    std::vector<BrixelizerSceneInstance> brixelizer_instances;
+    BrixelizerGeometryLookup brixelizer_geometry_lookup;
+    std::vector<std::shared_ptr<const void>> brixelizer_owners;
+    std::unordered_set<D3D12MA::Allocation *> brixelizer_backing;
+    std::vector<std::size_t> brixelizer_leaf_jobs;
+    if (active_features.software_gi_enabled)
+    {
+        brixelizer_owners.push_back(impl_->resident_generation_lease);
+        if (software_scene_preview.owner)
+            brixelizer_owners.push_back(software_scene_preview.owner);
+    }
+    if (active_features.software_gi_enabled && !software_scene_jobs.empty())
+    {
+            std::vector<SoftwareSceneGeometry> geometries;
+            std::vector<SoftwareSceneInstance> instances;
+            geometries.reserve(software_scene_jobs.size()); instances.reserve(software_scene_jobs.size());
+            for (std::size_t index = 0; index < software_scene_jobs.size(); ++index)
+            {
+                const auto &job = software_scene_preview.geometries[index];
+                const auto &draw = software_scene_draws[index];
+                const auto &page = *software_scene_pages[index];
+                const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
+                const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
+                const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
+                    std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
+                        persistent_metadata[job.skin_slot].skin_vertex_stride : 0;
+                if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
+                    page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
+                    frame.skin_cache_vertices.resource->GetDesc().Width))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
+                geometries.push_back({std::uint64_t(page.page_slot) + 1, page.generation, impl_->frame_number + 1,
+                    deformed ? software_scene_preview.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
+                    page.storage.resource.Get(), {},
+                    ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
+                        skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
+                    page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session});
+                // Immutable shared pages retain their revision through frames.
+                if (!deformed && !skin) geometries.back().current_revision = page.generation;
+                DirectX::XMFLOAT4X4 world;
+                DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
+                    DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
+                const auto mesh_key = MakeAssetId("render/geometry/page/" + std::to_string(page.page_slot)).value;
+                const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
+                instances.push_back({job.stable_gpu_scene_slot, job.instance_generation, static_cast<std::uint32_t>(index),
+                    material_id, mesh_key, page.generation, world});
+                if (active_features.software_gi_enabled)
+                {
+                    // Retain the allocator's actual backing in addition to COM
+                    // resources; native geometry IDs can outlive this frame slot.
+                    const auto retain_allocation = [&](const AllocationResource &backing) {
+                        if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
+                        backing.allocation->AddRef();
+                        brixelizer_owners.emplace_back(backing.allocation, [](const void *value) {
+                            const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
+                        });
+                    };
+                    retain_allocation(page.storage);
+                    if (skin) retain_allocation(frame.skin_cache_vertices);
+                    const auto &source = *software_scene_sources[index];
+                    const auto &sphere = page.metadata.bounds.sphere;
+                    const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
+                    const float sine = std::sin(draw.yaw), cosine = std::cos(draw.yaw);
+                    const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
+                    DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
+                        draw.position.z - sine * sx + cosine * sz};
+                    float radius = sphere[3] * maximum_scale;
+                    if (skin)
+                    {
+                        center = {draw.position.x, draw.position.y, draw.position.z};
+                        radius = std::max(draw.position.w, std::sqrt(sx*sx + sy*sy + sz*sz) + radius);
+                    }
+                    if (HasEnvironmentWind(source.mesh, source.environment_variant)) radius += grass_visibility_radius;
+                    std::span<const render_data::CharacterMaterialBinding> bindings;
+                    if (source.mesh == RenderMesh::Archer) bindings = impl_->archer_material_bindings;
+                    else if (is_monster(source.mesh)) bindings = impl_->monster_assets[
+                        static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::MonsterMelee)].material_bindings;
+                    const auto ordinal = job.environment_ordinal;
+                    const auto capabilities = ordinal < kAuthoredMaterialNames.size()
+                        ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
+                    const auto previous_leaf_count = brixelizer_geometries.size();
+                    if (auto appended = AppendBrixelizerLeaf(geometries.back(), instances.back(), page.submeshes, bindings,
+                            std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
+                            (job.flags & SceneGeometryTwoSided) != 0,
+                            (job.flags & SceneGeometryTransmissive) != 0,
+                            {center.x-radius,center.y-radius,center.z-radius},
+                            {center.x+radius,center.y+radius,center.z+radius},
+                            ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
+                                : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
+                                impl_->material_parameter_revision,
+                            brixelizer_geometry_lookup,brixelizer_geometries,brixelizer_instances); !appended) return appended;
+                    for (auto leaf = previous_leaf_count; leaf < brixelizer_geometries.size(); ++leaf)
+                        brixelizer_leaf_jobs.push_back(index);
+                }
+            }
+    }
+    const auto brixelizer_leaf_key = [&](std::size_t leaf) {
+        const auto job_index = brixelizer_leaf_jobs[leaf];
+        return std::pair{software_scene_pages[job_index]->page_slot,
+            software_scene_jobs[job_index].flags &
+                (SceneGeometryDeformed | SceneGeometryCachedSkin)};
+    };
+    if (source_candidate && active_features.software_gi_enabled)
+    {
+        const auto &reads = source_candidate->brixelizer.record.geometry_reads;
+        const auto &saved_keys = source_candidate->brixelizer_leaf_keys;
+        if (reads.size() != saved_keys.size() * 2u)
+            source_candidate = nullptr;
+        else
+            for (std::size_t leaf = 0; leaf < brixelizer_geometries.size(); ++leaf)
+            {
+                const auto found = std::ranges::find(saved_keys, brixelizer_leaf_key(leaf));
+                if (found == saved_keys.end()) { source_candidate = nullptr; break; }
+                const auto old_leaf = static_cast<std::size_t>(found - saved_keys.begin());
+                brixelizer_geometries[leaf].vertex_version = reads[old_leaf * 2u].version;
+                brixelizer_geometries[leaf].index_version = reads[old_leaf * 2u + 1u].version;
+            }
+    }
+    BrixelizerSceneInputs native_scene;
+    BrixelizerFrameRecordData brixelizer_record;
+    if (active_features.software_gi_enabled)
+    {
+        native_scene.geometries = brixelizer_geometries; native_scene.instances = brixelizer_instances;
+        native_scene.excluded_masked_count = excluded_masked_count;
+        native_scene.excluded_thin_count = excluded_thin_count;
+        native_scene.excluded_translucent_count = excluded_translucent_count;
+        native_scene.sdf_center = lod_eye; native_scene.frame_slot = back_buffer_index;
+        native_scene.frame_index = impl_->frame_number; native_scene.scene_revision = impl_->pipeline_revision + 1;
+        native_scene.completed = impl_->graph_queue_executor.Completed(); native_scene.owners = brixelizer_owners;
+        if (auto prepared = impl_->brixelizer_gi.PrepareFrameRecordData(native_scene, brixelizer_record); !prepared)
+            return prepared;
+        if (source_candidate && !MatchesBrixelizerGraphLayout(
+                brixelizer_record, source_candidate->brixelizer)) source_candidate = nullptr;
+    }
+    struct PreparedGiGuard
+    {
+        BrixelizerGiSystem *service{};
+        ~PreparedGiGuard() { if (service) service->AbandonPreparedFrame(); }
+    } prepared_gi_guard{active_features.software_gi_enabled ? &impl_->brixelizer_gi : nullptr};
+    std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> capture_pages;
+    std::vector<LocalProbeSceneRead> capture_reads;
+    LocalProbeRuntimeFrameInputs local_probe_inputs;
+    LocalProbeRuntimeFramePlan local_probe_plan;
+    bool local_probe_prepared{};
+    if (source_candidate)
+    {
+        const bool capture_source = impl_->local_probes.AllocatedBytes() != 0 &&
+            static_scene && impl_->static_gpu_scene;
+        const auto count_present = [](const AllocationResource &resource) {
+            return resource.resource ? std::size_t{1} : std::size_t{0};
+        };
+        std::size_t expected_reads{};
+        if (capture_source)
+        {
+            expected_reads = count_present(frame.upload) + count_present(impl_->material_parameters) +
+                count_present(impl_->hero_material_bindings_gpu) + count_present(impl_->environment_brdf_lut) + 9u;
+            if (source_candidate->virtual_shadows.target_generation)
+            {
+                expected_reads += 5u;
+                expected_reads += source_candidate->virtual_shadows.root_static_present ? 1u : 0u;
+                expected_reads += source_candidate->virtual_shadows.root_dynamic_present ? 1u : 0u;
+            }
+            if (source_candidate->local_shadows.storage_generation) expected_reads += 5u;
+        }
+        if (source_candidate->local_probe.scene_reads.size() != expected_reads)
+            source_candidate = nullptr;
+        else
+        {
+            local_probe_inputs.config = &impl_->config;
+            local_probe_inputs.pipeline_cache = &impl_->pipeline_cache;
+            local_probe_inputs.scene = static_scene;
+            local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
+            local_probe_inputs.static_instance_generation = impl_->static_gpu_scene
+                ? impl_->static_gpu_scene->instance_generation : 0;
+            local_probe_inputs.material_parameter_revision = impl_->material_parameter_revision;
+            local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
+            local_probe_inputs.foliage_density = foliage_density;
+            local_probe_inputs.frame_constants = constants;
+            local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
+            if (has_static_authored_material_draw)
+                local_probe_inputs.declare_material_sampling = [](PassBuilder &) {};
+            if (has_static_masked_material_draw)
+                local_probe_inputs.declare_shadow_sampling = [](PassBuilder &) {};
+            capture_reads = source_candidate->local_probe.scene_reads;
+            local_probe_inputs.scene_reads = capture_reads;
+            if (capture_source)
+            {
+                const auto &saved_reads = source_candidate->local_probe.shadow_reads;
+                if (saved_reads.size() >= expected_reads + 2u + capture_pages.size())
+                {
+                    local_probe_inputs.static_version = saved_reads[expected_reads + 1u].version;
+                    for (std::size_t material = 0; material < capture_pages.size(); ++material)
+                    {
+                        const auto &page = material == kEnvironmentMaterialNames.size()
+                            ? impl_->procedural_geometry : *bucket_pages[material * 3];
+                        capture_pages[material].vertex_version = saved_reads[expected_reads + 2u + material].version;
+                        capture_pages[material].index_version = capture_pages[material].vertex_version;
+                        capture_pages[material].vertices = page.storage.resource;
+                        capture_pages[material].indices = page.storage.resource;
+                        capture_pages[material].vertex_allocation = page.storage.allocation;
+                        capture_pages[material].index_allocation = page.storage.allocation;
+                        capture_pages[material].vertex_view = page.vertex_view;
+                        capture_pages[material].index_view = page.index_view;
+                        capture_pages[material].index_count = page.index_count;
+                        capture_pages[material].generation = page.generation;
+                        capture_pages[material].page_slot = page.page_slot;
+                        capture_pages[material].source_digest = page.source_digest;
+                        capture_pages[material].bounds = page.metadata.bounds;
+                        capture_pages[material].complete = page.storage.resource && page.index_count != 0;
+                    }
+                }
+                local_probe_inputs.pages = capture_pages;
+            }
+            if (auto prepared = impl_->local_probes.PrepareFrameRecordData(
+                    local_probe_inputs, local_probe_plan); !prepared) return prepared;
+            local_probe_prepared = true;
+            if (!impl_->local_probes.MatchesLayout(local_probe_inputs,
+                    local_probe_plan, source_candidate->local_probe)) source_candidate = nullptr;
+        }
+    }
+    VolumetricCamera retained_volumetric_camera;
+    VolumetricRevisions retained_volumetric_revisions;
+    if (source_candidate && impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
+    {
+        const auto &saved = *source_candidate;
+        const auto &v = saved.volumetrics.input_versions;
+        VolumetricInputs projected;
+        projected.depth.version = v[0]; projected.hdr.version = v[1];
+        projected.lights.lights = v[2]; projected.lights.ranges = v[3];
+        projected.lights.inline_indices = v[4]; projected.lights.spill_indices = v[5];
+        projected.shadows.metadata = v[6]; projected.shadows.page_table = v[7];
+        projected.shadows.static_bank = v[8]; projected.shadows.dynamic_bank = v[9];
+        projected.shadows.draw_records = v[10]; projected.shadows.root_static = v[11];
+        projected.shadows.root_dynamic = v[12];
+        projected.local_shadows.metadata = v[13]; projected.local_shadows.records = v[14];
+        projected.local_shadows.static_bank = v[15]; projected.local_shadows.dynamic_bank = v[16];
+        projected.local_shadows.draw_records = v[17];
+        projected.compact_shadow.atlas.version = v[18];
+        projected.hero_blue_noise = {v[19], impl_->vfx_stbn_scalar.resource.Get()};
+        projected.hero_gradient = {v[20], impl_->vfx_gradient.resource.Get()};
+        projected.hero_noise_volume = {v[21], impl_->vfx_noise_volume.resource.Get()};
+        projected.volumes = impl_->volumetric_media;
+        if (impl_->config.vfx_quality == VfxQuality::High) projected.hero_volumes = typed_volumes;
+        projected.frame_slot = back_buffer_index;
+        projected.frame_index = impl_->frame_number;
+        projected.reset_history = !(impl_->temporal_history_valid || impl_->hzb_history_valid) || new_session;
+        projected.revisions.scene = local_probe_plan.revisions.static_layout;
+        projected.revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
+        projected.revisions.light = local_probe_plan.revisions.light;
+        const auto mix_revision = [](std::uint64_t &hash, std::uint64_t value) {
+            hash = (hash ^ value) * 1099511628211ull;
+        };
+        for (const auto &source : frame_lights)
+        {
+            mix_revision(projected.revisions.light, source.stable_id);
+            mix_revision(projected.revisions.light, source.generation);
+            mix_revision(projected.revisions.light, source.revision);
+            for (const auto value : {source.direction.x, source.direction.y, source.direction.z,
+                    source.color.x, source.color.y, source.color.z, source.position.x, source.position.y,
+                    source.position.z, source.quantity, source.range, source.shape.x, source.shape.y,
+                    source.emitter_radius, source.inner_cone_radians, source.outer_cone_radians,
+                    source.area_tangent.x, source.area_tangent.y, source.area_tangent.z})
+                mix_revision(projected.revisions.light, std::bit_cast<UINT>(value));
+            mix_revision(projected.revisions.light, static_cast<UINT>(source.type));
+            mix_revision(projected.revisions.light, static_cast<UINT>(source.unit));
+            mix_revision(projected.revisions.light, source.shadow_flags);
+        }
+        projected.revisions.volume = impl_->volumetric_revision;
+        projected.camera.inverse_view_projection = camera_relative_inverse_view_projection;
+        DirectX::XMStoreFloat4x4(&projected.camera.view_projection,
+            DirectX::XMMatrixInverse(nullptr,
+                DirectX::XMLoadFloat4x4(&projected.camera.inverse_view_projection)));
+        DirectX::XMStoreFloat4x4(&projected.camera.world_to_view,
+            DirectX::XMMatrixTranslationFromVector(eye) * view);
+        projected.camera.origin = lod_eye;
+        projected.camera.near_plane = near_plane;
+        projected.camera.far_plane = far_plane;
+        projected.previous_camera = impl_->previous_volumetric_camera.near_plane > 0
+            ? impl_->previous_volumetric_camera : projected.camera;
+        retained_volumetric_camera = projected.camera;
+        retained_volumetric_revisions = projected.revisions;
+        if (primary_sun && csm_required) projected.compact_shadow.identity.w = 1;
+        const bool virtual_shadow_present = primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0;
+        if (!impl_->volumetrics.MatchesProjectedLayout(projected, saved.volumetrics,
+                virtual_shadow_present, local_shadow_planned,
+                virtual_shadow_present && saved.virtual_shadows.root_static_present,
+                virtual_shadow_present && saved.virtual_shadows.root_dynamic_present))
+            source_candidate = nullptr;
+    }
+    else if (source_candidate && source_candidate->volumetrics.storage_generation)
+        source_candidate = nullptr;
+    // GetBuffer publishes a DXGI-owned swapchain surface. Its owner guarantees
+    // that it is independent of application placed heaps; retain only value
+    // metadata while back_buffers owns the COM lifetime.
+    auto *native_back_buffer = impl_->back_buffers[back_buffer_index].Get();
+    if (!native_back_buffer)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Current swapchain buffer is missing.");
+    auto &back_buffer_contract = impl_->back_buffer_contracts[back_buffer_index];
+    if (back_buffer_contract.native_resource != native_back_buffer ||
+        impl_->back_buffer_contract_devices[back_buffer_index] != impl_->device.Get() ||
+        back_buffer_contract.description.Width != impl_->width ||
+        back_buffer_contract.description.Height != impl_->height ||
+        back_buffer_contract.description.Format != impl_->display_state.format)
+    {
+        ComPtr<IUnknown> resource_identity, owner_identity;
+        ComPtr<ID3D12Device> native_device;
+        if (FAILED(native_back_buffer->QueryInterface(IID_PPV_ARGS(&resource_identity))) ||
+            FAILED(native_back_buffer->GetDevice(IID_PPV_ARGS(&native_device))) ||
+            FAILED(native_device->QueryInterface(IID_PPV_ARGS(&owner_identity))))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Cannot certify the current swapchain buffer owner.");
+        ComPtr<IUnknown> renderer_device_identity;
+        if (FAILED(impl_->device->QueryInterface(IID_PPV_ARGS(&renderer_device_identity))) ||
+            renderer_device_identity.Get() != owner_identity.Get())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Swapchain buffer belongs to a different device.");
+        auto &generation = impl_->back_buffer_contract_generations[back_buffer_index];
+        if (++generation == 0) ++generation;
+        back_buffer_contract = {};
+        back_buffer_contract.native_resource = native_back_buffer;
+        back_buffer_contract.resource_identity = resource_identity.Get();
+        back_buffer_contract.device_identity = owner_identity.Get();
+        back_buffer_contract.description = native_back_buffer->GetDesc();
+        back_buffer_contract.generation = generation;
+        back_buffer_contract.backing = NativeBackingKind::DxgiSwapchain;
+        impl_->back_buffer_contract_devices[back_buffer_index] = impl_->device.Get();
+    }
+    const bool restored_graph = source_candidate &&
+        impl_->graph.RestorePlan(source_candidate->handle);
+    if (!restored_graph) impl_->graph.Reset();
+    cpu_timings.graph_frontend_reused = restored_graph;
+    FrameGraphLayout cold_graph_layout;
+    FrameGraphLayout &pending_graph_layout = restored_graph
+        ? *source_candidate : cold_graph_layout;
+    if (!restored_graph)
+    {
+        pending_graph_layout.early = early_key;
+        pending_graph_layout.geometry_page_slots = geometry_page_slots;
+        pending_graph_layout.software_scene_page_slots = software_scene_page_slots;
+        pending_graph_layout.brixelizer_leaf_keys.reserve(brixelizer_leaf_jobs.size());
+        for (std::size_t leaf = 0; leaf < brixelizer_leaf_jobs.size(); ++leaf)
+            pending_graph_layout.brixelizer_leaf_keys.push_back(brixelizer_leaf_key(leaf));
+        std::unordered_map<ID3D12Resource *, std::uint32_t> aliases;
+        aliases.reserve(160);
+        pending_graph_layout.direct_import_shapes.reserve(160);
+        visit_direct_imports([&](AllocationResource *resource) {
+            pending_graph_layout.direct_import_shapes.push_back(shape_of(resource, aliases));
+        });
+        if (direct_contract_failed)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Current allocation owner could not certify its native import shape.");
+    }
+    std::vector<TextureStreamingGraphBinding> texture_bindings;
+    auto copy_queue = std::make_shared<ComPtr<ID3D12CommandQueue>>(
+        impl_->graph_queue_executor.NativeQueue(QueueHint::Copy));
+    ExternalQueueBinding texture_copy_queue{std::shared_ptr<void>(copy_queue, copy_queue->Get()), QueueHint::Copy, {}};
+    const auto streaming_result = restored_graph
+        ? impl_->texture_streaming.BindRetained(impl_->graph, std::move(texture_copy_queue), 1000,
+            pending_graph_layout.texture_streaming, texture_bindings)
+        : impl_->texture_streaming.AddPendingPasses(impl_->graph, std::move(texture_copy_queue),
+            1000, texture_bindings, &pending_graph_layout.texture_streaming);
+    if (!streaming_result) return streaming_result;
+    std::unordered_map<ID3D12Resource *, ResourceHandle> canonical_textures;
+    for (const auto &binding : texture_bindings)
+        canonical_textures.emplace(impl_->texture_streaming.View(binding.texture).resource, binding.sampled.resource);
+    ResourceVersion texture_metadata;
+    const auto imported_feedback = restored_graph
+        ? impl_->texture_feedback.BindRetainedMetadata(impl_->graph, back_buffer_index,
+            pending_graph_layout.texture_feedback, texture_metadata)
+        : impl_->texture_feedback.ImportMetadata(impl_->graph, back_buffer_index,
+            texture_metadata, &pending_graph_layout.texture_feedback);
+    if (!imported_feedback) return imported_feedback;
+    std::vector<TextureFeedbackGraphBinding> feedback_bindings;
+    const auto clear_feedback = restored_graph
+        ? impl_->texture_feedback.BindRetainedClear(impl_->graph, back_buffer_index, 1200,
+            pending_graph_layout.texture_feedback, feedback_bindings)
+        : impl_->texture_feedback.AddClearPass(impl_->graph, back_buffer_index,
+            1200, feedback_bindings, &pending_graph_layout.texture_feedback);
+    if (!clear_feedback) return clear_feedback;
+    ResourceVersion entity_surface_noise_version, entity_surface_gradient_version, entity_surface_stbn_version;
+    const auto read_material_sampling = [&](PassBuilder &pass, bool feedback_writer,
+                                           Access sampling = Access::AllShaderRead) {
+        for (const auto &binding : texture_bindings) pass.Read(binding.sampled, sampling);
+        pass.Read(texture_metadata, sampling);
+        if (entity_surface_noise_version.resource)
+        {
+            pass.Read(entity_surface_noise_version, sampling);
+            pass.Read(entity_surface_gradient_version, sampling);
+            pass.Read(entity_surface_stbn_version, sampling);
+        }
+        if (feedback_writer && !restored_graph) RendererTextureFeedback::DeclareSampling(pass, feedback_bindings);
+    };
     // Keep deduplication local to this frame and indexed by the allocation
     // owner; do not rescan all prior imports on each declaration request.
     std::unordered_map<AllocationResource *, ResourceHandle> imported_resources;
     imported_resources.reserve(128);
+    std::size_t import_cursor{};
+    bool import_binding_failed{};
     const auto import_buffer = [&](AllocationResource &resource, Access initial,
                                    std::string_view name) {
         if (const auto existing = imported_resources.find(&resource); existing != imported_resources.end())
             return existing->second;
+        if (resource.allocation)
+            if (auto certified = resource.EnsureNativeContract(impl_->device.Get()); !certified)
+                import_binding_failed = true;
         const auto access = resource.graph_access == Access::Undefined
             ? initial : resource.graph_access;
-        const auto handle = impl_->graph.ImportBuffer(
-            {resource.resource.Get(), resource.graph_completion, resource.graph_queue}, access, name);
+        ResourceHandle handle;
+        if (restored_graph)
+        {
+            if (import_cursor >= pending_graph_layout.imports.size() ||
+                pending_graph_layout.imports[import_cursor].name != name ||
+                pending_graph_layout.imports[import_cursor].handle.kind != ResourceKind::Buffer)
+                import_binding_failed = true;
+            else
+            {
+                handle = pending_graph_layout.imports[import_cursor].handle;
+                import_binding_failed |= !impl_->graph.BindBuffer(handle,
+                    {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {},
+                     resource.NativeContract()}, access);
+            }
+            ++import_cursor;
+        }
+        else
+            handle = impl_->graph.ImportBuffer(
+                {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {},
+                 resource.NativeContract()}, access, name);
         imported_resources.emplace(&resource, handle);
+        if (!restored_graph)
+        {
+            const auto *contract = resource.NativeContract();
+            pending_graph_layout.certified_imports &= contract != nullptr;
+            pending_graph_layout.imports.push_back({std::string(name), handle,
+                contract ? contract->description : resource.resource ? resource.resource->GetDesc() : D3D12_RESOURCE_DESC{},
+                contract ? contract->buffer_heap : D3D12_HEAP_TYPE_DEFAULT, contract != nullptr});
+        }
         return handle;
     };
     const auto import_texture = [&](AllocationResource &resource, Access initial,
                                     std::string_view name) {
         if (const auto existing = imported_resources.find(&resource); existing != imported_resources.end())
             return existing->second;
+        if (resource.allocation)
+            if (auto certified = resource.EnsureNativeContract(impl_->device.Get()); !certified)
+                import_binding_failed = true;
         if (const auto existing = canonical_textures.find(resource.resource.Get()); existing != canonical_textures.end())
         {
             imported_resources.emplace(&resource, existing->second);
@@ -4704,9 +6183,35 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         const auto access = resource.graph_access == Access::Undefined
             ? initial : resource.graph_access;
-        const auto handle = impl_->graph.ImportTexture(
-            {resource.resource.Get(), resource.graph_completion, resource.graph_queue}, access, name);
+        ResourceHandle handle;
+        if (restored_graph)
+        {
+            if (import_cursor >= pending_graph_layout.imports.size() ||
+                pending_graph_layout.imports[import_cursor].name != name ||
+                pending_graph_layout.imports[import_cursor].handle.kind != ResourceKind::Texture)
+                import_binding_failed = true;
+            else
+            {
+                handle = pending_graph_layout.imports[import_cursor].handle;
+                import_binding_failed |= !impl_->graph.BindTexture(handle,
+                    {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {},
+                     resource.NativeContract()}, access);
+            }
+            ++import_cursor;
+        }
+        else
+            handle = impl_->graph.ImportTexture(
+                {resource.resource.Get(), resource.graph_completion, resource.graph_queue, {},
+                 resource.NativeContract()}, access, name);
         imported_resources.emplace(&resource, handle);
+        if (!restored_graph)
+        {
+            const auto *contract = resource.NativeContract();
+            pending_graph_layout.certified_imports &= contract != nullptr;
+            pending_graph_layout.imports.push_back({std::string(name), handle,
+                contract ? contract->description : resource.resource ? resource.resource->GetDesc() : D3D12_RESOURCE_DESC{},
+                contract ? contract->buffer_heap : D3D12_HEAP_TYPE_DEFAULT, contract != nullptr});
+        }
         return handle;
     };
     TextureHandle environment_stream_texture{};
@@ -4771,8 +6276,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         upload.version = impl_->graph.Version(upload.buffer);
         environment_geometry_uploads.push_back(upload);
     }
-    const auto distortion_vectors = impl_->graph.CreateTexture(
+    const auto distortion_vectors = restored_graph ? pending_graph_layout.distortion : impl_->graph.CreateTexture(
         {impl_->render_width,impl_->render_height,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET}, "VFX Distortion Vectors");
+    if (!restored_graph) pending_graph_layout.distortion = distortion_vectors;
     const auto ribbon_history = import_buffer(impl_->ribbon_history, Access::UnorderedWrite, "RibbonHistory");
     const auto ribbon_previous = import_buffer(impl_->ribbon_previous, Access::UnorderedWrite, "RibbonPrevious");
     const auto ribbon_arguments = import_buffer(frame.ribbon_arguments, Access::UnorderedWrite, "RibbonArguments");
@@ -4808,18 +6314,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         ResourceVersion version{};
     };
     std::vector<GeometryPageGraph> geometry_pages;
-    std::array<bool, kProceduralGeometryPage + 1> geometry_page_seen{};
-    geometry_pages.reserve(geometry_page_seen.size());
-    for (const auto &record : frame.geometry_draw_records_cpu)
+    geometry_pages.reserve(geometry_page_slots.size());
+    for (const auto page_slot : geometry_page_slots)
     {
-        // Shared hierarchy/HLOD pages are imported once by ClusterFrameGraph.
-        if (record.page_slot > kProceduralGeometryPage) continue;
-        if (record.geometry_generation == 0 || geometry_page_seen[record.page_slot]) continue;
-        const auto *page = impl_->FindGeometryPage(record.page_slot);
+        const auto *page = impl_->FindGeometryPage(page_slot);
         if (!page)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Geometry graph has no page for a prepared draw record.");
-        geometry_page_seen[record.page_slot] = true;
         GeometryPageGraph entry{page};
         entry.version = impl_->graph.Version(import_buffer(
             const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "GeometryPage"));
@@ -4830,8 +6331,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {
             if (skin_only)
             {
-                if (entry.page->page_slot >= kArcherGeometryPage &&
-                    entry.page->page_slot < kProjectileGeometryPage)
+                if ((entry.page->page_slot >= kArcherGeometryPage &&
+                        entry.page->page_slot < kProjectileGeometryPage) ||
+                    (entry.page->page_slot >= kMonsterReducedGeometryPage &&
+                        entry.page->page_slot < kMonsterReducedGeometryPage + 12u))
                     pass.Read(entry.version, Access::ComputeRead);
                 continue;
             }
@@ -4936,17 +6439,37 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         constexpr auto format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         constexpr auto flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        bloom_half = impl_->graph.CreateTexture(
-            {half_width, half_height, format, flags}, "BloomHalf");
-        bloom_quarter = impl_->graph.CreateTexture(
-            {quarter_width, quarter_height, format, flags}, "BloomQuarter");
-        bloom_half_combined = impl_->graph.CreateTexture(
-            {half_width, half_height, format, flags}, "BloomHalfCombined");
+        if (restored_graph)
+        {
+            bloom_half = pending_graph_layout.bloom_half;
+            bloom_quarter = pending_graph_layout.bloom_quarter;
+            bloom_half_combined = pending_graph_layout.bloom_combined;
+        }
+        else
+        {
+            bloom_half = impl_->graph.CreateTexture({half_width, half_height, format, flags}, "BloomHalf");
+            bloom_quarter = impl_->graph.CreateTexture({quarter_width, quarter_height, format, flags}, "BloomQuarter");
+            bloom_half_combined = impl_->graph.CreateTexture({half_width, half_height, format, flags}, "BloomHalfCombined");
+        }
+    }
+    if (!restored_graph)
+    {
+        pending_graph_layout.bloom_half = bloom_half;
+        pending_graph_layout.bloom_quarter = bloom_quarter;
+        pending_graph_layout.bloom_combined = bloom_half_combined;
     }
     const auto ui = import_texture(ui_texture, frame.ui_initialized ? Access::ShaderRead : Access::Common, "UiTexture");
-    const auto back_buffer = impl_->graph.ImportTexture(
+    const auto back_buffer = restored_graph ? pending_graph_layout.back_buffer : impl_->graph.ImportTexture(
         {impl_->back_buffers[back_buffer_index].Get(),
-         impl_->back_buffer_completion[back_buffer_index], QueueHint::Direct}, Access::Present, "BackBuffer");
+         impl_->back_buffer_completion[back_buffer_index], QueueHint::Direct, {},
+         &back_buffer_contract}, Access::Present, "BackBuffer");
+    if (restored_graph)
+        import_binding_failed |= !impl_->graph.BindTexture(back_buffer,
+            {impl_->back_buffers[back_buffer_index].Get(),
+             impl_->back_buffer_completion[back_buffer_index], QueueHint::Direct, {},
+             &back_buffer_contract}, Access::Present);
+    else
+        pending_graph_layout.back_buffer = back_buffer;
 
     // Keep physical handles for descriptors/callbacks; declarations below carry
     // the contents version consumed or produced by each pass.
@@ -5035,15 +6558,54 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     auto ui_version = impl_->graph.Version(ui);
     auto back_buffer_version = impl_->graph.Version(back_buffer);
 
+    const auto capture_surface_versions = [&](SurfacePassGraphLayout &layout) {
+        layout.versions = {visibility_ids_version, visibility_face_version, visibility_counts_version,
+            gbuffer_base_version, gbuffer_normal_version, gbuffer_metadata_version,
+            gbuffer_material_version, gbuffer_motion_version, gbuffer_surface_history_version, depth_version};
+        layout.sidecars.assign(material_sidecar_versions.begin(),
+            material_sidecar_versions.begin() + impl_->material_sidecar_layout.plane_count);
+    };
+    const auto restore_surface_versions = [&](const SurfacePassGraphLayout &layout) {
+        if (layout.sidecars.size() != impl_->material_sidecar_layout.plane_count) return false;
+        visibility_ids_version = layout.versions[0];
+        visibility_face_version = layout.versions[1];
+        visibility_counts_version = layout.versions[2];
+        gbuffer_base_version = layout.versions[3];
+        gbuffer_normal_version = layout.versions[4];
+        gbuffer_metadata_version = layout.versions[5];
+        gbuffer_material_version = layout.versions[6];
+        gbuffer_motion_version = layout.versions[7];
+        gbuffer_surface_history_version = layout.versions[8];
+        depth_version = layout.versions[9];
+        std::copy(layout.sidecars.begin(), layout.sidecars.end(), material_sidecar_versions.begin());
+        return true;
+    };
+
     record_graph_substage(cpu_timings.graph_resources_us);
     if (!impl_->exposure_initialized)
     {
         const auto exposure_upload = import_buffer(impl_->initial_exposure, Access::CopySource, "InitialExposure");
-        auto initialize = impl_->graph.AddPass(32, "ExposureInitialization", QueueHint::Copy);
-        initialize.Read(impl_->graph.Version(exposure_upload), Access::CopySource);
-        exposure_read_version = initialize.Write(exposure_read_version, Access::CopyDest);
-        exposure_write_version = initialize.Write(exposure_write_version, Access::CopyDest);
-        initialize.SetExecute([&](RenderPassContext &context) {
+        auto &layout = pending_graph_layout.initial.exposure;
+        std::optional<PassBuilder> initialize;
+        if (restored_graph)
+        {
+            initialize = impl_->graph.BindPass(layout.pass_index, 32);
+            if (!initialize) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Exposure initialization does not match the retained graph plan.");
+            exposure_read_version = layout.first;
+            exposure_write_version = layout.second;
+        }
+        else
+        {
+            layout.pass_index = impl_->graph.PassCount();
+            initialize = impl_->graph.AddPass(32, "ExposureInitialization", QueueHint::Copy);
+            initialize->Read(impl_->graph.Version(exposure_upload), Access::CopySource);
+            exposure_read_version = initialize->Write(exposure_read_version, Access::CopyDest);
+            exposure_write_version = initialize->Write(exposure_write_version, Access::CopyDest);
+            layout.first = exposure_read_version;
+            layout.second = exposure_write_version;
+        }
+        initialize->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             for (auto &value : impl_->exposure_values)
                 list->CopyBufferRegion(value.resource.Get(), 0, impl_->initial_exposure.resource.Get(), 0, 2 * sizeof(float));
@@ -5052,9 +6614,23 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     if (impl_->ui_dirty[back_buffer_index])
     {
-    auto ui_upload_pass = impl_->graph.AddPass(23, kRenderPassNames[23], QueueHint::Copy);
-    ui_version = ui_upload_pass.Write(ui_version, Access::CopyDest);
-    ui_upload_pass.SetExecute([&](RenderPassContext &context) {
+    auto &layout = pending_graph_layout.initial.ui;
+    std::optional<PassBuilder> ui_upload_pass;
+    if (restored_graph)
+    {
+        ui_upload_pass = impl_->graph.BindPass(layout.pass_index, 23);
+        if (!ui_upload_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "UI upload does not match the retained graph plan.");
+        ui_version = layout.output;
+    }
+    else
+    {
+        layout.pass_index = impl_->graph.PassCount();
+        ui_upload_pass = impl_->graph.AddPass(23, kRenderPassNames[23], QueueHint::Copy);
+        ui_version = ui_upload_pass->Write(ui_version, Access::CopyDest);
+        layout.output = ui_version;
+    }
+    ui_upload_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         D3D12_TEXTURE_COPY_LOCATION destination{};
         destination.pResource = ui_texture.resource.Get();
@@ -5069,14 +6645,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     if (initialize_temporal_targets)
     {
-        auto initialize_pass = impl_->graph.AddPass(24, kRenderPassNames[24], QueueHint::Direct);
-        temporal_read_version = initialize_pass.Write(temporal_read_version, Access::RenderTarget);
-        temporal_write_version = initialize_pass.Write(temporal_write_version, Access::RenderTarget);
-        temporal_normal_read_version = initialize_pass.Write(temporal_normal_read_version, Access::RenderTarget);
-        temporal_normal_write_version = initialize_pass.Write(temporal_normal_write_version, Access::RenderTarget);
-        temporal_material_read_version = initialize_pass.Write(temporal_material_read_version, Access::RenderTarget);
-        temporal_material_write_version = initialize_pass.Write(temporal_material_write_version, Access::RenderTarget);
-        initialize_pass.SetExecute([&](RenderPassContext &context) {
+        auto &layout = pending_graph_layout.initial;
+        std::optional<PassBuilder> initialize_pass;
+        if (restored_graph)
+        {
+            initialize_pass = impl_->graph.BindPass(layout.temporal_pass_index, 24);
+            if (!initialize_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Temporal initialization does not match the retained graph plan.");
+            temporal_read_version = layout.temporal[0];
+            temporal_write_version = layout.temporal[1];
+            temporal_normal_read_version = layout.temporal[2];
+            temporal_normal_write_version = layout.temporal[3];
+            temporal_material_read_version = layout.temporal[4];
+            temporal_material_write_version = layout.temporal[5];
+        }
+        else
+        {
+            layout.temporal_pass_index = impl_->graph.PassCount();
+            initialize_pass = impl_->graph.AddPass(24, kRenderPassNames[24], QueueHint::Direct);
+            temporal_read_version = initialize_pass->Write(temporal_read_version, Access::RenderTarget);
+            temporal_write_version = initialize_pass->Write(temporal_write_version, Access::RenderTarget);
+            temporal_normal_read_version = initialize_pass->Write(temporal_normal_read_version, Access::RenderTarget);
+            temporal_normal_write_version = initialize_pass->Write(temporal_normal_write_version, Access::RenderTarget);
+            temporal_material_read_version = initialize_pass->Write(temporal_material_read_version, Access::RenderTarget);
+            temporal_material_write_version = initialize_pass->Write(temporal_material_write_version, Access::RenderTarget);
+            layout.temporal = {temporal_read_version, temporal_write_version, temporal_normal_read_version,
+                temporal_normal_write_version, temporal_material_read_version, temporal_material_write_version};
+        }
+        initialize_pass->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             // Discard initializes newly allocated render-target metadata after
             // the graph's transition; the clear defines every history pixel.
@@ -5094,29 +6690,58 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     if (!frame.geometry_draw_records_cpu.empty())
     {
-        auto upload_pass = impl_->graph.AddPass(0, kRenderPassNames[0], QueueHint::Copy);
+        std::optional<PassBuilder> upload_pass;
+        auto &upload_layout = pending_graph_layout.upload;
+        if (restored_graph)
+        {
+            upload_pass = impl_->graph.BindPass(upload_layout.pass_index, 0);
+            if (!upload_pass || upload_layout.geometry_streams.size() != environment_geometry_uploads.size())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Frame upload does not match the retained graph plan.");
+            dynamic_lod_version = upload_layout.dynamic_lod;
+            static_lod_version = upload_layout.static_lod;
+            geometry_records_version = upload_layout.geometry_records;
+            dynamic_instances_version = upload_layout.dynamic_instances;
+            static_instances_version = upload_layout.static_instances;
+            environment_stream_version = upload_layout.environment_stream;
+            for (std::size_t index = 0; index < environment_geometry_uploads.size(); ++index)
+                environment_geometry_uploads[index].version = upload_layout.geometry_streams[index];
+        }
+        else
+        {
+        upload_layout.pass_index = impl_->graph.PassCount();
+        upload_pass = impl_->graph.AddPass(0, kRenderPassNames[0], QueueHint::Copy);
         if (initialize_dynamic_lod)
-            dynamic_lod_version = upload_pass.Write(dynamic_lod_version, Access::CopyDest);
+            dynamic_lod_version = upload_pass->Write(dynamic_lod_version, Access::CopyDest);
         if (initialize_static_lod)
-            static_lod_version = upload_pass.Write(static_lod_version, Access::CopyDest);
+            static_lod_version = upload_pass->Write(static_lod_version, Access::CopyDest);
         if (dynamic_lod_prefix)
-            upload_pass.Read(impl_->graph.Version(dynamic_lod_prefix), Access::CopySource);
+            upload_pass->Read(impl_->graph.Version(dynamic_lod_prefix), Access::CopySource);
         if (static_lod_prefix)
-            upload_pass.Read(impl_->graph.Version(static_lod_prefix), Access::CopySource);
-        geometry_records_version = upload_pass.Write(geometry_records_version, Access::CopyDest);
+            upload_pass->Read(impl_->graph.Version(static_lod_prefix), Access::CopySource);
+        geometry_records_version = upload_pass->Write(geometry_records_version, Access::CopyDest);
         if (upload_dynamic_scene)
-            dynamic_instances_version = upload_pass.ReadWrite(dynamic_instances_version,
+            dynamic_instances_version = upload_pass->ReadWrite(dynamic_instances_version,
                                                               Access::CopyDest);
         if (upload_static_scene)
-            static_instances_version = upload_pass.Write(static_instances_version,
+            static_instances_version = upload_pass->Write(static_instances_version,
                                                          Access::CopyDest);
         if (upload_environment_stream)
             environment_stream_version =
-                upload_pass.Write(environment_stream_version, Access::CopyDest);
+                upload_pass->Write(environment_stream_version, Access::CopyDest);
         if (upload_environment_geometry)
             for (auto &upload : environment_geometry_uploads)
-                upload.version = upload_pass.Write(upload.version, Access::CopyDest);
-        upload_pass.SetExecute([&](RenderPassContext &context) {
+                upload.version = upload_pass->Write(upload.version, Access::CopyDest);
+        upload_layout.dynamic_lod = dynamic_lod_version;
+        upload_layout.static_lod = static_lod_version;
+        upload_layout.geometry_records = geometry_records_version;
+        upload_layout.dynamic_instances = dynamic_instances_version;
+        upload_layout.static_instances = static_instances_version;
+        upload_layout.environment_stream = environment_stream_version;
+        for (const auto &upload : environment_geometry_uploads)
+            upload_layout.geometry_streams.push_back(upload.version);
+        }
+        upload_pass->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto initialize_lod = [&](GpuLodStateBuffer &state) {
                 list->CopyBufferRegion(state.states.resource.Get(), 0, state.zero_upload.resource.Get(),
@@ -5173,18 +6798,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 }
         });
     }
-    auto particle_pass = impl_->graph.AddPass(1, kRenderPassNames[1], QueueHint::Compute);
-    particles_version = particle_pass.ReadWrite(particles_version, Access::UnorderedWrite);
-    particle_alive_input_version = particle_pass.ReadWrite(particle_alive_input_version, Access::UnorderedWrite);
-    particle_alive_output_version = particle_pass.ReadWrite(particle_alive_output_version, Access::UnorderedWrite);
-    particle_dead_version = particle_pass.ReadWrite(particle_dead_version, Access::UnorderedWrite);
-    particle_counters_version = particle_pass.ReadWrite(particle_counters_version, Access::UnorderedWrite);
-    indirect_arguments_version = particle_pass.ReadWrite(indirect_arguments_version, Access::UnorderedWrite);
-    ribbon_history_version = particle_pass.ReadWrite(ribbon_history_version, Access::UnorderedWrite);
-    ribbon_previous_version = particle_pass.ReadWrite(ribbon_previous_version, Access::UnorderedWrite);
-    ribbon_arguments_version = particle_pass.ReadWrite(ribbon_arguments_version, Access::UnorderedWrite);
+    std::optional<PassBuilder> particle_pass;
+    if (restored_graph)
+    {
+        particle_pass = impl_->graph.BindPass(pending_graph_layout.particle.pass_index, 1);
+        if (!particle_pass)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Particle pass does not match the retained graph plan.");
+    }
+    else
+    {
+        pending_graph_layout.particle.pass_index = impl_->graph.PassCount();
+        particle_pass = impl_->graph.AddPass(1, kRenderPassNames[1], QueueHint::Compute);
+    }
+    std::array<ResourceVersion *, 9> particle_outputs{
+        &particles_version, &particle_alive_input_version, &particle_alive_output_version,
+        &particle_dead_version, &particle_counters_version, &indirect_arguments_version,
+        &ribbon_history_version, &ribbon_previous_version, &ribbon_arguments_version};
+    for (std::size_t index = 0; index < particle_outputs.size(); ++index)
+    {
+        if (restored_graph) *particle_outputs[index] = pending_graph_layout.particle.outputs[index];
+        else
+        {
+            *particle_outputs[index] = particle_pass->ReadWrite(*particle_outputs[index], Access::UnorderedWrite);
+            pending_graph_layout.particle.outputs[index] = *particle_outputs[index];
+        }
+    }
     const auto initialize_particles = !impl_->particles_initialized;
-    particle_pass.SetExecute([&](RenderPassContext &context) {
+    particle_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->particle_compute_pipeline.Get());
@@ -5257,112 +6898,106 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     });
 
+    struct SkinDispatch
+    {
+        UINT64 source, palette, output, bounds;
+        UINT vertex_count;
+        std::array<UINT, 2> constants;
+        bool reduce_bounds;
+    };
+    std::vector<SkinDispatch> skin_dispatches;
     if (have_skinned_instances && !reuse_canonical_skin)
     {
-        auto skin_cache_pass =
-            impl_->graph.AddPass(22, kRenderPassNames[22], QueueHint::Compute);
-        read_geometry_pages(skin_cache_pass, true);
-        skin_cache_version = skin_cache_pass.Write(
-            skin_cache_version, Access::UnorderedWrite);
-        skin_bounds_version = skin_cache_pass.Write(
-            skin_bounds_version, Access::UnorderedWrite);
-        skin_cache_pass.SetExecute([&](RenderPassContext &context) {
+        skin_dispatches.reserve(impl_->skin_cache.ActiveCount());
+        for (std::size_t index = 0; index < render_instances.size(); ++index)
+        {
+            const auto slot = dynamic_skin_slots[index];
+            if (slot == std::numeric_limits<std::uint32_t>::max()) continue;
+            const auto mesh = render_instances[index].mesh;
+            const auto archer = mesh == RenderMesh::Archer;
+            const auto asset = static_cast<std::size_t>(static_cast<std::uint32_t>(mesh) -
+                static_cast<std::uint32_t>(RenderMesh::MonsterMelee));
+            if (!archer && asset >= impl_->monster_assets.size())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Skinned instance has no monster geometry asset.");
+            if (index >= ordered_monster_lods.size() || ordered_monster_lods[index] >= 3)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Skinned instance LOD order is invalid.");
+            const auto lod = ordered_monster_lods[index];
+            const GeometryPageGpu &geometry = archer ? impl_->archer_geometry
+                : lod == 0 ? static_cast<const GeometryPageGpu &>(impl_->monster_assets[asset])
+                : impl_->monster_reduced_geometry[asset][lod - 1u];
+            const auto vertex_count = dynamic_skin_vertex_counts[index];
+            if (!geometry.storage.resource || vertex_count == 0 || vertex_count != geometry.vertex_count ||
+                dynamic_skin_geometry_ids[index] !=
+                    ((std::uint64_t(geometry.generation) << 32u) | geometry.page_slot))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Skinned instance has no complete geometry source.");
+            const auto clip = (dynamic_pose_flags[index] >> 8u) & 0x0fu;
+            const auto palette = archer
+                ? frame.upload.resource->GetGPUVirtualAddress() + archer_palette_data_offset +
+                    static_cast<UINT64>(archer_palette_slots[index]) * archer_palette_stride
+                : impl_->monster_skin_matrices.resource->GetGPUVirtualAddress();
+            skin_dispatches.push_back({geometry.storage.resource->GetGPUVirtualAddress(), palette,
+                static_cast<UINT64>(dynamic_skin_offsets[index]) * SkinVertexRanges::kVertexBytes,
+                static_cast<UINT64>(slot) * kSkinBoundStride, vertex_count,
+                {static_cast<UINT>(static_cast<std::uint32_t>(mesh) & 0xffu) |
+                    static_cast<UINT>(clip << 8u) | static_cast<UINT>(vertex_count << 12u),
+                    std::bit_cast<UINT>(dynamic_pose_times[index])},
+                dynamic_cooked_skin_bounds[index] == 0});
+        }
+        auto &layout = pending_graph_layout.skin;
+        std::optional<PassBuilder> skin_cache_pass;
+        if (restored_graph)
+        {
+            skin_cache_pass = impl_->graph.BindPass(layout.pass_index, 22);
+            if (!skin_cache_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Skin cache does not match the retained graph plan.");
+            skin_cache_version = layout.first;
+            skin_bounds_version = layout.second;
+        }
+        else
+        {
+            layout.pass_index = impl_->graph.PassCount();
+            skin_cache_pass = impl_->graph.AddPass(22, kRenderPassNames[22], QueueHint::Compute);
+            read_geometry_pages(*skin_cache_pass, true);
+            skin_cache_version = skin_cache_pass->Write(skin_cache_version, Access::UnorderedWrite);
+            skin_bounds_version = skin_cache_pass->Write(skin_bounds_version, Access::UnorderedWrite);
+            layout.first = skin_cache_version;
+            layout.second = skin_bounds_version;
+        }
+        skin_cache_pass->SetExecute([&](RenderPassContext &context) {
             auto *list =
                 static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->skin_cache_pipeline.Get());
-            list->SetComputeRootShaderResourceView(
-                17, impl_->monster_skin_matrices.resource->GetGPUVirtualAddress());
-            for (std::size_t index = 0; index < render_instances.size(); ++index)
+            for (const auto &dispatch : skin_dispatches)
             {
-                const auto slot = dynamic_skin_slots[index];
-                if (slot == std::numeric_limits<std::uint32_t>::max()) continue;
-                const auto mesh = render_instances[index].mesh;
-                ID3D12Resource *source{};
-                std::uint32_t vertex_count{};
-                if (mesh == RenderMesh::Archer)
-                {
-                    source = impl_->archer_geometry.storage.resource.Get();
-                    vertex_count = impl_->archer_geometry.vertex_count;
-                }
-                else
-                {
-                    const auto asset = static_cast<std::size_t>(
-                        static_cast<std::uint32_t>(mesh) -
-                        static_cast<std::uint32_t>(RenderMesh::MonsterMelee));
-                    if (asset >= impl_->monster_assets.size()) continue;
-                    source = impl_->monster_assets[asset].storage.resource.Get();
-                    vertex_count = impl_->monster_assets[asset].vertex_count;
-                }
-                if (!source || vertex_count == 0) continue;
-                const auto clip = (dynamic_pose_flags[index] >> 8u) & 0x0fu;
-                const std::array<UINT, 2> skin_constants{
-                    static_cast<UINT>(static_cast<std::uint32_t>(mesh) & 0xffu) |
-                        static_cast<UINT>(clip << 8u) |
-                        static_cast<UINT>(vertex_count << 12u),
-                    std::bit_cast<UINT>(dynamic_pose_times[index])};
-                const auto output_offset =
-                    static_cast<UINT64>(dynamic_skin_offsets[index]) * SkinVertexRanges::kVertexBytes;
-                list->SetComputeRootShaderResourceView(
-                    16, source->GetGPUVirtualAddress());
-                if (mesh == RenderMesh::Archer)
-                {
-                    const auto palette_slot = archer_palette_slots[index];
-                    list->SetComputeRootShaderResourceView(
-                        17, frame.upload.resource->GetGPUVirtualAddress() +
-                            archer_palette_data_offset +
-                            static_cast<UINT64>(palette_slot) * archer_palette_stride);
-                }
-                else
-                    list->SetComputeRootShaderResourceView(
-                        17, impl_->monster_skin_matrices.resource->GetGPUVirtualAddress());
+                list->SetComputeRootShaderResourceView(16, dispatch.source);
+                list->SetComputeRootShaderResourceView(17, dispatch.palette);
                 list->SetComputeRootUnorderedAccessView(
                     3, frame.skin_cache_vertices.resource->GetGPUVirtualAddress() +
-                           output_offset);
+                           dispatch.output);
                 list->SetComputeRoot32BitConstants(
-                    6, static_cast<UINT>(skin_constants.size()), skin_constants.data(), 0);
-                list->Dispatch((vertex_count + 63u) / 64u, 1, 1);
+                    6, static_cast<UINT>(dispatch.constants.size()), dispatch.constants.data(), 0);
+                list->Dispatch((dispatch.vertex_count + 63u) / 64u, 1, 1);
             }
             // All current deformation must be visible before the per-instance
             // reduction reads it back through the same UAV root binding.
             context.UavBarrier(skin_cache_buffer);
             list->SetPipelineState(impl_->skin_bounds_pipeline.Get());
-            for (std::size_t index = 0; index < render_instances.size(); ++index)
+            for (const auto &dispatch : skin_dispatches)
             {
-                const auto slot = dynamic_skin_slots[index];
-                if (slot == std::numeric_limits<std::uint32_t>::max()) continue;
-                const auto mesh = render_instances[index].mesh;
-                std::uint32_t vertex_count{};
-                if (mesh == RenderMesh::Archer)
-                    vertex_count = impl_->archer_geometry.vertex_count;
-                else
-                {
-                    const auto asset = static_cast<std::size_t>(
-                        static_cast<std::uint32_t>(mesh) -
-                        static_cast<std::uint32_t>(RenderMesh::MonsterMelee));
-                    if (asset >= impl_->monster_assets.size()) continue;
-                    vertex_count = impl_->monster_assets[asset].vertex_count;
-                }
-                if (vertex_count == 0) continue;
-                const auto clip = (dynamic_pose_flags[index] >> 8u) & 0x0fu;
-                const std::array<UINT, 2> skin_constants{
-                    static_cast<UINT>(static_cast<std::uint32_t>(mesh) & 0xffu) |
-                        static_cast<UINT>(clip << 8u) |
-                        static_cast<UINT>(vertex_count << 12u),
-                    std::bit_cast<UINT>(dynamic_pose_times[index])};
-                const auto output_offset =
-                    static_cast<UINT64>(dynamic_skin_offsets[index]) * SkinVertexRanges::kVertexBytes;
-                const auto bounds_offset =
-                    static_cast<UINT64>(slot) * kSkinBoundStride;
+                if (!dispatch.reduce_bounds) continue;
                 list->SetComputeRootUnorderedAccessView(
                     3, frame.skin_cache_vertices.resource->GetGPUVirtualAddress() +
-                           output_offset);
+                           dispatch.output);
                 list->SetComputeRootUnorderedAccessView(
                     21, frame.skin_cache_bounds.resource->GetGPUVirtualAddress() +
-                            bounds_offset);
+                            dispatch.bounds);
                 list->SetComputeRoot32BitConstants(
-                    6, static_cast<UINT>(skin_constants.size()),
-                    skin_constants.data(), 0);
+                    6, static_cast<UINT>(dispatch.constants.size()),
+                    dispatch.constants.data(), 0);
                 list->Dispatch(1, 1, 1);
             }
             context.UavBarrier(skin_bounds_buffer);
@@ -5429,9 +7064,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             bind_visible_draws();
             draw_bucket(kArcherVisibilityBucket, false, hero_pipeline);
         }
-        for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+        for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
         {
-            const auto [begin, count] = monster_ranges[asset];
+            const auto [begin, count] = monster_bucket_ranges[asset];
             if (count == 0) continue;
             bind_visible_draws();
             draw_bucket(kMonsterVisibilityBucketBegin + asset, false, hero_pipeline);
@@ -5525,34 +7160,59 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             renderer.frame_submission_faulted = true;
         }
     } pending_hlod{*impl_, frame, hlod_graph};
+    if (!restored_graph)
+    {
+        pending_graph_layout.hlod_input_geometry_records = geometry_records_version;
+        pending_graph_layout.hlod_input_static_instances = static_instances_version;
+    }
     if (auto prepared = impl_->AddHlodFramePasses(back_buffer_index,
         active_view_mask, geometry_records_version,
-        static_instances_version, {}, hlod_graph); !prepared) return prepared;
-    auto visibility_pass = impl_->graph.AddPass(3, kRenderPassNames[3], QueueHint::Compute);
-    impl_->ReadHlodFrame(visibility_pass, hlod_graph, false);
-    dynamic_lod_version = visibility_pass.ReadWrite(dynamic_lod_version, Access::UnorderedWrite);
-    if (static_lod_state)
-        static_lod_version = visibility_pass.ReadWrite(static_lod_version, Access::UnorderedWrite);
-    geometry_records_version = visibility_pass.ReadWrite(geometry_records_version, Access::UnorderedWrite);
-    visibility_pass.Read(dynamic_instances_version, Access::ComputeRead);
-    if (have_skinned_instances)
-        visibility_pass.Read(skin_bounds_version, Access::ComputeRead);
-    if (static_instances_buffer)
-        visibility_pass.Read(static_instances_version, Access::ComputeRead);
-    visibility_pass.Read(previous_hzb_version, Access::ComputeRead);
-    static_visible_refs_version = visibility_pass.Write(
-        static_visible_refs_version, Access::UnorderedWrite);
-    static_draw_args_version = visibility_pass.Write(
-        static_draw_args_version, Access::UnorderedWrite);
-    dynamic_visible_refs_version = visibility_pass.Write(
-        dynamic_visible_refs_version, Access::UnorderedWrite);
-    dynamic_draw_args_version = visibility_pass.Write(
-        dynamic_draw_args_version, Access::UnorderedWrite);
-    static_rejected_refs_version = visibility_pass.Write(
-        static_rejected_refs_version, Access::UnorderedWrite);
-    static_rejected_args_version = visibility_pass.Write(
-        static_rejected_args_version, Access::UnorderedWrite);
-    visibility_pass.SetExecute([&](RenderPassContext &context) {
+        static_instances_version, {}, hlod_graph,
+        restored_graph ? nullptr : &pending_graph_layout.hlod, &hlod_record,
+        restored_graph ? &pending_graph_layout.hlod : nullptr); !prepared) return prepared;
+    auto &visibility_layout = pending_graph_layout.visibility;
+    std::optional<PassBuilder> visibility_pass;
+    if (restored_graph)
+    {
+        visibility_pass = impl_->graph.BindPass(visibility_layout.pass_index, 3);
+        if (!visibility_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Visibility does not match the retained graph plan.");
+        dynamic_lod_version = visibility_layout.outputs[0];
+        static_lod_version = visibility_layout.outputs[1];
+        geometry_records_version = visibility_layout.outputs[2];
+        static_visible_refs_version = visibility_layout.outputs[3];
+        static_draw_args_version = visibility_layout.outputs[4];
+        dynamic_visible_refs_version = visibility_layout.outputs[5];
+        dynamic_draw_args_version = visibility_layout.outputs[6];
+        static_rejected_refs_version = visibility_layout.outputs[7];
+        static_rejected_args_version = visibility_layout.outputs[8];
+    }
+    else
+    {
+        visibility_layout.pass_index = impl_->graph.PassCount();
+        visibility_pass = impl_->graph.AddPass(3, kRenderPassNames[3], QueueHint::Compute);
+        impl_->ReadHlodFrame(*visibility_pass, hlod_graph, false);
+        dynamic_lod_version = visibility_pass->ReadWrite(dynamic_lod_version, Access::UnorderedWrite);
+        if (static_lod_state)
+            static_lod_version = visibility_pass->ReadWrite(static_lod_version, Access::UnorderedWrite);
+        geometry_records_version = visibility_pass->ReadWrite(geometry_records_version, Access::UnorderedWrite);
+        visibility_pass->Read(dynamic_instances_version, Access::ComputeRead);
+        if (have_skinned_instances)
+            visibility_pass->Read(skin_bounds_version, Access::ComputeRead);
+        if (static_instances_buffer)
+            visibility_pass->Read(static_instances_version, Access::ComputeRead);
+        visibility_pass->Read(previous_hzb_version, Access::ComputeRead);
+        static_visible_refs_version = visibility_pass->Write(static_visible_refs_version, Access::UnorderedWrite);
+        static_draw_args_version = visibility_pass->Write(static_draw_args_version, Access::UnorderedWrite);
+        dynamic_visible_refs_version = visibility_pass->Write(dynamic_visible_refs_version, Access::UnorderedWrite);
+        dynamic_draw_args_version = visibility_pass->Write(dynamic_draw_args_version, Access::UnorderedWrite);
+        static_rejected_refs_version = visibility_pass->Write(static_rejected_refs_version, Access::UnorderedWrite);
+        static_rejected_args_version = visibility_pass->Write(static_rejected_args_version, Access::UnorderedWrite);
+        visibility_layout.outputs = {dynamic_lod_version, static_lod_version, geometry_records_version,
+            static_visible_refs_version, static_draw_args_version, dynamic_visible_refs_version,
+            dynamic_draw_args_version, static_rejected_refs_version, static_rejected_args_version};
+    }
+    visibility_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->static_visibility_pipeline.Get());
@@ -5618,23 +7278,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     ClusterFrameGraph cluster_graph;
     if (auto prepared = impl_->AddClusterFramePasses(back_buffer_index, geometry_records_version,
-            use_visibility ? &raster_records_version : nullptr, static_instances_version, cluster_graph); !prepared)
+            use_visibility ? &raster_records_version : nullptr, static_instances_version, cluster_graph,
+            cluster_record, restored_graph ? nullptr : &pending_graph_layout.cluster,
+            restored_graph ? &pending_graph_layout.cluster : nullptr); !prepared)
         return prepared;
     if (auto prepared = impl_->AddClusterOcclusionPass(back_buffer_index, cluster_graph,
-            previous_hzb_version, false); !prepared) return prepared;
-    const auto ao_csm_adaptive_status = impl_->adaptive_shading.Status();
-    const bool overlap_ao_csm = presented_view &&
-        impl_->explicit_frame->views.size() == 1 && !impl_->config.environment_preview &&
-        !impl_->mesh_shader_enabled && !use_visibility && impl_->enhanced &&
-        active_features.ao_mode == GraphicsAoMode::GTAO &&
-        active_features.gi_mode == GraphicsGiMode::Probe &&
-        active_features.reflection_mode == GraphicsReflectionMode::ScreenSpace &&
-        active_features.shadow_mode == GraphicsShadowMode::Raster &&
-        !active_features.software_gi_enabled &&
-        active_features.adaptive_compute_enabled && ao_csm_adaptive_status.compute_ready &&
-        ao_csm_adaptive_status.usable && impl_->ambient_occlusion.AdaptiveComputeApplied() &&
-        !(impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized()) &&
-        !impl_->sdk_presentation.IsEnabled() && impl_->sdk_presentation.LatencyOwner() == SdkLatencyOwner::None;
+            previous_hzb_version, false, restored_graph ? nullptr : &pending_graph_layout.cluster,
+            restored_graph ? &pending_graph_layout.cluster : nullptr); !prepared) return prepared;
     // Preserve the original fallback input versions while delaying its declaration
     // until the CPU virtual-shadow plan can prove that CSM is unnecessary.
     std::vector<VirtualShadowNativeRead> csm_reads;
@@ -5679,19 +7329,33 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         csm_read(dynamic_draw_args_version, Access::IndirectArgs);
     };
     bool csm_registered = false;
-    const auto register_cascaded_shadow = [&] {
-        collect_csm_reads();
+    const auto register_cascaded_shadow = [&]() -> Result {
+        if (!restored_graph) collect_csm_reads();
         const auto shadow_initial = impl_->enhanced && impl_->shadow.graph_access == Access::Undefined
             ? Access::Common : initial_depth_access;
         shadow = import_texture(impl_->shadow, shadow_initial, "Shadow");
         shadow_version = impl_->graph.Version(shadow);
         csm_registered = true;
-        auto shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
-        read_material_sampling(shadow_pass, has_masked_material_draw);
-        read_geometry_pages(shadow_pass);
-        for (const auto &read : csm_reads) shadow_pass.Read(read.version, read.access);
-        shadow_version = shadow_pass.Write(shadow_version, Access::DepthWrite);
-        shadow_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
+        auto &layout = pending_graph_layout.cascaded_shadow;
+        std::optional<PassBuilder> shadow_pass;
+        if (restored_graph)
+        {
+            shadow_pass = impl_->graph.BindPass(layout.pass_index, 2);
+            if (!shadow_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Cascaded shadow does not match the retained graph plan.");
+            shadow_version = layout.output;
+        }
+        else
+        {
+            layout.pass_index = impl_->graph.PassCount();
+            shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
+            read_material_sampling(*shadow_pass, has_masked_material_draw);
+            read_geometry_pages(*shadow_pass);
+            for (const auto &read : csm_reads) shadow_pass->Read(read.version, read.access);
+            shadow_version = shadow_pass->Write(shadow_version, Access::DepthWrite);
+            layout.output = shadow_version;
+        }
+        shadow_pass->SetExecuteChecked([&](RenderPassContext &context) -> Result {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_graphics(list);
             bind_scene_roots(list);
@@ -5728,6 +7392,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             list->RSSetScissorRects(1, &scissor);
             return Result::Success();
         });
+        return Result::Success();
     };
 
     if (use_visibility)
@@ -5737,18 +7402,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         // graph so Compute clear waits for initialization after create/resize.
         if (!impl_->visibility_targets_initialized)
         {
-            auto initialize = impl_->graph.AddPass(31, "VisibilityDiscard", QueueHint::Direct);
-            visibility_ids_version = initialize.Write(visibility_ids_version, Access::RenderTarget);
-            visibility_face_version = initialize.Write(visibility_face_version, Access::RenderTarget);
-            gbuffer_base_version = initialize.Write(gbuffer_base_version, Access::RenderTarget);
-            gbuffer_normal_version = initialize.Write(gbuffer_normal_version, Access::RenderTarget);
-            gbuffer_metadata_version = initialize.Write(gbuffer_metadata_version, Access::RenderTarget);
-            gbuffer_material_version = initialize.Write(gbuffer_material_version, Access::RenderTarget);
-            gbuffer_motion_version = initialize.Write(gbuffer_motion_version, Access::RenderTarget);
-            gbuffer_surface_history_version = initialize.Write(gbuffer_surface_history_version, Access::RenderTarget);
-            for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-                material_sidecar_versions[plane] = initialize.Write(material_sidecar_versions[plane], Access::RenderTarget);
-            initialize.SetExecute([&](RenderPassContext &context) {
+            auto &layout = pending_graph_layout.visibility_discard;
+            std::optional<PassBuilder> initialize;
+            if (restored_graph)
+            {
+                initialize = impl_->graph.BindPass(layout.pass_index, 31);
+                if (!initialize || !restore_surface_versions(layout))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Visibility discard does not match the retained graph plan.");
+            }
+            else
+            {
+                layout.pass_index = impl_->graph.PassCount();
+                initialize = impl_->graph.AddPass(31, "VisibilityDiscard", QueueHint::Direct);
+                visibility_ids_version = initialize->Write(visibility_ids_version, Access::RenderTarget);
+                visibility_face_version = initialize->Write(visibility_face_version, Access::RenderTarget);
+                gbuffer_base_version = initialize->Write(gbuffer_base_version, Access::RenderTarget);
+                gbuffer_normal_version = initialize->Write(gbuffer_normal_version, Access::RenderTarget);
+                gbuffer_metadata_version = initialize->Write(gbuffer_metadata_version, Access::RenderTarget);
+                gbuffer_material_version = initialize->Write(gbuffer_material_version, Access::RenderTarget);
+                gbuffer_motion_version = initialize->Write(gbuffer_motion_version, Access::RenderTarget);
+                gbuffer_surface_history_version = initialize->Write(gbuffer_surface_history_version, Access::RenderTarget);
+                for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+                    material_sidecar_versions[plane] = initialize->Write(material_sidecar_versions[plane], Access::RenderTarget);
+                capture_surface_versions(layout);
+            }
+            initialize->SetExecute([&](RenderPassContext &context) {
                 auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
                 for (auto *resource : {impl_->visibility_ids.resource.Get(),
                         impl_->visibility_front_face.resource.Get(), impl_->gbuffer_base.resource.Get(),
@@ -5760,61 +7439,89 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     list->DiscardResource(impl_->material_sidecars[plane].resource.Get(), nullptr);
             });
         }
-        auto clear = impl_->graph.AddPass(25, "VisibilityClear", QueueHint::Compute);
-        visibility_ids_version = clear.Write(visibility_ids_version, Access::UnorderedWrite);
-        visibility_face_version = clear.Write(visibility_face_version, Access::UnorderedWrite);
-        visibility_counts_version = clear.Write(visibility_counts_version, Access::UnorderedWrite);
-        gbuffer_base_version = clear.Write(gbuffer_base_version, Access::UnorderedWrite);
-        gbuffer_normal_version = clear.Write(gbuffer_normal_version, Access::UnorderedWrite);
-        gbuffer_metadata_version = clear.Write(gbuffer_metadata_version, Access::UnorderedWrite);
-        gbuffer_material_version = clear.Write(gbuffer_material_version, Access::UnorderedWrite);
-        gbuffer_motion_version = clear.Write(gbuffer_motion_version, Access::UnorderedWrite);
-        gbuffer_surface_history_version = clear.Write(gbuffer_surface_history_version, Access::UnorderedWrite);
-        for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-            material_sidecar_versions[plane] = clear.Write(material_sidecar_versions[plane], Access::UnorderedWrite);
-        clear.SetExecute([&](RenderPassContext &context) {
+        auto &layout = pending_graph_layout.visibility_clear;
+        std::optional<PassBuilder> clear;
+        if (restored_graph)
+        {
+            clear = impl_->graph.BindPass(layout.pass_index, 25);
+            if (!clear || !restore_surface_versions(layout))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Visibility clear does not match the retained graph plan.");
+        }
+        else
+        {
+            layout.pass_index = impl_->graph.PassCount();
+            clear = impl_->graph.AddPass(25, "VisibilityClear", QueueHint::Compute);
+            visibility_ids_version = clear->Write(visibility_ids_version, Access::UnorderedWrite);
+            visibility_face_version = clear->Write(visibility_face_version, Access::UnorderedWrite);
+            visibility_counts_version = clear->Write(visibility_counts_version, Access::UnorderedWrite);
+            gbuffer_base_version = clear->Write(gbuffer_base_version, Access::UnorderedWrite);
+            gbuffer_normal_version = clear->Write(gbuffer_normal_version, Access::UnorderedWrite);
+            gbuffer_metadata_version = clear->Write(gbuffer_metadata_version, Access::UnorderedWrite);
+            gbuffer_material_version = clear->Write(gbuffer_material_version, Access::UnorderedWrite);
+            gbuffer_motion_version = clear->Write(gbuffer_motion_version, Access::UnorderedWrite);
+            gbuffer_surface_history_version = clear->Write(gbuffer_surface_history_version, Access::UnorderedWrite);
+            for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+                material_sidecar_versions[plane] = clear->Write(material_sidecar_versions[plane], Access::UnorderedWrite);
+            capture_surface_versions(layout);
+        }
+        clear->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->visibility_clear_pipeline.Get());
             list->Dispatch((impl_->render_width + 7) / 8, (impl_->render_height + 7) / 8, 1);
         });
     }
-    auto gbuffer_pass = impl_->graph.AddPass(4, kRenderPassNames[4], QueueHint::Direct);
-    read_material_sampling(gbuffer_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
-    impl_->ReadClusterFrame(gbuffer_pass, cluster_graph, true);
-    impl_->ReadHlodFrame(gbuffer_pass, hlod_graph, true);
-    gbuffer_pass.Read(geometry_records_version, Access::ShaderRead);
-    gbuffer_pass.Read(material_parameter_version, Access::ShaderRead);
-    gbuffer_pass.Read(hero_binding_version, Access::ShaderRead);
-    read_geometry_pages(gbuffer_pass);
-    gbuffer_pass.Read(dynamic_instances_version, Access::ShaderRead);
-    if (have_skinned_instances)
-        gbuffer_pass.Read(skin_cache_version, Access::ShaderRead);
-    if (have_skinned_instances && previous_skin_frame_valid)
-        gbuffer_pass.Read(previous_skin_cache_version, Access::ShaderRead);
-    if (static_instances_buffer) gbuffer_pass.Read(static_instances_version, Access::ShaderRead);
-    gbuffer_pass.Read(static_visible_refs_version, Access::ShaderRead);
-    gbuffer_pass.Read(static_draw_args_version, Access::IndirectArgs);
-    gbuffer_pass.Read(dynamic_visible_refs_version, Access::ShaderRead);
-    gbuffer_pass.Read(dynamic_draw_args_version, Access::IndirectArgs);
-    if (use_visibility)
+    auto &gbuffer_layout = pending_graph_layout.gbuffer;
+    std::optional<PassBuilder> gbuffer_pass;
+    if (restored_graph)
     {
-        visibility_ids_version = gbuffer_pass.ReadWrite(visibility_ids_version, Access::RenderTarget);
-        visibility_face_version = gbuffer_pass.ReadWrite(visibility_face_version, Access::RenderTarget);
+        gbuffer_pass = impl_->graph.BindPass(gbuffer_layout.pass_index, 4);
+        if (!gbuffer_pass || !restore_surface_versions(gbuffer_layout))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "G-buffer does not match the retained graph plan.");
     }
     else
     {
-    gbuffer_base_version = gbuffer_pass.Write(gbuffer_base_version, Access::RenderTarget);
-    gbuffer_normal_version = gbuffer_pass.Write(gbuffer_normal_version, Access::RenderTarget);
-    gbuffer_metadata_version = gbuffer_pass.Write(gbuffer_metadata_version, Access::RenderTarget);
-    gbuffer_material_version = gbuffer_pass.Write(gbuffer_material_version, Access::RenderTarget);
-    gbuffer_motion_version = gbuffer_pass.Write(gbuffer_motion_version, Access::RenderTarget);
-    gbuffer_surface_history_version = gbuffer_pass.Write(gbuffer_surface_history_version, Access::RenderTarget);
-    for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-        material_sidecar_versions[plane] = gbuffer_pass.Write(material_sidecar_versions[plane], Access::RenderTarget);
+        gbuffer_layout.pass_index = impl_->graph.PassCount();
+        gbuffer_pass = impl_->graph.AddPass(4, kRenderPassNames[4], QueueHint::Direct);
+        read_material_sampling(*gbuffer_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
+        impl_->ReadClusterFrame(*gbuffer_pass, cluster_graph, true);
+        impl_->ReadHlodFrame(*gbuffer_pass, hlod_graph, true);
+        gbuffer_pass->Read(geometry_records_version, Access::ShaderRead);
+        gbuffer_pass->Read(material_parameter_version, Access::ShaderRead);
+        gbuffer_pass->Read(hero_binding_version, Access::ShaderRead);
+        read_geometry_pages(*gbuffer_pass);
+        gbuffer_pass->Read(dynamic_instances_version, Access::ShaderRead);
+        if (have_skinned_instances)
+            gbuffer_pass->Read(skin_cache_version, Access::ShaderRead);
+        if (have_skinned_instances && previous_skin_frame_valid)
+            gbuffer_pass->Read(previous_skin_cache_version, Access::ShaderRead);
+        if (static_instances_buffer) gbuffer_pass->Read(static_instances_version, Access::ShaderRead);
+        gbuffer_pass->Read(static_visible_refs_version, Access::ShaderRead);
+        gbuffer_pass->Read(static_draw_args_version, Access::IndirectArgs);
+        gbuffer_pass->Read(dynamic_visible_refs_version, Access::ShaderRead);
+        gbuffer_pass->Read(dynamic_draw_args_version, Access::IndirectArgs);
+        if (use_visibility)
+        {
+            visibility_ids_version = gbuffer_pass->ReadWrite(visibility_ids_version, Access::RenderTarget);
+            visibility_face_version = gbuffer_pass->ReadWrite(visibility_face_version, Access::RenderTarget);
+        }
+        else
+        {
+            gbuffer_base_version = gbuffer_pass->Write(gbuffer_base_version, Access::RenderTarget);
+            gbuffer_normal_version = gbuffer_pass->Write(gbuffer_normal_version, Access::RenderTarget);
+            gbuffer_metadata_version = gbuffer_pass->Write(gbuffer_metadata_version, Access::RenderTarget);
+            gbuffer_material_version = gbuffer_pass->Write(gbuffer_material_version, Access::RenderTarget);
+            gbuffer_motion_version = gbuffer_pass->Write(gbuffer_motion_version, Access::RenderTarget);
+            gbuffer_surface_history_version = gbuffer_pass->Write(gbuffer_surface_history_version, Access::RenderTarget);
+            for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+                material_sidecar_versions[plane] = gbuffer_pass->Write(material_sidecar_versions[plane], Access::RenderTarget);
+        }
+        depth_version = gbuffer_pass->Write(depth_version, Access::DepthWrite);
+        capture_surface_versions(gbuffer_layout);
     }
-    depth_version = gbuffer_pass.Write(depth_version, Access::DepthWrite);
-    gbuffer_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
+    gbuffer_pass->SetExecuteChecked([&](RenderPassContext &context) -> Result {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         bind_scene_roots(list);
@@ -5874,29 +7581,57 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     };
 
-    auto depth_pyramid_pass =
-        impl_->graph.AddPass(18, kRenderPassNames[18], QueueHint::Compute);
-    depth_pyramid_pass.Read(depth_version, Access::ComputeRead);
-    current_hzb_version =
-        depth_pyramid_pass.Write(current_hzb_version, Access::UnorderedWrite);
-    depth_pyramid_pass.SetExecute(
+    auto &depth_layout = pending_graph_layout.depth_pyramid;
+    std::optional<PassBuilder> depth_pyramid_pass;
+    if (restored_graph)
+    {
+        depth_pyramid_pass = impl_->graph.BindPass(depth_layout.pass_index, 18);
+        if (!depth_pyramid_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Depth pyramid does not match the retained graph plan.");
+        current_hzb_version = depth_layout.output;
+    }
+    else
+    {
+        depth_layout.pass_index = impl_->graph.PassCount();
+        depth_pyramid_pass = impl_->graph.AddPass(18, kRenderPassNames[18], QueueHint::Compute);
+        depth_pyramid_pass->Read(depth_version, Access::ComputeRead);
+        current_hzb_version = depth_pyramid_pass->Write(current_hzb_version, Access::UnorderedWrite);
+        depth_layout.output = current_hzb_version;
+    }
+    depth_pyramid_pass->SetExecute(
         [&](RenderPassContext &context) { record_depth_pyramid(context); });
 
     if (auto prepared = impl_->AddClusterOcclusionPass(back_buffer_index, cluster_graph,
-            current_hzb_version, true); !prepared) return prepared;
-    auto retest_pass =
-        impl_->graph.AddPass(19, kRenderPassNames[19], QueueHint::Compute);
-    if (static_instances_buffer)
-        retest_pass.Read(static_instances_version, Access::ComputeRead);
-    retest_pass.Read(static_rejected_refs_version, Access::ComputeRead);
-    retest_pass.Read(static_rejected_args_version, Access::UnorderedRead);
-    geometry_records_version = retest_pass.ReadWrite(geometry_records_version, Access::UnorderedWrite);
-    retest_pass.Read(current_hzb_version, Access::ComputeRead);
-    static_retest_refs_version =
-        retest_pass.Write(static_retest_refs_version, Access::UnorderedWrite);
-    static_retest_args_version =
-        retest_pass.Write(static_retest_args_version, Access::UnorderedWrite);
-    retest_pass.SetExecute([&](RenderPassContext &context) {
+            current_hzb_version, true, restored_graph ? nullptr : &pending_graph_layout.cluster,
+            restored_graph ? &pending_graph_layout.cluster : nullptr); !prepared) return prepared;
+    auto &retest_layout = pending_graph_layout.retest;
+    std::optional<PassBuilder> retest_pass;
+    if (restored_graph)
+    {
+        retest_pass = impl_->graph.BindPass(retest_layout.pass_index, 19);
+        if (!retest_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Visibility retest does not match the retained graph plan.");
+        geometry_records_version = retest_layout.records;
+        static_retest_refs_version = retest_layout.refs;
+        static_retest_args_version = retest_layout.args;
+    }
+    else
+    {
+        retest_layout.pass_index = impl_->graph.PassCount();
+        retest_pass = impl_->graph.AddPass(19, kRenderPassNames[19], QueueHint::Compute);
+        if (static_instances_buffer)
+            retest_pass->Read(static_instances_version, Access::ComputeRead);
+        retest_pass->Read(static_rejected_refs_version, Access::ComputeRead);
+        retest_pass->Read(static_rejected_args_version, Access::UnorderedRead);
+        geometry_records_version = retest_pass->ReadWrite(geometry_records_version, Access::UnorderedWrite);
+        retest_pass->Read(current_hzb_version, Access::ComputeRead);
+        static_retest_refs_version = retest_pass->Write(static_retest_refs_version, Access::UnorderedWrite);
+        static_retest_args_version = retest_pass->Write(static_retest_args_version, Access::UnorderedWrite);
+        retest_layout.records = geometry_records_version;
+        retest_layout.refs = static_retest_refs_version;
+        retest_layout.args = static_retest_args_version;
+    }
+    retest_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->visibility_retest_pipeline.Get());
@@ -5929,44 +7664,49 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         list->Dispatch(kGpuVisibilityBucketCount, 1, 1);
     });
 
-    auto gbuffer_retest_pass =
-        impl_->graph.AddPass(20, kRenderPassNames[20], QueueHint::Direct);
-    read_material_sampling(gbuffer_retest_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
-    impl_->ReadClusterFrame(gbuffer_retest_pass, cluster_graph, true, true);
-    impl_->ReadHlodFrame(gbuffer_retest_pass, hlod_graph, false);
-    gbuffer_retest_pass.Read(geometry_records_version, Access::ShaderRead);
-    gbuffer_retest_pass.Read(material_parameter_version, Access::ShaderRead);
-    read_geometry_pages(gbuffer_retest_pass);
-    if (static_instances_buffer)
-        gbuffer_retest_pass.Read(static_instances_version, Access::ShaderRead);
-    gbuffer_retest_pass.Read(static_retest_refs_version, Access::ShaderRead);
-    gbuffer_retest_pass.Read(static_retest_args_version, Access::IndirectArgs);
-    if (use_visibility)
+    auto &gbuffer_retest_layout = pending_graph_layout.gbuffer_retest;
+    std::optional<PassBuilder> gbuffer_retest_pass;
+    if (restored_graph)
     {
-        visibility_ids_version = gbuffer_retest_pass.ReadWrite(visibility_ids_version, Access::RenderTarget);
-        visibility_face_version = gbuffer_retest_pass.ReadWrite(visibility_face_version, Access::RenderTarget);
+        gbuffer_retest_pass = impl_->graph.BindPass(gbuffer_retest_layout.pass_index, 20);
+        if (!gbuffer_retest_pass || !restore_surface_versions(gbuffer_retest_layout))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "G-buffer retest does not match the retained graph plan.");
     }
     else
     {
-    gbuffer_base_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_base_version, Access::RenderTarget);
-    gbuffer_normal_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_normal_version, Access::RenderTarget);
-    gbuffer_metadata_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_metadata_version, Access::RenderTarget);
-    gbuffer_material_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_material_version, Access::RenderTarget);
-    gbuffer_motion_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_motion_version, Access::RenderTarget);
-    gbuffer_surface_history_version =
-        gbuffer_retest_pass.ReadWrite(gbuffer_surface_history_version, Access::RenderTarget);
-    if (!use_visibility)
-        for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-            material_sidecar_versions[plane] = gbuffer_retest_pass.ReadWrite(material_sidecar_versions[plane], Access::RenderTarget);
+        gbuffer_retest_layout.pass_index = impl_->graph.PassCount();
+        gbuffer_retest_pass = impl_->graph.AddPass(20, kRenderPassNames[20], QueueHint::Direct);
+        read_material_sampling(*gbuffer_retest_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
+        impl_->ReadClusterFrame(*gbuffer_retest_pass, cluster_graph, true, true);
+        impl_->ReadHlodFrame(*gbuffer_retest_pass, hlod_graph, false);
+        gbuffer_retest_pass->Read(geometry_records_version, Access::ShaderRead);
+        gbuffer_retest_pass->Read(material_parameter_version, Access::ShaderRead);
+        read_geometry_pages(*gbuffer_retest_pass);
+        if (static_instances_buffer)
+            gbuffer_retest_pass->Read(static_instances_version, Access::ShaderRead);
+        gbuffer_retest_pass->Read(static_retest_refs_version, Access::ShaderRead);
+        gbuffer_retest_pass->Read(static_retest_args_version, Access::IndirectArgs);
+        if (use_visibility)
+        {
+            visibility_ids_version = gbuffer_retest_pass->ReadWrite(visibility_ids_version, Access::RenderTarget);
+            visibility_face_version = gbuffer_retest_pass->ReadWrite(visibility_face_version, Access::RenderTarget);
+        }
+        else
+        {
+            gbuffer_base_version = gbuffer_retest_pass->ReadWrite(gbuffer_base_version, Access::RenderTarget);
+            gbuffer_normal_version = gbuffer_retest_pass->ReadWrite(gbuffer_normal_version, Access::RenderTarget);
+            gbuffer_metadata_version = gbuffer_retest_pass->ReadWrite(gbuffer_metadata_version, Access::RenderTarget);
+            gbuffer_material_version = gbuffer_retest_pass->ReadWrite(gbuffer_material_version, Access::RenderTarget);
+            gbuffer_motion_version = gbuffer_retest_pass->ReadWrite(gbuffer_motion_version, Access::RenderTarget);
+            gbuffer_surface_history_version = gbuffer_retest_pass->ReadWrite(gbuffer_surface_history_version, Access::RenderTarget);
+            for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+                material_sidecar_versions[plane] = gbuffer_retest_pass->ReadWrite(material_sidecar_versions[plane], Access::RenderTarget);
+        }
+        depth_version = gbuffer_retest_pass->ReadWrite(depth_version, Access::DepthWrite);
+        capture_surface_versions(gbuffer_retest_layout);
     }
-    depth_version =
-        gbuffer_retest_pass.ReadWrite(depth_version, Access::DepthWrite);
-    gbuffer_retest_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
+    gbuffer_retest_pass->SetExecuteChecked([&](RenderPassContext &context) -> Result {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         bind_scene_roots(list, false);
@@ -6005,23 +7745,49 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     });
 
     // Retest19/53 only changed main-view records/counts.
-    auto final_depth_pyramid_pass =
-        impl_->graph.AddPass(21, kRenderPassNames[21], QueueHint::Compute);
-    final_depth_pyramid_pass.Read(depth_version, Access::ComputeRead);
-    current_hzb_version = final_depth_pyramid_pass.ReadWrite(
-        current_hzb_version, Access::UnorderedWrite);
-    final_depth_pyramid_pass.SetExecute(
+    auto &final_depth_layout = pending_graph_layout.final_depth_pyramid;
+    std::optional<PassBuilder> final_depth_pyramid_pass;
+    if (restored_graph)
+    {
+        final_depth_pyramid_pass = impl_->graph.BindPass(final_depth_layout.pass_index, 21);
+        if (!final_depth_pyramid_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Final depth pyramid does not match the retained graph plan.");
+        current_hzb_version = final_depth_layout.output;
+    }
+    else
+    {
+        final_depth_layout.pass_index = impl_->graph.PassCount();
+        final_depth_pyramid_pass = impl_->graph.AddPass(21, kRenderPassNames[21], QueueHint::Compute);
+        final_depth_pyramid_pass->Read(depth_version, Access::ComputeRead);
+        current_hzb_version = final_depth_pyramid_pass->ReadWrite(current_hzb_version, Access::UnorderedWrite);
+        final_depth_layout.output = current_hzb_version;
+    }
+    final_depth_pyramid_pass->SetExecute(
         [&](RenderPassContext &context) { record_depth_pyramid(context); });
 
     if (use_visibility)
     {
-        auto records = impl_->graph.AddPass(26, "RasterDrawRecords", QueueHint::Compute);
-        records.Read(geometry_records_version, Access::ComputeRead);
-        records.Read(static_visible_refs_version, Access::ComputeRead);
-        records.Read(dynamic_visible_refs_version, Access::ComputeRead);
-        records.Read(static_retest_refs_version, Access::ComputeRead);
-        raster_records_version = records.ReadWrite(raster_records_version, Access::UnorderedWrite);
-        records.SetExecute([&](RenderPassContext &context) {
+        auto &records_layout = pending_graph_layout.raster_records;
+        std::optional<PassBuilder> records;
+        if (restored_graph)
+        {
+            records = impl_->graph.BindPass(records_layout.pass_index, 26);
+            if (!records) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Raster draw records do not match the retained graph plan.");
+            raster_records_version = records_layout.output;
+        }
+        else
+        {
+            records_layout.pass_index = impl_->graph.PassCount();
+            records = impl_->graph.AddPass(26, "RasterDrawRecords", QueueHint::Compute);
+            records->Read(geometry_records_version, Access::ComputeRead);
+            records->Read(static_visible_refs_version, Access::ComputeRead);
+            records->Read(dynamic_visible_refs_version, Access::ComputeRead);
+            records->Read(static_retest_refs_version, Access::ComputeRead);
+            raster_records_version = records->ReadWrite(raster_records_version, Access::UnorderedWrite);
+            records_layout.output = raster_records_version;
+        }
+        records->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->raster_records_pipeline.Get());
@@ -6032,83 +7798,134 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 list->Dispatch(std::min(groups, 65535u), (groups + 65534u) / 65535u, 1);
             }
         });
-        auto count = impl_->graph.AddPass(27, "MaterialCount", QueueHint::Compute);
-        count.Read(geometry_records_version, Access::ComputeRead);
-        count.Read(hero_binding_version, Access::ComputeRead);
-        for (const auto &page : geometry_pages)
+        auto &count_layout = pending_graph_layout.material_count;
+        std::optional<PassBuilder> count;
+        if (restored_graph)
         {
-            count.Read(page.version, Access::ComputeRead);
+            count = impl_->graph.BindPass(count_layout.pass_index, 27);
+            if (!count) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Material count does not match the retained graph plan.");
+            visibility_counts_version = count_layout.output;
         }
-        count.Read(visibility_ids_version, Access::ComputeRead);
-        count.Read(raster_records_version, Access::ComputeRead);
-        visibility_counts_version = count.ReadWrite(visibility_counts_version, Access::UnorderedWrite);
-        count.SetExecute([&](RenderPassContext &context) {
+        else
+        {
+            count_layout.pass_index = impl_->graph.PassCount();
+            count = impl_->graph.AddPass(27, "MaterialCount", QueueHint::Compute);
+            count->Read(geometry_records_version, Access::ComputeRead);
+            count->Read(hero_binding_version, Access::ComputeRead);
+            for (const auto &page : geometry_pages) count->Read(page.version, Access::ComputeRead);
+            count->Read(visibility_ids_version, Access::ComputeRead);
+            count->Read(raster_records_version, Access::ComputeRead);
+            visibility_counts_version = count->ReadWrite(visibility_counts_version, Access::UnorderedWrite);
+            count_layout.output = visibility_counts_version;
+        }
+        count->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->visibility_count_pipeline.Get());
             list->Dispatch((impl_->render_width + 7) / 8, (impl_->render_height + 7) / 8, 1);
         });
-        auto prefix = impl_->graph.AddPass(28, "MaterialPrefix", QueueHint::Compute);
-        visibility_counts_version = prefix.ReadWrite(visibility_counts_version, Access::UnorderedWrite);
-        visibility_args_version = prefix.Write(visibility_args_version, Access::UnorderedWrite);
-        prefix.SetExecute([&](RenderPassContext &context) {
+        auto &prefix_layout = pending_graph_layout.material_prefix;
+        std::optional<PassBuilder> prefix;
+        if (restored_graph)
+        {
+            prefix = impl_->graph.BindPass(prefix_layout.pass_index, 28);
+            if (!prefix) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Material prefix does not match the retained graph plan.");
+            visibility_counts_version = prefix_layout.first;
+            visibility_args_version = prefix_layout.second;
+        }
+        else
+        {
+            prefix_layout.pass_index = impl_->graph.PassCount();
+            prefix = impl_->graph.AddPass(28, "MaterialPrefix", QueueHint::Compute);
+            visibility_counts_version = prefix->ReadWrite(visibility_counts_version, Access::UnorderedWrite);
+            visibility_args_version = prefix->Write(visibility_args_version, Access::UnorderedWrite);
+            prefix_layout.first = visibility_counts_version;
+            prefix_layout.second = visibility_args_version;
+        }
+        prefix->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->visibility_prefix_pipeline.Get());
             list->Dispatch(1, 1, 1);
         });
-        auto scatter = impl_->graph.AddPass(29, "MaterialScatter", QueueHint::Compute);
-        scatter.Read(geometry_records_version, Access::ComputeRead);
-        scatter.Read(hero_binding_version, Access::ComputeRead);
-        for (const auto &page : geometry_pages)
+        auto &scatter_layout = pending_graph_layout.material_scatter;
+        std::optional<PassBuilder> scatter;
+        if (restored_graph)
         {
-            scatter.Read(page.version, Access::ComputeRead);
+            scatter = impl_->graph.BindPass(scatter_layout.pass_index, 29);
+            if (!scatter) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Material scatter does not match the retained graph plan.");
+            visibility_counts_version = scatter_layout.first;
+            visibility_pixels_version = scatter_layout.second;
         }
-        scatter.Read(visibility_ids_version, Access::ComputeRead);
-        scatter.Read(raster_records_version, Access::ComputeRead);
-        visibility_counts_version = scatter.ReadWrite(visibility_counts_version, Access::UnorderedWrite);
-        visibility_pixels_version = scatter.Write(visibility_pixels_version, Access::UnorderedWrite);
-        scatter.SetExecute([&](RenderPassContext &context) {
+        else
+        {
+            scatter_layout.pass_index = impl_->graph.PassCount();
+            scatter = impl_->graph.AddPass(29, "MaterialScatter", QueueHint::Compute);
+            scatter->Read(geometry_records_version, Access::ComputeRead);
+            scatter->Read(hero_binding_version, Access::ComputeRead);
+            for (const auto &page : geometry_pages) scatter->Read(page.version, Access::ComputeRead);
+            scatter->Read(visibility_ids_version, Access::ComputeRead);
+            scatter->Read(raster_records_version, Access::ComputeRead);
+            visibility_counts_version = scatter->ReadWrite(visibility_counts_version, Access::UnorderedWrite);
+            visibility_pixels_version = scatter->Write(visibility_pixels_version, Access::UnorderedWrite);
+            scatter_layout.first = visibility_counts_version;
+            scatter_layout.second = visibility_pixels_version;
+        }
+        scatter->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
             list->SetPipelineState(impl_->visibility_scatter_pipeline.Get());
             list->Dispatch((impl_->render_width + 7) / 8, (impl_->render_height + 7) / 8, 1);
         });
-        auto resolve = impl_->graph.AddPass(30, "SurfaceResolve", QueueHint::Compute);
-        read_material_sampling(resolve, has_authored_material_draw, Access::ComputeRead);
-        impl_->ReadClusterFrame(resolve, cluster_graph, false);
-        impl_->ReadHlodFrame(resolve, hlod_graph, false);
-        resolve.Read(visibility_ids_version, Access::ComputeRead);
-        resolve.Read(visibility_face_version, Access::ComputeRead);
-        resolve.Read(depth_version, Access::ComputeRead);
-        resolve.Read(raster_records_version, Access::ComputeRead);
-        resolve.Read(geometry_records_version, Access::ComputeRead);
-        resolve.Read(material_parameter_version, Access::ComputeRead);
-        resolve.Read(hero_binding_version, Access::ComputeRead);
-        resolve.Read(visibility_pixels_version, Access::ComputeRead);
-        resolve.Read(visibility_counts_version, Access::ComputeRead);
-        resolve.Read(visibility_args_version, Access::IndirectArgs);
-        resolve.Read(static_visible_refs_version, Access::ComputeRead);
-        resolve.Read(dynamic_visible_refs_version, Access::ComputeRead);
-        resolve.Read(static_retest_refs_version, Access::ComputeRead);
-        resolve.Read(dynamic_instances_version, Access::ComputeRead);
-        if (static_instances_buffer) resolve.Read(static_instances_version, Access::ComputeRead);
-        if (have_skinned_instances) resolve.Read(skin_cache_version, Access::ComputeRead);
-        if (have_skinned_instances && previous_skin_frame_valid)
-            resolve.Read(previous_skin_cache_version, Access::ComputeRead);
-        for (const auto &page : geometry_pages)
+        auto &resolve_layout = pending_graph_layout.surface_resolve;
+        std::optional<PassBuilder> resolve;
+        if (restored_graph)
         {
-            resolve.Read(page.version, Access::ComputeRead);
+            resolve = impl_->graph.BindPass(resolve_layout.pass_index, 30);
+            if (!resolve || !restore_surface_versions(resolve_layout))
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Surface resolve does not match the retained graph plan.");
         }
-        gbuffer_base_version = resolve.ReadWrite(gbuffer_base_version, Access::UnorderedWrite);
-        gbuffer_normal_version = resolve.ReadWrite(gbuffer_normal_version, Access::UnorderedWrite);
-        gbuffer_metadata_version = resolve.ReadWrite(gbuffer_metadata_version, Access::UnorderedWrite);
-        gbuffer_material_version = resolve.ReadWrite(gbuffer_material_version, Access::UnorderedWrite);
-        gbuffer_motion_version = resolve.ReadWrite(gbuffer_motion_version, Access::UnorderedWrite);
-        gbuffer_surface_history_version = resolve.ReadWrite(gbuffer_surface_history_version, Access::UnorderedWrite);
-        for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-            material_sidecar_versions[plane] = resolve.ReadWrite(material_sidecar_versions[plane], Access::UnorderedWrite);
-        resolve.SetExecute([&](RenderPassContext &context) {
+        else
+        {
+            resolve_layout.pass_index = impl_->graph.PassCount();
+            resolve = impl_->graph.AddPass(30, "SurfaceResolve", QueueHint::Compute);
+            read_material_sampling(*resolve, has_authored_material_draw, Access::ComputeRead);
+            impl_->ReadClusterFrame(*resolve, cluster_graph, false);
+            impl_->ReadHlodFrame(*resolve, hlod_graph, false);
+            resolve->Read(visibility_ids_version, Access::ComputeRead);
+            resolve->Read(visibility_face_version, Access::ComputeRead);
+            resolve->Read(depth_version, Access::ComputeRead);
+            resolve->Read(raster_records_version, Access::ComputeRead);
+            resolve->Read(geometry_records_version, Access::ComputeRead);
+            resolve->Read(material_parameter_version, Access::ComputeRead);
+            resolve->Read(hero_binding_version, Access::ComputeRead);
+            resolve->Read(visibility_pixels_version, Access::ComputeRead);
+            resolve->Read(visibility_counts_version, Access::ComputeRead);
+            resolve->Read(visibility_args_version, Access::IndirectArgs);
+            resolve->Read(static_visible_refs_version, Access::ComputeRead);
+            resolve->Read(dynamic_visible_refs_version, Access::ComputeRead);
+            resolve->Read(static_retest_refs_version, Access::ComputeRead);
+            resolve->Read(dynamic_instances_version, Access::ComputeRead);
+            if (static_instances_buffer) resolve->Read(static_instances_version, Access::ComputeRead);
+            if (have_skinned_instances) resolve->Read(skin_cache_version, Access::ComputeRead);
+            if (have_skinned_instances && previous_skin_frame_valid)
+                resolve->Read(previous_skin_cache_version, Access::ComputeRead);
+            for (const auto &page : geometry_pages) resolve->Read(page.version, Access::ComputeRead);
+            gbuffer_base_version = resolve->ReadWrite(gbuffer_base_version, Access::UnorderedWrite);
+            gbuffer_normal_version = resolve->ReadWrite(gbuffer_normal_version, Access::UnorderedWrite);
+            gbuffer_metadata_version = resolve->ReadWrite(gbuffer_metadata_version, Access::UnorderedWrite);
+            gbuffer_material_version = resolve->ReadWrite(gbuffer_material_version, Access::UnorderedWrite);
+            gbuffer_motion_version = resolve->ReadWrite(gbuffer_motion_version, Access::UnorderedWrite);
+            gbuffer_surface_history_version = resolve->ReadWrite(gbuffer_surface_history_version, Access::UnorderedWrite);
+            for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+                material_sidecar_versions[plane] = resolve->ReadWrite(material_sidecar_versions[plane], Access::UnorderedWrite);
+            capture_surface_versions(resolve_layout);
+        }
+        resolve->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_surface_compute(list);
             list->SetComputeRootShaderResourceView(34, dynamic_instance_base);
@@ -6194,17 +8011,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     DecalSurfaceOutputs decal_surface_outputs;
     if (constants->vfx_decal_count.x)
     {
-        if (!impl_->decal_surface.AllocatedBytes())
-        {
-            DecalSurfaceCandidate candidate;
-            if (auto prepared = impl_->PrepareDecalSurface(impl_->config,
-                    impl_->view_state.render_capacity, true, candidate); !prepared) return prepared;
-            auto transition = impl_->DiagnosticsMemory();
-            transition.renderer_view_bytes += candidate.AllocatedBytes();
-            impl_->diagnostics.ObserveTransition(transition);
-            if (auto committed = impl_->decal_surface.Commit(std::move(candidate),
-                    impl_->graph_queue_executor.Completed()); !committed) return committed;
-        }
         DecalSurfaceInputs inputs;
         inputs.depth = {depth_version, impl_->depth.resource.Get()};
         inputs.metadata = {gbuffer_metadata_version, impl_->gbuffer_metadata.resource.Get()};
@@ -6240,8 +8046,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         camera.inverse_view_projection = constants->inverse_view_projection;
         camera.view_origin = constants->surface_view_origin;
         pending_effects.decal_surface = true;
-        if (auto registered = impl_->decal_surface.Register(impl_->graph, inputs, camera,
-                decal_surface_outputs); !registered) return registered;
+        const auto registered = restored_graph
+            ? impl_->decal_surface.BindRetained(impl_->graph, inputs, camera,
+                pending_graph_layout.decal_surface, decal_surface_outputs)
+            : impl_->decal_surface.Register(impl_->graph, inputs, camera,
+                decal_surface_outputs, &pending_graph_layout.decal_surface);
+        if (!registered) return registered;
         gbuffer_base_version = decal_surface_outputs.base.version;
         gbuffer_normal_version = decal_surface_outputs.normal.version;
         gbuffer_material_version = decal_surface_outputs.material.version;
@@ -6329,10 +8139,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.draw = draw_shadows;
         if (primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0)
         {
-            if (csm_required) register_cascaded_shadow();
+            if (csm_required)
+                if (auto registered = register_cascaded_shadow(); !registered) return registered;
             pending_effects.shadows = true;
-            if (auto registered = impl_->virtual_shadows.Register(impl_->graph, inputs, shadow_plan, virtual_shadow_outputs); !registered)
-                return registered;
+            const auto registered_virtual_shadows = restored_graph
+                ? impl_->virtual_shadows.BindRetained(impl_->graph, inputs, shadow_plan,
+                    pending_graph_layout.virtual_shadows, virtual_shadow_outputs)
+                : impl_->virtual_shadows.Register(impl_->graph, inputs, shadow_plan,
+                    virtual_shadow_outputs, &pending_graph_layout.virtual_shadows);
+            if (!registered_virtual_shadows) return registered_virtual_shadows;
             auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             destination.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount + kVirtualShadowDescriptorOffset) * impl_->srv_stride;
             for (const auto srv : virtual_shadow_outputs.srvs)
@@ -6343,16 +8158,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         if (impl_->local_shadows.AllocatedBytes() != 0)
         {
-            LocalShadowInputs local;
-            local.declare_material_sampling = inputs.declare_material_sampling;
-            local.lights = frame_lights; local.camera_position = lod_eye;
-            local.rendered_frame_id = impl_->frame_number; local.frame_slot = back_buffer_index;
-            local.completed = inputs.completed; local.reset_cache = new_session;
-            local.casters = ShadowCasterRange{static_shadow_batch->records,casters}; local.draw_groups = groups; local.native_reads = reads;
-            local.draw = draw_shadows;
+            local_shadow_input.declare_material_sampling = inputs.declare_material_sampling;
+            local_shadow_input.native_reads = reads;
+            local_shadow_input.draw = draw_shadows;
             pending_effects.local_shadows = true;
-            if (auto registered = impl_->local_shadows.Register(impl_->graph, local, local_shadow_outputs); !registered)
-                return registered;
+            const auto registered_local_shadows = restored_graph
+                ? impl_->local_shadows.BindRetained(impl_->graph, local_shadow_input, local_shadow_plan,
+                    pending_graph_layout.local_shadows, local_shadow_outputs)
+                : impl_->local_shadows.Register(impl_->graph, local_shadow_input, local_shadow_plan,
+                    local_shadow_outputs, &pending_graph_layout.local_shadows);
+            if (!registered_local_shadows) return registered_local_shadows;
             auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             destination.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount + kLocalShadowDescriptorOffset) * impl_->srv_stride;
             for (const auto srv : local_shadow_outputs.srvs)
@@ -6362,15 +8177,20 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
     }
-    if (csm_required && !csm_registered) register_cascaded_shadow();
+    if (csm_required && !csm_registered)
+        if (auto registered = register_cascaded_shadow(); !registered) return registered;
     // t5 is post-table slot3. Bind a typed null when there is no current CSM;
     // even speculative shader sampling cannot touch a stale/unwritten atlas.
     for (const auto offset : {0u,kToneMapInputDescriptorOffset,kFxaaInputDescriptorOffset})
         surface_descriptor(offset+3u, csm_required ? impl_->shadow.resource.Get() : nullptr, DXGI_FORMAT_R32_FLOAT);
     record_graph_substage(cpu_timings.graph_shadows_us);
     LightingProbeOutputs probe_outputs;
-    if (auto registered = impl_->lighting_probe.Register(impl_->graph,
-            impl_->graph_queue_executor.Completed(), probe_outputs); !registered) return registered;
+    const auto registered_probe = restored_graph
+        ? impl_->lighting_probe.BindRetained(impl_->graph,
+            impl_->graph_queue_executor.Completed(), pending_graph_layout.probe, probe_outputs)
+        : impl_->lighting_probe.Register(impl_->graph,
+            impl_->graph_queue_executor.Completed(), probe_outputs, &pending_graph_layout.probe);
+    if (!registered_probe) return registered_probe;
     pending_effects.probe = true;
     auto probe_descriptor = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     probe_descriptor.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
@@ -6394,8 +8214,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     light_inputs.near_plane = near_plane;
     light_inputs.far_plane = far_plane;
     LightListOutputs light_outputs;
-    if (auto registered = impl_->light_list.Register(impl_->graph, light_inputs, light_outputs); !registered)
-        return registered;
+    const auto registered_lights = restored_graph
+        ? impl_->light_list.BindRetained(impl_->graph, light_inputs,
+            pending_graph_layout.light_list, light_outputs)
+        : impl_->light_list.Register(impl_->graph, light_inputs, light_outputs,
+            &pending_graph_layout.light_list);
+    if (!registered_lights) return registered_lights;
     pending_effects.lights = true;
     auto light_descriptor = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     light_descriptor.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
@@ -6407,8 +8231,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         light_descriptor.ptr += impl_->srv_stride;
     }
     LtcLutOutputs ltc_outputs;
-    if (auto registered = impl_->ltc_lut.Register(impl_->graph,
-            impl_->graph_queue_executor.Completed(), ltc_outputs); !registered) return registered;
+    const auto registered_ltc = restored_graph
+        ? impl_->ltc_lut.BindRetained(impl_->graph, impl_->graph_queue_executor.Completed(),
+            pending_graph_layout.ltc, ltc_outputs)
+        : impl_->ltc_lut.Register(impl_->graph, impl_->graph_queue_executor.Completed(),
+            ltc_outputs, &pending_graph_layout.ltc);
+    if (!registered_ltc) return registered_ltc;
     pending_effects.ltc = static_cast<bool>(ltc_outputs.matrix.resource);
     for (const auto source : ltc_outputs.srvs)
     {
@@ -6416,9 +8244,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         light_descriptor.ptr += impl_->srv_stride;
     }
-    std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> capture_pages;
-    std::vector<LocalProbeSceneRead> capture_reads;
-    LocalProbeRuntimeFrameInputs local_probe_inputs;
+    if (!restored_graph && local_probe_prepared) capture_reads.clear();
     local_probe_inputs.config = &impl_->config;
     local_probe_inputs.pipeline_cache = &impl_->pipeline_cache;
     local_probe_inputs.scene = static_scene;
@@ -6455,7 +8281,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const auto handle = texture ? import_texture(resource, Access::AllShaderRead, name)
                 : import_buffer(resource, Access::AllShaderRead, name);
             const auto version = impl_->graph.Version(handle);
-            if (std::ranges::none_of(capture_reads, [&](const auto &read) {
+            if (!restored_graph && std::ranges::none_of(capture_reads, [&](const auto &read) {
                     return read.version.resource.value == version.resource.value &&
                            read.version.resource.kind == version.resource.kind;
                 }))
@@ -6480,6 +8306,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         capture_read(impl_->material_parameters, false, "ProbeMaterialParameters");
         capture_read(impl_->hero_material_bindings_gpu, false, "ProbeHeroBindings");
         capture_read(impl_->environment_brdf_lut, true, "ProbeBrdfLut");
+        if (!restored_graph)
+        {
         for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
                 light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
                 ltc_outputs.matrix, ltc_outputs.amplitude}) capture_reads.push_back({version, Access::AllShaderRead});
@@ -6495,13 +8323,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
                     local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
                 capture_reads.push_back({version, Access::AllShaderRead});
+        }
         local_probe_inputs.pages = capture_pages;
         local_probe_inputs.scene_reads = capture_reads;
     }
     LocalProbeOutputs local_probe_outputs;
     pending_effects.probe_scene = static_scene;
     pending_effects.local_probes = impl_->local_probes.AllocatedBytes() != 0;
-    if (auto registered = impl_->local_probes.Register(impl_->graph, local_probe_inputs, local_probe_outputs); !registered) return registered;
+    if (!local_probe_prepared)
+        if (auto prepared = impl_->local_probes.PrepareFrameRecordData(
+                local_probe_inputs, local_probe_plan); !prepared) return prepared;
+    const auto registered_local_probe = restored_graph
+        ? impl_->local_probes.BindRetained(impl_->graph, local_probe_inputs,
+            local_probe_plan, pending_graph_layout.local_probe, local_probe_outputs)
+        : impl_->local_probes.Register(impl_->graph, local_probe_inputs,
+            local_probe_plan, local_probe_outputs, &pending_graph_layout.local_probe);
+    if (!registered_local_probe) return registered_local_probe;
     pending_effects.probe_revisions = local_probe_outputs.revisions;
     if (local_probe_outputs.srvs[0].ptr)
     {
@@ -6539,8 +8376,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         pass.Read(ltc_outputs.amplitude, Access::ShaderRead);
     };
     record_graph_substage(cpu_timings.graph_light_probes_us);
-    if (auto result = impl_->texture_feedback.AddDecodePass(impl_->graph, back_buffer_index,
-            1201, feedback_bindings); !result) return result;
+    const auto decode_feedback = restored_graph
+        ? impl_->texture_feedback.BindRetainedDecode(impl_->graph, back_buffer_index, 1201,
+            pending_graph_layout.texture_feedback, feedback_bindings)
+        : impl_->texture_feedback.AddDecodePass(impl_->graph, back_buffer_index,
+            1201, feedback_bindings, &pending_graph_layout.texture_feedback);
+    if (!decode_feedback) return decode_feedback;
     SceneGeometryOutputs scene_geometry_outputs;
     std::vector<SceneShaderRead> scene_reads;
     const auto make_scene_bindings = [&](std::uint32_t table_offset) -> SceneFrameTableBuilder {
@@ -6573,28 +8414,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return Result::Success();
         };
     };
-    std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
-    std::vector<SoftwareSceneGeometry> brixelizer_geometries;
-    std::vector<BrixelizerSceneInstance> brixelizer_instances;
-    BrixelizerGeometryLookup brixelizer_geometry_lookup;
-    std::vector<std::shared_ptr<const void>> brixelizer_owners;
-    std::unordered_set<D3D12MA::Allocation *> brixelizer_backing;
-    std::uint64_t brixelizer_light_epoch = impl_->pipeline_revision ^ (impl_->material_parameter_revision * 1099511628211ull);
-    if (const auto digest = impl_->config.product_digests.find("render/lighting/default_probe.rpkg");
-        digest != impl_->config.product_digests.end()) brixelizer_light_epoch ^= MakeAssetId(digest->second).value;
-    if (active_features.software_gi_enabled)
-    {
-        if (impl_->brixelizer_history_valid && (new_session ||
-                !(impl_->temporal_history_valid || impl_->hzb_history_valid) ||
-                impl_->brixelizer_gi.Status().light_revision != brixelizer_light_epoch))
-        {
-            if (auto drained = impl_->WaitForGpu(); !drained) return drained;
-            if (auto reset = impl_->brixelizer_gi.ResetHistoryAfterCompletion(
-                    impl_->graph_queue_executor.Completed(), impl_->view_state.render_active, new_session); !reset) return reset;
-            impl_->brixelizer_history_valid = false;
-        }
-        brixelizer_owners.push_back(impl_->resident_generation_lease);
-    }
     if (active_features.software_gi_enabled)
     {
         const auto add_read = [&](ResourceVersion version, ID3D12Resource *resource) {
@@ -6646,171 +8465,46 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 &impl_->monster_emissive, &impl_->monster_ram, &impl_->family_diffuse, &impl_->family_normal}) add_texture(*texture);
 
 
-        std::vector<SceneGeometryRecord> jobs;
-        std::vector<SceneDrawInstance> draws;
-        std::vector<const GeometryPageGpu *> scene_pages;
-        std::vector<const RenderInstance *> scene_sources;
+        auto &jobs = software_scene_jobs;
+        auto &draws = software_scene_draws;
+        auto &scene_pages = software_scene_pages;
+        auto &scene_sources = software_scene_sources;
         std::vector<ResourceVersion> scene_page_versions;
-        const auto append_scene = [&](const RenderInstance &source, const GpuInstance &draw,
-                std::uint32_t stable_slot, std::uint32_t generation, std::uint32_t skin_slot) -> Result {
-            const bool environment = is_environment_mesh(source.mesh);
-            const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
-            const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
-            const auto geometry_ordinal = environment ? static_cast<std::uint32_t>(environment_mesh_index(source)) : UINT32_MAX;
-            const auto ordinal = environment ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal) : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
-            const auto page_slot = environment ? geometry_ordinal * render_data::kEnvironmentGeometryLodCount : source.mesh == RenderMesh::Archer ? kArcherGeometryPage :
-                is_monster(source.mesh) ? kMonsterGeometryPage + static_cast<std::uint32_t>(source.mesh) -
-                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee) :
-                source.mesh == RenderMesh::EnemyProjectile ? kProjectileGeometryPage : kProceduralGeometryPage;
+        scene_page_versions.reserve(scene_pages.size());
+        std::unordered_map<std::uint32_t, ResourceVersion> scene_versions_by_slot;
+        scene_versions_by_slot.reserve(software_scene_page_slots.size());
+        for (const auto page_slot : software_scene_page_slots)
+        {
             const auto *page = impl_->FindGeometryPage(page_slot);
-            if (!page)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene candidate has no complete resident geometry page.");
-            const bool masked = environment && render_data::ClassifyEnvironmentMaterial(
-                impl_->environment_meshes[geometry_ordinal * 3].material) == render_data::EnvironmentMaterialVariant::MaskedTwoSided;
-            const bool builtin = page->page_slot == kProceduralGeometryPage;
-            std::uint32_t flags = hero ? SceneGeometryCachedSkin : 0u;
-            if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
-                flags |= SceneGeometryTwoSided;
-            if (builtin) flags |= SceneGeometryBuiltin;
-            if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant))) flags |= SceneGeometryDeformed;
-            if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
-            const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
-                2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
-                0u, sizeof(Vertex), page->vertex_count, 0u, stable_slot, generation,
-                skin_slot, static_cast<std::uint32_t>(source.mesh), ordinal, flags};
-            const SceneDrawInstance instance{draw.position, draw.scale, draw.color, draw.mesh, draw.yaw, draw.padding};
-            if (environment && !hero)
-            {
-                const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-                    ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-                const auto domain = ClassifyBrixelizerDomain(capabilities,
-                    (flags & SceneGeometryTwoSided) != 0, (flags & SceneGeometryTransmissive) != 0);
-                if (domain != BrixelizerGeometryDomain::Opaque && domain != BrixelizerGeometryDomain::AuthoredCoverage)
-                {
-                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
-                    auto &count = domain == BrixelizerGeometryDomain::UnsupportedMasked ? excluded_masked_count :
-                        domain == BrixelizerGeometryDomain::UnsupportedThin ? excluded_thin_count : excluded_translucent_count;
-                    return AddBrixelizerExcludedCount(count, page->submeshes.size());
-                }
-            }
+            if (!page) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Software GI canonical page disappeared after preflight.");
             const auto version = impl_->graph.Version(import_buffer(
                 const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "SceneCanonicalGeometry"));
             add_read(version, page->storage.resource.Get());
-            jobs.push_back(job);
-            draws.push_back(instance);
-            scene_pages.push_back(page);
-            scene_sources.push_back(&source);
-            scene_page_versions.push_back(version);
-            return Result::Success();
-        };
-        std::vector<bool> included(persistent_instances.size());
-        for (std::size_t index = 0; index < render_instances.size(); ++index)
-        {
-            const auto &reference = dynamic_draw_refs[index];
-            if (included[reference.instance_index]) continue;
-            included[reference.instance_index] = true;
-            if (auto appended = append_scene(render_instances[index], persistent_instances[reference.instance_index],
-                    reference.instance_index, reference.instance_generation, dynamic_skin_slots[index]); !appended) return appended;
+            scene_versions_by_slot.emplace(page_slot, version);
         }
-        if (static_scene && impl_->static_gpu_scene)
-            for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
-            {
-                const auto &source = static_scene->instances[index];
-                if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
-                const bool environment = is_environment_mesh(source.mesh);
-                const GpuInstance draw{{source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0},
-                    {source.scale.x, source.scale.y, source.scale.z, 1}, source.color_rgba,
-                    static_cast<std::uint32_t>(source.mesh) | (environment ? kEnvironmentMeshFlag : 0u) |
-                        (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u), source.yaw,
-                    environment && source.mesh != RenderMesh::MeadowSurface ? 0.0f : std::bit_cast<float>(source.environment_seed)};
-                if (auto appended = append_scene(source, draw, 0x80000000u | static_cast<std::uint32_t>(index),
-                        impl_->static_gpu_scene->instance_generation, UINT32_MAX); !appended) return appended;
-            }
+        for (const auto *page : scene_pages)
+            scene_page_versions.push_back(scene_versions_by_slot.at(page->page_slot));
         if (!jobs.empty())
         {
-            if (auto registered = impl_->scene_geometry.Register(impl_->graph,
-                    {jobs, draws, scene_reads, make_scene_bindings(kSceneGeometryTableOffset), back_buffer_index,
-                     impl_->graph_queue_executor.Completed()}, scene_geometry_outputs); !registered) return registered;
+            const SceneGeometryInputs scene_inputs{jobs, draws, scene_reads,
+                make_scene_bindings(kSceneGeometryTableOffset), back_buffer_index,
+                impl_->graph_queue_executor.Completed()};
+            const auto registered_scene_geometry = restored_graph
+                ? impl_->scene_geometry.BindRetained(impl_->graph, scene_inputs,
+                    pending_graph_layout.scene_geometry, scene_geometry_outputs)
+                : impl_->scene_geometry.Register(impl_->graph, scene_inputs,
+                    scene_geometry_outputs, &pending_graph_layout.scene_geometry);
+            if (!registered_scene_geometry) return registered_scene_geometry;
             pending_effects.scene_geometry = true;
-            if (active_features.software_gi_enabled && scene_geometry_outputs.owner)
-                brixelizer_owners.push_back(scene_geometry_outputs.owner);
-            std::vector<SoftwareSceneGeometry> geometries;
-            std::vector<SoftwareSceneInstance> instances;
-            geometries.reserve(jobs.size()); instances.reserve(jobs.size());
-            for (std::size_t index = 0; index < jobs.size(); ++index)
+            for (std::size_t leaf = 0; leaf < brixelizer_leaf_jobs.size(); ++leaf)
             {
-                const auto &job = scene_geometry_outputs.geometries[index];
-                const auto &draw = draws[index];
-                const auto &page = *scene_pages[index];
-                const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
-                const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
-                const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
-                    std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
-                        persistent_metadata[job.skin_slot].skin_vertex_stride : 0;
-                if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
-                    page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
-                    frame.skin_cache_vertices.resource->GetDesc().Width))
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
-                geometries.push_back({std::uint64_t(page.page_slot) + 1, page.generation, impl_->frame_number + 1,
-                    deformed ? scene_geometry_outputs.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
-                    page.storage.resource.Get(), deformed ? scene_geometry_outputs.positions : skin ? skin_cache_version : scene_page_versions[index],
-                    scene_page_versions[index], vertex_offset, page.offsets[1], deformed ? 12u :
-                        skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
-                    page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session});
-                // Immutable shared pages retain their revision through frames.
-                if (!deformed && !skin) geometries.back().current_revision = page.generation;
-                DirectX::XMFLOAT4X4 world;
-                DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
-                    DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
-                const auto mesh_key = MakeAssetId("render/geometry/page/" + std::to_string(page.page_slot)).value;
-                const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
-                instances.push_back({job.stable_gpu_scene_slot, job.instance_generation, static_cast<std::uint32_t>(index),
-                    material_id, mesh_key, page.generation, world});
-                if (active_features.software_gi_enabled)
-                {
-                    // Retain the allocator's actual backing in addition to COM
-                    // resources; native geometry IDs can outlive this frame slot.
-                    const auto retain_allocation = [&](const AllocationResource &backing) {
-                        if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
-                        backing.allocation->AddRef();
-                        brixelizer_owners.emplace_back(backing.allocation, [](const void *value) {
-                            const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
-                        });
-                    };
-                    retain_allocation(page.storage);
-                    if (skin) retain_allocation(frame.skin_cache_vertices);
-                    const auto &source = *scene_sources[index];
-                    const auto &sphere = page.metadata.bounds.sphere;
-                    const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
-                    const float sine = std::sin(draw.yaw), cosine = std::cos(draw.yaw);
-                    const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
-                    DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
-                        draw.position.z - sine * sx + cosine * sz};
-                    float radius = sphere[3] * maximum_scale;
-                    if (skin)
-                    {
-                        center = {draw.position.x, draw.position.y, draw.position.z};
-                        radius = std::max(draw.position.w, std::sqrt(sx*sx + sy*sy + sz*sz) + radius);
-                    }
-                    if (HasEnvironmentWind(source.mesh, source.environment_variant)) radius += grass_visibility_radius;
-                    std::span<const render_data::CharacterMaterialBinding> bindings;
-                    if (source.mesh == RenderMesh::Archer) bindings = impl_->archer_material_bindings;
-                    else if (is_monster(source.mesh)) bindings = impl_->monster_assets[
-                        static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::MonsterMelee)].material_bindings;
-                    const auto ordinal = job.environment_ordinal;
-                    const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-                        ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-                    if (auto appended = AppendBrixelizerLeaf(geometries.back(), instances.back(), page.submeshes, bindings,
-                            std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
-                            (job.flags & SceneGeometryTwoSided) != 0,
-                            (job.flags & SceneGeometryTransmissive) != 0,
-                            {center.x-radius,center.y-radius,center.z-radius},
-                            {center.x+radius,center.y+radius,center.z+radius},
-                            ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
-                                : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
-                                impl_->material_parameter_revision,
-                            brixelizer_geometry_lookup,brixelizer_geometries,brixelizer_instances); !appended) return appended;
-                }
+                auto &geometry = brixelizer_geometries[leaf];
+                const auto job_index = brixelizer_leaf_jobs[leaf];
+                const auto &job = scene_geometry_outputs.geometries[job_index];
+                geometry.vertex_version = (job.flags & SceneGeometryDeformed) ? scene_geometry_outputs.positions
+                    : (job.flags & SceneGeometryCachedSkin) ? skin_cache_version : scene_page_versions[job_index];
+                geometry.index_version = scene_page_versions[job_index];
             }
         }
     }
@@ -6819,17 +8513,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ? static_cast<ID3D12Resource *>(impl_->graph.Resolve(version.resource)) : nullptr};
     };
     const auto register_software_gi_scene = [&]() -> Result {
-        BrixelizerSceneInputs native_scene;
-        native_scene.geometries = brixelizer_geometries; native_scene.instances = brixelizer_instances;
-        native_scene.excluded_masked_count = excluded_masked_count;
-        native_scene.excluded_thin_count = excluded_thin_count;
-        native_scene.excluded_translucent_count = excluded_translucent_count;
-        native_scene.sdf_center = lod_eye; native_scene.frame_slot = back_buffer_index;
-        native_scene.frame_index = impl_->frame_number; native_scene.scene_revision = impl_->pipeline_revision + 1;
-        native_scene.completed = impl_->graph_queue_executor.Completed(); native_scene.owners = brixelizer_owners;
         BrixelizerSceneOutputs native_scene_outputs;
         pending_effects.brixelizer = true;
-        if (auto registered = impl_->brixelizer_gi.RegisterScene(impl_->graph, native_scene, native_scene_outputs); !registered) return registered;
+        prepared_gi_guard.service = nullptr;
+        const auto registered = restored_graph
+            ? impl_->brixelizer_gi.RegisterScene(impl_->graph, native_scene, native_scene_outputs,
+                nullptr, &pending_graph_layout.brixelizer)
+            : impl_->brixelizer_gi.RegisterScene(impl_->graph, native_scene, native_scene_outputs,
+                &pending_graph_layout.brixelizer);
+        if (!registered) return registered;
         return Result::Success();
     };
     AmbientOcclusionConstants ambient_constants;
@@ -6868,8 +8560,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         // Set the completion guard before any graph registration can mutate the
         // service. Policies are copied to this completed frame bank immediately.
         pending_effects.adaptive = true;
-        if (auto registered = impl_->adaptive_shading.Register(impl_->graph, adaptive_inputs, adaptive_outputs);
-                !registered) return registered;
+        const auto registered_adaptive = restored_graph
+            ? impl_->adaptive_shading.BindRetained(impl_->graph, adaptive_inputs,
+                pending_graph_layout.adaptive, adaptive_outputs)
+            : impl_->adaptive_shading.Register(impl_->graph, adaptive_inputs, adaptive_outputs,
+                &pending_graph_layout.adaptive);
+        if (!registered_adaptive) return registered_adaptive;
         // A deferred CSM must have its actual density producer.
         if (overlap_ao_csm && csm_required)
         {
@@ -6897,8 +8593,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (active_features.ao_mode == GraphicsAoMode::GTAO || impl_->config.contact_shadows)
     {
         ambient_inputs.adaptive_density = texture_guide(adaptive_outputs.density.version);
-        if (auto registered = impl_->ambient_occlusion.Register(impl_->graph, ambient_inputs,
-                ambient_constants, ambient_outputs); !registered) return registered;
+        const auto registered_ambient = restored_graph
+            ? impl_->ambient_occlusion.BindRetained(impl_->graph, ambient_inputs,
+                ambient_constants, pending_graph_layout.ambient, ambient_outputs)
+            : impl_->ambient_occlusion.Register(impl_->graph, ambient_inputs,
+                ambient_constants, ambient_outputs, &pending_graph_layout.ambient);
+        if (!registered_ambient) return registered_ambient;
         pending_effects.ambient = ambient_outputs.ao.resource || ambient_outputs.contact.resource;
         if (overlap_ao_csm && !ambient_outputs.adaptive_density_used)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -6919,33 +8619,51 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->device->CopyDescriptorsSimple(1, ambient_descriptor, ambient_outputs.contact_srv,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     record_graph_substage(cpu_timings.graph_ao_us);
-    auto lighting_pass = impl_->graph.AddPass(5, kRenderPassNames[5], QueueHint::Direct);
-    if (adaptive_outputs.raster_ready)
-        lighting_pass.Read(adaptive_outputs.rate.version, Access::ShadingRateSource);
-    read_probe(lighting_pass);
-    if (ambient_outputs.ao.resource) lighting_pass.Read(ambient_outputs.ao, Access::ShaderRead);
-    if (ambient_outputs.contact.resource) lighting_pass.Read(ambient_outputs.contact, Access::ShaderRead);
-    lighting_pass.Read(gbuffer_base_version, Access::ShaderRead);
-    if (decal_surface_outputs.active)
-        lighting_pass.Read(decal_surface_outputs.emission.version, Access::ShaderRead);
-    lighting_pass.Read(gbuffer_normal_version, Access::ShaderRead);
-    lighting_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
-    lighting_pass.Read(gbuffer_material_version, Access::ShaderRead);
-    lighting_pass.Read(depth_version, Access::ShaderRead);
-    if (shadow_version.resource) lighting_pass.Read(shadow_version, Access::ShaderRead);
-    lighting_pass.Read(impl_->graph.Version(environment_brdf_lut), Access::ShaderRead);
-    lighting_pass.Read(material_parameter_version, Access::ShaderRead);
-    for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-        lighting_pass.Read(material_sidecar_versions[plane], Access::ShaderRead);
-    hdr_version = lighting_pass.Write(hdr_version, Access::RenderTarget);
-    if (subsurface_diffuse_version.resource)
-        subsurface_diffuse_version = lighting_pass.Write(subsurface_diffuse_version, Access::RenderTarget);
-    if (environment_specular_version.resource)
-        environment_specular_version = lighting_pass.Write(environment_specular_version, Access::RenderTarget);
-    if (indirect_diffuse_version.resource)
-        indirect_diffuse_version = lighting_pass.Write(indirect_diffuse_version, Access::RenderTarget);
+    auto &lighting_layout = pending_graph_layout.lighting;
+    std::optional<PassBuilder> lighting_pass;
+    if (restored_graph)
+    {
+        lighting_pass = impl_->graph.BindPass(lighting_layout.pass_index, 5);
+        if (!lighting_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Lighting does not match the retained graph plan.");
+        hdr_version = lighting_layout.outputs[0];
+        subsurface_diffuse_version = lighting_layout.outputs[1];
+        environment_specular_version = lighting_layout.outputs[2];
+        indirect_diffuse_version = lighting_layout.outputs[3];
+    }
+    else
+    {
+        lighting_layout.pass_index = impl_->graph.PassCount();
+        lighting_pass = impl_->graph.AddPass(5, kRenderPassNames[5], QueueHint::Direct);
+        if (adaptive_outputs.raster_ready)
+            lighting_pass->Read(adaptive_outputs.rate.version, Access::ShadingRateSource);
+        read_probe(*lighting_pass);
+        if (ambient_outputs.ao.resource) lighting_pass->Read(ambient_outputs.ao, Access::ShaderRead);
+        if (ambient_outputs.contact.resource) lighting_pass->Read(ambient_outputs.contact, Access::ShaderRead);
+        lighting_pass->Read(gbuffer_base_version, Access::ShaderRead);
+        if (decal_surface_outputs.active)
+            lighting_pass->Read(decal_surface_outputs.emission.version, Access::ShaderRead);
+        lighting_pass->Read(gbuffer_normal_version, Access::ShaderRead);
+        lighting_pass->Read(gbuffer_metadata_version, Access::ShaderRead);
+        lighting_pass->Read(gbuffer_material_version, Access::ShaderRead);
+        lighting_pass->Read(depth_version, Access::ShaderRead);
+        if (shadow_version.resource) lighting_pass->Read(shadow_version, Access::ShaderRead);
+        lighting_pass->Read(impl_->graph.Version(environment_brdf_lut), Access::ShaderRead);
+        lighting_pass->Read(material_parameter_version, Access::ShaderRead);
+        for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+            lighting_pass->Read(material_sidecar_versions[plane], Access::ShaderRead);
+        hdr_version = lighting_pass->Write(hdr_version, Access::RenderTarget);
+        if (subsurface_diffuse_version.resource)
+            subsurface_diffuse_version = lighting_pass->Write(subsurface_diffuse_version, Access::RenderTarget);
+        if (environment_specular_version.resource)
+            environment_specular_version = lighting_pass->Write(environment_specular_version, Access::RenderTarget);
+        if (indirect_diffuse_version.resource)
+            indirect_diffuse_version = lighting_pass->Write(indirect_diffuse_version, Access::RenderTarget);
+        lighting_layout.outputs = {hdr_version, subsurface_diffuse_version,
+            environment_specular_version, indirect_diffuse_version};
+    }
     const auto raw_hdr_version = hdr_version;
-    lighting_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
+    lighting_pass->SetExecuteChecked([&](RenderPassContext &context) -> Result {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear[] = {0, 0, 0, 0};
@@ -7100,8 +8818,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {hdr_version, opaque_hdr_resource}, {material_parameter_version, impl_->material_parameters.resource.Get()},
         impl_->view_state.render_active, back_buffer_index, impl_->graph_queue_executor.Completed()};
     SubsurfaceOutputs diffusion_outputs;
-    if (auto registered = impl_->subsurface.Register(impl_->graph, diffusion_inputs,
-            diffusion_constants, diffusion_outputs); !registered) return registered;
+    const auto registered_subsurface = restored_graph
+        ? impl_->subsurface.BindRetained(impl_->graph, diffusion_inputs,
+            diffusion_constants, pending_graph_layout.subsurface, diffusion_outputs)
+        : impl_->subsurface.Register(impl_->graph, diffusion_inputs,
+            diffusion_constants, diffusion_outputs, &pending_graph_layout.subsurface);
+    if (!registered_subsurface) return registered_subsurface;
     pending_effects.diffusion = static_cast<bool>(diffusion_outputs.corrected.resource);
     if (diffusion_outputs.corrected.resource)
     {
@@ -7153,8 +8875,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     reflection_inputs.ambient_visibility = {ambient_outputs.ao, ambient_outputs.ao_resource};
     reflection_inputs.ambient_visibility_enabled = static_cast<bool>(ambient_outputs.ao.resource);
     ScreenReflectionsOutputs reflection_outputs;
-    if (auto registered = impl_->screen_reflections.Register(impl_->graph, reflection_inputs,
-            reflection_constants, reflection_outputs); !registered) return registered;
+    const auto registered_reflections = restored_graph
+        ? impl_->screen_reflections.BindRetained(impl_->graph, reflection_inputs,
+            reflection_constants, pending_graph_layout.reflections, reflection_outputs)
+        : impl_->screen_reflections.Register(impl_->graph, reflection_inputs,
+            reflection_constants, reflection_outputs, &pending_graph_layout.reflections);
+    if (!registered_reflections) return registered_reflections;
     pending_effects.reflections = static_cast<bool>(reflection_outputs.composed.resource);
     if (reflection_outputs.composed.resource)
     {
@@ -7167,11 +8893,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto volumetric_raw_hdr = hdr_version;
     if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
     {
-        volumetric_camera.inverse_view_projection = camera_relative_inverse_view_projection;
-        DirectX::XMStoreFloat4x4(&volumetric_camera.view_projection, DirectX::XMMatrixInverse(nullptr,
-            DirectX::XMLoadFloat4x4(&volumetric_camera.inverse_view_projection)));
-        DirectX::XMStoreFloat4x4(&volumetric_camera.world_to_view, DirectX::XMMatrixTranslationFromVector(eye) * view);
-        volumetric_camera.origin = lod_eye; volumetric_camera.near_plane = near_plane; volumetric_camera.far_plane = far_plane;
+        if (restored_graph) volumetric_camera = retained_volumetric_camera;
+        else
+        {
+            volumetric_camera.inverse_view_projection = camera_relative_inverse_view_projection;
+            DirectX::XMStoreFloat4x4(&volumetric_camera.view_projection, DirectX::XMMatrixInverse(nullptr,
+                DirectX::XMLoadFloat4x4(&volumetric_camera.inverse_view_projection)));
+            DirectX::XMStoreFloat4x4(&volumetric_camera.world_to_view, DirectX::XMMatrixTranslationFromVector(eye) * view);
+            volumetric_camera.origin = lod_eye; volumetric_camera.near_plane = near_plane;
+            volumetric_camera.far_plane = far_plane;
+        }
         VolumetricInputs inputs;
         inputs.depth = {depth_version, impl_->depth.resource.Get()}; inputs.hdr = {hdr_version, opaque_hdr_resource};
         inputs.lights = light_outputs; inputs.shadows = virtual_shadow_outputs; inputs.volumes = impl_->volumetric_media;
@@ -7190,6 +8921,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.previous_camera = impl_->previous_volumetric_camera.near_plane > 0 ? impl_->previous_volumetric_camera : volumetric_camera;
         inputs.render_active = impl_->view_state.render_active; inputs.frame_slot = back_buffer_index; inputs.frame_index = impl_->frame_number;
         inputs.completed = impl_->graph_queue_executor.Completed(); inputs.reset_history = !previous_view_valid || new_session;
+        if (restored_graph) inputs.revisions = retained_volumetric_revisions;
+        else
+        {
         inputs.revisions.scene = pending_effects.probe_revisions.static_layout;
         inputs.revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
         inputs.revisions.light = pending_effects.probe_revisions.light;
@@ -7207,6 +8941,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             mix_revision(inputs.revisions.light, source.shadow_flags);
         }
         inputs.revisions.volume = impl_->volumetric_revision;
+        }
         if (primary_sun && csm_required)
         {
             inputs.compact_shadow.atlas = {shadow_version, impl_->shadow.resource.Get()};
@@ -7236,7 +8971,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return Result::Success();
         };
         pending_effects.volumetrics = true;
-        if (auto registered = impl_->volumetrics.Register(impl_->graph, inputs, volumetric_outputs); !registered) return registered;
+        const auto registered_volumetrics = restored_graph
+            ? impl_->volumetrics.BindRetained(impl_->graph, inputs,
+                pending_graph_layout.volumetrics, volumetric_outputs)
+            : impl_->volumetrics.Register(impl_->graph, inputs, volumetric_outputs,
+                &pending_graph_layout.volumetrics);
+        if (!registered_volumetrics) return registered_volumetrics;
         auto destination = local_probe_inputs.frame_srv_base; destination.ptr += kVolumetricDescriptorOffset * impl_->srv_stride;
         impl_->device->CopyDescriptorsSimple(kVolumetricDescriptorCount, destination, volumetric_outputs.descriptor_suffix,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -7262,12 +9002,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
     }
-    auto distortion_pass = impl_->graph.AddPass(6, kRenderPassNames[6], QueueHint::Direct);
-    distortion_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
-    distortion_pass.Read(gbuffer_normal_version, Access::ShaderRead);
-    distortion_pass.Read(depth_version, Access::ShaderRead);
-    distortion_vectors_version = distortion_pass.Write(distortion_vectors_version, Access::RenderTarget);
-    distortion_pass.SetExecute([&](RenderPassContext &context) {
+    std::optional<PassBuilder> distortion_pass;
+    if (restored_graph)
+    {
+        distortion_pass = impl_->graph.BindPass(pending_graph_layout.distortion_pass.pass_index, 6);
+        if (!distortion_pass)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Distortion pass does not match the retained graph plan.");
+        distortion_vectors_version = pending_graph_layout.distortion_pass.output;
+    }
+    else
+    {
+        pending_graph_layout.distortion_pass.pass_index = impl_->graph.PassCount();
+        distortion_pass = impl_->graph.AddPass(6, kRenderPassNames[6], QueueHint::Direct);
+        distortion_pass->Read(gbuffer_metadata_version, Access::ShaderRead);
+        distortion_pass->Read(gbuffer_normal_version, Access::ShaderRead);
+        distortion_pass->Read(depth_version, Access::ShaderRead);
+        distortion_vectors_version = distortion_pass->Write(distortion_vectors_version, Access::RenderTarget);
+        pending_graph_layout.distortion_pass.output = distortion_vectors_version;
+    }
+    distortion_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear[] = {0,0,0,0};
@@ -7283,40 +9037,56 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     const auto vfx_gradient_version = impl_->graph.Version(import_texture(
         impl_->vfx_gradient, Access::AllShaderRead, "VfxGradient"));
-    auto transparent_pass = impl_->graph.AddPass(7, kRenderPassNames[7], QueueHint::Direct);
-    read_probe(transparent_pass);
-    read_volumetrics(transparent_pass);
+    std::optional<PassBuilder> transparent_pass;
+    if (restored_graph)
+    {
+        transparent_pass = impl_->graph.BindPass(pending_graph_layout.transparent_pass.pass_index, 7);
+        if (!transparent_pass)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Transparent pass does not match the retained graph plan.");
+        oit_accumulation_version = pending_graph_layout.transparent_pass.first;
+        oit_revealage_version = pending_graph_layout.transparent_pass.second;
+    }
+    else
+    {
+    pending_graph_layout.transparent_pass.pass_index = impl_->graph.PassCount();
+    transparent_pass = impl_->graph.AddPass(7, kRenderPassNames[7], QueueHint::Direct);
+    read_probe(*transparent_pass);
+    read_volumetrics(*transparent_pass);
     // Retained GPU particles can sample the gradient even without new spawns.
     // Root 13 has ALL visibility, so declare every shader stage's read access.
-    transparent_pass.Read(vfx_gradient_version, Access::AllShaderRead);
-    transparent_pass.Read(geometry_records_version, Access::ShaderRead);
-    transparent_pass.Read(material_parameter_version, Access::ShaderRead);
-    transparent_pass.Read(hero_binding_version, Access::ShaderRead);
-    transparent_pass.Read(hdr_version, Access::ShaderRead);
-    read_geometry_pages(transparent_pass);
-    transparent_pass.Read(dynamic_instances_version, Access::ShaderRead);
-    transparent_pass.Read(dynamic_visible_refs_version, Access::ShaderRead);
-    transparent_pass.Read(dynamic_draw_args_version, Access::IndirectArgs);
-    if (static_instances_buffer) transparent_pass.Read(static_instances_version, Access::ShaderRead);
-    transparent_pass.Read(static_visible_refs_version, Access::ShaderRead);
-    transparent_pass.Read(static_draw_args_version, Access::IndirectArgs);
+    transparent_pass->Read(vfx_gradient_version, Access::AllShaderRead);
+    transparent_pass->Read(geometry_records_version, Access::ShaderRead);
+    transparent_pass->Read(material_parameter_version, Access::ShaderRead);
+    transparent_pass->Read(hero_binding_version, Access::ShaderRead);
+    transparent_pass->Read(hdr_version, Access::ShaderRead);
+    read_geometry_pages(*transparent_pass);
+    transparent_pass->Read(dynamic_instances_version, Access::ShaderRead);
+    transparent_pass->Read(dynamic_visible_refs_version, Access::ShaderRead);
+    transparent_pass->Read(dynamic_draw_args_version, Access::IndirectArgs);
+    if (static_instances_buffer) transparent_pass->Read(static_instances_version, Access::ShaderRead);
+    transparent_pass->Read(static_visible_refs_version, Access::ShaderRead);
+    transparent_pass->Read(static_draw_args_version, Access::IndirectArgs);
     if (have_skinned_instances)
-        transparent_pass.Read(skin_cache_version, Access::ShaderRead);
+        transparent_pass->Read(skin_cache_version, Access::ShaderRead);
     if (have_skinned_instances && previous_skin_frame_valid)
-        transparent_pass.Read(previous_skin_cache_version, Access::ShaderRead);
-    transparent_pass.Read(depth_version, Access::DepthShaderRead);
-    if (shadow_version.resource) transparent_pass.Read(shadow_version, Access::ShaderRead);
-    transparent_pass.Read(particles_version, Access::ShaderRead);
-    transparent_pass.Read(particle_alive_output_version, Access::ShaderRead);
-    transparent_pass.Read(indirect_arguments_version, Access::IndirectArgs);
-    transparent_pass.Read(ribbon_history_version, Access::ShaderRead);
-    transparent_pass.Read(ribbon_previous_version, Access::ShaderRead);
-    transparent_pass.Read(ribbon_arguments_version, Access::IndirectArgs);
-    transparent_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
-    transparent_pass.Read(gbuffer_normal_version, Access::ShaderRead);
-    oit_accumulation_version = transparent_pass.Write(oit_accumulation_version, Access::RenderTarget);
-    oit_revealage_version = transparent_pass.Write(oit_revealage_version, Access::RenderTarget);
-    transparent_pass.SetExecute([&](RenderPassContext &context) {
+        transparent_pass->Read(previous_skin_cache_version, Access::ShaderRead);
+    transparent_pass->Read(depth_version, Access::DepthShaderRead);
+    if (shadow_version.resource) transparent_pass->Read(shadow_version, Access::ShaderRead);
+    transparent_pass->Read(particles_version, Access::ShaderRead);
+    transparent_pass->Read(particle_alive_output_version, Access::ShaderRead);
+    transparent_pass->Read(indirect_arguments_version, Access::IndirectArgs);
+    transparent_pass->Read(ribbon_history_version, Access::ShaderRead);
+    transparent_pass->Read(ribbon_previous_version, Access::ShaderRead);
+    transparent_pass->Read(ribbon_arguments_version, Access::IndirectArgs);
+    transparent_pass->Read(gbuffer_metadata_version, Access::ShaderRead);
+    transparent_pass->Read(gbuffer_normal_version, Access::ShaderRead);
+    oit_accumulation_version = transparent_pass->Write(oit_accumulation_version, Access::RenderTarget);
+    oit_revealage_version = transparent_pass->Write(oit_revealage_version, Access::RenderTarget);
+    pending_graph_layout.transparent_pass.first = oit_accumulation_version;
+    pending_graph_layout.transparent_pass.second = oit_revealage_version;
+    }
+    transparent_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear_accumulation[] = {0, 0, 0, 0};
@@ -7383,9 +9153,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         list->SetGraphicsRoot32BitConstant(
             6, kDefaultSceneDrawMaterial | 1u, 1);
         bind_scene_deformation_roots(list, true);
-        const auto draw_cached_slime_range =
-            [&](std::size_t asset, std::pair<std::size_t, std::size_t> range) {
-            if (range.second == 0) return;
+        const auto draw_cached_slime_range = [&](std::size_t asset) {
+            if (monster_bucket_ranges[asset].second == 0) return;
             list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
             list->SetGraphicsRootShaderResourceView(
                 35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
@@ -7398,9 +9167,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         };
         if (impl_->hero_transparency.AllocatedBytes() == 0)
         {
-            draw_cached_slime_range(0, monster_ranges[0]);
-            draw_cached_slime_range(1, monster_ranges[1]);
-            draw_cached_slime_range(2, monster_ranges[2]);
+            for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
+                if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
+                    draw_cached_slime_range(asset);
             if (impl_->static_gpu_scene)
             {
                 list->SetGraphicsRootShaderResourceView(34,impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress());
@@ -7441,7 +9210,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     31, frame.upload.resource->GetGPUVirtualAddress() + fresnel_data_offset +
                             draw.command_index * sizeof(GpuFresnelShell));
                 const GeometryPageGpu &page = draw.archer ? impl_->archer_geometry
-                    : static_cast<const GeometryPageGpu &>(impl_->monster_assets[draw.asset_index]);
+                    : draw.lod == 0 ? static_cast<const GeometryPageGpu &>(impl_->monster_assets[draw.asset_index])
+                    : impl_->monster_reduced_geometry[draw.asset_index][draw.lod - 1u];
                 if (auto result = impl_->DrawGeometry(list, back_buffer_index,
                         impl_->fresnel_shell_pipeline.Get(), page, draw.geometry_pass); !result)
                     throw std::runtime_error(std::string(result.Message()));
@@ -7456,11 +9226,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     struct HeroWorkBinding { std::size_t bucket{}; bool immutable{}; };
     std::vector<HeroWorkContributorInput> hero_work_contributors;
     std::vector<HeroWorkBinding> hero_work_bindings;
-    bool have_hero_contributors = std::ranges::any_of(std::span(monster_ranges).first(3),
-        [](const auto &range) { return range.second != 0; });
-    if (impl_->static_gpu_scene)
-        for (std::size_t lod = 0; lod < 3; ++lod)
-            have_hero_contributors |= static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second != 0;
+    // All three water LOD ranges above refer to the same conservative source set.
     // Empty contributors export absent guides; downstream consumers select their opaque path.
     if (have_hero_contributors)
     {
@@ -7471,8 +9237,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             {static_visible_refs_version, Access::VertexShaderRead}, {static_draw_args_version, Access::IndirectArgs}};
         if (static_instances_buffer) hero_peel_reads.push_back({static_instances_version, Access::VertexShaderRead});
         if (have_skinned_instances) hero_peel_reads.push_back({skin_cache_version, Access::VertexShaderRead});
-        if (have_skinned_instances && previous_skin_frame_valid)
-            hero_peel_reads.push_back({previous_skin_cache_version, Access::VertexShaderRead});
         for (const auto &page : geometry_pages) hero_peel_reads.push_back({page.version, Access::VertexShaderRead});
         if (impl_->family_diffuse.resource)
             hero_peel_reads.push_back({impl_->graph.Version(import_texture(
@@ -7526,6 +9290,104 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         hero_inputs.opaque_depth = {depth_version, impl_->depth.resource.Get()};
         hero_inputs.hdr = {hdr_version, opaque_hdr_resource};
+        // Only a sphere proven to contain every vertex written by this Hero
+        // contributor may narrow the later ping-pong copies. Clip crossings,
+        // unknown skin deformation and invalid projection retain full copies.
+        const auto hero_active = impl_->view_state.render_active;
+        const D3D12_RECT full_hero_rect{0, 0, static_cast<LONG>(hero_active.width),
+            static_cast<LONG>(hero_active.height)};
+        D3D12_RECT hero_rect{static_cast<LONG>(hero_active.width),
+            static_cast<LONG>(hero_active.height), 0, 0};
+        bool hero_rect_qualified = hero_candidate_count <= 8 && !impl_->legacy_frame_bridge &&
+            hero_active.width == impl_->render_width && hero_active.height == impl_->render_height &&
+            std::isfinite(near_plane) && std::isfinite(far_plane) &&
+            std::isfinite(jitter_x) && std::isfinite(jitter_y);
+        bool hero_rect_has_contributor = false;
+        const auto extend_hero_rect = [&](DirectX::XMFLOAT4 sphere) {
+            const double position_error = 128.0 * FLT_EPSILON *
+                (std::abs(double(sphere.x)) + std::abs(double(sphere.y)) +
+                 std::abs(double(sphere.z)) + std::abs(double(sphere.w)) + 1.0);
+            const double radius = double(sphere.w) + position_error + 0.01;
+            if (!std::isfinite(radius) || radius <= 0 ||
+                !std::isfinite(sphere.x) || !std::isfinite(sphere.y) || !std::isfinite(sphere.z))
+                return false;
+            const auto eye_space = DirectX::XMVector3TransformCoord(
+                DirectX::XMVectorSet(sphere.x, sphere.y, sphere.z, 1.0f), view);
+            const double x = DirectX::XMVectorGetX(eye_space);
+            const double y = DirectX::XMVectorGetY(eye_space);
+            const double z = DirectX::XMVectorGetZ(eye_space);
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+                z - radius <= near_plane || z + radius >= far_plane ||
+                lod_projection._11 <= 0 || lod_projection._22 <= 0)
+                return false;
+            const auto project_axis = [&](double center, double scale, double jitter) {
+                const std::array ratios{(center - radius) / (z - radius),
+                    (center - radius) / (z + radius), (center + radius) / (z - radius),
+                    (center + radius) / (z + radius)};
+                const auto [low, high] = std::minmax_element(ratios.begin(), ratios.end());
+                return std::pair{*low * scale + jitter, *high * scale + jitter};
+            };
+            const auto [left_ndc, right_ndc] = project_axis(x, lod_projection._11, jitter_x);
+            const auto [bottom_ndc, top_ndc] = project_axis(y, lod_projection._22, jitter_y);
+            if (!std::isfinite(left_ndc) || !std::isfinite(right_ndc) ||
+                !std::isfinite(bottom_ndc) || !std::isfinite(top_ndc) ||
+                left_ndc <= -1 || right_ndc >= 1 || bottom_ndc <= -1 || top_ndc >= 1)
+                return false;
+            const double width = hero_active.width, height = hero_active.height;
+            hero_rect.left = std::min(hero_rect.left,
+                static_cast<LONG>(std::floor((left_ndc + 1.0) * width * 0.5 - 2.0)));
+            hero_rect.right = std::max(hero_rect.right,
+                static_cast<LONG>(std::ceil((right_ndc + 1.0) * width * 0.5 + 2.0)));
+            hero_rect.top = std::min(hero_rect.top,
+                static_cast<LONG>(std::floor((1.0 - top_ndc) * height * 0.5 - 2.0)));
+            hero_rect.bottom = std::max(hero_rect.bottom,
+                static_cast<LONG>(std::ceil((1.0 - bottom_ndc) * height * 0.5 + 2.0)));
+            hero_rect_has_contributor = true;
+            return true;
+        };
+        if (hero_rect_qualified)
+            for (std::size_t asset = 0; asset < 3 && hero_rect_qualified; ++asset)
+            {
+                const auto [begin, count] = monster_ranges[asset];
+                for (std::size_t index = begin; index < begin + count; ++index)
+                {
+                    if (index >= render_instances.size() || !dynamic_cooked_skin_bounds[index] ||
+                        !extend_hero_rect(next_draw_instances[index].position))
+                    { hero_rect_qualified = false; break; }
+                }
+            }
+        if (hero_rect_qualified && static_scene)
+        {
+            const auto [begin, count] =
+                static_environment_ranges[render_data::kMeadowWaterGeometry * 3u];
+            for (std::size_t index = begin; index < begin + count; ++index)
+            {
+                const auto slot = static_draw_refs[index].instance_index;
+                if (slot >= static_scene->instances.size())
+                { hero_rect_qualified = false; break; }
+                const auto &water = static_scene->instances[slot];
+                const auto scale = std::max({std::abs(water.scale.x), std::abs(water.scale.y),
+                    std::abs(water.scale.z)});
+                const float radius = impl_->environment_variant_radii[render_data::kMeadowWaterGeometry] * scale;
+                if (!extend_hero_rect({water.position.x, water.position.y, water.position.z, radius}))
+                { hero_rect_qualified = false; break; }
+            }
+        }
+        // Raster writes cannot leave the active viewport. Padding can cross
+        // its edge even when the proven projected sphere does not.
+        hero_rect.left = std::clamp(hero_rect.left, 0L, full_hero_rect.right);
+        hero_rect.top = std::clamp(hero_rect.top, 0L, full_hero_rect.bottom);
+        hero_rect.right = std::clamp(hero_rect.right, 0L, full_hero_rect.right);
+        hero_rect.bottom = std::clamp(hero_rect.bottom, 0L, full_hero_rect.bottom);
+        const std::uint64_t full_hero_area = std::uint64_t(hero_active.width) * hero_active.height;
+        const std::uint64_t partial_hero_area = hero_rect_has_contributor && hero_rect_qualified
+            ? std::uint64_t(hero_rect.right - hero_rect.left) * (hero_rect.bottom - hero_rect.top)
+            : full_hero_area;
+        hero_inputs.composition_rect = hero_rect_has_contributor && hero_rect_qualified &&
+            partial_hero_area * 4 < full_hero_area * 3 ? hero_rect : full_hero_rect;
+        // Four occupied layers were common in the dense baseline. Query and
+        // resolve only when a small source set can plausibly leave layers empty.
+        hero_inputs.use_occupancy_queries = hero_occupancy_topology;
         hero_inputs.accumulation = {oit_accumulation_version, impl_->oit_accumulation.resource.Get()};
         hero_inputs.revealage = {oit_revealage_version, impl_->oit_revealage.resource.Get()};
         hero_inputs.accumulation_rtv = oit_accumulation_rtv;
@@ -7552,9 +9414,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             list->SetGraphicsRoot32BitConstant(6, kDefaultSceneDrawMaterial | 1u, 1);
             list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
             list->SetGraphicsRootShaderResourceView(35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
-            for (std::size_t asset = 0; asset < 3; ++asset)
+            for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
             {
-                if (monster_ranges[asset].second == 0) continue;
+                if (asset >= 3 && (asset < 6 || (asset - 6) / 2 >= 3)) continue;
+                if (monster_bucket_ranges[asset].second == 0) continue;
                 const auto bucket = kMonsterVisibilityBucketBegin + asset;
                 if (auto drawn = impl_->DrawGeometry(list, back_buffer_index, pipeline, *bucket_pages[bucket],
                         dynamic_geometry_passes[bucket][0], frame.dynamic_draw_args.resource.Get(),
@@ -7580,8 +9443,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             static_assert(kGeometryArgumentStride == 24);
             if (impl_->rendered_submission_count == UINT64_MAX)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
-            hero_work_contributors.reserve(6);
-            hero_work_bindings.reserve(6);
+            hero_work_contributors.reserve(12);
+            hero_work_bindings.reserve(12);
             const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
                 const auto &page = *bucket_pages[bucket];
                 HeroWorkContributorInput contributor;
@@ -7620,10 +9483,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 hero_work_contributors.push_back(std::move(contributor));
                 hero_work_bindings.push_back({bucket,immutable});
             };
-            for (std::size_t asset=0;asset<3;++asset)
-                if (monster_ranges[asset].second)
-                    append_work(kMonsterVisibilityBucketBegin+asset,false,static_cast<std::uint32_t>(monster_ranges[asset].second),
-                                "monster"+std::to_string(asset));
+            for (std::size_t asset=0;asset<monster_bucket_ranges.size();++asset)
+                if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
+                    if (monster_bucket_ranges[asset].second)
+                        append_work(kMonsterVisibilityBucketBegin+asset,false,
+                            static_cast<std::uint32_t>(monster_bucket_ranges[asset].second),
+                            "monster"+std::to_string(asset < 6 ? asset : (asset-6)/2)+
+                            "_lod"+std::to_string(asset < 6 ? 0 : 1+(asset-6)%2));
             if (impl_->static_gpu_scene)
                 for (std::size_t lod=0;lod<3;++lod)
                 {
@@ -7660,8 +9526,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 return {1,0,0}; // Hero/water records explicitly use the indexed SceneVS path.
             };
         }
-        if (auto registered = impl_->hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs); !registered)
-            return registered;
+        const auto registered_hero = restored_graph
+            ? impl_->hero_transparency.BindRetainedLayers(impl_->graph, hero_inputs,
+                pending_graph_layout.hero, hero_outputs)
+            : impl_->hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs,
+                &pending_graph_layout.hero);
+        if (!registered_hero) return registered_hero;
         pending_effects.transparency = static_cast<bool>(hero_outputs.depth.resource);
         if (pending_effects.transparency)
         {
@@ -7670,26 +9540,37 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             constants->lod_clock.w |= 4u;
         }
     }
-    auto composite_pass = impl_->graph.AddPass(8, kRenderPassNames[8], QueueHint::Direct);
-    read_probe(composite_pass);
-    read_volumetrics(composite_pass);
-    if (flash_add_count || ground_add_count ||
-        std::ranges::any_of(ribbon_outputs, [](const GpuRibbonOutput &output) {
-            return (output.metadata[3] & 1u) == 0;
-        }))
-        composite_pass.Read(vfx_gradient_version, Access::AllShaderRead);
-    composite_pass.Read(hdr_version, Access::ShaderRead);
-    composite_pass.Read(distortion_vectors_version, Access::ShaderRead);
-    composite_pass.Read(oit_accumulation_version, Access::ShaderRead);
-    composite_pass.Read(oit_revealage_version, Access::ShaderRead);
-    composite_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
-    composite_pass.Read(gbuffer_normal_version, Access::ShaderRead);
-    composite_pass.Read(ribbon_history_version, Access::ShaderRead);
-    composite_pass.Read(ribbon_previous_version, Access::ShaderRead);
-    composite_pass.Read(ribbon_arguments_version, Access::IndirectArgs);
-    composite_pass.Read(depth_version, Access::DepthShaderRead);
-    composite_hdr_version = composite_pass.Write(composite_hdr_version, Access::RenderTarget);
-    composite_pass.SetExecute([&](RenderPassContext &context) {
+    std::optional<PassBuilder> composite_pass;
+    if (restored_graph)
+    {
+        composite_pass = impl_->graph.BindPass(pending_graph_layout.composite_pass.pass_index, 8);
+        if (!composite_pass)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Composite pass does not match the retained graph plan.");
+        composite_hdr_version = pending_graph_layout.composite_pass.output;
+    }
+    else
+    {
+    pending_graph_layout.composite_pass.pass_index = impl_->graph.PassCount();
+    composite_pass = impl_->graph.AddPass(8, kRenderPassNames[8], QueueHint::Direct);
+    read_probe(*composite_pass);
+    read_volumetrics(*composite_pass);
+    if (composite_gradient_read)
+        composite_pass->Read(vfx_gradient_version, Access::AllShaderRead);
+    composite_pass->Read(hdr_version, Access::ShaderRead);
+    composite_pass->Read(distortion_vectors_version, Access::ShaderRead);
+    composite_pass->Read(oit_accumulation_version, Access::ShaderRead);
+    composite_pass->Read(oit_revealage_version, Access::ShaderRead);
+    composite_pass->Read(gbuffer_metadata_version, Access::ShaderRead);
+    composite_pass->Read(gbuffer_normal_version, Access::ShaderRead);
+    composite_pass->Read(ribbon_history_version, Access::ShaderRead);
+    composite_pass->Read(ribbon_previous_version, Access::ShaderRead);
+    composite_pass->Read(ribbon_arguments_version, Access::IndirectArgs);
+    composite_pass->Read(depth_version, Access::DepthShaderRead);
+    composite_hdr_version = composite_pass->Write(composite_hdr_version, Access::RenderTarget);
+    pending_graph_layout.composite_pass.output = composite_hdr_version;
+    }
+    composite_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear[] = {0, 0, 0, 0};
@@ -7718,8 +9599,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     const auto raw_composite_version = composite_hdr_version;
     if (pending_effects.transparency)
-        if (auto registered = impl_->hero_transparency.RegisterComposition(impl_->graph,
-                {composite_hdr_version, composite_hdr_resource}, hero_outputs); !registered) return registered;
+    {
+        const HeroTransparencyGuide background{composite_hdr_version, composite_hdr_resource};
+        const auto registered_composition = restored_graph
+            ? impl_->hero_transparency.BindRetainedComposition(impl_->graph, background,
+                pending_graph_layout.hero, hero_outputs)
+            : impl_->hero_transparency.RegisterComposition(impl_->graph, background,
+                hero_outputs, &pending_graph_layout.hero);
+        if (!registered_composition) return registered_composition;
+    }
     if (hero_outputs.corrected.resource)
     {
         composite_hdr_version = hero_outputs.corrected;
@@ -7733,20 +9621,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     record_graph_substage(cpu_timings.graph_hero_us);
     ScreenOverlayOutputs screen_overlay_outputs;
     ResourceVersion screen_overlay_gradient;
-    const auto screen_intensity = impl_->explicit_frame->screen_overlay_intensity
-        ? *impl_->explicit_frame->screen_overlay_intensity : impl_->config.screen_overlay_intensity;
     if (!typed_screen.empty() && screen_intensity > 0)
     {
-        if (!impl_->screen_overlay.AllocatedBytes())
-        {
-            auto overlay_config = impl_->config;
-            overlay_config.screen_overlay_intensity = screen_intensity;
-            ScreenOverlayCandidate candidate;
-            if (auto prepared = impl_->PrepareScreenOverlay(overlay_config,
-                    impl_->view_state.render_capacity, candidate); !prepared) return prepared;
-            if (auto committed = impl_->screen_overlay.Commit(std::move(candidate),
-                    impl_->graph_queue_executor.Completed()); !committed) return committed;
-        }
         const auto gradient = import_texture(impl_->vfx_gradient, Access::ShaderRead, "VfxScreenGradient");
         screen_overlay_gradient = impl_->graph.Version(gradient);
         ScreenOverlayInputs overlay_inputs;
@@ -7761,8 +9637,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         overlay_inputs.intensity = screen_intensity;
         overlay_inputs.frame_slot = back_buffer_index;
         overlay_inputs.completed = impl_->graph_queue_executor.Completed();
-        if (auto registered = impl_->screen_overlay.RegisterMask(impl_->graph, overlay_inputs,
-                screen_overlay_outputs); !registered) return registered;
+        const auto registered_overlay = restored_graph
+            ? impl_->screen_overlay.BindRetained(impl_->graph, overlay_inputs,
+                pending_graph_layout.screen_overlay, screen_overlay_outputs)
+            : impl_->screen_overlay.RegisterMask(impl_->graph, overlay_inputs,
+                screen_overlay_outputs, &pending_graph_layout.screen_overlay);
+        if (!registered_overlay) return registered_overlay;
         pending_effects.screen_overlay = screen_overlay_outputs.active;
     }
     {
@@ -7784,45 +9664,38 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             impl_->device->CreateShaderResourceView(nullptr, &null_view, target);
         }
     }
-    auto pre_exposure = impl_->graph.AddPass(33, "PreExposure", QueueHint::Direct);
-    pre_exposure.Read(composite_hdr_version, Access::ShaderRead);
-    pre_exposure.Read(exposure_read_version, Access::ShaderRead);
-    scene_work_version = pre_exposure.Write(scene_work_version, Access::RenderTarget);
-    pre_exposure.SetExecute([&](RenderPassContext &context) {
+    ExposureFrameRecordData exposure_records;
+    exposure_records.record[0] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear[]{0, 0, 0, 0};
         list->ClearRenderTargetView(scene_work_rtv, clear, 0, nullptr);
         draw_fullscreen(list, impl_->pre_exposure_pipeline.Get(), scene_work_rtv);
-    });
-    auto clear_histogram = impl_->graph.AddPass(34, "ExposureHistogramClear", QueueHint::Compute);
-    histogram_version = clear_histogram.Write(histogram_version, Access::UnorderedWrite);
-    clear_histogram.SetExecute([&](RenderPassContext &context) {
+    };
+    exposure_records.record[1] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->exposure_clear_pipeline.Get());
         list->Dispatch(1, 1, 1);
-    });
-    auto build_histogram = impl_->graph.AddPass(35, "ExposureHistogramBuild", QueueHint::Compute);
-    build_histogram.Read(scene_work_version, Access::ComputeRead);
-    build_histogram.Read(exposure_read_version, Access::ComputeRead);
-    histogram_version = build_histogram.ReadWrite(histogram_version, Access::UnorderedWrite);
-    build_histogram.SetExecute([&](RenderPassContext &context) {
+    };
+    exposure_records.record[2] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->exposure_build_pipeline.Get());
         list->Dispatch((impl_->render_width + 15) / 16, (impl_->render_height + 15) / 16, 1);
-    });
-    auto reduce_exposure = impl_->graph.AddPass(36, "ExposureReduce", QueueHint::Compute);
-    reduce_exposure.Read(exposure_read_version, Access::ComputeRead);
-    histogram_version = reduce_exposure.ReadWrite(histogram_version, Access::UnorderedWrite);
-    exposure_write_version = reduce_exposure.Write(exposure_write_version, Access::UnorderedWrite);
-    reduce_exposure.SetExecute([&](RenderPassContext &context) {
+    };
+    exposure_records.record[3] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
         list->SetPipelineState(impl_->exposure_reduce_pipeline.Get());
         list->Dispatch(1, 1, 1);
-    });
+    };
+    if (auto built = BuildExposureGraph(impl_->graph, composite_hdr_version, exposure_read_version,
+            scene_work_version, histogram_version, exposure_write_version,
+            std::move(exposure_records), pending_graph_layout.exposure, restored_graph); !built) return built;
+    scene_work_version = pending_graph_layout.exposure.scene_work;
+    histogram_version = pending_graph_layout.exposure.histogram;
+    exposure_write_version = pending_graph_layout.exposure.exposure_write;
 
     ReconstructionGuidesOutputs reconstruction_outputs;
     const auto reconstruction_guide = [&](ResourceVersion version) {
@@ -7863,19 +9736,35 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         guides_inputs.screen_overlay_alpha = reconstruction_guide(screen_overlay_outputs.reactive);
         SdkReconstructionFrame sdk_frame;
         sdk_frame.identity = impl_->sdk_frame_identity; sdk_frame.camera = impl_->sdk_camera;
-        if (auto registered = impl_->reconstruction_guides.Register(impl_->graph, guides_inputs,
-                guides_constants, sdk_frame,
-                [provider = impl_->reconstruction_provider.get()](ID3D12GraphicsCommandList *commands,
-                    const SdkReconstructionFrame &frame) { return provider->Execute(commands, frame); },
+        const auto execute_reconstruction = [provider = impl_->reconstruction_provider.get()](
+                ID3D12GraphicsCommandList *commands, const SdkReconstructionFrame &frame) {
+            return provider->Execute(commands, frame);
+        };
+        const bool external_reconstruction = impl_->reconstruction_provider->UsesExternalQueue();
+        const auto external_callback = [provider = impl_->reconstruction_provider.get(), restored_graph](
+                PassBuilder &pass, const SdkReconstructionFrame &packet, std::uint32_t slot,
+                std::span<const ExternalResourceAccess> boundaries,
+                std::vector<std::shared_ptr<const void>> owners) {
+            return restored_graph
+                ? provider->BindExternal(pass, packet, slot, boundaries, std::move(owners))
+                : provider->RegisterExternal(pass, packet, slot, boundaries, std::move(owners));
+        };
+        const auto registered_reconstruction = restored_graph
+            ? impl_->reconstruction_guides.BindRetained(impl_->graph, guides_inputs,
+                guides_constants, sdk_frame, execute_reconstruction,
                 impl_->reconstruction_plan.effective_provider.value, reconstruction_outputs,
-                impl_->reconstruction_provider->UsesExternalQueue()
-                    ? ReconstructionGuidesSystem::RegisterExternalReconstruction{
-                        [provider = impl_->reconstruction_provider.get()](PassBuilder &pass,
-                            const SdkReconstructionFrame &packet, std::uint32_t slot,
-                            std::span<const ExternalResourceAccess> boundaries, std::vector<std::shared_ptr<const void>> owners) {
-                            return provider->RegisterExternal(pass, packet, slot, boundaries, std::move(owners));
-                        }} : ReconstructionGuidesSystem::RegisterExternalReconstruction{}); !registered)
-            return registered;
+                pending_graph_layout.reconstruction_guides,
+                external_reconstruction
+                    ? ReconstructionGuidesSystem::RegisterExternalReconstruction{external_callback}
+                    : ReconstructionGuidesSystem::RegisterExternalReconstruction{})
+            : impl_->reconstruction_guides.Register(impl_->graph, guides_inputs,
+                guides_constants, sdk_frame, execute_reconstruction,
+                impl_->reconstruction_plan.effective_provider.value, reconstruction_outputs,
+                external_reconstruction
+                    ? ReconstructionGuidesSystem::RegisterExternalReconstruction{external_callback}
+                    : ReconstructionGuidesSystem::RegisterExternalReconstruction{},
+                &pending_graph_layout.reconstruction_guides);
+        if (!registered_reconstruction) return registered_reconstruction;
         pending_effects.reconstruction = true;
     }
     if (use_native_reconstruction)
@@ -7889,8 +9778,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             tone_map_input = alternate_texture_table(kToneMapInputDescriptorOffset,
                 reconstruction_outputs.pre_exposed_resource);
     }
-    const bool fxaa_identity = constants->temporal_options.x > 0.5f ||
-        (constants->lod_clock.w & 2u) != 0;
     const auto tone_map_output_rtv = fxaa_identity && !impl_->config.outline
         ? display_linear_rtv : post_a_rtv;
     const auto outline_output_rtv = fxaa_identity ? display_linear_rtv : post_b_rtv;
@@ -8034,20 +9921,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     post_inputs.initialize_post_targets = !impl_->view_targets_initialized;
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (imgui_draw_data && !impl_->sdk_presentation.IsEnabled())
-        post_inputs.devtools_ui = [&](RenderGraphBuilder &graph, ResourceVersion previous, ResourceVersion &encoded) {
+    {
+        const auto record_devtools_ui = [&](RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            constexpr float clear[]{0, 0, 0, 0};
+            list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
+            list->OMSetRenderTargets(1, &post_a_rtv, FALSE, nullptr);
+            ID3D12DescriptorHeap *heaps[]{impl_->imgui_heap.Get()};
+            list->SetDescriptorHeaps(1, heaps);
+            ImGui_ImplDX12_RenderDrawData(imgui_draw_data, list);
+        };
+        post_inputs.devtools_ui = [&, record_devtools_ui](RenderGraphBuilder &graph, ResourceVersion previous, ResourceVersion &encoded) {
+            pending_graph_layout.devtools_ui.pass_index = graph.PassCount();
             auto pass = graph.AddPass(904, "DevTools UI", QueueHint::Direct);
             encoded = pass.Write(previous, Access::RenderTarget);
-            pass.SetExecute([&](RenderPassContext &context) {
-                auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-                constexpr float clear[]{0, 0, 0, 0};
-                list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
-                list->OMSetRenderTargets(1, &post_a_rtv, FALSE, nullptr);
-                ID3D12DescriptorHeap *heaps[]{impl_->imgui_heap.Get()};
-                list->SetDescriptorHeaps(1, heaps);
-                ImGui_ImplDX12_RenderDrawData(imgui_draw_data, list);
-            });
+            pending_graph_layout.devtools_ui.output = encoded;
+            pass.SetExecute(record_devtools_ui);
             return Result::Success();
         };
+        if (restored_graph)
+        {
+            auto pass = impl_->graph.BindPass(pending_graph_layout.devtools_ui.pass_index, 904);
+            if (!pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Devtools UI does not match the retained graph plan.");
+            pass->SetExecute(record_devtools_ui);
+        }
+    }
 #endif
     HdrPostOutputs hdr_processed;
     if (screen_overlay_outputs.active)
@@ -8087,9 +9986,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 : std::chrono::duration<float>(cpu_recording_start - impl_->render_submission_time).count();
             post_constants.frame_parameters = {render_dt,
                 previous_view_valid && !new_session && render_dt > 0.0f ? 1.0f : 0.0f, 0, 0};
-            if (auto registered = impl_->hdr_post.RegisterMotionAndDoF(graph,
-                    hdr_post_inputs(hdr, reconstructed_hdr_resource), post_constants, hdr_processed); !registered)
-                return registered;
+            const auto current_inputs = hdr_post_inputs(hdr, reconstructed_hdr_resource);
+            const auto registered = restored_graph
+                ? impl_->hdr_post.BindRetainedMotionAndDoF(graph, current_inputs,
+                    post_constants, pending_graph_layout.hdr_motion, hdr_processed)
+                : impl_->hdr_post.RegisterMotionAndDoF(graph, current_inputs,
+                    post_constants, hdr_processed, &pending_graph_layout.hdr_motion);
+            if (!registered) return registered;
             pending_effects.hdr_post = true;
             processed = hdr_processed.hdr;
             reconstructed_hdr_resource = hdr_processed.hdr_resource;
@@ -8106,7 +10009,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 ? impl_->post_b.resource.Get() : reconstructed_hdr_resource);
             inputs.sharpening = impl_->config.bloom ? 0.0f : impl_->config.sharpening;
             HdrPostOutputs output;
-            if (auto registered = impl_->hdr_post.RegisterGrade(graph, inputs, output); !registered) return registered;
+            const auto registered = restored_graph
+                ? impl_->hdr_post.BindRetainedGrade(graph, inputs,
+                    pending_graph_layout.hdr_grade, output)
+                : impl_->hdr_post.RegisterGrade(graph, inputs, output,
+                    &pending_graph_layout.hdr_grade);
+            if (!registered) return registered;
             pending_effects.hdr_post = true;
             graded = output.hdr;
             tone_map_input = alternate_texture_table(kToneMapInputDescriptorOffset, output.hdr_resource);
@@ -8116,10 +10024,31 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         temporal_write_version, bloom_half_version, bloom_quarter_version,
         bloom_half_combined_version, post_a_version, post_b_version, back_buffer_version,
         temporal_normal_write_version, temporal_material_write_version, display_linear_version};
+    if (restored_graph && post_inputs.pre_bloom)
+    {
+        ResourceVersion rebound;
+        if (auto bound = post_inputs.pre_bloom(impl_->graph,
+                pending_graph_layout.hdr_motion.inputs[0], rebound); !bound) return bound;
+        if (rebound != pending_graph_layout.hdr_motion.output)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "HDR motion output does not match the retained graph plan.");
+    }
+    if (restored_graph && post_inputs.pre_tone_map)
+    {
+        ResourceVersion rebound;
+        if (auto bound = post_inputs.pre_tone_map(impl_->graph,
+                pending_graph_layout.hdr_grade.input, rebound); !bound) return bound;
+        if (rebound != pending_graph_layout.hdr_grade.output)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "HDR grade output does not match the retained graph plan.");
+    }
     PostSubgraphOutputs post_outputs;
-    if (auto built = BuildPostSubgraphs(impl_->graph, post_inputs, post_targets,
-                                       std::move(post_callbacks), post_outputs); !built)
-        return built;
+    const auto built_post = restored_graph
+        ? BindRetainedPostSubgraphs(impl_->graph, post_inputs, post_targets,
+            pending_graph_layout.post, std::move(post_callbacks), post_outputs)
+        : BuildPostSubgraphs(impl_->graph, post_inputs, post_targets,
+            std::move(post_callbacks), post_outputs, &pending_graph_layout.post);
+    if (!built_post) return built_post;
     temporal_write_version = post_outputs.temporal;
     bloom_half_version = post_outputs.bloom_half;
     bloom_quarter_version = post_outputs.bloom_quarter;
@@ -8161,26 +10090,57 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             };
 #endif
         PresentationGuidesOutputs output;
-        if (auto registered = impl_->presentation_guides.Register(impl_->graph, input, output,
-                900, 901, 902); !registered) return registered;
+        const auto registered_presentation = restored_graph
+            ? impl_->presentation_guides.BindRetained(impl_->graph, input, output,
+                pending_graph_layout.presentation_guides)
+            : impl_->presentation_guides.Register(impl_->graph, input, output,
+                900, 901, 902, &pending_graph_layout.presentation_guides);
+        if (!registered_presentation) return registered_presentation;
         pending_effects.presentation = true;
         const auto source = impl_->sdk_presentation.PresentationOwner() == SdkPresentationOwner::Fsr
             ? output.hudless : output.composite;
-        auto copy = impl_->graph.AddPass(903, "SDK Backbuffer Copy", QueueHint::Direct);
-        copy.Read(source.version, Access::CopySource);
-        back_buffer_version = copy.Write(back_buffer_version, Access::CopyDest);
-        copy.SetExecute([source, destination = impl_->back_buffers[back_buffer_index]](RenderPassContext &context) {
+        auto &copy_layout = pending_graph_layout.sdk_copy;
+        std::optional<PassBuilder> copy;
+        if (restored_graph)
+        {
+            copy = impl_->graph.BindPass(copy_layout.pass_index, 903);
+            if (!copy) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "SDK backbuffer copy does not match the retained graph plan.");
+            back_buffer_version = copy_layout.output;
+        }
+        else
+        {
+            copy_layout.pass_index = impl_->graph.PassCount();
+            copy = impl_->graph.AddPass(903, "SDK Backbuffer Copy", QueueHint::Direct);
+            copy->Read(source.version, Access::CopySource);
+            back_buffer_version = copy->Write(back_buffer_version, Access::CopyDest);
+            copy_layout.output = back_buffer_version;
+        }
+        copy->SetExecute([source, destination = impl_->back_buffers[back_buffer_index]](RenderPassContext &context) {
             static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyResource(destination.Get(), source.resource);
         });
         SdkPresentationFrame packet;
         packet.identity = impl_->sdk_frame_identity; packet.camera = impl_->sdk_camera;
         packet.minimum_luminance = impl_->display_state.min_luminance_nits;
         if (reconstruction_outputs.owner) packet.owners.push_back(reconstruction_outputs.owner);
-        if (auto tagged = impl_->presentation_guides.RegisterTagPass(impl_->graph, output,
-                {back_buffer_version, impl_->back_buffers[back_buffer_index].Get()}, packet,
-                impl_->sdk_presentation, 904); !tagged) return tagged;
+        const PresentationGuideResource presented_buffer{
+            back_buffer_version, impl_->back_buffers[back_buffer_index].Get()};
+        const auto tagged = restored_graph
+            ? impl_->presentation_guides.BindRetainedTagPass(impl_->graph, output,
+                presented_buffer, packet, impl_->sdk_presentation,
+                pending_graph_layout.presentation_tag)
+            : impl_->presentation_guides.RegisterTagPass(impl_->graph, output,
+                presented_buffer, packet, impl_->sdk_presentation, 904,
+                &pending_graph_layout.presentation_tag);
+        if (!tagged) return tagged;
     }
 
+    if (import_binding_failed ||
+        (restored_graph && import_cursor != pending_graph_layout.imports.size()))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Frame imports do not match the retained graph plan.");
+    if (!restored_graph)
+    {
     impl_->graph.SetFinalAccess(particles_version, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(ribbon_history_version, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(ribbon_previous_version, Access::UnorderedWrite);
@@ -8243,38 +10203,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             impl_->graph.SetFinalAccess(upload.version, Access::Common);
     impl_->graph.SetFinalAccess(ui_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(back_buffer_version, Access::Present);
+    }
     // shortcut: DRS retains reference scheduling until qualified ready cadence and recovery span are validated.
     const bool reference_frame_timing = presented_view && impl_->config.dynamic_resolution &&
         !active_features.software_gi_enabled;
     const bool collect_gpu_timing = (impl_->config.capture_timing_stream && impl_->config.capture_gpu_timings) || reference_frame_timing;
-    if (reference_frame_timing)
-    {
-        auto begin = impl_->graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
-        begin.SetExecute([](RenderPassContext &) {});
-        auto end = impl_->graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
-        end.SetExecute([](RenderPassContext &) {});
-        for (std::uint32_t pass = 0; pass < impl_->graph.PassCount(); ++pass)
-        {
-            const auto id = impl_->graph.DeclaredPassId(pass);
-            if (id == 37 || id == 38) continue;
-            impl_->graph.AddOrderingDependency(37, id);
-            impl_->graph.AddOrderingDependency(id, 38);
-        }
-    }
-    else
-    {
-        auto ready = impl_->graph.AddPass(38, "SourceRenderOutputReady", QueueHint::Direct);
-        ready.Read(back_buffer_version, Access::Present);
-        ready.SetExecute([](RenderPassContext &) {});
-        // Tagging reads the exact guide producers; unrelated streaming/readback
-        // must not join this boundary. The frame still owns their CompletionSet.
-        if (pending_effects.presentation) impl_->graph.AddOrderingDependency(904, 38);
-    }
+    if (auto built = BuildFinalGraph(impl_->graph, back_buffer_version, reference_frame_timing,
+            pending_effects.presentation, pending_graph_layout.final, restored_graph); !built) return built;
     record_graph_substage(cpu_timings.graph_post_us);
     cpu_timings.graph_build_us = measure_stage();
     GraphExecutionStats prepare_cpu;
     if (auto prepared = impl_->graph.Prepare(transient_pool,
             impl_->config.capture_timing_stream ? &prepare_cpu : nullptr); !prepared) return prepared;
+    if (!restored_graph)
+    {
+        pending_graph_layout.certified_imports = impl_->graph.AllImportsCertified();
+        pending_graph_layout.passes.reserve(impl_->graph.PassCount());
+        for (std::uint32_t index = 0; index < impl_->graph.PassCount(); ++index)
+            pending_graph_layout.passes.push_back({impl_->graph.DeclaredPassId(index), index});
+        pending_graph_layout.handle = impl_->graph.PreparedPlan();
+    }
     cpu_timings.graph_prepare_us = measure_stage();
     cpu_timings.graph_prepare_validation_us = prepare_cpu.cpu_prepare_validation_us;
     cpu_timings.graph_prepare_info_key_us = prepare_cpu.cpu_prepare_info_key_us;
@@ -8282,6 +10230,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     cpu_timings.graph_prepare_transient_us = prepare_cpu.cpu_prepare_transient_us;
     frame.timestamp_passes.clear();
     frame.timestamp_frequencies.clear();
+    frame.timing_closure_slots.clear();
+    frame.timing_closure_imports_ready = false;
     if (collect_gpu_timing)
     {
         if (auto prepared = impl_->PrepareFrameTimestamps(frame, impl_->graph.PassCount()); !prepared)
@@ -8298,6 +10248,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             frame.timestamp_passes.push_back({pass_id, std::string(pass_name),
                 static_cast<RenderQueue>(queue), 0, frequency != 0});
             frame.timestamp_frequencies.push_back(frequency);
+        }
+        if (!reference_frame_timing)
+        {
+            frame.timing_closure_slots = impl_->graph.OutputDependencyClosureSlots(38);
+            frame.timing_closure_imports_ready = impl_->graph.OutputClosureImportsReady(
+                frame.timing_closure_slots, impl_->graph_queue_executor.Completed());
         }
     }
     auto *distortion_resource = static_cast<ID3D12Resource *>(impl_->graph.Resolve(distortion_vectors));
@@ -8351,6 +10307,23 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         execution_options.timestamp_readback = frame.timestamp_readback.resource.Get();
     }
     execution_options.task_executor = &impl_->config.task_executor;
+    frame.timing_prior_output_completion = impl_->timing_source_output_completion;
+    frame.timing_clock_before = {};
+    if (collect_gpu_timing)
+    {
+        LARGE_INTEGER frequency{};
+        if (QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+            for (std::size_t index = 0; index < frame.timing_clock_before.size(); ++index)
+            {
+                const auto hint = static_cast<QueueHint>(index);
+                auto *native = impl_->graph_queue_executor.NativeQueue(hint);
+                auto &anchor = frame.timing_clock_before[index];
+                anchor.gpu_frequency = impl_->graph_queue_executor.TimestampFrequency(hint);
+                anchor.cpu_frequency = static_cast<std::uint64_t>(frequency.QuadPart);
+                anchor.valid = native && anchor.gpu_frequency &&
+                    SUCCEEDED(native->GetClockCalibration(&anchor.gpu, &anchor.cpu));
+            }
+    }
     frame.cpu_qpc_frequency = 0;
     if (impl_->config.capture_timing_stream)
     {
@@ -8368,6 +10341,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->hdr_capture_valid = false;
     impl_->hdr_capture_source.Reset();
     cpu_timings.descriptors_us = measure_stage();
+    frame.timing_execute_begin_qpc = RendererDiagnosticsCounter();
     if (auto graph_result = impl_->graph_queue_executor.Execute(
             impl_->graph, back_buffer_index,
             impl_->enhanced ? BarrierMode::Enhanced : BarrierMode::Legacy,
@@ -8391,6 +10365,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
         return graph_result;
     }
+    frame.timing_execute_end_qpc = RendererDiagnosticsCounter();
+    const auto completed_at_submit = impl_->graph_queue_executor.Completed();
+    frame.timing_backlog_at_submit = frame.timing_prior_output_completion.direct &&
+        frame.timing_prior_output_completion.direct > completed_at_submit.direct;
+    impl_->timing_source_output_completion = impl_->graph.ResourceCompletion(back_buffer);
     world_step_receipt.submitted = impl_->render_scene_inputs;
     if (impl_->ui_dirty[back_buffer_index])
     {
@@ -8410,6 +10389,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->render_package_id = impl_->active_render_package_id;
     frame.submitted_frame_id = ++impl_->rendered_submission_count;
     frame.submitted_view_id = impl_->active_view_id.value;
+    frame.timing_source_sequence = ++impl_->timing_source_sequence;
     frame.timing_kind = GpuFrameTimingKind::Unavailable;
     if (collect_gpu_timing)
     {
@@ -8417,6 +10397,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         frame.timing_generation = impl_->view_configuration_revision;
         frame.timing_resize_epoch = impl_->view_state.resize_epoch;
         frame.timing_render_active = impl_->view_state.render_active;
+        frame.timing_quality_generation = impl_->view_state.quality_generation;
+        frame.timing_provider_generation = impl_->view_state.provider_generation;
         frame.timing_main_view = presented_view;
         frame.timing_frame_generation_enabled = presented_view && impl_->sdk_presentation.IsEnabled();
     }
@@ -8716,24 +10698,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ++impl_->static_scene_upload_count;
         }
     }
-    cpu_timings.post_submit_us = measure_stage();
-    const auto present_begin_qpc = presented_view ? RendererDiagnosticsCounter() : 0;
-    const auto presented = presented_view ? impl_->sdk_presentation.Present(impl_->swap_chain.Get(), impl_->sdk_frame_identity,
-        impl_->config.vsync ? 1 : 0, 0) : Result::Success();
-    if (presented_view) impl_->native_input_phase = 0;
-    if (!presented)
-    {
-        const auto device_reason = impl_->device->GetDeviceRemovedReason();
-        if (FAILED(device_reason)) return impl_->CheckDevice(device_reason, "SDK Present");
-        return presented;
-    }
-    if (presented_view)
-        world_step_receipt.presented_ui_generation = impl_->explicit_frame->ui_packet_generation;
-
-    cpu_timings.present_us = measure_stage();
-    impl_->diagnostics.RecordRenderedFrame(frame.submitted_frame_id, submit_qpc, present_begin_qpc,
-        presented_view ? RendererDiagnosticsCounter() : 0, LastQueueStats(), impl_->DiagnosticsMemory(),
-        impl_->config.validation, impl_->config.gpu_validation, presented_view, impl_->active_view_id.value);
+    // All graph batches and service receipts are accepted; Present does not own history.
     impl_->previous_scene_origin = view_input.scene_origin;
     impl_->previous_view_origin = current_view_origin;
     impl_->previous_origins_valid = true;
@@ -8741,21 +10706,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::copy_n(constants->grass_benders, 32, impl_->previous_grass_benders.begin());
     impl_->previous_grass_state = {constants->camera_time.w,
         static_cast<float>(constants->grass_bender_count.x), 1.0f, 0.0f};
-    if (!impl_->canonical_instance_current || impl_->canonical_instance_current->package_id != impl_->active_render_package_id)
-    {
-        auto submitted = std::make_shared<Impl::SubmittedInstanceFrame>();
-        const auto instances = impl_->dynamic_scene_slots.Instances();
-        const auto metadata = impl_->dynamic_scene_slots.Metadata();
-        submitted->instances.assign(instances.begin(), instances.end());
-        submitted->generations.reserve(metadata.size());
-        for (const auto &slot : metadata) submitted->generations.push_back(slot.generation);
-        submitted->scene_origin = view_input.scene_origin;
-        submitted->package_id = impl_->active_render_package_id;
-        impl_->canonical_instance_current = std::move(submitted);
-    }
     impl_->previous_instances = impl_->canonical_instance_current;
     impl_->skin_cache.Commit();
     auto &view_owner = *impl_->owned_views.at(impl_->active_view_id.value);
+    view_owner.last_rendered_sample = snapshot.header;
+    view_owner.has_rendered_sample = true;
     if (view_scene_changed)
     {
         ++view_owner.history_generation;
@@ -8792,7 +10747,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                     current_temporal_eye.y,
                                     current_temporal_eye.z};
     impl_->temporal_previous_fov = snapshot.camera.vertical_fov_degrees;
+    if (view_input.camera_cut)
+    {
+        ++view_owner.history_generation;
+        if (impl_->cluster_runtime && back_buffer_index < kClusterRuntimeFrames)
+            impl_->cluster_runtime->frames[back_buffer_index].history_generation = view_owner.history_generation;
+    }
     ++impl_->frame_number;
+    world_step_receipt.history_committed = true;
+    cpu_timings.post_submit_us = measure_stage();
+    const auto present_begin_qpc = presented_view ? RendererDiagnosticsCounter() : 0;
+    const auto presented = presented_view ? impl_->sdk_presentation.Present(impl_->swap_chain.Get(), impl_->sdk_frame_identity,
+        impl_->config.vsync ? 1 : 0, 0) : Result::Success();
+    if (presented_view) impl_->native_input_phase = 0;
+    if (!presented)
+    {
+        const auto device_reason = impl_->device->GetDeviceRemovedReason();
+        if (FAILED(device_reason)) return impl_->CheckDevice(device_reason, "SDK Present");
+        return presented;
+    }
+    if (presented_view)
+        world_step_receipt.presented_ui_generation = impl_->explicit_frame->ui_packet_generation;
+
+    cpu_timings.present_us = measure_stage();
+    impl_->diagnostics.RecordRenderedFrame(frame.submitted_frame_id, submit_qpc, present_begin_qpc,
+        presented_view ? RendererDiagnosticsCounter() : 0, LastQueueStats(), impl_->DiagnosticsMemory(),
+        impl_->config.validation, impl_->config.gpu_validation, presented_view, impl_->active_view_id.value);
     grass_history_attempt.succeeded = true;
     frame_result = {impl_->frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -8826,6 +10806,21 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (impl_->render_scene_inputs) impl_->previous_ribbon_eye = ribbon_eye;
     impl_->CountValidationErrors();
     cpu_timings.diagnostics_us = measure_stage();
+    // Current CPU records and graph callbacks can borrow saved logical-token
+    // arrays during graph recording and synchronous completion. Publish or
+    // evict a cold layout only after successful submission and presentation.
+    if (!restored_graph && cold_graph_layout.handle)
+    {
+        auto layout_slot = std::ranges::find_if(impl_->graph_layouts, [&](const auto &layout) {
+            return layout.handle == cold_graph_layout.handle;
+        });
+        if (layout_slot == impl_->graph_layouts.end())
+            layout_slot = std::ranges::min_element(impl_->graph_layouts,
+                {}, &FrameGraphLayout::last_used);
+        cold_graph_layout.last_used = ++impl_->graph_layout_use_serial;
+        *layout_slot = std::move(cold_graph_layout);
+    }
+    else if (restored_graph) source_candidate->last_used = ++impl_->graph_layout_use_serial;
     frame_result.cpu_timings = cpu_timings;
     frame_result.streamline_present = presented_view ? impl_->sdk_presentation.ActualPresentCount() : RendererStreamlinePresentCount{};
     return Result::Success();

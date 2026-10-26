@@ -173,42 +173,53 @@ void ReferenceDependency(std::uint16_t index, std::span<const std::string> depen
     }
 }
 
+void ValidatePageDirectory(const GeometryHierarchy &hierarchy, const GeometryHierarchyPage &directory,
+    const GeometryData &page)
+{
+    Require(page.flags == hierarchy.geometry_flags && page.vertices.size() == directory.vertex_count &&
+            page.indices.size() == directory.index_count && page.meshlets.size() == directory.meshlet_count,
+            "geometry page disagrees with hierarchy directory");
+}
+
+void ValidateClusterPayload(const GeometryRefinementGroup &group,
+    const GeometryHierarchyCluster &cluster, const GeometryData &page)
+{
+    Require(cluster.material_partition == group.material_partition &&
+            cluster.material_selector == group.material_selector, "page material partition disagreement");
+    for (std::uint32_t offset = 0; offset < cluster.index_count; ++offset)
+    {
+        const auto &vertex = page.vertices[page.indices[cluster.first_index + offset]];
+        Require(vertex.material_index == cluster.material_selector, "cluster crosses authored material selector");
+        Encloses(cluster.bounds, vertex);
+        Encloses(group.bounds, vertex);
+    }
+    for (std::uint32_t offset = 0; offset < cluster.meshlet_count; ++offset)
+    {
+        const auto &meshlet = page.meshlets[cluster.first_meshlet + offset];
+        Require(page.submeshes[meshlet.submesh_index].material_index == cluster.material_selector,
+                "meshlet material disagrees with hierarchy cluster");
+        for (std::uint32_t triangle = 0; triangle < meshlet.triangle_count; ++triangle)
+        {
+            const auto primitive = page.canonical_primitive_remap[meshlet.first_triangle + triangle];
+            Require(primitive >= cluster.first_index / 3 &&
+                    primitive - cluster.first_index / 3 < cluster.index_count / 3,
+                    "mesh and indexed cluster primitive intervals disagree");
+        }
+    }
+}
+
 void ValidatePagePayload(const GeometryHierarchy &hierarchy, std::uint32_t page_index,
     const GeometryData &page)
 {
     Require(page_index < hierarchy.pages.size(), "page index exceeds hierarchy directory");
-    const auto &directory = hierarchy.pages[page_index];
     ValidateGeometryData(page);
-    Require(page.flags == hierarchy.geometry_flags && page.vertices.size() == directory.vertex_count &&
-            page.indices.size() == directory.index_count && page.meshlets.size() == directory.meshlet_count,
-            "geometry page disagrees with hierarchy directory");
+    ValidatePageDirectory(hierarchy, hierarchy.pages[page_index], page);
     for (const auto &group : hierarchy.groups)
         for (std::uint32_t cluster_offset = 0; cluster_offset < group.cluster_count; ++cluster_offset)
         {
             const auto &cluster = hierarchy.clusters[group.first_cluster + cluster_offset];
             if (cluster.page_index != page_index) continue;
-            Require(cluster.material_partition == group.material_partition &&
-                    cluster.material_selector == group.material_selector, "page material partition disagreement");
-            for (std::uint32_t offset = 0; offset < cluster.index_count; ++offset)
-            {
-                const auto &vertex = page.vertices[page.indices[cluster.first_index + offset]];
-                Require(vertex.material_index == cluster.material_selector, "cluster crosses authored material selector");
-                Encloses(cluster.bounds, vertex);
-                Encloses(group.bounds, vertex);
-            }
-            for (std::uint32_t offset = 0; offset < cluster.meshlet_count; ++offset)
-            {
-                const auto &meshlet = page.meshlets[cluster.first_meshlet + offset];
-                Require(page.submeshes[meshlet.submesh_index].material_index == cluster.material_selector,
-                        "meshlet material disagrees with hierarchy cluster");
-                for (std::uint32_t triangle = 0; triangle < meshlet.triangle_count; ++triangle)
-                {
-                    const auto primitive = page.canonical_primitive_remap[meshlet.first_triangle + triangle];
-                    Require(primitive >= cluster.first_index / 3 &&
-                            primitive - cluster.first_index / 3 < cluster.index_count / 3,
-                            "mesh and indexed cluster primitive intervals disagree");
-                }
-            }
+            ValidateClusterPayload(group, cluster, page);
         }
 }
 } // namespace
@@ -453,6 +464,31 @@ void ValidateGeometryHierarchyPage(const GeometryHierarchy &hierarchy,
 {
     ValidateGeometryHierarchy(hierarchy);
     ValidatePagePayload(hierarchy, page_index, page);
+}
+
+AdmittedGeometryHierarchy::AdmittedGeometryHierarchy(std::span<const std::byte> bytes)
+    : hierarchy_(DecodeGeometryHierarchy(bytes)), page_clusters_(hierarchy_.pages.size())
+{
+    for (std::size_t group_index = 0; group_index < hierarchy_.groups.size(); ++group_index)
+    {
+        const auto &group = hierarchy_.groups[group_index];
+        for (std::uint32_t offset = 0; offset < group.cluster_count; ++offset)
+        {
+            const auto cluster_index = group.first_cluster + offset;
+            page_clusters_[hierarchy_.clusters[cluster_index].page_index].emplace_back(
+                Count(group_index), cluster_index);
+        }
+    }
+}
+
+void AdmittedGeometryHierarchy::ValidatePage(std::uint32_t page_index,
+    const PreparedGeometryPage &page) const
+{
+    Require(page_index < hierarchy_.pages.size(), "page index exceeds hierarchy directory");
+    ValidatePageDirectory(hierarchy_, hierarchy_.pages[page_index], page.geometry);
+    for (const auto &[group_index, cluster_index] : page_clusters_[page_index])
+        ValidateClusterPayload(hierarchy_.groups[group_index], hierarchy_.clusters[cluster_index],
+            page.geometry);
 }
 
 std::vector<std::byte> EncodeGeometryHierarchy(const GeometryHierarchy &hierarchy)

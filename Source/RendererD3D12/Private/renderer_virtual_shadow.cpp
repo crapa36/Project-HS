@@ -2,6 +2,7 @@
 #include "d3d12_resources.hpp"
 #include "renderer_diagnostics.hpp"
 #include "renderer_pipeline_cache.hpp"
+#include "renderer_content.hpp"
 #include <hs/renderer/renderer.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 #include <hs/core/sha256.hpp>
@@ -189,7 +190,7 @@ struct VirtualShadowBakeData
 {
     render_data::StaticShadowArchiveDescription description;
     std::string generation,index_digest,pages_digest;
-    std::filesystem::path index_path,pages_path;
+    RendererAssetSource index_source,pages_source;
     std::vector<std::byte> staging; // Coarse directory followed by decoded R32 tiles only.
     std::vector<float> root_static_pixels; // Core texels flattened in world light-space order.
     ViewExtent root_static_extent;
@@ -214,6 +215,7 @@ struct VirtualShadowTargets
     ViewExtent extent;
     std::uint32_t columns{}, entries{}, words{}, descriptor_stride{}, dsv_stride{};
     std::uint64_t allocated{}, upload_bytes{}, caster_offset{512}, receiver_offset{},segment_offset{};
+    std::uint64_t generation{};
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     VirtualShadowSystem::ShaderReader reader;
@@ -376,17 +378,47 @@ void BindCompute(ID3D12GraphicsCommandList *list, const VirtualShadowTargets &t,
     list->SetComputeRootShaderResourceView(4,t.baked_staging.resource ? t.baked_staging.resource->GetGPUVirtualAddress() : 0);
     list->SetComputeRootShaderResourceView(5,f.metadata.resource->GetGPUVirtualAddress()+kSegmentMetadataOffset);
 }
-ResourceVersion Import(RenderGraphBuilder &graph, AllocationResource &r, std::string_view name, bool texture = false)
+ResourceVersion Import(RenderGraphBuilder &graph, AllocationResource &r,
+    std::string_view name,bool texture,ResourceHandle saved,bool retained,bool &valid)
 {
-    return texture ? graph.Version(graph.ImportTexture({r.resource.Get(), r.graph_completion, r.graph_queue}, r.graph_access, name))
-        : graph.Version(graph.ImportBuffer({r.resource.Get(), r.graph_completion, r.graph_queue}, r.graph_access, name));
+    ResourceHandle handle{};
+    if(retained)
+    {
+        handle=saved;
+        valid&=texture?graph.BindTexture(handle,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access):
+            graph.BindBuffer(handle,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access);
+    }
+    else handle=texture?
+        graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name):
+        graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name);
+    return graph.Version(handle);
 }
+class ShadowPlanPass
+{
+  public:
+    ShadowPlanPass(PassBuilder pass,bool retained):pass_(std::move(pass)),retained_(retained){}
+    void Read(ResourceVersion version,Access access)
+    {if(!retained_)pass_.Read(version,access);}
+    ResourceVersion Write(ResourceVersion version,Access access)
+    {return retained_?ResourceVersion{version.resource,version.ordinal+1}:pass_.Write(version,access);}
+    ResourceVersion ReadWrite(ResourceVersion version,Access access)
+    {return retained_?ResourceVersion{version.resource,version.ordinal+1}:pass_.ReadWrite(version,access);}
+    void SetExecute(std::move_only_function<void(RenderPassContext &)> callback)
+    {pass_.SetExecute(std::move(callback));}
+    void SetExecuteChecked(std::move_only_function<Result(RenderPassContext &)> callback)
+    {pass_.SetExecuteChecked(std::move(callback));}
+    PassBuilder &Native() noexcept{return pass_;}
+  private:
+    PassBuilder pass_;
+    bool retained_{};
+};
 }
 
 struct VirtualShadowSystem::Impl
 {
     struct Tracked { AllocationResource *resource; ResourceHandle handle; };
     std::shared_ptr<VirtualShadowTargets> active;
+    std::uint64_t next_generation{};
     std::vector<std::shared_ptr<VirtualShadowTargets>> retired;
     std::vector<Tracked> tracked;
     const RenderGraphBuilder *pending_graph{};
@@ -484,40 +516,46 @@ Result VirtualShadowSystem::LoadBake(const RendererConfig &config,VirtualShadowP
     constexpr std::string_view index_id="render/lighting/arena_static_shadow.index";
     constexpr std::string_view pages_id="render/lighting/arena_static_shadow.pages";
     if(!profile.enabled || profile.virtual_sides!=std::array<std::uint32_t,3>{32,8,8} ||
-        !config.product_paths.contains(std::string(index_id)) ||
-        !config.product_paths.contains(std::string(pages_id))) return Result::Success();
+        (config.packed_content ? (!FindRendererBulk(config,index_id) || !FindRendererBulk(config,pages_id)) :
+        (!config.product_paths.contains(std::string(index_id)) ||
+        !config.product_paths.contains(std::string(pages_id))))) return Result::Success();
     try
     {
-        std::filesystem::path index_path,pages_path;
-        if(auto r=config.ResolveProduct(index_id,index_path);!r) return r;
-        if(auto r=config.ResolveProduct(pages_id,pages_path);!r) return r;
-        const auto digest=config.product_digests.find(std::string(index_id));
-        const auto pages_digest=config.product_digests.find(std::string(pages_id));
-        if(digest==config.product_digests.end() || pages_digest==config.product_digests.end())
+        RendererAssetSource index_source,pages_source;
+        if(auto r=ResolveRendererAsset(config,index_id,index_source);!r) return r;
+        if(auto r=ResolveRendererAsset(config,pages_id,pages_source);!r) return r;
+        const auto digest=RendererProductDigest(config,index_id);
+        const auto pages_digest=RendererProductDigest(config,pages_id);
+        if(digest.empty() || pages_digest.empty())
             return Invalid("Static shadow products lack selected Generation identities.");
         const auto requested_root_span=profile.fixed_root_depth_span;
-        if(shared_source && shared_source->generation==config.content_generation_id &&
-            shared_source->index_digest==digest->second && shared_source->pages_digest==pages_digest->second &&
-            shared_source->index_path==index_path && shared_source->pages_path==pages_path &&
+        if(shared_source && (config.packed_content || shared_source->generation==config.content_generation_id) &&
+            shared_source->index_digest==digest && shared_source->pages_digest==pages_digest &&
+            shared_source->index_source==index_source && shared_source->pages_source==pages_source &&
             shared_source->root_depth_span==requested_root_span)
         { profile.baked=shared_source; return Result::Success(); }
-        ShippedContentOwner index_file,pages_file;
-        if(auto r=ShippedContentOwner::Open(index_path,index_file);!r) return r;
-        if(auto r=ShippedContentOwner::Open(pages_path,pages_file);!r) return r;
-        if(index_file.Size()>64ull*1024*1024) return Invalid("Static shadow index exceeds bounded metadata size.");
-        std::vector<std::byte> bytes(static_cast<std::size_t>(index_file.Size()));
-        if(auto r=index_file.ReadExact(0,bytes);!r) return r;
+        std::uint64_t index_bytes{},pages_bytes{};
+        if(auto r=index_source.ByteCount(index_bytes);!r) return r;
+        if(auto r=pages_source.ByteCount(pages_bytes);!r) return r;
+        if(index_bytes>64ull*1024*1024) return Invalid("Static shadow index exceeds bounded metadata size.");
+        std::vector<std::byte> bytes;
+        if(auto r=index_source.Read(bytes,index_bytes);!r) return r;
         std::string index_hash="sha256:"; index_hash.reserve(71);
         constexpr char hex[]="0123456789abcdef";
         for(const auto byte:Sha256(bytes))
         { const auto value=std::to_integer<unsigned>(byte); index_hash+=hex[value>>4]; index_hash+=hex[value&15]; }
-        if(index_hash!=digest->second)
+        if(index_hash!=digest)
             return Invalid("Static shadow index does not match the selected Generation.");
         const auto index=render_data::ReadStaticShadowArchiveIndex(bytes);
-        if(index.payload_bytes!=pages_file.Size()) return Invalid("Static shadow archive payload size differs from index.");
+        if(index.payload_bytes!=pages_bytes) return Invalid("Static shadow archive payload size differs from index.");
+        ShippedContentOwner loose_pages;
+        if(!pages_source.pack)
+            if(auto r=ShippedContentOwner::Open(pages_source.path,loose_pages);!r) return r;
+        const auto &pages_file=pages_source.pack ? *pages_source.pack : loose_pages;
+        const auto pages_offset=pages_source.pack ? pages_source.range.offset : 0;
         auto data=std::make_shared<VirtualShadowBakeData>(); data->description=index.description;
-        data->generation=config.content_generation_id; data->index_digest=digest->second; data->pages_digest=pages_digest->second;
-        data->index_path=index_path; data->pages_path=pages_path;
+        data->generation=config.content_generation_id; data->index_digest=digest; data->pages_digest=pages_digest;
+        data->index_source=index_source; data->pages_source=pages_source;
         const auto &level=index.description.levels[2];
         const std::uint64_t count=std::uint64_t(level.width)*level.height;
         if(!count || count>UINT32_MAX/4) return Invalid("Static shadow coarse directory is empty or exceeds native addressing.");
@@ -545,8 +583,10 @@ Result VirtualShadowSystem::LoadBake(const RendererConfig &config,VirtualShadowP
             std::uint32_t offset{};
             if(entry.bytes && entry.bytes!=UINT32_MAX)
             {
+                if(entry.offset>pages_bytes || entry.bytes>pages_bytes-entry.offset)
+                    return Invalid("Static shadow page exceeds its selected bulk range.");
                 bytes.resize(entry.bytes);
-                if(auto r=pages_file.ReadExact(entry.offset,bytes);!r) return r;
+                if(auto r=pages_file.ReadExact(pages_offset+entry.offset,bytes);!r) return r;
                 if(Sha256(bytes)!=entry.digest) return Invalid("Static shadow encoded page digest mismatch.");
                 render_data::DecodeStaticShadowPage(bytes,tile);
                 if(data->staging.size()>UINT32_MAX-tile.size()*sizeof(float)) return Invalid("Coarse shadow staging exceeds native address range.");
@@ -763,6 +803,11 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
 Result VirtualShadowSystem::Commit(VirtualShadowCandidate &&candidate, const CompletionSet &completed)
 {
     if (impl_->pending_graph) return Invalid("Cannot replace virtual shadows while a graph is awaiting submission.");
+    if(candidate.targets_)
+    {
+        if(impl_->next_generation==UINT64_MAX)return Invalid("Virtual shadow target generation is exhausted.");
+        candidate.targets_->generation=++impl_->next_generation;
+    }
     impl_->Collect(completed);
     if (impl_->active && !impl_->active->lease.IsSatisfiedBy(completed)) impl_->retired.push_back(impl_->active);
     impl_->active = std::move(candidate.targets_);
@@ -1040,8 +1085,38 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
     impl_->cpu_plan_prepared = true;
     return Result::Success();
 }
-Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualShadowInputs &in,
-    const VirtualShadowFramePlan &plan, VirtualShadowOutputs &out)
+bool VirtualShadowSystem::MatchesLayout(const VirtualShadowInputs &in,
+    const VirtualShadowFramePlan &plan,const VirtualShadowLayout &layout) const noexcept
+{
+    const auto t=impl_->active;
+    if(!t||!plan.prepared||plan.targets!=t||impl_->faulted||
+        !layout.target_generation||layout.target_generation!=t->generation||
+        layout.fixed_root!=plan.fixed_root||
+        layout.baked_present!=bool(t->baked_staging.resource)||
+        layout.seed_upload!=(bool(t->baked_staging.resource)&&!t->baked_initialized)||
+        layout.root_static_present!=bool(t->root_static.resource)||
+        layout.root_static_upload!=(bool(t->root_static.resource)&&
+            bool(t->root_static_upload.resource)&&!t->root_static_initialized)||
+        layout.root_dynamic_present!=(plan.fixed_root&&bool(t->root_dynamic.resource))||
+        layout.reset!=bool(plan.constants.options.x)||
+        layout.material_sampling!=(bool(in.draw)&&!in.draw_groups.empty()&&
+            bool(in.declare_material_sampling))||
+        layout.depth!=in.depth||layout.normal!=in.normal||
+        layout.native_reads.size()!=in.native_reads.size())return false;
+    for(std::size_t index=0;index<in.native_reads.size();++index)
+        if(layout.native_reads[index].version!=in.native_reads[index].version||
+            layout.native_reads[index].access!=in.native_reads[index].access)return false;
+    return true;
+}
+Result VirtualShadowSystem::Register(RenderGraphBuilder &graph,const VirtualShadowInputs &in,
+    const VirtualShadowFramePlan &plan,VirtualShadowOutputs &out,VirtualShadowLayout *layout)
+{return RegisterImpl(graph,in,plan,out,layout,nullptr);}
+Result VirtualShadowSystem::BindRetained(RenderGraphBuilder &graph,const VirtualShadowInputs &in,
+    const VirtualShadowFramePlan &plan,const VirtualShadowLayout &layout,VirtualShadowOutputs &out)
+{return RegisterImpl(graph,in,plan,out,nullptr,&layout);}
+Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const VirtualShadowInputs &in,
+    const VirtualShadowFramePlan &plan, VirtualShadowOutputs &out,
+    VirtualShadowLayout *layout,const VirtualShadowLayout *retained)
 {
     out = {};
     if (!impl_->active && !plan.targets) { out.descriptor_count = 0; return Result::Success(); }
@@ -1071,6 +1146,50 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     if (!in.depth.resource || !in.normal.resource || !in.depth_resource || !in.normal_resource || !in.draw)
         return Invalid("Virtual shadow registration lacks current graph/native bindings.");
     const auto t = plan.targets;
+    if(retained)
+    {
+        if(!MatchesLayout(in,plan,*retained))return Invalid("Virtual shadow retained topology changed.");
+        std::array<std::uint32_t,16> expected{};UINT count{};
+        if(retained->seed_upload)expected[count++]=226;
+        if(retained->root_static_upload)expected[count++]=227;
+        for(auto id:{147u,148u,149u,150u,224u,225u,151u})expected[count++]=id;
+        if(retained->fixed_root)expected[count++]=228;
+        expected[count++]=152;expected[count++]=153;
+        if(retained->fixed_root)expected[count++]=229;
+        expected[count++]=154;expected[count++]=155;
+        if(count!=retained->pass_count)return Invalid("Virtual shadow retained pass count changed.");
+        for(UINT index=0;index<count;++index)
+            if(retained->passes[index].id!=expected[index]||
+                !graph.BindPass(retained->passes[index].declaration_index,expected[index]))
+                return Invalid("Virtual shadow retained pass order changed.");
+        for(UINT index=0;index<retained->imports.size();++index)
+        {
+            const bool used=index!=12||retained->baked_present;
+            const bool root_static_used=index!=13||retained->root_static_present;
+            const bool root_dynamic_used=index!=14||retained->root_dynamic_present;
+            const auto handle=retained->imports[index];
+            if(used&&root_static_used&&root_dynamic_used&&
+                (!handle||handle.value>graph.ResourceCount()||
+                    handle.kind!=(index>=13?ResourceKind::Texture:ResourceKind::Buffer)))
+                return Invalid("Virtual shadow retained import slot changed.");
+        }
+    }
+    if(layout)
+    {
+        *layout={};layout->target_generation=t->generation;
+        layout->depth=in.depth;layout->normal=in.normal;
+        layout->native_reads.assign(in.native_reads.begin(),in.native_reads.end());
+        layout->fixed_root=plan.fixed_root;
+        layout->baked_present=bool(t->baked_staging.resource);
+        layout->seed_upload=layout->baked_present&&!t->baked_initialized;
+        layout->root_static_present=bool(t->root_static.resource);
+        layout->root_static_upload=layout->root_static_present&&
+            bool(t->root_static_upload.resource)&&!t->root_static_initialized;
+        layout->root_dynamic_present=plan.fixed_root&&bool(t->root_dynamic.resource);
+        layout->reset=bool(plan.constants.options.x);
+        layout->material_sampling=bool(in.draw)&&!in.draw_groups.empty()&&
+            bool(in.declare_material_sampling);
+    }
     auto &f = t->frames[in.frame_slot];
     if (!f.completion.IsSatisfiedBy(in.completed)) return Invalid("Virtual shadow frame slot still has GPU readers.");
     auto constants = plan.constants;
@@ -1206,30 +1325,47 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         Cpu(t->compute_heap.Get(), in.frame_slot*kComputeDescriptors, t->descriptor_stride));
     TextureSrv(t->device.Get(), in.normal_resource, in.normal_resource->GetDesc().Format,
         Cpu(t->compute_heap.Get(), in.frame_slot*kComputeDescriptors+1, t->descriptor_stride));
-    impl_->tracked.clear();
-    const auto import = [&](AllocationResource &resource, std::string_view name, bool texture = false)
+    for(auto *resource:{&f.metadata,&f.casters,&f.receivers,&f.pages,&f.requests,
+            &t->residents,&f.draws,&f.indexed,&f.mesh,&f.counts,&f.clear,
+            &f.page_draw_counts,&t->baked_staging,&t->root_static,
+            &t->root_dynamic,&t->static_bank,&t->dynamic_bank})
+        if(resource->resource)
+            if(auto certified=resource->EnsureNativeContract(t->device.Get());!certified)return certified;
+    impl_->tracked.clear();bool imports_valid=true;
+    const auto import = [&](AllocationResource &resource, std::string_view name,
+            UINT index,bool texture = false)
     {
-        const auto version = Import(graph, resource, name, texture);
+        const auto version=Import(graph,resource,name,texture,
+            retained?retained->imports[index]:ResourceHandle{},retained!=nullptr,imports_valid);
+        if(layout)layout->imports[index]=version.resource;
         impl_->tracked.push_back({&resource, version.resource}); return version;
     };
-    auto metadata = import(f.metadata, "VirtualShadow.Metadata");
-    auto casters = import(f.casters, "VirtualShadow.CasterSnapshot");
-    auto receivers = import(f.receivers, "VirtualShadow.ReceiverBounds");
-    auto pages = import(f.pages, "VirtualShadow.FramePageTable");
-    auto requests = import(f.requests, "VirtualShadow.RequestBitset");
-    auto residents = import(t->residents, "VirtualShadow.PersistentResidents");
-    auto draws = import(f.draws, "VirtualShadow.DrawRecords");
-    auto indexed = import(f.indexed, "VirtualShadow.IndexedCommands");
-    auto mesh = import(f.mesh, "VirtualShadow.MeshCommands");
-    auto counts = import(f.counts, "VirtualShadow.CommandCounts");
-    auto clear = import(f.clear, "VirtualShadow.ClearCommands");
-    auto page_draw_counts = import(f.page_draw_counts, "VirtualShadow.PageDrawCounts");
-    auto baked_staging=t->baked_staging.resource ? import(t->baked_staging,"VirtualShadow.CoarseSeed") : ResourceVersion{};
-    auto root_static=t->root_static.resource ? import(t->root_static,"VirtualShadow.FixedRootStatic",true) : ResourceVersion{};
-    auto root_dynamic=plan.fixed_root&&t->root_dynamic.resource ? import(t->root_dynamic,"VirtualShadow.FixedRootDynamic",true) : ResourceVersion{};
+    auto metadata = import(f.metadata, "VirtualShadow.Metadata",0);
+    auto casters = import(f.casters, "VirtualShadow.CasterSnapshot",1);
+    auto receivers = import(f.receivers, "VirtualShadow.ReceiverBounds",2);
+    auto pages = import(f.pages, "VirtualShadow.FramePageTable",3);
+    auto requests = import(f.requests, "VirtualShadow.RequestBitset",4);
+    auto residents = import(t->residents, "VirtualShadow.PersistentResidents",5);
+    auto draws = import(f.draws, "VirtualShadow.DrawRecords",6);
+    auto indexed = import(f.indexed, "VirtualShadow.IndexedCommands",7);
+    auto mesh = import(f.mesh, "VirtualShadow.MeshCommands",8);
+    auto counts = import(f.counts, "VirtualShadow.CommandCounts",9);
+    auto clear = import(f.clear, "VirtualShadow.ClearCommands",10);
+    auto page_draw_counts = import(f.page_draw_counts, "VirtualShadow.PageDrawCounts",11);
+    auto baked_staging=t->baked_staging.resource ? import(t->baked_staging,"VirtualShadow.CoarseSeed",12) : ResourceVersion{};
+    auto root_static=t->root_static.resource ? import(t->root_static,"VirtualShadow.FixedRootStatic",13,true) : ResourceVersion{};
+    auto root_dynamic=plan.fixed_root&&t->root_dynamic.resource ? import(t->root_dynamic,"VirtualShadow.FixedRootDynamic",14,true) : ResourceVersion{};
+    UINT pass_cursor{};
+    const auto make_pass=[&](std::uint32_t id,std::string_view name,QueueHint queue) -> ShadowPlanPass
+    {
+        const UINT index=pass_cursor++;
+        if(layout)layout->passes[index]={graph.PassCount(),id};
+        return {retained?*graph.BindPass(retained->passes[index].declaration_index,id):
+            graph.AddPass(id,name,queue),retained!=nullptr};
+    };
     if(baked_staging.resource && !t->baked_initialized)
     {
-        auto seed_upload=graph.AddPass(226,"VirtualShadow.CoarseSeedUpload",QueueHint::Copy);
+        auto seed_upload=make_pass(226,"VirtualShadow.CoarseSeedUpload",QueueHint::Copy);
         baked_staging=seed_upload.Write(baked_staging,Access::CopyDest);
         seed_upload.SetExecute([t](RenderPassContext &ctx) {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
@@ -1238,7 +1374,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     if(root_static.resource && t->root_static_upload.resource && !t->root_static_initialized)
     {
-        auto pass=graph.AddPass(227,"VirtualShadow.FixedRootStaticUpload",QueueHint::Copy);
+        auto pass=make_pass(227,"VirtualShadow.FixedRootStaticUpload",QueueHint::Copy);
         root_static=pass.Write(root_static,Access::CopyDest);
         const auto footprint=t->root_static_footprint;
         pass.SetExecute([t,footprint](RenderPassContext &ctx) {
@@ -1250,10 +1386,11 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
             list->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
         });
     }
-    auto static_bank = import(t->static_bank, "VirtualShadow.StaticDepth", true);
-    auto dynamic_bank = import(t->dynamic_bank, "VirtualShadow.DynamicDepth", true);
+    auto static_bank = import(t->static_bank, "VirtualShadow.StaticDepth",15,true);
+    auto dynamic_bank = import(t->dynamic_bank, "VirtualShadow.DynamicDepth",16,true);
+    if(!imports_valid)return Invalid("Virtual shadow retained resource binding changed.");
     {
-        auto pass = graph.AddPass(147, "VirtualShadow.SnapshotUpload", QueueHint::Copy);
+        auto pass = make_pass(147, "VirtualShadow.SnapshotUpload", QueueHint::Copy);
         metadata = pass.Write(metadata, Access::CopyDest);
         casters = pass.Write(casters, Access::CopyDest);
         receivers = pass.Write(receivers, Access::CopyDest);
@@ -1269,7 +1406,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(148, "VirtualShadow.InitializeFeedback", QueueHint::Compute);
+        auto pass = make_pass(148, "VirtualShadow.InitializeFeedback", QueueHint::Compute);
         pages = pass.Write(pages, Access::UnorderedWrite); requests = pass.Write(requests, Access::UnorderedWrite);
         counts = pass.Write(counts, Access::UnorderedWrite);
         page_draw_counts = pass.Write(page_draw_counts, Access::UnorderedWrite);
@@ -1283,7 +1420,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(149, "VirtualShadow.ReceiverFeedback", QueueHint::Compute);
+        auto pass = make_pass(149, "VirtualShadow.ReceiverFeedback", QueueHint::Compute);
         pass.Read(in.depth, Access::ComputeRead); pass.Read(in.normal, Access::ComputeRead); pass.Read(receivers, Access::ComputeRead);
         requests = pass.ReadWrite(requests, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot, width=in.render_active.width, rows=std::uint32_t(feedback_rows)](RenderPassContext &ctx)
@@ -1293,7 +1430,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(150, "VirtualShadow.ResidentAndDirty", QueueHint::Compute);
+        auto pass = make_pass(150, "VirtualShadow.ResidentAndDirty", QueueHint::Compute);
         pass.Read(casters, Access::ComputeRead); pass.Read(requests, Access::UnorderedRead);
         residents = pass.ReadWrite(residents, Access::UnorderedWrite); pages = pass.ReadWrite(pages, Access::UnorderedWrite);
         counts = pass.ReadWrite(counts, Access::UnorderedWrite); clear = pass.Write(clear, Access::UnorderedWrite);
@@ -1306,7 +1443,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(224, "VirtualShadow.CountPageDraws", QueueHint::Compute);
+        auto pass = make_pass(224, "VirtualShadow.CountPageDraws", QueueHint::Compute);
         pass.Read(metadata,Access::ComputeRead);
         if(baked_staging.resource) pass.Read(baked_staging,Access::ComputeRead);
         pass.Read(requests, Access::UnorderedRead);
@@ -1320,7 +1457,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(225, "VirtualShadow.AdmitCompletePages", QueueHint::Compute);
+        auto pass = make_pass(225, "VirtualShadow.AdmitCompletePages", QueueHint::Compute);
         pass.Read(metadata,Access::ComputeRead);
         pass.Read(requests, Access::UnorderedRead);
         pass.Read(page_draw_counts, Access::UnorderedRead);
@@ -1334,7 +1471,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(151, "VirtualShadow.CullAndCommands", QueueHint::Compute);
+        auto pass = make_pass(151, "VirtualShadow.CullAndCommands", QueueHint::Compute);
         pass.Read(metadata,Access::ComputeRead);
         if(baked_staging.resource) pass.Read(baked_staging,Access::ComputeRead);
         pass.Read(requests, Access::UnorderedRead);
@@ -1351,7 +1488,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     if(plan.fixed_root)
     {
-        auto pass=graph.AddPass(228,"VirtualShadow.FixedRootCurrentCommands",QueueHint::Compute);
+        auto pass=make_pass(228,"VirtualShadow.FixedRootCurrentCommands",QueueHint::Compute);
         pass.Read(metadata,Access::ComputeRead); pass.Read(casters,Access::ComputeRead);
         draws=pass.ReadWrite(draws,Access::UnorderedWrite); indexed=pass.ReadWrite(indexed,Access::UnorderedWrite);
         mesh=pass.ReadWrite(mesh,Access::UnorderedWrite); counts=pass.ReadWrite(counts,Access::UnorderedWrite);
@@ -1381,14 +1518,14 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     if(t->root_static.resource)out.root_extent=t->profile.baked->root_static_extent;
     for (std::uint32_t layer=0; layer<2; ++layer)
     {
-        auto pass = graph.AddPass(152+layer, layer ? "VirtualShadow.DynamicBank" : "VirtualShadow.StaticBank", QueueHint::Direct);
+        auto pass = make_pass(152+layer, layer ? "VirtualShadow.DynamicBank" : "VirtualShadow.StaticBank", QueueHint::Direct);
         if(!layer && baked_staging.resource) pass.Read(baked_staging,Access::ShaderRead);
         pass.Read(metadata, Access::ShaderRead); pass.Read(pages, Access::ShaderRead); pass.Read(draws, Access::ShaderRead);
         pass.Read(indexed, Access::IndirectArgs); pass.Read(mesh, Access::IndirectArgs);
         pass.Read(counts, Access::IndirectArgs); pass.Read(clear, Access::IndirectArgs);
         for (const auto &read : in.native_reads) if (read.version.resource) pass.Read(read.version, read.access);
         if (in.draw && !in.draw_groups.empty() && in.declare_material_sampling)
-            in.declare_material_sampling(pass);
+            if(!retained)in.declare_material_sampling(pass.Native());
         if (layer) dynamic_bank = pass.Write(dynamic_bank, Access::DepthWrite);
         else static_bank = pass.ReadWrite(static_bank, Access::DepthWrite);
         pass.SetExecuteChecked([t, slot=in.frame_slot, layer, callback=in.draw, outputs=out,
@@ -1419,13 +1556,14 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     if(plan.fixed_root)
     {
-        auto pass=graph.AddPass(229,"VirtualShadow.FixedRootCurrent",QueueHint::Direct);
+        auto pass=make_pass(229,"VirtualShadow.FixedRootCurrent",QueueHint::Direct);
         pass.Read(metadata,Access::ShaderRead); pass.Read(pages,Access::ShaderRead); pass.Read(draws,Access::ShaderRead);
         pass.Read(indexed,Access::IndirectArgs); pass.Read(mesh,Access::IndirectArgs); pass.Read(counts,Access::IndirectArgs);
         for(const auto &read:in.native_reads)if(read.version.resource)pass.Read(read.version,read.access);
-        if(in.draw&&!in.draw_groups.empty()&&in.declare_material_sampling)in.declare_material_sampling(pass);
+        if(!retained&&in.draw&&!in.draw_groups.empty()&&in.declare_material_sampling)
+            in.declare_material_sampling(pass.Native());
         root_dynamic=pass.Write(root_dynamic,Access::DepthWrite);
-        graph.AddOrderingDependency(152,229); graph.AddOrderingDependency(153,229);
+        if(!retained){graph.AddOrderingDependency(152,229); graph.AddOrderingDependency(153,229);}
         pass.SetExecuteChecked([t,slot=in.frame_slot,callback=in.draw,outputs=out](RenderPassContext &ctx) -> Result {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             const auto dsv=outputs.depth_views[2];
@@ -1440,9 +1578,12 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(154, "VirtualShadow.Publish", QueueHint::Compute);
-        graph.AddOrderingDependency(152, 154); graph.AddOrderingDependency(153, 154);
-        if(plan.fixed_root)graph.AddOrderingDependency(229,154);
+        auto pass = make_pass(154, "VirtualShadow.Publish", QueueHint::Compute);
+        if(!retained)
+        {
+            graph.AddOrderingDependency(152, 154); graph.AddOrderingDependency(153, 154);
+            if(plan.fixed_root)graph.AddOrderingDependency(229,154);
+        }
         pages = pass.ReadWrite(pages, Access::UnorderedWrite); residents = pass.ReadWrite(residents, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot](RenderPassContext &ctx)
         {
@@ -1451,7 +1592,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         });
     }
     {
-        auto pass = graph.AddPass(155, "VirtualShadow.ShadowDataReady", QueueHint::Direct);
+        auto pass = make_pass(155, "VirtualShadow.ShadowDataReady", QueueHint::Direct);
         for (const auto version : {metadata, pages, static_bank, dynamic_bank, draws}) pass.Read(version, Access::ShaderRead);
         if(root_static.resource)pass.Read(root_static,Access::ShaderRead);
         if(root_dynamic.resource)pass.Read(root_dynamic,Access::ShaderRead);
@@ -1461,6 +1602,13 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     out.metadata=metadata; out.page_table=pages; out.draw_records=draws;
     out.indexed_commands=indexed; out.mesh_commands=mesh; out.command_counts=counts;
     out.root_static=root_static; out.root_dynamic=root_dynamic;
+    if(layout)
+    {
+        layout->pass_count=pass_cursor;
+        layout->outputs={out.metadata,out.page_table,out.static_bank,out.dynamic_bank,
+            out.draw_records,out.indexed_commands,out.mesh_commands,out.command_counts,
+            out.root_static,out.root_dynamic};
+    }
     impl_->pending_graph = &graph; impl_->pending_slot = in.frame_slot; impl_->pending = constants;
     return Result::Success();
 }

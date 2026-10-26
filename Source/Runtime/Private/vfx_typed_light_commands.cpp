@@ -27,7 +27,7 @@ std::optional<Float3> Center(const VfxEventInput &input,std::uint32_t schema)
 }
 
 }
-std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,std::span<const VfxEventInput> inputs,Tick current_tick)
+std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,std::span<const VfxEventInput> inputs,double current_tick)
 {
  std::vector<VfxLightInput> result;
  for(const auto &input:inputs)

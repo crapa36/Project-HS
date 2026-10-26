@@ -197,11 +197,15 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         (surface.completed_version == surface.bitmap_version || ui_dirty[frame_index]) &&
         cached.size() == models.size() && std::equal(cached.begin(), cached.end(), models.begin(), equal))
         return Result::Success();
-    auto candidate_layouts = ui_text_layouts;
-    candidate_layouts.resize(models.size());
+    // Candidate layouts and model identity publish only after the whole raster succeeds.
+    ui_text_layouts.resize(std::max(ui_text_layouts.size(), models.size()));
+    std::vector<UiTextLayout> candidate_layouts(models.size());
+    std::vector<bool> replace_layout(models.size());
+    std::vector<UiModel> candidate_models(models.begin(), models.end());
     // A failed raster cannot make the old model a valid bitmap on the next retry.
     surface.bitmap_valid = false;
     ui_dirty[frame_index] = false;
+    // shortcut: whole-surface raster/upload stays until GR25 proves partial bitmap and native-copy equivalence.
     surface.target->BeginDraw();
     surface.target->SetTransform(D2D1_MATRIX_3X2_F{1, 0, 0, 1, 0, 0});
     surface.target->Clear(D2D1_COLOR_F{0, 0, 0, 0});
@@ -260,7 +264,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         const auto byte_count = static_cast<int>(end - model.utf8_text.begin());
         if (byte_count == 0)
         {
-            candidate_layouts[model_index] = {};
+            replace_layout[model_index] = true;
             continue;
         }
         const auto font_size = static_cast<float>(
@@ -284,12 +288,13 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                                     : D2D1_COLOR_F{1, 1, 1, 1});
         const auto text_width = std::max(text_rectangle.right - text_rectangle.left, 1.0f);
         const auto text_height = std::max(text_rectangle.bottom - text_rectangle.top, 1.0f);
-        auto &cached_layout = candidate_layouts[model_index];
+        auto &cached_layout = ui_text_layouts[model_index];
         const std::string_view utf8{model.utf8_text.data(), static_cast<std::size_t>(byte_count)};
         if (!cached_layout.layout || cached_layout.utf8 != utf8 || cached_layout.kind != model.kind ||
             cached_layout.font_size != font_size || cached_layout.width != text_width ||
             cached_layout.height != text_height)
         {
+            replace_layout[model_index] = true;
             const auto wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                                                          model.utf8_text.data(), byte_count,
                                                          nullptr, 0);
@@ -348,17 +353,21 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                     layout->SetTrimming(&trimming, ellipsis.Get());
                 }
             }
-            cached_layout.utf8.assign(utf8);
-            cached_layout.kind = model.kind;
-            cached_layout.font_size = font_size;
-            cached_layout.width = text_width;
-            cached_layout.height = text_height;
-            cached_layout.layout = std::move(layout);
+            auto &candidate = candidate_layouts[model_index];
+            candidate.utf8.assign(utf8);
+            candidate.kind = model.kind;
+            candidate.font_size = font_size;
+            candidate.width = text_width;
+            candidate.height = text_height;
+            candidate.layout = std::move(layout);
         }
-        assert(cached_layout.layout->GetMaxWidth() == text_width &&
-               cached_layout.layout->GetMaxHeight() == text_height);
+        auto *draw_layout = replace_layout[model_index]
+                                ? candidate_layouts[model_index].layout.Get()
+                                : cached_layout.layout.Get();
+        assert(draw_layout->GetMaxWidth() == text_width &&
+               draw_layout->GetMaxHeight() == text_height);
         surface.target->DrawTextLayout(
-            {text_rectangle.left, text_rectangle.top}, cached_layout.layout.Get(), surface.brush.Get(),
+            {text_rectangle.left, text_rectangle.top}, draw_layout, surface.brush.Get(),
             D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
@@ -380,8 +389,10 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         std::memcpy(frame.ui_mapped + ui_footprint.Offset + row * ui_footprint.Footprint.RowPitch,
                     pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(ui_row_bytes));
     }
-    ui_raster_models[frame_index].assign(models.begin(), models.end());
-    ui_text_layouts.swap(candidate_layouts);
+    for (std::size_t index = 0; index < models.size(); ++index)
+        if (replace_layout[index]) ui_text_layouts[index] = std::move(candidate_layouts[index]);
+    ui_text_layouts.resize(models.size());
+    ui_raster_models[frame_index].swap(candidate_models);
     ui_dirty[frame_index] = true;
     ++surface.bitmap_version;
     surface.bitmap_valid = true;

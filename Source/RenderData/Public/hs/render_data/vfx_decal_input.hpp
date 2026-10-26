@@ -1,5 +1,5 @@
 #pragma once
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 namespace hs
 {
 enum class VfxDecalKind : std::uint32_t { Fracture, Organic };

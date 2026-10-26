@@ -17,49 +17,97 @@ std::span<const std::byte> GeometryChunk(const render_data::PackageView &package
 }
 }
 
+Result D3D12Renderer::Impl::PrepareReadGeometry(const RendererConfig &input, std::string_view id,
+    std::span<const std::byte> bytes, const render_data::GeometryMetadata &metadata,
+    PreparedGeometryUpload &output) const
+{
+    try
+    {
+        output.source_product = id;
+        if (input.packed_content)
+        {
+            const auto handle = FindRendererGeometry(input, MakeAssetId(id));
+            if (!handle) throw std::runtime_error("Missing compiled geometry descriptor: " + std::string(id));
+            output.descriptor = &input.packed_geometry[handle.value];
+            render_data::ValidateGeometryDescriptorMetadata(*output.descriptor, metadata);
+            output.digest = input.packed_bulks[output.descriptor->bulk_index].range.expected_digest;
+        }
+        else if (input.development_catalog)
+        {
+            const auto asset=MakeAssetId(id);
+            const auto &bulk=input.development_catalog->bulks[
+                input.development_catalog->BulkIndex(asset)];
+            if(bytes.size()!=bulk.range.byte_count || render_data::Sha256(bytes)!=bulk.range.expected_digest)
+                throw std::runtime_error("Developer geometry differs from selected Generation");
+            output.digest=bulk.range.expected_digest;
+            output.descriptor=input.development_catalog->FindGeometry(asset);
+            if(!output.descriptor || !output.descriptor->payload_ready)
+            {
+                output.page=render_data::PrepareGeometryPage(bytes,asset,metadata);
+                output.descriptor=&input.development_catalog->AdmitGeometry(asset,bytes,output.page);
+            }
+            render_data::ValidateGeometryDescriptorMetadata(*output.descriptor,metadata);
+        }
+        else
+        {
+            output.page = render_data::PrepareGeometryPage(bytes, MakeAssetId(id), metadata);
+            output.digest = render_data::Sha256(bytes);
+        }
+        return Result::Success();
+    }
+    catch (const std::exception &error)
+    { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
+}
+
 Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
     std::span<const std::byte> package_bytes, AssetId page_asset,
     std::uint32_t page_slot, AllocationResource &upload,
-    PreparedEnvironmentGeometry *preparation)
+    PreparedGeometryUpload *preparation)
 {
     if (page_slot >= kGeometryPageCapacity || page.storage.resource || upload.resource)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Geometry page upload has an invalid slot or occupied destination.");
     render_data::PackageView package;
-    std::vector<std::byte> auxiliary;
     std::vector<render_data::GeometrySubmesh> submeshes;
-    std::array<std::span<const std::byte>, kGeometryBuffersPerPage> bytes;
+    std::array<std::span<const std::byte>, 6> bytes;
     std::array<std::byte, 32> source_digest{};
     try
     {
-        // Streaming workers validate before upload; startup callers decode and validate here.
-        if (preparation)
+        if (preparation && preparation->descriptor)
         {
-            if (preparation->package.asset_id.value != page_asset.value)
-                throw std::runtime_error("prepared geometry page identity changed before upload");
-            submeshes = std::move(preparation->geometry.submeshes);
-            package = std::move(preparation->package);
+            const auto &descriptor = *preparation->descriptor;
+            if (descriptor.asset_id.value != page_asset.value)
+                throw std::runtime_error("compiled geometry page identity changed before upload");
+            const auto view = render_data::BindGeometryDescriptor(package_bytes, descriptor);
+            bytes = {view.chunks[0], view.chunks[1], view.chunks[3], view.chunks[4], view.chunks[5], view.chunks[6]};
+            submeshes.assign(view.submeshes.begin(), view.submeshes.end());
             source_digest = preparation->digest;
         }
         else
         {
-            auto decoded = render_data::DecodeGeometryPage(package_bytes, page_asset, metadata);
-            submeshes = std::move(decoded.submeshes);
-            package = render_data::ReadPackage(package_bytes, page_asset);
-            source_digest = render_data::Sha256(package_bytes);
+            if (preparation)
+            {
+                if (preparation->page.package.asset_id.value != page_asset.value)
+                    throw std::runtime_error("prepared geometry page identity changed before upload");
+                submeshes = std::move(preparation->page.geometry.submeshes);
+                package = std::move(preparation->page.package);
+                source_digest = preparation->digest;
+            }
+            else
+            {
+                auto prepared = render_data::PrepareGeometryPage(package_bytes, page_asset, metadata);
+                submeshes = std::move(prepared.geometry.submeshes);
+                package = std::move(prepared.package);
+                source_digest = render_data::Sha256(package_bytes);
+            }
+            bytes = {GeometryChunk(package, render_data::ChunkType::GeometryVertices),
+                GeometryChunk(package, render_data::ChunkType::GeometryIndices),
+                GeometryChunk(package, render_data::ChunkType::GeometryMeshlets),
+                GeometryChunk(package, render_data::ChunkType::GeometryMeshletVertexRefs),
+                GeometryChunk(package, render_data::ChunkType::GeometryMeshletTriangles),
+                GeometryChunk(package, render_data::ChunkType::GeometryCanonicalPrimitiveRemap)};
         }
-        bytes[0] = GeometryChunk(package, render_data::ChunkType::GeometryVertices);
-        bytes[1] = GeometryChunk(package, render_data::ChunkType::GeometryIndices);
-        bytes[2] = GeometryChunk(package, render_data::ChunkType::GeometryMeshlets);
-        for (const auto type : {render_data::ChunkType::GeometryMeshletVertexRefs,
-                               render_data::ChunkType::GeometryMeshletTriangles,
-                               render_data::ChunkType::GeometryCanonicalPrimitiveRemap})
-        {
-            const auto chunk = GeometryChunk(package, type);
-            auxiliary.insert(auxiliary.end(), chunk.begin(), chunk.end());
-        }
-        bytes[3] = auxiliary;
     }
     catch (const std::exception &error)
     {
@@ -68,23 +116,18 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     }
     std::array<std::uint64_t, 4> upload_offsets{};
     std::uint64_t upload_size{};
-    const bool raster_suffix = page_slot >= kMonsterGeometryPage && page_slot < kProjectileGeometryPage &&
+    const bool monster_slot = (page_slot >= kMonsterGeometryPage && page_slot < kProjectileGeometryPage) ||
+        (page_slot >= kMonsterReducedGeometryPage && page_slot < kMonsterReducedGeometryPage + 12u);
+    const bool raster_suffix = monster_slot &&
         (metadata.flags & render_data::kGeometryFlagSkinned) != 0;
     const std::array<std::uint64_t, 4> sizes{bytes[0].size(),
-        std::uint64_t(bytes[1].size()) * (raster_suffix ? 2u : 1u),bytes[2].size(),bytes[3].size()};
+        std::uint64_t(bytes[1].size()) * (raster_suffix ? 2u : 1u),bytes[2].size(),bytes[3].size() + bytes[4].size() + bytes[5].size()};
     if (!GeometryPageLayout(sizes, upload_offsets, upload_size))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Geometry page GPU buffer size exceeds its ABI.");
     GeometryPageGpu next;
     next.source_asset = page_asset;
     next.source_digest = source_digest;
-    for (const auto &[id, path] : config.product_paths)
-        if ((id.starts_with("render/geometry/") || id.starts_with("render/hlod/")) &&
-            id.ends_with(".rpage") && MakeAssetId(id).value == page_asset.value)
-        {
-            if (!next.source_product.empty())
-                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Selected geometry AssetId is ambiguous.");
-            next.source_product = id;
-        }
+    if (preparation) next.source_product = std::move(preparation->source_product);
     next.offsets = upload_offsets;
     next.sizes = sizes;
     next.raster_index_offset = raster_suffix ? static_cast<std::uint32_t>(bytes[1].size()) : 0;
@@ -104,12 +147,18 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     const auto result = next_upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(result)) return HResultFailure("Map geometry page upload", result);
     std::memset(mapped, 0, static_cast<std::size_t>(upload_size));
-    for (std::size_t index = 0; index < bytes.size(); ++index)
+    for (std::size_t index = 0; index < 3; ++index)
         std::memcpy(static_cast<std::byte *>(mapped) + upload_offsets[index],
                     bytes[index].data(), bytes[index].size());
+    auto auxiliary_offset = upload_offsets[3];
+    for (std::size_t index = 3; index < bytes.size(); ++index)
+    {
+        std::memcpy(static_cast<std::byte *>(mapped) + auxiliary_offset, bytes[index].data(), bytes[index].size());
+        auxiliary_offset += bytes[index].size();
+    }
     if (raster_suffix && !WriteGeometryRasterIndexSuffix(
         {static_cast<std::byte *>(mapped) + upload_offsets[1] + next.raster_index_offset, bytes[1].size()},
-        bytes[1], GeometryChunk(package, render_data::ChunkType::GeometryCanonicalPrimitiveRemap)))
+        bytes[1], bytes[5]))
     {
         next_upload.resource->Unmap(0, nullptr);
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid geometry raster index suffix.");
@@ -131,8 +180,7 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     next.meshlet_count = metadata.meshlet_count;
     next.triangle_offset = metadata.vertex_ref_count * sizeof(std::uint32_t);
     next.remap_offset = next.triangle_offset +
-        static_cast<std::uint32_t>(GeometryChunk(package,
-            render_data::ChunkType::GeometryMeshletTriangles).size());
+        static_cast<std::uint32_t>(bytes[4].size());
     next.vertex_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[0],
         static_cast<UINT>(bytes[0].size()), sizeof(Vertex)};
     next.index_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[1] + next.raster_index_offset,
@@ -154,11 +202,11 @@ Result D3D12Renderer::Impl::CreateGeometryPage(
     GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
     std::span<const std::byte> package_bytes, AssetId page_asset,
     std::uint32_t page_slot, ID3D12GraphicsCommandList *list,
-    std::vector<AllocationResource> &uploads)
+    std::vector<AllocationResource> &uploads, PreparedGeometryUpload *preparation)
 {
     AllocationResource upload;
     if (auto prepared = PrepareGeometryPageUpload(page, metadata, package_bytes, page_asset,
-                                                  page_slot, upload); !prepared)
+                                                  page_slot, upload, preparation); !prepared)
         return prepared;
     RecordGeometryPageUpload(list, page, upload);
     D3D12_RESOURCE_BARRIER barrier{};
@@ -174,7 +222,7 @@ Result D3D12Renderer::Impl::CreateGeometryPage(
 
 const GeometryPageGpu *D3D12Renderer::Impl::FindGeometryPage(std::uint32_t page_slot) const noexcept
 {
-    if (page_slot > kProceduralGeometryPage) return FindClusterGeometryPage(page_slot);
+    if (page_slot >= kMonsterReducedGeometryPage + 12u) return FindClusterGeometryPage(page_slot);
     for (std::uint32_t attempt = 0; attempt < kGeometryPageCapacity; ++attempt)
     {
         const GeometryPageGpu *page{};
@@ -184,6 +232,11 @@ const GeometryPageGpu *D3D12Renderer::Impl::FindGeometryPage(std::uint32_t page_
             page = &monster_assets[page_slot - kMonsterGeometryPage];
         else if (page_slot == kProjectileGeometryPage) page = &gel_projectile_geometry;
         else if (page_slot == kProceduralGeometryPage) page = &procedural_geometry;
+        else if (page_slot >= kMonsterReducedGeometryPage && page_slot < kMonsterReducedGeometryPage + 12u)
+        {
+            const auto reduced = page_slot - kMonsterReducedGeometryPage;
+            page = &monster_reduced_geometry[reduced / 2u][reduced % 2u];
+        }
         if (!page) return nullptr;
         if (page->storage.resource) return page;
         if (page->fallback_page_slot >= kGeometryPageCapacity ||

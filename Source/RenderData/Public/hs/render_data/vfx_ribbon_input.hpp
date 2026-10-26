@@ -1,6 +1,6 @@
 #pragma once
-#include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_program_values.hpp>
 #include <span>
 
 namespace hs

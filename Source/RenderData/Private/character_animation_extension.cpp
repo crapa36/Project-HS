@@ -253,7 +253,11 @@ std::vector<std::byte> BuildCharacterAnimationExtension(
 CharacterAnimationExtensionData DecodeCharacterAnimationExtension(
     std::span<const std::byte> bytes, AssetId expected_asset_id)
 {
-    const auto package = ReadPackage(bytes, expected_asset_id);
+    return DecodeCharacterAnimationExtension(ReadPackage(bytes, expected_asset_id));
+}
+
+CharacterAnimationExtensionData DecodeCharacterAnimationExtension(const PackageView &package)
+{
     const auto &metadata = Find(package, ChunkType::CharacterAnimationMetadata);
     CharacterAnimationExtensionData animation;
     animation.character_asset_id = AssetId{Get(metadata.bytes, 0, 8)};

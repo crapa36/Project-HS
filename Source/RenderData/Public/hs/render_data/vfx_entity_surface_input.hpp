@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 
 #include <cstdint>
 #include <span>
@@ -21,12 +21,13 @@ enum class VfxEntitySurfaceDirection : std::uint32_t
 
 // A surface output belongs to the actual rendered mesh and source episode.
 // Phase is already resolved from the exact cooked source interval; ticks are
-// the authoritative owner/effect clock, not a guessed particle lifetime.
+// owner endpoints stay integral; current_tick is the fractional display clock.
 struct VfxEntitySurfaceCommand
 {
     std::uint64_t render_instance_id{}, owner_id{}, event_sequence{};
     std::uint64_t status_episode_generation{};
-    Tick owner_started_tick{}, current_tick{}, owner_until_tick{};
+    Tick owner_started_tick{}, owner_until_tick{};
+    double current_tick{};
     std::uint32_t output_index{}, stable_seed{}, gradient_row{};
     VfxEntitySurfaceShape shape{VfxEntitySurfaceShape::Transition};
     VfxEntitySurfaceDirection direction{VfxEntitySurfaceDirection::Up};

@@ -1,7 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ballistic_commands.hpp"
 #include "test_generation_paths.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -38,6 +38,9 @@ void TimingIdentityAndScale()
  for(const auto &c:a){float v=std::hypot(c.authored_initial_velocity.x,c.authored_initial_velocity.y,c.authored_initial_velocity.z);Check(c.authored_initial_velocity.x/v>=std::cos(55*.01745329252f)-.00001f,"fan ignored impact normal");}
  const auto again=Run(p,i);Check(again.size()==a.size()&&again[0].seed==a[0].seed&&again[0].authored_initial_velocity.x==a[0].authored_initial_velocity.x,"repeated decode changed initial conditions");
  Check(a[0].seed!=a[1].seed,"emission ordinal seed collapsed");
+ auto appended=a;hs::runtime_detail::BuildVfxTypedBallisticCommands(p,std::span(&i,1),appended);
+ Check(appended.size()==2*a.size()&&appended[0].seed==a[0].seed&&appended[a.size()].seed==a[0].seed,
+       "direct queue append replaced pending commands or changed emission identity");
  std::get<hs::VfxPointPayload>(i.payload).authored_scale=2;auto scaled=Run(p,i);Check(Near(scaled[0].start_size_min,2*a[0].start_size_min)&&scaled[0].authored_initial_velocity.x==a[0].authored_initial_velocity.x,"point scale altered world velocity");
  i=Input();p.effects.push_back(p.effects[0]);p.effects[1].handle=2;p.sources[0].effect=2;p.effect_lookup[0].handle=2;i.effect_handle=2;
  Check(Run(p,i)[0].seed==a[0].seed,"catalog handle changed semantic seed");
@@ -160,6 +163,11 @@ void PersistentStatusShards()
   auto run=[&]{return hs::runtime_detail::BuildVfxPersistentStatusShardCommands(p,std::span(&owner,1),77);};
   const auto commands=run();
   Check(commands.size()==5,"persistent shard count lost");
+  std::vector<hs::ParticleSpawnCommand> queued(1);
+  queued.front().seed=123;
+  hs::runtime_detail::BuildVfxPersistentStatusShardCommands(p,std::span(&owner,1),77,queued);
+  Check(queued.size()==6&&queued.front().seed==123&&queued[1].seed==commands[0].seed&&
+    queued[5].seed==commands[4].seed,"persistent shard append replaced pending commands");
   for(const auto &cmd:commands)
    Check(cmd.authored_ballistic&&cmd.renderer==hs::VfxRenderer::Mesh&&cmd.mesh_index==4&&
      cmd.tick==77&&cmd.authored_birth_tick==77&&cmd.authored_birth_fraction==0&&

@@ -7,12 +7,18 @@
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/render_data/scene_probe.hpp>
+#include <hs/render_data/quality_profiles.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
+#include <hs/render_data/material_descriptor.hpp>
+#include <hs/render_data/character_descriptor.hpp>
+#include <hs/render_data/render_revision.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/renderer/render_frame_input.hpp>
+#include <hs/render_data/render_frame_input.hpp>
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "view_fixture.hpp"
 #include "static_shadow_bake_probe.hpp"
 #include "../Common/world_transport_scene.hpp"
+#include "../Common/renderer_geometry_catalog.hpp"
 #if defined(HS_SCENE_PROBE_ACTION_ENABLED)
 #include "scene_probe_action.hpp"
 #endif
@@ -1902,10 +1908,229 @@ int main(int argc, char **argv)
             recording_group = std::make_unique<hs::TaskGroup>();
             return joined;
         };
+        std::vector<hs::render_data::RendererBulkDescriptor> packed_directory;
+        std::vector<hs::render_data::TextureDescriptorStorage> packed_texture_storage;
+        std::vector<hs::render_data::TextureDescriptor> packed_textures;
+        std::vector<hs::render_data::GeometryDescriptorStorage> packed_geometry_storage;
+        std::vector<hs::render_data::GeometryDescriptor> packed_geometry;
+        std::vector<hs::render_data::MaterialDescriptorStorage> packed_material_storage;
+        std::vector<hs::render_data::MaterialDescriptor> packed_materials;
+        std::vector<hs::render_data::CharacterDescriptorStorage> packed_character_storage;
+        std::vector<hs::render_data::CharacterDescriptor> packed_characters;
+        std::vector<hs::render_data::AnimationDescriptorStorage> packed_animation_storage;
+        std::vector<hs::render_data::AnimationDescriptor> packed_animations;
+        hs::render_data::VfxMeshAtlasDescriptor packed_vfx_mesh_atlas;
+        std::vector<hs::render_data::RendererSourceRevision> packed_source_revisions;
+        std::vector<hs::render_data::RendererRevisionBulk> packed_revision_bulks;
         hs::D3D12Renderer renderer;
         failure_code = "HS_RENDER_INITIALIZE_FAILED";
         auto startup_font = ReadDeveloperFont();
         config.font_bytes = startup_font;
+        if (residency_streaming_probe)
+        {
+            const auto pack_path = artifacts / "renderer-products-pack.hsp";
+            std::ofstream pack(pack_path, std::ios::binary | std::ios::trunc);
+            const std::array<char, 64> zeros{};
+            pack.write(zeros.data(), zeros.size());
+            std::vector<std::pair<hs::AssetId, std::string>> products;
+            for (const auto &[id, path] : generation.product_paths)
+                if (id.starts_with("render/") || id == "vfx/vfx_mesh_atlas.hsbin")
+                    products.emplace_back(hs::MakeAssetId(id), id);
+            std::ranges::sort(products, {}, [](const auto &entry) { return entry.first.value; });
+            const auto digest_bytes = [&](const std::string &id) {
+                const auto &digest = generation.product_digests.at(id);
+                std::array<std::byte, 32> expected{};
+                if (digest.size() != 71 || !digest.starts_with("sha256:"))
+                    throw std::runtime_error("Invalid renderer fixture digest: " + id);
+                for (std::size_t i = 0; i < expected.size(); ++i)
+                {
+                    unsigned byte{};
+                    const auto first = digest.data() + 7 + i * 2;
+                    const auto [last, error] = std::from_chars(first, first + 2, byte, 16);
+                    if (error != std::errc{} || last != first + 2) throw std::runtime_error("Invalid renderer digest byte");
+                    expected[i] = static_cast<std::byte>(byte);
+                }
+                return expected;
+            };
+            const auto verified_product = [&](const std::string &id) {
+                hs::ShippedContentOwner input;
+                Require(hs::ShippedContentOwner::Open(generation.product_paths.at(id), input));
+                if (input.Size() > std::numeric_limits<std::size_t>::max())
+                    throw std::runtime_error("Fixture product exceeds addressing: " + id);
+                std::vector<std::byte> bytes(static_cast<std::size_t>(input.Size()));
+                Require(input.ReadVerified(0, bytes, digest_bytes(id)));
+                return bytes;
+            };
+            std::vector<std::string> closure;
+            closure.reserve(generation.product_paths.size());
+            for (const auto &[id, path] : generation.product_paths) closure.push_back(id);
+            hs::apps::RendererGeometryCatalog geometry_catalog(closure);
+            std::map<std::string, std::vector<std::byte>> metadata_buffers;
+            for (const auto &[asset, id] : products)
+                if (hs::apps::RendererGeometryCatalog::NeedsMetadata(id))
+                {
+                    auto bytes = verified_product(id);
+                    geometry_catalog.AddMetadata(id, bytes);
+                    metadata_buffers.emplace(id, std::move(bytes));
+                }
+            std::vector<char> buffer(1024 * 1024);
+            std::uint64_t offset = 64;
+            for (const auto &[asset, id] : products)
+            {
+                const auto expected = digest_bytes(id);
+                using F = hs::render_data::RenderBulkFormat;
+                const auto format = id.ends_with(".rpkg") ? F::Package : id.ends_with(".rpage") ? F::GeometryPage :
+                    id.ends_with(".ghbin") ? F::GeometryHierarchy : id.ends_with(".shl1") ? F::SceneHlod :
+                    id.ends_with(".index") ? F::StaticShadowIndex : id.ends_with(".pages") ? F::StaticShadowPages :
+                    id.ends_with(".dds") ? F::DdsTexture : id.ends_with(".spkg") ? F::SceneProbe :
+                    id.ends_with(".hsbin") ? F::VfxMeshAtlas : F::ShaderDxil;
+                if (format == F::ShaderDxil && !id.ends_with(".dxil"))
+                    throw std::runtime_error("Unsupported renderer fixture bulk format: " + id);
+                const auto bytes = std::filesystem::file_size(generation.product_paths.at(id));
+                const auto padding = (64 - offset % 64) % 64;
+                pack.write(zeros.data(), static_cast<std::streamsize>(padding));
+                offset += padding;
+                packed_directory.push_back({asset, {offset, bytes, format, expected}});
+                if (const auto metadata = metadata_buffers.find(id); metadata != metadata_buffers.end())
+                {
+                    if (metadata->second.size() != bytes ||
+                        !pack.write(reinterpret_cast<const char *>(metadata->second.data()), static_cast<std::streamsize>(bytes)))
+                        throw std::runtime_error("Could not write verified geometry metadata: " + id);
+                    offset += bytes;
+                    continue;
+                }
+                if (id.ends_with(".rpage"))
+                {
+                    const auto page_bytes = verified_product(id);
+                    packed_geometry_storage.push_back(geometry_catalog.CompilePage(id, page_bytes,
+                        static_cast<std::uint32_t>(packed_directory.size() - 1)));
+                    if (page_bytes.size() != bytes ||
+                        !pack.write(reinterpret_cast<const char *>(page_bytes.data()), static_cast<std::streamsize>(bytes)))
+                        throw std::runtime_error("Could not write verified geometry page: " + id);
+                    offset += bytes;
+                    continue;
+                }
+                if (id.starts_with("render/texture/") && id.ends_with(".rpkg"))
+                {
+                    hs::ShippedContentOwner input;
+                    Require(hs::ShippedContentOwner::Open(generation.product_paths.at(id), input));
+                    if (bytes > std::numeric_limits<std::size_t>::max() ||
+                        bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
+                        throw std::runtime_error("Renderer fixture texture exceeds host addressing");
+                    std::vector<std::byte> texture_bytes(static_cast<std::size_t>(bytes));
+                    Require(input.ReadVerified(0, texture_bytes, expected));
+                    packed_texture_storage.push_back(hs::render_data::CompileTextureDescriptor(texture_bytes, asset,
+                        static_cast<std::uint32_t>(packed_directory.size() - 1)));
+                    if (!pack.write(reinterpret_cast<const char *>(texture_bytes.data()), static_cast<std::streamsize>(bytes)))
+                        throw std::runtime_error("Could not write renderer fixture texture: " + id);
+                    offset += bytes;
+                    continue;
+                }
+                if (id == "vfx/vfx_mesh_atlas.hsbin")
+                {
+                    const auto atlas_bytes = verified_product(id);
+                    packed_vfx_mesh_atlas = hs::render_data::CompileVfxMeshAtlasDescriptor(atlas_bytes, asset);
+                    if (atlas_bytes.size() != bytes ||
+                        !pack.write(reinterpret_cast<const char *>(atlas_bytes.data()), static_cast<std::streamsize>(bytes)))
+                        throw std::runtime_error("Could not write verified VFX mesh atlas");
+                    offset += bytes;
+                    continue;
+                }
+                std::ifstream input(generation.product_paths.at(id), std::ios::binary);
+                for (std::uint64_t remaining = bytes; remaining;)
+                {
+                    const auto count = static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
+                    if (!input.read(buffer.data(), count) || !pack.write(buffer.data(), count))
+                        throw std::runtime_error("Could not copy renderer fixture bulk: " + id);
+                    remaining -= count;
+                }
+                offset += bytes;
+            }
+            pack.close();
+            if (!pack) throw std::runtime_error("Could not write renderer fixture pack");
+            auto owner = std::make_shared<hs::ShippedContentOwner>();
+            Require(hs::ShippedContentOwner::Open(pack_path, *owner));
+            config.packed_content = std::move(owner);
+            config.packed_bulks = packed_directory;
+            for (const auto &texture : packed_texture_storage) packed_textures.push_back(texture.View());
+            config.packed_textures = packed_textures;
+            for (const auto &geometry : packed_geometry_storage) packed_geometry.push_back(geometry.View());
+            config.packed_geometry = packed_geometry;
+            std::vector<hs::AssetId> bulk_assets;
+            for (const auto &bulk : packed_directory) bulk_assets.push_back(bulk.asset_id);
+            for (std::size_t index = 0; index < products.size(); ++index)
+            {
+                const auto &id = products[index].second;
+                if (!hs::render_data::IsMaterialDescriptorProduct(id)) continue;
+                const auto parameters = hs::render_data::MaterialParametersProduct(id);
+                packed_material_storage.push_back(hs::render_data::CompileMaterialDescriptor(id,
+                    metadata_buffers.at(id), metadata_buffers.at(parameters), static_cast<std::uint32_t>(index),
+                    bulk_assets, packed_textures));
+            }
+            for (const auto &material : packed_material_storage) packed_materials.push_back(material.View());
+            config.packed_materials = packed_materials;
+            const auto character_bulk = [&](hs::AssetId id) {
+                const auto found = std::ranges::find(bulk_assets, id.value, &hs::AssetId::value);
+                if (found == bulk_assets.end()) throw std::runtime_error("Character fixture bulk missing");
+                return static_cast<std::uint32_t>(found - bulk_assets.begin());
+            };
+            for (auto &prepared : geometry_catalog.TakeCharacters())
+                packed_character_storage.push_back(hs::render_data::CompileCharacterDescriptor(prepared.bytes,
+                    prepared.package, std::move(prepared.data), character_bulk(prepared.package.asset_id),
+                    packed_directory, packed_geometry, packed_materials));
+            for (const auto &character : packed_character_storage) packed_characters.push_back(character.View());
+            for (auto &prepared : geometry_catalog.TakeAnimations())
+            {
+                const auto found = std::ranges::find(packed_characters, prepared.data.character_asset_id.value,
+                    [](const auto &character) { return character.asset_id.value; });
+                if (found == packed_characters.end()) throw std::runtime_error("Animation fixture character missing");
+                const auto index = static_cast<std::uint32_t>(found - packed_characters.begin());
+                packed_animation_storage.push_back(hs::render_data::CompileAnimationDescriptor(prepared.bytes,
+                    prepared.package, std::move(prepared.data), character_bulk(prepared.package.asset_id),
+                    packed_directory, hs::render_data::CharacterHandle{index}, packed_character_storage[index]));
+            }
+            for (const auto &animation : packed_animation_storage) packed_animations.push_back(animation.View());
+            config.packed_characters = packed_characters;
+            config.packed_animations = packed_animations;
+            config.packed_vfx_mesh_atlas = &packed_vfx_mesh_atlas;
+            // Canonical names borrow the selected Generation, which outlives the renderer.
+            for (const auto &[id, path] : generation.product_paths)
+                if (!id.starts_with("render/") && id != "vfx/vfx_mesh_atlas.hsbin")
+                    packed_source_revisions.push_back({hs::MakeAssetId(id), id, digest_bytes(id)});
+            std::ranges::sort(packed_source_revisions, {}, [](const auto &revision) { return revision.asset_id.value; });
+            for (std::size_t i = 0; i < packed_source_revisions.size(); ++i)
+            {
+                const auto &revision = packed_source_revisions[i];
+                if (i && packed_source_revisions[i-1].asset_id.value == revision.asset_id.value)
+                    throw std::runtime_error("Fixture provenance AssetId collision");
+                if (std::ranges::find(bulk_assets, revision.asset_id.value, &hs::AssetId::value) != bulk_assets.end())
+                    throw std::runtime_error("Fixture provenance collides with bulk AssetId");
+            }
+            for (std::size_t index = 0; index < products.size(); ++index)
+                if (hs::render_data::IsRendererMaterialRevisionProduct(products[index].second))
+                {
+                    // products is local to this block; borrow the persistent map key.
+                    const auto found = generation.product_paths.find(products[index].second);
+                    packed_revision_bulks.push_back({found->first, static_cast<std::uint32_t>(index)});
+                }
+            config.packed_source_revisions = packed_source_revisions;
+            config.packed_revision_bulks = packed_revision_bulks;
+            config.product_paths.clear();
+            config.product_digests.clear();
+            receipt["packed_generation_maps_empty"] = config.product_paths.empty() && config.product_digests.empty();
+            receipt["packed_quality_profiles"] = true;
+            receipt["packed_renderer_products"] = packed_directory.size();
+            receipt["packed_renderer_textures"] = packed_textures.size();
+            receipt["packed_renderer_geometry"] = packed_geometry.size();
+            receipt["packed_renderer_materials"] = packed_materials.size();
+            receipt["packed_renderer_characters"] = packed_characters.size();
+            receipt["packed_renderer_animations"] = packed_animations.size();
+            receipt["packed_renderer_source_revisions"] = packed_source_revisions.size();
+            receipt["packed_renderer_revision_bulks"] = packed_revision_bulks.size();
+            receipt["packed_renderer_volumes"] = std::ranges::count(packed_textures,
+                hs::render_data::TextureDimension::Texture3D, &hs::render_data::TextureDescriptor::dimension);
+            receipt["packed_renderer_bytes"] = offset;
+        }
         measure("initialize", [&] { Require(renderer.Initialize(config)); });
         config.font_bytes = {};
         std::vector<std::byte>().swap(startup_font);
@@ -2002,6 +2227,23 @@ int main(int argc, char **argv)
                 initial_residency.geometry_streaming_publications != 0)
                 throw std::runtime_error("Geometry streamed before any scene demand.");
             receipt["geometry_initial_requests"] = initial_residency.geometry_streaming_requests;
+            auto missing_paths = generation.product_paths;
+            auto changed_digests = generation.product_digests;
+            const std::string probe_id = "render/lighting/default_probe.rpkg";
+            missing_paths.at(probe_id) = artifacts / "absent-developer-probe.rpkg";
+            auto &probe_digest = changed_digests.at(probe_id);
+            probe_digest.back() = probe_digest.back() == '0' ? '1' : '0';
+            bool resident_replaced = false;
+            const auto rejected = renderer.ReloadContentGeneration(generation.id + "-missing-probe", missing_paths,
+                changed_digests, std::make_shared<const hs::SelectedGeneration>(generation), nullptr, &resident_replaced);
+            const std::string rejection_message(rejected.Message());
+            if (rejected || resident_replaced ||
+                (rejection_message.find("default_probe") == std::string::npos &&
+                 rejection_message.find("absent-developer-probe") == std::string::npos))
+                throw std::runtime_error("Developer reload did not reject the actual missing probe while preserving the packed resident.");
+            receipt["packed_developer_reload_missing_product_rejected"] = true;
+            receipt["packed_developer_reload_rejection"] = rejection_message;
+            receipt["packed_developer_reload_resident_preserved"] = !resident_replaced;
         }
         const auto scene = Scene(generation.id);
         const auto grid_floor_scene = GridFloorScene(generation.id);
@@ -2062,7 +2304,7 @@ int main(int argc, char **argv)
         }
         if (persistent_scene_probe)
             for (auto &source : current) source.revisions = {11, 22, 33, 44};
-        hs::RenderSnapshotExchange::ReadPair pair;
+        hs::RenderSnapshotPair pair;
         pair.has_current = true;
         pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || scene_probe_bake_only ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;

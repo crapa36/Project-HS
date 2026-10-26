@@ -25,8 +25,8 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_c
     if (candidate_config.volumetric_quality != GraphicsOptionalQuality::Off)
     {
         constexpr std::string_view id = "render/lighting/volumetric_media.rpkg";
-        std::filesystem::path path;
-        if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
         std::vector<std::byte> bytes;
         if (auto read = ReadBinary(path, bytes); !read) return read;
         try
@@ -56,8 +56,8 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_c
         candidate_config.volumetric_quality, QualityProfileFor(candidate_config.volumetric_quality == GraphicsOptionalQuality::Off
             ? GraphicsQuality::Low : static_cast<GraphicsQuality>(static_cast<unsigned>(candidate_config.volumetric_quality) - 1u)), capacity, kFrameCount, 256,
         [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate.service, &pipeline_cache, candidate_config.vfx_quality == VfxQuality::High);
 }
@@ -75,7 +75,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
     for (const auto id : {"render/shader/scene_geometry_cs.dxil", "render/shader/brixelizer_guides_cs.dxil",
             "render/shader/brixelizer_gi_resolve_cs.dxil", "render/shader/brixelizer_cache_export_cs.dxil",
             "render/shader/brixelizer_gi_compose_cs.dxil", "render/shader/brixelizer_cache_direct_ps.dxil"})
-        available.software_gi_consumer = available.software_gi_consumer && request.product_paths.contains(id);
+        available.software_gi_consumer = available.software_gi_consumer && (request.product_paths.contains(id) || FindRendererBulk(request, id));
 #if HS_WITH_BRIXELIZER
     if (available.software_gi_consumer &&
         request.gi_mode == GraphicsGiMode::SoftwareHybrid)
@@ -93,7 +93,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
                 return ids;
             }();
             available.software_gi_consumer = products.size() == 748 && std::ranges::all_of(products,
-                [&](const auto &id) {return request.product_paths.contains(id);});
+                [&](const auto &id) {return (request.product_paths.contains(id) || FindRendererBulk(request, id));});
         }
         catch (...) { available.software_gi_consumer = false; }
     }
@@ -101,12 +101,12 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
     available.software_gi_consumer = false;
 #endif
     available.adaptive_raster_consumer = available.adaptive_raster_consumer &&
-        request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") &&
-        request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil");
+        (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
+        (request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_rate_cs.dxil"));
     available.adaptive_compute_consumer = available.adaptive_compute_consumer &&
-        request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") &&
-        request.product_paths.contains("render/shader/adaptive_gtao_horizon_cs.dxil") &&
-        request.product_paths.contains("render/shader/adaptive_gtao_resolve_cs.dxil");
+        (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
+        (request.product_paths.contains("render/shader/adaptive_gtao_horizon_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_horizon_cs.dxil")) &&
+        (request.product_paths.contains("render/shader/adaptive_gtao_resolve_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_resolve_cs.dxil"));
     return ResolveRendererFeatures({request.ao_mode,
         request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
 }
@@ -123,8 +123,8 @@ Result D3D12Renderer::Impl::PrepareLightList(const RendererConfig &candidate_con
 {
     return light_list.Prepare(device.Get(), allocator, capacity, 128, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, QualityProfileFor(candidate_config.lighting_quality).lighting_cluster_capacity);
 }
@@ -138,7 +138,7 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidat
         "render/shader/virtual_shadow_seed_ps.dxil"};
     VirtualShadowProfile profile;
     profile.enabled = candidate_config.shadow_mode == GraphicsShadowMode::Raster &&
-        std::ranges::all_of(products, [&](const auto id) { return candidate_config.product_paths.contains(id); });
+        std::ranges::all_of(products, [&](const auto id) { return (candidate_config.product_paths.contains(id) || FindRendererBulk(candidate_config, id)); });
     constexpr std::uint64_t mib = 1024ull * 1024ull;
     const auto cache_bytes = UINT64(QualityProfileFor(candidate_config.shadow_quality).shadow_cache_mib) * mib;
     // Two D32 banks with guarded 132x132 tiles. A rectangular native atlas can
@@ -178,8 +178,8 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidat
     if(auto loaded=VirtualShadowSystem::LoadBake(candidate_config,profile,baked_shadow_source);!loaded) return loaded;
     return virtual_shadows.Prepare(device.Get(), allocator, profile,
         [candidate_config](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, &pipeline_cache);
 }
@@ -192,8 +192,8 @@ Result D3D12Renderer::Impl::PrepareHdrPost(const RendererConfig &candidate_confi
     settings.color_grading = candidate_config.color_grading;
     return hdr_post.Prepare(device.Get(), allocator, render_capacity, output_extent, settings,
         kFrameCount, [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate);
 }
@@ -202,8 +202,8 @@ Result D3D12Renderer::Impl::PrepareAdditionalShadows(const RendererConfig &candi
 {
     candidate = {};
     const auto shader_reader = [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
-        std::filesystem::path path;
-        if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
         return ReadBinary(path, bytes);
     };
     constexpr std::uint64_t mib = 1024ull * 1024ull;
@@ -231,8 +231,8 @@ Result D3D12Renderer::Impl::PrepareSceneGeometry(const RendererConfig &candidate
     SceneGeometryCandidate &geometry) const
 {
     const auto read_shader = [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
-        std::filesystem::path path;
-        if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
         return ReadBinary(path, bytes);
     };
     return scene_geometry.Prepare(device.Get(), allocator, root_signature.Get(),
@@ -241,8 +241,8 @@ Result D3D12Renderer::Impl::PrepareSceneGeometry(const RendererConfig &candidate
 Result D3D12Renderer::Impl::PrepareLightingProbe(const RendererConfig &candidate_config,
     LightingProbeCandidate &candidate) const
 {
-    std::filesystem::path path;
-    if (auto resolved = candidate_config.ResolveProduct("render/lighting/default_probe.rpkg", path); !resolved)
+    RendererAssetSource path;
+    if (auto resolved = ResolveRendererAsset(candidate_config, "render/lighting/default_probe.rpkg", path); !resolved)
         return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
@@ -251,8 +251,8 @@ Result D3D12Renderer::Impl::PrepareLightingProbe(const RendererConfig &candidate
 Result D3D12Renderer::Impl::PrepareLtcLut(const RendererConfig &candidate_config,
     LtcLutCandidate &candidate) const
 {
-    std::filesystem::path path;
-    if (auto resolved = candidate_config.ResolveProduct("render/lighting/default_ltc.rpkg", path); !resolved)
+    RendererAssetSource path;
+    if (auto resolved = ResolveRendererAsset(candidate_config, "render/lighting/default_ltc.rpkg", path); !resolved)
         return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
@@ -282,8 +282,8 @@ Result D3D12Renderer::Impl::PrepareAdaptiveShading(const RendererConfig &candida
     }
     return adaptive_shading.Prepare(device.Get(), allocator, profile,
         [&](std::string_view id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate);
 }
@@ -297,18 +297,32 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
         for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
         {
             bool eligible{};
-            const auto &header = material_headers[ordinal];
-            const auto metadata = std::ranges::find(header.view.chunks, render_data::ChunkType::MaterialMetadata,
-                &render_data::ChunkView::type);
-            if (metadata != header.view.chunks.end())
+            if (config.packed_content || config.development_catalog)
             {
-                const auto material = render_data::DecodeRockMaterial(metadata->bytes, header.view.dependencies);
-                // Cooked alpha coverage and actual high-frequency authored
-                // detail/height/histogram domains stay full rate. Basic base,
-                // roughness and normal texture variation is checked per pixel.
-                eligible = material_surface_layouts[ordinal].capability_mask == basic &&
-                    !material.alpha_mask && !material.two_sided && material.textures[3].empty() &&
-                    material.textures[4].empty() && material.textures[5].empty();
+                const std::string name(kAuthoredMaterialNames[ordinal]);
+                const auto id = ordinal == kTerrainMaterialOrdinal || ordinal == render_data::kGroundDetailMaterialOrdinal
+                    ? "render/material/" + name + ".rpkg" : "render/" + name + ".rpkg";
+                const auto handle = FindRendererMaterial(config, MakeAssetId(id));
+                if (!handle) throw std::runtime_error("Compiled adaptive material is missing");
+                const auto &material = config.packed_materials[handle.value];
+                eligible = material.surface.capability_mask == basic && material.flags == 0 &&
+                    std::ranges::none_of(material.textures, [](const auto &texture) { return texture.slot >= 3; });
+            }
+            else
+            {
+                const auto &header = material_headers[ordinal];
+                const auto metadata = std::ranges::find(header.view.chunks, render_data::ChunkType::MaterialMetadata,
+                    &render_data::ChunkView::type);
+                if (metadata != header.view.chunks.end())
+                {
+                    const auto material = render_data::DecodeRockMaterial(metadata->bytes, header.view.dependencies);
+                    // Cooked alpha coverage and actual high-frequency authored
+                    // detail/height/histogram domains stay full rate. Basic base,
+                    // roughness and normal texture variation is checked per pixel.
+                    eligible = material_surface_layouts[ordinal].capability_mask == basic &&
+                        !material.alpha_mask && !material.two_sided && material.textures[3].empty() &&
+                        material.textures[4].empty() && material.textures[5].empty();
+                }
             }
             // This exact renderer profile replaces terrain by the unlayered
             // analytic grid. Its actual line/normal/depth edges remain protected
@@ -334,8 +348,8 @@ Result D3D12Renderer::Impl::PrepareAmbientOcclusion(const RendererConfig &candid
         candidate_config.ao_quality, QualityProfileFor(candidate_config.ao_quality), ResolveFeatures(candidate_config).ao_mode == GraphicsAoMode::GTAO,
         candidate_config.contact_shadows, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, adaptive_compute);
 }
@@ -343,8 +357,8 @@ Result D3D12Renderer::Impl::PrepareSurfaceLighting(const RendererConfig &candida
     ViewExtent capacity, SubsurfaceCandidate &diffusion, ScreenReflectionsCandidate &reflections) const
 {
     const auto read_shader = [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-        std::filesystem::path path;
-        if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
         return ReadBinary(path, bytes);
     };
     const bool have_subsurface = std::ranges::any_of(material_surface_layouts, [](const auto &layout) {
@@ -375,8 +389,8 @@ Result D3D12Renderer::Impl::PrepareHeroTransparency(const RendererConfig &candid
     return hero_transparency.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
         layers, enabled, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, pipeline_cache, candidate, candidate_config.capture_hero_work, candidate_config.hero_work_mode);
 }

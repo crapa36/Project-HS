@@ -133,6 +133,8 @@ struct LocalShadowStorage
     {
         AllocationResource upload,metadata,records,draws,indexed,mesh,counts;
         std::byte *mapped{};CompletionSet completion;
+        std::vector<std::byte> prepared_upload;
+        std::uint64_t record_generation{};
         std::vector<VirtualShadowDrawBatch> batches;
         std::array<std::vector<D3D12_RECT>,2> clears;
         std::vector<std::shared_ptr<const void>> owners;
@@ -140,7 +142,9 @@ struct LocalShadowStorage
         Frame()=default;Frame(const Frame &)=delete;Frame &operator=(const Frame &)=delete;
         Frame(Frame &&other)noexcept:upload(std::move(other.upload)),metadata(std::move(other.metadata)),records(std::move(other.records)),
             draws(std::move(other.draws)),indexed(std::move(other.indexed)),mesh(std::move(other.mesh)),counts(std::move(other.counts)),
-            mapped(std::exchange(other.mapped,nullptr)),completion(other.completion),batches(std::move(other.batches)),
+            mapped(std::exchange(other.mapped,nullptr)),completion(other.completion),
+            prepared_upload(std::move(other.prepared_upload)),record_generation(other.record_generation),
+            batches(std::move(other.batches)),
             clears(std::move(other.clears)),owners(std::move(other.owners)){}
     };
     ComPtr<ID3D12Device> device;ComPtr<D3D12MA::Allocator> allocator;
@@ -149,14 +153,53 @@ struct LocalShadowStorage
     AllocationResource static_bank,dynamic_bank;
     ComPtr<ID3D12DescriptorHeap> srvs,dsvs;
     std::vector<Frame> frames;std::vector<CachedLight> cache;
-    CompletionSet completion;bool initialized{},usable{true};
+    CompletionSet completion;std::uint64_t generation{};bool initialized{},usable{true};
     D3D12_CPU_DESCRIPTOR_HANDLE Srv(UINT frame,UINT offset)const
     {auto h=srvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(frame*5+offset)*stride;return h;}
     D3D12_CPU_DESCRIPTOR_HANDLE Dsv(UINT index)const
     {auto h=dsvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(index)*dsv_stride;return h;}
 };
+struct LocalShadowFramePlanData
+{
+    struct Scratch
+    {
+        std::byte *mapped{};
+        std::vector<VirtualShadowDrawBatch> batches;
+        std::array<std::vector<D3D12_RECT>,2> clears;
+    } frame;
+    const LocalShadowInputs *source{};
+    std::shared_ptr<LocalShadowStorage> storage;
+    const LightView *lights{};
+    const VirtualShadowCaster *stable_casters{}, *dynamic_casters{};
+    const VirtualShadowDrawGroup *groups{};
+    std::size_t light_count{}, stable_count{}, dynamic_count{}, group_count{};
+    DirectX::XMFLOAT3 camera_position{};
+    std::uint64_t rendered_frame_id{};
+    std::uint32_t frame_slot{};
+    std::uint64_t record_generation{};
+    bool reset_cache{};
+    std::vector<LocalShadowStorage::CachedLight> cache;
+    LocalShadowStatus status;
+    std::vector<LocalShadowLightReference> light_records;
+    std::array<bool,2> has_batches{};
+    bool consumed{};
+};
 namespace
 {
+bool PreparedInputsMatch(const LocalShadowFramePlanData &data,
+    const LocalShadowInputs &in) noexcept
+{
+    return data.source==&in&&data.lights==in.lights.data()&&
+        data.light_count==in.lights.size()&&
+        data.stable_casters==in.casters.stable.data()&&
+        data.stable_count==in.casters.stable.size()&&
+        data.dynamic_casters==in.casters.dynamic.data()&&
+        data.dynamic_count==in.casters.dynamic.size()&&
+        data.groups==in.draw_groups.data()&&data.group_count==in.draw_groups.size()&&
+        data.rendered_frame_id==in.rendered_frame_id&&data.frame_slot==in.frame_slot&&
+        data.reset_cache==in.reset_cache&&
+        std::memcmp(&data.camera_position,&in.camera_position,sizeof(in.camera_position))==0;
+}
 Result Allocate(LocalShadowStorage &s,AllocationResource &resource,D3D12_RESOURCE_DESC desc,bool upload=false)
 {
     D3D12MA::ALLOCATION_DESC ad{};ad.HeapType=upload?D3D12_HEAP_TYPE_UPLOAD:D3D12_HEAP_TYPE_DEFAULT;
@@ -272,6 +315,7 @@ struct LocalShadowSystem::Impl
 {
     struct Import{AllocationResource *resource;ResourceHandle handle;};
     std::shared_ptr<LocalShadowStorage> storage;
+    std::uint64_t next_generation{};
     struct Pending{const RenderGraphBuilder *graph{};UINT slot{};std::vector<Import> imports;
         std::vector<LocalShadowStorage::CachedLight> cache;LocalShadowStatus status;
         std::vector<LocalShadowLightReference> light_records;}pending;
@@ -326,6 +370,7 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         for(auto [r,bytes]:buffers)if(auto result=Allocate(*s,*r,Buffer(bytes));!result)return result;
         void *mapped{};D3D12_RANGE empty{};auto hr=f.upload.resource->Map(0,&empty,&mapped);
         if(FAILED(hr))return Native("Map local shadow upload",hr);f.mapped=static_cast<std::byte *>(mapped);
+        f.prepared_upload.resize(static_cast<std::size_t>(s->upload_bytes));
     }
     s->stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     s->dsv_stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -352,20 +397,35 @@ Result LocalShadowSystem::Commit(LocalShadowCandidate &&candidate,const Completi
 {
     if(!candidate.prepared_||impl_->pending.graph||(impl_->storage&&!impl_->storage->completion.IsSatisfiedBy(completed)))
         return Failure(ErrorCode::InvalidState,"Local shadow replacement requires a prepared candidate and all queue readers completed.");
+    if(candidate.storage_&&impl_->next_generation==UINT64_MAX)
+        return Failure(ErrorCode::InvalidState,"Local shadow storage generation is exhausted.");
+    if(candidate.storage_)candidate.storage_->generation=++impl_->next_generation;
     impl_->storage=std::move(candidate.storage_);impl_->status={};impl_->status.enabled=bool(impl_->storage);
     impl_->status.allocated_bytes=AllocatedBytes();candidate.prepared_=false;return Result::Success();
 }
-Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowInputs &in,LocalShadowOutputs &out)
+Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
+    LocalShadowFramePlan &plan)
 {
-    out={};auto s=impl_->storage;if(!s)return Result::Success();
+    plan={};auto s=impl_->storage;if(!s)return Result::Success();
     if(!s->usable||impl_->pending.graph)return Failure(ErrorCode::InvalidState,"Local shadows require completion and reset after a failed graph.");
     if(in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!in.draw||
         in.casters.size()>s->profile.max_casters||in.draw_groups.size()>s->profile.max_draw_groups)
         return Failure(ErrorCode::InvalidArgument,"Local shadow caster/draw capacity or completed frame slot is invalid.");
     for(const auto &c:in.casters)if((c.present&&(!Sphere(c.current_bounds)||c.draw_group>=in.draw_groups.size()))||
         (c.previous_present&&!Sphere(c.previous_bounds)))return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
-    for(const auto &read:in.native_reads)if(!read.version.resource||!graph.Resolve(read.version.resource))
-        return Failure(ErrorCode::InvalidArgument,"Local shadow canonical geometry/material graph read is missing.");
+    auto data=std::make_shared<LocalShadowFramePlanData>();
+    data->source=&in;data->storage=s;
+    auto &native_frame=s->frames[in.frame_slot];
+    if(native_frame.record_generation==UINT64_MAX)
+        return Failure(ErrorCode::InvalidState,"Local shadow frame record generation is exhausted.");
+    data->record_generation=++native_frame.record_generation;
+    data->lights=in.lights.data();data->light_count=in.lights.size();
+    data->stable_casters=in.casters.stable.data();data->stable_count=in.casters.stable.size();
+    data->dynamic_casters=in.casters.dynamic.data();data->dynamic_count=in.casters.dynamic.size();
+    data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
+    data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;
+    data->frame_slot=in.frame_slot;data->reset_cache=in.reset_cache;
+    data->frame.mapped=native_frame.prepared_upload.data();
     LocalShadowStatus status;status.enabled=true;status.allocated_bytes=s->allocated;
     struct Ranked{const LightView *light;double priority;};std::vector<Ranked> ranked;
     for(const auto &light:in.lights)
@@ -443,7 +503,7 @@ Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowIn
     }
     std::vector<GpuLocalShadowRecord> records(cache.size());std::vector<GpuShadowDrawRecord> draws;
     std::vector<IndexedCommand> indexed;std::vector<MeshCommand> mesh;std::vector<UINT> counts;
-    auto &frame=s->frames[in.frame_slot];frame.batches.clear();for(auto &clears:frame.clears)clears.clear();
+    auto &frame=data->frame;frame.batches.clear();for(auto &clears:frame.clears)clears.clear();
     for(const auto &choice:selected)
     {
         const auto slot=choice.slot;const auto &light=*choice.light;auto &cached=cache[slot];
@@ -497,27 +557,134 @@ Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowIn
         std::memcpy(frame.mapped+s->indexed_offset,indexed.data(),indexed.size()*sizeof(indexed[0]));
         std::memcpy(frame.mapped+s->mesh_offset,mesh.data(),mesh.size()*sizeof(mesh[0]));}
     if(!counts.empty())std::memcpy(frame.mapped+s->count_offset,counts.data(),counts.size()*sizeof(counts[0]));
-    auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;pending.cache=std::move(cache);pending.status=status;
-    pending.light_records.reserve(selected.size());
+    data->cache=std::move(cache);data->status=status;
+    data->light_records.reserve(selected.size());
     for(const auto &choice:selected)
-        pending.light_records.push_back({choice.light->stable_id,choice.light->revision,
+        data->light_records.push_back({choice.light->stable_id,choice.light->revision,
             choice.light->generation,choice.slot,choice.light->type});
-    out.light_records=pending.light_records;
-    auto import=[&](AllocationResource &r,std::string_view name,bool texture=false)
-    {const auto handle=texture?graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name):
-        graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name);pending.imports.push_back({&r,handle});return graph.Version(handle);};
-    auto upload=import(frame.upload,"LocalShadow.Upload"),meta=import(frame.metadata,"LocalShadow.Metadata"),record=import(frame.records,"LocalShadow.Records"),
-        draw=import(frame.draws,"LocalShadow.DrawRecords"),index=import(frame.indexed,"LocalShadow.Indexed"),mesh_args=import(frame.mesh,"LocalShadow.Mesh"),
-        count=import(frame.counts,"LocalShadow.Counts"),statics=import(s->static_bank,"LocalShadow.StaticBank",true),dynamics=import(s->dynamic_bank,"LocalShadow.DynamicBank",true);
-    auto copy=graph.AddPass(220,"LocalShadow.UploadCommands",QueueHint::Copy);copy.Read(upload,Access::CopySource);
-    meta=copy.Write(meta,Access::CopyDest);record=copy.Write(record,Access::CopyDest);draw=copy.Write(draw,Access::CopyDest);
-    index=copy.Write(index,Access::CopyDest);mesh_args=copy.Write(mesh_args,Access::CopyDest);count=copy.Write(count,Access::CopyDest);
-    // Initialize the complete buffers, including unused commands. Readers see
-    // only published records/counts, but the graph owns their full native ranges.
+    // Complete the unused portions in the prepared value before publishing it
+    // to a waited native frame bank.
     std::memset(frame.mapped+s->draw_offset+draws.size()*32,0,std::size_t(s->indexed_offset-s->draw_offset-draws.size()*32));
     std::memset(frame.mapped+s->indexed_offset+indexed.size()*24,0,std::size_t(s->mesh_offset-s->indexed_offset-indexed.size()*24));
     std::memset(frame.mapped+s->mesh_offset+mesh.size()*16,0,std::size_t(s->count_offset-s->mesh_offset-mesh.size()*16));
     std::memset(frame.mapped+s->count_offset+counts.size()*4,0,std::size_t(s->upload_bytes-s->count_offset-counts.size()*4));
+    for(const auto &batch:frame.batches)data->has_batches[batch.layer]=true;
+    plan.has_batches=data->has_batches;plan.data=std::move(data);
+    return Result::Success();
+}
+Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowInputs &in,
+    LocalShadowOutputs &out,LocalShadowLayout *layout)
+{
+    LocalShadowFramePlan plan;
+    if(auto prepared=PrepareFrameRecordData(in,plan);!prepared)return prepared;
+    return RegisterImpl(graph,in,plan,out,layout,nullptr);
+}
+Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowInputs &in,
+    LocalShadowFramePlan &plan,LocalShadowOutputs &out,LocalShadowLayout *layout)
+{return RegisterImpl(graph,in,plan,out,layout,nullptr);}
+Result LocalShadowSystem::BindRetained(RenderGraphBuilder &graph,const LocalShadowInputs &in,
+    LocalShadowFramePlan &plan,const LocalShadowLayout &layout,LocalShadowOutputs &out)
+{return RegisterImpl(graph,in,plan,out,nullptr,&layout);}
+bool LocalShadowSystem::MatchesLayout(const LocalShadowInputs &in,
+    const LocalShadowFramePlan &plan,const LocalShadowLayout &layout) const noexcept
+{
+    const auto s=impl_->storage;
+    if(!s||!s->usable||!plan.data||!PreparedInputsMatch(*plan.data,in)||
+        plan.data->storage!=s||plan.data->consumed||
+        in.frame_slot>=s->frames.size()||
+        plan.data->record_generation!=s->frames[in.frame_slot].record_generation||
+        layout.storage_generation!=s->generation||
+        layout.initialized!=s->initialized||
+        layout.material_sampling!=bool(in.declare_material_sampling)||
+        layout.native_reads.size()!=in.native_reads.size())return false;
+    for(std::size_t index=0;index<in.native_reads.size();++index)
+        if(layout.native_reads[index].version!=in.native_reads[index].version||
+            layout.native_reads[index].access!=in.native_reads[index].access)return false;
+    for(UINT layer=0;layer<2;++layer)
+        if(layout.sampled_layers[layer]!=(plan.has_batches[layer]&&bool(in.draw)&&
+            bool(in.declare_material_sampling)))return false;
+    return true;
+}
+Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShadowInputs &in,
+    LocalShadowFramePlan &plan,LocalShadowOutputs &out,LocalShadowLayout *layout,
+    const LocalShadowLayout *retained)
+{
+    out={};auto s=impl_->storage;if(!s)return Result::Success();
+    auto data=plan.data;
+    if(!data||!PreparedInputsMatch(*data,in)||data->storage!=s||data->consumed||
+        in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||
+        data->record_generation!=s->frames[in.frame_slot].record_generation||
+        !s->usable||impl_->pending.graph)
+        return Failure(ErrorCode::InvalidState,"Local shadow frame record plan changed or is already used.");
+    if(retained)
+    {
+        if(!MatchesLayout(in,plan,*retained))
+            return Failure(ErrorCode::InvalidState,"Local shadow retained topology changed.");
+        for(UINT index=0;index<4;++index)
+            if(!graph.BindPass(retained->pass_indices[index],220+index))
+                return Failure(ErrorCode::InvalidState,"Local shadow retained pass changed.");
+        for(UINT index=0;index<retained->imports.size();++index)
+            if(!retained->imports[index]||
+                retained->imports[index].value>graph.ResourceCount()||
+                retained->imports[index].kind!=(index<7?ResourceKind::Buffer:ResourceKind::Texture))
+                return Failure(ErrorCode::InvalidState,"Local shadow retained import slot changed.");
+    }
+    for(const auto &read:in.native_reads)if(!read.version.resource||!graph.Resolve(read.version.resource))
+        return Failure(ErrorCode::InvalidArgument,"Local shadow canonical geometry/material graph read is missing.");
+    for(auto *resource:{&s->frames[in.frame_slot].upload,&s->frames[in.frame_slot].metadata,
+            &s->frames[in.frame_slot].records,&s->frames[in.frame_slot].draws,
+            &s->frames[in.frame_slot].indexed,&s->frames[in.frame_slot].mesh,
+            &s->frames[in.frame_slot].counts,&s->static_bank,&s->dynamic_bank})
+        if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
+    if(layout)
+    {
+        *layout={};layout->storage_generation=s->generation;
+        layout->initialized=s->initialized;
+        layout->material_sampling=bool(in.declare_material_sampling);
+        layout->native_reads.assign(in.native_reads.begin(),in.native_reads.end());
+        for(UINT layer=0;layer<2;++layer)
+            layout->sampled_layers[layer]=plan.has_batches[layer]&&bool(in.draw)&&
+                bool(in.declare_material_sampling);
+    }
+    auto &frame=s->frames[in.frame_slot];
+    std::memcpy(frame.mapped,data->frame.mapped,static_cast<std::size_t>(s->upload_bytes));
+    frame.batches=std::move(data->frame.batches);frame.clears=std::move(data->frame.clears);
+    auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;
+    pending.cache=std::move(data->cache);pending.status=std::move(data->status);
+    pending.light_records=std::move(data->light_records);out.light_records=pending.light_records;
+    data->consumed=true;
+    bool imports_valid=true;UINT import_index{};
+    auto import=[&](AllocationResource &r,std::string_view name,bool texture=false)
+    {
+        const UINT index=import_index++;
+        const auto handle=retained?retained->imports[index]:
+            (texture?graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name):
+                graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access,name));
+        if(retained)
+            imports_valid&=texture?graph.BindTexture(handle,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access):
+                graph.BindBuffer(handle,{r.resource.Get(),r.graph_completion,r.graph_queue,{},r.NativeContract()},r.graph_access);
+        if(layout)layout->imports[index]=handle;
+        pending.imports.push_back({&r,handle});return graph.Version(handle);
+    };
+    auto upload=import(frame.upload,"LocalShadow.Upload"),meta=import(frame.metadata,"LocalShadow.Metadata"),record=import(frame.records,"LocalShadow.Records"),
+        draw=import(frame.draws,"LocalShadow.DrawRecords"),index=import(frame.indexed,"LocalShadow.Indexed"),mesh_args=import(frame.mesh,"LocalShadow.Mesh"),
+        count=import(frame.counts,"LocalShadow.Counts"),statics=import(s->static_bank,"LocalShadow.StaticBank",true),dynamics=import(s->dynamic_bank,"LocalShadow.DynamicBank",true);
+    if(!imports_valid)return Failure(ErrorCode::InvalidState,"Local shadow retained resource binding changed.");
+    if(layout)layout->pass_indices[0]=graph.PassCount();
+    auto copy=retained?*graph.BindPass(retained->pass_indices[0],220):
+        graph.AddPass(220,"LocalShadow.UploadCommands",QueueHint::Copy);
+    if(!retained)
+    {
+        copy.Read(upload,Access::CopySource);
+        meta=copy.Write(meta,Access::CopyDest);record=copy.Write(record,Access::CopyDest);
+        draw=copy.Write(draw,Access::CopyDest);index=copy.Write(index,Access::CopyDest);
+        mesh_args=copy.Write(mesh_args,Access::CopyDest);count=copy.Write(count,Access::CopyDest);
+    }
+    else
+    {
+        meta=retained->outputs[0];record=retained->outputs[1];draw=retained->outputs[2];
+        index=retained->outputs[3];mesh_args=retained->outputs[4];count=retained->outputs[5];
+    }
     copy.SetExecute([s,slot=in.frame_slot](RenderPassContext &context)
     {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());auto &f=s->frames[slot];
         const std::pair<AllocationResource *,UINT64> copies[]{{&f.metadata,0},{&f.records,s->record_offset},{&f.draws,s->draw_offset},
@@ -530,14 +697,20 @@ Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowIn
     out.bank_extent=s->extent;out.descriptor_count=5;
     for(UINT layer=0;layer<2;++layer)
     {
-        auto pass=graph.AddPass(221+layer,layer?"LocalShadow.DynamicBank":"LocalShadow.StaticBank",QueueHint::Direct);
-        for(auto version:{meta,record,draw})pass.Read(version,Access::ShaderRead);
-        for(auto version:{index,mesh_args,count})pass.Read(version,Access::IndirectArgs);
-        for(const auto &r:in.native_reads)pass.Read(r.version,r.access);
-        if(in.draw && std::ranges::any_of(s->frames[in.frame_slot].batches,
-                [layer](const auto &batch) { return batch.layer==layer; }) && in.declare_material_sampling)
-            in.declare_material_sampling(pass);
-        auto &bank=layer?dynamics:statics;bank=s->initialized?pass.ReadWrite(bank,Access::DepthWrite):pass.Write(bank,Access::DepthWrite);
+        if(layout)layout->pass_indices[1+layer]=graph.PassCount();
+        auto pass=retained?*graph.BindPass(retained->pass_indices[1+layer],221+layer):
+            graph.AddPass(221+layer,layer?"LocalShadow.DynamicBank":"LocalShadow.StaticBank",QueueHint::Direct);
+        if(!retained)
+        {
+            for(auto version:{meta,record,draw})pass.Read(version,Access::ShaderRead);
+            for(auto version:{index,mesh_args,count})pass.Read(version,Access::IndirectArgs);
+            for(const auto &r:in.native_reads)pass.Read(r.version,r.access);
+            if(plan.has_batches[layer]&&in.declare_material_sampling)
+                in.declare_material_sampling(pass);
+        }
+        auto &bank=layer?dynamics:statics;
+        bank=retained?retained->outputs[6+layer]:
+            (s->initialized?pass.ReadWrite(bank,Access::DepthWrite):pass.Write(bank,Access::DepthWrite));
         pass.SetExecuteChecked([s,slot=in.frame_slot,layer,callback=in.draw,outputs=out,initialize=!s->initialized](RenderPassContext &context)->Result
         {
             auto *cmd=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());const auto &f=s->frames[slot];
@@ -552,9 +725,13 @@ Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowIn
             cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&rect);return callback(context,outputs,batches);
         });
     }
-    auto ready=graph.AddPass(223,"LocalShadow.ShadowDataReady",QueueHint::Direct);
-    for(auto version:{meta,record,statics,dynamics,draw})ready.Read(version,Access::AllShaderRead);
+    if(layout)layout->pass_indices[3]=graph.PassCount();
+    auto ready=retained?*graph.BindPass(retained->pass_indices[3],223):
+        graph.AddPass(223,"LocalShadow.ShadowDataReady",QueueHint::Direct);
+    if(!retained)for(auto version:{meta,record,statics,dynamics,draw})
+        ready.Read(version,Access::AllShaderRead);
     ready.SetExecute([](RenderPassContext &){});out.static_bank=statics;out.dynamic_bank=dynamics;
+    if(layout)layout->outputs={meta,record,draw,index,mesh_args,count,statics,dynamics};
     frame.owners=in.owners;return Result::Success();
 }
 Result LocalShadowSystem::CompleteSubmission(const RenderGraphBuilder &graph,const CompletionSet &completion,bool success)

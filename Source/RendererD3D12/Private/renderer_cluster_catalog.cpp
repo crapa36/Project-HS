@@ -1,4 +1,5 @@
 #include "renderer_cluster_catalog.hpp"
+#include "renderer_content.hpp"
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/material_schema.hpp>
 
@@ -35,13 +36,12 @@ std::string Digest(std::span<const std::byte> bytes)
 }
 std::string ExpectedDigest(const RendererConfig &config, const std::string &id)
 {
-    const auto found = config.product_digests.find(id);
-    Require(found != config.product_digests.end() && found->second.size() == 71 &&
-            found->second.starts_with("sha256:"), "selected Generation omits product digest");
-    for (std::size_t index = 7; index < found->second.size(); ++index)
-        Require((found->second[index] >= '0' && found->second[index] <= '9') ||
-                (found->second[index] >= 'a' && found->second[index] <= 'f'), "invalid Generation product digest");
-    return found->second;
+    const auto digest = RendererProductDigest(config, id);
+    Require(digest.size() == 71 && digest.starts_with("sha256:"), "selected content omits product digest");
+    for (std::size_t index = 7; index < digest.size(); ++index)
+        Require((digest[index] >= '0' && digest[index] <= '9') ||
+                (digest[index] >= 'a' && digest[index] <= 'f'), "invalid content product digest");
+    return digest;
 }
 std::vector<std::uint32_t> Depths(const rd::GeometryHierarchy &hierarchy, std::uint32_t &maximum)
 {
@@ -94,12 +94,12 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
         const auto stem = main_product_id.substr(7, main_product_id.size() - 12);
         const auto source_id = "environment/environment_" + std::string(stem) + ".meshbin";
         Require(std::ranges::find(main_package.dependencies, source_id) != main_package.dependencies.end(), "cluster catalog omits original mesh dependency");
-        std::filesystem::path hierarchy_path;
-        if (auto resolved = config.ResolveProduct(logical_id, hierarchy_path); !resolved) return resolved;
+        RendererAssetSource hierarchy_path;
+        if (auto resolved = ResolveRendererAsset(config, logical_id, hierarchy_path); !resolved) return resolved;
         const auto expected_digest = ExpectedDigest(config, logical_id);
         std::vector<std::byte> bytes;
         if (auto loaded = read(hierarchy_path, bytes); !loaded) return loaded;
-        Require(Digest(bytes) == expected_digest, "hierarchy bytes differ from selected Generation digest");
+        Require(hierarchy_path.pack || Digest(bytes) == expected_digest, "hierarchy bytes differ from selected Generation digest");
         EnvironmentClusterCatalog prepared;
         prepared.hierarchy_ = rd::DecodeGeometryHierarchy(bytes);
         Require(prepared.hierarchy_.geometry_flags == metadata.flags &&
@@ -111,7 +111,6 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
         Require(std::ranges::all_of(prepared.hierarchy_.groups, [&](const auto &group) {
             return group.material_partition == 0 && group.material_selector <= metadata.max_material_index;
         }), "environment hierarchy crosses its actual material or authored selector range");
-        (void)Depths(prepared.hierarchy_, prepared.max_ancestor_steps_);
         prepared.generation_ = config.content_generation_id;
         prepared.logical_id_ = logical_id;
         prepared.source_id_ = source_id;
@@ -122,7 +121,7 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
             Require(page.logical_id.starts_with(page_prefix), "hierarchy page belongs to another catalog");
             ClusterCatalogPage directory;
             directory.logical_id = page.logical_id;
-            if (auto resolved = config.ResolveProduct(page.logical_id, directory.path); !resolved) return resolved;
+            if (auto resolved = ResolveRendererAsset(config, page.logical_id, directory.source); !resolved) return resolved;
             directory.digest = ExpectedDigest(config, page.logical_id); // No page payload I/O during catalog load.
             directory.pinned = (page.flags & rd::kGeometryHierarchyPagePinned) != 0;
             const auto local_index = static_cast<std::uint32_t>(index);
@@ -141,17 +140,20 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
 }
 
 Result EnvironmentClusterCatalog::DecodePage(std::uint32_t page_index, std::span<const std::byte> bytes,
-    rd::GeometryData &output) const
+    rd::GeometryData &output,
+    const std::function<void(const rd::PackageView &, const rd::GeometryData &)> &admit) const
 {
     try
     {
         Require(!generation_.empty() && page_index < pages_.size(), "cluster page has no catalog/generation");
         const auto &page = pages_[page_index];
         Require(Digest(bytes) == page.digest, "cluster page bytes differ from selected Generation digest");
-        const auto package = rd::ReadPackage(bytes, MakeAssetId(page.logical_id));
+        const auto package = rd::ReadPackage(bytes, MakeAssetId(page.logical_id),
+            rd::PackageReadMode::GeometryDecoderValidatesVertices);
         Require(package.dependencies == std::vector<std::string>{source_id_}, "cluster page source dependency mismatch");
-        auto geometry = rd::DecodeGeometryPagePayload(bytes, MakeAssetId(page.logical_id), hierarchy_.geometry_flags);
+        auto geometry = rd::DecodeGeometryPagePayload(package, hierarchy_.geometry_flags);
         rd::ValidateGeometryHierarchyPage(hierarchy_, page_index, geometry);
+        if (admit) admit(package, geometry);
         output = std::move(geometry);
         return Result::Success();
     }
@@ -165,7 +167,7 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
     try
     {
         Require(!generation_.empty() && catalog_ordinal < rd::kEnvironmentMaterialNames.size() && generation_tag != 0, "GPU catalog identity is invalid");
-        rd::ValidateGeometryHierarchy(hierarchy_);
+        // Load decoded and validated this privately owned, immutable hierarchy.
         RebasedRange(group_base, hierarchy_.groups.size()); RebasedRange(child_base, hierarchy_.child_groups.size());
         RebasedRange(cluster_base, hierarchy_.clusters.size()); RebasedRange(page_base, hierarchy_.pages.size());
         ClusterGpuTables prepared;
@@ -233,7 +235,7 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
 void EnvironmentClusterCatalog::Reset() noexcept
 {
     hierarchy_ = {}; pages_.clear(); pinned_pages_.clear(); page_indices_.clear();
-    generation_.clear(); logical_id_.clear(); source_id_.clear(); max_ancestor_steps_ = 0;
+    generation_.clear(); logical_id_.clear(); source_id_.clear();
 }
 std::uint32_t EnvironmentClusterCatalog::FindPage(std::string_view logical_id) const
 {

@@ -112,9 +112,9 @@ Result D3D12Renderer::Impl::PrepareBrixelizerGi(const RendererConfig &candidate_
     return brixelizer_gi.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
         kFrameCount, settings,
         [&](std::string_view id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
-        }, candidate);
+        }, candidate_config.packed_textures, candidate);
 }
 } // namespace hs

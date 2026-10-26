@@ -3,9 +3,12 @@
 #include <hs/core/result.hpp>
 #include <hs/core/types.hpp>
 
+#include <d3d12.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -128,6 +131,8 @@ struct ResourceHandle
     std::uint32_t value{};
     ResourceKind kind{};
 
+    [[nodiscard]] bool operator==(const ResourceHandle &) const noexcept = default;
+
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return value != 0;
@@ -146,6 +151,8 @@ struct ResourceVersion
 {
     ResourceHandle resource{};
     std::uint32_t ordinal{};
+
+    [[nodiscard]] bool operator==(const ResourceVersion &) const noexcept = default;
 };
 
 // Half-open byte interval. Zero length and out-of-bounds intervals are invalid.
@@ -206,12 +213,38 @@ struct ExternalResourceAccess
     Access outgoing{Access::Common};
 };
 
+enum class NativeBackingKind : std::uint8_t
+{
+    Unknown,
+    Allocation,
+    DxgiSwapchain,
+    OwnedReservedTiles,
+};
+
+// Issued by the current resource owner after validating native identity and
+// backing ownership. OwnedReservedTiles attests that the streaming owner gives
+// this reserved resource exclusive tile ranges for its mapping lifetime.
+// This is frame binding data, never part of a cached graph plan.
+struct NativeResourceContract
+{
+    void *native_resource{};
+    void *resource_identity{};
+    void *device_identity{};
+    void *heap_identity{};
+    D3D12_RESOURCE_DESC description{};
+    D3D12_HEAP_TYPE buffer_heap{D3D12_HEAP_TYPE_DEFAULT};
+    std::uint64_t heap_offset{}, heap_size{};
+    std::uint64_t generation{};
+    NativeBackingKind backing{NativeBackingKind::Unknown};
+};
+
 struct ExternalTexture
 {
     void *native_resource{};
     CompletionSet completion{};
     QueueHint initial_queue{QueueHint::Direct};
     ExternalQueueCompletion external_completion{};
+    const NativeResourceContract *contract{};
 };
 
 struct ExternalBuffer
@@ -220,6 +253,7 @@ struct ExternalBuffer
     CompletionSet completion{};
     QueueHint initial_queue{QueueHint::Direct};
     ExternalQueueCompletion external_completion{};
+    const NativeResourceContract *contract{};
 };
 
 class RenderGraphBuilder;
@@ -391,6 +425,9 @@ class PassBuilder
     void SetExternalExecute(ExternalQueueBinding binding,
         std::span<const ExternalResourceAccess> accesses,
         std::move_only_function<Result(RenderExternalPassContext &, ExternalQueueCompletion &)> execute);
+    // A restored plan already owns its logical whole-resource boundaries.
+    void BindExternalExecute(ExternalQueueBinding binding,
+        std::move_only_function<Result(RenderExternalPassContext &, ExternalQueueCompletion &)> execute);
 
   private:
     PassBuilder(void *graph, std::uint32_t pass) noexcept;
@@ -404,6 +441,7 @@ class PassBuilder
 class RenderGraphBuilder
 {
   public:
+    using PlanHandle = std::uint64_t;
     RenderGraphBuilder();
     ~RenderGraphBuilder();
 
@@ -411,6 +449,18 @@ class RenderGraphBuilder
     RenderGraphBuilder &operator=(const RenderGraphBuilder &) = delete;
 
     void Reset();
+    // Handles identify one of the eight retained value-only plans on this builder.
+    // The caller must select by its exact pass/resource/use topology; a miss
+    // leaves it free to Reset and declare a new topology. Current native imports,
+    // state, completion and callbacks must all be rebound before Prepare.
+    [[nodiscard]] bool RestorePlan(PlanHandle handle);
+    [[nodiscard]] PlanHandle PreparedPlan() const noexcept;
+    [[nodiscard]] bool AllImportsCertified() const noexcept;
+    [[nodiscard]] bool BindTexture(TextureHandle slot, const ExternalTexture &texture, Access initial);
+    [[nodiscard]] bool BindBuffer(BufferHandle slot, const ExternalBuffer &buffer, Access initial);
+    [[nodiscard]] std::optional<PassBuilder> BindPass(std::uint32_t declaration_index,
+                                                       std::uint32_t expected_pass_id);
+    [[nodiscard]] std::uint32_t ResourceCount() const noexcept;
     [[nodiscard]] TextureHandle CreateTexture(const TextureDesc &description,
                                               std::string_view name);
     [[nodiscard]] BufferHandle CreateBuffer(const BufferDesc &description,
@@ -445,6 +495,10 @@ class RenderGraphBuilder
     [[nodiscard]] std::uint32_t CrossQueueDependencyCount() const noexcept;
     [[nodiscard]] QueueScheduleDependency CrossQueueDependency(
         std::uint32_t dependency_index) const noexcept;
+    // Execution slots on the physical queue/resource path to this output pass.
+    [[nodiscard]] std::vector<std::uint32_t> OutputDependencyClosureSlots(std::uint32_t pass_id) const;
+    [[nodiscard]] bool OutputClosureImportsReady(std::span<const std::uint32_t> slots,
+                                                 const CompletionSet &completed) const noexcept;
     [[nodiscard]] Access FinalAccess(ResourceHandle resource) const noexcept;
     [[nodiscard]] CompletionSet ResourceCompletion(ResourceHandle resource) const noexcept;
     [[nodiscard]] QueueHint FinalQueue(ResourceHandle resource) const noexcept;

@@ -1,24 +1,24 @@
 set(_hs_build_root "@CMAKE_CURRENT_BINARY_DIR@")
-set(_hs_generation_exe "@HS_GENERATION_EXE@")
-if(NOT EXISTS "${_hs_generation_exe}")
-    message(FATAL_ERROR "Runtime package requires the hs_generation snapshot exporter")
-endif()
 set(_hs_package_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
 file(MAKE_DIRECTORY "${_hs_package_root}")
-execute_process(COMMAND "${_hs_generation_exe}" --export-snapshot
-    --build-root "${_hs_build_root}" --scope runtime-full
-    --destination "${_hs_package_root}"
-    RESULT_VARIABLE _hs_export_result)
-if(NOT _hs_export_result EQUAL 0)
-    message(FATAL_ERROR "Selected runtime Generation snapshot export failed")
+if(CMAKE_INSTALL_CONFIG_NAME STREQUAL "Release")
+    set(_hs_pack_relative "@HS_SHIPPING_PACK_RELATIVE_PATH@")
+    set(_hs_pack_source "${_hs_build_root}/${_hs_pack_relative}")
+    if(NOT EXISTS "${_hs_pack_source}")
+        message(FATAL_ERROR "Runtime package requires the linked shipping content image")
+    endif()
+    get_filename_component(_hs_pack_destination "${_hs_package_root}/${_hs_pack_relative}" DIRECTORY)
+    file(INSTALL DESTINATION "${_hs_pack_destination}" TYPE FILE FILES "${_hs_pack_source}")
+else()
+    set(_hs_generation_exe "@HS_GENERATION_EXE@")
+    if(NOT EXISTS "${_hs_generation_exe}")
+        message(FATAL_ERROR "Development package requires the hs_generation snapshot exporter")
+    endif()
+    execute_process(COMMAND "${_hs_generation_exe}" --export-snapshot
+        --build-root "${_hs_build_root}" --scope runtime-full
+        --destination "${_hs_package_root}"
+        RESULT_VARIABLE _hs_export_result)
+    if(NOT _hs_export_result EQUAL 0)
+        message(FATAL_ERROR "Selected runtime Generation snapshot export failed")
+    endif()
 endif()
-
-# Temporary legacy Generation export remains necessary for renderer products.
-# N01 is incomplete until those consumers use the packed image as well.
-set(_hs_pack_relative "@HS_SHIPPING_PACK_RELATIVE_PATH@")
-set(_hs_pack_source "${_hs_build_root}/${_hs_pack_relative}")
-if(NOT EXISTS "${_hs_pack_source}")
-    message(FATAL_ERROR "Runtime package requires the linked shipping content image")
-endif()
-get_filename_component(_hs_pack_destination "${_hs_package_root}/${_hs_pack_relative}" DIRECTORY)
-file(INSTALL DESTINATION "${_hs_pack_destination}" TYPE FILE FILES "${_hs_pack_source}")

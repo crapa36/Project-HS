@@ -28,8 +28,8 @@ Result Invalid(std::string message)
 
 Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource> &uploads)
 {
-    std::filesystem::path path;
-    if (auto resolved = config.ResolveProduct(std::string(kNoiseVolumePackage), path); !resolved)
+    RendererAssetSource path;
+    if (auto resolved = ResolveRendererAsset(config, std::string(kNoiseVolumePackage), path); !resolved)
         return resolved;
     std::vector<std::byte> storage;
     if (auto read = ReadBinary(path, storage); !read) return read;
@@ -37,20 +37,19 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
     render_data::VolumeTexturePackageView package;
     try
     {
-        package = render_data::ReadVolumeTexturePackage(
-            storage, MakeAssetId(std::string(kNoiseVolumePackage)));
+        package = ReadRendererVolumeTexturePackage(config, kNoiseVolumePackage, storage);
     }
     catch (const std::exception &error)
     {
-        return Invalid("Invalid VFX volume texture package " + path.string() + ": " +
+        return Invalid("Invalid VFX volume texture package " + path.path.string() + ": " +
                        error.what());
     }
     const auto &description = package.description;
     if (description.width != 64 || description.height != 64 || description.depth != 64 ||
         description.mip_count != 1 || description.format != render_data::kTextureFormatRgba8 ||
-        package.dependencies != std::vector<std::string>{std::string(kNoiseVolumeSource)} ||
+        !RendererTextureDependencyMatches(config, kNoiseVolumePackage, package, kNoiseVolumeSource) ||
         package.subresources.size() != 1)
-        return Invalid("VFX volume texture package shape or dependency changed: " + path.string());
+        return Invalid("VFX volume texture package shape or dependency changed: " + path.path.string());
 
     const auto &source = package.subresources.front();
     if (source.mip_level != 0 || source.width != 64 || source.height != 64 || source.depth != 64 ||
@@ -58,7 +57,7 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
         source.volume_pitch != 64u * 64u * 64u * 4u ||
         source.volume_pitch != source.slice_pitch * source.depth ||
         source.bytes.size() != source.volume_pitch)
-        return Invalid("VFX volume texture package pitches changed: " + path.string());
+        return Invalid("VFX volume texture package pitches changed: " + path.path.string());
 
     D3D12_RESOURCE_DESC description_native{};
     description_native.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
@@ -94,7 +93,7 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
                     source.row_pitch >
                 upload_size - footprint.Offset)
         return Invalid("VFX volume texture package does not match the native copy footprint: " +
-                       path.string());
+                       path.path.string());
 
     uploads.emplace_back();
     D3D12MA::ALLOCATION_DESC upload_allocation{};

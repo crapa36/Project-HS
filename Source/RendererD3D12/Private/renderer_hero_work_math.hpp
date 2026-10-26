@@ -5,7 +5,7 @@
 
 namespace hs
 {
-inline constexpr std::uint32_t kHeroWorkContributors = 6, kHeroWorkPhases = 14;
+inline constexpr std::uint32_t kHeroWorkContributors = 12, kHeroWorkPhases = 14;
 inline constexpr std::uint64_t kHeroWorkRowBytes = 136;
 inline constexpr std::uint64_t kHeroWorkStatisticsOffset = 16, kHeroWorkOcclusionOffset = 128;
 inline constexpr std::uint32_t kHeroWorkShaderMagic = 0x31574848u, kHeroWorkShaderVersion = 1;

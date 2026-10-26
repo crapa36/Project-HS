@@ -85,6 +85,7 @@ struct TextureOwner
     TextureStreamRegistration registration;
     ResidencyTicket fallback_ticket;
     ComPtr<ID3D12Resource> reserved;
+    NativeResourceContract reserved_contract{};
     D3D12_PACKED_MIP_INFO packed{};
     std::vector<D3D12_SUBRESOURCE_TILING> tilings;
     std::vector<MipBacking> backing;
@@ -120,6 +121,7 @@ struct RendererTextureStreaming::Impl
     std::uint32_t frame_count{};
     std::uint64_t budget{};
     std::vector<TextureOwner> textures;
+    std::span<const render_data::TextureDescriptor> texture_catalog;
     std::vector<RetiredTexture> retired;
     Result Create(AllocationResource &target, D3D12_RESOURCE_DESC description,
                   D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state)
@@ -195,7 +197,7 @@ RendererTextureStreaming::RendererTextureStreaming() : impl_(std::make_unique<Im
 RendererTextureStreaming::~RendererTextureStreaming() = default;
 Result RendererTextureStreaming::Initialize(ID3D12Device *device, D3D12MA::Allocator *allocator,
     GraphicsQuality quality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities &capabilities,
-    std::uint32_t frame_count)
+    std::uint32_t frame_count, std::span<const render_data::TextureDescriptor> texture_catalog)
 {
     if (!device || !allocator || impl_->device || !frame_count)
         return Failure("Texture streaming initialization requires one device, allocator and budget.");
@@ -218,6 +220,7 @@ Result RendererTextureStreaming::Initialize(ID3D12Device *device, D3D12MA::Alloc
         options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
     impl_->device = device; impl_->allocator = allocator; impl_->capabilities = capabilities;
     impl_->frame_count = frame_count;
+    impl_->texture_catalog = texture_catalog;
     return Configure(quality, finest_mip, budget_mib);
 }
 Result RendererTextureStreaming::ValidateConfiguration(GraphicsQuality quality, std::uint32_t budget_mib) const
@@ -242,8 +245,14 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
                                           ResidencyManager &residency, TextureStreamId &id)
 {
     id = {};
+    if (static_cast<bool>(registration.source.pack) != static_cast<bool>(registration.compiled_texture) ||
+        (registration.compiled_texture && (registration.compiled_texture.value >= impl_->texture_catalog.size() ||
+            impl_->texture_catalog[registration.compiled_texture.value].dimension != render_data::TextureDimension::Texture2DArray ||
+            impl_->texture_catalog[registration.compiled_texture.value].asset_id.value != MakeAssetId(registration.logical_id).value ||
+            !Same(impl_->texture_catalog[registration.compiled_texture.value].description, registration.description))))
+        return Failure("Texture registration does not match its compiled metadata handle.");
     if (!impl_->device || !registration.fallback || !registration.generation_lease ||
-        registration.generation.empty() || registration.logical_id.empty() || registration.path.empty() ||
+        registration.generation.empty() || registration.logical_id.empty() || registration.source.empty() ||
         !registration.fallback_allocation_bytes || !registration.description.width || !registration.description.height ||
         !registration.description.mip_count || registration.fallback_graph_access == Access::Undefined ||
         registration.description.mip_count > 32 || !registration.description.array_size ||
@@ -255,6 +264,11 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
         (registration.pinned && registration.fallback_first_mip))
         return Failure("Invalid selected texture streaming registration.");
     const auto fallback = registration.fallback->GetDesc();
+    if (registration.fallback_contract.backing != NativeBackingKind::Unknown &&
+        (registration.fallback_contract.native_resource != registration.fallback.Get() ||
+         !registration.fallback_contract.resource_identity || !registration.fallback_contract.device_identity ||
+         !registration.fallback_contract.generation))
+        return Failure("Selected texture fallback contract does not belong to its owner.");
     const auto expected = Description(registration.description, registration.fallback_first_mip);
     D3D12_FEATURE_DATA_FORMAT_INFO planes{expected.Format, 0};
     if (fallback.Dimension != expected.Dimension || fallback.Width != expected.Width ||
@@ -268,7 +282,8 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
     {
         const auto &existing = impl_->textures[index].registration;
         if (existing.logical_id != registration.logical_id) continue;
-        if (existing.generation != registration.generation || existing.path != registration.path ||
+        if (existing.generation != registration.generation || existing.source != registration.source ||
+            existing.compiled_texture.value != registration.compiled_texture.value ||
             !Same(existing.description, registration.description) || existing.fallback.Get() != registration.fallback.Get() ||
             existing.fallback_first_mip != registration.fallback_first_mip ||
             existing.fallback_allocation_bytes != registration.fallback_allocation_bytes ||
@@ -298,6 +313,19 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
         const auto hr = impl_->device->CreateReservedResource(&description, D3D12_RESOURCE_STATE_COMMON,
             nullptr, IID_PPV_ARGS(&texture.reserved));
         if (FAILED(hr)) return NativeFailure("Create reserved selected texture", hr);
+        ComPtr<IUnknown> resource_identity, device_identity;
+        if (auto identity = texture.reserved.As(&resource_identity); FAILED(identity))
+            return NativeFailure("Identify reserved selected texture", identity);
+        if (auto identity = impl_->device.As(&device_identity); FAILED(identity))
+            return NativeFailure("Identify reserved texture device", identity);
+        auto &contract = texture.reserved_contract;
+        contract.native_resource = texture.reserved.Get();
+        contract.resource_identity = resource_identity.Get();
+        contract.device_identity = device_identity.Get();
+        contract.description = texture.reserved->GetDesc();
+        // Every mapped mip owns a distinct D3D12MA allocation until unmapping completes.
+        contract.backing = NativeBackingKind::OwnedReservedTiles;
+        contract.generation = texture.revision;
         UINT total_tiles{}, count = texture.registration.description.array_size * texture.registration.description.mip_count;
         texture.tilings.resize(count); D3D12_TILE_SHAPE shape{};
         impl_->device->GetResourceTiling(texture.reserved.Get(), &total_tiles, &texture.packed, &shape,
@@ -335,7 +363,12 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
     if (target > texture.tail_mip || texture.revision == UINT64_MAX)
         return Failure("Selected texture mip target or descriptor revision is invalid.");
     render_data::TexturePackageView package;
-    try { package = render_data::ReadTexturePackage(texture.bytes, MakeAssetId(texture.registration.logical_id)); }
+    try
+    {
+        package = texture.registration.compiled_texture ?
+            render_data::BindTextureDescriptor(texture.bytes, texture_catalog[texture.registration.compiled_texture.value]) :
+            render_data::ReadTexturePackage(texture.bytes, MakeAssetId(texture.registration.logical_id));
+    }
     catch (const std::exception &error) { return Failure("Selected texture decode failed: " + std::string(error.what())); }
     if (!Same(package.description, texture.registration.description))
         return Failure("Selected texture metadata changed inside its immutable Generation.");
@@ -659,8 +692,9 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         static_cast<void>(streaming.UpdatePriority(texture.request, texture.priority));
         if (page->state == StreamingPageState::Requested)
         {
-            std::error_code error; const auto size = std::filesystem::file_size(texture.registration.path, error);
-            if (error || !size || size > UINT64_MAX / 3u) return Failure("Selected texture file size is invalid.");
+            std::uint64_t size{};
+            if (auto sized = texture.registration.source.ByteCount(size); !sized) return sized;
+            if (!size || size > UINT64_MAX / 3u) return Failure("Selected texture file size is invalid.");
             if (!residency.CanStage(size * 3u)) continue;
             texture.read_ticket = residency.ReserveHost(size); texture.decode_ticket = residency.ReserveHost(size * 2u);
             if (!texture.read_ticket || !texture.decode_ticket)
@@ -672,7 +706,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             }
             bool submitted{};
             auto result = io.Enqueue({texture.request, texture.registration.generation, texture.registration.logical_id,
-                texture.registration.path, size, texture.registration.generation_lease}, streaming, residency,
+                texture.registration.source, size, texture.registration.generation_lease}, streaming, residency,
                 texture.read_ticket, submitted);
             if (!submitted)
             {
@@ -728,30 +762,138 @@ bool RendererTextureStreaming::HardwareBacked(TextureStreamId id) const noexcept
 {
     return id && id.value <= impl_->textures.size() && !!impl_->textures[id.value - 1].reserved;
 }
-Result RendererTextureStreaming::AddPendingPasses(RenderGraphBuilder &graph, ExternalQueueBinding queue,
-    std::uint32_t first_pass, std::vector<TextureStreamingGraphBinding> &bindings)
+bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
+    const TextureStreamingLayout &layout) const noexcept
+{
+    if(layout.first_pass_id!=first_pass||layout.queue!=QueueHint::Copy||
+        layout.entries.size()!=impl_->textures.size())return false;
+    for(std::size_t index=0;index<impl_->textures.size();++index)
+    {
+        const auto &texture=impl_->textures[index];
+        const auto view=View({static_cast<std::uint32_t>(index+1u)});
+        const auto batch=texture.pending;
+        const bool pending=batch&&!batch->submitted;
+        const auto &entry=layout.entries[index];
+        if(!view.resource||!entry.sampled||entry.sampled_version.resource!=entry.sampled||
+            entry.sampled_version.ordinal!=(pending&&!entry.separate_target?1u:0u)||
+            !Same(entry.description,view.logical_description)||
+            entry.first_mip!=view.first_mip||entry.resident_min_mip!=view.resident_min_mip||
+            entry.access!=view.access||entry.pending!=pending)return false;
+        if(pending)
+        {
+            if(entry.separate_target!=(batch->resource.Get()!=view.resource)||
+                (entry.separate_target&&!entry.candidate)||
+                entry.reserved!=batch->reserved||entry.copy_upload!=bool(batch->upload.resource)||
+                entry.target_mip!=batch->target_mip||entry.map_count!=batch->maps.size()||
+                entry.unmap_count!=batch->unmaps.size()||
+                entry.pass_id!=first_pass+index)return false;
+            if(entry.mapped_mips.size()!=batch->maps.size()||
+                entry.unmapped_mips!=batch->unmap_mips)return false;
+            for(std::size_t mip=0;mip<batch->maps.size();++mip)
+                if(entry.mapped_mips[mip]!=batch->maps[mip].mip)return false;
+        }
+    }
+    return true;
+}
+Result RendererTextureStreaming::AddPendingPasses(RenderGraphBuilder &graph,
+    ExternalQueueBinding queue,std::uint32_t first_pass,
+    std::vector<TextureStreamingGraphBinding> &bindings,TextureStreamingLayout *layout)
+{return AddPendingPassesImpl(graph,std::move(queue),first_pass,bindings,layout,nullptr);}
+Result RendererTextureStreaming::BindRetained(RenderGraphBuilder &graph,
+    ExternalQueueBinding queue,std::uint32_t first_pass,
+    const TextureStreamingLayout &layout,std::vector<TextureStreamingGraphBinding> &bindings)
+{return AddPendingPassesImpl(graph,std::move(queue),first_pass,bindings,nullptr,&layout);}
+Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
+    ExternalQueueBinding queue,std::uint32_t first_pass,
+    std::vector<TextureStreamingGraphBinding> &bindings,
+    TextureStreamingLayout *layout,const TextureStreamingLayout *retained)
 {
     if (!queue.native_queue_owner || queue.queue_type != QueueHint::Copy)
         return Failure("Texture mapping requires the graph's actual owned Copy queue.");
+    if(retained)
+    {
+        if(!MatchesLayout(first_pass,*retained))
+            return Failure("Texture streaming retained topology changed.");
+        for(const auto &entry:retained->entries)
+            if(entry.pending&&!graph.BindPass(entry.pass_index,entry.pass_id))
+                return Failure("Texture streaming retained Copy pass changed.");
+    }
+    if(layout)
+    {
+        *layout={};layout->first_pass_id=first_pass;
+        layout->entries.resize(impl_->textures.size());
+    }
     bindings.clear(); bindings.reserve(impl_->textures.size());
     for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
         auto &texture = impl_->textures[index]; const auto view = View({static_cast<std::uint32_t>(index + 1u)});
-        const auto handle = graph.ImportTexture({view.resource, view.completion, QueueHint::Direct}, view.access,
-            texture.registration.logical_id);
+        const NativeResourceContract *sampled_contract{};
+        if(texture.reserved.Get()==view.resource&&view.resource)
+        {
+            texture.reserved_contract.generation=texture.revision;
+            sampled_contract=&texture.reserved_contract;
+        }
+        else if(texture.software.resource.Get()==view.resource&&view.resource)
+        {
+            if(auto certified=texture.software.EnsureNativeContract(impl_->device.Get());!certified)return certified;
+            sampled_contract=texture.software.NativeContract();
+        }
+        else if(texture.registration.fallback.Get()==view.resource&&view.resource&&
+                texture.registration.fallback_contract.backing!=NativeBackingKind::Unknown)
+            sampled_contract=&texture.registration.fallback_contract;
+        TextureStreamingLayout::Entry unused{};
+        auto *capture=layout?&layout->entries[index]:nullptr;
+        const auto &entry=retained?retained->entries[index]:capture?*capture:unused;
+        const auto external=ExternalTexture{view.resource,view.completion,QueueHint::Direct,{},sampled_contract};
+        const auto handle=retained?entry.sampled:
+            graph.ImportTexture(external,view.access,texture.registration.logical_id);
+        if(retained&&!graph.BindTexture(handle,external,view.access))
+            return Failure("Texture streaming sampled import changed.");
+        if(layout)
+        {
+            capture->sampled=handle;capture->description=view.logical_description;
+            capture->first_mip=view.first_mip;capture->resident_min_mip=view.resident_min_mip;
+            capture->access=view.access;
+        }
         auto version = graph.Version(handle); const auto batch = texture.pending;
         if (batch && !batch->submitted)
         {
             auto target = handle;
             if (batch->resource.Get() != view.resource)
-                target = graph.ImportTexture({batch->resource.Get(), {}, QueueHint::Copy}, Access::Common,
-                    "selected texture candidate");
-            auto pass = graph.AddPass(first_pass + static_cast<std::uint32_t>(index), "Texture mip map/upload", QueueHint::Copy);
-            const auto written = pass.Write(graph.Version(target), Access::CopyDest);
+            {
+                const NativeResourceContract *target_contract{};
+                if(batch->reserved&&texture.reserved.Get()==batch->resource.Get())
+                    target_contract=&texture.reserved_contract;
+                else if(batch->replacement.resource.Get()==batch->resource.Get()&&batch->resource)
+                {
+                    if(auto certified=batch->replacement.EnsureNativeContract(impl_->device.Get());!certified)return certified;
+                    target_contract=batch->replacement.NativeContract();
+                }
+                const auto target_external=ExternalTexture{batch->resource.Get(),{},QueueHint::Copy,{},target_contract};
+                target=retained?entry.candidate:
+                    graph.ImportTexture(target_external,Access::Common,"selected texture candidate");
+                if(retained&&!graph.BindTexture(target,target_external,Access::Common))
+                    return Failure("Texture streaming candidate import changed.");
+            }
+            if(layout)
+            {
+                capture->pending=true;capture->separate_target=target.value!=handle.value;
+                capture->candidate=capture->separate_target?target:TextureHandle{};
+                capture->reserved=batch->reserved;capture->copy_upload=bool(batch->upload.resource);
+                capture->target_mip=batch->target_mip;
+                capture->map_count=static_cast<std::uint32_t>(batch->maps.size());
+                capture->unmap_count=static_cast<std::uint32_t>(batch->unmaps.size());
+                for(const auto &mapping:batch->maps)capture->mapped_mips.push_back(mapping.mip);
+                capture->unmapped_mips=batch->unmap_mips;
+                capture->pass_index=graph.PassCount();capture->pass_id=first_pass+static_cast<std::uint32_t>(index);
+            }
+            auto pass=retained?*graph.BindPass(entry.pass_index,entry.pass_id):
+                graph.AddPass(first_pass+static_cast<std::uint32_t>(index),"Texture mip map/upload",QueueHint::Copy);
+            const auto written=retained?ResourceVersion{target,1}:
+                pass.Write(graph.Version(target),Access::CopyDest);
             const ExternalResourceAccess access{target, Access::Common, Access::Common};
             auto retained_queue = queue; retained_queue.resource_lease = batch;
-            pass.SetExternalExecute(std::move(retained_queue), {&access, 1},
-                [batch](RenderExternalPassContext &context, ExternalQueueCompletion &completion) {
+            auto execute=[batch](RenderExternalPassContext &context, ExternalQueueCompletion &completion) {
                     completion.resource_lease = batch;
                     auto *native_queue = static_cast<ID3D12CommandQueue *>(context.NativeCommandQueue());
                     if (!native_queue || batch->started) return Failure("Texture copy/mapping batch submitted twice.");
@@ -775,12 +917,16 @@ Result RendererTextureStreaming::AddPendingPasses(RenderGraphBuilder &graph, Ext
                     }
                     ID3D12CommandList *lists[]{batch->list.Get()}; native_queue->ExecuteCommandLists(1, lists);
                     return Result::Success();
-                });
+                };
+            if(retained)pass.BindExternalExecute(std::move(retained_queue),std::move(execute));
+            else pass.SetExternalExecute(std::move(retained_queue),{&access,1},std::move(execute));
             batch->scheduled = true;
             if (target.value == handle.value) version = written;
-            else graph.SetFinalAccess(written, Access::Common);
+            else if(!retained)graph.SetFinalAccess(written, Access::Common);
         }
-        graph.SetFinalAccess(version, Access::AllShaderRead);
+        if(!retained)graph.SetFinalAccess(version,Access::AllShaderRead);
+        else version=entry.sampled_version;
+        if(layout)capture->sampled_version=version;
         bindings.push_back({{static_cast<std::uint32_t>(index + 1u)}, version});
     }
     return Result::Success();

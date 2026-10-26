@@ -1,7 +1,7 @@
 #pragma once
 
 #include "vfx_ribbon_gpu.hpp"
-#include <hs/renderer/vfx_ribbon_input.hpp>
+#include <hs/render_data/vfx_ribbon_input.hpp>
 #include <span>
 #include <string>
 #include <tuple>

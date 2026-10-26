@@ -1,5 +1,5 @@
 #pragma once
-#include <hs/renderer/vfx_owned_mesh.hpp>
+#include <hs/render_data/vfx_owned_mesh.hpp>
 #include <hs/renderer/vfx_program.hpp>
 #include <span>
 #include <vector>

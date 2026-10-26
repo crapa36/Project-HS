@@ -6,6 +6,7 @@
 #include <hs/renderer/hero_work.hpp>
 
 #include <d3d12.h>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -46,6 +47,10 @@ struct HeroTransparencyInputs
     HeroTransparencyGuide opaque_depth, hdr, accumulation, revealage;
     D3D12_CPU_DESCRIPTOR_HANDLE accumulation_rtv{}, revealage_rtv{}, opaque_readonly_dsv{};
     ViewExtent render_active;
+    // Current-frame conservative HDR write rectangle. Empty selects a full copy.
+    D3D12_RECT composition_rect{};
+    // A sparse CPU contributor set may justify same-frame GPU occupancy queries.
+    bool use_occupancy_queries{};
     std::uint32_t frame_slot{};
     CompletionSet completed;
     // Reserved suffix of the current native frame SRV heap. Root owns its lease.
@@ -78,6 +83,37 @@ struct HeroTransparencyOutputs
     ID3D12Resource *corrected_resource{};
     D3D12_CPU_DESCRIPTOR_HANDLE corrected_srv{};
 };
+struct HeroWorkRetainedLayout
+{
+    static constexpr std::size_t kMaxContributors = 12;
+    std::uint32_t contributor_count{}, argument_copy_pass{};
+    BufferHandle zero_upload{}, arguments_readback{};
+    std::array<ResourceVersion, kMaxContributors> argument_versions{};
+    std::array<BufferHandle, kHeroTransparencyPhaseCount> native_readback{},
+        shader_gpu{}, shader_readback{};
+    std::array<std::uint32_t, kHeroTransparencyPhaseCount> shader_initialize_pass{},
+        shader_copy_pass{};
+};
+struct HeroTransparencyLayout
+{
+    std::uint64_t target_generation{};
+    std::uint32_t layer_count{};
+    bool capture_work{}, occupancy{};
+    std::array<ResourceVersion, 4> inputs{};
+    ResourceVersion background{};
+    std::vector<HeroTransparencySceneRead> peel_reads, scene_reads;
+    std::array<TextureHandle, kHeroTransparencyMaxLayers> front{}, identity{}, exit{};
+    std::array<TextureHandle, 2> color{};
+    std::array<TextureHandle, 6> guides{};
+    TextureHandle overflow{};
+    std::array<BufferHandle, kHeroTransparencyMaxLayers> occupancy_results{};
+    std::array<std::uint32_t, kHeroTransparencyMaxLayers> front_pass{}, exit_pass{},
+        copy_pass{}, composite_pass{};
+    std::uint32_t overflow_clear_pass{}, tail_pass{};
+    std::array<ResourceVersion, 6> guide_versions{};
+    ResourceVersion overflow_version{}, accumulation_version{}, revealage_version{}, corrected_version{};
+    HeroWorkRetainedLayout work{};
+};
 struct HeroTransparencyTargets;
 class HeroTransparencyCandidate
 {
@@ -102,12 +138,20 @@ class HeroTransparencySystem
     // Root registers the regular VFX OIT first, excluding the hero bodies.
     // These passes append only the unpeeled hero fragments to that OIT tail.
     [[nodiscard]] Result RegisterLayers(RenderGraphBuilder &, const HeroTransparencyInputs &,
-        HeroTransparencyOutputs &);
+        HeroTransparencyOutputs &, HeroTransparencyLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetainedLayers(RenderGraphBuilder &, const HeroTransparencyInputs &,
+        const HeroTransparencyLayout &, HeroTransparencyOutputs &);
     // Call after the existing distortion/OIT composite has produced background.
-    // Copies its active rectangle, then replaces each peeled front far to near.
+    // Initializes both targets from the active background, then copies the
+    // qualified write rectangle for later layers before replacing fronts.
     // The final nearest-front draw also produces all six reconstruction guides.
     [[nodiscard]] Result RegisterComposition(RenderGraphBuilder &, HeroTransparencyGuide background,
-        HeroTransparencyOutputs &);
+        HeroTransparencyOutputs &, HeroTransparencyLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetainedComposition(RenderGraphBuilder &, HeroTransparencyGuide background,
+        const HeroTransparencyLayout &, HeroTransparencyOutputs &);
+    // Pure topology check for selecting a retained plan before RestorePlan.
+    [[nodiscard]] bool MatchesLayout(const HeroTransparencyInputs &,
+        HeroTransparencyGuide background, const HeroTransparencyLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
@@ -116,6 +160,12 @@ class HeroTransparencySystem
     // Called only after all old submissions have reliably completed.
     void SwapState(HeroTransparencySystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterLayersImpl(RenderGraphBuilder &, const HeroTransparencyInputs &,
+        HeroTransparencyOutputs &, HeroTransparencyLayout *capture,
+        const HeroTransparencyLayout *retained);
+    [[nodiscard]] Result RegisterCompositionImpl(RenderGraphBuilder &, HeroTransparencyGuide,
+        HeroTransparencyOutputs &, HeroTransparencyLayout *capture,
+        const HeroTransparencyLayout *retained);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

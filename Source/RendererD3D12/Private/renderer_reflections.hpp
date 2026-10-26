@@ -61,6 +61,17 @@ struct ScreenReflectionsOutputs
     ID3D12Resource *composed_resource{};
     D3D12_CPU_DESCRIPTOR_HANDLE composed_srv{};
 };
+struct ScreenReflectionsLayout
+{
+    bool valid{}, active{}, history{}, ambient{};
+    ViewExtent render_capacity{},trace_capacity{};
+    std::uint32_t hierarchy_elements{};
+    std::uint32_t sidecars{};
+    std::array<ResourceVersion, 13> guides{};
+    std::array<ResourceHandle, 7> resources{};
+    std::array<std::uint32_t, 3> passes{};
+    ResourceVersion hierarchy, raw, current, validation, composed;
+};
 struct ScreenReflectionsTargets;
 class ScreenReflectionsCandidate
 {
@@ -87,7 +98,11 @@ class ScreenReflectionsSystem
         const ShaderReader &read_shader, ScreenReflectionsCandidate &candidate) const;
     [[nodiscard]] Result Commit(ScreenReflectionsCandidate &&candidate, const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &graph, const ScreenReflectionsInputs &inputs,
-        ScreenReflectionsConstants constants, ScreenReflectionsOutputs &outputs);
+        ScreenReflectionsConstants constants, ScreenReflectionsOutputs &outputs,
+        ScreenReflectionsLayout *layout = nullptr);
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const ScreenReflectionsInputs &,
+        ScreenReflectionsConstants, const ScreenReflectionsLayout &, ScreenReflectionsOutputs &);
+    [[nodiscard]] bool MatchesLayout(const ScreenReflectionsInputs &,const ScreenReflectionsLayout &)const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;
@@ -96,6 +111,9 @@ class ScreenReflectionsSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(ScreenReflectionsSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const ScreenReflectionsInputs &,
+        ScreenReflectionsConstants, ScreenReflectionsOutputs &,
+        ScreenReflectionsLayout *, const ScreenReflectionsLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

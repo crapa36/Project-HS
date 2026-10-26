@@ -100,7 +100,7 @@ void Append(const VfxProgramView&p,const VfxEffectRecord&e,const Anchor&a,float 
  }
 }
 }
-std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick tick)
+std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,double tick)
 {
  std::vector<VfxDecalInput> result;
  for(const auto&i:events)

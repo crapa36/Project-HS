@@ -20,7 +20,6 @@ namespace hs
 {
 
 class ShippedContentOwner;
-struct SelectedGeneration;
 namespace audio_detail { struct DeveloperAudioCatalog; }
 
 enum class AudioDeviceState : std::uint8_t
@@ -134,7 +133,7 @@ class AudioEngine
     [[nodiscard]] Result InitializeDevice(const SettingsData &settings);
     [[nodiscard]] Result InitializePlayback(const SettingsData &settings);
     [[nodiscard]] Result InitializePrepared(const SettingsData &settings, audio_detail::DeveloperAudioCatalog catalog);
-    void RetainGeneration(SelectedGeneration &&generation);
+    void RetainGeneration(std::shared_ptr<const void> generation);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -325,7 +325,8 @@ void ResolveVisibilitySphere(InstanceData instance, StaticDrawRef draw,
 {
     center = instance.Position.xyz;
     radius = instance.Position.w;
-    if ((draw.MeshFlags & 0x40000u) != 0u)
+    // Qualified cooked bounds already enclose every interpolated skin position.
+    if ((draw.MeshFlags & 0x40000u) != 0u && (draw.MeshFlags & 0x400000u) == 0u)
     {
         const uint skin_slot = HsLoadGpuSceneSkin(draw.InstanceIndex).x;
         const float4 local_bound = SkinBounds[skin_slot];

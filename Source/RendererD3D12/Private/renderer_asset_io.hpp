@@ -2,6 +2,7 @@
 
 #include "residency_manager.hpp"
 #include "streaming_manager.hpp"
+#include "renderer_asset_source.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -16,7 +17,7 @@ struct ImmutableAssetRead
 {
     StreamingRequestId request;
     std::string generation, logical_id;
-    std::filesystem::path path;
+    RendererAssetSource source;
     std::uint64_t expected_bytes{};
     std::shared_ptr<const void> generation_lease;
     std::function<void(std::span<const std::byte>)> prepare;

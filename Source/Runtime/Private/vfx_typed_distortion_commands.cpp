@@ -116,7 +116,7 @@ void Append(const VfxProgramView&p,const VfxEffectRecord&e,const Anchor&a,float 
  }
 }
 }
-std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick current_tick)
+std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,double current_tick)
 {
  std::vector<VfxDistortionInput> result;
  for(const auto&in:events)

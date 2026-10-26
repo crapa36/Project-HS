@@ -186,8 +186,8 @@ Result D3D12Renderer::Impl::PrepareReconstructionGuides(const RendererConfig &ca
 {
     return reconstruction_guides.Prepare(device.Get(), allocator, capacity, output, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
-            std::filesystem::path path;
-            if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
+            RendererAssetSource path;
+            if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, composition);
 }

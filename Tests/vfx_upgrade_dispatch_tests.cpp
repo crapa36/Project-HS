@@ -757,12 +757,12 @@ void SimulationEmitsCooldownProcForRealRefund()
 }
 void StagesAreIndependent()
 {
-    auto p=Program();std::vector<hs::PresentationEvent> out;
+    auto p=Program();std::vector<hs::PresentationEvent> out, staging;
     for(std::uint8_t stage=1;stage<=3;++stage)
     {
         auto e=Event(1,stage);auto audio=e;audio.kind=hs::PresentationKind::Audio;audio.asset=hs::MakeAssetId("audio.common.explosion_small");
         const std::array input{e,audio};
-        Check(hs::runtime_detail::DispatchVfxUpgradeEvents(p,input,out).Succeeded(),"valid stage dispatch failed");
+        Check(hs::runtime_detail::DispatchVfxUpgradeEvents(p,input,out,&staging).Succeeded(),"valid stage dispatch failed");
         Check(out.size()==2&&out[0].asset.value==hs::MakeAssetId(names[stage]).value&&out[1].asset.value==audio.asset.value,
               "dispatch fired entire sequence or duplicated generic event/audio");
         Check(out[0].sequence==91&&out[0].tick==100&&out[0].geometry.radius==2.25f&&out[0].geometry.end_tick==160&&
@@ -772,6 +772,13 @@ void StagesAreIndependent()
         out.size()==1&&out[0].asset.value==hs::MakeAssetId(names[0]).value,"zero-based upgrade index did not select ordinal1");
     e.upgrade_stage=0;Check(hs::runtime_detail::DispatchVfxUpgradeEvents(p,std::span(&e,1),out).Succeeded()&&
         out[0].asset.value==e.asset.value,"ordinary event was remapped");
+    auto invalid=Event(1,2);invalid.geometry.radius=0;
+    const std::array partially_valid{e,invalid};
+    Check(!hs::runtime_detail::DispatchVfxUpgradeEvents(p,partially_valid,out,&staging) &&
+          out.size()==1 && out[0].asset.value==e.asset.value,
+          "reused staging published a partial failed batch");
+    Check(hs::runtime_detail::DispatchVfxUpgradeEvents(p,{},out,&staging).Succeeded() && out.empty(),
+          "reused staging retained events from a failed batch");
 }
 void InvalidContractsFailWithoutPartialOutput()
 {

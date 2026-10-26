@@ -2,6 +2,7 @@
 #include <hs/render_data/geometry_package.hpp>
 #include <cstdint>
 #include <span>
+#include <vector>
 namespace hs::geometry_content
 {
 struct GeometryErrorBounds
@@ -35,6 +36,17 @@ struct GeometryErrorChecks
     GeometryErrorCheckMode mode{GeometryErrorCheckMode::Normal};
     const GeometryErrorQualification *qualification{};
 };
+// One fixed target triangle per source triangle. Its three barycentric
+// witnesses are reused at both palette endpoints; convexity then encloses
+// the complete source triangle throughout linear skin interpolation.
+struct SurfaceWitness
+{
+    std::uint32_t target_triangle{};
+    std::array<std::array<double, 3>, 3> target_barycentric{};
+};
+[[nodiscard]] std::vector<SurfaceWitness> BuildSurfaceWitnesses(
+    std::span<const render_data::ExpandedVertex> source,
+    std::span<const render_data::ExpandedVertex> target);
 [[nodiscard]] GeometryErrorQualificationKey GeometryErrorImplementationKey() noexcept;
 // Preserve complete vertex field identity without a portable encode/decode roundtrip.
 void IndexVertices(std::span<const render_data::ExpandedVertex> expanded,
@@ -42,6 +54,10 @@ void IndexVertices(std::span<const render_data::ExpandedVertex> expanded,
                    std::vector<unsigned> &indices);
 [[nodiscard]] render_data::GeometryData CookGeometry(
     std::span<const render_data::ExpandedVertex> expanded, std::uint32_t flags);
+// Index-only skinned simplification keeps every surviving authored vertex
+// field intact. Each material submesh is simplified independently.
+[[nodiscard]] std::vector<render_data::ExpandedVertex> SimplifySkinnedGeometry(
+    const render_data::GeometryData &fine, float absolute_error);
 // Method ABI 1: symmetric material-aware distance to closed triangle
 // surfaces, with adaptive Lipschitz upper bounds (including degenerate faces).
 // ExpandedVertex::material_index may be a shader/atlas entry rather than the

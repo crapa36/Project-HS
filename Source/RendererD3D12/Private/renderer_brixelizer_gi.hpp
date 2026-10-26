@@ -3,6 +3,7 @@
 #include "renderer_scene_geometry.hpp"
 #include "renderer_ambient_occlusion.hpp"
 #include "renderer_sdk_frame.hpp"
+#include <hs/render_data/texture_descriptor.hpp>
 #include <array>
 #include <string>
 
@@ -55,6 +56,40 @@ struct BrixelizerSceneInputs
     std::uint32_t excluded_masked_count{},excluded_thin_count{},excluded_translucent_count{};
 };
 struct BrixelizerSceneOutputs { ResourceVersion sdf_atlas{}; std::uint32_t instance_count{}; };
+// Ephemeral current-frame CPU/SDK preparation. The SDK BakeUpdate and native
+// identity mutations happen once before graph plan selection; no native owner
+// pointer or baked SDK descriptor is retained in a graph layout.
+struct BrixelizerFrameRecordData
+{
+    std::uint32_t frame_slot{}, static_instances{}, dynamic_instances{}, updated_cascade{};
+    std::uint64_t frame_index{}, scene_revision{}, scratch_width{};
+    std::uint32_t geometry_count{}, instance_count{}, physical_cascades{};
+    ViewExtent extent{};
+    bool history_valid{}, noise_upload{};
+    std::vector<SceneGeometryReadToken> geometry_reads;
+    std::vector<SceneGeometryReadToken> unique_geometry_reads;
+    bool operator==(const BrixelizerFrameRecordData &) const noexcept = default;
+};
+inline constexpr std::uint32_t kBrixelizerGraphScreenCount=16;
+struct BrixelizerGraphLayout
+{
+    BrixelizerFrameRecordData record;
+    std::vector<ResourceHandle> imports;
+    std::vector<ResourceVersion> sdf_versions,sdf_read_versions;
+    std::array<ResourceVersion,kBrixelizerGraphScreenCount> initial_screens{};
+    std::array<ResourceVersion,kBrixelizerGraphScreenCount> screens{};
+    std::array<ResourceVersion,16> noise_versions{};
+    ResourceVersion constant_version{};
+    std::array<std::uint32_t,10> passes{UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,
+        UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX};
+    std::vector<SceneGeometryReadToken> cache_reads,lighting_reads;
+    std::array<ResourceVersion,12> lighting_guides{};
+    ResourceVersion environment_cube{},noise_override{},composite_hdr{};
+    std::uint32_t sidecar_count{};
+    bool cache_injection{},lighting{},composite{},valid{};
+};
+[[nodiscard]] bool MatchesBrixelizerGraphLayout(const BrixelizerFrameRecordData &,
+    const BrixelizerGraphLayout &) noexcept;
 struct BrixelizerCacheInjectionInputs
 {
     std::span<const SceneShaderRead> reads; // one canonical set of deferred probe/shadow/light dependencies
@@ -141,19 +176,26 @@ class BrixelizerGiSystem
     BrixelizerGiSystem &operator=(const BrixelizerGiSystem&)=delete;
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ID3D12RootSignature *,
         ViewExtent fixed_render_extent,std::uint32_t frame_slots,const BrixelizerSettings &,
-        const SceneShaderReader &,BrixelizerCandidate &) const;
+        const SceneShaderReader &,std::span<const render_data::TextureDescriptor>,BrixelizerCandidate &) const;
     [[nodiscard]] Result Commit(BrixelizerCandidate &&,const CompletionSet &);
-    [[nodiscard]] Result RegisterScene(RenderGraphBuilder &,const BrixelizerSceneInputs &,BrixelizerSceneOutputs &);
+    [[nodiscard]] Result PrepareFrameRecordData(const BrixelizerSceneInputs &,
+        BrixelizerFrameRecordData &);
+    [[nodiscard]] Result RegisterScene(RenderGraphBuilder &,const BrixelizerSceneInputs &,BrixelizerSceneOutputs &,
+        BrixelizerGraphLayout *capture=nullptr,const BrixelizerGraphLayout *retained=nullptr);
     [[nodiscard]] Result RegisterCacheInjection(RenderGraphBuilder &,const BrixelizerCacheInjectionInputs &,AmbientOcclusionGuide &);
     [[nodiscard]] Result RegisterLighting(RenderGraphBuilder &,const BrixelizerLightingInputs &,
         BrixelizerConstants,BrixelizerLightingOutputs &);
     [[nodiscard]] Result RegisterComposite(RenderGraphBuilder &,const BrixelizerCompositeInputs &,BrixelizerTexture &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
+    void AbandonPreparedFrame() noexcept;
     // SDK has no reset flag. Drained GI recreation retains SDF on a pure extent
     // change; camera cut/origin discontinuity requests rebuild_sdf=true.
     [[nodiscard]] Result ResetHistoryAfterCompletion(const CompletionSet &,ViewExtent fixed_render_extent,bool rebuild_sdf=false);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] BrixelizerStatus Status() const;
+    // Exact finest SDF voxel configured on the active native context; zero
+    // means no usable context and requires LOD0 at its consumers.
+    [[nodiscard]] float FinestVoxelSizeMeters() const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     [[nodiscard]] CompletionSet RequiredCompletion() const noexcept;
     void SwapState(BrixelizerGiSystem &other) noexcept { impl_.swap(other.impl_); }

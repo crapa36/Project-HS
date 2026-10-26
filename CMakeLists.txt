@@ -40,6 +40,23 @@ option(HS_WITH_DIRECTSTORAGE "Build the pinned native DirectStorage 1.3.0 asset 
 option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
 option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(HS_SINGLE_CONFIG_RELEASE ON)
+endif()
+if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS AND HS_SINGLE_CONFIG_RELEASE)
+    foreach(shipping_input IN ITEMS
+            "Shipping/content.generated.cpp" "${HS_SHIPPING_PACK_RELATIVE_PATH}")
+        if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/${shipping_input}")
+            message(FATAL_ERROR
+                "Prebuilt Release requires ${shipping_input} in ${CMAKE_CURRENT_BINARY_DIR}; build with HS_BUILD_CONTENT_TOOLS=ON to produce the shipping pair first.")
+        endif()
+    endforeach()
+endif()
+if(HS_BUILD_RUNTIME)
+    install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_release_begin.cmake"
+        CONFIGURATIONS Release COMPONENT Runtime)
+endif()
+
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     # Each completed object owns its dependency snapshot. Querying Ninja's
     # shared writable deps log during a parallel build races Windows file locks.
@@ -89,13 +106,15 @@ endif()
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
     set(HS_FONT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Generated/Fonts")
     file(MAKE_DIRECTORY "${HS_FONT_DIRECTORY}")
-    file(
-        DOWNLOAD
-        "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf"
-        "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
-        EXPECTED_HASH SHA256=194018E6B2B293A7964F037B25C0249CE1418BC9AB3C971060A03AA57861E252
-        TLS_VERIFY ON
-    )
+    if(HS_BUILD_CONTENT_TOOLS OR NOT HS_SINGLE_CONFIG_RELEASE)
+        file(
+            DOWNLOAD
+            "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf"
+            "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
+            EXPECTED_HASH SHA256=194018E6B2B293A7964F037B25C0249CE1418BC9AB3C971060A03AA57861E252
+            TLS_VERIFY ON
+        )
+    endif()
     file(
         DOWNLOAD
         "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/OFL.txt"
@@ -107,13 +126,15 @@ if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
 endif()
 
 if(HS_BUILD_RUNTIME)
-    FetchContent_Declare(
-        imgui
-        GIT_REPOSITORY https://github.com/ocornut/imgui.git
-        GIT_TAG v1.91.9b
-        GIT_SHALLOW TRUE
-    )
-    FetchContent_MakeAvailable(imgui)
+    if(NOT HS_SINGLE_CONFIG_RELEASE)
+        FetchContent_Declare(
+            imgui
+            GIT_REPOSITORY https://github.com/ocornut/imgui.git
+            GIT_TAG v1.91.9b
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(imgui)
+    endif()
 
     FetchContent_Declare(
         agility
@@ -166,8 +187,6 @@ add_library(
     Source/Core/Private/sha256.cpp
     Source/Core/Private/shipped_content_owner.cpp
     Source/Core/Private/process_info.cpp
-    Source/Core/Private/render_snapshot.cpp
-    Source/Core/Private/snapshot_exchange.cpp
 )
 target_include_directories(hs_core PUBLIC Source/Core/Public)
 if(WIN32)
@@ -175,6 +194,11 @@ if(WIN32)
 endif()
 target_compile_definitions(hs_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_core)
+
+add_library(hs_render_data_values STATIC Source/RenderData/Private/render_snapshot.cpp)
+target_include_directories(hs_render_data_values PUBLIC Source/RenderData/Public)
+target_link_libraries(hs_render_data_values PUBLIC hs_core)
+hs_configure_target(hs_render_data_values)
 
 add_library(
     hs_jobs STATIC
@@ -193,7 +217,7 @@ hs_configure_target(hs_game_domain)
 add_library(hs_environment_layout STATIC
     Source/Presentation/Private/environment_layout.cpp)
 target_include_directories(hs_environment_layout PUBLIC Source/Presentation/Public)
-target_link_libraries(hs_environment_layout PUBLIC hs_core hs_game_domain)
+target_link_libraries(hs_environment_layout PUBLIC hs_core hs_game_domain hs_render_data_values)
 hs_configure_target(hs_environment_layout)
 
 add_library(
@@ -202,9 +226,10 @@ add_library(
     Source/Presentation/Private/environment_projector.cpp
     Source/Presentation/Private/snapshot_projector.cpp
     Source/Presentation/Private/ui_interaction.cpp
+    Source/Presentation/Private/snapshot_exchange.cpp
 )
 target_include_directories(hs_presentation PUBLIC Source/Presentation/Public)
-target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain hs_environment_layout)
+target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain hs_environment_layout hs_render_data_values)
 hs_configure_target(hs_presentation)
 
 # File decoding belongs to developer tools; shipped tables are compiled constants.
@@ -258,7 +283,7 @@ endif()
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
 add_library(hs_vfx_program_io STATIC EXCLUDE_FROM_ALL Source/RendererD3D12/Private/vfx_program_loader.cpp)
 target_include_directories(hs_vfx_program_io PUBLIC Source/RendererD3D12/Public)
-target_link_libraries(hs_vfx_program_io PUBLIC hs_core)
+target_link_libraries(hs_vfx_program_io PUBLIC hs_core hs_render_data_values)
 hs_configure_target(hs_vfx_program_io)
 add_library(hs_vfx_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/vfx_image_io.cpp)
 target_include_directories(hs_vfx_image_io PUBLIC Source/Runtime/Public)
@@ -277,6 +302,9 @@ endif()
 add_library(hs_render_data STATIC
     Source/RenderData/Private/render_asset_format.cpp
     Source/RenderData/Private/material_schema.cpp
+    Source/RenderData/Private/material_descriptor.cpp
+    Source/RenderData/Private/character_descriptor.cpp
+    Source/RenderData/Private/render_revision.cpp
     Source/RenderData/Private/material_sidecar.cpp
     Source/RenderData/Private/geometry_hierarchy.cpp
     Source/RenderData/Private/scene_hlod.cpp
@@ -294,7 +322,7 @@ add_library(hs_render_data STATIC
     Source/RenderData/Private/texture_package.cpp
     Source/RenderData/Private/volume_texture_package.cpp)
 target_include_directories(hs_render_data PUBLIC Source/RenderData/Public)
-target_link_libraries(hs_render_data PUBLIC hs_core)
+target_link_libraries(hs_render_data PUBLIC hs_core hs_render_data_values)
 target_link_libraries(hs_render_data PRIVATE hs_meshoptimizer_codec)
 hs_configure_target(hs_render_data)
 endif()
@@ -447,27 +475,29 @@ add_library(
     Source/RendererD3D12/Private/renderer_lod.cpp
     Source/RendererD3D12/Private/renderer_ui.cpp
 )
-target_sources(
-    hs_renderer_d3d12 PRIVATE
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui.cpp>
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_draw.cpp>
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_tables.cpp>
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_widgets.cpp>
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp>
-    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp>
-)
+if(NOT HS_SINGLE_CONFIG_RELEASE)
+    target_sources(
+        hs_renderer_d3d12 PRIVATE
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui.cpp>
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_draw.cpp>
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_tables.cpp>
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_widgets.cpp>
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp>
+        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp>
+    )
+    target_include_directories(
+        hs_renderer_d3d12 PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends"
+    )
+endif()
 target_include_directories(hs_renderer_d3d12 PUBLIC Source/RendererD3D12/Public)
 target_include_directories(
     hs_renderer_d3d12
     BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include"
 )
-target_include_directories(
-    hs_renderer_d3d12 PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends"
-)
 target_link_libraries(
     hs_renderer_d3d12
-    PUBLIC hs_core
-    PRIVATE hs_render_data D3D12MemoryAllocator WinPixEventRuntime DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
+    PUBLIC hs_core hs_render_data hs_render_data_values
+    PRIVATE D3D12MemoryAllocator WinPixEventRuntime DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
 )
 target_compile_definitions(hs_renderer_d3d12 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 include(cmake/RenderSDKs.cmake)
@@ -532,8 +562,8 @@ target_sources(
 target_include_directories(hs_runtime PUBLIC Source/Runtime/Public Source/RendererD3D12/Public)
 target_link_libraries(
     hs_runtime
-    PUBLIC hs_core hs_gameplay
-    PRIVATE hs_jobs hs_presentation hs_renderer_d3d12 hs_asset_manifest nlohmann_json::nlohmann_json
+    PUBLIC hs_core hs_gameplay hs_render_data
+    PRIVATE hs_jobs hs_presentation hs_renderer_d3d12 $<$<NOT:$<CONFIG:Release>>:hs_asset_manifest> nlohmann_json::nlohmann_json
             user32 shell32 xaudio2 ole32
 )
 target_compile_definitions(hs_runtime PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
@@ -560,7 +590,7 @@ target_link_libraries(hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:hs_presentat
 target_link_libraries(hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:hs_game_rules_io>)
 endif()
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
+if(HS_BUILD_CONTENT_TOOLS OR (HS_BUILD_RUNTIME AND (NOT HS_SINGLE_CONFIG_RELEASE OR HS_BUILD_TESTS)))
 find_program(
     HS_DXC
     NAMES dxc.exe
@@ -622,9 +652,11 @@ hs_copy_runtime_asset(
 hs_copy_runtime_asset(
     "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
     "${CMAKE_CURRENT_BINARY_DIR}/WinPixEventRuntime.dll")
-hs_copy_runtime_asset(
-    "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
-    "${CMAKE_CURRENT_BINARY_DIR}/Fonts/NotoSansKR.ttf")
+if(NOT HS_SINGLE_CONFIG_RELEASE)
+    hs_copy_runtime_asset(
+        "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
+        "${CMAKE_CURRENT_BINARY_DIR}/Fonts/NotoSansKR.ttf")
+endif()
 hs_deploy_render_sdks()
 add_custom_target(hs_runtime_native_assets DEPENDS
     "${CMAKE_CURRENT_BINARY_DIR}/D3D12/D3D12Core.dll"
@@ -638,6 +670,7 @@ add_executable(ProjectHS Source/Apps/ProjectHS/main.cpp
 target_link_libraries(ProjectHS PRIVATE hs_runtime)
 target_include_directories(ProjectHS BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include")
 target_compile_definitions(ProjectHS PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
 if(HS_ENABLE_VALIDATION)
     target_compile_definitions(ProjectHS PRIVATE HS_ENABLE_VALIDATION=1)
 endif()
@@ -734,6 +767,8 @@ if(MSVC)
     set_source_files_properties(Source/Apps/Content/geometry_error.cpp PROPERTIES
         COMPILE_OPTIONS /fp:strict
         COMPILE_DEFINITIONS HS_GEOMETRY_ERROR_FP_STRICT=1)
+    set_source_files_properties(Source/Apps/Content/character_products.cpp PROPERTIES
+        COMPILE_OPTIONS /fp:strict)
 endif()
 add_library(hs_scene_hlod_cooker STATIC Source/Apps/Content/scene_hlod_cooker.cpp)
 target_link_libraries(hs_scene_hlod_cooker PUBLIC hs_geometry_cooker PRIVATE hs_meshoptimizer_cook hs_jobs)
@@ -1702,24 +1737,6 @@ foreach(name IN LISTS HS_HERO_MATERIAL_NAMES)
     list(APPEND HS_CHARACTER_BINDING_RESULTS
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${name}/result.json")
 endforeach()
-add_custom_command(
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp"
-    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp"
-        "${CMAKE_CURRENT_BINARY_DIR}/${HS_SHIPPING_PACK_RELATIVE_PATH}"
-    COMMAND "$<TARGET_FILE:hs_content_linker>" --build-root "${CMAKE_CURRENT_BINARY_DIR}"
-        --font "${HS_FONT_DIRECTORY}/NotoSansKR.ttf" ${HS_CHARACTER_LINK_ARGUMENTS}
-    COMMAND "${CMAKE_COMMAND}" -E touch "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp"
-    DEPENDS hs_content_linker "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
-        ${HS_CHARACTER_ACTION_RESULTS} ${HS_CHARACTER_BINDING_RESULTS}
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/presentation-payload/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/simulation-payload/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/content-identity/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/audio/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/vfx/particle-definitions/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/vfx/vfx-runtime/result.json"
-    COMMAND_EXPAND_LISTS VERBATIM)
-add_custom_target(hs_shipping_image
-    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp")
 add_executable(hs_vfx_content
     Source/Apps/VfxContent/main.cpp
     Source/Apps/VfxContent/particle_bridge.cpp
@@ -1992,6 +2009,26 @@ list(JOIN HS_RUNTIME_FULL_RESULTS "\n" HS_RUNTIME_FULL_RESULT_LINES)
 file(GENERATE OUTPUT "${HS_RUNTIME_FULL_RESULT_LIST}"
     CONTENT "${HS_RUNTIME_FULL_RESULT_LINES}\n")
 add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp"
+        "${CMAKE_CURRENT_BINARY_DIR}/${HS_SHIPPING_PACK_RELATIVE_PATH}"
+    COMMAND "$<TARGET_FILE:hs_content_linker>" --build-root "${CMAKE_CURRENT_BINARY_DIR}"
+        --font "${HS_FONT_DIRECTORY}/NotoSansKR.ttf" ${HS_CHARACTER_LINK_ARGUMENTS}
+        --renderer-result-list "${HS_RUNTIME_FULL_RESULT_LIST}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp"
+    DEPENDS hs_content_linker "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
+        "${HS_RUNTIME_FULL_RESULT_LIST}" ${HS_RUNTIME_FULL_RESULTS}
+        ${HS_CHARACTER_ACTION_RESULTS} ${HS_CHARACTER_BINDING_RESULTS}
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/presentation-payload/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/simulation-payload/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/content-identity/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/audio/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/vfx/particle-definitions/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/vfx/vfx-runtime/result.json"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_custom_target(hs_shipping_image
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp")
+add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json"
     COMMAND "$<TARGET_FILE:hs_generation>" --compose
         --build-root "${CMAKE_CURRENT_BINARY_DIR}"
@@ -2008,7 +2045,7 @@ if(HS_BUILD_RUNTIME)
     add_dependencies(ProjectHS hs_content_generation)
 endif()
 endif()
-if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS)
+if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS AND NOT HS_SINGLE_CONFIG_RELEASE)
     add_custom_target(hs_content_generation
         COMMAND "$<TARGET_FILE:hs_generation>" --verify
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope runtime-full
@@ -2017,22 +2054,29 @@ if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS)
     add_dependencies(ProjectHS hs_content_generation)
 endif()
 
-if(HS_BUILD_RUNTIME AND HS_BUILD_CONTENT_TOOLS)
+if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
     add_library(hs_shipping_content STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp")
     target_include_directories(hs_shipping_content PRIVATE Source/Runtime/Public Source/RendererD3D12/Public)
-    target_link_libraries(hs_shipping_content PUBLIC hs_presentation hs_game_rules)
+    target_link_libraries(hs_shipping_content PUBLIC hs_presentation hs_game_rules hs_render_data)
     if(HS_BUILD_CONTENT_TOOLS)
         add_dependencies(hs_shipping_content hs_shipping_image)
     endif()
     hs_configure_target(hs_shipping_content)
     target_link_libraries(hs_runtime PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
-elseif(HS_BUILD_RUNTIME AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    message(FATAL_ERROR "Release requires HS_BUILD_CONTENT_TOOLS=ON to produce matching shipping tables and content.hsp. Tools OFF supports development/compile-only configurations.")
 endif()
 
 if(HS_BUILD_TESTS)
     set(CMAKE_TEST_BUILD_DEPENDS ON)
     enable_testing()
+    if(HS_BUILD_RUNTIME)
+        add_test(NAME build.release-install-transaction COMMAND "${CMAKE_COMMAND}"
+            "-DHS_TEST_WORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}/Tests/release-install-transaction"
+            "-DHS_TEST_ALLOWED_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DHS_TEST_GENERATOR=${CMAKE_GENERATOR}"
+            "-DHS_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_release_install.cmake")
+        set_tests_properties(build.release-install-transaction PROPERTIES TIMEOUT 90)
+    endif()
     add_executable(hs_tests Tests/foundation_tests.cpp Tests/shipped_content_tests.cpp)
     target_link_libraries(hs_tests PRIVATE hs_core hs_jobs)
     hs_configure_target(hs_tests)
@@ -2040,7 +2084,7 @@ if(HS_BUILD_TESTS)
     add_test(NAME foundation.core COMMAND hs_tests foundation)
     add_executable(hs_render_scene_extractor_tests
         Tests/render_scene_extractor_tests.cpp)
-    target_link_libraries(hs_render_scene_extractor_tests PRIVATE hs_core)
+    target_link_libraries(hs_render_scene_extractor_tests PRIVATE hs_core hs_render_data_values hs_presentation)
     target_include_directories(hs_render_scene_extractor_tests PRIVATE
         Source/RendererD3D12/Private)
     hs_configure_target(hs_render_scene_extractor_tests)
@@ -2075,7 +2119,7 @@ if(HS_BUILD_TESTS)
             PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
     endif()
     add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp)
-    target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_core hs_game_domain)
+    target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_core hs_game_domain hs_render_data_values)
     target_include_directories(hs_vfx_session_state_tests PRIVATE
         Source/Runtime/Private Source/RendererD3D12/Public)
     hs_configure_target(hs_vfx_session_state_tests)
@@ -2104,7 +2148,7 @@ if(HS_BUILD_TESTS)
             Tests/vfx_typed_frame_adapter_tests.cpp
             Source/Runtime/Private/vfx_typed_frame_adapter.cpp
             Source/Runtime/Private/vfx_typed_screen_commands.cpp)
-        target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_core hs_game_domain)
+        target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_core hs_game_domain hs_render_data_values)
         target_include_directories(hs_vfx_typed_frame_tests PRIVATE
             Source/Runtime/Private Source/RendererD3D12/Public Source/AssetManifest/Public)
         hs_configure_target(hs_vfx_typed_frame_tests)
@@ -2114,7 +2158,7 @@ if(HS_BUILD_TESTS)
             add_executable(hs_persistent_gpu_scene_tests
                 Tests/persistent_gpu_scene_tests.cpp
                 Source/RendererD3D12/Private/persistent_gpu_scene.cpp)
-            target_link_libraries(hs_persistent_gpu_scene_tests PRIVATE hs_core)
+            target_link_libraries(hs_persistent_gpu_scene_tests PRIVATE hs_core hs_render_data_values)
             target_include_directories(hs_persistent_gpu_scene_tests PRIVATE
                 Source/RendererD3D12/Private)
             hs_configure_target(hs_persistent_gpu_scene_tests)
@@ -2132,7 +2176,7 @@ if(HS_BUILD_TESTS)
         add_executable(hs_render_feature_tests
             Tests/render_feature_tests.cpp
             Source/RendererD3D12/Private/render_features.cpp)
-        target_link_libraries(hs_render_feature_tests PRIVATE hs_core)
+        target_link_libraries(hs_render_feature_tests PRIVATE hs_core hs_render_data_values)
         target_include_directories(hs_render_feature_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_render_feature_tests)
         add_test(NAME rendering.feature-signals COMMAND hs_render_feature_tests)
@@ -2140,13 +2184,13 @@ if(HS_BUILD_TESTS)
             Tests/dynamic_resolution_tests.cpp
             Source/RendererD3D12/Private/view_state.cpp
             Source/RendererD3D12/Private/reconstruction_plan.cpp)
-        target_link_libraries(hs_dynamic_resolution_tests PRIVATE hs_core)
+        target_link_libraries(hs_dynamic_resolution_tests PRIVATE hs_core hs_render_data_values)
         target_include_directories(hs_dynamic_resolution_tests PRIVATE
             Source/RendererD3D12/Private Source/RendererD3D12/Public)
         hs_configure_target(hs_dynamic_resolution_tests)
         add_test(NAME rendering.dynamic-resolution COMMAND hs_dynamic_resolution_tests)
         add_executable(hs_render_instance_order_tests Tests/render_instance_order_tests.cpp)
-        target_link_libraries(hs_render_instance_order_tests PRIVATE hs_core)
+        target_link_libraries(hs_render_instance_order_tests PRIVATE hs_core hs_render_data_values)
         target_include_directories(hs_render_instance_order_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_render_instance_order_tests)
         add_test(NAME rendering.instance-order COMMAND hs_render_instance_order_tests)
@@ -2155,7 +2199,7 @@ if(HS_BUILD_TESTS)
         hs_configure_target(hs_renderer_caster_storage_tests)
         add_test(NAME rendering.caster-storage COMMAND hs_renderer_caster_storage_tests)
         add_executable(hs_local_probe_draw_tests Tests/local_probe_draw_tests.cpp)
-        target_link_libraries(hs_local_probe_draw_tests PRIVATE hs_core)
+        target_link_libraries(hs_local_probe_draw_tests PRIVATE hs_core hs_render_data_values)
         target_include_directories(hs_local_probe_draw_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_local_probe_draw_tests)
         add_test(NAME rendering.local-probe-draws COMMAND hs_local_probe_draw_tests)
@@ -2267,7 +2311,7 @@ if(HS_BUILD_TESTS)
             Source/RendererD3D12/Private/render_graph_validation.cpp)
         target_include_directories(hs_render_graph_validation_tests PRIVATE
             Source/RendererD3D12/Private)
-        target_link_libraries(hs_render_graph_validation_tests PRIVATE hs_core)
+        target_link_libraries(hs_render_graph_validation_tests PRIVATE hs_core hs_render_data_values)
         hs_configure_target(hs_render_graph_validation_tests)
         add_test(NAME rendering.graph-range-validation
             COMMAND hs_render_graph_validation_tests)
@@ -2721,7 +2765,7 @@ if(HS_BUILD_TESTS)
     add_executable(hs_vfx_persistent_tests
         Tests/vfx_persistent_state_tests.cpp
         Source/RendererD3D12/Private/vfx_persistent_state.cpp)
-    target_link_libraries(hs_vfx_persistent_tests PRIVATE hs_core)
+    target_link_libraries(hs_vfx_persistent_tests PRIVATE hs_core hs_render_data_values)
     target_include_directories(hs_vfx_persistent_tests PRIVATE
         Source/RendererD3D12/Public Source/RendererD3D12/Private)
     hs_configure_target(hs_vfx_persistent_tests)
@@ -2799,7 +2843,7 @@ if(HS_BUILD_TESTS)
     add_executable(hs_vfx_ribbon_state_tests
         Tests/vfx_ribbon_state_tests.cpp
         Source/RendererD3D12/Private/vfx_ribbon_state.cpp)
-    target_link_libraries(hs_vfx_ribbon_state_tests PRIVATE hs_core)
+    target_link_libraries(hs_vfx_ribbon_state_tests PRIVATE hs_core hs_render_data_values)
     target_include_directories(hs_vfx_ribbon_state_tests PRIVATE
         Source/RendererD3D12/Public Source/RendererD3D12/Private)
     hs_configure_target(hs_vfx_ribbon_state_tests)
@@ -2989,6 +3033,8 @@ configure_file(cmake/install_selected_generation.cmake.in
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_selected_generation.cmake"
     COMPONENT Runtime)
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)
+install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_release_finish.cmake"
+    CONFIGURATIONS Release COMPONENT Runtime)
 
 set(CPACK_GENERATOR ZIP)
 set(CPACK_PACKAGE_NAME ProjectHS)

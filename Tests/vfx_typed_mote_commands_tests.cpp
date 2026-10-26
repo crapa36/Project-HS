@@ -1,7 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_mote_commands.hpp"
 #include "test_generation_paths.hpp"
-#include <hs/core/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -94,7 +94,7 @@ hs::VfxEventInput OwnedInput()
     hs::VfxSafeSectorPayload sector;sector.center={4,.25f,-7};sector.direction={1,0,0};
     sector.inner_radius=2;sector.outer_radius=8;sector.half_angle_degrees=15;in.payload=sector;return in;
 }
-auto Owned(const hs::VfxProgramData &p,const hs::VfxEventInput &in,hs::Tick tick)
+auto Owned(const hs::VfxProgramData &p,const hs::VfxEventInput &in,double tick)
 {return hs::runtime_detail::BuildVfxOwnedMoteCommands(p,std::span(&in,1),tick);}
 void OwnedRateAndClock()
 {
@@ -102,6 +102,10 @@ void OwnedRateAndClock()
     Require(Owned(p,in,99).empty()&&Owned(p,in,220).empty(),"owner boundaries ignored");
     const auto birth=Owned(p,in,100);Require(birth.size()==1&&Near(birth[0].normalized_age,0),"integer rate first birth missing");
     const auto at20=Owned(p,in,120);Require(at20.size()==2,"integer rate cadence wrong");
+    const auto between=Owned(p,in,119.5);
+    Require(between.size()==1&&between[0].stable_seed==birth[0].stable_seed&&
+            between[0].normalized_age>birth[0].normalized_age,
+            "fractional owner age admitted a future birth or changed its ordinal");
     const auto at38=Owned(p,in,138),at39=Owned(p,in,139),at40=Owned(p,in,140);
     Require(at38.size()==2&&at39.size()==1&&at40.size()==2,"particle lifetime boundary or next birth incorrect");
     Require(at39[0].stable_seed==at20[1].stable_seed&&at39[0].position.x==at20[1].position.x&&
@@ -218,6 +222,15 @@ void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
     Require(repeat.size() == at20.size() && repeat[0].stable_seed == at20[0].stable_seed &&
             repeat[0].normalized_age == at20[0].normalized_age,
             "retained birth window accumulated or changed births");
+    auto fractional_owner = owner;
+    fractional_owner.elapsed_seconds = 20.5f / 60.0f;
+    fractional_owner.normalized_age = 20.5f / 120.0f;
+    std::get<hs::VfxEntityPayload>(fractional_owner.payload).lifetime01 = fractional_owner.normalized_age;
+    const auto fractional = hs::runtime_detail::BuildVfxPersistentMoteCommands(
+        program, std::span(&fractional_owner, 1), births, 121, 0.5f);
+    Require(fractional.size() == at20.size() && fractional[0].stable_seed == at20[0].stable_seed &&
+            fractional[0].normalized_age > at20[0].normalized_age,
+            "fractional display time dropped or regenerated persistent motes");
     owner = PersistentMoteOwner(40);
     const auto at40 = hs::runtime_detail::BuildVfxPersistentMoteCommands(
         program, std::span(&owner, 1), births, 140);

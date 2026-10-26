@@ -6,11 +6,13 @@
 
 #include <DirectXMath.h>
 #include <d3d12.h>
+#include <array>
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -61,6 +63,16 @@ struct ReconstructionGuidesOutputs
     ID3D12Resource *depth_resource{}, *motion_resource{};
     std::shared_ptr<const void> owner;
 };
+struct ReconstructionGuidesLayout
+{
+    std::uint64_t target_generation{};
+    std::array<ResourceHandle,7> imports{};
+    std::array<ResourceVersion,7> outputs{};
+    std::array<ResourceVersion,16> inputs{};
+    std::array<std::uint32_t,3> pass_indices{}; // 49, 9, 51
+    std::string provider_name;
+    bool external{}, transparent_guides{}, screen_overlay{}, composition{};
+};
 struct ReconstructionGuidesTargets;
 class ReconstructionGuidesCandidate
 {
@@ -93,7 +105,16 @@ class ReconstructionGuidesSystem
     [[nodiscard]] Result Register(RenderGraphBuilder &graph, const ReconstructionGuidesInputs &inputs,
         ReconstructionGuidesConstants constants, SdkReconstructionFrame frame,
         ExecuteReconstruction execute, std::string_view provider_name,
-        ReconstructionGuidesOutputs &outputs, RegisterExternalReconstruction external = {});
+        ReconstructionGuidesOutputs &outputs, RegisterExternalReconstruction external = {},
+        ReconstructionGuidesLayout *layout=nullptr);
+    [[nodiscard]] bool MatchesLayout(const ReconstructionGuidesInputs &,bool external,
+        std::string_view provider_name,const ReconstructionGuidesLayout &) const noexcept;
+    // external_bind must call the provider's BindExternal, which supplies the
+    // current queue lease and callback without declaring graph boundaries.
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const ReconstructionGuidesInputs &,
+        ReconstructionGuidesConstants,SdkReconstructionFrame,ExecuteReconstruction,
+        std::string_view provider_name,ReconstructionGuidesOutputs &,
+        const ReconstructionGuidesLayout &,RegisterExternalReconstruction external_bind={});
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
@@ -104,6 +125,10 @@ class ReconstructionGuidesSystem
     // Called only after all old submissions have reliably completed.
     void SwapState(ReconstructionGuidesSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
+    [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const ReconstructionGuidesInputs &,
+        ReconstructionGuidesConstants,SdkReconstructionFrame,ExecuteReconstruction,
+        std::string_view,ReconstructionGuidesOutputs &,RegisterExternalReconstruction,
+        ReconstructionGuidesLayout *,const ReconstructionGuidesLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -1,7 +1,7 @@
 #pragma once
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/renderer/vfx_program.hpp>
-#include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/render_data/vfx_spawn_command.hpp>
 #include <span>
 
 namespace hs

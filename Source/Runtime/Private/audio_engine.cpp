@@ -1,5 +1,4 @@
 #include <hs/runtime/audio_engine.hpp>
-#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 #include "audio_catalog.hpp"
@@ -97,7 +96,7 @@ std::uint64_t AudioQpc() noexcept
 
 struct AudioEngine::Impl
 {
-    SelectedGeneration selected_generation;
+    std::shared_ptr<const void> generation_lease;
     struct CuePlayback
     {
         std::uint64_t last_play_ms{};
@@ -380,9 +379,9 @@ AudioEngine::~AudioEngine()
     Shutdown();
 }
 
-void AudioEngine::RetainGeneration(SelectedGeneration &&generation)
+void AudioEngine::RetainGeneration(std::shared_ptr<const void> generation)
 {
-    impl_->selected_generation = std::move(generation);
+    impl_->generation_lease = std::move(generation);
 }
 
 Result AudioEngine::InitializePlayback(const SettingsData &settings)
@@ -640,7 +639,7 @@ void AudioEngine::Shutdown() noexcept
     impl_->sample_count = 0;
     impl_->content = nullptr;
     impl_->stopping = false;
-    impl_->selected_generation = {};
+    impl_->generation_lease.reset();
     impl_->status = {};
 }
 

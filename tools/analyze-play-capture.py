@@ -99,6 +99,30 @@ def interval_result(stats):
                             if key in ("mean", "min", "max")}}
 
 
+def source_cadence_report(samples):
+    values = [value for _, value, _ in samples]
+    result = graphics.stats(values)
+    if result is None: return {"available": False}
+    budgets = {budget for _, _, budget in samples if budget is not None}
+    budget = next(iter(budgets)) if len(budgets) == 1 and all(b is not None for _, _, b in samples) else None
+    thresholds = {"16.67": 16.67, "33.33": 33.33, "50": 50.0}
+    if budget is not None: thresholds["target"] = budget
+    exceed = {}
+    for name, threshold in thresholds.items():
+        count = longest = run = 0
+        previous_sequence = None
+        for sequence, value, _ in samples:
+            delayed = value > threshold
+            count += delayed
+            run = run + 1 if delayed and sequence is not None and previous_sequence is not None and sequence == previous_sequence + 1 else int(delayed)
+            longest = max(longest, run)
+            previous_sequence = sequence
+        exceed[name] = {"count": count, "fraction": count / len(samples),
+                        "longest_consecutive_source_frames": longest if all(s is not None for s, _, _ in samples) else None}
+    return {"available": True, "metric": "qualified_source_render_ready_cadence_ms",
+            "target_budget_ms": budget, **result, "exceed": exceed}
+
+
 def presentation_observation(row):
     if row.get("streamline_actual_present_count_valid") != "1": return None
     count, begin, end, frequency = (number(row.get(key)) for key in (
@@ -453,6 +477,7 @@ def analyze(directory):
         issues.append("Cached renderer diagnostics have stale/mismatched frame identity; affected cached metrics excluded")
     if cpu_gaps or invalid_intervals: issues.append(f"CPU samples have {cpu_gaps} missing frame IDs and {invalid_intervals} nonpositive intervals")
     passes, groups, gpu_counts, critical = defaultdict(pass_stats), defaultdict(group_stats), Counter(), defaultdict(Stats)
+    source_cadence = defaultdict(list)
     gpu_rows = gpu_frames = missing_cpu = incomplete = invalid_queries = 0
     last_gpu = 0
     try:
@@ -466,6 +491,21 @@ def analyze(directory):
             if any(row.get("fence_completed") != "1" for row in rows): incomplete += 1; continue
             gpu_frames += 1; seen = set(); frame_groups = {}
             if rows[0].get("gpu_timings_valid") == "0": invalid_queries += 1
+            first = rows[0]
+            if (first.get("frame_metric_kind") == "source_output_ready" and
+                first.get("cadence_valid") == "1" and first.get("gpu_backlog_proven") == "1" and
+                first.get("cadence_exclusions_valid") == "1" and first.get("cadence_gap") == "0" and
+                first.get("calibration_valid") == "1" and first.get("timing_main_view") == "1" and
+                first.get("is_generated_frame") == "0"):
+                cadence = number(first.get("source_ready_cadence_ms"))
+                sequence_text = first.get("source_frame_sequence", "")
+                sequence = int(sequence_text) if sequence_text.isdecimal() else None
+                budget_fps = number(owner.get("target_render_fps"))
+                if cadence is not None and cadence > 0:
+                    key = (int(owner["session_phase"]), int(owner["config_revision"]),
+                           owner.get("foreground", "unknown"), int(first["view_id"]))
+                    source_cadence[key].append((sequence,
+                                                cadence, 1000 / budget_fps if budget_fps and budget_fps > 0 else None))
             for scope in owner_scopes:
                 gpu_counts[scope] += 1
                 value = number(rows[0].get("critical_path_ms")) if rows[0].get("critical_path_valid") == "1" else None
@@ -547,6 +587,9 @@ def analyze(directory):
         "diagnostics": diagnostics, "capture_provenance": provenance, "cpu_frame_count": count, "gpu_frame_count": gpu_frames, "gpu_pass_rows": gpu_rows,
         "gpu_frame_coverage_complete": gpu_coverage, "gpu_frames_missing_cpu_identity": missing_cpu,
         "gpu_incomplete_frames": incomplete, "gpu_invalid_query_frames": invalid_queries, "cpu_missing_frame_ids": cpu_gaps,
+        "source_render_ready_cadence": [{"phase_id": phase, "config_revision": revision,
+            "foreground": foreground, "view_id": view_id, **source_cadence_report(samples)}
+            for (phase, revision, foreground, view_id), samples in sorted(source_cadence.items())],
         "overall": frame_report(frame_data["overall"]), "playing": frame_report(frame_data["playing"]),
         "phases": [{"phase_id": phase, "phase": PHASES[phase] if 0 <= phase < len(PHASES) else f"unknown:{phase}",
             **frame_report(frame_data[f"phase:{phase}"]), "gpu_critical_path_ms": critical[f"phase:{phase}"].result(),
@@ -601,6 +644,16 @@ def write_outputs(directory, result):
               "CPU stage wall time (Playing only)", "", "| Stage | Count | Mean ms | Min ms | Max ms |", "|---|---:|---:|---:|---:|"]
     for name, data in sorted(playing["cpu_stage_wall_ms"].items(), key=lambda item: item[1]["mean"] or -1, reverse=True):
         report.append(f"| {name} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
+    report += ["", "Qualified source render-ready cadence by phase/configuration/foreground/view", "",
+        "Only completed source frames with explicit cadence validity contribute; pass sums, CPU QPC intervals and generated Presents are separate.", "",
+        "| Phase | Config | Foreground | View | Samples | p50 / p95 / p99 ms | > target | > 16.67 / 33.33 / 50 ms | Longest > 16.67 ms |",
+        "|---:|---:|---|---:|---:|---|---|---|---:|"]
+    for data in summary["source_render_ready_cadence"]:
+        exceed = data["exceed"]
+        target = exceed.get("target")
+        report.append(f"| {data['phase_id']} | {data['config_revision']} | {data['foreground']} | {data['view_id']} | {data['count']} | {fmt(data['p50'])} / {fmt(data['p95'])} / {fmt(data['p99'])} | {fmt(target['fraction']) if target else 'N/A'} | {fmt(exceed['16.67']['fraction'])} / {fmt(exceed['33.33']['fraction'])} / {fmt(exceed['50']['fraction'])} | {exceed['16.67']['longest_consecutive_source_frames'] if exceed['16.67']['longest_consecutive_source_frames'] is not None else 'N/A'} |")
+    if not summary["source_render_ready_cadence"]:
+        report.append("| N/A | N/A | N/A | N/A | 0 | N/A | N/A | N/A | N/A |")
     report += ["", "Streamline SDK-reported presentation throughput (separate from base FPS)", "",
         "Counts come from numFramesActuallyPresented over their native GetState QPC windows. They are not physical display cadence, nominal multiplication, FSR generated frames or XeSS queued frames. Transition, overlapping and out-of-frame windows are excluded; unavailable data remains N/A.", "",
         "| Scope | Base QPC FPS | SDK-reported present FPS | Actual SDK count | Observed query seconds | Observations | Excluded / invalid |", "|---|---:|---:|---:|---:|---:|---:|"]
@@ -714,6 +767,10 @@ def write_outputs(directory, result):
 
 
 def self_test():
+    cadence = source_cadence_report([(1, 20.0, 1000 / 60), (2, 35.0, 1000 / 60),
+                                     (4, 10.0, 1000 / 60)])
+    assert cadence["p95"] == 35.0 and cadence["exceed"]["target"]["count"] == 2
+    assert cadence["exceed"]["16.67"]["longest_consecutive_source_frames"] == 2
     # Shared classifier must include native GI preparation as well as SDK passes.
     # Each GPU pass has one group; linked options repeat it, never add savings.
     native_gi_passes = ((142, "SceneGeometryDeformation"), (143, "SceneGeometryUpload"),

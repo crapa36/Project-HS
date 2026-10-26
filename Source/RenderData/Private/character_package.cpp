@@ -171,6 +171,10 @@ void ValidateMonster(const MonsterCharacterData &data, std::uint32_t bones,
     {
         const auto &entry = data.lods[lod];
         Require(entry.lod == lod && (entry.flags & kGeometryFlagSkinned) &&
+            entry.error_method_abi == (lod == 0 ? kGeometryErrorMethodAbi : kSkinnedPoseErrorMethodAbi) &&
+            (lod == 0 || entry.geometric_error >= data.lods[lod - 1].geometric_error) &&
+            (lod == 0 || (entry.vertex_count < data.lods[lod - 1].vertex_count &&
+                          entry.index_count < data.lods[lod - 1].index_count)) &&
             std::ranges::find(pages, entry.page_dependency_index) == pages.end(), "invalid or duplicate monster LOD page");
         (void)EncodeGeometryMetadata(entry, dependencies, {});
         pages.push_back(entry.page_dependency_index);
@@ -489,6 +493,25 @@ void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
                                const GeometryData &geometry)
 {
     ValidateGeometryPage(character.geometry, geometry);
+    Require(geometry.flags & kGeometryFlagSkinned, "character page is not skinned");
+    Validate(character, std::span(geometry.vertices), false, false,
+        character.monster ? character.monster->final_matrices.size() : 0);
+}
+
+void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
+                               const PreparedGeometryPage &page)
+{
+    const auto &geometry = page.geometry;
+    const auto &metadata = character.geometry;
+    Require(page.package.asset_id.value != 0 && geometry.flags == metadata.flags &&
+            geometry.vertices.size() == metadata.vertex_count && geometry.indices.size() == metadata.index_count &&
+            geometry.submeshes.size() == metadata.submesh_count && geometry.meshlets.size() == metadata.meshlet_count &&
+            geometry.meshlet_vertex_refs.size() == metadata.vertex_ref_count &&
+            geometry.bounds.minimum == metadata.bounds.minimum && geometry.bounds.maximum == metadata.bounds.maximum &&
+            geometry.bounds.sphere == metadata.bounds.sphere, "prepared character page disagrees with metadata");
+    std::uint32_t max_material = 0;
+    for (const auto &submesh : geometry.submeshes) max_material = std::max(max_material, submesh.material_index);
+    Require(max_material == metadata.max_material_index, "prepared character material maximum differs");
     Require(geometry.flags & kGeometryFlagSkinned, "character page is not skinned");
     Validate(character, std::span(geometry.vertices), false, false,
         character.monster ? character.monster->final_matrices.size() : 0);

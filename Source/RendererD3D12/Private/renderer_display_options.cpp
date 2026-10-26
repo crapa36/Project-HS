@@ -16,13 +16,13 @@ Result D3D12Renderer::Impl::PrepareDisplayPipeline(
     for (auto [name, bytes] : {std::pair{"fullscreen_vs.dxil", &vertex},
                                std::pair{"ui_ps.dxil", &pixel}})
     {
-        std::filesystem::path path;
-        if (auto resolved = candidate_config.ResolveProduct("render/shader/" + std::string(name), path);
+        RendererAssetSource path;
+        if (auto resolved = ResolveRendererAsset(candidate_config, "render/shader/" + std::string(name), path);
             !resolved) return resolved;
         if (auto read = ReadBinary(path, *bytes); !read) return read;
         if (bytes->empty())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Empty selected display shader: " + path.string());
+                                   "Empty selected display shader: " + path.path.string());
     }
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
@@ -184,6 +184,8 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
                                                  "Reacquire original display buffers"); !acquired)
                 return unusable(failure, acquired.Message());
             back_buffers.swap(buffers);
+            back_buffer_contracts = {};
+            back_buffer_contract_devices = {};
             write_rtvs();
             back_buffer_completion = {};
             last_presented_index = previous_presented_index;
@@ -265,6 +267,8 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
             return recover(acquired);
         }
         back_buffers.swap(buffers);
+        back_buffer_contracts = {};
+        back_buffer_contract_devices = {};
     }
     write_rtvs();
     back_buffer_completion = {};

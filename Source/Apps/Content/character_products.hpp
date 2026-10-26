@@ -26,8 +26,9 @@ struct CharacterProduct
     const CharacterIR &character, std::string_view stem,
     const nlohmann::json &authoring);
 
-// Final LOD0 geometry, skeleton/clip metadata and optional named animation are
-// produced from the same owned import. Reduced skeletal LODs are not fabricated.
+// LOD0 and any certified skinned LOD pages, skeleton/clip metadata and optional
+// named animation are produced from the same owned import. A reduced page is
+// published only after interval-wide pose and appearance error qualification.
 [[nodiscard]] std::vector<CharacterProduct> BuildCharacterProducts(
     const CharacterIR &character, std::string_view stem,
     std::span<const CharacterMaterialSelection> materials);

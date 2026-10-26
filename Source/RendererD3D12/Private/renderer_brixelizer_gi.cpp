@@ -10,6 +10,7 @@
 #include <exception>
 #include <stdexcept>
 #include <map>
+#include <optional>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -117,6 +118,7 @@ struct BrixelizerStorage
     BrixelizerSettings settings{};
     BrixelizerStatus status{};
     SceneShaderReader shader_reader;
+    std::span<const render_data::TextureDescriptor> texture_catalog;
     CompletionSet completion;
     std::uint64_t last_frame{},last_light{},last_scene{},successful_updates{};
     bool history_valid{},usable{true};
@@ -275,13 +277,14 @@ bool SameStatic(const BrixelizerStorage::StaticInstance &old,const BrixelizerSce
         b.vertex_byte_offset==g.vertex_byte_offset&&b.index_byte_offset==g.index_byte_offset&&b.vertex_stride==g.vertex_stride&&
         b.vertex_count==g.vertex_count&&b.index_count==g.index_count&&b.index_format==g.index_format;
 }
-Result ValidateGeometry(const RenderGraphBuilder &graph,const SoftwareSceneGeometry &g)
+Result ValidateGeometry(const RenderGraphBuilder *graph,const SoftwareSceneGeometry &g)
 {
     const auto index_bytes=g.index_format==DXGI_FORMAT_R32_UINT?4u:g.index_format==DXGI_FORMAT_R16_UINT?2u:0u;
     if(!g.stable_key||!g.generation||g.vertex_count<3||g.index_count<3||g.index_count%3||g.vertex_stride<12||g.vertex_stride%4||
         g.vertex_byte_offset%4||!index_bytes||g.index_byte_offset%index_bytes||g.vertex_byte_offset>UINT32_MAX||g.index_byte_offset>UINT32_MAX||
-        !g.vertices||!g.indices||!g.vertex_version.resource||!g.index_version.resource||
-        graph.Resolve(g.vertex_version.resource)!=g.vertices||graph.Resolve(g.index_version.resource)!=g.indices)
+        !g.vertices||!g.indices||(graph&&(!g.vertex_version.resource||!g.index_version.resource))||
+        (graph&&(graph->Resolve(g.vertex_version.resource)!=g.vertices||
+            graph->Resolve(g.index_version.resource)!=g.indices)))
         return Fail(ErrorCode::InvalidArgument,"Brixelizer requires actual generation-scoped indexed float3 geometry ranges.");
     for(const auto &entry:{std::tuple{g.vertices,g.vertex_byte_offset,std::uint64_t(g.vertex_count-1)*g.vertex_stride+12},
         std::tuple{g.indices,g.index_byte_offset,std::uint64_t(g.index_count)*index_bytes}})
@@ -334,6 +337,13 @@ struct BrixelizerGiSystem::Impl
         const RenderGraphBuilder *graph{};
         std::uint32_t slot{},updated_cascade{};
         std::uint64_t frame{},scene_revision{},light_revision{};
+        bool prepared{};
+        const SoftwareSceneGeometry *prepared_geometries{};
+        const BrixelizerSceneInstance *prepared_instances{};
+        BrixelizerFrameRecordData record;
+        BrixelizerGraphLayout *capture{};
+        const BrixelizerGraphLayout *retained{};
+        bool import_failed{};
         bool lighting{},composite{},cache_injection{},noise_upload{};
         BrixelizerConstants constants{};
         AmbientOcclusionGuide original_environment;
@@ -349,16 +359,75 @@ struct BrixelizerGiSystem::Impl
     ResourceVersion Import(RenderGraphBuilder &graph,const Allocation &allocation,std::string_view name)
     {
         const auto desc=allocation->resource->GetDesc();ResourceHandle handle;
-        if(desc.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER)
-            handle=graph.ImportBuffer({allocation->resource.Get(),allocation->graph_completion,allocation->graph_queue},allocation->graph_access,name);
-        else handle=graph.ImportTexture({allocation->resource.Get(),allocation->graph_completion,allocation->graph_queue},allocation->graph_access,name);
-        pending.imports.push_back({allocation,handle});return graph.Version(handle);
+        const auto index=pending.imports.size();
+        if(pending.retained)
+        {
+            if(index>=pending.retained->imports.size()){pending.import_failed=true;return {};}
+            handle=pending.retained->imports[index];
+            const bool bound=desc.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER
+                ? graph.BindBuffer(handle,{allocation->resource.Get(),allocation->graph_completion,
+                    allocation->graph_queue,{},allocation->NativeContract()},allocation->graph_access)
+                : graph.BindTexture(handle,{allocation->resource.Get(),allocation->graph_completion,
+                    allocation->graph_queue,{},allocation->NativeContract()},allocation->graph_access);
+            pending.import_failed|=!bound;
+        }
+        else if(desc.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER)
+            handle=graph.ImportBuffer({allocation->resource.Get(),allocation->graph_completion,
+                allocation->graph_queue,{},allocation->NativeContract()},allocation->graph_access,name);
+        else handle=graph.ImportTexture({allocation->resource.Get(),allocation->graph_completion,
+            allocation->graph_queue,{},allocation->NativeContract()},allocation->graph_access,name);
+        pending.imports.push_back({allocation,handle});
+        if(pending.capture)pending.capture->imports.push_back(handle);
+        return {handle,0};
+    }
+    std::optional<PassBuilder> Pass(RenderGraphBuilder &graph,std::size_t slot,
+        std::uint32_t id,std::string_view name)
+    {
+        if(pending.retained)return graph.BindPass(pending.retained->passes[slot],id);
+        if(pending.capture)pending.capture->passes[slot]=graph.PassCount();
+        return graph.AddPass(id,name,QueueHint::Direct);
     }
 };
+namespace
+{
+std::vector<SceneGeometryReadToken> UniqueGeometryReads(
+    const std::vector<SceneGeometryReadToken> &reads)
+{
+    std::vector<SceneGeometryReadToken> unique;
+    unique.reserve(reads.size());
+    for (const auto &read : reads) if (read.version.resource) unique.push_back(read);
+    const auto key=[](const SceneGeometryReadToken &read) {
+        return std::tuple{read.version.resource.value,read.version.resource.kind,
+            read.version.ordinal,read.access};
+    };
+    std::ranges::sort(unique,[&](const auto &left,const auto &right) {
+        return key(left)<key(right);
+    });
+    unique.erase(std::unique(unique.begin(),unique.end()),unique.end());
+    return unique;
+}
+}
+bool MatchesBrixelizerGraphLayout(const BrixelizerFrameRecordData &current,
+    const BrixelizerGraphLayout &layout) noexcept
+{
+    const auto &saved=layout.record;
+    // The SDF pass declares each native geometry ResourceVersion only once.
+    // Leaf and instance multiplicity changes SDK update data, not graph uses.
+    return layout.valid&&current.frame_slot==saved.frame_slot&&current.scratch_width==saved.scratch_width&&
+        current.physical_cascades==saved.physical_cascades&&current.extent==saved.extent&&
+        current.history_valid==saved.history_valid&&current.noise_upload==saved.noise_upload&&
+        current.unique_geometry_reads==saved.unique_geometry_reads;
+}
 BrixelizerGiSystem::BrixelizerGiSystem():impl_(std::make_unique<Impl>()) {}
 BrixelizerGiSystem::~BrixelizerGiSystem()=default;
 std::uint64_t BrixelizerCandidate::AllocatedBytes()const noexcept {return storage_?storage_->GpuBytes():0;}
 std::uint64_t BrixelizerGiSystem::AllocatedBytes()const noexcept {return impl_->storage?impl_->storage->GpuBytes():0;}
+float BrixelizerGiSystem::FinestVoxelSizeMeters()const noexcept
+{
+    const auto *storage=impl_->storage.get();
+    return storage&&storage->usable&&storage->status.native_ready
+        ? storage->settings.first_voxel_size_m : 0.0f;
+}
 CompletionSet BrixelizerGiSystem::RequiredCompletion()const noexcept {return impl_->storage?impl_->storage->completion:CompletionSet{};}
 BrixelizerStatus BrixelizerGiSystem::Status()const
 {
@@ -366,12 +435,13 @@ BrixelizerStatus BrixelizerGiSystem::Status()const
     BrixelizerStatus status{};status.compiled=HS_WITH_BRIXELIZER!=0;status.reason="Brixelizer SoftwareHybrid GI is Off.";return status;
 }
 Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
-    ViewExtent extent,std::uint32_t frame_slots,const BrixelizerSettings &settings,const SceneShaderReader &reader,BrixelizerCandidate &candidate)const
+    ViewExtent extent,std::uint32_t frame_slots,const BrixelizerSettings &settings,const SceneShaderReader &reader,
+    std::span<const render_data::TextureDescriptor> texture_catalog,BrixelizerCandidate &candidate)const
 {
     candidate={};
     if(!settings.enabled)return Result::Success();
 #if !HS_WITH_BRIXELIZER
-    (void)device;(void)allocator;(void)root;(void)extent;(void)frame_slots;(void)reader;
+    (void)device;(void)allocator;(void)root;(void)extent;(void)frame_slots;(void)reader;(void)texture_catalog;
     return Fail(ErrorCode::InvalidState,"Native Brixelizer was excluded by HS_WITH_BRIXELIZER=OFF.");
 #else
     if(!device||!allocator||!root||!reader||!Extent(extent)||!frame_slots||frame_slots>=FFX_MAX_QUEUED_FRAMES||
@@ -382,7 +452,7 @@ Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allo
     const auto support=QueryBrixelizerNativeSupport(device);
     if(!support.supported)return Fail(ErrorCode::InvalidState,std::string(support.reason));
     auto s=std::make_shared<BrixelizerStorage>();s->device=device;s->allocator=allocator;s->root=root;s->extent=extent;
-    s->settings=settings;s->slots.resize(frame_slots);s->shader_reader=reader;s->status.compiled=true;s->status.enabled=true;
+    s->settings=settings;s->slots.resize(frame_slots);s->shader_reader=reader;s->texture_catalog=texture_catalog;s->status.compiled=true;s->status.enabled=true;
     if(ffxBrixelizerGetEffectVersion()!=FFX_SDK_MAKE_VERSION(1,0,0)||ffxBrixelizerGIGetEffectVersion()!=FFX_SDK_MAKE_VERSION(1,0,1))
         return Fail(ErrorCode::InvalidState,"Linked Brixelizer effect versions do not match the pinned SDK1.1.4 contract.");
     const auto backend_bytes=ffxGetScratchMemorySizeDX12(2);
@@ -412,7 +482,19 @@ Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allo
         const auto id="render/texture/brixelizer_noise_"+std::to_string(i)+".rpkg";
         std::vector<std::byte> package;if(auto result=reader(id,package);!result)return result;
         render_data::TexturePackageView view;
-        try {view=render_data::ReadTexturePackage(package,MakeAssetId(id));}
+        try
+        {
+            if(texture_catalog.empty()) view=render_data::ReadTexturePackage(package,MakeAssetId(id));
+            else
+            {
+                const auto asset=MakeAssetId(id);
+                const auto found=std::lower_bound(texture_catalog.begin(),texture_catalog.end(),asset.value,
+                    [](const auto &entry,std::uint64_t value){return entry.asset_id.value<value;});
+                if(found==texture_catalog.end() || found->asset_id.value!=asset.value)
+                    throw std::runtime_error("Compiled Brixelizer noise texture is absent");
+                view=render_data::BindTextureDescriptor(package,*found);
+            }
+        }
         catch(const std::exception &e){return Fail(ErrorCode::InvalidArgument,std::string("Invalid selected Brixelizer noise package: ")+e.what());}
         const auto &d=view.description;
         if(d.width!=128||d.height!=128||d.array_size!=1||d.mip_count!=1||d.format!=render_data::kTextureFormatRgba16Float||
@@ -489,16 +571,18 @@ Result BrixelizerGiSystem::Commit(BrixelizerCandidate &&candidate,const Completi
     if(auto old=impl_->storage;old&&!old->completion.IsSatisfiedBy(completed))return Fail(ErrorCode::InvalidState,"Brixelizer publication requires all old queue uses completed.");
     impl_->storage=std::move(candidate.storage_);return Result::Success();
 }
-Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const BrixelizerSceneInputs &in,BrixelizerSceneOutputs &out)
+Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &in,BrixelizerFrameRecordData &out)
 {
     out={};auto s=impl_->storage;if(!s)return Result::Success();
 #if !HS_WITH_BRIXELIZER
-    (void)graph;(void)in;return Fail(ErrorCode::InvalidState,"Brixelizer native package is unavailable.");
+    (void)in;return Fail(ErrorCode::InvalidState,"Brixelizer native package is unavailable.");
 #else
-    if(!s->usable||impl_->pending.graph)return Fail(ErrorCode::InvalidState,"Brixelizer is faulted or already has a pending graph.");
+    if(!s->usable||impl_->pending.graph||impl_->pending.prepared)
+        return Fail(ErrorCode::InvalidState,"Brixelizer is faulted or already has a prepared frame.");
     if(s->noise_uploaded)for(auto &upload:s->noise_uploads)if(upload&&upload->graph_completion.IsSatisfiedBy(in.completed))upload.reset();
     if(in.frame_slot>=s->slots.size()||!s->slots[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!Finite(in.sdf_center)||
-        (s->successful_updates&&in.frame_index<=s->last_frame)||in.frame_index>UINT32_MAX||in.owners.empty())
+        (s->successful_updates&&in.frame_index<=s->last_frame)||in.frame_index>UINT32_MAX||in.owners.empty()||
+        in.geometries.size()>UINT32_MAX||in.instances.size()>UINT32_MAX)
         return Fail(ErrorCode::InvalidArgument,"Brixelizer scene requires a completed frame slot, monotonic frame and backed owners.");
     // Validate every input before mutating SDK CPU identity and invalidations.
     std::set<BrixelizerStorage::InstanceKey> wanted_static;
@@ -518,7 +602,7 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
             !Finite(instance.bounds_min)||!Finite(instance.bounds_max)||instance.bounds_min.x>instance.bounds_max.x||
             instance.bounds_min.y>instance.bounds_max.y||instance.bounds_min.z>instance.bounds_max.z)
             return Fail(ErrorCode::InvalidArgument,"Invalid Brixelizer scene instance identity, world transform or conservative bounds.");
-        const auto &g=in.geometries[instance.geometry_index];if(auto result=ValidateGeometry(graph,g);!result)return result;
+        const auto &g=in.geometries[instance.geometry_index];if(auto result=ValidateGeometry(nullptr,g);!result)return result;
         if(!g.opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)
             return Fail(ErrorCode::InvalidArgument,"Masked/thin leaves need authored coverage triangles or an explicit unsupported domain.");
         const BrixelizerStorage::InstanceKey key{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
@@ -540,7 +624,8 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     if(buffer_count>FFX_BRIXELIZER_MAX_INSTANCES||std::uint64_t(counts.static_instances)+counts.dynamic_instances+
         s->static_invalidation_masks.size()+invalidations>FFX_BRIXELIZER_MAX_INSTANCES)
         return Fail(ErrorCode::InvalidState,"Native buffer IDs or pending old/new static invalidations exceed the pinned capacity before mutation.");
-    impl_->pending={};auto &p=impl_->pending;p.graph=&graph;p.slot=in.frame_slot;p.frame=in.frame_index;p.scene_revision=in.scene_revision;
+    impl_->pending={};auto &p=impl_->pending;p.slot=in.frame_slot;p.frame=in.frame_index;p.scene_revision=in.scene_revision;
+    p.prepared_geometries=in.geometries.data();p.prepared_instances=in.instances.data();
     s->static_invalidation_masks.insert(s->static_invalidation_masks.end(),invalidations,(1u<<s->settings.logical_cascades)-1u);
     p.updated_cascade=ffxBrixelizerRawGetCascadeToUpdate(std::uint32_t(in.frame_index),s->settings.logical_cascades);
     auto &slot=s->slots[in.frame_slot];slot.owners=in.owners;slot.resources.clear();slot.binders={};slot.restore={};
@@ -594,7 +679,62 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
         s->retired_scratch.push_back(s->scratch);s->scratch=std::move(next);
     }
     s->status.scratch_bytes=scratch_bytes;
-    auto pass=graph.AddPass(261,"BrixelizerSdfUpdate",QueueHint::Direct);
+    const auto certify=[&](const Allocation &allocation)->Result
+    {return allocation?allocation->EnsureNativeContract(s->device.Get()):Result::Success();};
+    for(const auto &allocation:s->screens)if(auto result=certify(allocation);!result)return mutation_failure(result);
+    for(const auto &allocation:s->noise_textures)if(auto result=certify(allocation);!result)return mutation_failure(result);
+    for(const auto &allocation:s->noise_uploads)if(auto result=certify(allocation);!result)return mutation_failure(result);
+    for(const auto &allocation:{s->constants,s->atlas,s->brick_aabbs,s->scratch})
+        if(auto result=certify(allocation);!result)return mutation_failure(result);
+    for(const auto &allocation:s->trees)if(auto result=certify(allocation);!result)return mutation_failure(result);
+    for(const auto &allocation:s->maps)if(auto result=certify(allocation);!result)return mutation_failure(result);
+    p.record.frame_slot=in.frame_slot;p.record.frame_index=in.frame_index;p.record.scene_revision=in.scene_revision;
+    p.record.static_instances=counts.static_instances;p.record.dynamic_instances=counts.dynamic_instances;
+    p.record.updated_cascade=p.updated_cascade;p.record.scratch_width=s->scratch->resource->GetDesc().Width;
+    p.record.geometry_count=std::uint32_t(in.geometries.size());p.record.instance_count=std::uint32_t(in.instances.size());
+    p.record.physical_cascades=s->status.physical_cascades;p.record.extent=s->extent;
+    p.record.history_valid=s->history_valid;p.record.noise_upload=!s->noise_uploaded;
+    p.record.geometry_reads.reserve(in.geometries.size()*2);
+    for(const auto &geometry:in.geometries)
+    {p.record.geometry_reads.push_back({geometry.vertex_version,Access::ComputeRead});
+     p.record.geometry_reads.push_back({geometry.index_version,Access::ComputeRead});}
+    p.record.unique_geometry_reads=UniqueGeometryReads(p.record.geometry_reads);
+    p.prepared=true;out=p.record;return Result::Success();
+#endif
+}
+Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const BrixelizerSceneInputs &in,
+    BrixelizerSceneOutputs &out,BrixelizerGraphLayout *capture,const BrixelizerGraphLayout *retained)
+{
+    out={};auto s=impl_->storage;if(!s)return Result::Success();
+#if !HS_WITH_BRIXELIZER
+    (void)graph;(void)in;return Fail(ErrorCode::InvalidState,"Brixelizer native package is unavailable.");
+#else
+    auto &p=impl_->pending;
+    if(!s->usable||!p.prepared||p.graph||p.slot!=in.frame_slot||p.frame!=in.frame_index||
+        p.scene_revision!=in.scene_revision||p.prepared_geometries!=in.geometries.data()||
+        p.prepared_instances!=in.instances.data()||p.record.geometry_count!=in.geometries.size()||
+        p.record.instance_count!=in.instances.size())
+        return Fail(ErrorCode::InvalidState,"Brixelizer scene does not match its once-prepared frame inputs.");
+    if((capture&&retained)||(retained&&!MatchesBrixelizerGraphLayout(p.record,*retained)))
+        return Fail(ErrorCode::InvalidState,"Brixelizer graph layout changed after current SDK preparation.");
+    if(capture)
+    {
+        p.record.geometry_reads.clear();
+        for(const auto &geometry:in.geometries)
+        {p.record.geometry_reads.push_back({geometry.vertex_version,Access::ComputeRead});
+         p.record.geometry_reads.push_back({geometry.index_version,Access::ComputeRead});}
+        p.record.unique_geometry_reads=UniqueGeometryReads(p.record.geometry_reads);
+        *capture={};capture->record=p.record;
+    }
+    p.capture=capture;p.retained=retained;
+    for(const auto &geometry:in.geometries)
+        if(auto result=ValidateGeometry(&graph,geometry);!result)return result;
+    p.graph=&graph;
+    const auto counts=s->status;
+    auto pass=impl_->Pass(graph,0,261,"BrixelizerSdfUpdate");
+    if(!pass)return Fail(ErrorCode::InvalidState,"Brixelizer SDF pass does not match retained plan.");
+    if(retained){p.sdf_versions=retained->sdf_versions;p.sdf_read_versions=retained->sdf_read_versions;}
+    std::size_t sdf_index{};
     std::set<std::tuple<std::uint32_t,ResourceKind,std::uint32_t>> geometry_reads;
     std::vector<ExternalResourceAccess> native_accesses;
     const auto add_native_access = [&](ResourceHandle resource, Access access) -> Result {
@@ -616,20 +756,22 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
         if(g.vertex_version.resource && geometry_reads.emplace(g.vertex_version.resource.value,
                 g.vertex_version.resource.kind,g.vertex_version.ordinal).second)
         {
-            pass.Read(g.vertex_version,Access::ComputeRead);
+            if(!retained)pass->Read(g.vertex_version,Access::ComputeRead);
             if(auto result=add_native_access(g.vertex_version.resource,Access::ComputeRead);!result)return result;
         }
         if(g.index_version.resource && geometry_reads.emplace(g.index_version.resource.value,
                 g.index_version.resource.kind,g.index_version.ordinal).second)
         {
-            pass.Read(g.index_version,Access::ComputeRead);
+            if(!retained)pass->Read(g.index_version,Access::ComputeRead);
             if(auto result=add_native_access(g.index_version.resource,Access::ComputeRead);!result)return result;
         }
     }
     const auto add_sdf = [&](const Allocation &allocation, bool read_by_gi) -> Result {
-        const auto version=pass.ReadWrite(impl_->Import(graph,allocation,"BrixelizerSdfBacking"),Access::UnorderedWrite);
-        p.sdf_versions.push_back(version);
-        if (read_by_gi) p.sdf_read_versions.push_back(version);
+        const auto imported=impl_->Import(graph,allocation,"BrixelizerSdfBacking");
+        const auto index=sdf_index++;
+        const auto version=retained?retained->sdf_versions[index]:
+            pass->ReadWrite(imported,Access::UnorderedWrite);
+        if(!retained){p.sdf_versions.push_back(version);if(read_by_gi)p.sdf_read_versions.push_back(version);}
         return add_native_access(version.resource,Access::UnorderedWrite);
     };
     if(auto result=add_sdf(s->atlas,true);!result)return result;
@@ -637,16 +779,22 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     if(auto result=add_sdf(s->scratch,false);!result)return result;
     for(std::uint32_t i=0;i<s->status.physical_cascades;++i)
     {
-        const auto tree=pass.ReadWrite(impl_->Import(graph,s->trees[i],"BrixelizerCascadeTree"),Access::UnorderedWrite);
-        p.sdf_versions.push_back(tree);p.sdf_read_versions.push_back(tree);
+        const auto tree_import=impl_->Import(graph,s->trees[i],"BrixelizerCascadeTree");
+        const auto tree=retained?retained->sdf_versions[sdf_index++]:pass->ReadWrite(tree_import,Access::UnorderedWrite);
+        if(!retained)++sdf_index;
+        if(!retained){p.sdf_versions.push_back(tree);p.sdf_read_versions.push_back(tree);}
         if(auto result=add_native_access(tree.resource,Access::UnorderedWrite);!result)return result;
-        const auto map=pass.ReadWrite(impl_->Import(graph,s->maps[i],"BrixelizerCascadeMap"),Access::UnorderedWrite);
-        p.sdf_versions.push_back(map);p.sdf_read_versions.push_back(map);
+        const auto map_import=impl_->Import(graph,s->maps[i],"BrixelizerCascadeMap");
+        const auto map=retained?retained->sdf_versions[sdf_index++]:pass->ReadWrite(map_import,Access::UnorderedWrite);
+        if(!retained)++sdf_index;
+        if(!retained){p.sdf_versions.push_back(map);p.sdf_read_versions.push_back(map);}
         if(auto result=add_native_access(map.resource,Access::UnorderedWrite);!result)return result;
     }
     // First native update initializes atlas/cascade resources; the graph models
     // the complete native write boundary. Subsequent updates preserve contents.
-    pass.SetExecuteOnOwner([s,baked=p.baked,slot_index=p.slot,scratch=s->scratch,
+    if(capture){capture->sdf_versions=p.sdf_versions;capture->sdf_read_versions=p.sdf_read_versions;}
+    if(p.import_failed)return Fail(ErrorCode::InvalidState,"Brixelizer SDF native import failed retained binding.");
+    pass->SetExecuteOnOwner([s,baked=p.baked,slot_index=p.slot,scratch=s->scratch,
         native_accesses=std::move(native_accesses)](RenderPassContext &ctx)->Result
     {
         const auto execute_native = [&]() -> Result {
@@ -678,9 +826,19 @@ Result BrixelizerGiSystem::RegisterCacheInjection(RenderGraphBuilder &graph,cons
     for(const auto &g:in.reads)if(!g.resource||!g.version.resource||graph.Resolve(g.version.resource)!=g.resource)
         return Fail(ErrorCode::InvalidArgument,"Cache injection read lacks actual graph backing.");
     auto &slot=s->slots[p.slot];slot.owners.insert(slot.owners.end(),in.owners.begin(),in.owners.end());
-    auto pass=graph.AddPass(266,"BrixelizerCacheDirectDiffuseEmission",QueueHint::Direct);
-    for(const auto &g:in.reads){pass.Read(g.version,g.access);slot.resources.emplace_back(g.resource);}
-    p.screens[CacheInjection]=pass.Write(impl_->Import(graph,s->screens[CacheInjection],"BrixelizerCacheInjection"),Access::RenderTarget);
+    std::vector<SceneGeometryReadToken> reads;reads.reserve(in.reads.size());
+    for(const auto &g:in.reads)reads.push_back({g.version,g.access});
+    if(p.retained&&reads!=p.retained->cache_reads)
+        return Fail(ErrorCode::InvalidState,"Brixelizer cache closure reads changed after plan selection.");
+    if(p.capture){p.capture->cache_reads=std::move(reads);p.capture->cache_injection=true;}
+    auto pass=impl_->Pass(graph,1,266,"BrixelizerCacheDirectDiffuseEmission");
+    if(!pass)return Fail(ErrorCode::InvalidState,"Brixelizer cache injection pass does not match retained plan.");
+    for(const auto &g:in.reads){if(!p.retained)pass->Read(g.version,g.access);slot.resources.emplace_back(g.resource);}
+    const auto target=impl_->Import(graph,s->screens[CacheInjection],"BrixelizerCacheInjection");
+    if(p.capture)p.capture->initial_screens[CacheInjection]=target;
+    p.screens[CacheInjection]=p.retained?p.retained->screens[CacheInjection]:pass->Write(target,Access::RenderTarget);
+    if(p.capture)p.capture->screens[CacheInjection]=p.screens[CacheInjection];
+    if(p.import_failed)return Fail(ErrorCode::InvalidState,"Brixelizer cache native import failed retained binding.");
     // A freshly allocated/resized cache target has no published graph state.
     // CompleteSubmission records both its actual completion lease and final
     // access on this allocation, so the allocation itself is the lifetime
@@ -689,7 +847,7 @@ Result BrixelizerGiSystem::RegisterCacheInjection(RenderGraphBuilder &graph,cons
     const bool first_storage_use=cache_allocation.graph_completion.direct==0&&
         cache_allocation.graph_completion.compute==0&&
         cache_allocation.graph_completion.copy==0;
-    pass.SetExecuteChecked([s,bind=in.bind_graphics,first_storage_use](RenderPassContext &ctx)->Result
+    pass->SetExecuteChecked([s,bind=in.bind_graphics,first_storage_use](RenderPassContext &ctx)->Result
     {
         auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());cmd->SetGraphicsRootSignature(s->root.Get());
         if(auto result=bind(cmd);!result)return result;
@@ -735,6 +893,10 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
     if(cube.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||cube.DepthOrArraySize!=6||cube.Width!=cube.Height||cube.SampleDesc.Count!=1)
         return Fail(ErrorCode::InvalidArgument,"Brixelizer needs an actual environment cube.");
     AmbientOcclusionGuide noise_guide=in.noise;
+    std::array<ResourceVersion,16> pinned_noise_versions{};
+    if(p.retained&&p.retained->noise_override!=in.noise.version)
+        return Fail(ErrorCode::InvalidState,"Brixelizer noise binding changed after plan selection.");
+    if(p.capture)p.capture->noise_override=in.noise.version;
     if(noise_guide.resource)
     {const auto noise=noise_guide.resource->GetDesc();
         if(!noise_guide.version.resource||graph.Resolve(noise_guide.version.resource)!=noise_guide.resource||noise.Width!=128||noise.Height!=128||
@@ -747,10 +909,13 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         for(std::uint32_t i=0;i<16;++i)textures[i]=impl_->Import(graph,s->noise_textures[i],"BrixelizerPinnedNoise");
         if(!s->noise_uploaded)
         {
-            auto upload=graph.AddPass(259,"BrixelizerUploadPinnedNoise",QueueHint::Direct);
+            auto upload=impl_->Pass(graph,2,259,"BrixelizerUploadPinnedNoise");
+            if(!upload)return Fail(ErrorCode::InvalidState,"Brixelizer pinned noise upload does not match retained plan.");
             for(std::uint32_t i=0;i<16;++i)
-            {upload.Read(impl_->Import(graph,s->noise_uploads[i],"BrixelizerNoiseUpload"),Access::CopySource);textures[i]=upload.Write(textures[i],Access::CopyDest);}
-            upload.SetExecuteChecked([s](RenderPassContext &ctx)->Result
+            {const auto source=impl_->Import(graph,s->noise_uploads[i],"BrixelizerNoiseUpload");
+             if(!p.retained){upload->Read(source,Access::CopySource);textures[i]=upload->Write(textures[i],Access::CopyDest);}
+             else textures[i]=p.retained->noise_versions[i];}
+            upload->SetExecuteChecked([s](RenderPassContext &ctx)->Result
             {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
                 for(std::uint32_t i=0;i<16;++i)
                 {D3D12_TEXTURE_COPY_LOCATION src{},dst{};src.pResource=s->noise_uploads[i]->resource.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -758,7 +923,10 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
                     cmd->CopyTextureRegion(&dst,0,0,0,&src,nullptr);}return Result::Success();});
             p.noise_upload=true;
         }
-        for(auto texture:textures)graph.SetFinalAccess(texture,Access::ComputeRead);
+        if(p.capture)p.capture->noise_versions=textures;
+        if(!p.retained)for(auto texture:textures)graph.SetFinalAccess(texture,Access::ComputeRead);
+        if(p.retained&&s->noise_uploaded)textures=p.retained->noise_versions;
+        pinned_noise_versions=textures;
         const auto index=std::uint32_t(in.frame_index%16);noise_guide={textures[index],s->noise_textures[index]->resource.Get()};
     }
     if(s->history_valid&&in.light_revision!=s->last_light)
@@ -767,6 +935,18 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
     auto &slot=s->slots[p.slot];slot.owners.insert(slot.owners.end(),in.owners.begin(),in.owners.end());slot.restore=in.restore_bindings;
     const std::array<AmbientOcclusionGuide,12> guides{in.depth,in.normal,in.metadata,in.motion,in.base,in.material,in.sidecars[0],in.sidecars[1],
         in.cache_injection,in.fallback_diffuse,in.environment_specular,in.subsurface_diffuse};
+    std::vector<SceneGeometryReadToken> lighting_reads;lighting_reads.reserve(in.reads.size());
+    for(const auto &read:in.reads)lighting_reads.push_back({read.version,read.access});
+    std::array<ResourceVersion,12> guide_versions{};
+    for(std::size_t i=0;i<guides.size();++i)guide_versions[i]=guides[i].version;
+    if(p.retained&&(lighting_reads!=p.retained->lighting_reads||
+        guide_versions!=p.retained->lighting_guides||
+        in.environment_cube.version!=p.retained->environment_cube||
+        in.sidecar_plane_count!=p.retained->sidecar_count))
+        return Fail(ErrorCode::InvalidState,"Brixelizer current lighting closure changed after plan selection.");
+    if(p.capture)
+    {p.capture->lighting_reads=std::move(lighting_reads);p.capture->lighting_guides=guide_versions;
+     p.capture->environment_cube=in.environment_cube.version;p.capture->sidecar_count=in.sidecar_plane_count;}
     constexpr DXGI_FORMAT guide_formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R32G32_UINT,DXGI_FORMAT_R16G16_FLOAT,
         DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32G32B32A32_UINT,DXGI_FORMAT_R32G32B32A32_UINT,
         DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT};
@@ -794,28 +974,43 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         if(stage==2)s->Uav(p.slot,stage,20,s->screens[CacheCurrent]->resource.Get(),kScreenFormats[CacheCurrent]);
         if(auto result=in.make_bindings(s->Cpu(p.slot,stage,0),kBrixelizerDescriptorCount,slot.binders[stage]);!result)return result;
     }
-    for(std::uint32_t i=0;i<ScreenCount;++i)if(!p.screens[i].resource)p.screens[i]=impl_->Import(graph,s->screens[i],"BrixelizerScreenBacking");
-    auto cb=impl_->Import(graph,s->constants,"BrixelizerAdapterConstants");p.constant_version=cb;
+    for(std::uint32_t i=0;i<ScreenCount;++i)if(!p.screens[i].resource)
+    {const auto imported=impl_->Import(graph,s->screens[i],"BrixelizerScreenBacking");
+     if(p.capture)p.capture->initial_screens[i]=imported;
+     p.screens[i]=p.retained?p.retained->initial_screens[i]:imported;}
+    auto cb=impl_->Import(graph,s->constants,"BrixelizerAdapterConstants");
+    p.constant_version=p.retained?p.retained->constant_version:cb;
+    if(p.capture)p.capture->constant_version=p.constant_version;
+    if(p.import_failed)return Fail(ErrorCode::InvalidState,"Brixelizer lighting native import failed retained binding.");
     auto run=[s,slot_index=p.slot,size](std::uint32_t stage)
     {return [s,slot_index,size,stage](RenderPassContext &ctx)->Result
         {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());cmd->SetComputeRootSignature(s->root.Get());cmd->SetPipelineState(s->pipelines[stage].Get());
             if(auto result=s->slots[slot_index].binders[stage](cmd);!result)return result;
             cmd->Dispatch((size.width+7)/8,(size.height+7)/8,1);return Result::Success();};};
-    auto guide_pass=graph.AddPass(260,"BrixelizerGuides",QueueHint::Direct);guide_pass.Read(cb,Access::ComputeRead);
-    for(const auto &r:in.reads){guide_pass.Read(r.version,r.access);slot.resources.emplace_back(r.resource);}
-    for(std::uint32_t i=0;i<8;++i)if(guides[i].version.resource)guide_pass.Read(guides[i].version,Access::ComputeRead);
-    for(std::uint32_t i=0;i<4;++i)p.screens[i]=guide_pass.Write(p.screens[i],Access::UnorderedWrite);
-    guide_pass.SetExecuteChecked(run(0));
-    auto cache_pass=graph.AddPass(264,"BrixelizerCacheInjectionExport",QueueHint::Direct);cache_pass.Read(cb,Access::ComputeRead);
-    cache_pass.Read(in.cache_injection.version,Access::ComputeRead);p.screens[CacheCurrent]=cache_pass.Write(p.screens[CacheCurrent],Access::UnorderedWrite);
-    cache_pass.SetExecuteChecked(run(2));
-    auto native_pass=graph.AddPass(262,"BrixelizerNativeGi",QueueHint::Direct);
+    auto guide_pass=impl_->Pass(graph,3,260,"BrixelizerGuides");
+    if(!guide_pass)return Fail(ErrorCode::InvalidState,"Brixelizer guide pass does not match retained plan.");
+    if(!p.retained)guide_pass->Read(cb,Access::ComputeRead);
+    for(const auto &r:in.reads){if(!p.retained)guide_pass->Read(r.version,r.access);slot.resources.emplace_back(r.resource);}
+    if(!p.retained)
+    {for(std::uint32_t i=0;i<8;++i)if(guides[i].version.resource)guide_pass->Read(guides[i].version,Access::ComputeRead);
+     for(std::uint32_t i=0;i<4;++i)p.screens[i]=guide_pass->Write(p.screens[i],Access::UnorderedWrite);}
+    else for(std::uint32_t i=0;i<4;++i)p.screens[i]=p.retained->screens[i];
+    guide_pass->SetExecuteChecked(run(0));
+    auto cache_pass=impl_->Pass(graph,4,264,"BrixelizerCacheInjectionExport");
+    if(!cache_pass)return Fail(ErrorCode::InvalidState,"Brixelizer cache export pass does not match retained plan.");
+    if(!p.retained)
+    {cache_pass->Read(cb,Access::ComputeRead);cache_pass->Read(in.cache_injection.version,Access::ComputeRead);
+     p.screens[CacheCurrent]=cache_pass->Write(p.screens[CacheCurrent],Access::UnorderedWrite);}
+    else p.screens[CacheCurrent]=p.retained->screens[CacheCurrent];
+    cache_pass->SetExecuteChecked(run(2));
+    auto native_pass=impl_->Pass(graph,5,262,"BrixelizerNativeGi");
+    if(!native_pass)return Fail(ErrorCode::InvalidState,"Brixelizer native GI pass does not match retained plan.");
     std::set<std::tuple<std::uint32_t,ResourceKind,std::uint32_t>> native_graph_reads;
     std::vector<ExternalResourceAccess> native_accesses;
     const auto add_native_read = [&](ResourceVersion version) -> Result {
         if (!version.resource) return Result::Success();
         if (native_graph_reads.emplace(version.resource.value,version.resource.kind,version.ordinal).second)
-            native_pass.Read(version,Access::ComputeRead);
+            if(!p.retained)native_pass->Read(version,Access::ComputeRead);
         const auto found = std::ranges::find_if(native_accesses, [&](const auto &entry) {
             return entry.resource.value == version.resource.value && entry.resource.kind == version.resource.kind;
         });
@@ -834,7 +1029,13 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
     if(auto result=add_native_read(s->history_valid?p.screens[DepthHistory]:p.screens[Depth]);!result)return result;
     if(auto result=add_native_read(s->history_valid?p.screens[NormalHistory]:p.screens[Normal]);!result)return result;
     if(auto result=add_native_read(in.environment_cube.version);!result)return result;
-    if(auto result=add_native_read(noise_guide.version);!result)return result;
+    // The native dispatch chooses one pinned noise texture by frame index.
+    // Declare the fixed 16-resource read boundary so a retained plan never
+    // preserves last frame's selected index while the SDK reads a new one.
+    if(in.noise.resource)
+    {if(auto result=add_native_read(noise_guide.version);!result)return result;}
+    else for(const auto version:pinned_noise_versions)
+        if(auto result=add_native_read(version);!result)return result;
     const auto add_native_write = [&](ResourceHandle resource) -> Result {
         if (!resource) return Result::Success();
         const auto found = std::ranges::find_if(native_accesses, [&](const auto &entry) {
@@ -851,12 +1052,16 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
     };
     if(auto result=add_native_write(p.screens[RawDiffuse].resource);!result)return result;
     if(auto result=add_native_write(p.screens[RawSpecular].resource);!result)return result;
-    p.screens[RawDiffuse]=native_pass.Write(p.screens[RawDiffuse],Access::UnorderedWrite);
-    p.screens[RawSpecular]=native_pass.Write(p.screens[RawSpecular],Access::UnorderedWrite);
+    if(!p.retained)
+    {p.screens[RawDiffuse]=native_pass->Write(p.screens[RawDiffuse],Access::UnorderedWrite);
+     p.screens[RawSpecular]=native_pass->Write(p.screens[RawSpecular],Access::UnorderedWrite);}
+    else
+    {p.screens[RawDiffuse]=p.retained->screens[RawDiffuse];
+     p.screens[RawSpecular]=p.retained->screens[RawSpecular];}
     const bool history=s->history_valid;auto camera=in.camera;const auto restore=in.restore_bindings;
     ComPtr<ID3D12Resource> environment=in.environment_cube.resource,noise_resource=noise_guide.resource;
     slot.resources.push_back(environment);slot.resources.push_back(noise_resource);
-    native_pass.SetExecuteOnOwner([s,camera,history,environment,noise_resource,restore,
+    native_pass->SetExecuteOnOwner([s,camera,history,environment,noise_resource,restore,
         native_accesses=std::move(native_accesses)](RenderPassContext &ctx)->Result
     {
         FfxBrixelizerGIDispatchDescription desc{};
@@ -895,20 +1100,28 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         if(!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
         return result;
     });
-    auto resolve=graph.AddPass(263,"BrixelizerMaterialResolve",QueueHint::Direct);resolve.Read(cb,Access::ComputeRead);
-    for(const auto &r:in.reads)resolve.Read(r.version,r.access);
-    for(const auto &g:guides)if(g.version.resource)resolve.Read(g.version,Access::ComputeRead);
-    resolve.Read(p.screens[RawDiffuse],Access::ComputeRead);resolve.Read(p.screens[RawSpecular],Access::ComputeRead);
-    for(std::uint32_t i=Diffuse;i<=Specular;++i)p.screens[i]=resolve.Write(p.screens[i],Access::UnorderedWrite);
-    resolve.SetExecuteChecked(run(1));
-    auto histories=graph.AddPass(265,"BrixelizerRetainHistories",QueueHint::Direct);
+    auto resolve=impl_->Pass(graph,6,263,"BrixelizerMaterialResolve");
+    if(!resolve)return Fail(ErrorCode::InvalidState,"Brixelizer material resolve pass does not match retained plan.");
+    if(!p.retained)
+    {resolve->Read(cb,Access::ComputeRead);
+     for(const auto &r:in.reads)resolve->Read(r.version,r.access);
+     for(const auto &g:guides)if(g.version.resource)resolve->Read(g.version,Access::ComputeRead);
+     resolve->Read(p.screens[RawDiffuse],Access::ComputeRead);resolve->Read(p.screens[RawSpecular],Access::ComputeRead);
+     for(std::uint32_t i=Diffuse;i<=Specular;++i)p.screens[i]=resolve->Write(p.screens[i],Access::UnorderedWrite);}
+    else for(std::uint32_t i=Diffuse;i<=Specular;++i)p.screens[i]=p.retained->screens[i];
+    resolve->SetExecuteChecked(run(1));
+    auto histories=impl_->Pass(graph,7,265,"BrixelizerRetainHistories");
+    if(!histories)return Fail(ErrorCode::InvalidState,"Brixelizer histories pass does not match retained plan.");
     for(auto pair:{std::pair{CacheCurrent,CacheHistory},std::pair{Depth,DepthHistory},std::pair{Normal,NormalHistory}})
-    {histories.Read(p.screens[pair.first],Access::CopySource);p.screens[pair.second]=histories.Write(p.screens[pair.second],Access::CopyDest);}
-    graph.AddOrderingDependency(262,265);graph.AddOrderingDependency(264,262);
-    histories.SetExecuteChecked([s](RenderPassContext &ctx)->Result
+    {if(!p.retained){histories->Read(p.screens[pair.first],Access::CopySource);
+     p.screens[pair.second]=histories->Write(p.screens[pair.second],Access::CopyDest);}
+     else p.screens[pair.second]=p.retained->screens[pair.second];}
+    if(!p.retained){graph.AddOrderingDependency(262,265);graph.AddOrderingDependency(264,262);}
+    histories->SetExecuteChecked([s](RenderPassContext &ctx)->Result
     {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());for(auto pair:{std::pair{CacheCurrent,CacheHistory},std::pair{Depth,DepthHistory},std::pair{Normal,NormalHistory}})
         cmd->CopyResource(s->screens[pair.second]->resource.Get(),s->screens[pair.first]->resource.Get());return Result::Success();});
-    for(std::uint32_t i=0;i<ScreenCount;++i)graph.SetFinalAccess(p.screens[i],Access::ComputeRead);
+    if(!p.retained)for(std::uint32_t i=0;i<ScreenCount;++i)graph.SetFinalAccess(p.screens[i],Access::ComputeRead);
+    if(p.capture){p.capture->screens=p.screens;p.capture->lighting=true;}
     auto output=[&](Screen index){return BrixelizerTexture{p.screens[index],s->screens[index]->resource.Get(),s->Export(index)};};
     out={output(Diffuse),output(Delta),output(Subsurface),output(Specular),output(RawDiffuse),output(RawSpecular),output(CacheCurrent)};
     p.lighting=true;return Result::Success();
@@ -921,6 +1134,9 @@ Result BrixelizerGiSystem::RegisterComposite(RenderGraphBuilder &graph,const Bri
         in.render_active.width!=s->extent.width||in.render_active.height!=s->extent.height||
         !Guide(graph,in.hdr,s->extent,DXGI_FORMAT_R16G16B16A16_FLOAT))
         return Fail(ErrorCode::InvalidArgument,"Brixelizer composite requires this frame's real HDR and completed native lighting registration.");
+    if(p.retained&&in.hdr.version!=p.retained->composite_hdr)
+        return Fail(ErrorCode::InvalidState,"Brixelizer HDR producer changed after plan selection.");
+    if(p.capture)p.capture->composite_hdr=in.hdr.version;
     constexpr std::uint32_t stage=3;
     const auto cb_offset=std::uint64_t(p.slot*kStages+stage)*kConstantStride;
     std::memcpy(s->mapped+cb_offset,&p.constants,sizeof(p.constants));
@@ -936,20 +1152,29 @@ Result BrixelizerGiSystem::RegisterComposite(RenderGraphBuilder &graph,const Bri
     auto &slot=s->slots[p.slot];
     if(auto result=in.make_bindings(s->Cpu(p.slot,stage,0),kBrixelizerDescriptorCount,slot.binders[stage]);!result)return result;
     slot.owners.insert(slot.owners.end(),in.owners.begin(),in.owners.end());slot.resources.emplace_back(in.hdr.resource);
-    auto pass=graph.AddPass(267,"BrixelizerComposeHDR",QueueHint::Direct);pass.Read(p.constant_version,Access::ComputeRead);
-    pass.Read(in.hdr.version,Access::ComputeRead);pass.Read(p.screens[Delta],Access::ComputeRead);
-    pass.Read(p.screens[Specular],Access::ComputeRead);pass.Read(p.original_environment.version,Access::ComputeRead);
-    p.screens[Composed]=pass.Write(p.screens[Composed],Access::UnorderedWrite);
-    pass.SetExecuteChecked([s,slot_index=p.slot](RenderPassContext &ctx)->Result
+    auto pass=impl_->Pass(graph,8,267,"BrixelizerComposeHDR");
+    if(!pass)return Fail(ErrorCode::InvalidState,"Brixelizer composite pass does not match retained plan.");
+    if(!p.retained)
+    {pass->Read(p.constant_version,Access::ComputeRead);
+     pass->Read(in.hdr.version,Access::ComputeRead);pass->Read(p.screens[Delta],Access::ComputeRead);
+     pass->Read(p.screens[Specular],Access::ComputeRead);pass->Read(p.original_environment.version,Access::ComputeRead);
+     p.screens[Composed]=pass->Write(p.screens[Composed],Access::UnorderedWrite);}
+    else p.screens[Composed]=p.retained->screens[Composed];
+    pass->SetExecuteChecked([s,slot_index=p.slot](RenderPassContext &ctx)->Result
     {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());cmd->SetComputeRootSignature(s->root.Get());
         cmd->SetPipelineState(s->pipelines[3].Get());if(auto result=s->slots[slot_index].binders[3](cmd);!result)return result;
         cmd->Dispatch((s->extent.width+7)/8,(s->extent.height+7)/8,1);return Result::Success();});
-    graph.SetFinalAccess(p.screens[Composed],Access::ComputeRead);p.composite=true;
+    if(!p.retained)graph.SetFinalAccess(p.screens[Composed],Access::ComputeRead);
+    if(p.retained&&p.imports.size()!=p.retained->imports.size())
+        return Fail(ErrorCode::InvalidState,"Brixelizer retained native import sequence changed.");
+    if(p.capture){p.capture->screens[Composed]=p.screens[Composed];p.capture->composite=true;p.capture->valid=true;}
+    p.composite=true;
     out={p.screens[Composed],s->screens[Composed]->resource.Get(),s->Export(Composed)};return Result::Success();
 }
 Result BrixelizerGiSystem::CompleteSubmission(const RenderGraphBuilder &graph,const CompletionSet &completion,bool success)
 {
-    auto &p=impl_->pending;auto s=impl_->storage;if(!p.graph)return Result::Success();
+    auto &p=impl_->pending;auto s=impl_->storage;
+    if(!p.graph){if(p.prepared&&!success)AbandonPreparedFrame();return Result::Success();}
     if(p.graph!=&graph)return Fail(ErrorCode::InvalidArgument,"Brixelizer completion refers to another graph.");
     auto &slot=s->slots[p.slot];slot.completion.Merge(completion);s->completion.Merge(completion);
     for(const auto &import:p.imports)
@@ -972,6 +1197,17 @@ Result BrixelizerGiSystem::CompleteSubmission(const RenderGraphBuilder &graph,co
         s->status.reason="Native Brixelizer graph failed or was incomplete; drain every submitted queue and recreate before reuse.";}
     p={};return Result::Success();
 }
+void BrixelizerGiSystem::AbandonPreparedFrame() noexcept
+{
+    auto &p=impl_->pending;
+    if(!p.prepared||p.graph)return;
+    if(auto s=impl_->storage)
+    {
+        s->usable=false;s->history_valid=false;s->status.faulted=true;s->status.native_ready=false;
+        s->status.reason="Prepared native SDF state was abandoned before graph submission; drained recreation is required.";
+    }
+    p={};
+}
 Result BrixelizerGiSystem::ResetHistoryAfterCompletion(const CompletionSet &completed,ViewExtent extent,bool rebuild_sdf)
 {
     auto s=impl_->storage;if(!s)return Result::Success();
@@ -986,7 +1222,7 @@ Result BrixelizerGiSystem::ResetHistoryAfterCompletion(const CompletionSet &comp
         BrixelizerCandidate next;
         // Drained replacement no longer has staging overlap with submitted old
         // resources. Prepare still includes the resident overlap in its budget.
-        if(auto result=Prepare(s->device.Get(),s->allocator.Get(),s->root.Get(),extent,std::uint32_t(s->slots.size()),s->settings,s->shader_reader,next);!result)return result;
+        if(auto result=Prepare(s->device.Get(),s->allocator.Get(),s->root.Get(),extent,std::uint32_t(s->slots.size()),s->settings,s->shader_reader,s->texture_catalog,next);!result)return result;
         return Commit(std::move(next),completed);
     }
     if(s->gi_created)
@@ -1009,6 +1245,7 @@ Result BrixelizerGiSystem::ResetAfterCompletion(const CompletionSet &completed)
 {
     if(impl_->pending.graph)return Fail(ErrorCode::InvalidState,"Complete the pending Brixelizer graph before reset.");
     if(auto s=impl_->storage;s&&!s->completion.IsSatisfiedBy(completed))return Fail(ErrorCode::InvalidState,"Brixelizer reset requires every submitted Direct/Compute/Copy use completed.");
-    impl_->storage.reset();return Result::Success();
+    if(impl_->pending.prepared)AbandonPreparedFrame();
+    impl_->pending={};impl_->storage.reset();return Result::Success();
 }
 } // namespace hs

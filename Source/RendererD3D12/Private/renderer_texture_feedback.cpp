@@ -278,21 +278,73 @@ Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12Descr
     frame.written_stride = stride;
     return Result::Success();
 }
+bool RendererTextureFeedback::MatchesLayout(std::uint32_t slot,
+    std::uint32_t clear_id,std::uint32_t decode_id,
+    const TextureFeedbackLayout &layout) const noexcept
+{
+    if(slot>=impl_->frames.size()||!impl_->frames[slot])return false;
+    const auto &frame=*impl_->frames[slot];
+    if(!frame.metadata.resource||(!frame.owners.empty()&&!frame.heap)||
+        layout.owners.size()!=frame.owners.size()||
+        layout.clear_pass_id!=(frame.owners.empty()?0u:clear_id)||
+        layout.decode_pass_id!=(frame.owners.empty()?0u:decode_id)||
+        !layout.metadata||layout.metadata_version.resource!=layout.metadata||
+        layout.metadata_version.ordinal!=0)return false;
+    for(std::size_t index=0;index<frame.owners.size();++index)
+    {
+        const auto &owner=frame.owners[index];const auto &saved=layout.owners[index];
+        if(saved.texture!=owner.id||!saved.imported||
+            saved.cleared.resource!=saved.imported||saved.cleared.ordinal!=1||
+            saved.sampled.resource!=saved.imported||saved.sampled.ordinal<1||
+            saved.width!=owner.width||saved.height!=owner.height||
+            saved.slices!=owner.slices||saved.mip_count!=owner.mip_count)return false;
+    }
+    return true;
+}
 Result RendererTextureFeedback::AddClearPass(RenderGraphBuilder &graph, std::uint32_t slot,
-    std::uint32_t pass_id, std::vector<TextureFeedbackGraphBinding> &bindings)
+    std::uint32_t pass_id, std::vector<TextureFeedbackGraphBinding> &bindings,
+    TextureFeedbackLayout *layout)
+{return AddClearPassImpl(graph,slot,pass_id,bindings,layout,nullptr);}
+Result RendererTextureFeedback::BindRetainedClear(RenderGraphBuilder &graph,
+    std::uint32_t slot,std::uint32_t pass_id,const TextureFeedbackLayout &layout,
+    std::vector<TextureFeedbackGraphBinding> &bindings)
+{return AddClearPassImpl(graph,slot,pass_id,bindings,nullptr,&layout);}
+Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
+    std::uint32_t slot,std::uint32_t pass_id,
+    std::vector<TextureFeedbackGraphBinding> &bindings,
+    TextureFeedbackLayout *layout,const TextureFeedbackLayout *retained)
 {
     bindings.clear();
     if (slot >= impl_->frames.size() || !impl_->frames[slot]) return FeedbackFailure("Sampler feedback frame is missing.");
     const auto frame = impl_->frames[slot];
     if (frame->owners.empty()) return Result::Success();
     if (!frame->heap) return FeedbackFailure("Sampler feedback GPU descriptors were not written.");
-    auto pass = graph.AddPass(pass_id, "Clear actual material feedback", QueueHint::Direct);
-    bindings.reserve(frame->owners.size());
-    for (const auto &owner : frame->owners)
+    if(retained&&(!MatchesLayout(slot,pass_id,retained->decode_pass_id,*retained)||
+        !graph.BindPass(retained->clear_pass_index,pass_id)))
+        return FeedbackFailure("Sampler feedback retained clear topology changed.");
+    if(layout)
     {
-        const auto handle = graph.ImportTexture({owner.feedback.resource.Get(), frame->completion, QueueHint::Direct},
-            Access::Common, "actual material sampler feedback");
-        bindings.push_back({owner.id, pass.Write(graph.Version(handle), Access::UnorderedWrite)});
+        layout->owners.clear();layout->owners.reserve(frame->owners.size());
+        layout->clear_pass_index=graph.PassCount();layout->clear_pass_id=pass_id;
+    }
+    auto pass=retained?*graph.BindPass(retained->clear_pass_index,pass_id):
+        graph.AddPass(pass_id,"Clear actual material feedback",QueueHint::Direct);
+    bindings.reserve(frame->owners.size());
+    for (std::size_t index=0;index<frame->owners.size();++index)
+    {
+        auto &owner=frame->owners[index];
+        if(auto certified=owner.feedback.EnsureNativeContract(impl_->device.Get());!certified)return certified;
+        const auto external=ExternalTexture{owner.feedback.resource.Get(),frame->completion,
+            QueueHint::Direct,{},owner.feedback.NativeContract()};
+        const auto handle=retained?retained->owners[index].imported:
+            graph.ImportTexture(external,Access::Common,"actual material sampler feedback");
+        if(retained&&!graph.BindTexture(handle,external,Access::Common))
+            return FeedbackFailure("Sampler feedback retained map import changed.");
+        const auto written=retained?retained->owners[index].cleared:
+            pass.Write(graph.Version(handle),Access::UnorderedWrite);
+        bindings.push_back({owner.id,written});
+        if(layout)layout->owners.push_back({owner.id,handle,written,{},
+            owner.width,owner.height,owner.slices,owner.mip_count});
     }
     pass.SetExecuteChecked([frame](RenderPassContext &context) {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -306,30 +358,79 @@ Result RendererTextureFeedback::AddClearPass(RenderGraphBuilder &graph, std::uin
 }
 ResourceVersion RendererTextureFeedback::ImportMetadata(RenderGraphBuilder &graph, std::uint32_t slot) const
 {
-    if (slot >= impl_->frames.size() || !impl_->frames[slot]) return {};
-    const auto &frame = *impl_->frames[slot];
-    return graph.Version(graph.ImportBuffer({frame.metadata.resource.Get(), frame.completion, QueueHint::Direct},
-        Access::AllShaderRead, "Material resident mip metadata"));
+    ResourceVersion version{};
+    if(auto imported=ImportMetadata(graph,slot,version,nullptr);!imported)return {};
+    return version;
+}
+Result RendererTextureFeedback::ImportMetadata(RenderGraphBuilder &graph,
+    std::uint32_t slot,ResourceVersion &out,TextureFeedbackLayout *layout) const
+{
+    out={};
+    if(slot>=impl_->frames.size()||!impl_->frames[slot])
+        return FeedbackFailure("Sampler feedback metadata frame is missing.");
+    auto &frame=*impl_->frames[slot];
+    if(auto certified=frame.metadata.EnsureNativeContract(impl_->device.Get());!certified)return certified;
+    const auto handle=graph.ImportBuffer({frame.metadata.resource.Get(),frame.completion,
+        QueueHint::Direct,{},frame.metadata.NativeContract()},Access::AllShaderRead,
+        "Material resident mip metadata");
+    out=graph.Version(handle);
+    if(layout){layout->metadata=handle;layout->metadata_version=out;}
+    return Result::Success();
+}
+Result RendererTextureFeedback::BindRetainedMetadata(RenderGraphBuilder &graph,
+    std::uint32_t slot,const TextureFeedbackLayout &layout,ResourceVersion &out) const
+{
+    out={};
+    if(slot>=impl_->frames.size()||!impl_->frames[slot]||
+        !layout.metadata||layout.metadata_version.resource!=layout.metadata)
+        return FeedbackFailure("Sampler feedback retained metadata frame changed.");
+    auto &frame=*impl_->frames[slot];
+    if(auto certified=frame.metadata.EnsureNativeContract(impl_->device.Get());!certified)return certified;
+    if(!graph.BindBuffer(layout.metadata,{frame.metadata.resource.Get(),frame.completion,
+            QueueHint::Direct,{},frame.metadata.NativeContract()},Access::AllShaderRead))
+        return FeedbackFailure("Sampler feedback retained metadata import changed.");
+    out=layout.metadata_version;
+    return Result::Success();
 }
 void RendererTextureFeedback::DeclareSampling(PassBuilder &pass, std::vector<TextureFeedbackGraphBinding> &bindings)
 {
     for (auto &binding : bindings) binding.feedback = pass.ReadWrite(binding.feedback, Access::UnorderedWrite);
 }
 Result RendererTextureFeedback::AddDecodePass(RenderGraphBuilder &graph, std::uint32_t slot,
-    std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding> bindings)
+    std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding> bindings,
+    TextureFeedbackLayout *layout)
+{return AddDecodePassImpl(graph,slot,pass_id,bindings,layout,nullptr);}
+Result RendererTextureFeedback::BindRetainedDecode(RenderGraphBuilder &graph,
+    std::uint32_t slot,std::uint32_t pass_id,const TextureFeedbackLayout &layout,
+    std::span<const TextureFeedbackGraphBinding> bindings)
+{return AddDecodePassImpl(graph,slot,pass_id,bindings,nullptr,&layout);}
+Result RendererTextureFeedback::AddDecodePassImpl(RenderGraphBuilder &graph,
+    std::uint32_t slot,std::uint32_t pass_id,
+    std::span<const TextureFeedbackGraphBinding> bindings,
+    TextureFeedbackLayout *layout,const TextureFeedbackLayout *retained)
 {
     if (slot >= impl_->frames.size() || !impl_->frames[slot]) return FeedbackFailure("Sampler feedback frame is missing.");
     const auto frame = impl_->frames[slot];
     if (frame->owners.empty()) return Result::Success();
     if (bindings.size() != frame->owners.size()) return FeedbackFailure("Sampler feedback graph alias set changed.");
-    auto pass = graph.AddPass(pass_id, "Decode actual material feedback", QueueHint::Direct);
-    for (const auto &binding : bindings)
+    if(retained&&(!MatchesLayout(slot,retained->clear_pass_id,pass_id,*retained)||
+        !graph.BindPass(retained->decode_pass_index,pass_id)))
+        return FeedbackFailure("Sampler feedback retained decode topology changed.");
+    if(layout){layout->decode_pass_index=graph.PassCount();layout->decode_pass_id=pass_id;}
+    auto pass=retained?*graph.BindPass(retained->decode_pass_index,pass_id):
+        graph.AddPass(pass_id,"Decode actual material feedback",QueueHint::Direct);
+    for(std::size_t index=0;index<bindings.size();++index)
     {
+        const auto &binding=bindings[index];
+        if(binding.texture!=frame->owners[index].id)
+            return FeedbackFailure("Sampler feedback decode owner order changed.");
+        if(retained)continue;
         // The opaque source is read only during decode. COMMON is an explicit
         // bridge between graph enhanced barriers and the private legacy resolve
         // sequence; both the callback and graph leave it in COMMON.
         pass.Read(binding.feedback, Access::Common);
         graph.SetFinalAccess(binding.feedback, Access::Common);
+        if(layout)layout->owners[index].sampled=binding.feedback;
     }
     pass.SetExecuteChecked([frame](RenderPassContext &context) {
         auto *base = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());

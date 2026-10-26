@@ -18,14 +18,86 @@ void DispatchCluster(ID3D12GraphicsCommandList *list, std::uint32_t elements)
     list->Dispatch(static_cast<UINT>(std::min<std::uint64_t>(groups, 65535u)),
         static_cast<UINT>((groups + 65534u) / 65535u), 1u);
 }
+
+template<class F> void VisitClusterVersions(ClusterFrameGraph &state,F &&visit)
+{
+    for(auto *buffer:{&state.groups,&state.children,&state.clusters,&state.pages,&state.refs})
+        visit(buffer->version);
+    for(auto &page:state.geometry) visit(page.buffer.version);
+    for(auto &cut:state.cuts)
+        for(auto *buffer:{&cut.counts,&cut.offsets,&cut.block_sums,&cut.block_offsets,
+            &cut.demand,&cut.status,&cut.draw_commands,&cut.mesh_commands,&cut.command_counts,&cut.readback,
+            &cut.history_bits,&cut.history_generations,&cut.selected_bounds,&cut.previous_rejected,
+            &cut.retest_draw_commands,&cut.retest_mesh_commands,&cut.previous_bits,&cut.previous_generations,
+            &cut.previous_pages,&cut.previous_status}) visit(buffer->version);
+    visit(state.geometry_records);visit(state.raster_records);
 }
+
+void SaveClusterVersions(ClusterFrameGraph &state,ClusterGraphLayout &layout)
+{
+    layout.versions.clear();
+    VisitClusterVersions(state,[&](ResourceVersion &version){layout.versions.push_back(version);});
+}
+
+bool RestoreClusterVersions(ClusterFrameGraph &state,const ClusterGraphLayout &layout)
+{
+    std::size_t cursor{};
+    VisitClusterVersions(state,[&](ResourceVersion &version){
+        if(cursor<layout.versions.size()) version=layout.versions[cursor];
+        ++cursor;
+    });
+    return cursor==layout.versions.size();
+}
+}
+
+ClusterFrameRecordData D3D12Renderer::Impl::PrepareClusterFrameRecordData(
+    std::uint32_t frame_slot,bool visibility) const
+{
+    ClusterFrameRecordData record;record.frame_slot=frame_slot;record.visibility=visibility;
+    if(!cluster_runtime || frame_slot>=kClusterRuntimeFrames) return record;
+    const auto &runtime=*cluster_runtime;
+    const auto &native=runtime.frames[frame_slot];
+    record.runtime_generation=runtime.generation;
+    record.page_upload=native.page_upload_pending;
+    // The graph registration occurs after this preflight. Enabled is the
+    // current prepared branch; registered still describes the prior graph.
+    if(const auto *hlod=ActiveHlodView()) record.hlod_leaf=hlod->frames[frame_slot].enabled;
+    for(std::uint32_t ordinal=0;ordinal<kClusterRuntimeCatalogs;++ordinal)
+    {
+        const auto &cut=native.cuts[ordinal];
+        record.previous_slots[ordinal]=cut.previous_history_slot;
+        record.output_capacities[ordinal]=cut.output_capacity;
+        record.frontend_flags[ordinal]=cut.geometry_frontend_flags;
+        if(cut.candidate_count) record.active_mask|=1u<<ordinal;
+    }
+    record.pages.reserve(runtime.streams.size());
+    for(const auto &stream:runtime.streams)
+    {
+        const auto &snapshot=native.snapshot[stream.logical_slot];
+        const bool resident=snapshot.resident && snapshot.generation==runtime.generation &&
+            snapshot.physical_page_slot==stream.physical_slot && snapshot.page_version==stream.version;
+        if(!resident && !stream.upload_pending) continue;
+        record.pages.push_back({stream.logical_slot,stream.physical_slot,stream.version,
+            resident,stream.upload_pending});
+    }
+    return record;
+}
+
+bool D3D12Renderer::Impl::MatchesClusterGraphLayout(
+    const ClusterFrameRecordData &current,const ClusterGraphLayout &layout) const noexcept
+{ return cluster_runtime && current==layout.record; }
 
 Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
     ResourceVersion &geometry_records, ResourceVersion *visibility_raster_records,
-    ResourceVersion static_scene, ClusterFrameGraph &state)
+    ResourceVersion static_scene, ClusterFrameGraph &state,
+    const ClusterFrameRecordData &record,ClusterGraphLayout *capture,
+    const ClusterGraphLayout *retained)
 {
     if (!cluster_runtime || frame_slot >= kClusterRuntimeFrames || state.prepared ||
-        !geometry_records.resource || !cluster_root_signature)
+        !geometry_records.resource || !cluster_root_signature ||
+        (capture && retained) || record.frame_slot!=frame_slot ||
+        record.visibility!=(visibility_raster_records!=nullptr) ||
+        (retained && !MatchesClusterGraphLayout(record,*retained)))
         return GraphFailure("Cluster graph has an invalid runtime/frame/shared record input.");
     auto &runtime = *cluster_runtime;
     auto &native = runtime.frames[frame_slot];
@@ -38,8 +110,20 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             throw std::runtime_error("cluster graph imports an absent/uninitialized native buffer");
         for (const auto &entry : state.imports)
             if (entry.native == &resource) return entry;
-        const auto handle = graph.ImportBuffer({resource.resource.Get(), resource.graph_completion,
-            resource.graph_queue}, resource.graph_access, name);
+        if(auto certified=resource.EnsureNativeContract(device.Get());!certified)
+            throw std::runtime_error("cluster graph native buffer contract failed: "+std::string(certified.Message()));
+        BufferHandle handle{};
+        if(retained)
+        {
+            if(state.imports.size()>=retained->imports.size())
+                throw std::runtime_error("cluster graph retained import count changed");
+            handle=retained->imports[state.imports.size()];
+            if(!graph.BindBuffer(handle,{resource.resource.Get(),resource.graph_completion,
+                resource.graph_queue,{},resource.NativeContract()},resource.graph_access))
+                throw std::runtime_error("cluster graph retained native import changed");
+        }
+        else handle = graph.ImportBuffer({resource.resource.Get(), resource.graph_completion,
+            resource.graph_queue,{},resource.NativeContract()}, resource.graph_access, name);
         ClusterGraphBuffer entry{&resource, handle, graph.Version(handle)};
         state.imports.push_back(entry);
         return entry;
@@ -91,6 +175,10 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             const bool resident = snapshot.resident && snapshot.generation == runtime.generation &&
                 snapshot.physical_page_slot == stream.physical_slot && snapshot.page_version == stream.version;
             if (!resident && !stream.upload_pending) continue;
+            if(state.geometry.size()>=record.pages.size() ||
+                record.pages[state.geometry.size()]!=ClusterGraphPageRecord{
+                    stream.logical_slot,stream.physical_slot,stream.version,resident,stream.upload_pending})
+                return GraphFailure("Cluster page publication changed after topology preflight.");
             if (!stream.page) return GraphFailure("Cluster graph snapshot/upload has no native page.");
             ClusterGraphPage page;
             page.logical_slot = stream.logical_slot;
@@ -101,14 +189,49 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         }
     }
     catch (const std::exception &error) { return GraphFailure(error.what()); }
+    if(retained && state.imports.size()!=retained->imports.size())
+        return GraphFailure("Cluster graph retained import set changed.");
+    if(capture)
+    {
+        capture->record=record;capture->imports.clear();
+        for(const auto &entry:state.imports) capture->imports.push_back(entry.handle);
+    }
+    const auto *hlod_view=ActiveHlodView();
+    const bool current_hlod_leaf=hlod_view && hlod_view->frames[frame_slot].registered;
+    if(runtime.generation!=record.runtime_generation ||
+        state.draws!=(record.active_mask!=0) || state.geometry.size()!=record.pages.size() ||
+        native.page_upload_pending!=record.page_upload || current_hlod_leaf!=record.hlod_leaf)
+        return GraphFailure("Cluster graph current record changed after topology preflight.");
+    for(std::uint32_t ordinal=0;ordinal<kClusterRuntimeCatalogs;++ordinal)
+        if(state.cuts[ordinal].active!=((record.active_mask&(1u<<ordinal))!=0) ||
+            native.cuts[ordinal].previous_history_slot!=record.previous_slots[ordinal] ||
+            native.cuts[ordinal].output_capacity!=record.output_capacities[ordinal] ||
+            native.cuts[ordinal].geometry_frontend_flags!=record.frontend_flags[ordinal])
+            return GraphFailure("Cluster cut changed after topology preflight.");
+    for(std::size_t index=0;index<state.geometry.size();++index)
+        if(state.geometry[index].logical_slot!=record.pages[index].logical_slot ||
+            state.geometry[index].resident!=record.pages[index].resident ||
+            state.geometry[index].upload!=record.pages[index].upload)
+            return GraphFailure("Cluster page set changed after topology preflight.");
+    const auto make_pass=[&](std::uint32_t id,std::string_view name,QueueHint queue,
+        std::uint32_t *capture_index,std::uint32_t retained_index) -> std::optional<PassBuilder> {
+        if(retained) return graph.BindPass(retained_index,id);
+        if(capture_index) *capture_index=graph.PassCount();
+        return graph.AddPass(id,name,queue);
+    };
     if (native.page_upload_pending || std::ranges::any_of(state.geometry, [](const auto &page) { return page.upload; }))
     {
-        auto upload = graph.AddPass(39u, "ClusterPageUpload", QueueHint::Copy);
-        if (native.page_upload_pending) state.pages.version = upload.Write(state.pages.version, Access::CopyDest);
-        for (auto &page : state.geometry)
-            if (page.upload)
-                page.buffer.version = upload.Write(page.buffer.version, Access::CopyDest);
-        upload.SetExecute([this, frame_slot, &state](RenderPassContext &context) {
+        auto upload=make_pass(39u,"ClusterPageUpload",QueueHint::Copy,
+            capture?&capture->upload_pass:nullptr,retained?retained->upload_pass:UINT32_MAX);
+        if(!upload) return GraphFailure("Cluster page upload pass differs from retained plan.");
+        if(!retained)
+        {
+            if (native.page_upload_pending) state.pages.version = upload->Write(state.pages.version, Access::CopyDest);
+            for (auto &page : state.geometry)
+                if (page.upload)
+                    page.buffer.version = upload->Write(page.buffer.version, Access::CopyDest);
+        }
+        upload->SetExecute([this, frame_slot, &state](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             if (cluster_runtime->frames[frame_slot].page_upload_pending) RecordClusterPageTableUpload(list, frame_slot);
             for (const auto &page : state.geometry)
@@ -183,26 +306,31 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                     read_once(cut.previous_status.version);
                 }
         };
-        auto count = graph.AddPass(40u, "ClusterCutCount", QueueHint::Compute);
-        read_tables(count);
-        state.refs.version = count.Write(state.refs.version, Access::UnorderedWrite);
-        for (auto &cut : state.cuts)
-            if (cut.active)
-            {
-                // ConstantsValid queries these UAV dimensions, without reading
-                // prior bytes. Their actual writers are Prefix or Emit below.
-                for (auto *buffer : {&cut.offsets, &cut.block_sums, &cut.block_offsets,
-                    &cut.draw_commands, &cut.mesh_commands})
-                    count.Read(buffer->version, Access::UnorderedRead);
-                for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
-                    &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
-                    buffer->version = count.Write(buffer->version, Access::UnorderedWrite);
-            }
-        for (auto &cut : state.cuts)
-            if (cut.active)
-                for (auto *buffer : {&cut.history_bits, &cut.history_generations})
-                    buffer->version = count.Write(buffer->version, Access::UnorderedWrite);
-        count.SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
+        auto count=make_pass(40u,"ClusterCutCount",QueueHint::Compute,
+            capture?&capture->count_pass:nullptr,retained?retained->count_pass:UINT32_MAX);
+        if(!count) return GraphFailure("Cluster count pass differs from retained plan.");
+        if(!retained)
+        {
+            read_tables(*count);
+            state.refs.version = count->Write(state.refs.version, Access::UnorderedWrite);
+            for (auto &cut : state.cuts)
+                if (cut.active)
+                {
+                    // ConstantsValid queries these UAV dimensions, without reading
+                    // prior bytes. Their actual writers are Prefix or Emit below.
+                    for (auto *buffer : {&cut.offsets, &cut.block_sums, &cut.block_offsets,
+                        &cut.draw_commands, &cut.mesh_commands})
+                        count->Read(buffer->version, Access::UnorderedRead);
+                    for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
+                        &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
+                        buffer->version = count->Write(buffer->version, Access::UnorderedWrite);
+                }
+            for (auto &cut : state.cuts)
+                if (cut.active)
+                    for (auto *buffer : {&cut.history_bits, &cut.history_generations})
+                        buffer->version = count->Write(buffer->version, Access::UnorderedWrite);
+        }
+        count->SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             constexpr UINT zero[4]{};
             const auto clear = [&](std::uint32_t ordinal, std::uint32_t uav, AllocationResource &resource) {
@@ -256,34 +384,38 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         for (std::uint32_t stage = 0; stage < 3; ++stage)
         {
             constexpr std::array names{"ClusterCutPrefix0", "ClusterCutPrefix1", "ClusterCutPrefix2"};
-            auto prefix = graph.AddPass(41u + stage, names[stage], QueueHint::Compute);
-            for (auto &cut : state.cuts)
-            {
-                if (!cut.active) continue;
-                cut.status.version = prefix.ReadWrite(cut.status.version, Access::UnorderedWrite);
-                cut.command_counts.version = prefix.ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
-                if (stage == 0)
+            auto prefix=make_pass(41u+stage,names[stage],QueueHint::Compute,
+                capture?&capture->prefix_pass[stage]:nullptr,
+                retained?retained->prefix_pass[stage]:UINT32_MAX);
+            if(!prefix) return GraphFailure("Cluster prefix pass differs from retained plan.");
+            if(!retained)
+                for (auto &cut : state.cuts)
                 {
-                    prefix.Read(cut.counts.version, Access::UnorderedRead);
-                    // Every readable active element is written by Prefix0;
-                    // invalid constants fault/return before any scratch reader.
-                    cut.offsets.version = prefix.Write(cut.offsets.version, Access::UnorderedWrite);
-                    cut.block_sums.version = prefix.Write(cut.block_sums.version, Access::UnorderedWrite);
+                    if (!cut.active) continue;
+                    cut.status.version = prefix->ReadWrite(cut.status.version, Access::UnorderedWrite);
+                    cut.command_counts.version = prefix->ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
+                    if (stage == 0)
+                    {
+                        prefix->Read(cut.counts.version, Access::UnorderedRead);
+                        // Every readable active element is written by Prefix0;
+                        // invalid constants fault/return before any scratch reader.
+                        cut.offsets.version = prefix->Write(cut.offsets.version, Access::UnorderedWrite);
+                        cut.block_sums.version = prefix->Write(cut.block_sums.version, Access::UnorderedWrite);
+                    }
+                    else if (stage == 1)
+                    {
+                        prefix->Read(cut.block_sums.version, Access::UnorderedRead);
+                        cut.block_offsets.version = prefix->Write(cut.block_offsets.version, Access::UnorderedWrite);
+                    }
+                    else
+                    {
+                        prefix->Read(cut.block_offsets.version, Access::UnorderedRead);
+                        cut.offsets.version = prefix->ReadWrite(cut.offsets.version, Access::UnorderedWrite);
+                        cut.draw_commands.version = prefix->ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
+                        cut.mesh_commands.version = prefix->ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
+                    }
                 }
-                else if (stage == 1)
-                {
-                    prefix.Read(cut.block_sums.version, Access::UnorderedRead);
-                    cut.block_offsets.version = prefix.Write(cut.block_offsets.version, Access::UnorderedWrite);
-                }
-                else
-                {
-                    prefix.Read(cut.block_offsets.version, Access::UnorderedRead);
-                    cut.offsets.version = prefix.ReadWrite(cut.offsets.version, Access::UnorderedWrite);
-                    cut.draw_commands.version = prefix.ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
-                    cut.mesh_commands.version = prefix.ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
-                }
-            }
-            prefix.SetExecute([this, frame_slot, &state, bind, stage](RenderPassContext &context) {
+            prefix->SetExecute([this, frame_slot, &state, bind, stage](RenderPassContext &context) {
                 auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
                 list->SetPipelineState(cluster_prefix_pipeline.Get());
                 for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
@@ -297,26 +429,31 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 }
             });
         }
-        auto emit = graph.AddPass(44u, "ClusterCutEmit", QueueHint::Compute);
-        read_tables(emit);
-        geometry_records = emit.ReadWrite(geometry_records, Access::UnorderedWrite);
-        state.geometry_records = geometry_records;
-        state.refs.version = emit.ReadWrite(state.refs.version, Access::UnorderedWrite);
-        if (visibility_raster_records)
+        auto emit=make_pass(44u,"ClusterCutEmit",QueueHint::Compute,
+            capture?&capture->emit_pass:nullptr,retained?retained->emit_pass:UINT32_MAX);
+        if(!emit) return GraphFailure("Cluster emit pass differs from retained plan.");
+        if(!retained)
         {
-            *visibility_raster_records = emit.ReadWrite(*visibility_raster_records, Access::UnorderedWrite);
-            state.raster_records = *visibility_raster_records;
+            read_tables(*emit);
+            geometry_records = emit->ReadWrite(geometry_records, Access::UnorderedWrite);
+            state.geometry_records = geometry_records;
+            state.refs.version = emit->ReadWrite(state.refs.version, Access::UnorderedWrite);
+            if (visibility_raster_records)
+            {
+                *visibility_raster_records = emit->ReadWrite(*visibility_raster_records, Access::UnorderedWrite);
+                state.raster_records = *visibility_raster_records;
+            }
+            for (auto &cut : state.cuts)
+            {
+                if (!cut.active) continue;
+                emit->Read(cut.counts.version, Access::UnorderedRead);
+                emit->Read(cut.offsets.version, Access::UnorderedRead);
+                for (auto *buffer : {&cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
+                    &cut.history_bits, &cut.history_generations, &cut.selected_bounds})
+                    buffer->version = emit->ReadWrite(buffer->version, Access::UnorderedWrite);
+            }
         }
-        for (auto &cut : state.cuts)
-        {
-            if (!cut.active) continue;
-            emit.Read(cut.counts.version, Access::UnorderedRead);
-            emit.Read(cut.offsets.version, Access::UnorderedRead);
-            for (auto *buffer : {&cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
-                &cut.history_bits, &cut.history_generations, &cut.selected_bounds})
-                buffer->version = emit.ReadWrite(buffer->version, Access::UnorderedWrite);
-        }
-        emit.SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
+        emit->SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             list->SetPipelineState(cluster_emit_pipeline.Get());
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
@@ -326,15 +463,18 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 DispatchCluster(list, cluster_runtime->frames[frame_slot].cuts[ordinal].candidate_count);
             }
         });
-        auto readback = graph.AddPass(50u, "ClusterDemandStatusReadback", QueueHint::Copy);
-        for (auto &cut : state.cuts)
-        {
-            if (!cut.active) continue;
-            readback.Read(cut.demand.version, Access::CopySource);
-            readback.Read(cut.status.version, Access::CopySource);
-            cut.readback.version = readback.Write(cut.readback.version, Access::CopyDest);
-        }
-        readback.SetExecute([this, frame_slot, &state](RenderPassContext &context) {
+        auto readback=make_pass(50u,"ClusterDemandStatusReadback",QueueHint::Copy,
+            capture?&capture->readback_pass:nullptr,retained?retained->readback_pass:UINT32_MAX);
+        if(!readback) return GraphFailure("Cluster readback pass differs from retained plan.");
+        if(!retained)
+            for (auto &cut : state.cuts)
+            {
+                if (!cut.active) continue;
+                readback->Read(cut.demand.version, Access::CopySource);
+                readback->Read(cut.status.version, Access::CopySource);
+                cut.readback.version = readback->Write(cut.readback.version, Access::CopyDest);
+            }
+        readback->SetExecute([this, frame_slot, &state](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto demand_bytes = cluster_runtime->cpu.pages.size() * sizeof(std::uint32_t);
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
@@ -346,6 +486,8 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             }
         });
     }
+    if(!retained)
+    {
     graph.SetFinalAccess(state.groups.version, Access::ComputeRead);
     graph.SetFinalAccess(state.children.version, Access::ComputeRead);
     graph.SetFinalAccess(state.clusters.version, Access::ComputeRead);
@@ -368,15 +510,26 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             if (cut.previous_frame_slot != UINT32_MAX) graph.SetFinalAccess(cut.previous_pages.version, Access::ComputeRead);
             graph.SetFinalAccess(cut.previous_status.version, Access::ComputeRead);
         }
+    }
+    if(retained)
+    {
+        if(!RestoreClusterVersions(state,*retained))
+            return GraphFailure("Cluster retained output version inventory changed.");
+        geometry_records=state.geometry_records;
+        if(visibility_raster_records) *visibility_raster_records=state.raster_records;
+    }
+    if(capture) SaveClusterVersions(state,*capture);
     state.prepared = true;
     return Result::Success();
 }
 
 Result D3D12Renderer::Impl::AddClusterOcclusionPass(std::uint32_t frame_slot,
-    ClusterFrameGraph &state, ResourceVersion hzb, bool retest)
+    ClusterFrameGraph &state, ResourceVersion hzb, bool retest,
+    ClusterGraphLayout *capture,const ClusterGraphLayout *retained)
 {
     if (!cluster_runtime || !state.prepared || state.frame_slot != frame_slot ||
         frame_slot >= kClusterRuntimeFrames || !hzb.resource ||
+        (capture && retained) ||
         (retest ? !state.previous_occlusion || state.current_retest : state.previous_occlusion))
         return GraphFailure("Cluster occlusion has an invalid frame/HZB/phase input.");
     if (retest) state.current_retest = true;
@@ -386,39 +539,47 @@ Result D3D12Renderer::Impl::AddClusterOcclusionPass(std::uint32_t frame_slot,
         !hzb_history[hzb_read_index ^ (retest ? 1u : 0u)].resource)
         return GraphFailure("Cluster occlusion has no compatible pipeline/HZB resource.");
 
-    auto pass = graph.AddPass(retest ? 53u : 52u,
-        retest ? "ClusterCurrentDepthRetest" : "ClusterPreviousHzbOcclusion", QueueHint::Compute);
-    pass.Read(hzb, Access::ComputeRead);
-    pass.Read(state.refs.version, Access::UnorderedRead);
-    pass.Read(state.geometry_records, Access::UnorderedRead);
-    for (auto &cut : state.cuts)
+    const auto id=retest?53u:52u;
+    auto pass=retained?graph.BindPass(retest?retained->retest_pass:retained->previous_occlusion_pass,id):
+        std::optional<PassBuilder>(graph.AddPass(id,
+            retest?"ClusterCurrentDepthRetest":"ClusterPreviousHzbOcclusion",QueueHint::Compute));
+    if(!pass) return GraphFailure("Cluster occlusion pass differs from retained plan.");
+    if(!retained)
     {
-        if (!cut.active) continue;
-        pass.Read(cut.status.version, Access::UnorderedRead);
-        pass.Read(cut.selected_bounds.version, Access::UnorderedRead);
-        if (retest)
+        if(capture) (retest?capture->retest_pass:capture->previous_occlusion_pass)=graph.PassCount()-1u;
+        pass->Read(hzb, Access::ComputeRead);
+        pass->Read(state.refs.version, Access::UnorderedRead);
+        pass->Read(state.geometry_records, Access::UnorderedRead);
+        for (auto &cut : state.cuts)
         {
-            pass.Read(cut.previous_rejected.version, Access::UnorderedRead);
-            cut.retest_draw_commands.version = pass.Write(cut.retest_draw_commands.version, Access::UnorderedWrite);
-            cut.retest_mesh_commands.version = pass.Write(cut.retest_mesh_commands.version, Access::UnorderedWrite);
-            cut.command_counts.version = pass.ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.retest_draw_commands.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.retest_mesh_commands.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
+            if (!cut.active) continue;
+            pass->Read(cut.status.version, Access::UnorderedRead);
+            pass->Read(cut.selected_bounds.version, Access::UnorderedRead);
+            if (retest)
+            {
+                pass->Read(cut.previous_rejected.version, Access::UnorderedRead);
+                cut.retest_draw_commands.version = pass->Write(cut.retest_draw_commands.version, Access::UnorderedWrite);
+                cut.retest_mesh_commands.version = pass->Write(cut.retest_mesh_commands.version, Access::UnorderedWrite);
+                cut.command_counts.version = pass->ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.retest_draw_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.retest_mesh_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
+            }
+            else
+            {
+                cut.previous_rejected.version = pass->Write(cut.previous_rejected.version, Access::UnorderedWrite);
+                cut.draw_commands.version = pass->ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
+                cut.mesh_commands.version = pass->ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
+                cut.command_counts.version = pass->ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.previous_rejected.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.draw_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.mesh_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
+            }
         }
-        else
-        {
-            cut.previous_rejected.version = pass.Write(cut.previous_rejected.version, Access::UnorderedWrite);
-            cut.draw_commands.version = pass.ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
-            cut.mesh_commands.version = pass.ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
-            cut.command_counts.version = pass.ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.previous_rejected.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.draw_commands.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.mesh_commands.version, Access::UnorderedWrite);
-            graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
-        }
+        if(capture) SaveClusterVersions(state,*capture);
     }
-    pass.SetExecute([this, frame_slot, &state, retest](RenderPassContext &context) {
+    pass->SetExecute([this, frame_slot, &state, retest](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         auto &runtime = *cluster_runtime;
         ID3D12DescriptorHeap *heap[]{runtime.descriptors.Get()};

@@ -39,6 +39,34 @@ struct ClusterFrameGraph
     ResourceVersion geometry_records{}, raster_records{};
     bool prepared{}, draws{}, visibility{}, previous_occlusion{}, current_retest{};
 };
+struct ClusterGraphPageRecord
+{
+    std::uint32_t logical_slot{}, physical_slot{}, page_version{};
+    bool resident{}, upload{};
+    bool operator==(const ClusterGraphPageRecord &) const noexcept = default;
+};
+// Prepared once before graph restore. All fields affect the declaration
+// topology or the native range/capacity contract of a cluster pass.
+struct ClusterFrameRecordData
+{
+    static_assert(kClusterRuntimeCatalogs <= 32);
+    std::uint32_t frame_slot{}, active_mask{}, runtime_generation{};
+    std::array<std::uint32_t,kClusterRuntimeCatalogs> previous_slots{},
+        output_capacities{}, frontend_flags{};
+    std::vector<ClusterGraphPageRecord> pages;
+    bool visibility{}, page_upload{}, hlod_leaf{};
+    bool operator==(const ClusterFrameRecordData &) const noexcept = default;
+};
+struct ClusterGraphLayout
+{
+    ClusterFrameRecordData record;
+    std::vector<BufferHandle> imports;
+    std::vector<ResourceVersion> versions;
+    std::uint32_t upload_pass{UINT32_MAX}, count_pass{UINT32_MAX},
+        emit_pass{UINT32_MAX}, readback_pass{UINT32_MAX},
+        previous_occlusion_pass{UINT32_MAX}, retest_pass{UINT32_MAX};
+    std::array<std::uint32_t,3> prefix_pass{UINT32_MAX,UINT32_MAX,UINT32_MAX};
+};
 // IDs39..44: cluster upload, count, prefix0/1/2, emit. ID50: demand/status readback.
 // Add after the existing authored visibility pass and before Shadow. Pass reads
 // of geometry_records/raster_records use the returned latest versions. Draw

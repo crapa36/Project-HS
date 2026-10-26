@@ -1,5 +1,5 @@
 #pragma once
-#include <hs/renderer/vfx_frame_input.hpp>
+#include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -57,7 +57,7 @@ class VfxPersistentMoteBirthWindow
     const VfxProgramView &program, std::span<const VfxEventInput> inputs);
 // Reconstruct only live indexed emissions from an authoritative owner clock.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(
-    const VfxProgramView &program, std::span<const VfxEventInput> inputs, Tick current_tick);
+    const VfxProgramView &program, std::span<const VfxEventInput> inputs, double current_tick);
 
 struct VfxOwnedStatusTickMoteCommand
 {
@@ -77,7 +77,7 @@ struct VfxOwnedStatusTickMoteCommand
     const VfxProgramView &program, std::span<const VfxPersistentInput> owners);
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
     const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
-    VfxPersistentMoteBirthWindow &births, Tick current_tick);
+    VfxPersistentMoteBirthWindow &births, Tick current_tick, float interpolation = 1.0f);
 
 // One cursor per live projectile/source. The six supported micro_sparks sources
 // each have one velocity_billboard output. Past births are skipped when snapshots
@@ -88,7 +88,7 @@ class VfxPersistentSparkState
     [[nodiscard]] std::vector<VfxFlashSpawnInput> Emit(
         const VfxProgramView &program,
         std::span<const VfxPersistentInput> owners,
-        Tick current_tick);
+        Tick current_tick, float interpolation = 1.0f);
     void Clear() noexcept { cursors_.clear(); }
     [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
                                      const VfxProgramView &next) noexcept;

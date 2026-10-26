@@ -93,6 +93,17 @@ struct PostSubgraphPlan
     PostSubgraphOutputs outputs;
 };
 
+struct PostSubgraphLayout
+{
+    struct Pass { std::uint32_t declaration_index{}, id{}; };
+    std::array<ResourceVersion, 34> inputs{};
+    std::array<Pass, 9> passes{};
+    PostSubgraphOutputs outputs{};
+    std::uint32_t pass_count{};
+    bool bloom{}, outline{}, fxaa_identity{}, initialize_post_targets{};
+    bool pre_bloom{}, pre_tone_map{}, devtools_ui{};
+};
+
 using PostPassCallback = std::move_only_function<void(RenderPassContext &)>;
 // Index zero corresponds to stable pass ID 9, through ID 17 at index eight.
 using PostPassCallbacks = std::array<PostPassCallback, 9>;
@@ -104,5 +115,12 @@ using PostPassCallbacks = std::array<PostPassCallback, 9>;
                                        const PostSubgraphInputs &inputs,
                                        const PostSubgraphTargets &targets,
                                        PostPassCallbacks callbacks,
-                                       PostSubgraphOutputs &outputs);
+                                       PostSubgraphOutputs &outputs,
+                                       PostSubgraphLayout *layout = nullptr);
+[[nodiscard]] bool MatchesPostSubgraphLayout(const PostSubgraphInputs &inputs,
+    const PostSubgraphTargets &targets, const PostSubgraphLayout &layout) noexcept;
+[[nodiscard]] Result BindRetainedPostSubgraphs(RenderGraphBuilder &graph,
+    const PostSubgraphInputs &inputs, const PostSubgraphTargets &targets,
+    const PostSubgraphLayout &layout, PostPassCallbacks callbacks,
+    PostSubgraphOutputs &outputs);
 } // namespace hs

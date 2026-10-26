@@ -1,5 +1,6 @@
 #pragma once
 
+#include "renderer_asset_source.hpp"
 #include <hs/render_data/geometry_hierarchy.hpp>
 #include <hs/renderer/renderer.hpp>
 
@@ -93,11 +94,11 @@ struct ClusterGpuTables
 struct ClusterCatalogPage
 {
     std::string logical_id;
-    std::filesystem::path path;
+    RendererAssetSource source;
     std::string digest;
     bool pinned{};
 };
-using ClusterCatalogRead = std::function<Result(const std::filesystem::path &, std::vector<std::byte> &)>;
+using ClusterCatalogRead = std::function<Result(const RendererAssetSource &, std::vector<std::byte> &)>;
 
 // Owns one of the fourteen environment material catalogs. The selected
 // Generation is immutable: Load reads only GHI1, while page paths/digests are
@@ -109,7 +110,8 @@ public:
         const render_data::PackageView &main_package, std::string_view main_product_id,
         const ClusterCatalogRead &read);
     [[nodiscard]] Result DecodePage(std::uint32_t page_index,
-        std::span<const std::byte> bytes, render_data::GeometryData &output) const;
+        std::span<const std::byte> bytes, render_data::GeometryData &output,
+        const std::function<void(const render_data::PackageView &, const render_data::GeometryData &)> &admit = {}) const;
     [[nodiscard]] Result PrepareGpu(std::uint32_t catalog_ordinal, std::uint32_t generation_tag,
         std::uint32_t group_base, std::uint32_t child_base, std::uint32_t cluster_base,
         std::uint32_t page_base, std::uint32_t material_base, ClusterGpuTables &output) const;
@@ -119,7 +121,6 @@ public:
     [[nodiscard]] std::span<const std::uint32_t> PinnedPages() const noexcept { return pinned_pages_; }
     [[nodiscard]] std::string_view Generation() const noexcept { return generation_; }
     [[nodiscard]] std::string_view LogicalId() const noexcept { return logical_id_; }
-    [[nodiscard]] std::uint32_t MaxAncestorSteps() const noexcept { return max_ancestor_steps_; }
     [[nodiscard]] std::uint32_t FindPage(std::string_view logical_id) const;
 
 private:
@@ -128,7 +129,6 @@ private:
     std::vector<std::uint32_t> pinned_pages_;
     std::unordered_map<std::string, std::uint32_t> page_indices_;
     std::string generation_, logical_id_, source_id_;
-    std::uint32_t max_ancestor_steps_{};
 };
 
 // Dispatch contract: clear status/demand/count buffers, CountCuts, UAV barrier,

@@ -442,11 +442,15 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     timings.cpu_qpc_frequency = frame.cpu_qpc_frequency;
     timings.fence_completed = true;
     timings.completed_frame_id = frame.submitted_frame_id;
+    timings.source_frame_id = frame.submitted_frame_id;
+    timings.source_frame_sequence = frame.timing_source_sequence;
     timings.view_id = frame.submitted_view_id;
     timings.metric_kind = frame.timing_kind;
     timings.metric_generation = frame.timing_generation;
     timings.resize_epoch = frame.timing_resize_epoch;
     timings.render_active = frame.timing_render_active;
+    timings.quality_generation = frame.timing_quality_generation;
+    timings.provider_generation = frame.timing_provider_generation;
     timings.main_view = frame.timing_main_view;
     timings.frame_generation_enabled = frame.timing_frame_generation_enabled;
     timings.cpu_recording_ms = frame.cpu_recording_ms;
@@ -555,10 +559,146 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
                 timings.output_ready_qpc = ready.end_qpc;
                 timings.output_ready_qpc_frequency = ready.qpc_frequency;
                 timings.output_ready_clock_calibrated = ready.clock_calibrated;
+                if (calibrations[0].available && qpc_available)
+                {
+                    timings.clock_gpu_after = calibrations[0].gpu;
+                    timings.clock_cpu_after = calibrations[0].cpu;
+                    timings.clock_gpu_frequency = ready.timestamp_frequency;
+                    timings.clock_cpu_frequency = static_cast<std::uint64_t>(qpc_frequency.QuadPart);
+                }
             }
         }
-        // A single ready endpoint cannot establish dependency span, GPU backlog,
-        // pacing exclusion or clock drift. Do not turn it into a DRS sample.
+        const auto &before = frame.timing_clock_before[0];
+        timings.clock_gpu_before = before.gpu;
+        timings.clock_cpu_before = before.cpu;
+        timings.clock_anchors_valid = before.valid && calibrations[0].available &&
+            before.gpu_frequency == timings.clock_gpu_frequency &&
+            before.cpu_frequency == timings.clock_cpu_frequency;
+
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> closure_intervals;
+        bool closure_measured = frame.timing_closure_imports_ready && !frame.timing_closure_slots.empty();
+        bool ready_in_closure = false;
+        for (const auto slot : frame.timing_closure_slots)
+        {
+            if (slot >= timings.passes.size()) { closure_measured = false; break; }
+            const auto &pass = timings.passes[slot];
+            ready_in_closure |= slot == end_slot;
+            const auto queue_index = static_cast<std::size_t>(pass.queue);
+            if (!pass.measured || !pass.clock_calibrated ||
+                queue_index >= frame.timing_clock_before.size() ||
+                !frame.timing_clock_before[queue_index].valid ||
+                !calibrations[queue_index].available ||
+                !qpc_available || pass.qpc_frequency != static_cast<std::uint64_t>(qpc_frequency.QuadPart))
+            {
+                closure_measured = false;
+                break;
+            }
+            const auto &anchor = frame.timing_clock_before[queue_index];
+            const GpuClockCalibrationEvidence clock{anchor.gpu, anchor.cpu,
+                calibrations[queue_index].gpu, calibrations[queue_index].cpu,
+                anchor.gpu_frequency, anchor.cpu_frequency};
+            if (anchor.gpu_frequency != pass.timestamp_frequency ||
+                !QualifiedGpuClockInterval(clock, pass.begin_ticks, pass.end_ticks))
+            {
+                closure_measured = false;
+                break;
+            }
+            closure_intervals.emplace_back(pass.begin_qpc, pass.end_qpc);
+        }
+        timings.closure_clock_valid = closure_measured && ready_in_closure;
+        if (timings.closure_clock_valid)
+        {
+            std::sort(closure_intervals.begin(), closure_intervals.end());
+            const auto first = closure_intervals.front().first;
+            if (first < timings.output_ready_qpc && timings.output_ready_qpc_frequency &&
+                frame.timing_execute_begin_qpc && frame.timing_execute_end_qpc >= frame.timing_execute_begin_qpc)
+            {
+                timings.output_dependency_span_ms = static_cast<double>(
+                    static_cast<long double>(timings.output_ready_qpc - first) * 1000.0L /
+                    timings.output_ready_qpc_frequency);
+                timings.closure_gap_checked = std::isfinite(timings.output_dependency_span_ms) &&
+                    timings.output_dependency_span_ms > 0.0;
+                timings.span_valid = timings.closure_gap_checked;
+                const auto tolerance = std::max<std::uint64_t>(1, timings.output_ready_qpc_frequency / 20'000);
+                auto covered_until = closure_intervals.front().second;
+                timings.closure_span_gap = frame.timing_execute_end_qpc > first;
+                for (std::size_t index = 1; index < closure_intervals.size(); ++index)
+                {
+                    const auto [begin, end] = closure_intervals[index];
+                    if (begin > covered_until && begin - covered_until > tolerance)
+                        timings.closure_span_gap = true;
+                    covered_until = std::max(covered_until, end);
+                }
+                if (covered_until < timings.output_ready_qpc &&
+                    timings.output_ready_qpc - covered_until > tolerance)
+                    timings.closure_span_gap = true;
+            }
+        }
+
+        SourceTimingEndpoint current;
+        current.view_id = timings.view_id;
+        current.source_frame_id = timings.source_frame_id;
+        current.source_frame_sequence = timings.source_frame_sequence;
+        current.metric_generation = timings.metric_generation;
+        current.quality_generation = timings.quality_generation;
+        current.provider_generation = timings.provider_generation;
+        current.render_active = timings.render_active;
+        current.completed = timings.fence_completed;
+        current.main_view = timings.main_view;
+        current.generated = timings.generated_frame;
+        current.ready_tick = timings.output_ready_ticks;
+        current.ready_frequency = timings.output_ready_frequency;
+        current.ready_qpc = timings.output_ready_qpc;
+        current.qpc_frequency = timings.output_ready_qpc_frequency;
+        current.ready_valid = timings.output_ready_valid;
+        current.clock_anchors_valid = timings.clock_anchors_valid;
+        current.clock = {timings.clock_gpu_before, timings.clock_cpu_before,
+            timings.clock_gpu_after, timings.clock_cpu_after,
+            timings.clock_gpu_frequency, timings.clock_cpu_frequency};
+        current.gpu_backlog_proven = frame.timing_backlog_at_submit;
+        current.closure_span_valid = timings.span_valid;
+        current.closure_clock_valid = timings.closure_clock_valid;
+        current.closure_gap_checked = timings.closure_gap_checked;
+        current.closure_span_gap = timings.closure_span_gap;
+        current.closure_span_ms = timings.output_dependency_span_ms;
+        auto &history = timing_previous_source_endpoints[timings.view_id];
+        if (history.latest.source_frame_id &&
+            history.latest.qpc_frequency == current.qpc_frequency &&
+            history.latest.ready_qpc && frame.timing_execute_begin_qpc &&
+            frame.timing_execute_end_qpc >= frame.timing_execute_begin_qpc)
+        {
+            const auto prior_ready = history.latest.ready_qpc;
+            if (frame.timing_execute_end_qpc <= prior_ready)
+                current.cadence_exclusions_valid = true;
+            else if (frame.timing_execute_begin_qpc >= prior_ready)
+            {
+                current.cadence_exclusions_valid = true;
+                current.cpu_supply_gap = true;
+            }
+        }
+        DynamicResolutionSample sample;
+        if (history.latest.source_frame_id == current.source_frame_id)
+            sample = history.qualified;
+        else if (history.latest.source_frame_id < current.source_frame_id)
+        {
+            sample = QualifySourceTiming(current,
+                history.latest.source_frame_id ? &history.latest : nullptr);
+            history = {current, sample};
+        }
+        else
+            sample = QualifySourceTiming(current, nullptr);
+        timings.calibration_valid = sample.calibration_valid;
+        timings.calibration_drift = sample.calibration_drift;
+        timings.cadence_valid = sample.cadence_valid;
+        timings.source_ready_cadence_ms = sample.source_ready_cadence_ms;
+        timings.span_valid = sample.span_valid;
+        timings.output_dependency_span_ms = sample.output_dependency_span_ms;
+        timings.gpu_backlog_proven = sample.gpu_backlog_proven;
+        timings.cadence_gap = sample.cadence_gap;
+        timings.closure_span_gap = sample.closure_span_gap;
+        timings.cadence_exclusions_valid = current.cadence_exclusions_valid;
+        timings.cpu_supply_gap = current.cpu_supply_gap;
+        timings.pacing_gap = current.pacing_gap;
         return publish();
     }
     if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan) return publish();
