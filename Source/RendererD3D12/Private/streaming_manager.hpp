@@ -57,6 +57,8 @@ class StreamingManager
                                     std::string_view content_generation) noexcept;
     [[nodiscard]] bool BeginUpload(StreamingRequestId request,
                                    std::string_view content_generation) noexcept;
+    [[nodiscard]] bool BeginMappingOnly(StreamingRequestId request,
+                                        std::string_view content_generation) noexcept;
     [[nodiscard]] bool SubmitUpload(StreamingRequestId request,
                                     std::string_view content_generation,
                                     const CompletionSet &completion) noexcept;

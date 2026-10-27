@@ -81,8 +81,8 @@ Result ResolveResidentClosure(const RendererConfig &config,
             for (std::uint32_t lod = 0; lod < 3; ++lod)
                 pending.push_back("render/" + std::string(name) +
                     (lod ? "_lod" + std::to_string(lod) : std::string{}) + ".rpkg");
-        pending.emplace_back("render/material/terrain.rpkg");
-        pending.emplace_back("render/material/ground_detail.rpkg");
+        for (const auto name : kAuthoredMaterialNames)
+            pending.push_back(render_data::MaterialProduct(name));
         for (const auto name : kAuthoredMaterialNames)
             pending.push_back("render/material/" + std::string(name) + "/parameters.rpkg");
         for (const auto name : kHeroMaterialNames)
@@ -121,6 +121,18 @@ Result ResolveResidentClosure(const RendererConfig &config,
             // Appending dependencies can reallocate pending; retain the identity.
             const auto id = pending[next];
             if (!resolved.insert(id).second) continue;
+            if (RendererIsSourceRevision(config, id))
+            {
+                const auto digest = RendererProductDigest(config, id);
+                if (digest.size() != 71 || !digest.starts_with("sha256:") ||
+                    !std::ranges::all_of(std::string_view(digest).substr(7), [](char value) {
+                        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+                    }))
+                    return ResidentFailure("Invalid source revision identity: " + id);
+                continue;
+            }
+            if (!RendererIsAdmittedRuntimeProduct(config, id))
+                return ResidentFailure("Dependency is absent from the admitted runtime and provenance catalogs: " + id);
             std::filesystem::path path;
             if (auto result = config.ResolveProduct(id, path); !result) return result;
             const auto digest = config.product_digests.find(id);
@@ -227,10 +239,20 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
     next.mesh_shader_supported = mesh_shader_supported;
     next.mesh_shader_enabled = mesh_shader_enabled;
     next.feature_capabilities = feature_capabilities;
-    next.display_state = display_state;
-    next.view_state = view_state;
-    next.width = width; next.height = height;
-    next.render_width = render_width; next.render_height = render_height;
+    auto candidate_main = std::make_unique<OwnedView>();
+    auto &candidate_view = *candidate_main;
+    const auto &active_main = *owned_views.at(kMainRenderViewId.value);
+    candidate_view.view_id = kMainRenderViewId;
+    candidate_view.role = RenderViewRole::Main;
+    candidate_view.state = active_main.state;
+    candidate_view.display_state = active_main.display_state;
+    candidate_view.width = active_main.width;
+    candidate_view.height = active_main.height;
+    candidate_view.render_width = active_main.render_width;
+    candidate_view.render_height = active_main.render_height;
+    candidate_view.native_viewport_id = active_main.native_viewport_id;
+    next.owned_views.emplace(kMainRenderViewId.value, std::move(candidate_main));
+    next.active_view_id = kMainRenderViewId;
     next.dred_enabled = dred_enabled;
     next.resident_preparation_accounting.enabled = true;
     D3D12_FEATURE_DATA_ARCHITECTURE1 architecture{};
@@ -297,7 +319,8 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
                 monster_reduced_geometry[asset][lod]);!result) return result;
     for (std::size_t index = 0; index < environment_meshes.size(); ++index)
         if (auto result = seed(next.environment_meshes[index], environment_meshes[index]); !result) return result;
-    next.previous_geometry_page_versions = cluster_runtime ? cluster_runtime->physical_versions : previous_geometry_page_versions;
+    candidate_view.previous_geometry_page_versions = cluster_runtime ? cluster_runtime->physical_versions :
+        active_main.previous_geometry_page_versions;
     if (auto result = next.PrepareMaterialParameters(next.config, false); !result) return result;
     next.CommitMaterialParameters();
     return Result::Success();
@@ -481,7 +504,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(environment_texture_descriptions);
     HS_SWAP_RESIDENT(environment_material_textures);
     HS_SWAP_RESIDENT(environment_material_bindings);
-    HS_SWAP_RESIDENT(terrain_material);
+    HS_SWAP_RESIDENT(environment_material_variants);
     HS_SWAP_RESIDENT(environment_meshes);
     HS_SWAP_RESIDENT(environment_variant_radii);
     HS_SWAP_RESIDENT(environment_cluster_catalogs);
@@ -533,6 +556,16 @@ void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate)
             source.ptr += offset * candidate.srv_stride;
             device->CopyDescriptorsSimple(range.count, destination, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
+    const auto active_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+    {
+        auto &published = geometry_page_descriptor_banks[frame];
+        // Preparation wrote every candidate bank before copying these descriptors.
+        published = candidate.geometry_page_descriptor_banks[frame];
+        published.heap_owner = srv_cpu_heap;
+        published.heap_start = active_start.ptr;
+        published.stride = srv_stride;
+    }
 }
 
 Result D3D12Renderer::Impl::SubmitResidentUtilityUpload(ID3D12GraphicsCommandList *list,

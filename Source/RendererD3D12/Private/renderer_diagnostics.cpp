@@ -433,7 +433,18 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
     output.allocator_stats_available = accounting.allocator_stats_available;
     output.texture_physical_bytes = texture_streaming.PhysicalBytes();
     output.presentation_provider_bytes = sdk_presentation.Status().allocated_bytes + presentation_guides.AllocatedBytes();
-    output.reconstruction_guide_bytes = reconstruction_guides.AllocatedBytes();
+    const auto add_guides = [&](const OwnedView &owner) {
+        const auto bytes = owner.reconstruction_guides.AllocatedBytes();
+        output.reconstruction_guide_bytes = bytes > UINT64_MAX - output.reconstruction_guide_bytes
+            ? UINT64_MAX : output.reconstruction_guide_bytes + bytes;
+    };
+    for (const auto &entry : owned_views) add_guides(*entry.second);
+    for (const auto &owner : unresolved_view_candidates) add_guides(*owner);
+    for (const auto &resident : unresolved_resident_candidates)
+    {
+        for (const auto &entry : resident->owned_views) add_guides(*entry.second);
+        for (const auto &owner : resident->unresolved_view_candidates) add_guides(*owner);
+    }
     return output;
 }
 

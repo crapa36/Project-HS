@@ -1,4 +1,5 @@
 #pragma once
+#include "vfx_event_view.hpp"
 
 #include <hs/core/result.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
@@ -16,6 +17,6 @@ namespace hs::runtime_detail
 // exist only while their actual snapshot owner exists. Below High, output is
 // empty. Malformed allowlisted recipes fail the whole conversion visibly.
 [[nodiscard]] Result BuildVfxTypedVolumeCommands(const VfxProgramView &,
-    std::span<const VfxEventInput>, std::span<const VfxPersistentInput>, double current_tick,
+    VfxEventView, std::span<const VfxPersistentInput>, double current_tick,
     VfxQuality admission, std::vector<VfxVolumeInput> &);
 } // namespace hs::runtime_detail

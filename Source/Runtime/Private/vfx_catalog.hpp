@@ -38,7 +38,8 @@ class VfxCatalog
     [[nodiscard]] Result ExpandEvent(const PresentationEvent &event,
                                 float decorative_fraction,
                                 std::vector<ParticleSpawnCommand> &particles,
-                                std::vector<VfxLineSpawnCommand> &lines) const;
+                                std::vector<VfxLineSpawnCommand> &lines,
+                                std::span<const Sequence> replaced_particle_sequences = {}) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return image_.payload_hash; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return image_.sprite_count; }
     [[nodiscard]] const VfxProgramView &Program() const noexcept { return image_.program; }

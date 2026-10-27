@@ -86,7 +86,7 @@ Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareS
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareBrixelizerGi(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareBrixelizerGi(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, BrixelizerCandidate &candidate) const
 {
     BrixelizerSettings settings;
@@ -101,7 +101,7 @@ Result D3D12Renderer::Impl::PrepareBrixelizerGi(const RendererConfig &candidate_
         const auto queried = adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory);
         if (FAILED(queried)) return HResultFailure("Query software GI preparation budget", queried);
         const auto available = memory.Budget > memory.CurrentUsage ? memory.Budget - memory.CurrentUsage : 0;
-        const auto live = brixelizer_gi.AllocatedBytes();
+        const auto live = owner.brixelizer_gi.AllocatedBytes();
         if (available > UINT64_MAX - live)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software GI preparation budget overflow.");
         settings.memory_budget_bytes = available + live;
@@ -109,7 +109,7 @@ Result D3D12Renderer::Impl::PrepareBrixelizerGi(const RendererConfig &candidate_
         settings.logical_cascades = quality.gi_logical_cascades;
         settings.internal_resolution_percent = quality.gi_internal_resolution_percent;
     }
-    return brixelizer_gi.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
+    return owner.brixelizer_gi.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
         kFrameCount, settings,
         [&](std::string_view id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;

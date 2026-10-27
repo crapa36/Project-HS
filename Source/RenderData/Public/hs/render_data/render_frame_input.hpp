@@ -20,6 +20,15 @@
 
 namespace hs
 {
+// A zero sequence supplies only the held world clock; nonzero identifies a frozen batch.
+struct RenderVfxWorldBatch
+{
+    std::uint64_t session{};
+    Tick stateful_target{};
+    std::uint64_t sequence{};
+    bool reset_particle_state{};
+};
+
 struct RenderVfxFrameInput
 {
     std::span<const ParticleSpawnCommand> particle_spawns;
@@ -37,6 +46,8 @@ struct RenderVfxFrameInput
     VfxVolumeInputs volumes;
     VfxScreenInputs screen;
     VfxEntitySurfaceInputs entity_surfaces;
+    // Unspecified preserves legacy snapshot-tick stepping.
+    std::optional<RenderVfxWorldBatch> world_batch;
 };
 // Borrowed frame package: the caller keeps snapshot leases and all spans alive
 // until Render returns. One common scene is rendered sequentially into views;

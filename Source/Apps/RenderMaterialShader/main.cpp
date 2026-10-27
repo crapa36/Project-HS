@@ -3,7 +3,9 @@
 #endif
 
 #include "../AssetPipeline/action.hpp"
+#include "../AssetPipeline/dxc_process.hpp"
 #include "../AssetPipeline/render_shader_binding_inputs.hpp"
+#include "../AssetPipeline/shader_source_snapshot.hpp"
 #include "coated_dfg_cooker.hpp"
 #include "material_graph_parser.hpp"
 #include <hs/core/cooked_format.hpp>
@@ -48,11 +50,14 @@ void Require(bool condition, std::string_view reason)
     if (!condition) throw std::runtime_error("hs_render_material_shader: " + std::string(reason));
 }
 
+bool ValidDxilBytes(std::string_view bytes)
+{
+    return bytes.size() >= 32 && bytes.starts_with("DXBC");
+}
+
 bool ValidDxil(const fs::path &path)
 {
-    if (!fs::exists(path)) return false;
-    const auto bytes = ap::ReadBytes(path);
-    return bytes.size() >= 32 && bytes.substr(0, 4) == "DXBC";
+    return fs::exists(path) && ValidDxilBytes(ap::ReadBytes(path));
 }
 
 ap::Input SemanticInput(std::string logical_id, const fs::path &dependency_path,
@@ -68,7 +73,10 @@ void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_r
     for(const auto *relative:{"Content/Shaders/render_binding_contract.hlsli", "Content/Shaders/local_probe_sampling.hlsli",
         "Content/Shaders/shadow_data.hlsli","Content/Shaders/local_shadow.hlsli",
         "Content/Shaders/volumetric_sampling.hlsli",
-        "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli"})
+        "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli",
+        "Content/Shaders/shadow_filter.hlsli", "Content/Shaders/environment_wind.hlsli",
+        "Content/Shaders/meadow_surface.hlsli", "Content/Shaders/grass_deformation.hlsli",
+        "Content/Shaders/particle_collision.hlsli"})
         if(std::ranges::none_of(spec.inputs,[&](const auto &input) { return input.logical_id==relative; }))
             spec.inputs.push_back(ap::HashInput(relative,source_root/relative));
 }
@@ -94,8 +102,8 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     std::vector<std::wstring> args{
         L"-nologo", L"-WX", L"-O3", L"-Ges",
         L"-E", std::wstring(entry), L"-T", std::wstring(profile),
-        L"-I", stage.wstring(),
-        L"-I", (source_root / "Content/Shaders").wstring(),
+        L"-I", L"..",
+        L"-I", L"Content/Shaders",
         L"-Fo", output.wstring(),
         L"-Fe", diagnostics.wstring(),
         source.wstring()};
@@ -114,17 +122,12 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     STARTUPINFOW startup{.cb = sizeof(startup)};
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(dxc.c_str(), command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+                        CREATE_NO_WINDOW, nullptr, source_root.c_str(), &startup, &process))
         throw std::runtime_error("hs_render_material_shader: DXC launch failed: " +
                                  std::to_string(GetLastError()));
     CloseHandle(process.hThread);
-    const auto wait = WaitForSingleObject(process.hProcess, 120'000);
-    if (wait == WAIT_TIMEOUT)
-        TerminateProcess(process.hProcess, 1);
-    DWORD code = 1;
-    const auto got_code = GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess);
-    if (wait != WAIT_OBJECT_0 || !got_code || code != 0)
+    const auto code = hs::shader_content::WaitForDxcExit(process, stage, diagnostics);
+    if (code != 0)
         throw std::runtime_error("hs_render_material_shader: DXC compilation failed for " +
             output.filename().string() + ": " +
             (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
@@ -278,25 +281,21 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     {
         try
         {
-            const auto result = ap::Json::parse(ap::ReadBytes(result_path));
+            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
             ap::UpstreamProduct ignored;
-            fs::path path;
-            if (result.at("action_key") == ap::ActionKey(spec) &&
-                result.at("action_id") == spec.action_id &&
-                result.at("products").size() == outputs.size() + static_cast<std::size_t>(!hero_work))
+            if (result.ActionKeyValue() == ap::ActionKey(spec) &&
+                result.ActionId() == spec.action_id &&
+                result.ProductCount() == outputs.size() + static_cast<std::size_t>(!hero_work))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
                 {
-                    (void)ap::ReadActionResult(build_root, spec.namespace_path, output.id,
-                                               ignored, path);
-                    valid &= ValidDxil(path);
+                    valid &= ValidDxilBytes(result.ReadProductBytes(output.id, ignored));
                 }
                 if (!hero_work)
                 {
-                    (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                        "render/lighting/coated_ggx_dfg.dds", ignored, path);
-                    valid &= fs::file_size(path) == 148u + 128u * 128u * 8u;
+                    valid &= result.ReadProductBytes("render/lighting/coated_ggx_dfg.dds", ignored).size() ==
+                        148u + 128u * 128u * 8u;
                 }
                 if (valid)
                 {
@@ -311,6 +310,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
+        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include_path = stage / "deferred_materials.generated.hlsli";
         ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
         const auto hero_include_path = stage / "hero_materials.generated.hlsli";
@@ -323,7 +323,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             const auto define = (program.id.starts_with("render/shader/hero_") || brixelizer_guides)
                 ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
-            RunDxc(dxc, source_root, stage, output, source_root / program.source_relative,
+            RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
                    program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides, false, hero_work);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
@@ -338,8 +338,10 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         }
         fs::remove(include_path);
         fs::remove(hero_include_path);
+        ap::RemoveStage(source_snapshot);
         ap::Publish(build_root, spec, stage, std::move(products));
     }
+    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
         ap::RemoveStage(stage);
@@ -392,17 +394,14 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     {
         try
         {
-            const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-            if (result.at("action_id") == spec.action_id &&
-                result.at("action_key") == ap::ActionKey(spec) &&
-                result.at("products").is_array() && result.at("products").size() == 1 &&
-                result.at("products").at(0).at("logical_id") == product_id)
+            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+            if (result.ActionId() == spec.action_id &&
+                result.ActionKeyValue() == ap::ActionKey(spec) &&
+                result.ProductCount() == 1 &&
+                result.HasProduct(product_id))
             {
                 ap::UpstreamProduct ignored;
-                fs::path package_path;
-                (void)ap::ReadActionResult(build_root, spec.namespace_path, product_id,
-                                           ignored, package_path);
-                const auto package = ap::ReadBytes(package_path);
+                const auto package = result.ReadProductBytes(product_id, ignored);
                 const auto decoded = rd::ReadMaterialParameterPackage(
                     std::as_bytes(std::span(package.data(), package.size())),
                     hs::MakeAssetId(product_id));
@@ -504,19 +503,16 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
     {
         try
         {
-            const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-            if (result.at("action_id") == spec.action_id && result.at("action_key") == ap::ActionKey(spec) &&
-                result.at("products").size() == graphs.size() + 1)
+            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+            if (result.ActionId() == spec.action_id && result.ActionKeyValue() == ap::ActionKey(spec) &&
+                result.ProductCount() == graphs.size() + 1)
             {
-                ap::UpstreamProduct ignored; fs::path path;
-                (void)ap::ReadActionResult(build_root, spec.namespace_path, shader_id, ignored, path);
-                bool valid = ValidDxil(path);
+                ap::UpstreamProduct ignored;
+                bool valid = ValidDxilBytes(result.ReadProductBytes(shader_id, ignored));
                 for (std::size_t ordinal = 0; ordinal < graphs.size(); ++ordinal)
                 {
                     const std::string name(rd::kDecalMaterialNames[ordinal]);
-                    (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                        "render/material/" + name + "/material.rpkg", ignored, path);
-                    const auto bytes = ap::ReadBytes(path);
+                    const auto bytes = result.ReadProductBytes("render/material/" + name + "/material.rpkg", ignored);
                     const auto material = rd::ReadDecalMaterialPackage(std::as_bytes(std::span(bytes.data(), bytes.size())), name);
                     valid = valid && material.receivers == graphs[ordinal].decal_receivers &&
                         material.parameter_layout_hash == rd::MaterialParameterLayoutHash(graphs[ordinal].parameters);
@@ -529,10 +525,11 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
+        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include = stage / "decal_materials.generated.hlsli";
         ap::WriteBytes(include, std::as_bytes(std::span(generated.data(), generated.size())));
         const auto shader = stage / "decal_surface_cs.dxil";
-        RunDxc(dxc, source_root, stage, shader, source_root / "Content/Shaders/decal_surface.hlsl",
+        RunDxc(dxc, source_snapshot, stage, shader, "Content/Shaders/decal_surface.hlsl",
             L"DecalSurfaceCS", L"cs_6_0", L"");
         Require(ValidDxil(shader), "DXC did not produce a decal DXIL container");
         std::vector<ap::Product> products{ap::HashProduct(std::string(shader_id), shader.filename().string(), shader)};
@@ -548,8 +545,11 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
             auto product = ap::HashProduct("render/material/" + name + "/material.rpkg", output.filename().string(), output);
             product.dependencies = decoded.dependencies; products.push_back(std::move(product));
         }
-        fs::remove(include); ap::Publish(build_root, spec, stage, std::move(products));
+        fs::remove(include);
+        ap::RemoveStage(source_snapshot);
+        ap::Publish(build_root, spec, stage, std::move(products));
     }
+    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...) { ap::RemoveStage(stage); throw; }
     ap::RemoveStage(stage); std::cout << spec.action_id << " published\n";
 }
@@ -617,22 +617,18 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     {
         try
         {
-            const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-            if (result.at("action_id") == spec.action_id && result.at("action_key") == ap::ActionKey(spec) &&
-                result.at("products").size() == outputs.size() + 1)
+            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+            if (result.ActionId() == spec.action_id && result.ActionKeyValue() == ap::ActionKey(spec) &&
+                result.ProductCount() == outputs.size() + 1)
             {
                 bool valid = true;
                 for (const auto &program : outputs)
                 {
                     ap::UpstreamProduct ignored;
-                    fs::path path;
-                    (void)ap::ReadActionResult(build_root, namespace_path, program.id, ignored, path);
-                    valid = valid && ValidDxil(path);
+                    valid &= ValidDxilBytes(result.ReadProductBytes(program.id, ignored));
                 }
                 ap::UpstreamProduct ignored;
-                fs::path path;
-                (void)ap::ReadActionResult(build_root, namespace_path, material_id, ignored, path);
-                const auto contents = ap::ReadBytes(path);
+                const auto contents = result.ReadProductBytes(material_id, ignored);
                 const auto material = rd::ReadHeroMaterialPackage(std::as_bytes(std::span(contents.data(), contents.size())), name);
                 valid = valid && material.surface == rd::MaterialSurfaceLayout{reflection.capability_mask, reflection.varying_mask} &&
                     material.parameter_layout_hash == rd::MaterialParameterLayoutHash(graph.parameters);
@@ -644,6 +640,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     const auto stage = ap::CreateStage(build_root / "Actions" / namespace_path);
     try
     {
+        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include_path = stage / "hero_materials.generated.hlsli";
         ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
         std::vector<ap::Product> products;
@@ -652,7 +649,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         {
             const auto &program = outputs[i];
             const auto output = stage / program.filename;
-            RunDxc(dxc, source_root, stage, output, source_root / program.source_relative,
+            RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
                 program.entry, program.profile, L"-DHS_GENERATED_HERO_MATERIAL=1", sidecar_layout.plane_count);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
@@ -667,8 +664,10 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         product.dependencies = decoded.dependencies;
         products.push_back(std::move(product));
         fs::remove(include_path);
+        ap::RemoveStage(source_snapshot);
         ap::Publish(build_root, spec, stage, std::move(products));
     }
+    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...) { ap::RemoveStage(stage); throw; }
     ap::RemoveStage(stage);
     std::cout << spec.action_id << " published\n";
@@ -806,19 +805,16 @@ void Produce(std::string_view name, const fs::path &source_root,
     {
         try
         {
-            const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-            if (result.at("action_id") == spec.action_id &&
-                result.at("action_key") == ap::ActionKey(spec) &&
-                result.at("products").size() == outputs.size())
+            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+            if (result.ActionId() == spec.action_id &&
+                result.ActionKeyValue() == ap::ActionKey(spec) &&
+                result.ProductCount() == outputs.size())
             {
                 bool valid = true;
                 for (const auto &output : outputs)
                 {
                     ap::UpstreamProduct ignored;
-                    fs::path product_path;
-                    (void)ap::ReadActionResult(build_root, namespace_path,
-                                               output.id, ignored, product_path);
-                    valid &= ValidDxil(product_path);
+                    valid &= ValidDxilBytes(result.ReadProductBytes(output.id, ignored));
                 }
                 if (valid)
                 {
@@ -834,6 +830,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     const auto stage = ap::CreateStage(build_root / "Actions" / namespace_path);
     try
     {
+        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include_path = stage / std::string(include_name);
         ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
         std::vector<ap::Product> products;
@@ -841,8 +838,8 @@ void Produce(std::string_view name, const fs::path &source_root,
         for (const auto &program : outputs)
         {
             const auto output = stage / std::string(program.filename);
-            RunDxc(dxc, source_root, stage, output,
-                   source_root / program.source_relative, program.entry, program.profile,
+            RunDxc(dxc, source_snapshot, stage, output,
+                   program.source_relative, program.entry, program.profile,
                    L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1", sidecar_layout.plane_count, false,
                    program.feedback);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
@@ -850,8 +847,10 @@ void Produce(std::string_view name, const fs::path &source_root,
                                                std::string(program.filename), output));
         }
         fs::remove(include_path);
+        ap::RemoveStage(source_snapshot);
         ap::Publish(build_root, spec, stage, std::move(products));
     }
+    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
         ap::RemoveStage(stage);

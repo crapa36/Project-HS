@@ -35,7 +35,42 @@ int main()
     using namespace hs;
     const auto &v = shipping::Vfx();
     Check(&v == &shipping::Vfx());
+    Check(v.effect_output_profiles.size() == 1 &&
+        v.HasOutput(1, VfxOutputProfile::SpriteSmoke6WayOit) &&
+        !v.HasOutput(1, VfxOutputProfile::RibbonAdd) && !v.HasOutput(0, VfxOutputProfile::Light));
     Check(v.light_effect_ranges.size()==1 && Range(v.light_effect_ranges[0],0,1) && v.light_recipes.size()==1);
+    Check(v.ground_effect_ranges.size()==1 && v.HasGroundRecipes(1) && v.ground_recipes.size()==2 &&
+        v.ground_recipes[0].gradient_row==31 && v.ground_recipes[0].tick_count==9 &&
+        Same(v.ground_recipes[0].tertiary,.125f) && v.ground_recipes[1].kind==VfxGroundRecipeKind::ExpandingRing &&
+        Same(v.ground_recipes[1].primary,.15f) && Same(v.ground_recipes[1].secondary,1.25f) &&
+        Same(v.ground_recipes[1].tertiary,.07f) && v.ground_recipes[0].mask_variants[2].valid &&
+        !v.ground_recipes[0].mask_variants[2].present &&
+        Range(v.ground_recipes[1].mask_variants[0].slices,8,2) &&
+        Same(v.ground_recipes[1].mask_variants[0].strength,.35f) &&
+        v.ground_recipes[1].mask_variants[0].valid && v.ground_recipes[1].mask_variants[0].present &&
+        v.ground_recipes[1].source_output_count==1 && v.ground_recipes[1].source_parameters_empty);
+    Check(v.flash_effect_ranges.size()==1 && v.HasFlashRecipes(1) && v.flash_recipes.size()==1 &&
+        v.flash_recipes[0].effect_id==44 && v.flash_recipes[0].supported_quality_mask==4 &&
+        v.flash_recipes[0].spawn.shape==VfxImpactShape::Flame && v.flash_recipes[0].mask_strengths[2]==.75f);
+    Check(v.persistent_stamp_effect_ranges.size()==1 && v.persistent_stamp_recipes.size()==1 &&
+        v.persistent_stamp_recipes[0].effect_id==45 && v.persistent_stamp_recipes[0].source_visual_kind==12 &&
+        v.persistent_stamp_recipes[0].spawn.shape==VfxImpactShape::StatusStamp &&
+        v.persistent_stamp_recipes[0].mask_slices[2].first==5 &&
+        v.persistent_fire_recipes.size()==1 && v.persistent_fire_recipes[0].rate==8 &&
+        v.persistent_fire_recipes[0].spawn.shape==VfxImpactShape::Flame &&
+        v.owned_status_tick_recipes.size()==1 && v.owned_status_tick_recipes[0].tick_effect_id==47 &&
+        v.owned_status_tick_recipes[0].mask_slices[2]==5);
+    Check(v.mote_source_recipes.size()==1 && v.mote_source_recipes[0].count==7 && v.mote_source_recipes[0].rate==3 &&
+        v.mote_source_recipes[0].common_params_valid && v.mote_source_recipes[0].spark_valid &&
+        v.mote_output_recipes.size()==1 && v.mote_output_recipes[0].min_quality==2 &&
+        v.mote_output_recipes[0].gradient_row==31 &&
+        v.mote_output_recipes[0].mask_slices[2].first==5 &&
+        v.mote_output_recipes[0].mask_strengths[2]==.625f &&
+        v.mote_output_recipes[0].persistent_curve_row==6 &&
+        v.mote_output_recipes[0].persistent_size==.075f &&
+        Same(v.mote_output_recipes[0].color,Float4{1,2,3,4}) &&
+        v.mote_output_recipes[0].mask_present_mask==4 && v.mote_output_recipes[0].output_color_valid &&
+        v.mote_output_recipes[0].spark_textures_valid);
     const auto &lr=v.light_recipes[0];
     Check(lr.seed_xor==0xf123456789abcdefull && lr.payload_kind==11 && lr.importance==12 && lr.min_quality==13 && lr.knot_count==4 &&
         Same(lr.seconds,2.5f) && Same(lr.radius,6.5f) && Same(lr.knots[0],-0.0f) && Same(lr.knots[1],.25f) && Same(lr.knots[2],.75f) && Same(lr.knots[3],1) &&
@@ -164,10 +199,77 @@ void TestReleaseVfxCodegen()
     const std::array<std::uint32_t,3> sequences{4,37,38};
     const std::array light_ranges{VfxRange{0,1}};
     const std::array light_recipes{VfxLightRecipe{0xf123456789abcdefull,11,12,13,4,2.5f,6.5f,{-0.0f,.25f,.75f,1},{2,3,4},5,.5f,{1,2},1,true}};
+    const std::array<VfxRange,0> ballistic_ranges{};
+    const std::array<std::uint32_t,1> output_profiles{1u << static_cast<unsigned>(VfxOutputProfile::SpriteSmoke6WayOit)};
+    const std::array ballistic_recipes{VfxBallisticRecipe{
+        123ull,1,2,3,4,5,0,6,2,8,3,5,2,VfxSourceType::BallisticCollision,
+        VfxMotionKind::BallisticBurstGravitySpin,{0,.75f,0,0},.5f,.06f,.12f,1.5f,2.6f,
+        -9.81f,.2f,.8f,-1,75,5,11,{1,.5f,.25f,.75f},3,true}};
+    const std::array distortion_ranges{VfxRange{0,1}};
+    const std::array distortion_recipes{VfxDistortionRecipe{123ull,1,2,3,4,0,0,1,2,VfxDistortionShape::RadialRing,
+        VfxMotionKind::SingleOutwardRefractivePulse,{0,.5f,1,0},2,.8f,.02f,.75f}};
+    const std::array decal_ranges{VfxRange{0,1}};
+    const std::array decal_recipes{VfxDecalRecipe{124ull,1,3,4,5,0,0,1,4,VfxDecalKind::Organic,
+        {0,.2f,.6f,1},3,2,.8f,.4f,{.1f,.2f,.3f},7,12,4,1}};
+    VfxGroundRecipe ground_recipe{}; ground_recipe.effect_id=43; ground_recipe.effect_handle=1;
+    ground_recipe.source_index=2; ground_recipe.source_stable_id=3; ground_recipe.output_index=4;
+    ground_recipe.gradient_row=31; ground_recipe.kind=VfxGroundRecipeKind::Ticks;
+    ground_recipe.source_output_count=1; ground_recipe.source_parameters_empty=true;
+    ground_recipe.tick_count=9; ground_recipe.pulse_curve_keys={1,2}; ground_recipe.tertiary=.125f;
+    VfxGroundRecipe expanding_recipe=ground_recipe; expanding_recipe.output_index=5;
+    expanding_recipe.kind=VfxGroundRecipeKind::ExpandingRing; expanding_recipe.knots={0,.5f,0,0};
+    expanding_recipe.primary=.15f; expanding_recipe.secondary=1.25f; expanding_recipe.tertiary=.07f;
+    expanding_recipe.mask_variants[0]={{8,2},.35f,true,true};
+    const std::array ground_ranges{VfxRange{0,2}};
+    const std::array ground_recipes{ground_recipe,expanding_recipe};
+    VfxFlashRecipe flash_recipe{}; flash_recipe.effect_id=44; flash_recipe.effect_handle=1;
+    flash_recipe.source_index=2; flash_recipe.source_stable_id=3; flash_recipe.output_index=4;
+    flash_recipe.payload_kind=5; flash_recipe.min_quality=2; flash_recipe.knots={.1f,.8f};
+    flash_recipe.seconds=.9f; flash_recipe.spawn.shape=VfxImpactShape::Flame;
+    flash_recipe.spawn.size=.4f; flash_recipe.mask_slice_ranges[2]={3,2};
+    flash_recipe.mask_strengths[2]=.75f; flash_recipe.supported_quality_mask=4;
+    flash_recipe.mask_present_mask=4; flash_recipe.unique_effect_identity=true;
+    const std::array flash_ranges{VfxRange{0,1}};
+    const std::array flash_recipes{flash_recipe};
+    VfxPersistentStampRecipe stamp_recipe{}; stamp_recipe.effect_id=45; stamp_recipe.effect_handle=1;
+    stamp_recipe.source_visual_kind=12; stamp_recipe.payload_kind=6; stamp_recipe.source_stable_id=7;
+    stamp_recipe.timing_kind=0; stamp_recipe.fixed_seconds=.6f; stamp_recipe.source_end=.55f;
+    stamp_recipe.spawn.shape=VfxImpactShape::StatusStamp; stamp_recipe.spawn.curve_row=4;
+    stamp_recipe.mask_slices[2]={5,3}; stamp_recipe.mask_strengths[2]=.38f;
+    stamp_recipe.supported_quality_mask=7; stamp_recipe.mask_present_mask=4; stamp_recipe.bleed_extend=true;
+    const std::array stamp_ranges{VfxRange{0,1}};
+    const std::array stamp_recipes{stamp_recipe};
+    VfxPersistentFireRecipe fire_recipe{}; fire_recipe.effect_id=46; fire_recipe.effect_handle=1;
+    fire_recipe.source_stable_id=8; fire_recipe.rate=8; fire_recipe.radius_scale=.5f;
+    fire_recipe.spawn.shape=VfxImpactShape::Flame; fire_recipe.spawn.size=.7f;
+    fire_recipe.mask_slices={2,3}; fire_recipe.mask_strength=.4f;
+    const std::array fire_ranges{VfxRange{0,1}};
+    const std::array fire_recipes{fire_recipe};
+    VfxOwnedStatusTickRecipe tick_recipe{}; tick_recipe.tick_effect_id=47; tick_recipe.status_effect_id=48;
+    tick_recipe.tick_effect_handle=1; tick_recipe.status_effect_handle=2; tick_recipe.min_quality=1;
+    tick_recipe.tick_seconds=.2f; tick_recipe.delay_fraction=0; tick_recipe.lifetime_fraction=.5f;
+    tick_recipe.spawn.shape=VfxImpactShape::Pulse;
+    tick_recipe.mask_slices={3,4,5}; tick_recipe.mask_strength=.38f; tick_recipe.bleed=true;
+    const std::array tick_ranges{VfxRange{0,1}};
+    const std::array tick_recipes{tick_recipe};
+    const std::array mote_source_recipes{VfxMoteSourceRecipe{7,3,.2f,.8f,.45f,42.0f,true,true,true,true}};
+    VfxMoteOutputRecipe mote_output_recipe{};
+    mote_output_recipe.min_quality=2; mote_output_recipe.gradient_row=31;
+    mote_output_recipe.mask_slices={VfxRange{1,2},VfxRange{3,1},VfxRange{5,2}};
+    mote_output_recipe.mask_strengths={.25f,.5f,.625f}; mote_output_recipe.persistent_curve_row=6;
+    mote_output_recipe.persistent_size=.075f; mote_output_recipe.hdr=2;
+    mote_output_recipe.color={1,2,3,4}; mote_output_recipe.mask_present_mask=4;
+    mote_output_recipe.mask_quality_mask=7; mote_output_recipe.output_color_valid=true;
+    mote_output_recipe.persistent_params_valid=true; mote_output_recipe.spark_textures_valid=true;
+    const std::array mote_output_recipes{mote_output_recipe};
     const VfxImage image{definitions,emitters,sprites,meshes,decorative,
         {effects,sources,outputs,parameters,textures,slices,curves,keys,lookup,resources,strings,upgrades,sequences},
         true,65535,0xfedcba0123456789ull,
-        {{100,10,20},{101,11,21},{102,12,22},{103,13,23},{104,14,24},{105,15,25}},true,light_ranges,light_recipes};
+        {{100,10,20},{101,11,21},{102,12,22},{103,13,23},{104,14,24},{105,15,25}},true,light_ranges,light_recipes,ballistic_ranges,ballistic_recipes,output_profiles,
+        distortion_ranges,distortion_recipes,decal_ranges,decal_recipes,
+        ground_ranges,ground_recipes,flash_ranges,flash_recipes,
+        stamp_ranges,stamp_recipes,fire_ranges,fire_recipes,tick_ranges,tick_recipes,
+        mote_source_recipes,mote_output_recipes};
     const auto source = hs::content::EmitReleaseVfxCpp(image);
     Check(source == hs::content::EmitReleaseVfxCpp(image));
     for (const std::string_view token : {"constinit const VfxImage kVfx{", "VfxProgramView{", "const VfxImage &Vfx() noexcept",
@@ -178,7 +280,16 @@ void TestReleaseVfxCodegen()
         Check(source.find(token) != std::string::npos);
     std::size_t arrays = 0, offset = 0;
     while ((offset = source.find("constinit const std::array<", offset)) != std::string::npos) { ++arrays; ++offset; }
-    Check(arrays == 20);
+    Check(arrays == 38);
+    Check(source.find("std::array<VfxGroundRecipe,2> kGroundRecipes") != std::string::npos &&
+          source.find("std::array<VfxFlashRecipe,1> kFlashRecipes") != std::string::npos &&
+          source.find("std::array<VfxPersistentStampRecipe,1> kPersistentStampRecipes") != std::string::npos &&
+          source.find("std::array<VfxPersistentFireRecipe,1> kPersistentFireRecipes") != std::string::npos &&
+          source.find("std::array<VfxOwnedStatusTickRecipe,1> kOwnedStatusTickRecipes") != std::string::npos &&
+          source.find("std::array<VfxMoteSourceRecipe,1> kMoteSourceRecipes") != std::string::npos &&
+          source.find("std::array<VfxMoteOutputRecipe,1> kMoteOutputRecipes") != std::string::npos);
+    Check(source.find("123ull,1u,2u,3u,4u,5u,0u,6u,2u,8u,3u,5u,2u,VfxSourceType(2u)") != std::string::npos &&
+          source.find("std::array<VfxBallisticRecipe,1> kBallisticRecipes") != std::string::npos);
     for (const std::string_view token : {"std::vector", "memcpy", "DecodeVfx", "LoadVfx", "new ", "[]"})
         Check(source.find(token) == std::string::npos);
     Check(source.find("18364758544493064720ull") < source.find("{1ull,0u,1u,VfxDefinitionKind"));

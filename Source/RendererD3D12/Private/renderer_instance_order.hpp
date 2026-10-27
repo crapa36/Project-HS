@@ -1,6 +1,8 @@
 #pragma once
 
 #include "renderer_quality.hpp"
+#include <hs/render_data/vfx_owned_mesh.hpp>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -17,6 +19,46 @@ inline constexpr std::size_t kInstanceEnvironmentBucketBegin = 8;
 inline constexpr std::size_t kInstanceTerrainBucket = 24 + kGroundDetailVariantCount;
 inline constexpr std::size_t kInstanceOtherBucket = kInstanceTerrainBucket + 1;
 inline constexpr std::size_t kInstanceBucketCount = kInstanceOtherBucket + 1;
+
+inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instances,
+    std::span<const VfxGroundSpawnInput> ground, std::span<const VfxOwnedMeshInput> meshes,
+    std::vector<std::pair<std::uint64_t, std::uint8_t>> &replacements)
+{
+    constexpr std::uint8_t area_body=1,area_owner=2,projectile_owner=4;
+    replacements.clear();
+    replacements.reserve(ground.size()+meshes.size());
+    for(const auto &spawn:ground)
+    {
+        std::uint8_t mask{};
+        if(spawn.source_visual_kind!=0xff&&spawn.geometry.shape==VfxGroundShape::Circle&&
+            spawn.command.primitive==VfxPrimitive::LowFrequencyFill)mask|=area_body;
+        if((spawn.source_visual_kind==0xff&&(spawn.geometry.shape==VfxGroundShape::LineBorder||
+                spawn.geometry.shape==VfxGroundShape::ConeBorder))||
+            spawn.geometry.shape==VfxGroundShape::RingGapsBorder||
+            spawn.geometry.shape==VfxGroundShape::RingGapsPreviewBorder||
+            spawn.geometry.shape==VfxGroundShape::CirclePreviewBorder)mask|=area_owner;
+        if(mask)replacements.emplace_back(spawn.stable_id,mask);
+    }
+    for(const auto &head:meshes)replacements.emplace_back(head.owner_id,projectile_owner);
+    if(replacements.empty())return;
+    std::ranges::sort(replacements,{},&std::pair<std::uint64_t,std::uint8_t>::first);
+    std::size_t count{};
+    for(const auto entry:replacements)
+        if(count&&replacements[count-1].first==entry.first)replacements[count-1].second|=entry.second;
+        else replacements[count++]=entry;
+    replacements.resize(count);
+    const auto mask_for=[&](std::uint64_t id)->std::uint8_t {
+        const auto found=std::ranges::lower_bound(replacements,id,{},&std::pair<std::uint64_t,std::uint8_t>::first);
+        return found!=replacements.end()&&found->first==id?found->second:0;
+    };
+    std::erase_if(instances,[&](const RenderInstance &instance) {
+        if(instance.mesh==RenderMesh::Area)
+            return (instance.stable_id!=0&&(mask_for(instance.stable_id)&area_body)!=0)||
+                (instance.vfx_owner_id!=0&&(mask_for(instance.vfx_owner_id)&area_owner)!=0);
+        return (instance.mesh==RenderMesh::PlayerProjectile||instance.mesh==RenderMesh::EnemyProjectile)&&
+            (mask_for(instance.stable_id)&projectile_owner)!=0;
+    });
+}
 
 // Only draw references are reordered. Canonical indices also identify anonymous
 // instances and foliage, so retain their original values and order within buckets.
@@ -80,7 +122,8 @@ struct MonsterLodInstanceOrder
 // draw references are stably partitioned; every other bucket is unchanged.
 [[nodiscard]] inline std::optional<MonsterLodInstanceOrder> BuildRenderInstanceOrderWithMonsterLods(
     std::span<const RenderInstance> sources, std::span<const std::uint16_t> selected_lods,
-    float foliage_density, std::vector<std::uint32_t> &source_indices)
+    float foliage_density, std::vector<std::uint32_t> &source_indices,
+    std::vector<std::uint32_t> &scratch)
 {
     if (selected_lods.size() != sources.size()) return std::nullopt;
     for (std::size_t index = 0; index < sources.size(); ++index)
@@ -91,7 +134,6 @@ struct MonsterLodInstanceOrder
 
     MonsterLodInstanceOrder result;
     result.ranges = BuildRenderInstanceOrder(sources, foliage_density, source_indices);
-    std::vector<std::uint32_t> scratch;
     for (std::size_t family = 0; family < kMonsterFamilyCount; ++family)
     {
         const auto [begin, count] = result.ranges[kInstanceMonsterBucketBegin + family];

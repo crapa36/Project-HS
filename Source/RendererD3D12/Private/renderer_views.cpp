@@ -24,6 +24,14 @@ bool ExtentValid(ViewExtent e)
 Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
 {
     if (input.views.empty()) return ViewFailure("A render frame requires at least one view.");
+    if (input.vfx.world_batch)
+    {
+        const auto &batch = *input.vfx.world_batch;
+        if (batch.session != input.snapshots.current.header.session_id ||
+            (batch.sequence == 0 && (batch.reset_particle_state ||
+                !input.vfx.particle_spawns.empty() || !input.vfx.effect_lines.empty())))
+            return ViewFailure("Native VFX batch must match the session and identify its emission/reset submission.");
+    }
     if (input.delta_seconds && (!std::isfinite(*input.delta_seconds) || *input.delta_seconds < 0))
         return ViewFailure("Frame delta must be finite and nonnegative.");
     if (input.screen_overlay_intensity && (!std::isfinite(*input.screen_overlay_intensity) ||
@@ -35,7 +43,9 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
             "Native latency rendering requires acknowledged input sampling and simulation for this frame token.");
     if (streamline_session && streamline_session->Initialized() && render_package_id >= UINT32_MAX)
         return ViewFailure("Native rendered-package identity is exhausted; reinitialize the renderer.");
-    const bool dynamic_resolution_active = config.dynamic_resolution && !ResolveFeatures(config).software_gi_enabled;
+    const auto frame_features = ResolveFeatures(config);
+    const bool dynamic_resolution_active = EffectiveDynamicResolution(config.dynamic_resolution, frame_features);
+    const auto &main_owner = *owned_views.at(kMainRenderViewId.value);
     const auto origin = input.views.front().scene_origin;
     if (native_input_phase && std::ranges::none_of(input.views, [](const auto &view) { return view.role == RenderViewRole::Main; }))
         return ViewFailure("An outstanding main input token must be completed by a packet containing the main view.");
@@ -62,7 +72,8 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
                 return ViewFailure("View capacity cannot cover the configured integer DRS minimum extent.");
         }
         if (view.role == RenderViewRole::Main &&
-            (view.output_extent != ViewExtent{width, height} || view.render_capacity != view_state.render_capacity))
+            (view.output_extent != ViewExtent{main_owner.width, main_owner.height} ||
+             view.render_capacity != main_owner.state.render_capacity))
             return ViewFailure("Main output/capacity must match the current presentation; use Resize or ApplyOptions first.");
         if (!Finite(view.scene_origin) || !Finite(view.view_origin) || !Finite(view.camera.position) ||
             !Finite(view.camera.target) || view.scene_origin != origin ||
@@ -82,19 +93,19 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
             return ViewFailure("Camera direction and up must form a finite nondegenerate basis.");
         if (const auto found = owned_views.find(view.id.value); found != owned_views.end())
         {
-            const bool active = view.id == active_view_id;
-            const auto &plan = active ? reconstruction_plan : found->second->reconstruction_plan;
-            const auto *provider = active ? reconstruction_provider.get() : found->second->reconstruction_provider.get();
-            const bool same_configuration = active || (found->second->state.output_extent == view.output_extent &&
+            const auto &owner = *found->second;
+            const auto &plan = owner.reconstruction_plan;
+            const auto *provider = owner.reconstruction_provider.get();
+            const bool same_configuration = owner.state.output_extent == view.output_extent &&
                 found->second->state.render_capacity == view.render_capacity &&
-                found->second->configuration_revision == view_configuration_revision &&
-                found->second->content_generation == resource_generation_id && found->second->pipeline_revision == pipeline_revision);
+                owner.configuration_revision == view_configuration_revision &&
+                owner.content_generation == resource_generation_id && owner.pipeline_revision == pipeline_revision;
             if (same_configuration && provider && provider->Initialized())
                 if (view.render_active.width < plan.input_minimum.width || view.render_active.height < plan.input_minimum.height ||
                     view.render_active.width > plan.input_maximum.width || view.render_active.height > plan.input_maximum.height)
                     return ViewFailure("Requested active extent is outside this view's selected native reconstruction domain.");
-            const bool prior_valid = active ? previous_origins_valid : found->second->previous_origins_valid;
-            const auto prior_origin = active ? previous_scene_origin : found->second->previous_scene_origin;
+            const bool prior_valid = owner.previous_origins_valid;
+            const auto prior_origin = owner.previous_scene_origin;
             if (same_configuration && prior_valid && !view.camera_cut)
                 for (const double shift : {view.scene_origin.x-prior_origin.x, view.scene_origin.y-prior_origin.y, view.scene_origin.z-prior_origin.z})
                     if (!std::isfinite(shift) || std::abs(shift) > std::numeric_limits<float>::max())
@@ -616,186 +627,25 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
-{
-    using std::swap;
-    swap(skin_cache, view.skin_history);
-    if (cluster_runtime) swap(static_cast<ClusterViewRuntime &>(*cluster_runtime), view.cluster_view);
-    swap(previous_skin_deformation, view.previous_skin_deformation);
-    swap(previous_instances, view.previous_instances);
-    swap(previous_grass_benders, view.previous_grass_benders);
-    swap(previous_grass_state, view.previous_grass_state);
-    swap(view_session_id, view.view_session_id);
-    swap(width, view.width);
-    swap(height, view.height);
-    swap(render_width, view.render_width);
-    swap(render_height, view.render_height);
-    swap(last_presented_index, view.last_presented_index);
-    swap(exposure_read_index, view.exposure_read_index);
-    swap(temporal_read_index, view.temporal_read_index);
-    swap(hzb_read_index, view.hzb_read_index);
-    swap(exposure_initialized, view.exposure_initialized);
-    swap(view_targets_initialized, view.view_targets_initialized);
-    swap(temporal_history_valid, view.temporal_history_valid);
-    swap(temporal_targets_initialized, view.temporal_targets_initialized);
-    swap(hzb_history_valid, view.hzb_history_valid);
-    swap(material_sidecars_initialized, view.material_sidecars_initialized);
-    swap(visibility_targets_initialized, view.visibility_targets_initialized);
-    swap(transient_textures_common, view.transient_textures_common);
-    swap(brixelizer_history_valid, view.brixelizer_history_valid);
-    swap(exposure_sample_time, view.exposure_sample_time);
-    swap(render_submission_time, view.render_submission_time);
-    swap(previous_view_projection, view.previous_view_projection);
-    swap(previous_unjittered_view_projection, view.previous_unjittered_view_projection);
-    swap(previous_projection_depth, view.previous_projection_depth);
-    swap(previous_jitter_uv, view.previous_jitter_uv);
-    swap(temporal_previous_eye, view.temporal_previous_eye);
-    swap(temporal_previous_fov, view.temporal_previous_fov);
-    swap(previous_scene_origin, view.previous_scene_origin);
-    swap(previous_view_origin, view.previous_view_origin);
-    swap(previous_origins_valid, view.previous_origins_valid);
-    swap(frame_number, view.frame_number);
-    swap(dynamic_resolution_controller, view.dynamic_resolution_controller);
-    swap(completed_gpu_timings, view.completed_gpu_timings);
-    swap(dynamic_resolution_sample_id, view.dynamic_resolution_sample_id);
-    swap(timing_source_sequence, view.timing_source_sequence);
-    swap(timing_source_output_completion, view.timing_source_output_completion);
-    swap(timing_last_active, view.timing_last_active);
-    swap(timing_last_provider, view.timing_last_provider);
-    swap(dynamic_lod_states, view.dynamic_lod_states);
-    swap(lod_session_epoch, view.lod_session_epoch);
-    swap(previous_volumetric_camera, view.previous_volumetric_camera);
-    swap(previous_shadow_casters, view.previous_shadow_casters);
-    swap(previous_geometry_page_versions, view.previous_geometry_page_versions);
-    swap(reconstruction_provider, view.reconstruction_provider);
-    swap(reconstruction_plan, view.reconstruction_plan);
-    swap(sdk_camera, view.sdk_camera);
-    swap(sdk_frame_identity, view.sdk_frame_identity);
-    swap(display_state, view.display_state);
-    swap(exposure_values, view.exposure_values);
-    swap(exposure_histogram, view.exposure_histogram);
-    swap(initial_exposure, view.initial_exposure);
-    swap(depth, view.targets.depth);
-    swap(shadow, view.targets.shadow);
-    swap(gbuffer_base, view.targets.gbuffer_base);
-    swap(gbuffer_normal, view.targets.gbuffer_normal);
-    swap(gbuffer_metadata, view.targets.gbuffer_metadata);
-    swap(gbuffer_material, view.targets.gbuffer_material);
-    swap(gbuffer_motion, view.targets.gbuffer_motion);
-    swap(gbuffer_surface_history, view.targets.gbuffer_surface_history);
-    swap(material_sidecars, view.targets.material_sidecars);
-    swap(visibility_ids, view.targets.visibility_ids);
-    swap(visibility_front_face, view.targets.visibility_front_face);
-    swap(visibility_pixels, view.targets.visibility_pixels);
-    swap(visibility_counts, view.targets.visibility_counts);
-    swap(visibility_dispatch_args, view.targets.visibility_dispatch_args);
-    swap(hdr_color, view.targets.hdr_color);
-    swap(subsurface_diffuse, view.targets.subsurface_diffuse);
-    swap(environment_specular, view.targets.environment_specular);
-    swap(indirect_diffuse, view.targets.indirect_diffuse);
-    swap(oit_accumulation, view.targets.oit_accumulation);
-    swap(oit_revealage, view.targets.oit_revealage);
-    swap(post_a, view.targets.post_a);
-    swap(post_b, view.targets.post_b);
-    swap(hdr_capture_source, view.hdr_capture_source);
-    swap(hdr_capture_extent, view.hdr_capture_extent);
-    swap(hdr_capture_valid, view.hdr_capture_valid);
-    swap(hdr_capture_pre_exposed, view.hdr_capture_pre_exposed);
-    swap(hdr_capture_submission_id, view.hdr_capture_submission_id);
-    swap(hdr_capture_package_id, view.hdr_capture_package_id);
-    swap(hdr_capture_snapshot_tick, view.hdr_capture_snapshot_tick);
-    swap(hdr_capture_source_name, view.hdr_capture_source_name);
-    swap(temporal_history, view.targets.temporal_history);
-    swap(temporal_normal_history, view.targets.temporal_normal_history);
-    swap(temporal_material_history, view.targets.temporal_material_history);
-    swap(scene_work, view.targets.scene_work);
-    swap(display_linear, view.targets.display_linear);
-    swap(composite_hdr, view.targets.composite_hdr);
-    swap(hzb_history, view.targets.hzb_history);
-    swap(hzb_layout, view.targets.hzb_layout);
-    ambient_occlusion.SwapState(view.ambient_occlusion);
-    adaptive_shading.SwapState(view.adaptive_shading);
-    subsurface.SwapState(view.subsurface);
-    screen_reflections.SwapState(view.screen_reflections);
-    hero_transparency.SwapState(view.hero_transparency);
-    hdr_post.SwapState(view.hdr_post);
-    screen_overlay.SwapState(view.screen_overlay);
-    brixelizer_gi.SwapState(view.brixelizer_gi);
-    virtual_shadows.SwapState(view.virtual_shadows);
-    local_shadows.SwapState(view.local_shadows);
-    volumetrics.SwapState(view.volumetrics);
-    light_list.SwapState(view.light_list);
-    decal_surface.SwapState(view.decal_surface);
-    reconstruction_guides.SwapState(view.reconstruction_guides);
-    swap(view_state, view.state);
-    swap(back_buffers, view.outputs);
-    swap(back_buffer_completion, view.output_completion);
-    swap(ui_textures, view.ui.textures);
-    swap(ui_surfaces, view.ui.surfaces);
-    swap(ui_footprint, view.ui.footprint);
-    swap(ui_rows, view.ui.rows);
-    swap(ui_raster_width, view.ui.raster_width);
-    swap(ui_raster_height, view.ui.raster_height);
-    swap(ui_row_bytes, view.ui.row_bytes);
-    swap(ui_upload_bytes, view.ui.upload_bytes);
-    swap(ui_raster_models, view.ui_models);
-    swap(ui_dirty, view.ui_dirty);
-    for (std::size_t i = 0; i < frames.size(); ++i)
-    {
-        swap(frames[i].ui_upload, view.ui.uploads[i]);
-        swap(frames[i].ui_mapped, view.ui.mapped[i]);
-        swap(frames[i].ui_initialized, view.ui_initialized[i]);
-        transient_pools[i].Swap(view.targets.transient_pools[i]);
-    }
-    if (static_gpu_scene) swap(static_gpu_scene->lod_states, view.static_lod_states);
-}
-
 Result D3D12Renderer::Impl::ActivateView(ViewId id)
 {
-    if (id == active_view_id) return Result::Success();
     const auto next = owned_views.find(id.value);
     if (next == owned_views.end() || !next->second->ready)
         return ViewFailure("View has no prepared GPU state.");
-    if (auto drained = WaitForGpu(); !drained) return drained;
+    if (id == active_view_id) return Result::Success();
     if (cluster_runtime && !next->second->cluster_view.descriptors)
         if (auto prepared = CreateClusterViewResources(next->second->cluster_view); !prepared) return prepared;
-    std::vector<ID3D12CommandQueue *> queues;
-    for (const auto hint : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
-        if (auto *queue = graph_queue_executor.NativeQueue(hint)) queues.push_back(queue);
-    if (auto reusable = sdk_presentation.BeforeReuse(queues); !reusable) return reusable;
-    // Native selectors retain contexts; they do not destroy/recreate history.
+    // Per-view native reconstruction contexts retain their own history. Selecting
+    // one does not mutate another view's resources or submission-slot descriptors.
     if (streamline_session)
         if (auto selected = streamline_session->SelectReconstructionViewAfterCompletion(next->second->native_viewport_id); !selected) return selected;
     if (fsr_session)
         if (auto selected = fsr_session->SelectReconstructionViewAfterCompletion(next->second->native_viewport_id); !selected) return selected;
-    ExchangeView(*owned_views.at(active_view_id.value));
-    ExchangeView(*next->second);
     active_view_id = id;
     active_view_role = next->second->role;
     active_native_viewport_id = next->second->native_viewport_id;
-    WriteOptionTargetDescriptors();
-    auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    for (const auto &output : back_buffers)
-    {
-        device->CreateRenderTargetView(output.Get(), nullptr, rtv);
-        rtv.ptr += rtv_stride;
-    }
-    // UI descriptors contain view allocations and must follow the exchange.
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC ui{};
-        ui.Format = DXGI_FORMAT_B8G8R8A8_UNORM; ui.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        ui.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; ui.Texture2D.MipLevels = 1;
-        for (const auto table : {0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset})
-        {
-            auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + table + 9) * srv_stride;
-            device->CreateShaderResourceView(ui_textures[frame].resource.Get(), &ui, handle);
-        }
-    }
     return Result::Success();
 }
-
 Result D3D12Renderer::Impl::PrepareDecalSurface(const RendererConfig &candidate_config,
     ViewExtent capacity, bool admitted_work, DecalSurfaceCandidate &candidate) const
 {
@@ -824,20 +674,25 @@ Result D3D12Renderer::Impl::PrepareDecalSurface(const RendererConfig &candidate_
 
 Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::unique_ptr<OwnedView> &output, bool decal_work)
 {
+    auto reconstruction_config = config;
+    const auto feature_plan = ResolveFeatures(config);
+    reconstruction_config.dynamic_resolution = EffectiveDynamicResolution(config.dynamic_resolution, feature_plan);
     auto candidate = std::make_unique<OwnedView>();
+    candidate->view_id = input.id;
     candidate->role = input.role;
     candidate->native_viewport_id = next_native_viewport_id++;
     candidate->width = input.output_extent.width; candidate->height = input.output_extent.height;
     candidate->render_width = input.render_active.width; candidate->render_height = input.render_active.height;
+    candidate->display_state = owned_views.at(kMainRenderViewId.value)->display_state;
     candidate->configuration_revision = view_configuration_revision;
     candidate->content_generation = resource_generation_id;
     candidate->pipeline_revision = pipeline_revision;
     (void)UpdateViewState(candidate->state, input.output_extent, input.render_capacity, input.render_active);
     auto &v = *candidate;
     ViewExtent native_capacity;
-    if (auto r = ResolveNativeReconstruction(config, input.output_extent, v.reconstruction_plan, native_capacity); !r) return r;
+    if (auto r = ResolveNativeReconstruction(reconstruction_config, input.output_extent, v.reconstruction_plan, native_capacity); !r) return r;
     if (auto r = PrepareReconstructionProvider(config.reconstruction_request ? &*config.reconstruction_request : nullptr,
-            config.dynamic_resolution, config.dynamic_min_percent, config.dynamic_max_percent, input.output_extent,
+            reconstruction_config.dynamic_resolution, config.dynamic_min_percent, config.dynamic_max_percent, input.output_extent,
             v.reconstruction_plan, native_capacity, v.reconstruction_provider, &config); !r) return r;
     if (auto r = PrepareOptionTargets(v.targets, input.render_capacity.width, input.render_capacity.height,
             config.shadow_resolution, config.bloom, input.output_extent.width, input.output_extent.height,
@@ -848,7 +703,7 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; desc.Width = v.width; desc.Height = v.height;
-    desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = display_state.format; desc.SampleDesc.Count = 1;
+    desc.DepthOrArraySize = desc.MipLevels = 1; desc.Format = v.display_state.format; desc.SampleDesc.Count = 1;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     for (std::size_t i = 0; i < kFrameCount; ++i)
     {
@@ -877,18 +732,18 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     DecalSurfaceCandidate decals;
     LightListCandidate lights; BrixelizerCandidate brixelizer;
     VirtualShadowCandidate shadows; AdditionalShadowPrepared additional; VolumetricPrepared volume;
-    if (auto r = PrepareAdaptiveShading(config, capacity, adaptive); !r) return r;
-    if (auto r = PrepareAmbientOcclusion(config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
-    if (auto r = PrepareSurfaceLighting(config, capacity, diffusion, reflections); !r) return r;
-    if (auto r = PrepareHeroTransparency(config, capacity, transparency); !r) return r;
-    if (auto r = PrepareHdrPost(config, capacity, input.output_extent, hdr); !r) return r;
+    if (auto r = PrepareAdaptiveShading(v, config, capacity, adaptive); !r) return r;
+    if (auto r = PrepareAmbientOcclusion(v, config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
+    if (auto r = PrepareSurfaceLighting(v, config, capacity, diffusion, reflections); !r) return r;
+    if (auto r = PrepareHeroTransparency(v, config, capacity, transparency); !r) return r;
+    if (auto r = PrepareHdrPost(v, config, capacity, input.output_extent, hdr); !r) return r;
     if (auto r = PrepareScreenOverlay(config, capacity, overlay); !r) return r;
-    if (auto r = PrepareLightList(config, capacity, lights); !r) return r;
+    if (auto r = PrepareLightList(v, config, capacity, lights); !r) return r;
     if (auto r = PrepareDecalSurface(config, capacity, decal_work, decals); !r) return r;
-    if (auto r = PrepareBrixelizerGi(config, input.render_active, brixelizer); !r) return r;
-    if (auto r = PrepareVirtualShadows(config, capacity, shadows); !r) return r;
-    if (auto r = PrepareAdditionalShadows(config, capacity, additional); !r) return r;
-    if (auto r = PrepareVolumetrics(config, capacity, volume); !r) return r;
+    if (auto r = PrepareBrixelizerGi(v, config, input.render_active, brixelizer); !r) return r;
+    if (auto r = PrepareVirtualShadows(v, config, capacity, shadows); !r) return r;
+    if (auto r = PrepareAdditionalShadows(v, config, capacity, additional); !r) return r;
+    if (auto r = PrepareVolumetrics(v, config, capacity, volume); !r) return r;
     if (auto r = v.adaptive_shading.Commit(std::move(adaptive), completed); !r) return r;
     if (auto r = v.ambient_occlusion.Commit(std::move(ambient), completed); !r) return r;
     if (auto r = v.subsurface.Commit(std::move(diffusion), completed); !r) return r;
@@ -912,12 +767,11 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (v.reconstruction_provider)
     {
         v.reconstruction_provider->SetViewportId(v.native_viewport_id);
-        if (auto r = PrepareReconstructionGuides(config, capacity, input.output_extent, guides,
+        if (auto r = PrepareReconstructionGuides(v, config, capacity, input.output_extent, guides,
                 v.reconstruction_provider->NeedsCompositionGuide()); !r) return r;
         if (auto r = v.reconstruction_guides.Commit(std::move(guides), completed); !r) return r;
     }
     v.reconstruction_plan.render_active = input.render_active;
-    v.display_state = display_state;
     v.ready = true;
     output = std::move(candidate);
     return Result::Success();
@@ -925,15 +779,11 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
 
 void D3D12Renderer::Impl::InvalidateCanonicalDeformationAfterCompletion() noexcept
 {
-    hdr_capture_source.Reset();
-    hdr_capture_valid = false;
     for (auto &[id, view] : owned_views)
     {
         view->hdr_capture_source.Reset();
         view->hdr_capture_valid = false;
     }
-    previous_skin_deformation.reset();
-    previous_instances.reset();
     skin_cache.Clear();
     for (auto &[id, view] : owned_views)
     {
@@ -957,8 +807,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = view.adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.subsurface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_reflections.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = ArchiveHeroWork(view.hero_transparency); !r) return r;
-    if (auto r = view.hero_transparency.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
+    if (auto r = RetireHeroTransparency(view.hero_transparency); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
@@ -974,8 +823,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
 Result D3D12Renderer::Impl::ResetOwnedViewsAfterCompletion()
 {
     for (auto &[id, view] : owned_views)
-        if (id != active_view_id.value)
-            if (auto r = ResetOwnedViewAfterCompletion(*view); !r) return r;
+        if (auto r = ResetOwnedViewAfterCompletion(*view); !r) return r;
     for (auto &candidate : unresolved_view_candidates)
         if (auto r = ResetOwnedViewAfterCompletion(*candidate); !r) return r;
     unresolved_view_candidates.clear();
@@ -1028,9 +876,10 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
     input.camera.target = {family ? 0.0 : camera.target.x, target_height, family ? 0.0 : camera.target.z};
     input.camera.vertical_fov_degrees = camera.vertical_fov_degrees;
     input.view_origin = input.camera.position;
-    input.output_extent = {impl_->width, impl_->height};
-    input.render_capacity = impl_->view_state.render_capacity;
-    input.render_active = impl_->view_state.render_active;
+    const auto &main_owner = *impl_->owned_views.at(kMainRenderViewId.value);
+    input.output_extent = {main_owner.width, main_owner.height};
+    input.render_capacity = main_owner.state.render_capacity;
+    input.render_active = main_owner.state.render_active;
     return input;
 }
 
@@ -1042,7 +891,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     {
         RendererFrameResult &output;
         Tick tick{};
-        std::uint64_t session{};
+        std::uint64_t session{}, sequence{};
         bool submitted{};
         std::uint64_t presented_ui_generation{};
         ~WorldStepReceipt()
@@ -1050,6 +899,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
             output.vfx_world_step_submitted = submitted;
             output.vfx_world_tick = tick;
             output.vfx_world_session_id = session;
+            output.vfx_world_batch_sequence = sequence;
             output.presented_ui_packet_generation = presented_ui_generation;
         }
     } world_step_receipt{frame_result};
@@ -1112,15 +962,9 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     sample_header.simulation_time = display_time;
     impl_->prepared_archer_palettes.clear();
     if (auto r = impl_->ValidateFrameInput(input); !r) return r;
-    if (impl_->owned_views.empty())
-    {
-        auto main = std::make_unique<Impl::OwnedView>(); main->ready = true;
-        main->configuration_revision = impl_->view_configuration_revision;
-        main->content_generation = impl_->resource_generation_id;
-        main->pipeline_revision = impl_->pipeline_revision;
-        main->history_output_extent = impl_->view_state.output_extent;
-        impl_->owned_views.emplace(kMainRenderViewId.value, std::move(main));
-    }
+    if (!impl_->owned_views.contains(kMainRenderViewId.value) ||
+        !impl_->owned_views.at(kMainRenderViewId.value)->ready)
+        return ViewFailure("Main render view has no initialized GPU owner.");
     // Prepare all new/replaced view packages before publishing any of them.
     std::map<std::uint32_t, std::unique_ptr<Impl::OwnedView>> candidates;
     for (const auto &view : input.views)
@@ -1191,21 +1035,28 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     auto &main_owner = *impl_->owned_views.at(kMainRenderViewId.value);
     if (main_owner.configuration_revision != impl_->view_configuration_revision ||
         main_owner.content_generation != impl_->resource_generation_id || main_owner.pipeline_revision != impl_->pipeline_revision ||
-        main_owner.history_output_extent != impl_->view_state.output_extent)
+        main_owner.history_output_extent != main_owner.state.output_extent)
     {
         ++main_owner.history_generation;
         main_owner.configuration_revision = impl_->view_configuration_revision;
         main_owner.content_generation = impl_->resource_generation_id;
         main_owner.pipeline_revision = impl_->pipeline_revision;
-        impl_->temporal_history_valid = false; impl_->hzb_history_valid = false;
-        main_owner.history_output_extent = impl_->view_state.output_extent;
+        main_owner.temporal_history_valid = false; main_owner.hzb_history_valid = false;
+        main_owner.history_output_extent = main_owner.state.output_extent;
     }
     const auto saved_devtools_visible = impl_->config.devtools_visible;
-    const auto saved_identity = impl_->sdk_frame_identity;
+    const auto saved_identity = main_owner.sdk_frame_identity;
     const auto saved_input_phase = impl_->native_input_phase;
     impl_->active_render_package_id = impl_->render_package_id + 1;
     if (auto r = impl_->BeginHlodViewPackage(input); !r) return r;
     impl_->explicit_frame = &input;
+    auto &prepared_scene = impl_->prepared_scene_package;
+    prepared_scene.ReleaseBorrowed();
+    struct PreparedSceneLease
+    {
+        Impl::PreparedScenePackage &scene;
+        ~PreparedSceneLease() { scene.ReleaseBorrowed(); }
+    } prepared_scene_lease{prepared_scene};
     Result result = Result::Success();
     RendererFrameResult main_result{};
     std::vector<RenderViewFrameResult> view_results;
@@ -1224,20 +1075,22 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         }
         const auto &view = *view_pointer;
         if (auto r = impl_->ActivateView(view.id); !r) { result = r; break; }
+        auto &owned_view = *impl_->owned_views.at(view.id.value);
         impl_->explicit_view = &view;
         impl_->config.devtools_visible = saved_devtools_visible && view.role == RenderViewRole::Main;
-        if (view.role == RenderViewRole::Main) { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
-        const bool active_changed = view.render_active != impl_->view_state.render_active;
-        (void)UpdateViewState(impl_->view_state, view.output_extent, view.render_capacity, view.render_active);
-        impl_->render_width = view.render_active.width; impl_->render_height = view.render_active.height;
-        if (active_changed) { impl_->hzb_history_valid = false; impl_->hzb_layout = MakeHzbLayout(impl_->render_width, impl_->render_height); }
+        if (view.role == RenderViewRole::Main) { impl_->native_input_phase = saved_input_phase; owned_view.sdk_frame_identity = saved_identity; }
+        const bool active_changed = view.render_active != owned_view.state.render_active;
+        (void)UpdateViewState(owned_view.state, view.output_extent, view.render_capacity, view.render_active);
+        owned_view.width = view.output_extent.width; owned_view.height = view.output_extent.height;
+        owned_view.render_width = view.render_active.width; owned_view.render_height = view.render_active.height;
+        if (active_changed) { owned_view.hzb_history_valid = false; owned_view.targets.hzb_layout = MakeHzbLayout(owned_view.render_width, owned_view.render_height); }
         if (view.camera_cut)
         {
-            impl_->temporal_history_valid = false; impl_->hzb_history_valid = false; impl_->brixelizer_history_valid = false;
-            impl_->exposure_initialized = false; impl_->previous_origins_valid = false;
-            impl_->previous_skin_deformation.reset(); impl_->previous_instances.reset(); impl_->skin_cache.Clear();
-            impl_->ambient_occlusion.ResetHistory(); impl_->screen_reflections.ResetHistory();
-            impl_->volumetrics.ResetHistory();
+            owned_view.temporal_history_valid = false; owned_view.hzb_history_valid = false; owned_view.brixelizer_history_valid = false;
+            owned_view.exposure_initialized = false; owned_view.previous_origins_valid = false;
+            owned_view.previous_skin_deformation.reset(); owned_view.previous_instances.reset(); owned_view.skin_history.Clear();
+            owned_view.ambient_occlusion.ResetHistory(); owned_view.screen_reflections.ResetHistory();
+            owned_view.volumetrics.ResetHistory();
         }
         auto snapshots = input.snapshots;
         if (input.scene) { snapshots.current.static_scene = input.scene->lease; snapshots.has_current = true; }
@@ -1261,6 +1114,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
             world_step_receipt.submitted = true;
             world_step_receipt.tick = rendered.vfx_world_tick;
             world_step_receipt.session = rendered.vfx_world_session_id;
+            world_step_receipt.sequence = rendered.vfx_world_batch_sequence;
         }
         if (!result)
         {
@@ -1276,18 +1130,22 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     }
     if (!result && impl_->explicit_view && !failed_view_history_committed)
     {
-        impl_->temporal_history_valid = false;
-        impl_->hzb_history_valid = false;
-        impl_->brixelizer_history_valid = false;
-        impl_->previous_origins_valid = false;
-        impl_->previous_skin_deformation.reset();
-        impl_->previous_instances.reset();
-        impl_->skin_cache.Clear();
+        if (impl_->explicit_view)
+        {
+            auto &failed_view = *impl_->owned_views.at(impl_->explicit_view->id.value);
+            failed_view.temporal_history_valid = false;
+            failed_view.hzb_history_valid = false;
+            failed_view.brixelizer_history_valid = false;
+            failed_view.previous_origins_valid = false;
+            failed_view.previous_skin_deformation.reset();
+            failed_view.previous_instances.reset();
+            failed_view.skin_history.Clear();
+        }
     }
     impl_->explicit_view = nullptr; impl_->explicit_frame = nullptr;
     impl_->config.devtools_visible = saved_devtools_visible;
     if (auto restored = impl_->ActivateView(kMainRenderViewId); !restored) return restored;
-    if (!rendered_main) { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
+    if (!rendered_main) { impl_->native_input_phase = saved_input_phase; main_owner.sdk_frame_identity = saved_identity; }
     if (rendered_main) frame_result = main_result;
     frame_result.views = std::move(view_results);
     frame_result.cpu_timings.wrapper_us = static_cast<std::uint64_t>(

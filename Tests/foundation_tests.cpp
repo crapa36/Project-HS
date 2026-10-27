@@ -1,4 +1,5 @@
 #include <hs/core/bounded_spsc_queue.hpp>
+#include <hs/core/canonical_bytes.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
@@ -7,6 +8,7 @@
 #include <hs/core/windows_command_line.hpp>
 #include <hs/jobs/task_system.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -291,6 +293,40 @@ void TestCookedHeaderValidation()
     std::filesystem::remove(path);
 }
 
+void TestCanonicalBytes()
+{
+    hs::CanonicalBytes bytes("x", 1);
+    bytes.Fields(std::int32_t{-2}, std::uint64_t{0x0102030405060708ull}, -0.0f);
+    bytes.String("a");
+    bytes.String("bc");
+    const std::vector<std::byte> expected{
+        std::byte{1}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{'x'},
+        std::byte{1}, std::byte{}, std::byte{}, std::byte{},
+        std::byte{0xfe}, std::byte{0xff}, std::byte{0xff}, std::byte{0xff},
+        std::byte{8}, std::byte{7}, std::byte{6}, std::byte{5}, std::byte{4}, std::byte{3}, std::byte{2}, std::byte{1},
+        std::byte{}, std::byte{}, std::byte{}, std::byte{0x80},
+        std::byte{1}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{'a'},
+        std::byte{2}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{}, std::byte{'b'}, std::byte{'c'}};
+    Check(std::ranges::equal(bytes.View(), expected), "canonical bytes use length-prefixed LE fields and preserve signed zero");
+    hs::CanonicalBytes negative_zero("x", 1), positive_zero("x", 1);
+    negative_zero.Scalar(-0.0f);
+    positive_zero.Scalar(0.0f);
+    Check(!std::ranges::equal(negative_zero.View(), positive_zero.View()), "canonical float bytes preserve signed zero");
+    hs::CanonicalBytes other_domain("y", 1), other_version("x", 2);
+    Check(!std::ranges::equal(other_domain.View(), positive_zero.View()) &&
+              !std::ranges::equal(other_version.View(), positive_zero.View()),
+          "canonical bytes include domain and version");
+    hs::CanonicalBytes field_order("x", 1), swapped_order("x", 1);
+    field_order.Fields(std::uint32_t{1}, std::uint32_t{2});
+    swapped_order.Fields(std::uint32_t{2}, std::uint32_t{1});
+    Check(!std::ranges::equal(field_order.View(), swapped_order.View()), "canonical bytes preserve field order");
+    hs::CanonicalBytes short_string("x", 1), long_string("x", 1);
+    short_string.String("ab");
+    long_string.String("a");
+    long_string.String("b");
+    Check(!std::ranges::equal(short_string.View(), long_string.View()), "canonical strings retain length boundaries");
+}
+
 void TestProcessInfo()
 {
     const auto executable = hs::CurrentExecutablePath();
@@ -333,6 +369,7 @@ int main(int argc, char **argv)
             TestSpscQueueSize();
             TestVfxEventParameters();
             TestCookedHeaderValidation();
+            TestCanonicalBytes();
             TestWindowsCommandLineQuoting();
             TestProcessInfo();
             TestShippedContentOwner();

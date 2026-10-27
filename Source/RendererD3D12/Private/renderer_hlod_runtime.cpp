@@ -1,6 +1,7 @@
 #include "renderer_impl.hpp"
 #include "renderer_hlod_runtime.hpp"
 #include <hs/render_data/render_asset_format.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 
 #include <bit>
 #include <numeric>
@@ -45,7 +46,7 @@ std::uint32_t MaterialOrdinal(const render_data::SceneHlod &scene, const render_
         return render_data::kGroundDetailMaterialOrdinal;
     }
     for (std::uint32_t i = 0; i < 10; ++i)
-        if (id == "render/" + std::string(kEnvironmentMaterialNames[i]) + ".rpkg")
+        if (id == render_data::MaterialProduct(kEnvironmentMaterialNames[i]))
         {
             const auto semantic = static_cast<std::uint32_t>(i < 3 ? RenderMesh::TreeTrunk :
                 i < 6 ? RenderMesh::TreeCanopy : RenderMesh::Rock);
@@ -223,9 +224,11 @@ HlodViewRuntime *D3D12Renderer::Impl::ActiveHlodView() noexcept
 const HlodViewRuntime *D3D12Renderer::Impl::ActiveHlodView() const noexcept
 {
     if (!hlod_runtime) return nullptr;
+    const auto owner = owned_views.find(active_view_id.value);
+    if (owner == owned_views.end()) return nullptr;
     const auto session = explicit_frame
         ? (explicit_frame->snapshots.has_current ? explicit_frame->snapshots.current.header.session_id : 0u)
-        : view_session_id;
+        : owner->second->view_session_id;
     const auto found = hlod_runtime->views.find({active_view_id.value, session});
     return found == hlod_runtime->views.end() ? nullptr : found->second.get();
 }
@@ -286,10 +289,9 @@ Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderFrameInput &input)
         }
         owner->participating = true;
         const auto owned = owned_views.find(input_view.id.value);
-        const bool prior_origins = input_view.id == active_view_id ? previous_origins_valid
-            : owned != owned_views.end() && owned->second->previous_origins_valid;
-        const auto prior_origin = input_view.id == active_view_id ? previous_scene_origin
-            : owned != owned_views.end() ? owned->second->previous_scene_origin : RenderWorldPosition{};
+        const bool prior_origins = owned != owned_views.end() && owned->second->previous_origins_valid;
+        const auto prior_origin = owned != owned_views.end()
+            ? owned->second->previous_scene_origin : RenderWorldPosition{};
         if (input_view.camera_cut || (prior_origins && input_view.scene_origin != prior_origin))
             InvalidateHlodQualification(*owner);
         if (!scene || scene->content_generation_id != runtime.content_generation ||
@@ -483,7 +485,8 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     };
     if (auto result = ensure(native.readback, native.readback_residency, readback_bytes, D3D12_HEAP_TYPE_READBACK,
         D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
-    native.enabled = true; native.frame_id = frame_number + 1u;
+    const auto &owner = *owned_views.at(active_view_id.value);
+    native.enabled = true; native.frame_id = owner.frame_number + 1u;
     native.qualification_epoch = view.qualification_epoch;
     return Result::Success();
 }
@@ -503,12 +506,12 @@ Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(std::uint32_t frame_slot,
     inputs.rendered_frame_id = native.frame_id; inputs.static_scene_generation = static_gpu_scene->instance_generation;
     const auto &owner = *owned_views.at(active_view_id.value);
     const bool camera_cut = explicit_view && explicit_view->camera_cut;
-    const bool scene_changed = frame_number != 0u && owner.scene_lease != view.matching_scene;
+    const bool scene_changed = owner.frame_number != 0u && owner.scene_lease != view.matching_scene;
     // These increments match successful publication in renderer_frame/views.
     // The cut frame cannot read history, but its output owns the new generation.
     inputs.history_generation = owner.history_generation + (camera_cut ? 1u : 0u) + (scene_changed ? 1u : 0u);
-    inputs.history_valid = !camera_cut && !scene_changed && view.session_id == view_session_id &&
-        previous_origins_valid && explicit_view && explicit_view->scene_origin == previous_scene_origin;
+    inputs.history_valid = !camera_cut && !scene_changed && view.session_id == owner.view_session_id &&
+        owner.previous_origins_valid && explicit_view && explicit_view->scene_origin == owner.previous_scene_origin;
     inputs.completed = graph_queue_executor.Completed(); inputs.content_generation_id = resource_generation_id;
     inputs.layout_abi = view.matching_scene->layout_abi; inputs.layout_digest = view.matching_scene->eligible_layout_digest;
     inputs.members = native.members; inputs.proxies = native.bindings; inputs.buckets = native.buckets; inputs.views = native.views;

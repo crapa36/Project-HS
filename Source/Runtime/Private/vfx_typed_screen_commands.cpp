@@ -122,7 +122,7 @@ float VfxLowHealthPulseState::EntryFade(double display_tick) const noexcept
 }
 bool IsVfxTypedScreenEffect(const VfxProgramView &p,VfxEffectHandle handle) noexcept
 { const auto id=EffectId(p,handle);return id==kHit||id==kHealth; }
-Result BuildVfxTypedScreenCommands(const VfxProgramView &p,std::span<const VfxEventInput> events,
+Result BuildVfxTypedScreenCommands(const VfxProgramView &p,VfxEventView events,
     std::span<const VfxPersistentInput> persistent,Tick observation_tick,double display_tick,VfxQuality admission,
     VfxLowHealthPulseState &pulse,std::vector<VfxScreenInput> &output)
 {

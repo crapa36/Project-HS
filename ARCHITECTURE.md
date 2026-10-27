@@ -142,10 +142,24 @@ Developer Catalog file loading is hs_runtime_vfx_io. These decoders are absent
 from the Release Runtime link, and IO libraries build only when consumed.
 Runtime retains each adapted VFX event payload once in a stable-order
 ActiveEffectStore; profile lists and entity-surface captures hold private row
-references. PreparedPairFacts indexes only the retained snapshot pair by its
-publication sequences, and frame adapters still recompute live age and geometry.
+references. Profile consumers borrow indexed views; attached ground/light/decal/
+distortion outputs share one sparse current-owner binding without overwriting
+birth/capture inputs. Membership masks avoid duplicate scans; unchanged stores
+skip compaction and expiry remaps the existing episode index incrementally.
+Raw events retain the simulation producer's session/tick FIFO order; CPU activation
+retires that ingress independently from pending native emission submission.
+PreparedPairFacts indexes only the retained snapshot pair by its
+semantic publication revisions and row counts. It stores row ordinals, never
+borrowed data addresses; frame adapters still recompute live age and geometry.
 Light output recipes and their effect ranges are prepared by that same CPU IO
-phase and emitted as immutable tables; Runtime evaluates only live input/time.
+phase and emitted as immutable tables. Ballistic mesh recipes likewise prepare
+immutable source/output shape, parameter and LUT contracts at admission; Runtime
+binds live event or persistent-owner values without reinterpreting that program.
+Distortion and decal preparation likewise owns static knots, shapes, parameters,
+texture/slice and quality contracts; per-frame evaluation only binds live values.
+Output-profile presence is prepared with the image and generated for shipping;
+activation does not rescan source/output tables or retain non-ribbon events in
+the ribbon profile.
 Renderer accepts font bytes and DirectWrite owns its copy after initialization.
 Release reads the generated, verified font range from the pack; developer hosts
 load their explicit font input. Renderer texture/shader/bulk deployment still uses
@@ -213,6 +227,14 @@ adapter returns Core's padded value only for accessed rows. Monster palette rows
 read directly into the existing upload vector in their cooked transposed order.
 The remaining W01 provenance and deployment cutover is still pending.
 
+Environment materials have one canonical product per authored material, independent
+of geometry LOD. Geometry metadata products contain a checked material dependency
+reference; LOD0 also references its hierarchy. Material metadata, program, bindings,
+parameter layout and surface layout belong to the material product only. Terrain
+and ground-detail geometry share their existing standalone material products.
+The renderer derives one immutable material variant per authored ordinal and swaps
+those facts with the candidate geometry on resident reload.
+
 Geometry page preparation returns its parsed package view and validated geometry
 together. Startup, streaming and GPU upload reuse that result. Package views borrow
 the read bytes through the final CPU copy; GPU staging retains its copy until the
@@ -238,26 +260,86 @@ and extents at their boundaries.
 
 The graph retains at most eight exact value-only compiled plans. Declaration
 storage can survive Reset; callbacks, external owners and logical uses do not.
+Candidate scans share one current resource-shape snapshot. Flat reusable alias
+scratch labels the first occurrence rather than retaining native addresses or
+allocating a hash node per resource. Cold registration refreshes that snapshot
+after provider preparation; native certification and binding remain authoritative.
 
 Sequential views retain their own temporal and native reconstruction state.
 There is no parallel semantic history-resource registry: resources and history
 generation owned by each view are authoritative. Main renders first; auxiliary
 views retain packet order and share canonical scene simulation. Shared descriptor
-banks still require completion before view exchange.
+banks, allocators and upload scratch belong to the three global submission slots;
+each slot waits for its actual completion before reuse. Output backbuffer indices
+remain separate from those slots. OwnedView is used directly during initialization,
+rendering, resize, options, capture and resident reload; there is no view exchange
+mirror or whole-device drain for selecting another retained view. Native SDK
+selectors preserve separate viewport contexts; actual reset/reconfigure and
+presentation reuse still require their completion boundaries. Geometry SRV banks
+retain resolved resource ownership and slice ranges; only changed bindings are
+rewritten after slot completion. Resident descriptor publication transfers the
+prepared bank snapshot into the destination heap. Feature preparation/admission
+uses the target view; main lighting status and per-view geometry/HLOD history do
+not read a parallel Impl service mirror. Hero retirement drains samples, resets
+completed native work, then folds statistics once.
+UI targets/bitmap state are per view; upload buffers grow and reuse capacity in
+the waited submission slot. Pending cached bitmaps recopy into that shared scratch.
+Instance identity, retained surfaces, union-consumer monster LOD and stable draw
+order are prepared once per package. Current stable-slot/GPU-instance reconciliation
+runs on its first view. View skin offsets/strides live in each waited submission
+slot's upload table; later views do not mutate the common scene table. Two immutable
+descriptor-table variants select scene history or ribbon history while retaining
+the same view skin table, without adding a root parameter.
+The submitted canonical skin owner/range directory defines current deformation
+across all views; previous leases/ranges and history validity remain per view.
+Current instance tables use pooled GPU owners; each view leases its own submitted
+owner directly as previous data. There is no current-to-history GPU copy. Each
+backing uploads only active slot/channels changed since its accepted payload
+revision, including changes across skipped revisions. Header and entity-surface
+publication belong to that backing. Only generation, mesh and motion-epoch facts
+remain on the CPU, not previous full instances.
+Reuse requires the same device, no logical readers and completed GPU uses. Scene
+upload-only frames still publish a truthful table. Prior table reads cover compute
+visibility resolve and raster/transparent/Hero motion; current-only consumers do
+not acquire a history read. Original per-view projection retains old coordinates
+through origin changes. One perspective-correct unjittered clip varying supplies
+previous UV/depth, and active raster coordinates supply current motion UV.
+Capture identifies frame scratch by its actual submitted slot/id and committed
+constants stamp; output image indices remain separate. A reused slot cannot be
+reported as fresh per-view CPU capture metadata.
+GPU-read completion retains that owner independently of slot and UI lifetimes.
+Borrowed pose pointers end with the Render
+call; retained scratch capacity does not extend the caller's input lifetime.
 Runtime supplies a package sample timestamp captured before effect preparation;
 direct renderer callers may omit it to sample at entry. Explicit timestamps are not
 retimed by individual view history; backward samples invalidate motion history.
 Event light, distortion,
 decal and volume lifetimes use fractional display ticks from that timestamp.
-Actual particle world-step scheduling and submission receipts remain tick-based.
+Native VFX input owns a frozen session/target/sequence batch until actual producer
+submission, independently of CPU activation or UI Present. Collision particles
+hold at the integer display target; native analytic slots age at display time.
+An explicit zero sequence supplies the held clock without a batch; legacy callers
+that omit the clock retain snapshot-tick stepping. Gameplay/rendered snapshot tick
+and the common analytic camera clock are not replaced by the frozen target.
 
 Each rendered package evaluates one display sample from the producer's actual
 adjacent tick pair. Transforms, poses and endpoint lifetime transitions share that
-sample across views; package-owned Archer palettes also serve preflight and draws.
+sample across views; package-owned Archer palettes feed bounds and canonical skin
+compute. All actual character draw consumers use that cache; the unused128-matrix
+compatibility cbuffer and legacy vertex deformation are removed. Qualified bounds
+with no skin allocation encode no package consumer. Visibility omits their visible
+and rejected output, still publishing zero indirect arguments; shadow preparation
+omits their caster/receiver work and retains retirement of previous caster records.
+Packet-owned instance lookup and sorted attachment IDs serve Fresnel and skin
+demand across views, without scanning every effect for every instance.
+Mirrored shader prefixes
+share the4720-byte FrameConstants layout, and upload offsets follow its alignment.
 Each view records its successful sample time independently of retired GPU resources.
-Instance history is prepared before submission and accepted after successful graph
-and service submissions, before Present. A later Present failure preserves this
-history; a partial/pre-commit failure does not advance the display-clock record.
+CPU scene payload revisions and current GPU owners commit together at successful
+graph execution, before fallible service completion. Per-view display samples and
+history accept after successful graph/service submissions, before Present. A later
+Present failure preserves them; a partial/pre-commit failure does not advance the
+display-clock record.
 Capture callers use `Capture(request)` with a view ID. Legacy format-specific
 capture helpers are private, so callers cannot bypass submitted-frame ownership
 checks. Shared geometry/visibility diagnostics require a retained submission
@@ -323,6 +405,12 @@ The Apps-owned `hs_asset_pipeline` static library compiles the shared Action
 implementation once. Producers remain separate executables, so a producer-specific
 change does not invalidate unrelated recipes. Each process hashes its own executable;
 there is no intermediate recipe manifest or post-link preparation target.
+Material and runtime DXC compilation consume hashed private source/include
+snapshots; generated includes are owned by that producer stage. Saved runtime
+shader input closures permit cache hits without dependency-scanner processes.
+Environment producers derive consumed paths from frozen metadata and hash the
+captured bytes they cook. Shader process waits share bounded termination handling;
+uncertain process exit preserves its stage instead of racing cleanup.
 
 CharacterContent imports one CharacterIR and directly emits final character
 metadata, LOD0 geometry, named animation and DDS products. Normal builds do not

@@ -250,6 +250,15 @@ const GeometryPageGpu *D3D12Renderer::Impl::FindGeometryPage(std::uint32_t page_
 void D3D12Renderer::Impl::WriteGeometryPageDescriptors(std::uint32_t frame_slot)
 {
     if (frame_slot >= kFrameCount) return;
+    auto &bank = geometry_page_descriptor_banks[frame_slot];
+    const auto heap_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    if (bank.heap_owner.Get() != srv_cpu_heap.Get() || bank.heap_start != heap_start.ptr || bank.stride != srv_stride)
+    {
+        bank = {};
+        bank.heap_owner = srv_cpu_heap;
+        bank.heap_start = heap_start.ptr;
+        bank.stride = srv_stride;
+    }
     auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     descriptor.ptr += static_cast<SIZE_T>(
         frame_slot * kTextureDescriptorCount + kGeometryDescriptorOffset + 1) * srv_stride;
@@ -257,8 +266,20 @@ void D3D12Renderer::Impl::WriteGeometryPageDescriptors(std::uint32_t frame_slot)
     {
         const auto *page = FindGeometryPage(slot);
         auto *resource = page ? page->storage.resource.Get() : nullptr;
+        auto &cached = bank.pages[slot];
+        const auto resolved_slot = page ? page->page_slot : UINT32_MAX;
+        const bool resource_changed = !cached.valid || cached.resource_owner.Get() != resource ||
+            cached.resolved_page_slot != resolved_slot;
         for (std::size_t slice = 0; slice < kGeometryBuffersPerPage; ++slice)
         {
+            const auto offset = page ? page->offsets[slice] : 0;
+            const auto size = page ? page->sizes[slice] : 0;
+            auto &view_cache = cached.views[slice];
+            if (!resource_changed && view_cache.offset == offset && view_cache.size == size)
+            {
+                descriptor.ptr += srv_stride;
+                continue;
+            }
             D3D12_SHADER_RESOURCE_VIEW_DESC view{};
             view.Format = DXGI_FORMAT_R32_TYPELESS;
             view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -267,7 +288,14 @@ void D3D12Renderer::Impl::WriteGeometryPageDescriptors(std::uint32_t frame_slot)
             view.Buffer.NumElements = page ? static_cast<UINT>(page->sizes[slice] / 4) : 1;
             view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
             device->CreateShaderResourceView(resource, &view, descriptor);
+            view_cache = {offset, size};
             descriptor.ptr += srv_stride;
+        }
+        if (resource_changed)
+        {
+            cached.resource_owner = resource;
+            cached.resolved_page_slot = resolved_slot;
+            cached.valid = true;
         }
     }
     for (auto &stream : environment_geometry_streams)

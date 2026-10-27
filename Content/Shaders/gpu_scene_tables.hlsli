@@ -8,6 +8,8 @@ static const uint HsGpuSceneMagic = 0x37475348u; // "HSG7"
 static const uint HsGpuSceneVersion = 3u;
 
 ByteAddressBuffer HsGpuSceneTables : register(t28, space3);
+// Per-view previous deformation offsets must not mutate the shared current scene.
+ByteAddressBuffer HsViewSkinBindings : register(t30, space3);
 
 bool HsGpuSceneSlotValid(ByteAddressBuffer scene, uint slot,
                          out uint4 header0, out uint4 header1,
@@ -93,7 +95,10 @@ uint4 HsLoadGpuSceneSkin(ByteAddressBuffer scene, uint slot)
 
 uint4 HsLoadGpuSceneSkin(uint slot)
 {
-    return HsLoadGpuSceneSkin(HsGpuSceneTables, slot);
+    uint bytes;
+    HsViewSkinBindings.GetDimensions(bytes);
+    return slot < bytes / 32u ? HsViewSkinBindings.Load4(slot * 32u)
+        : uint4(0xffffffffu, 0u, 0u, 0u);
 }
 
 uint2 HsLoadGpuSceneSkinStrides(ByteAddressBuffer scene, uint slot)
@@ -107,7 +112,9 @@ uint2 HsLoadGpuSceneSkinStrides(ByteAddressBuffer scene, uint slot)
 }
 uint2 HsLoadGpuSceneSkinStrides(uint slot)
 {
-    return HsLoadGpuSceneSkinStrides(HsGpuSceneTables, slot);
+    uint bytes;
+    HsViewSkinBindings.GetDimensions(bytes);
+    return slot < bytes / 32u ? HsViewSkinBindings.Load2(slot * 32u + 16u) : 0u;
 }
 
 #endif

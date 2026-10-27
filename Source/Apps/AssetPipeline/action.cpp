@@ -765,6 +765,11 @@ const ProducerRecipe &CurrentProducerRecipe()
 }
 } // namespace
 
+std::string_view ProducerRecipeIdentity()
+{
+    return CurrentProducerRecipe().identity;
+}
+
 std::string ActionKey(const ActionSpec &spec)
 {
     Sha256 hash;
@@ -818,6 +823,12 @@ std::size_t ActionResultSnapshot::ProductCount() const
 {
     return result_.at("products").size();
 }
+
+const Json &ActionResultSnapshot::InputMetadata() const
+{
+    return result_.at("inputs");
+}
+
 
 bool ActionResultSnapshot::HasProduct(std::string_view product_id) const
 {

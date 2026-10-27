@@ -4,6 +4,10 @@
 #include "../AssetPipeline/action.hpp"
 #include "../Content/character_products.hpp"
 #include "../Content/release_vfx_codegen.hpp"
+#include "renderer_identity.hpp"
+#include "simulation_identity.hpp"
+#include <hs/game_rules/simulation_rules.hpp>
+#include <hs/presentation/presentation_catalog_io.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
 #include <hs/render_data/geometry_descriptor.hpp>
@@ -23,6 +27,8 @@
 #include <limits>
 #include <set>
 #include <map>
+#include <memory>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -84,7 +90,7 @@ std::string GeometrySource(std::span<const rd::GeometryDescriptorStorage> geomet
         for(const auto &chunk:g.chunks) source+="{"+std::to_string(chunk.offset)+"ull,"+std::to_string(chunk.byte_count)+"ull},";
         source+="}},std::span<const AssetId>(kGeometryDependencies).subspan("+std::to_string(dependency_first)+","+std::to_string(g.dependencies.size())+"),"+
             "std::span<const render_data::GeometrySubmesh>(kGeometrySubmeshes).subspan("+std::to_string(submesh_first)+","+std::to_string(g.submeshes.size())+"),"+
-            "std::span<const render_data::ExpandedVertex>(kGeometryGroundSupport).subspan("+std::to_string(support_first)+","+std::to_string(g.ground_support.size())+")},\n";
+            "std::span<const render_data::ExpandedVertex>(kGeometryGroundSupport).subspan("+std::to_string(support_first)+","+std::to_string(g.ground_support.size())+"),"+(g.payload_ready?"true":"false")+"},\n";
         dependency_first+=g.dependencies.size();submesh_first+=g.submeshes.size();support_first+=g.ground_support.size();
     }
     source+="}};\n}\nstd::span<const render_data::GeometryDescriptor> RendererGeometry() noexcept { return kGeometryDescriptors; }\n}\n";
@@ -326,13 +332,32 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     ap::ActionSpec spec;
     spec.action_id = "shipping-image";
     spec.recipe_id = "shipping-image-v1";
-    spec.recipe_version = 16;
+    spec.recipe_version = 17;
     spec.upstream = {presentation_dependency, simulation_dependency, identity_dependency};
+    auto rules = std::make_unique<hs::SimulationRules>();
+    hs::PresentationCatalog catalog;
+    {
+        ap::UpstreamProduct dependency;
+        const auto payload = simulation.ReadProductBytes("game-data/simulation-payload", dependency);
+        Require(payload.size() == sizeof(*rules), "simulation payload differs from its compiled ABI");
+        std::memcpy(rules.get(), payload.data(), payload.size());
+        spec.upstream.push_back(std::move(dependency));
+    }
+    {
+        ap::UpstreamProduct dependency;
+        const auto payload = presentation.ReadProductBytes("game-data/presentation-payload", dependency);
+        Require(payload.size() == sizeof(catalog), "presentation payload differs from its compiled ABI");
+        std::memcpy(&catalog, payload.data(), payload.size());
+        spec.upstream.push_back(std::move(dependency));
+    }
     BindCharacters(build_root, characters, binding_results, spec);
     const ap::ActionResultSnapshot audio(build_root, "audio");
     ap::UpstreamProduct audio_cpp_dependency, audio_pcm_dependency;
     source += audio.ReadProductBytes("audio/release-cpp", audio_cpp_dependency);
     spec.upstream.push_back(std::move(audio_cpp_dependency));
+    ap::UpstreamProduct audio_identity_dependency;
+    const auto audio_identity = audio.ReadProductBytes("audio/release-identity", audio_identity_dependency);
+    spec.upstream.push_back(std::move(audio_identity_dependency));
     const ap::ActionResultSnapshot particles(build_root, "vfx/particle-definitions");
     const ap::ActionResultSnapshot program(build_root, "vfx/vfx-runtime");
     ap::UpstreamProduct particles_dependency, program_dependency;
@@ -607,8 +632,10 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     };
     bulk_source+="\n#include <hs/render_data/render_revision.hpp>\nnamespace hs::shipping { namespace {\n";
     bulk_source+="constinit const std::array<render_data::RendererSourceRevision,"+std::to_string(source_revisions.size())+"> kRendererSourceRevisions{{\n";
+    std::vector<rd::RendererSourceRevision> revision_descriptors;
     for(const auto &[asset,revision]:source_revisions)
     {
+        rd::RendererSourceRevision row{hs::AssetId{asset}, revision.logical_id, {}};
         Require(revision.digest.starts_with("sha256:") && revision.digest.size()==71,"invalid source revision digest");
         bulk_source+="{{"+std::to_string(asset)+"ull},"+revision_name(revision.logical_id)+",{";
         for(std::size_t i=0;i<32;++i)
@@ -616,15 +643,19 @@ void Link(const fs::path &build_root, const fs::path &font_path,
             unsigned byte{};const auto first=revision.digest.data()+7+i*2;
             const auto [end,error]=std::from_chars(first,first+2,byte,16);
             Require(error==std::errc{} && end==first+2,"invalid source revision digest byte");
+            row.digest[i] = std::byte(byte);
             bulk_source+="std::byte{"+std::to_string(byte)+"},";
         }
         bulk_source+="}},\n";
+        revision_descriptors.push_back(row);
     }
     std::string revision_rows;std::size_t revision_count{};std::uint32_t revision_index{};
+    std::vector<rd::RendererRevisionBulk> revision_bulk_descriptors;
     for(const auto &[asset,bulk]:bulks)
     {
         if(rd::IsRendererMaterialRevisionProduct(bulk.id))
-        {revision_rows+="{"+revision_name(bulk.id)+","+std::to_string(revision_index)+"u},\n";++revision_count;}
+        {revision_rows+="{"+revision_name(bulk.id)+","+std::to_string(revision_index)+"u},\n";++revision_count;
+            revision_bulk_descriptors.push_back({bulk.id, revision_index});}
         ++revision_index;
     }
     bulk_source+="}};\nconstinit const std::array<render_data::RendererRevisionBulk,"+std::to_string(revision_count)+"> kRendererRevisionBulks{{\n"+revision_rows+"}};\n}\n";
@@ -636,11 +667,39 @@ void Link(const fs::path &build_root, const fs::path &font_path,
             Require(spec.upstream[i-1].digest==spec.upstream[i].digest && spec.upstream[i-1].size==spec.upstream[i].size,
                 "character and renderer inputs disagree");
     spec.upstream.erase(std::unique(spec.upstream.begin(),spec.upstream.end(),[](const auto &a,const auto &b){return a.logical_id==b.logical_id;}),spec.upstream.end());
-    const auto action_key = ap::Sha256Bytes(Bytes(ap::ActionKey(spec)+bulk_source));
-    Require(action_key.starts_with("sha256:") && action_key.size() == 71,
-            "invalid shipping action key");
-    const auto build_id = action_key.substr(7);
     const auto font_offset = 64 + pcm_bytes;
+    hs::CanonicalBytes semantic("project-hs-shipping-image", 1);
+    // Wire header fields are explicit LE bytes; omit its self-referential identity.
+    semantic.Blob(Bytes(Header(std::string(64, '0'), extent)));
+    semantic.String(HS_SHIPPING_PACK_RELATIVE_PATH);
+    semantic.Fields(content_hash, font_offset, font_bytes, std::uint64_t{64}, pcm_bytes);
+    semantic.String(font_digest); semantic.String(audio_pcm_dependency.digest);
+    semantic.Blob(hs::content_identity::Simulation(*rules));
+    semantic.Scalar(hs::PresentationCatalogSchemaHash());
+    semantic.Blob(hs::CanonicalPresentationCatalogBytes(catalog));
+    semantic.Blob(hs::CanonicalVfxImageBytes(vfx.View()));
+    semantic.Blob(Bytes(audio_identity));
+    semantic.Sequence(bulks, [](hs::CanonicalBytes &out, const auto &entry) {
+        out.Scalar(entry.first); out.String(entry.second.id);
+    });
+    semantic.Sequence(bulk_descriptors, [](hs::CanonicalBytes &out, const auto &row) {
+        out.Scalar(row.asset_id.value); hs::content_identity::Bulk(out, row.range);
+    });
+    semantic.Sequence(textures, [](hs::CanonicalBytes &out, const auto &row) { hs::content_identity::Texture(out, row.View()); });
+    semantic.Sequence(geometries, [](hs::CanonicalBytes &out, const auto &row) { hs::content_identity::Geometry(out, row.View()); });
+    semantic.Sequence(materials, [](hs::CanonicalBytes &out, const auto &row) { hs::content_identity::Material(out, row.View()); });
+    semantic.Sequence(characters, [](hs::CanonicalBytes &out, const auto &row) { hs::content_identity::Character(out, row.View()); });
+    semantic.Sequence(animations, [](hs::CanonicalBytes &out, const auto &row) { hs::content_identity::Animation(out, row.View()); });
+    hs::content_identity::Atlas(semantic, *vfx_mesh_atlas);
+    semantic.Sequence(revision_descriptors, [](hs::CanonicalBytes &out, const auto &row) {
+        out.Scalar(row.asset_id.value); out.String(row.product_id); out.Blob(row.digest);
+    });
+    semantic.Sequence(revision_bulk_descriptors, [](hs::CanonicalBytes &out, const auto &row) {
+        out.String(row.product_id); out.Scalar(row.bulk_index);
+    });
+    const auto image_digest = ap::Sha256Bytes(semantic.View());
+    const auto build_id = image_digest.substr(7);
+    const auto action_key = ap::ActionKey(spec);
     const auto header = Header(build_id, extent);
     output.seekp(0);write(header);output.flush();Require(bool(output),"cannot flush shipping pack");
     output.close();Require(bool(output),"cannot close shipping pack");
@@ -653,6 +712,17 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     // transaction: an interrupted publish is rejected by exact header matching.
     ap::AtomicPublishFile(temporary, pack_path);
     ap::AtomicWriteIfDifferent(shipping / "content.generated.cpp", source);
+    ap::Json receipt{{"identity_domain", "project-hs-shipping-image"}, {"identity_version", 1},
+        {"content_image_id", build_id}, {"action_key", action_key},
+        {"producer_identity", ap::ProducerRecipeIdentity()},
+        {"action_id", spec.action_id}, {"recipe_id", spec.recipe_id}, {"recipe_version", spec.recipe_version},
+        {"inputs", ap::Json::array()}, {"upstream", ap::Json::array()}};
+    for (const auto &input : spec.inputs)
+        receipt["inputs"].push_back({{"logical_id", input.logical_id}, {"digest", input.digest}});
+    for (const auto &dependency : spec.upstream)
+        receipt["upstream"].push_back({{"logical_id", dependency.logical_id}, {"digest", dependency.digest},
+            {"size", dependency.size}, {"result", dependency.result_path.generic_string()}});
+    ap::AtomicWriteIfDifferent(shipping / "content.receipt.json", receipt.dump(2) + "\n");
     std::cout << "shipping-image published " << build_id << '\n';
     }
     catch (...) { ap::RemoveStage(stage); throw; }

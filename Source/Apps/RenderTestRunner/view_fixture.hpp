@@ -7,9 +7,11 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace hs::render_test
 {
@@ -23,12 +25,14 @@ struct OwnedViewProbeEvidence
     std::array<std::array<RenderViewFrameResult, 3>, 3> frames;
     std::array<std::uint32_t, 3> admitted_decals{};
     std::array<std::uint64_t, 2> archer_clip_ids{};
+    std::uint64_t motion_epoch_target_id{}, motion_epoch_before{}, motion_epoch_after{};
     RendererFrameResult final_frame;
     std::uint64_t submissions_before{}, submissions_after_bad_preflight{}, submissions_after{};
     bool duplicate_rejected{}, nonfinite_origin_rejected{}, rejected_outputs_unchanged{}, stale_diagnostics_rejected{};
     bool nonfinite_flash_history_rejected{};
     std::array<std::filesystem::path, 2> captures;
     std::filesystem::path hdr_capture;
+    nlohmann::ordered_json motion_readbacks{nlohmann::ordered_json::object()};
 };
 
 namespace owned_view_probe_detail
@@ -70,12 +74,46 @@ inline bool SameRejectedResultEvidence(const RendererFrameResult &a, const Rende
         !a.vfx_world_step_submitted && a.vfx_world_tick == 0 && a.vfx_world_session_id == 0 &&
         a.presented_ui_packet_generation == 0;
 }
+using Matrix = std::array<double, 16>;
+inline Matrix StampMatrix(const RenderViewFrameResult &stamp)
+{
+    Matrix matrix{};
+    std::ranges::transform(stamp.unjittered_view_projection, matrix.begin(),
+        [](float value) { return static_cast<double>(value); });
+    return matrix;
+}
+inline Matrix ReadMatrix(const nlohmann::ordered_json &inputs, const char *name)
+{
+    return inputs.at(name).get<Matrix>();
+}
+inline bool SameMatrix(const Matrix &a, const Matrix &b, double tolerance = 1.0e-4)
+{
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (std::abs(a[i] - b[i]) > tolerance) return false;
+    return true;
+}
+inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
+    const std::filesystem::path &path, std::uint64_t expected_frame,
+    nlohmann::ordered_json &metadata)
+{
+    if (auto captured = renderer.Capture({.view_id = view_id, .path = path,
+            .kind = CaptureKind::SurfaceDiagnostics}); !captured) return captured;
+    std::ifstream input(path);
+    if (!input) return Failure("Native surface readback metadata was not written.");
+    input >> metadata;
+    const auto &temporal = metadata.at("temporal_inputs");
+    if (temporal.is_null() || temporal.at("view_id").get<std::uint32_t>() != view_id.value ||
+        temporal.at("frame").get<std::uint64_t>() != expected_frame ||
+        metadata.value("foreground_depth_pixels", std::uint64_t{}) == 0)
+        return Failure("Surface readback does not identify the expected rendered view/frame or foreground pixels.");
+    return Result::Success();
+}
 } // namespace owned_view_probe_detail
 
 // Opt-in integration probe. The caller owns the ordinary internal renderer
 // configuration and snapshot leases. This helper never requests a native SDK
 // provider or manufactures a provider token. It performs exactly three frame
-// packages, three rejected preflights and two captures of persistent view output.
+// packages with skipped-view history, rejected preflights and native readbacks.
 inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts,
     AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
@@ -92,8 +130,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     const auto main = renderer.MainViewInput(snapshots.current.camera);
     auto preview = main;
     preview.id = kOwnedViewProbePreview; preview.role = RenderViewRole::Preview;
-    // Preserve the configured active/capacity ratio without imposing native
-    // provider eligibility or consuming full Main-sized auxiliary images.
+    // Keep a smaller preview and a Main-sized capture to exercise slot upload growth.
     const auto half = [](ViewExtent e) { return ViewExtent{std::max(1u, e.width / 2u), std::max(1u, e.height / 2u)}; };
     preview.output_extent = half(main.output_extent);
     preview.render_capacity = half(main.render_capacity);
@@ -102,6 +139,9 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     preview.view_origin = preview.camera.position;
     auto capture = preview;
     capture.id = kOwnedViewProbeCapture; capture.role = RenderViewRole::Capture;
+    capture.output_extent = main.output_extent;
+    capture.render_capacity = main.render_capacity;
+    capture.render_active = main.render_active;
     capture.camera = main.camera;
     capture.camera.position.x += 4.0; capture.camera.target.x += 2.0;
     capture.view_origin = capture.camera.position;
@@ -120,77 +160,132 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     if (archer == moving_instances.end() || clips.size() < 2 || !archer_asset_id.value)
         return Failure("Owned-view deformation probe requires an Archer and two actual cooked named clips.");
     archer->asset_id = archer_asset_id;
+    const auto moving_archer_id = archer->stable_id;
     archer->animation_clip_id = clips[0].id;
     archer->animation_time_seconds = clips[0].duration_seconds * 0.2;
     auto second_archer = *archer;
     second_archer.stable_id = 0x41524348u;
+    if (std::ranges::find(moving_instances, second_archer.stable_id,
+            &RenderInstance::stable_id) != moving_instances.end())
+        return Failure("Owned-view epoch target stable ID already exists in the admitted scene.");
     second_archer.position.x += 3;
     second_archer.animation_clip_id = clips[1].id;
     second_archer.animation_time_seconds = clips[1].duration_seconds * 0.6;
+    evidence.motion_epoch_target_id = second_archer.stable_id;
+    evidence.motion_epoch_before = second_archer.motion_epoch;
+    evidence.motion_epoch_after = second_archer.motion_epoch + 1u;
     evidence.archer_clip_ids = {clips[0].id.value, clips[1].id.value};
     moving_instances.push_back(second_archer);
     auto package_snapshots = snapshots;
     package_snapshots.current.instances = moving_instances;
+    std::error_code error;
+    std::filesystem::create_directories(artifacts, error);
+    if (error) return Failure("Cannot create owned-view capture directory: " + error.message());
     evidence.submissions_before = renderer.GetDiagnostics().total_rendered_frames;
     RendererFrameResult result;
+    nlohmann::ordered_json preview_before_skip;
+    nlohmann::ordered_json capture_origin_reset;
     for (std::size_t package = 0; package < evidence.frames.size(); ++package)
     {
         if (package == 1)
         {
-            // Keep the scene coordinate convention shared. Only B changes its
-            // camera and view-relative origin, with one explicit discontinuity.
+            // Rebase the whole packet consistently. Preview is omitted, so it
+            // must retain its old origin/projection until it is submitted again.
             views[2].camera.position.x += 2.0;
             views[2].camera.target.x += 0.25;
             views[2].view_origin.x += 64.0;
             views[2].camera_cut = true;
+            for (auto &view : views)
+            {
+                view.scene_origin.x = 1.0e9;
+                view.camera.position.x += 1.0e9;
+                view.camera.target.x += 1.0e9;
+                view.view_origin.x += 1.0e9;
+            }
         }
-        else if (package == 2) views[2].camera_cut = false;
+        else if (package == 2)
+        {
+            views[2].camera_cut = false;
+            // Reappear Preview with a small camera movement. Its previous GPU
+            // projection must come from package 0, not Main or the rebased B.
+            views[1].camera.position.x += 0.5;
+            views[1].camera.target.x += 0.5;
+            views[1].view_origin.x += 0.5;
+            auto changed_epoch = std::ranges::find(moving_instances, 0x41524348u,
+                &RenderInstance::stable_id);
+            if (changed_epoch == moving_instances.end())
+                return Failure("Owned-view epoch discontinuity target was not retained in the packet scene.");
+            changed_epoch->position.x += 0.75f;
+            ++changed_epoch->revisions.transform;
+            ++changed_epoch->motion_epoch;
+        }
         if (package && !moving_instances.empty())
         {
-            moving_instances.front().position.x += 0.75f;
-            ++moving_instances.front().revisions.transform;
+            auto moving_archer = std::ranges::find(moving_instances, moving_archer_id,
+                &RenderInstance::stable_id);
+            if (moving_archer == moving_instances.end())
+                return Failure("Owned-view motion target was not retained in the packet scene.");
+            moving_archer->position.x += 0.25f;
+            ++moving_archer->revisions.transform;
         }
         const auto admitted = package == 1 ? std::span<const VfxDecalInput>{} : std::span<const VfxDecalInput>{decals};
-        const std::array submitted_views = package == 0 ? views :
-            package == 1 ? std::array{views[1], views[0], views[2]} : std::array{views[1], views[2], views[0]};
+        const std::vector<RenderViewInput> submitted_views = package == 0
+            ? std::vector<RenderViewInput>{views[0], views[2], views[1]}
+            : package == 1 ? std::vector<RenderViewInput>{views[0], views[2]}
+                           : std::vector<RenderViewInput>{views[0], views[2], views[1]};
+        const RenderVfxWorldBatch world{
+            .session = package_snapshots.current.header.session_id,
+            .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1,
+            .sequence = package == 1 ? 0u : package == 0 ? 1u : 2u};
         const RenderFrameInput input{.views = submitted_views, .snapshots = package_snapshots,
-            .vfx = {.decals = admitted}, .delta_seconds = 1.0f / 60.0f};
+            .vfx = {.decals = admitted, .world_batch = world}, .delta_seconds = 1.0f / 60.0f};
         if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
+        if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
+            (world.sequence != 0 && (!result.vfx_world_step_submitted ||
+                result.vfx_world_tick != world.stateful_target || result.vfx_world_session_id != world.session ||
+                result.vfx_world_batch_sequence != world.sequence)))
+            return Failure("World receipt must identify its frozen producer batch independently of snapshot tick and view order.");
         evidence.admitted_decals[package] = result.typed_vfx_decal_count;
         if (result.typed_vfx_decal_count != admitted.size())
             return Failure("Decal Surface probe did not admit both authored command kinds or clear the empty package.");
-        if (result.views.size() != views.size() || result.identity.view_id != kMainRenderViewId)
-            return Failure("Frame package did not return all actual keyed view submissions and its Main result.");
-        for (std::size_t view = 0; view < views.size(); ++view)
-            if (result.views[view].identity.view_id != views[view].id)
+        if (result.views.size() != submitted_views.size() || result.identity.view_id != kMainRenderViewId)
+            return Failure("Frame package did not return its actual keyed submissions and Main result.");
+        for (std::size_t view = 0; view < submitted_views.size(); ++view)
+            if (result.views[view].identity.view_id != submitted_views[view].id)
                 return Failure("Main must render first while auxiliary views retain their packet order.");
         const auto package_id = result.identity.render_frame_id;
         if (!package_id || (package && package_id != evidence.frames[package - 1][0].identity.render_frame_id + 1u))
             return Failure("Rejected preflight or sequential reuse changed the actual render-package identity.");
-        for (std::size_t view = 0; view < views.size(); ++view)
+        for (std::size_t view = 0; view < submitted_views.size(); ++view)
         {
             const auto found = std::ranges::find_if(result.views, [&](const auto &stamp) {
-                return stamp.identity.view_id == views[view].id;
+                return stamp.identity.view_id == submitted_views[view].id;
             });
             if (found == result.views.end() ||
-                std::ranges::count(result.views, views[view].id, [](const auto &stamp) { return stamp.identity.view_id; }) != 1 ||
+                std::ranges::count(result.views, submitted_views[view].id, [](const auto &stamp) { return stamp.identity.view_id; }) != 1 ||
                 found->identity.render_frame_id != package_id || found->identity.actual_tick != snapshots.current.header.tick ||
                 !found->submission_id || !found->rendered_frame || !found->history_generation ||
-                !SameView(found->rendered_view, views[view]) ||
+                !SameView(found->rendered_view, submitted_views[view]) ||
                 !std::ranges::all_of(found->unjittered_view_projection, [](float v) { return std::isfinite(v); }) ||
                 (view != 0 && found->identity.presentation_id != 0))
                 return Failure("Returned view identity, camera, history, matrix or presentation ownership disagrees with its actual submission.");
-            evidence.frames[package][view] = *found;
-            if (package)
+            const auto ordinal = found->identity.view_id == kMainRenderViewId ? 0u :
+                found->identity.view_id == kOwnedViewProbePreview ? 1u : 2u;
+            evidence.frames[package][ordinal] = *found;
+            const bool has_previous = package != 0 && !(package == 1 && ordinal == 1);
+            if (has_previous)
             {
-                const auto &old = evidence.frames[package - 1][view];
-                const auto increment = package == 1 && view == 2 ? 1u : 0u;
-                if (found->submission_id != old.submission_id + views.size() || found->rendered_frame != old.rendered_frame + 1u ||
+                const auto previous_package = package == 2 && ordinal == 1 ? 0u : package - 1u;
+                const auto &old = evidence.frames[previous_package][ordinal];
+                const auto increment = package == 1 && ordinal == 2 ? 1u : 0u;
+                if (found->submission_id <= old.submission_id || found->rendered_frame != old.rendered_frame + 1u ||
                     found->history_generation != old.history_generation + increment)
-                    return Failure("Only the cut Capture view may advance history generation; each accepted package must render every view once.");
+                    return Failure("A successful view render must advance its own sequence; only Capture's explicit cut advances history generation.");
                 const bool same_matrix = found->unjittered_view_projection == old.unjittered_view_projection;
-                if (same_matrix == (increment != 0))
-                    return Failure("Capture camera/origin discontinuity or unaffected Main/Preview matrix reuse was not isolated by ViewId.");
+                if (package == 1 && ordinal == 2 && same_matrix)
+                    return Failure("Capture's large origin/camera discontinuity did not change its projected basis.");
+                if (package == 2 && ordinal == 1 && same_matrix)
+                    return Failure("Reappearing Preview camera movement did not update its current projection.");
             }
         }
         const auto &main_stamp = evidence.frames[package][0];
@@ -222,6 +317,12 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const auto rejected_flash = renderer.Render(bad_flash_input, result);
             evidence.nonfinite_flash_history_rejected = !rejected_flash &&
                 rejected_flash.Code() == ErrorCode::InvalidArgument;
+            auto bad_world_input = input;
+            ++bad_world_input.vfx.world_batch->session;
+            const auto rejected_world = renderer.Render(bad_world_input, result);
+            if (rejected_world || rejected_world.Code() != ErrorCode::InvalidArgument ||
+                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                return Failure("A VFX batch from another session must be rejected before any native submission.");
             VfxLightInput bad_light{};
             bad_light.radius = 1.0f;
             bad_light.intensity = std::numeric_limits<float>::quiet_NaN();
@@ -256,19 +357,56 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged)
                 return Failure("Duplicate/nonfinite view or flash preflight was accepted or mutated submission/result evidence.");
         }
+        if (package == 0)
+        {
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
+                    artifacts / "owned-view-preview-before-skip.json",
+                    evidence.frames[0][1].rendered_frame, preview_before_skip); !captured) return captured;
+            evidence.motion_readbacks["preview_before_skip"] = preview_before_skip;
+        }
+        else if (package == 1)
+        {
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbeCapture,
+                    artifacts / "owned-view-capture-origin-reset.json",
+                    evidence.frames[1][2].rendered_frame, capture_origin_reset); !captured) return captured;
+            const auto &inputs = capture_origin_reset.at("temporal_inputs");
+            const auto current = ReadMatrix(inputs, "current_vp");
+            const auto previous_instance = ReadMatrix(inputs,
+                "previous_instance_unjittered_view_projection");
+            if (inputs.at("options").at(1).get<double>() > 0.5 ||
+                !SameMatrix(previous_instance, current))
+                return Failure("Capture camera_cut must invalidate instance history and use the current projection after rebasing.");
+            evidence.motion_readbacks["capture_origin_reset"] = capture_origin_reset;
+        }
+        else if (package == 2)
+        {
+            nlohmann::ordered_json preview_after_skip;
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
+                    artifacts / "owned-view-preview-after-skip.json",
+                    evidence.frames[2][1].rendered_frame, preview_after_skip); !captured) return captured;
+            const auto previous = ReadMatrix(preview_after_skip.at("temporal_inputs"),
+                "previous_instance_unjittered_view_projection");
+            const auto old_preview_current = ReadMatrix(preview_before_skip.at("temporal_inputs"), "current_vp");
+            const auto current_preview = ReadMatrix(preview_after_skip.at("temporal_inputs"), "current_vp");
+            const auto unrelated_capture_current = ReadMatrix(capture_origin_reset.at("temporal_inputs"), "current_vp");
+            if (!SameMatrix(previous, old_preview_current) ||
+                !SameMatrix(old_preview_current, StampMatrix(evidence.frames[0][1])) ||
+                SameMatrix(previous, unrelated_capture_current) ||
+                SameMatrix(previous, current_preview) ||
+                preview_after_skip.value("nonzero_motion_pixels", std::uint64_t{}) == 0)
+                return Failure("Reappearing Preview did not retain its own old-basis projection and real nonzero motion after another view's origin reset.");
+            evidence.motion_readbacks["preview_after_skip"] = std::move(preview_after_skip);
+        }
     }
     evidence.final_frame = std::move(result);
     evidence.submissions_after = renderer.GetDiagnostics().total_rendered_frames;
-    if (evidence.submissions_after != evidence.submissions_before + 9u)
-        return Failure("Owned-view probe did not produce exactly nine actual view submissions in three accepted packages.");
+    if (evidence.submissions_after != evidence.submissions_before + 8u)
+        return Failure("Owned-view probe did not produce exactly eight actual view submissions with Preview skipped once.");
     const auto stale_capture = renderer.Capture({.path = artifacts / "stale-main-geometry.json",
         .kind = CaptureKind::GeometryDiagnostics});
     evidence.stale_diagnostics_rejected = !stale_capture && stale_capture.Code() == ErrorCode::InvalidState;
     if (!evidence.stale_diagnostics_rejected)
         return Failure("Main geometry capture must reject shared frame buffers overwritten by an auxiliary view.");
-    std::error_code error;
-    std::filesystem::create_directories(artifacts, error);
-    if (error) return Failure("Cannot create owned-view capture directory: " + error.message());
     evidence.captures = {artifacts / "owned-view-preview-a.png", artifacts / "owned-view-capture-b.png"};
     if (auto captured = renderer.Capture({.view_id = kOwnedViewProbePreview, .path = evidence.captures[0]}); !captured) return captured;
     if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture, .path = evidence.captures[1]}); !captured) return captured;
@@ -288,7 +426,8 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
         for (const auto &stamp : package)
         {
             const auto &v = stamp.rendered_view;
-            views.push_back({{"view_id", stamp.identity.view_id.value},
+            views.push_back({{"submitted", stamp.submission_id != 0},
+                {"view_id", stamp.identity.view_id.value},
                 {"role", v.role == RenderViewRole::Main ? "main" : v.role == RenderViewRole::Preview ? "preview" : "capture"},
                 {"actual_tick", stamp.identity.actual_tick}, {"render_package_id", stamp.identity.render_frame_id},
                 {"submission_id", stamp.submission_id}, {"view_render_sequence", stamp.rendered_frame},
@@ -306,6 +445,9 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
     }
     return {{"packages", std::move(packages)}, {"admitted_decals", evidence.admitted_decals},
         {"archer_clip_ids", evidence.archer_clip_ids},
+        {"motion_epoch_break", {{"stable_id", evidence.motion_epoch_target_id},
+            {"before", evidence.motion_epoch_before}, {"after", evidence.motion_epoch_after}}},
+        {"motion_readbacks", evidence.motion_readbacks},
         {"submissions_before", evidence.submissions_before},
         {"submissions_after_bad_preflight", evidence.submissions_after_bad_preflight},
         {"submissions_after", evidence.submissions_after}, {"duplicate_rejected", evidence.duplicate_rejected},

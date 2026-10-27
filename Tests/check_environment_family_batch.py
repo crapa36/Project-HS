@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +32,14 @@ def add_text_chunk(path: Path, value: bytes) -> None:
 
 def action(build: Path, namespace: str) -> dict:
     return json.loads((build / "Actions" / namespace / "result.json").read_text(encoding="utf-8"))
+
+
+def assert_hashed_source(result: dict, source_root: Path, path: Path) -> None:
+    logical_id = path.relative_to(source_root).as_posix()
+    inputs = {item["logical_id"]: item["digest"] for item in result["inputs"]}
+    expected = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    if inputs.get(logical_id) != expected:
+        raise RuntimeError(f"Action input digest does not match the consumed source snapshot: {logical_id}")
 
 
 def depfile_path(path: Path) -> str:
@@ -68,6 +77,11 @@ def main() -> None:
             raise RuntimeError("successful batch did not publish its union depfile and completion stamp")
         role_before = action(build, "environment/textures/terrain/base_color")
         histogram_before = action(build, "environment/histogram")
+        assert_hashed_source(role_before, fixture, fixture_env / "project_hs_environment_materials_v9_LEAN.json")
+        assert_hashed_source(role_before, fixture, fixture_env / "baked_materials.json")
+        assert_hashed_source(role_before, fixture, base_path)
+        assert_hashed_source(histogram_before, fixture, fixture_env / "project_hs_environment_materials_v9_LEAN.json")
+        assert_hashed_source(histogram_before, fixture, base_path)
 
         second_log = run(args.producer, fixture, build)
         if "D3D11 hardware unavailable" in second_log or "D3D11 GPU compressor" in second_log:
@@ -79,6 +93,8 @@ def main() -> None:
         run(args.producer, fixture, build)
         role_after = action(build, "environment/textures/terrain/base_color")
         histogram_after = action(build, "environment/histogram")
+        assert_hashed_source(role_after, fixture, base_path)
+        assert_hashed_source(histogram_after, fixture, base_path)
         if role_after["action_key"] == role_before["action_key"] or histogram_after["action_key"] == histogram_before["action_key"]:
             raise RuntimeError("changed source snapshot did not invalidate each consuming Action")
         if role_after["product_set_id"] != role_before["product_set_id"]:

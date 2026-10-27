@@ -1,4 +1,5 @@
 #pragma once
+#include "vfx_event_view.hpp"
 #include <hs/core/result.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
@@ -21,7 +22,7 @@ struct VfxLowHealthPulseState
 };
 [[nodiscard]] bool IsVfxTypedScreenEffect(const VfxProgramView &, VfxEffectHandle) noexcept;
 [[nodiscard]] Result BuildVfxTypedScreenCommands(const VfxProgramView &,
-    std::span<const VfxEventInput>, std::span<const VfxPersistentInput>, Tick observation_tick,
+    VfxEventView, std::span<const VfxPersistentInput>, Tick observation_tick,
     double display_tick,
     VfxQuality, VfxLowHealthPulseState &, std::vector<VfxScreenInput> &);
 }

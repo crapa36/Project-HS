@@ -158,6 +158,7 @@ struct GpuSceneSerializedSlot
     std::uint32_t slot, const GpuInstance &instance,
     const GpuSceneMetadata &metadata) noexcept;
 
+// Qualified-bound refs without cached skin have no package draw/caster consumer.
 // Transitional shared draw-reference ABI for both immutable static instances
 // and persistent dynamic instance slots. InstanceGeneration is not consumed by
 // the current indexed frontend yet, but travels with the slot so visibility
@@ -235,6 +236,11 @@ class PersistentGpuSceneSlots
     }
     [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges();
     [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges(GpuSceneChannel channel);
+    [[nodiscard]] std::uint64_t PayloadRevision() const noexcept;
+    void CollectDirtyRangesSince(GpuSceneChannel channel, std::uint64_t uploaded_revision,
+                                 std::vector<PersistentGpuSceneRange> &out) const;
+    void CollectDirtyRangesSince(std::uint64_t uploaded_revision,
+                                 std::vector<PersistentGpuSceneRange> &out) const;
     [[nodiscard]] std::size_t ActiveCount() const noexcept { return active_count_; }
     [[nodiscard]] std::size_t SlotCount() const noexcept
     {
@@ -265,11 +271,16 @@ class PersistentGpuSceneSlots
 
     void MarkDirty(std::uint32_t slot, std::uint8_t channels = kGpuSceneAllChannels);
     void RebuildDirtyRanges();
+    void CommitPayloadChanges() noexcept;
+    void CollectDirtyRangesSince(std::uint8_t channels, std::uint64_t uploaded_revision,
+                                 std::vector<PersistentGpuSceneRange> &out) const;
 
     std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> slots_;
     std::vector<Entry> entries_;
     std::vector<GpuInstance> instances_;
     std::vector<GpuSceneMetadata> metadata_;
+    std::vector<std::array<std::uint64_t, kGpuSceneChannelCount>> payload_slot_revisions_;
+    std::vector<std::uint8_t> pending_payload_channels_;
     std::vector<std::uint32_t> free_slots_;
     // Only touched payloads need an undo record. Retained slot identity is
     // unchanged until Commit, while Instances exposes the prepared upload.
@@ -297,7 +308,10 @@ class PersistentGpuSceneSlots
     std::size_t anonymous_count_{};
     GpuSceneChanges changes_{};
     std::uint64_t content_revision_{}, pending_content_revision_{};
+    std::uint64_t payload_revision_{};
     bool content_changed_{};
+    bool payload_change_pending_{};
+    bool payload_revision_exhausted_{};
     bool dirty_ranges_valid_{true};
 };
 

@@ -1,4 +1,5 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_distortion_commands.hpp"
 #include <bit>
 #include <cmath>
@@ -27,8 +28,9 @@ hs::VfxProgramData Program(hs::VfxMotionKind motion=hs::VfxMotionKind::SingleOut
  o.coverage_ref=o.shape;o.parameters={0,static_cast<std::uint32_t>(p.parameters.size())};p.outputs.push_back(o);return p;
 }
 hs::VfxEventInput Input(){hs::VfxEventInput in;in.effect_handle=1;in.event_tick=100;in.sequence=77;in.stable_seed=31;in.payload=hs::VfxPointPayload{{1,2,3},{},{0,0,2},2};return in;}
-auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick t=145){return hs::runtime_detail::BuildVfxTypedDistortionCommands(p,std::span(&i,1),{},t);}
-auto Owned(const hs::VfxProgramData&p,const hs::VfxPersistentInput&i){return hs::runtime_detail::BuildVfxTypedDistortionCommands(p,{},std::span(&i,1),999);}
+hs::VfxImageData Image(const hs::VfxProgramData&p){hs::VfxImageData d;d.program=p;hs::PrepareVfxDistortionRecipes(d.program.View(),d.distortion_effect_ranges,d.distortion_recipes);return d;}
+auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick t=145){auto d=Image(p);return hs::runtime_detail::BuildVfxTypedDistortionCommands(d.View(),std::span(&i,1),{},t);}
+auto Owned(const hs::VfxProgramData&p,const hs::VfxPersistentInput&i){auto d=Image(p);return hs::runtime_detail::BuildVfxTypedDistortionCommands(d.View(),{},std::span(&i,1),999);}
 void GeometryClockAndIdentity()
 {
  auto p=Program();auto i=Input();auto a=Run(p,i);Check(a.size()==1&&Near(a[0].radius,1.6f)&&Near(a[0].normalized_age,.25f)&&Near(a[0].alpha,.5f)&&Near(a[0].strength,.022f)&&a[0].position.y==2&&a[0].direction.z==1,"radial geometry or authored source-local phase lost");
@@ -50,7 +52,7 @@ void Presence()
  in.normalized_age=.96f;Check(Owned(p,in).empty(),"actual source expiry ignored");
  in.normalized_age=0;p.effects[0].seconds=2;in.elapsed_seconds=.09f;Check(Owned(p,in).empty(),"authored source birth knot interpreted as seconds");
  in.elapsed_seconds=.1f;Check(Owned(p,in).size()==1,"authored source birth incorrectly delayed");in.elapsed_seconds=100;Check(Near(Owned(p,in)[0].normalized_age,.5f),"presence failed to hold after midpoint");
- Check(hs::runtime_detail::BuildVfxTypedDistortionCommands(p,{},{},999).empty(),"absent owner retained distortion");
+ {auto d=Image(p);Check(hs::runtime_detail::BuildVfxTypedDistortionCommands(d.View(),{},{},999).empty(),"absent owner retained distortion");}
 }
 void ExactBossGeometry()
 {

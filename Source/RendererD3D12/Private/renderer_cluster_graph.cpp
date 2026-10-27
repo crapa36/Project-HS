@@ -523,7 +523,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::AddClusterOcclusionPass(std::uint32_t frame_slot,
+Result D3D12Renderer::Impl::AddClusterOcclusionPass(OwnedView &owner, std::uint32_t frame_slot,
     ClusterFrameGraph &state, ResourceVersion hzb, bool retest,
     ClusterGraphLayout *capture,const ClusterGraphLayout *retained)
 {
@@ -536,7 +536,7 @@ Result D3D12Renderer::Impl::AddClusterOcclusionPass(std::uint32_t frame_slot,
     else state.previous_occlusion = true;
     if (!state.draws) return Result::Success();
     if (!cluster_root_signature || !(retest ? cluster_retest_pipeline : cluster_occlusion_pipeline) ||
-        !hzb_history[hzb_read_index ^ (retest ? 1u : 0u)].resource)
+        !owner.targets.hzb_history[owner.hzb_read_index ^ (retest ? 1u : 0u)].resource)
         return GraphFailure("Cluster occlusion has no compatible pipeline/HZB resource.");
 
     const auto id=retest?53u:52u;
@@ -674,7 +674,7 @@ Result D3D12Renderer::Impl::DrawClusterGeometry(ID3D12GraphicsCommandList *list,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CommitClusterFrameGraph(std::uint32_t frame_slot,
+Result D3D12Renderer::Impl::CommitClusterFrameGraph(OwnedView &owner, std::uint32_t frame_slot,
     ClusterFrameGraph &state, const CompletionSet &completion)
 {
     if (!cluster_runtime || !state.prepared || state.frame_slot != frame_slot ||
@@ -712,7 +712,7 @@ Result D3D12Renderer::Impl::CommitClusterFrameGraph(std::uint32_t frame_slot,
             }
         }
     MarkClusterFrameUse(frame_slot, completion);
-    cluster_runtime->frames[frame_slot].history_frame_id = frame_number + 1u;
+    cluster_runtime->frames[frame_slot].history_frame_id = owner.frame_number + 1u;
     return Result::Success();
 }
 } // namespace hs

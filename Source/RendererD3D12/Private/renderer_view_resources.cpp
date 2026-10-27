@@ -70,7 +70,7 @@ Result D3D12Renderer::Impl::PrepareViewTargets(OptionTargets &targets,
                    capacity_width, capacity_height);
 }
 
-Result D3D12Renderer::Impl::PrepareExposureResources()
+Result D3D12Renderer::Impl::PrepareExposureResources(OwnedView &owner)
 {
     if (!sampler_heap)
     {
@@ -113,17 +113,17 @@ Result D3D12Renderer::Impl::PrepareExposureResources()
     initial.resource->Unmap(0, &written);
 
     using std::swap;
-    swap(exposure_values, values);
-    swap(exposure_histogram, histogram);
-    swap(initial_exposure, initial);
-    exposure_read_index = 0;
-    exposure_initialized = false;
+    swap(owner.exposure_values, values);
+    swap(owner.exposure_histogram, histogram);
+    swap(owner.initial_exposure, initial);
+    owner.exposure_read_index = 0;
+    owner.exposure_initialized = false;
     // The first frame graph copies the immutable upload into both values. No
     // command submission or blocking startup upload occurs in resource creation.
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
+void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t frame,
                                               std::uint32_t read_history,
                                               std::uint32_t write_history,
                                               std::uint32_t exposure_read,
@@ -248,7 +248,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
     overflow.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     device->CreateUnorderedAccessView(nullptr, nullptr, &overflow, null_table);
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kViewRtvOffset) * rtv_stride;
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kViewRtvOffset) * rtv_stride;
     const auto create_rtv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = format;
@@ -256,13 +256,13 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
         device->CreateRenderTargetView(resource, &view, rtv);
         rtv.ptr += rtv_stride;
     };
-    for (auto &history : temporal_normal_history)
+    for (auto &history : owner.targets.temporal_normal_history)
         create_rtv(history.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-    for (auto &history : temporal_material_history)
+    for (auto &history : owner.targets.temporal_material_history)
         create_rtv(history.resource.Get(), DXGI_FORMAT_R32G32_UINT);
-    create_rtv(scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_rtv(display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_rtv(composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_rtv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_rtv(owner.targets.display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_rtv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
     auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     descriptor.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount +
@@ -276,12 +276,12 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
         device->CreateShaderResourceView(resource, &view, descriptor);
         descriptor.ptr += srv_stride;
     };
-    create_texture_srv(temporal_normal_history[read_history].resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-    create_texture_srv(temporal_material_history[read_history].resource.Get(), DXGI_FORMAT_R32G32_UINT);
-    create_texture_srv(scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_texture_srv(display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_texture_srv(composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_texture_srv(scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.temporal_normal_history[read_history].resource.Get(), DXGI_FORMAT_R16G16_SNORM);
+    create_texture_srv(owner.targets.temporal_material_history[read_history].resource.Get(), DXGI_FORMAT_R32G32_UINT);
+    create_texture_srv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC exposure_srv{};
     exposure_srv.Format = DXGI_FORMAT_UNKNOWN;
@@ -289,7 +289,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
     exposure_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     exposure_srv.Buffer.NumElements = 2;
     exposure_srv.Buffer.StructureByteStride = sizeof(float);
-    device->CreateShaderResourceView(exposure_values[exposure_read].resource.Get(),
+    device->CreateShaderResourceView(owner.exposure_values[exposure_read].resource.Get(),
                                      &exposure_srv, descriptor);
     descriptor.ptr += srv_stride;
     D3D12_UNORDERED_ACCESS_VIEW_DESC buffer_uav{};
@@ -297,30 +297,21 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
     buffer_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     buffer_uav.Buffer.NumElements = 2;
     buffer_uav.Buffer.StructureByteStride = sizeof(float);
-    device->CreateUnorderedAccessView(exposure_values[exposure_write].resource.Get(),
+    device->CreateUnorderedAccessView(owner.exposure_values[exposure_write].resource.Get(),
                                       nullptr, &buffer_uav, descriptor);
     descriptor.ptr += srv_stride;
     buffer_uav.Buffer.NumElements = 256;
     buffer_uav.Buffer.StructureByteStride = sizeof(std::uint32_t);
-    device->CreateUnorderedAccessView(exposure_histogram.resource.Get(), nullptr,
+    device->CreateUnorderedAccessView(owner.exposure_histogram.resource.Get(), nullptr,
                                       &buffer_uav, descriptor);
     descriptor.ptr += srv_stride;
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
     cbv.BufferLocation = exposure_cb_gpu_address;
     cbv.SizeInBytes = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     device->CreateConstantBufferView(exposure_cb_gpu_address ? &cbv : nullptr, descriptor);
-    descriptor.ptr += srv_stride;
-    D3D12_SHADER_RESOURCE_VIEW_DESC skin_srv{};
-    skin_srv.Format = DXGI_FORMAT_UNKNOWN;
-    skin_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    skin_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    skin_srv.Buffer.StructureByteStride = sizeof(DirectX::XMFLOAT4X4);
-    skin_srv.Buffer.NumElements = monster_skin_matrices.resource
-        ? static_cast<UINT>(monster_skin_matrices.resource->GetDesc().Width / sizeof(DirectX::XMFLOAT4X4))
-        : 1;
-    device->CreateShaderResourceView(monster_skin_matrices.resource.Get(), &skin_srv, descriptor);
+    // Keep the native table's ambient views at offsets 11/12.
+    descriptor.ptr += 2u * srv_stride;
     auto sampler = sampler_heap->GetCPUDescriptorHandleForHeapStart();
-    descriptor.ptr += srv_stride;
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
     sampler.ptr += static_cast<SIZE_T>(frame) * 2 * sampler_stride;

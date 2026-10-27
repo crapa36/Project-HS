@@ -3,7 +3,9 @@
 #endif
 
 #include "../AssetPipeline/action.hpp"
+#include "../AssetPipeline/dxc_process.hpp"
 #include "../AssetPipeline/render_shader_binding_inputs.hpp"
+#include "../AssetPipeline/shader_source_snapshot.hpp"
 
 #include <hs/core/windows_command_line.hpp>
 
@@ -13,6 +15,8 @@
 #include <array>
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <sstream>
@@ -46,11 +50,14 @@ void Require(bool condition, std::string_view reason)
         throw std::runtime_error("hs_render_runtime_shader: " + std::string(reason));
 }
 
+bool ValidDxilBytes(std::string_view bytes)
+{
+    return bytes.size() >= 32 && bytes.substr(0, 4) == "DXBC";
+}
+
 bool ValidDxil(const fs::path &path)
 {
-    if (!fs::exists(path)) return false;
-    const auto bytes = ap::ReadBytes(path);
-    return bytes.size() >= 32 && bytes.substr(0, 4) == "DXBC";
+    return fs::exists(path) && ValidDxilBytes(ap::ReadBytes(path));
 }
 
 constexpr std::array kProjectPrograms{
@@ -248,18 +255,8 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root, const fs::path &st
                         CREATE_NO_WINDOW, nullptr, source_root.c_str(), &startup, &process))
         throw std::runtime_error("DXC launch failed: " + std::to_string(GetLastError()));
     CloseHandle(process.hThread);
-    auto wait = WaitForSingleObject(process.hProcess, 120'000);
-    if (wait == WAIT_TIMEOUT)
-    {
-        TerminateProcess(process.hProcess, 1);
-        // TerminateProcess is asynchronous. Keep the handle open until the
-        // child is actually gone so stage cleanup cannot race its file IO.
-        wait = WaitForSingleObject(process.hProcess, INFINITE);
-    }
-    DWORD code = 1;
-    const auto got_code = GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess);
-    if (wait != WAIT_OBJECT_0 || !got_code || code != 0)
+    const auto code = hs::shader_content::WaitForDxcExit(process, stage, diagnostics);
+    if (code != 0)
         throw std::runtime_error("DXC compilation failed for " + output.filename().string() + ": " +
             (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
 }
@@ -273,7 +270,7 @@ void RemoveTransientDirectory(const fs::path &path)
 }
 
 void RunDependencyScan(const fs::path &dxc, const fs::path &source_root,
-                       const fs::path &dependency_file, const fs::path &diagnostics,
+                       const fs::path &stage, const fs::path &dependency_file, const fs::path &diagnostics,
                        std::string_view source_relative, std::wstring_view entry,
                        std::wstring_view profile)
 {
@@ -297,18 +294,8 @@ void RunDependencyScan(const fs::path &dxc, const fs::path &source_root,
         throw std::runtime_error("DXC dependency scan launch failed: " +
                                  std::to_string(GetLastError()));
     CloseHandle(process.hThread);
-    auto wait = WaitForSingleObject(process.hProcess, 120'000);
-    if (wait == WAIT_TIMEOUT)
-    {
-        TerminateProcess(process.hProcess, 1);
-        // TerminateProcess is asynchronous. Keep the handle open until the
-        // child is actually gone so stage cleanup cannot race its file IO.
-        wait = WaitForSingleObject(process.hProcess, INFINITE);
-    }
-    DWORD code = 1;
-    const auto got_code = GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess);
-    if (wait != WAIT_OBJECT_0 || !got_code || code != 0)
+    const auto code = hs::shader_content::WaitForDxcExit(process, stage, diagnostics);
+    if (code != 0)
         throw std::runtime_error("DXC dependency scan failed for " + std::string(source_relative) + ": " +
             (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
 }
@@ -421,7 +408,7 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
             (std::to_string(index) + ".d");
         const auto diagnostics = dependency_directory /
             (std::to_string(index) + ".diagnostics.txt");
-        RunDependencyScan(dxc, source_root, dependency_file, diagnostics,
+        RunDependencyScan(dxc, source_root, stage, dependency_file, diagnostics,
                           family.source_relative, program.entry, program.profile);
         for (const auto &dependency : ParseDependencyFile(dependency_file))
             logical_paths.insert(LogicalShaderPath(source_root, fs::path(dependency)));
@@ -464,23 +451,94 @@ void RequireStableToolInputs(const std::vector<ap::Input> &inputs)
     }
 }
 
-fs::path CreateSourceSnapshot(const std::vector<ap::Input> &inputs, const fs::path &stage)
+bool IsDigest(std::string_view value)
 {
-    const auto snapshot = stage / "source-snapshot";
-    std::size_t copied = 0;
-    for (const auto &input : inputs)
+    return value.starts_with("sha256:") && value.size() == 71 && std::ranges::all_of(value.substr(7), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+
+std::vector<ap::Input> ResolveCachedInputs(const ap::Json &metadata,
+                                          const ShaderFamily &family,
+                                          const fs::path &source_root,
+                                          const fs::path &dxc)
+{
+    Require(metadata.is_array(), "cached shader inputs are not an array");
+    std::vector<ap::Input> binding_inputs;
+    hs::shader_content::AddRenderBindingInputs(binding_inputs, source_root);
+    const std::map<std::string, fs::path> fixed_inputs{
+        {"Source/Apps/AssetPipeline/render_shader_bindings.hpp", source_root / "Source/Apps/AssetPipeline/render_shader_bindings.hpp"},
+        {"Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp", source_root / "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp"},
+        {"tool/dxc.exe", dxc},
+        {"tool/dxcompiler.dll", dxc.parent_path() / "dxcompiler.dll"},
+        {"tool/dxil.dll", dxc.parent_path() / "dxil.dll"}};
+    std::set<std::string> seen;
+    std::vector<ap::Input> inputs;
+    inputs.reserve(metadata.size());
+    for (const auto &entry : metadata)
     {
-        if (!input.logical_id.starts_with("Content/Shaders/"))
+        Require(entry.is_object() && entry.at("logical_id").is_string() && entry.at("digest").is_string(),
+                "cached shader input metadata is malformed");
+        const auto logical = entry.at("logical_id").get<std::string>();
+        const auto digest = entry.at("digest").get<std::string>();
+        Require(!logical.empty() && IsDigest(digest) && seen.insert(logical).second,
+                "cached shader input identity is invalid or duplicated");
+        if (logical.starts_with("Content/Shaders/"))
+        {
+            const auto path = source_root / fs::path(logical);
+            Require(LogicalShaderPath(source_root, path) == logical,
+                    "cached shader path escapes Content/Shaders");
+            inputs.push_back(ap::HashInput(logical, path));
             continue;
-        const auto target = snapshot / fs::path(input.logical_id);
-        ap::MakeDirectory(target.parent_path());
-        const auto staged = ap::CopyAndHashInput(input.logical_id, input.path, target);
-        Require(staged.digest == input.digest,
-                "shader source changed while creating snapshot: " + input.logical_id);
-        ++copied;
+        }
+        if (logical == "shader/render-binding-defines-ir")
+        {
+            const auto found = std::ranges::find(binding_inputs, logical, &ap::Input::logical_id);
+            Require(found != binding_inputs.end(), "cached render binding IR is unavailable");
+            inputs.push_back(*found);
+            continue;
+        }
+        const auto fixed = fixed_inputs.find(logical);
+        if (fixed != fixed_inputs.end())
+        {
+            inputs.push_back(ap::HashInput(logical, fixed->second));
+            continue;
+        }
+        throw std::runtime_error("cached shader input has no trusted path mapping: " + logical);
     }
-    Require(copied != 0, "shader source dependency snapshot is empty");
-    return snapshot;
+    for (const auto *required : {"shader/render-binding-defines-ir",
+             "Source/Apps/AssetPipeline/render_shader_bindings.hpp",
+             "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp",
+             "tool/dxc.exe", "tool/dxcompiler.dll", "tool/dxil.dll"})
+        Require(seen.contains(required), "cached shader input closure is incomplete");
+    Require(seen.contains(std::string(family.source_relative)),
+            "cached shader input closure omits the family source");
+    std::ranges::sort(inputs, {}, &ap::Input::logical_id);
+    return inputs;
+}
+
+bool CachedProductsMatch(const ap::ActionResultSnapshot &snapshot,
+                         const ShaderFamily &family, bool &read_attempted)
+{
+    if (snapshot.ProductCount() != family.programs.size()) return false;
+    for (const auto &program : family.programs)
+        if (!snapshot.HasProduct("render/shader/" + std::string(program.filename))) return false;
+    read_attempted = true;
+    for (const auto &program : family.programs)
+    {
+        ap::UpstreamProduct dependency;
+        const auto bytes = snapshot.ReadProductBytes("render/shader/" + std::string(program.filename), dependency);
+        if (!ValidDxilBytes(bytes)) return false;
+    }
+    return true;
+}
+
+bool TryCurrentReceipt(const ap::ActionResultSnapshot &snapshot, const ShaderFamily &family,
+                       const ap::ActionSpec &spec, bool &product_read_attempted)
+{
+    if (snapshot.ActionId() != spec.action_id || snapshot.ActionKeyValue() != ap::ActionKey(spec))
+        return false;
+    return CachedProductsMatch(snapshot, family, product_read_attempted);
 }
 
 void Produce(const ShaderFamily &family, const fs::path &source_root,
@@ -502,43 +560,50 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
     spec.recipe_version = 1;
     spec.namespace_path = namespace_path;
 
+    const auto result_path = build_root / "Actions" / namespace_path / "result.json";
+    const auto result_depfile = result_path.parent_path() / "result.d";
+    std::optional<ap::ActionResultSnapshot> cached_result;
+    if (fs::exists(result_path) && fs::exists(result_depfile))
+    {
+        try { cached_result.emplace(build_root, namespace_path); }
+        catch (const std::exception &) { /* Rebuild invalid current result. */ }
+    }
+    bool product_read_attempted{};
+    if (cached_result)
+    {
+        try
+        {
+            spec.inputs = ResolveCachedInputs(cached_result->InputMetadata(), family, source_root, dxc);
+            if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
+            {
+                ap::TouchActionResult(result_path);
+                std::cout << spec.action_id << " current\n";
+                return;
+            }
+        }
+        catch (const std::exception &) { /* Discover the live closure before rebuilding. */ }
+    }
+
     const auto stage = ap::CreateStage(build_root / "Actions" / namespace_path);
     try
     {
         spec.inputs = DiscoverInputs(family, source_root, stage, dxc);
-        const auto result_path = build_root / "Actions" / namespace_path / "result.json";
-        if (fs::exists(result_path) && fs::exists(result_path.parent_path() / "result.d"))
+        if (cached_result && !product_read_attempted)
         {
             try
             {
-                const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-                if (result.at("action_id") == spec.action_id &&
-                    result.at("action_key") == ap::ActionKey(spec) &&
-                    result.at("products").size() == family.programs.size())
+                if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
                 {
-                    bool valid = true;
-                    for (const auto &program : family.programs)
-                    {
-                        ap::UpstreamProduct ignored;
-                        fs::path product_path;
-                        (void)ap::ReadActionResult(build_root, namespace_path,
-                                                   "render/shader/" + std::string(program.filename),
-                                                   ignored, product_path);
-                        valid &= ValidDxil(product_path);
-                    }
-                    if (valid)
-                    {
-                        ap::TouchActionResult(result_path);
-                        std::cout << spec.action_id << " current\n";
-                        ap::RemoveStage(stage);
-                        return;
-                    }
+                    ap::TouchActionResult(result_path);
+                    std::cout << spec.action_id << " current\n";
+                    ap::RemoveStage(stage);
+                    return;
                 }
             }
             catch (const std::exception &) { /* Rebuild invalid current result. */ }
         }
 
-        const auto source_snapshot = CreateSourceSnapshot(spec.inputs, stage);
+        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         RequireStableToolInputs(spec.inputs);
 
         std::vector<ap::Product> products;
@@ -562,6 +627,7 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
         ap::RemoveStage(stage);
         std::cout << spec.action_id << " published programs=" << family.programs.size() << '\n';
     }
+    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
         ap::RemoveStage(stage);

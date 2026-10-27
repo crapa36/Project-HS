@@ -17,6 +17,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -34,8 +35,6 @@ namespace fs = std::filesystem;
 struct PackageInput
 {
     std::string logical_id;
-    fs::path mesh_path;
-    rd::RockMaterial material;
     std::vector<std::string> dependencies;
     std::string page_id, mesh_id, hierarchy_id;
     std::vector<rd::ExpandedVertex> vertices;
@@ -127,10 +126,9 @@ rd::RockMaterial NeutralMaterial(const rd::RockMaterial &material)
     return neutral;
 }
 
-void ValidateParameterProduct(const std::string &product_id, const fs::path &package_path,
+void ValidateParameterBytes(const std::string &product_id, std::string_view bytes,
                               std::span<const rd::MaterialParameterDefinition> parameters)
 {
-    const auto bytes = ap::ReadBytes(package_path);
     const auto decoded = rd::ReadMaterialParameterPackage(
         std::as_bytes(std::span(bytes.data(), bytes.size())), hs::MakeAssetId(product_id));
     rd::ValidateMaterialParameters(decoded);
@@ -139,6 +137,51 @@ void ValidateParameterProduct(const std::string &product_id, const fs::path &pac
                 std::ranges::equal(decoded, parameters),
             "material parameter package layout disagrees with material source");
 }
+
+struct UpstreamSource
+{
+    std::string name_space, product_id;
+};
+
+class UpstreamProducts
+{
+  public:
+    explicit UpstreamProducts(const fs::path &build_root) : build_root_(build_root) {}
+
+    ap::ActionResultSnapshot &Snapshot(std::string_view name_space)
+    {
+        const auto key = std::string(name_space);
+        auto found = snapshots_.find(key);
+        if (found == snapshots_.end())
+            found = snapshots_.try_emplace(key, build_root_, key).first;
+        return found->second;
+    }
+
+    ap::UpstreamProduct Identity(std::string_view name_space, std::string_view product_id)
+    {
+        const auto &metadata = Snapshot(name_space).ProductMetadata(product_id);
+        return {std::string(product_id), metadata.at("digest").get<std::string>(),
+            metadata.at("size").get<std::uint64_t>(),
+            build_root_ / "Actions" / fs::path(std::string(name_space)) / "result.json"};
+    }
+
+    std::string ReadBytes(std::string_view name_space, std::string_view product_id,
+                          ap::UpstreamProduct &dependency)
+    {
+        return Snapshot(name_space).ReadProductBytes(product_id, dependency);
+    }
+
+    void Verify(std::string_view name_space, std::string_view product_id)
+    {
+        ap::UpstreamProduct actual;
+        fs::path path;
+        Snapshot(name_space).ReadProduct(product_id, actual, path);
+    }
+
+  private:
+    fs::path build_root_;
+    std::map<std::string, ap::ActionResultSnapshot> snapshots_;
+};
 
 constexpr std::string_view kTerrainMaterialName = "terrain";
 
@@ -172,19 +215,13 @@ bool CurrentStandaloneMaterial(const fs::path &build_root, const ap::ActionSpec 
         return false;
     try
     {
-        const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-        const auto &products = result.at("products");
-        if (result.at("action_id") != spec.action_id ||
-            result.at("action_key") != ap::ActionKey(spec) ||
-            !products.is_array() || products.size() != 1 ||
-            products.at(0).at("logical_id") != std::string(product_id) ||
-            products.at(0).at("dependencies") != expected_dependencies)
+        const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+        if (result.ActionId() != spec.action_id ||
+            result.ActionKeyValue() != ap::ActionKey(spec) || result.ProductCount() != 1 ||
+            result.ProductMetadata(product_id).at("dependencies") != expected_dependencies)
             return false;
         ap::UpstreamProduct ignored;
-        fs::path package_path;
-        (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                   product_id, ignored, package_path);
-        const auto contents = ap::ReadBytes(package_path);
+        const auto contents = result.ReadProductBytes(product_id, ignored);
         const auto view = rd::ReadPackage(
             std::as_bytes(std::span(contents.data(), contents.size())),
             hs::MakeAssetId(product_id));
@@ -248,17 +285,14 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     spec.recipe_id = "project-hs.render.material";
     spec.recipe_version = 4;
     spec.namespace_path = "render/" + std::string(name);
+    UpstreamProducts upstream_products(build_root);
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) + "/package-structure",
                                                   material_path, material_text));
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
 
     const std::string parameter_namespace = "render/material/" + std::string(name) + "/parameters";
     const std::string parameter_id = parameter_namespace + ".rpkg";
-    ap::UpstreamProduct parameter_dependency;
-    fs::path parameter_result_path;
-    (void)ap::ReadActionResult(build_root, parameter_namespace,
-                               parameter_id, parameter_dependency, parameter_result_path);
-    ValidateParameterProduct(parameter_id, parameter_result_path, definition.prepared.Graph().parameters);
+    auto parameter_dependency = upstream_products.Identity(parameter_namespace, parameter_id);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
 
     std::vector<std::string> dependencies;
@@ -266,28 +300,15 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     dependencies.push_back(parameter_id);
     for (const auto &texture : definition.prepared.Graph().textures)
     {
-        ap::UpstreamProduct upstream;
-        fs::path texture_path;
         const auto texture_namespace = texture.product_id.substr(
             0, texture.product_id.size() - std::string_view(".rpkg").size());
-        (void)ap::ReadActionResult(build_root, texture_namespace, texture.product_id,
-                                   upstream, texture_path);
-        const auto contents = ap::ReadBytes(texture_path);
-        const auto view = rd::ReadTexturePackage(
-            std::as_bytes(std::span(contents.data(), contents.size())),
-            hs::MakeAssetId(texture.product_id));
-        rd::ValidateMaterialTexturePackage(texture, view.description, name == kTerrainMaterialName ? 3u : 0u);
-        spec.upstream.push_back(std::move(upstream));
+        spec.upstream.push_back(upstream_products.Identity(texture_namespace, texture.product_id));
         dependencies.push_back(texture.product_id);
     }
 
     const auto shader_namespace = "render/shader/" + std::string(name);
     const std::string shader_id = std::string(shader_namespace) + "_scene.dxil";
-    ap::UpstreamProduct shader_upstream;
-    fs::path shader_path;
-    (void)ap::ReadActionResult(build_root, shader_namespace, shader_id,
-                               shader_upstream, shader_path);
-    spec.upstream.push_back(std::move(shader_upstream));
+    spec.upstream.push_back(upstream_products.Identity(shader_namespace, shader_id));
     dependencies.push_back(shader_id);
     std::ranges::sort(dependencies);
     dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
@@ -301,11 +322,28 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     const auto surface_layout = SurfaceLayout(definition.prepared);
     if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies, definition.prepared.Graph().parameters, surface_layout))
     {
+        upstream_products.Verify(parameter_namespace, parameter_id);
+        for (const auto &texture : definition.prepared.Graph().textures)
+            upstream_products.Verify(texture.product_id.substr(0, texture.product_id.size() - 5),
+                texture.product_id);
+        upstream_products.Verify(shader_namespace, shader_id);
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         std::cout << spec.action_id << " current\n";
         return;
     }
 
+    const auto parameter_bytes = upstream_products.ReadBytes(parameter_namespace, parameter_id, parameter_dependency);
+    ValidateParameterBytes(parameter_id, parameter_bytes, definition.prepared.Graph().parameters);
+    for (const auto &texture : definition.prepared.Graph().textures)
+    {
+        ap::UpstreamProduct dependency;
+        const auto contents = upstream_products.ReadBytes(
+            texture.product_id.substr(0, texture.product_id.size() - 5), texture.product_id, dependency);
+        const auto view = rd::ReadTexturePackage(
+            std::as_bytes(std::span(contents.data(), contents.size())), hs::MakeAssetId(texture.product_id));
+        rd::ValidateMaterialTexturePackage(texture, view.description, name == kTerrainMaterialName ? 3u : 0u);
+    }
+    upstream_products.Verify(shader_namespace, shader_id);
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
@@ -414,7 +452,7 @@ bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
     ap::UpstreamProduct ignored;
     const auto contents = result.ReadProductBytes(input.hierarchy_id, ignored);
     const auto hierarchy = rd::DecodeGeometryHierarchy(std::as_bytes(std::span(contents.data(), contents.size())));
-    if (hierarchy.geometry_flags != flags || hierarchy.source_triangle_count != input.vertices.size() / 3 ||
+    if (hierarchy.geometry_flags != flags ||
         !std::ranges::all_of(hierarchy.groups, [](const auto &group) { return group.material_partition == 0; }))
         return false;
     std::vector<std::string> page_ids;
@@ -422,16 +460,16 @@ bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
     std::ranges::sort(page_ids);
     if (result.ProductMetadata(input.hierarchy_id).at("dependencies") != page_ids) return false;
     expected_products.insert(input.hierarchy_id);
-    for (std::size_t index = 0; index < hierarchy.pages.size(); ++index)
+    for (const auto &page : hierarchy.pages)
     {
-        const auto &page_id = hierarchy.pages[index].logical_id;
+        const auto &page_id = page.logical_id;
         const std::vector<std::string> dependencies{input.mesh_id};
         if (result.ProductMetadata(page_id).at("dependencies") != dependencies) return false;
-        const auto page_contents = result.ReadProductBytes(page_id, ignored);
-        const auto bytes = std::as_bytes(std::span(page_contents.data(), page_contents.size()));
-        if (rd::ReadPackage(bytes, hs::MakeAssetId(page_id)).dependencies != dependencies) return false;
-        const auto payload = rd::DecodeGeometryPagePayload(bytes, hs::MakeAssetId(page_id), hierarchy.geometry_flags);
-        rd::ValidateGeometryHierarchyPage(hierarchy, static_cast<std::uint32_t>(index), payload);
+        // The matching producer ActionKey certifies the page recipe; stream
+        // its declared extent and digest without decoding the large geometry
+        // payload on a cache hit.
+        fs::path page_path;
+        result.ReadProduct(page_id, ignored, page_path);
         expected_products.insert(page_id);
     }
     return true;
@@ -451,6 +489,30 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
         if (result.ActionId() != spec.action_id ||
             result.ActionKeyValue() != ap::ActionKey(spec)) return false;
         std::set<std::string> expected_products;
+        const auto action_name = std::string_view(spec.action_id).substr(7);
+        const auto geometry_name = std::ranges::find(rd::kEnvironmentMaterialNames, action_name);
+        if (geometry_name == rd::kEnvironmentMaterialNames.end()) return false;
+        const auto geometry_ordinal = static_cast<std::size_t>(geometry_name - rd::kEnvironmentMaterialNames.begin());
+        const auto material_name = rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)];
+        const auto material_product = rd::MaterialProduct(material_name);
+        if (material_product.ends_with("/material.rpkg"))
+        {
+            ap::UpstreamProduct ignored;
+            const auto material_contents = result.ReadProductBytes(material_product, ignored);
+            const auto material_bytes = std::as_bytes(std::span(material_contents.data(), material_contents.size()));
+            const auto material_view = rd::ReadPackage(material_bytes, hs::MakeAssetId(material_product));
+            if (material_view.chunks.size() != 5 || !MatchesSurfaceLayout(material_view, surface_layout) ||
+                result.ProductMetadata(material_product).at("dependencies") != material_view.dependencies) return false;
+            const auto metadata = std::ranges::find(material_view.chunks,
+                rd::ChunkType::MaterialMetadata, &rd::ChunkView::type);
+            const auto layout = std::ranges::find(material_view.chunks,
+                rd::ChunkType::MaterialParameterLayout, &rd::ChunkView::type);
+            if (metadata == material_view.chunks.end() || layout == material_view.chunks.end()) return false;
+            const auto material = rd::DecodeRockMaterial(metadata->bytes, material_view.dependencies);
+            if (material.metallic != 0.0f || material.roughness_scale != 1.0f) return false;
+            rd::ValidateMaterialParameterLayout(layout->bytes, parameters);
+            expected_products.insert(material_product);
+        }
         for (const auto &package : packages)
         {
             if (result.ProductMetadata(package.logical_id).at("dependencies") != package.dependencies)
@@ -459,45 +521,21 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
             const auto contents = result.ReadProductBytes(package.logical_id, ignored);
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto view = rd::ReadPackage(bytes, hs::MakeAssetId(package.logical_id));
-            const auto name = std::string_view(spec.action_id).substr(7);
-            if (view.chunks.size() != (package.lod == 0 ? 7u : 6u) || !MatchesSurfaceLayout(view, surface_layout) ||
+            if (view.chunks.size() != (package.lod == 0 ? 3u : 2u) ||
                 view.dependencies != package.dependencies)
                 return false;
-            const auto program = std::ranges::find_if(view.chunks, [](const rd::ChunkView &chunk) {
-                return chunk.type == rd::ChunkType::MaterialProgram;
-            });
-            if (program == view.chunks.end() || !program->required) return false;
-            const auto decoded = rd::DecodeMaterialPrograms(program->bytes,
-                                                             view.dependencies);
-            if (decoded.size() != (hs::material_content::IsMaskedEnvironmentMaterial(name)
-                                       ? 2u : 1u)) return false;
-            const auto bindings = std::ranges::find(view.chunks, rd::ChunkType::MaterialBindings,
-                                                    &rd::ChunkView::type);
-            if (bindings == view.chunks.end() || !bindings->required) return false;
-            (void)rd::DecodeMaterialBindings(bindings->bytes, view.dependencies);
+            const auto material_reference = std::ranges::find(view.chunks,
+                rd::ChunkType::GeometryMaterialReference, &rd::ChunkView::type);
+            if (material_reference == view.chunks.end() || !material_reference->required ||
+                view.dependencies[rd::DecodeGeometryMaterialReference(material_reference->bytes,
+                    view.dependencies)] != material_product) return false;
             const auto geometry_chunk=std::ranges::find(view.chunks,rd::ChunkType::GeometryMetadata,&rd::ChunkView::type);
             if(geometry_chunk==view.chunks.end() || !geometry_chunk->required)return false;
             const auto geometry=rd::DecodeGeometryMetadata(geometry_chunk->bytes,view.dependencies,package.logical_id);
-            const auto material_chunk = std::ranges::find(view.chunks,
-                rd::ChunkType::MaterialMetadata, &rd::ChunkView::type);
-            if (material_chunk == view.chunks.end() || !material_chunk->required ||
-                material_chunk->version != 1 || material_chunk->count != 1 ||
-                material_chunk->stride != rd::kMaterialMetadataStride)
-                return false;
-            const auto material = rd::DecodeRockMaterial(material_chunk->bytes, view.dependencies);
-            if (material.metallic != 0.0f || material.roughness_scale != 1.0f)
-                return false;
-            const auto layout = std::ranges::find(view.chunks,
-                rd::ChunkType::MaterialParameterLayout, &rd::ChunkView::type);
-            if (layout == view.chunks.end() || !layout->required || layout->version != 1 ||
-                layout->count != 1 || layout->stride != 32)
-                return false;
-            rd::ValidateMaterialParameterLayout(layout->bytes, parameters);
-            const auto page_contents=result.ReadProductBytes(package.page_id,ignored);
-            const auto page_bytes=std::as_bytes(std::span(page_contents.data(),page_contents.size()));
-            const auto page_view=rd::ReadPackage(page_bytes,hs::MakeAssetId(package.page_id));
-            if(page_view.dependencies!=std::vector<std::string>{package.mesh_id})return false;
-            (void)rd::DecodeGeometryPage(page_bytes,hs::MakeAssetId(package.page_id),geometry);
+            const std::vector<std::string> page_dependencies{package.mesh_id};
+            if(result.ProductMetadata(package.page_id).at("dependencies")!=page_dependencies)return false;
+            fs::path page_path;
+            result.ReadProduct(package.page_id,ignored,page_path);
             expected_products.insert(package.logical_id);
             expected_products.insert(package.page_id);
             if (package.lod == 0 && !CurrentHierarchy(result, package, view,
@@ -535,9 +573,11 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.environment";
-    spec.recipe_version = 14;
+    spec.recipe_version = 15;
     spec.namespace_path = "render/" + std::string(name);
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
+    UpstreamProducts upstream_products(build_root);
+    std::vector<UpstreamSource> upstream_sources;
     hs::geometry_content::GeometryHierarchyCookOptions hierarchy_options;
     if (exhaustive_geometry_error)
         hierarchy_options.error_checks.mode = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
@@ -555,26 +595,24 @@ void Produce(std::string_view name, const fs::path &source_root,
                                                   material_path, material_text));
     const std::string parameter_id = "render/material/" + std::string(material_name) +
                                      "/parameters.rpkg";
-    ap::UpstreamProduct parameter_dependency;
-    fs::path parameter_result_path;
-    (void)ap::ReadActionResult(build_root,
-                               "render/material/" + std::string(material_name) + "/parameters",
-                               parameter_id, parameter_dependency, parameter_result_path);
-    ValidateParameterProduct(parameter_id, parameter_result_path, definition.prepared.Graph().parameters);
+    const auto material_product = rd::MaterialProduct(material_name);
+    if (!material_product.ends_with("/material.rpkg"))
+    {
+        const auto material_namespace = "render/" + std::string(material_name);
+        auto material_dependency = upstream_products.Identity(material_namespace, material_product);
+        spec.upstream.push_back(std::move(material_dependency));
+        upstream_sources.push_back({material_namespace, material_product});
+    }
+    const auto parameter_namespace = "render/material/" + std::string(material_name) + "/parameters";
+    auto parameter_dependency = upstream_products.Identity(parameter_namespace, parameter_id);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
+    upstream_sources.push_back({parameter_namespace, parameter_id});
     std::vector<rd::TextureDescription> texture_descriptions;
     for (const auto &texture : definition.prepared.Graph().textures)
     {
-        ap::UpstreamProduct upstream;
-        fs::path texture_path;
         const auto texture_namespace = texture.product_id.substr(0, texture.product_id.size() - 5);
-        (void)ap::ReadActionResult(build_root, texture_namespace, texture.product_id,
-                                   upstream, texture_path);
-        const auto contents = ap::ReadBytes(texture_path);
-        const auto view = rd::ReadTexturePackage(std::as_bytes(std::span(contents.data(), contents.size())),
-                                                hs::MakeAssetId(texture.product_id));
-        texture_descriptions.push_back(view.description);
-        spec.upstream.push_back(upstream);
+        spec.upstream.push_back(upstream_products.Identity(texture_namespace, texture.product_id));
+        upstream_sources.push_back({texture_namespace, texture.product_id});
     }
     const auto shader_namespace = "render/shader/" + std::string(material_name);
     const auto scene_id = shader_namespace + "_scene.dxil";
@@ -582,29 +620,93 @@ void Produce(std::string_view name, const fs::path &source_root,
     for (const auto &shader_id : masked ? std::vector<std::string>{scene_id, shadow_id}
                                         : std::vector<std::string>{scene_id})
     {
-        ap::UpstreamProduct shader;
-        fs::path shader_path;
-        (void)ap::ReadActionResult(build_root, shader_namespace,
-                                   shader_id, shader, shader_path);
-        spec.upstream.push_back(shader);
+        spec.upstream.push_back(upstream_products.Identity(shader_namespace, shader_id));
+        upstream_sources.push_back({shader_namespace, shader_id});
     }
+    std::vector<std::string> material_dependencies{parameter_id, scene_id};
+    if (masked) material_dependencies.push_back(shadow_id);
+    for (const auto &texture : material.textures)
+        if (!texture.empty()) material_dependencies.push_back(texture);
+    std::ranges::sort(material_dependencies);
+    material_dependencies.erase(std::unique(material_dependencies.begin(), material_dependencies.end()),
+        material_dependencies.end());
     for (const auto *suffix : {"", "_lod1", "_lod2"})
     {
         const auto stem = std::string(name) + suffix;
         const auto mesh_id = "environment/environment_" + stem + ".meshbin";
-        ap::UpstreamProduct upstream;
-        fs::path mesh_path;
-        (void)ap::ReadActionResult(build_root, "environment/meshes",
-                                   mesh_id, upstream, mesh_path);
-        spec.upstream.push_back(upstream);
-        // Shader layer context comes from the actual mesh and foliage atlas ABI.
-        // Reject an authored replacement whose array cannot serve any used layer.
-        const auto mesh = ap::ReadBytes(mesh_path);
+        spec.upstream.push_back(upstream_products.Identity("environment/meshes", mesh_id));
+        upstream_sources.push_back({"environment/meshes", mesh_id});
+        PackageInput package{"render/" + stem + ".rpkg", {mesh_id}};
+        package.page_id="render/geometry/"+stem+".rpage";package.mesh_id=mesh_id;
+        package.lod=static_cast<std::uint16_t>(packages.size());
+        if (package.lod == 0)
+        {
+            package.hierarchy_id = "render/hierarchy/" + std::string(name) + ".ghbin";
+            package.dependencies.push_back(package.hierarchy_id);
+        }
+        package.dependencies.push_back(material_product);
+        package.dependencies.push_back(package.page_id);
+        if(package.lod<2)
+        {
+            package.dependencies.push_back("render/"+std::string(name)+"_lod"+std::to_string(package.lod+1)+".rpkg");
+            if(package.lod==0)package.dependencies.push_back("render/"+std::string(name)+"_lod2.rpkg");
+        }
+        std::ranges::sort(package.dependencies);
+        package.dependencies.erase(std::unique(package.dependencies.begin(),
+                                               package.dependencies.end()),
+                                   package.dependencies.end());
+        packages.push_back(std::move(package));
+    }
+    std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+    std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);
+    spec.upstream.erase(std::unique(spec.upstream.begin(), spec.upstream.end(),
+        [](const ap::UpstreamProduct &a, const ap::UpstreamProduct &b) {
+            return a.logical_id == b.logical_id;
+        }), spec.upstream.end());
+    std::ranges::sort(upstream_sources, [](const auto &a, const auto &b) {
+        return a.product_id < b.product_id;
+    });
+    upstream_sources.erase(std::unique(upstream_sources.begin(), upstream_sources.end(),
+        [](const auto &a, const auto &b) { return a.product_id == b.product_id; }), upstream_sources.end());
+    if (!exhaustive_geometry_error && Current(build_root, spec, packages, definition.prepared.Graph().parameters, surface_layout))
+    {
+        for (const auto &source : upstream_sources)
+            upstream_products.Verify(source.name_space, source.product_id);
+        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
+        std::cout << spec.action_id << " current\n";
+        return;
+    }
+
+    // Only a cache miss needs semantic source decoding. Each verified byte
+    // buffer is consumed directly so the same upstream file is not reopened.
+    const auto parameter_bytes = upstream_products.ReadBytes(
+        parameter_namespace, parameter_id, parameter_dependency);
+    std::set<std::string> decoded_upstream_ids{parameter_id};
+    ValidateParameterBytes(parameter_id, parameter_bytes,
+        definition.prepared.Graph().parameters);
+    texture_descriptions.clear();
+    for (const auto &texture : definition.prepared.Graph().textures)
+    {
+        const auto texture_namespace = texture.product_id.substr(0, texture.product_id.size() - 5);
+        ap::UpstreamProduct dependency;
+        const auto contents = upstream_products.ReadBytes(texture_namespace, texture.product_id, dependency);
+        decoded_upstream_ids.insert(texture.product_id);
+        const auto view = rd::ReadTexturePackage(
+            std::as_bytes(std::span(contents.data(), contents.size())), hs::MakeAssetId(texture.product_id));
+        texture_descriptions.push_back(view.description);
+    }
+    for (auto &package : packages)
+    {
+        ap::UpstreamProduct dependency;
+        const auto mesh = upstream_products.ReadBytes("environment/meshes", package.mesh_id, dependency);
+        decoded_upstream_ids.insert(package.mesh_id);
         Require(mesh.size() >= 16 && U32(mesh, 0) == 0x4d455348 && U32(mesh, 4) == 1 &&
                 U32(mesh, 8) > 0 && U32(mesh, 8) <= 3'000'000 &&
                 U32(mesh, 12) == rd::kExpandedVertexStride &&
                 std::uint64_t(U32(mesh, 8)) * rd::kExpandedVertexStride == mesh.size() - 16,
                 "upstream mesh has an invalid vertex payload");
+        package.vertices = rd::DecodeExpandedVertices(
+            std::as_bytes(std::span(mesh.data() + 16, mesh.size() - 16)));
         std::uint32_t required_layer = name.starts_with("leaf_") ? 2u :
                                        name.starts_with("grass_") ? 1u : 0u;
         for (std::size_t offset = 16; offset < mesh.size(); offset += rd::kExpandedVertexStride)
@@ -622,45 +724,10 @@ void Produce(std::string_view name, const fs::path &source_root,
         std::vector<std::uint32_t> layer_counts;
         for (const auto &description : texture_descriptions) layer_counts.push_back(description.array_size);
         rd::ValidateMaterialSampleLayers(definition.prepared, layer_counts, required_layer);
-        PackageInput package{"render/" + stem + ".rpkg", mesh_path, material,
-                             {mesh_id}};
-        package.page_id="render/geometry/"+stem+".rpage";package.mesh_id=mesh_id;
-        package.lod=static_cast<std::uint16_t>(packages.size());
-        if (package.lod == 0)
-        {
-            package.hierarchy_id = "render/hierarchy/" + std::string(name) + ".ghbin";
-            package.dependencies.push_back(package.hierarchy_id);
-        }
-        package.vertices=rd::DecodeExpandedVertices(std::as_bytes(std::span(mesh.data()+16,mesh.size()-16)));
-        package.dependencies.push_back(parameter_id);
-        package.dependencies.push_back(package.page_id);
-        if(package.lod<2)
-        {
-            package.dependencies.push_back("render/"+std::string(name)+"_lod"+std::to_string(package.lod+1)+".rpkg");
-            if(package.lod==0)package.dependencies.push_back("render/"+std::string(name)+"_lod2.rpkg");
-        }
-        for (const auto &texture : material.textures)
-            if (!texture.empty()) package.dependencies.push_back(texture);
-        package.dependencies.push_back(scene_id);
-        if (masked) package.dependencies.push_back(shadow_id);
-        std::ranges::sort(package.dependencies);
-        package.dependencies.erase(std::unique(package.dependencies.begin(),
-                                               package.dependencies.end()),
-                                   package.dependencies.end());
-        packages.push_back(std::move(package));
     }
-    std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
-    std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);
-    spec.upstream.erase(std::unique(spec.upstream.begin(), spec.upstream.end(),
-        [](const ap::UpstreamProduct &a, const ap::UpstreamProduct &b) {
-            return a.logical_id == b.logical_id;
-        }), spec.upstream.end());
-    if (!exhaustive_geometry_error && Current(build_root, spec, packages, definition.prepared.Graph().parameters, surface_layout))
-    {
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
-        return;
-    }
+    for (const auto &source : upstream_sources)
+        if (!decoded_upstream_ids.contains(source.product_id))
+            upstream_products.Verify(source.name_space, source.product_id);
 
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
@@ -702,10 +769,42 @@ void Produce(std::string_view name, const fs::path &source_root,
         const auto parameter_layout = rd::EncodeMaterialParameterLayout(
             definition.prepared.Graph().parameters);
         const auto surface_bytes = rd::EncodeMaterialSurfaceLayout(surface_layout);
+        if (material_product.ends_with("/material.rpkg"))
+        {
+            const auto material_metadata = rd::EncodeRockMaterial(material, material_dependencies);
+            const auto material_program = masked
+                ? rd::EncodeMaterialPrograms(material_dependencies, std::array{
+                    rd::MaterialProgramSource{scene_id, rd::MaterialProgramKind::MaskedScenePS},
+                    rd::MaterialProgramSource{shadow_id, rd::MaterialProgramKind::MaskedShadowPS}})
+                : rd::EncodeMaterialProgram(material_dependencies, scene_id);
+            const auto material_bindings = rd::EncodeMaterialBindings(material_dependencies,
+                definition.prepared.Graph().textures);
+            const std::array material_chunks{
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialMetadata),1,true,
+                    material_metadata,1,rd::kMaterialMetadataStride},
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialProgram),1,true,
+                    material_program,material_program.size()/rd::kMaterialProgramStride,rd::kMaterialProgramStride},
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialBindings),1,true,
+                    material_bindings,rd::kMaterialTextureSlots,rd::kMaterialBindingStride},
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),1,true,
+                    parameter_layout,1,32},
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),1,true,
+                    surface_bytes,1,rd::kMaterialSurfaceLayoutStride}};
+            const auto material_bytes = rd::BuildPackage(hs::MakeAssetId(material_product),
+                material_dependencies, material_chunks);
+            const auto verified_material = rd::ReadPackage(material_bytes, hs::MakeAssetId(material_product));
+            Require(verified_material.dependencies == material_dependencies && verified_material.chunks.size() == 5,
+                "canonical environment material package self-validation failed");
+            const auto material_filename = fs::path(material_product).filename().string();
+            const auto material_output = stage / material_filename;
+            ap::WriteBytes(material_output, material_bytes);
+            auto material_product_entry = ap::HashProduct(material_product, material_filename, material_output);
+            material_product_entry.dependencies = material_dependencies;
+            products.push_back(std::move(material_product_entry));
+        }
         float previous_error=0;
         for (const auto &input : packages)
         {
-            const auto metadata = rd::EncodeRockMaterial(input.material, input.dependencies);
             const auto geometry=hs::geometry_content::CookGeometry(input.vertices,
                 geometry_flags);
             rd::GeometryMetadata gm;gm.flags=geometry.flags;gm.vertex_count=static_cast<std::uint32_t>(geometry.vertices.size());gm.index_count=static_cast<std::uint32_t>(geometry.indices.size());gm.submesh_count=static_cast<std::uint32_t>(geometry.submeshes.size());gm.meshlet_count=static_cast<std::uint32_t>(geometry.meshlets.size());gm.vertex_ref_count=static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());gm.bounds=geometry.bounds;gm.lod=input.lod;
@@ -719,30 +818,12 @@ void Produce(std::string_view name, const fs::path &source_root,
             const auto page=rd::BuildGeometryPage(hs::MakeAssetId(input.page_id),page_dependencies,geometry);
             (void)rd::DecodeGeometryPage(page,hs::MakeAssetId(input.page_id),gm);
             const auto page_filename=fs::path(input.page_id).filename().string();const auto page_output=stage/page_filename;ap::WriteBytes(page_output,page);auto page_product=ap::HashProduct(input.page_id,page_filename,page_output);page_product.dependencies=page_dependencies;products.push_back(std::move(page_product));
-            const std::array legacy_chunks{
+            const auto material_reference = rd::EncodeGeometryMaterialReference(dep(material_product),
+                input.dependencies);
+            std::vector<rd::ChunkSource> chunks{
                 rd::ChunkSource{13,1,true,geometry_metadata,1,rd::kGeometryMetadataStride},
-                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialMetadata),
-                                1, true, metadata, 1, rd::kMaterialMetadataStride}};
-            std::vector<rd::ChunkSource> chunks(legacy_chunks.begin(), legacy_chunks.end());
-            std::vector<std::byte> program;
-            if (masked)
-            {
-                const std::array sources{
-                    rd::MaterialProgramSource{scene_id, rd::MaterialProgramKind::MaskedScenePS},
-                    rd::MaterialProgramSource{shadow_id, rd::MaterialProgramKind::MaskedShadowPS}};
-                program = rd::EncodeMaterialPrograms(input.dependencies, sources);
-            }
-            else program = rd::EncodeMaterialProgram(input.dependencies, scene_id);
-            chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialProgram),
-                              1, true, program, program.size() / rd::kMaterialProgramStride,
-                              rd::kMaterialProgramStride});
-            const auto bindings = rd::EncodeMaterialBindings(input.dependencies, definition.prepared.Graph().textures);
-            chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialBindings),
-                              1, true, bindings, rd::kMaterialTextureSlots, rd::kMaterialBindingStride});
-            chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),
-                              1, true, parameter_layout, 1, 32});
-            chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),
-                              1, true, surface_bytes, 1, rd::kMaterialSurfaceLayoutStride});
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::GeometryMaterialReference),1,true,
+                    material_reference,1,rd::kGeometryMaterialReferenceStride}};
             std::vector<std::byte> hierarchy_reference;
             if (input.lod == 0)
             {
@@ -755,20 +836,13 @@ void Produce(std::string_view name, const fs::path &source_root,
                                                   input.dependencies, chunks);
             const auto verified = rd::ReadPackage(package, hs::MakeAssetId(input.logical_id));
             Require(verified.chunks.size() == chunks.size() &&
-                    verified.dependencies == input.dependencies &&
-                    MatchesSurfaceLayout(verified, surface_layout),
+                    verified.dependencies == input.dependencies,
                     "render package self-validation failed");
-            const auto verified_layout = std::ranges::find(verified.chunks,
-                rd::ChunkType::MaterialParameterLayout, &rd::ChunkView::type);
-            Require(verified_layout != verified.chunks.end() && verified_layout->required &&
-                    verified_layout->version == 1 && verified_layout->count == 1 &&
-                    verified_layout->stride == 32,
-                    "render package parameter layout chunk missing");
-            rd::ValidateMaterialParameterLayout(verified_layout->bytes,
-                                                definition.prepared.Graph().parameters);
-            (void)rd::DecodeMaterialPrograms(verified.chunks[2].bytes,
-                                             verified.dependencies);
-            (void)rd::DecodeMaterialBindings(verified.chunks[3].bytes, verified.dependencies);
+            const auto reference = std::ranges::find(verified.chunks,
+                rd::ChunkType::GeometryMaterialReference, &rd::ChunkView::type);
+            Require(reference != verified.chunks.end() && rd::DecodeGeometryMaterialReference(
+                reference->bytes, verified.dependencies) == dep(material_product),
+                "render package material reference self-validation failed");
             const auto filename = fs::path(input.logical_id).filename().string();
             const auto output = stage / filename;
             ap::WriteBytes(output, package);

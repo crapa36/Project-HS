@@ -421,9 +421,16 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         build_now()
         verify()
         action = json.loads(action_path.read_text())
+        pinned_pointer = pointer_path.read_bytes()
+        pinned_generation = json.loads(pinned_pointer)
+        pinned_manifest_path = build / pinned_generation['manifest_locator']
+        pinned_manifest = pinned_manifest_path.read_bytes()
+        pinned_products = json.loads(pinned_manifest)['products']
+        pinned_bytes = {item['logical_id']: (build / item['locator']).read_bytes()
+                        for item in pinned_products}
         assert action['recipe_identity'] == 'sha256:' + hashlib.sha256(fixture_audio.read_bytes()).hexdigest()
         expected_count = len({name for entry in json.loads(catalog.read_text())['entries']
-                              for name in entry['files']}) + 3
+                              for name in entry['files']}) + 4
         assert len(action['products']) == expected_count
         for item in action['products']:
             data = (build / item['locator']).read_bytes()
@@ -448,17 +455,33 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         assert action_path.read_bytes() == result_bytes and action_path.stat().st_mtime_ns == result_stamp
         assert all((build / item['locator']).read_bytes() == published[item['logical_id']]
                    for item in action['products'])
-        # Both generated outputs are checked, and matching corrupt state is not silently repaired.
-        for logical_id in ('audio/release-cpp', 'audio/release-pcm'):
+        # Corrupt current products are repaired as one quarantined ProductSet; the pinned
+        # generation remains an independent immutable snapshot throughout publication.
+        for logical_id in ('audio/release-cpp', 'audio/release-pcm', 'audio/release-identity'):
             item = next(item for item in action['products'] if item['logical_id'] == logical_id)
             path = build / item['locator']
             damaged = bytearray(published[logical_id])
             damaged[-1] ^= 1
             path.write_bytes(damaged)
             try:
-                assert 'upstream product is missing or corrupt' in without_preparation(False)
-                assert path.read_bytes() == damaged and action_path.read_bytes() == result_bytes
-                assert not (build / 'CorruptProducts').exists(), 'current lookup repaired a corrupt output'
+                output = run(*producer)
+                assert 'shipping-audio PCM' in output, output
+                assert action_path.read_bytes() == result_bytes
+                assert all((build / item['locator']).read_bytes() == published[item['logical_id']]
+                           for item in action['products']), 'repair exposed a partial ProductSet'
+                quarantine_root = build / 'CorruptProducts/audio'
+                quarantined = [p for p in quarantine_root.iterdir()
+                               if p.name.startswith(action['product_set_id'] + '-')]
+                quarantine_set = next((p for p in quarantined
+                    if (p / path.name).is_file() and (p / path.name).read_bytes() == damaged), None)
+                assert quarantine_set is not None, 'corrupt ProductSet was not quarantined before repair'
+                assert all((quarantine_set / item['locator'].split('/')[-1]).read_bytes() ==
+                           (damaged if item['logical_id'] == logical_id else published[item['logical_id']])
+                           for item in action['products']), 'quarantine did not preserve the complete prior set'
+                assert pointer_path.read_bytes() == pinned_pointer
+                assert pinned_manifest_path.read_bytes() == pinned_manifest
+                assert all((build / item['locator']).read_bytes() == pinned_bytes[item['logical_id']]
+                           for item in pinned_products), 'repair mutated the pinned generation snapshot'
                 verify()  # A producer-side fault must not alter the independently composed snapshot.
             finally:
                 path.write_bytes(published[logical_id])

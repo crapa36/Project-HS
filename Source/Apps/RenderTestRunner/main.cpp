@@ -3544,11 +3544,24 @@ int main(int argc, char **argv)
                     auto preview_pair = pair;
                     preview_pair.has_previous = false;
                     preview_pair.current.instances = preview_instances;
+                    auto auxiliary = preview;
+                    auxiliary.id = hs::ViewId{0x47524154u};
+                    auxiliary.output_extent = auxiliary.render_capacity = auxiliary.render_active = {320, 180};
+                    auxiliary.camera.position.z -= 2.0;
+                    auxiliary.view_origin = auxiliary.camera.position;
+                    std::array preview_views{preview, auxiliary};
+                    if (frame == 9) std::swap(preview_views[0], preview_views[1]);
                     const hs::RenderFrameInput preview_input{
-                        .views = std::span(&preview, 1), .snapshots = preview_pair,
+                        .views = preview_views, .snapshots = preview_pair,
                         .simulation_time = std::chrono::nanoseconds(10000000000ll + frame * 1000000000ll / 30)};
                     hs::RendererFrameResult preview_result;
                     Require(renderer.Render(preview_input, preview_result));
+                    if (preview_result.views.size() != preview_views.size())
+                        throw std::runtime_error("shared scene package lost a preview view");
+                    for (std::size_t index = 0; index < preview_views.size(); ++index)
+                        if (preview_result.views[index].identity.view_id != preview_views[index].id ||
+                            preview_result.views[index].rendered_view.output_extent != preview_views[index].output_extent)
+                            throw std::runtime_error("shared scene package mixed preview identity or extent");
                     const auto path = artifacts / std::format("grass-preview-{:03}.json", frame);
                     Require(renderer.Capture({preview.id, path, hs::CaptureKind::SurfaceDiagnostics}));
                     const auto captured = Json::parse(std::ifstream(path));

@@ -11,7 +11,6 @@ cbuffer FrameConstants : register(b0)
     float4x4 ShadowViewProjection[3];
     float4 ShadowAtlasScaleOffset[3];
     float4 ShadowAtlasTexelSize;
-    row_major float4x4 ArcherBones[128];
     uint4 MonsterAssetMeta[6];
     uint4 MonsterClipMeta[6][5];
     float4 RenderOptions;

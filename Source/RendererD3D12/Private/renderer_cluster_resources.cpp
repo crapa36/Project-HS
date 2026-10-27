@@ -183,7 +183,7 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
     next->content_generation = resource_generation_id;
     next->first_physical_slot = kMonsterReducedGeometryPage + 12u;
     next->physical_owner.fill(UINT32_MAX);
-    next->physical_versions = previous_geometry_page_versions;
+    next->physical_versions = owned_views.at(kMainRenderViewId.value)->previous_geometry_page_versions;
     try
     {
         for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
@@ -449,7 +449,7 @@ Result D3D12Renderer::Impl::CreateClusterViewResources(ClusterViewRuntime &targe
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
+Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t frame_slot,
     const std::array<ClusterCutInput, kClusterRuntimeCatalogs> &inputs)
 {
     if (!cluster_runtime || frame_slot >= kClusterRuntimeFrames)
@@ -462,15 +462,15 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         return ClusterFailure("Cluster frame resources are still used by an earlier submission.");
     if (frame.geometry_draw_records_cpu.empty())
         return ClusterFailure("Authored geometry prefix must be prepared before cluster cuts.");
-    if (!frame.mapped || !hzb_layout.count || hzb_layout.elements > UINT32_MAX)
+    if (!frame.mapped || !owner.targets.hzb_layout.count || owner.targets.hzb_layout.elements > UINT32_MAX)
         return ClusterFailure("Cluster occlusion requires prepared frame constants and HZB layout.");
     const auto &frame_constants = *reinterpret_cast<const FrameConstants *>(frame.mapped);
-    const ClusterFrameRuntime *previous_frame = last_presented_index < kClusterRuntimeFrames &&
-        last_presented_index != frame_slot ? &runtime.frames[last_presented_index] : nullptr;
-    const auto history_generation = owned_views.at(active_view_id.value)->history_generation;
-    const bool previous_history_valid = hzb_history_valid && previous_frame &&
+    const ClusterFrameRuntime *previous_frame = owner.last_presented_index < kClusterRuntimeFrames &&
+        owner.last_presented_index != frame_slot ? &runtime.frames[owner.last_presented_index] : nullptr;
+    const auto history_generation = owner.history_generation;
+    const bool previous_history_valid = owner.hzb_history_valid && previous_frame &&
         previous_frame->history_generation == history_generation;
-    const auto &hzb_extent = hzb_layout.levels[0];
+    const auto &hzb_extent = owner.targets.hzb_layout.levels[0];
     const bool previous_hzb_valid = previous_history_valid &&
         previous_frame->history_extent_depth[0] == static_cast<float>(hzb_extent.width) &&
         previous_frame->history_extent_depth[1] == static_cast<float>(hzb_extent.height) &&
@@ -482,9 +482,9 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
     for (const auto &cut : native.cuts)
         if (cut.readback_pending)
             return ClusterFailure("Cluster demand/status must be consumed before rewriting a frame slot.");
-    if (frame_number == UINT64_MAX)
+    if (owner.frame_number == UINT64_MAX)
         return ClusterFailure("Cluster actual render frame identity overflow.");
-    const auto actual_frame_id = frame_number + 1u;
+    const auto actual_frame_id = owner.frame_number + 1u;
     std::array<std::uint32_t, kClusterRuntimeCatalogs> capacities{};
     std::array<std::uint32_t, kClusterRuntimeCatalogs> history_capacities{};
     std::uint64_t total{};
@@ -705,13 +705,13 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         cut.previous_history_slot = UINT32_MAX;
         if (previous_history_valid && actual_frame_id > 1u)
         {
-            const auto &previous = runtime.frames[last_presented_index];
+            const auto &previous = runtime.frames[owner.last_presented_index];
             const auto &previous_cut = previous.cuts[ordinal];
             if (previous.history_frame_id == actual_frame_id - 1u && previous_cut.actual_frame_id == actual_frame_id - 1u &&
                 previous_cut.generation == runtime.generation && previous_cut.candidate_count &&
                 previous_cut.history_bits.resource && previous_cut.history_generations.resource && previous_cut.status.resource &&
                 previous_cut.history_words_per_instance == history_words)
-                cut.previous_history_slot = last_presented_index;
+                cut.previous_history_slot = owner.last_presented_index;
         }
         if (cut.candidate_owner != input.candidates || cut.candidate_generation != runtime.generation ||
             cut.candidate_static_error != runtime.catalogs[ordinal].static_error)
@@ -779,8 +779,8 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
                 : frame_constants.temporal_options.w;
             occlusion.extent_near_far = {static_cast<float>(hzb_extent.width), static_cast<float>(hzb_extent.height),
                 std::min(near_depth, far_depth), std::max(near_depth, far_depth)};
-            occlusion.level_count = hzb_layout.count;
-            occlusion.element_count = static_cast<std::uint32_t>(hzb_layout.elements);
+            occlusion.level_count = owner.targets.hzb_layout.count;
+            occlusion.element_count = static_cast<std::uint32_t>(owner.targets.hzb_layout.elements);
             occlusion.history_valid = phase == 0u ? (previous_hzb_valid && constants.previous_history_valid ? 1u : 0u) : 1u;
             occlusion.phase = phase;
             std::memcpy(static_cast<std::byte *>(mapped) + phase * kClusterOcclusionConstantStride,
@@ -826,7 +826,7 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(std::uint32_t frame_slot,
             previous_cut ? &previous_cut->history_generations : &runtime.history_zero,
             previous ? &previous->pages : &native.pages,
             previous_cut ? &previous_cut->status : &runtime.history_zero,
-            &hzb_history[hzb_read_index ^ phase]};
+            &owner.targets.hzb_history[owner.hzb_read_index ^ phase]};
         constexpr std::array<std::uint32_t, kClusterCutSrvCount> srv_strides{96, 4, 32, 32, 48, 4, 4, 32, 0, 4};
         for (std::size_t i = 0; i < srvs.size(); ++i)
         {

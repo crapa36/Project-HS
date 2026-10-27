@@ -1,6 +1,8 @@
 #pragma once
+#include "vfx_event_view.hpp"
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
+#include <hs/runtime/vfx_image.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -54,10 +56,10 @@ class VfxPersistentMoteBirthWindow
 
 // Emits one immutable record per burst particle. Runtime owns absolute event age.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(
-    const VfxProgramView &program, std::span<const VfxEventInput> inputs);
+    const VfxImage &image, VfxEventView inputs);
 // Reconstruct only live indexed emissions from an authoritative owner clock.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(
-    const VfxProgramView &program, std::span<const VfxEventInput> inputs, double current_tick);
+    const VfxImage &image, VfxEventView inputs, double current_tick);
 
 struct VfxOwnedStatusTickMoteCommand
 {
@@ -67,16 +69,16 @@ struct VfxOwnedStatusTickMoteCommand
 // A real status tick supplies the burst clock; the matching entity episode
 // supplies the persistent recipe and surface anchor.
 [[nodiscard]] std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
-    const VfxProgramView &program, std::span<const VfxEventInput> events,
+    const VfxImage &image, VfxEventView events,
     std::span<const VfxPersistentInput> owners);
 
 // Reconstruct the currently visible indexed births for gameplay-owned entity
 // status effects. This is intentionally stateless: callers submit the result
 // directly for the current frame instead of retaining the records as flashes.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners);
+    const VfxImage &image, std::span<const VfxPersistentInput> owners);
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
+    const VfxImage &image, std::span<const VfxPersistentInput> owners,
     VfxPersistentMoteBirthWindow &births, Tick current_tick, float interpolation = 1.0f);
 
 // One cursor per live projectile/source. The six supported micro_sparks sources
@@ -86,7 +88,7 @@ class VfxPersistentSparkState
 {
   public:
     [[nodiscard]] std::vector<VfxFlashSpawnInput> Emit(
-        const VfxProgramView &program,
+        const VfxImage &image,
         std::span<const VfxPersistentInput> owners,
         Tick current_tick, float interpolation = 1.0f);
     void Clear() noexcept { cursors_.clear(); }

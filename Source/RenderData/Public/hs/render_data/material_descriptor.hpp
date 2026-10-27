@@ -65,6 +65,7 @@ struct MaterialDescriptorStorage
     }
 };
 [[nodiscard]] bool IsMaterialDescriptorProduct(std::string_view product_id) noexcept;
+[[nodiscard]] std::string MaterialProduct(std::string_view name);
 [[nodiscard]] std::string MaterialParametersProduct(std::string_view material_product);
 [[nodiscard]] MaterialDescriptorStorage CompileMaterialDescriptor(
     std::string_view product_id, std::span<const std::byte> material_bytes,

@@ -33,47 +33,31 @@ constexpr Recipe recipes[]{
     {Hash("diamond_motes"), VfxMotionKind::ShortUpwardSpiral, VfxImpactShape::DiamondMote, .035f, .15f, .6f, 5}
 };
 struct SourceParams { std::uint32_t count{}; float curl{.2f}, drag{.8f}; };
-std::optional<SourceParams> DecodeParams(const VfxProgramView &p, const VfxSourceRecord &source)
+std::optional<SourceParams> DecodeParams(const VfxImage &image, std::size_t source_index)
 {
-    if (!Range(source.parameters, p.parameters)) return {};
-    SourceParams result;
-    bool count_seen = false, curl_seen = false, drag_seen = false;
-    for (const auto &v : std::span(p.parameters).subspan(source.parameters.first, source.parameters.count))
-    {
-        if (v.key == Hash("count"))
-        {
-            if (count_seen || v.type != VfxParameterType::Int || v.bits == 0 || v.bits > 1024) return {};
-            count_seen = true; result.count = v.bits;
-        }
-        else if (v.key == Hash("curl") || v.key == Hash("drag"))
-        {
-            auto &seen = v.key == Hash("curl") ? curl_seen : drag_seen;
-            if (seen || v.type != VfxParameterType::Float) return {};
-            seen = true;
-            const float value = std::bit_cast<float>(v.bits);
-            if (!std::isfinite(value) || value < 0) return {};
-            (v.key == Hash("curl") ? result.curl : result.drag) = value;
-        }
-        else return {}; // Rate/cone/domain emitters belong to other motion families.
-    }
-    return count_seen ? std::optional(result) : std::nullopt;
+    if (source_index >= image.mote_source_recipes.size()) return {};
+    const auto &recipe = image.mote_source_recipes[source_index];
+    if (!recipe.common_params_valid) return {};
+    return SourceParams{recipe.count, recipe.curl, recipe.drag};
 }
 template<class Input>
-bool DecodeMask(const VfxProgramView &p, const VfxOutputRecord &o, const Input &input, VfxFlashSpawnInput &out)
+bool DecodeMask(const VfxImage &image, std::size_t output_index, const Input &input,
+                VfxFlashSpawnInput &out)
 {
-    if (!Range(o.textures, p.texture_bindings)) return false;
-    for (const auto &b : std::span(p.texture_bindings).subspan(o.textures.first, o.textures.count))
+    const auto &program = image.program;
+    if (output_index >= image.mote_output_recipes.size()) return false;
+    const auto &recipe = image.mote_output_recipes[output_index];
+    const auto quality = static_cast<std::uint32_t>(input.quality);
+    if (quality > 2 ||
+        !(recipe.mask_quality_mask & (1u << quality))) return false;
+    if (recipe.mask_present_mask & (1u << quality))
     {
-        if (b.role != Hash("authored_mask_array")) continue;
-        if (b.min_quality > 2 || !std::isfinite(b.strength) || b.strength < 0 || b.strength > 1) return false;
-        if (b.min_quality > static_cast<std::uint32_t>(input.quality)) continue;
-        const auto r = std::find_if(p.texture_resources.begin(), p.texture_resources.end(), [&](const auto &v) { return v.slot == b.catalog_slot; });
-        if (r == p.texture_resources.end() || !Range(r->asset_path_bytes, p.strings)) return false;
-        const std::string_view path(reinterpret_cast<const char *>(p.strings.data()) + r->asset_path_bytes.first, r->asset_path_bytes.count);
-        if (path != "Content/Textures/VFX/vfx_authored_mask_array.dds" || out.mask_slice != 0xffffffffu ||
-            b.selection != Hash("stable_seed_mod_group_size") || !Range(b.slices, p.slice_indices) || b.slices.count == 0) return false;
-        for (const auto slice : std::span(p.slice_indices).subspan(b.slices.first, b.slices.count)) if (slice >= 12) return false;
-        out.mask_slice = p.slice_indices[b.slices.first + input.stable_seed % b.slices.count]; out.mask_strength = b.strength;
+        const auto slices = recipe.mask_slices[quality];
+        if (out.mask_slice != 0xffffffffu || !Range(slices, program.slice_indices) || slices.count == 0)
+            return false;
+        const auto choices = program.slice_indices.subspan(slices.first, slices.count);
+        out.mask_slice = choices[input.stable_seed % choices.size()];
+        out.mask_strength = recipe.mask_strengths[quality];
     }
     return true;
 }
@@ -103,34 +87,15 @@ struct PersistentMoteParameters
 };
 
 std::optional<PersistentMoteParameters> DecodePersistentMoteParameters(
-    const VfxProgramView &program, const VfxOutputRecord &output, float footprint)
+    const VfxImage &image, std::size_t output_index, float footprint)
 {
-    if (!Range(output.parameters, program.parameters) || !std::isfinite(footprint) ||
-        footprint <= 0.0f) return {};
-    PersistentMoteParameters result{.size = .05f * footprint};
-    bool size_seen = false;
-    bool curve_seen = false;
-    for (const auto &parameter : std::span(program.parameters).subspan(
-             output.parameters.first, output.parameters.count))
-    {
-        if (parameter.key == Hash("size"))
-        {
-            if (size_seen || parameter.type != VfxParameterType::Float) return {};
-            result.size = std::bit_cast<float>(parameter.bits);
-            size_seen = true;
-            if (!std::isfinite(result.size) || result.size <= 0.0f) return {};
-        }
-        else if (parameter.key == Hash("scale_curve_ref"))
-        {
-            if (curve_seen || parameter.type != VfxParameterType::CurveRow ||
-                parameter.bits >= 7u) return {};
-            result.curve_row = parameter.bits;
-            curve_seen = true;
-        }
-        else return {};
-    }
-    return std::isfinite(result.size) && result.size > 0.0f ?
-        std::optional(result) : std::nullopt;
+    const auto &program = image.program;
+    if (output_index >= image.mote_output_recipes.size() || !std::isfinite(footprint) || footprint <= 0.0f) return {};
+    const auto &recipe = image.mote_output_recipes[output_index];
+    if (!recipe.persistent_params_valid) return {};
+    const float size = recipe.persistent_size == 0.0f ? .05f * footprint : recipe.persistent_size;
+    return std::isfinite(size) && size > 0.0f ?
+        std::optional(PersistentMoteParameters{size, recipe.persistent_curve_row}) : std::nullopt;
 }
 
 bool FiniteTransform(const VfxTransform &transform)
@@ -197,34 +162,6 @@ std::optional<SparkParams> DecodeSparkParams(const VfxProgramView &p,
         return {};
     return result;
 }
-bool SparkTextures(const VfxProgramView &p, const VfxOutputRecord &output)
-{
-    if (!Range(output.textures, p.texture_bindings) || output.textures.count != 3) return false;
-    bool gradient = false, curve = false, optional_mask = false;
-    for (const auto &binding : std::span(p.texture_bindings).subspan(
-             output.textures.first, output.textures.count))
-    {
-        const auto resource = std::find_if(p.texture_resources.begin(), p.texture_resources.end(),
-            [&](const auto &candidate) { return candidate.slot == binding.catalog_slot; });
-        if (resource == p.texture_resources.end() ||
-            resource->asset_path_bytes.count == 0 ||
-            !Range(resource->asset_path_bytes, p.strings)) return false;
-        const std::string_view path(reinterpret_cast<const char *>(p.strings.data()) +
-            resource->asset_path_bytes.first, resource->asset_path_bytes.count);
-        if (binding.role == Hash("profile.global") &&
-            path == "Content/Textures/VFX/vfx_gradient_lut.dds" && !gradient)
-            gradient = true;
-        else if (binding.role == Hash("profile.global") &&
-                 path == "Content/Textures/VFX/vfx_curve_lut.dds" && !curve)
-            curve = true;
-        else if (binding.role == Hash("profile.optional_detail") &&
-                 path == "Content/Textures/VFX/vfx_authored_mask_array.dds" &&
-                 !optional_mask && binding.slices.count == 0)
-            optional_mask = true;
-        else return false;
-    }
-    return gradient && curve && optional_mask;
-}
 Float3 Cross(Float3 a, Float3 b)
 { return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
 Float3 SparkDirection(Float3 velocity, float cone_degrees, std::uint32_t seed)
@@ -246,7 +183,7 @@ Float3 SparkDirection(Float3 velocity, float cone_degrees, std::uint32_t seed)
 }
 
 template<class Input>
-void AppendRateMotes(const VfxProgramView &program, const Input &owner,
+void AppendRateMotes(const VfxImage &image, const Input &owner,
                           Float3 position, float extent, const VfxEffectRecord &effect,
                           std::uint64_t effect_id, double current_ticks,
                           double duration_ticks, std::vector<VfxFlashSpawnInput> &result,
@@ -255,6 +192,7 @@ void AppendRateMotes(const VfxProgramView &program, const Input &owner,
                           std::uint64_t owner_id = 0,
                           std::uint64_t episode_generation = 0)
 {
+    const auto &program = image.program;
     constexpr double lifetime_ticks = kPersistentMoteLifetimeTicks;
     constexpr double lifetime_seconds = lifetime_ticks / 60.0;
     for (std::size_t source_index = effect.sources.first;
@@ -268,10 +206,9 @@ void AppendRateMotes(const VfxProgramView &program, const Input &owner,
             !Range(source.parameters, program.parameters) || source.parameters.count != 1 ||
             !Range(source.outputs, program.outputs) || source.outputs.count != 1)
             continue;
-        const auto &rate_parameter = program.parameters[source.parameters.first];
-        if (rate_parameter.key != Hash("count_per_second") ||
-            rate_parameter.type != VfxParameterType::Int ||
-            std::bit_cast<std::int32_t>(rate_parameter.bits) != 3)
+        if (source_index >= image.mote_source_recipes.size() ||
+            !image.mote_source_recipes[source_index].rate_valid ||
+            image.mote_source_recipes[source_index].rate != 3)
             continue;
 
         const double start_ticks = 0.0;
@@ -296,21 +233,20 @@ void AppendRateMotes(const VfxProgramView &program, const Input &owner,
             Mix(static_cast<std::uint32_t>(effect_id >> 32)) ^
             Mix(source.stable_id));
 
+        if (source.outputs.first >= image.mote_output_recipes.size()) continue;
         const auto &output = program.outputs[source.outputs.first];
+        const auto &output_recipe = image.mote_output_recipes[source.outputs.first];
         if (output.source != source_index || output.profile != VfxOutputProfile::SpriteAdd ||
             output.shape != kSoftMotes || output.shape_domain != kSpriteDomain ||
             output.shape_scale_rule != kComponentSize || output.shape_component_kind != kParticle ||
             output.coverage_type != kAnalytic || output.coverage_ref != kSoftDisc ||
             output.motion != VfxMotionKind::RareInwardDrift ||
-            output.min_quality != static_cast<std::uint32_t>(VfxQuality::Medium) ||
-            output.min_quality > static_cast<std::uint32_t>(owner.quality) ||
-            !Range(output.parameters, program.parameters) || output.parameters.count != 0 ||
-            !std::isfinite(output.hdr) || output.hdr <= 0.0f ||
-            std::any_of(output.rgba.begin(), output.rgba.end(),
-                        [](float value) { return !std::isfinite(value); }) ||
-            output.rgba[3] < 0.0f || output.rgba[3] > 1.0f)
+            !output_recipe.output_color_valid ||
+            output_recipe.min_quality != static_cast<std::uint32_t>(VfxQuality::Medium) ||
+            output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality) ||
+            !Range(output.parameters, program.parameters) || output.parameters.count != 0)
             continue;
-        const auto params = DecodePersistentMoteParameters(program, output, extent);
+        const auto params = DecodePersistentMoteParameters(image, source.outputs.first, extent);
         if (!params)
             continue;
 
@@ -358,30 +294,28 @@ void AppendRateMotes(const VfxProgramView &program, const Input &owner,
             mote.direction = {velocity.x / horizontal, 0.0f, velocity.z / horizontal};
             mote.initial_offset = offset;
             mote.initial_velocity = velocity;
-            mote.gradient_row = output.gradient_row;
+            mote.gradient_row = output_recipe.gradient_row;
             mote.curve_row = params->curve_row;
-            mote.hdr = output.hdr;
-            mote.color = {output.rgba[0] * output.hdr,
-                          output.rgba[1] * output.hdr,
-                          output.rgba[2] * output.hdr,
-                          output.rgba[3]};
+            mote.hdr = output_recipe.hdr;
+            mote.color = output_recipe.color;
             if (Finite(mote.position) &&
                 Finite({mote.color.x, mote.color.y, mote.color.z}) &&
                 std::isfinite(mote.color.w) && mote.color.w >= 0.0f &&
-                mote.color.w <= 1.0f && DecodeMask(program, output, owner, mote))
+                mote.color.w <= 1.0f && DecodeMask(image, source.outputs.first, owner, mote))
                 result.push_back(mote);
             if (ordinal == std::numeric_limits<std::uint64_t>::max()) break;
         }
     }
 }
 
-void AppendPersistentTrapMotes(const VfxProgramView &program,
+void AppendPersistentTrapMotes(const VfxImage &image,
                                const VfxPersistentInput &owner,
                                const VfxCirclePayload &circle,
                                std::vector<VfxFlashSpawnInput> &result,
                                VfxPersistentMoteBirthWindow *birth_window = nullptr,
                                double global_current_tick = 0)
 {
+    const auto &program = image.program;
     if (owner.stable_id == 0 || owner.effect_handle == 0 ||
         owner.effect_handle > program.effects.size() ||
         static_cast<std::uint32_t>(owner.quality) > 2 ||
@@ -432,7 +366,7 @@ void AppendPersistentTrapMotes(const VfxProgramView &program,
         (!std::isfinite(duration_ticks) || duration_ticks <= 0.0))
         return;
 
-    AppendRateMotes(program, owner, circle.center, circle.radius, effect, lookup->effect_id,
+    AppendRateMotes(image, owner, circle.center, circle.radius, effect, lookup->effect_id,
                           current_ticks, duration_ticks, result, birth_window, global_current_tick,
                           owner.stable_id, owner.status_episode_generation);
 }
@@ -459,8 +393,9 @@ VfxPersistentMoteBirthWindow::UnitBirth VfxPersistentMoteBirthWindow::GetOrCreat
     return unit;
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &program, std::span<const VfxEventInput> inputs)
+std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxImage &image, VfxEventView inputs)
 {
+    const auto &program = image.program;
     std::vector<VfxFlashSpawnInput> result;
     for (const auto &input : inputs)
     {
@@ -487,29 +422,22 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &
                     source.knots[0] != 0 || source.knots[1] != 1 ||
                     !Range(source.parameters, program.parameters) || source.parameters.count != 2 ||
                     !Range(source.outputs, program.outputs)) continue;
-                std::uint32_t count{};
-                float speed{};
-                bool valid = true;
-                for (const auto &parameter : std::span(program.parameters).subspan(
-                         source.parameters.first, source.parameters.count))
+                if (si >= image.mote_source_recipes.size() ||
+                    !image.mote_source_recipes[si].residual_valid) continue;
+                const auto count = image.mote_source_recipes[si].count;
+                const auto speed = image.mote_source_recipes[si].speed;
+            for (std::size_t output_index = source.outputs.first;
+                 output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count;
+                 ++output_index)
                 {
-                    if (parameter.key == Hash("count") && parameter.type == VfxParameterType::Int && !count)
-                        count = parameter.bits;
-                    else if (parameter.key == Hash("inward_speed") &&
-                             parameter.type == VfxParameterType::Float && speed == 0)
-                        speed = std::bit_cast<float>(parameter.bits);
-                    else valid = false;
-                }
-                if (!valid || count == 0 || count > 1024 || !std::isfinite(speed) || speed <= 0) continue;
-                for (const auto &output : std::span(program.outputs).subspan(
-                         source.outputs.first, source.outputs.count))
-                {
+                const auto &output = program.outputs[output_index];
+                if (output_index >= image.mote_output_recipes.size()) continue;
+                const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (output.source != si || output.profile != VfxOutputProfile::SpriteAdd ||
                         output.motion != VfxMotionKind::ParticlesPulledInward || output.shape != Hash("camera_billboard") ||
-                        output.min_quality > static_cast<std::uint32_t>(input.quality) ||
+                        !output_recipe.output_color_valid ||
+                        output_recipe.min_quality > static_cast<std::uint32_t>(input.quality) ||
                         !Range(output.parameters, program.parameters) || output.parameters.count != 0 ||
-                        !std::isfinite(output.hdr) || output.hdr <= 0 ||
-                        output.rgba[3] > 1 ||
                         std::any_of(output.rgba.begin(), output.rgba.end(),
                             [](float value) { return !std::isfinite(value) || value < 0; })) continue;
                     for (std::uint32_t ordinal = 0; ordinal < count; ++ordinal)
@@ -529,13 +457,12 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &
                         mote.size = .025f;
                         mote.lifetime = effect.seconds;
                         mote.event_tick = input.event_tick;
-                        mote.gradient_row = output.gradient_row;
-                        mote.hdr = output.hdr;
-                        mote.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
-                                      output.rgba[2] * output.hdr, output.rgba[3]};
+                        mote.gradient_row = output_recipe.gradient_row;
+                        mote.hdr = output_recipe.hdr;
+                        mote.color = output_recipe.color;
                         if (Finite(mote.initial_offset) && Finite(mote.initial_velocity) &&
                             Finite({mote.color.x, mote.color.y, mote.color.z}) &&
-                            DecodeMask(program, output, input, mote)) result.push_back(mote);
+                            DecodeMask(image, output_index, input, mote)) result.push_back(mote);
                     }
                 }
             }
@@ -560,25 +487,32 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &
             if (source.effect != effect.handle || source.type != VfxSourceType::CurlMotes || source.knot_count != 2 ||
                 !std::isfinite(source.knots[0]) || !std::isfinite(source.knots[1]) || source.knots[0] < 0 ||
                 source.knots[1] <= source.knots[0] || source.knots[1] > 1 || !Range(source.outputs, program.outputs)) continue;
-            const auto params = DecodeParams(program, source);
+            const auto params = DecodeParams(image, si);
             if (!params) continue;
             const auto source_seed = Mix(input.stable_seed ^ Mix(static_cast<std::uint32_t>(lookup->effect_id)) ^
                 Mix(static_cast<std::uint32_t>(lookup->effect_id >> 32)) ^ Mix(source.stable_id));
-            for (const auto &output : std::span(program.outputs).subspan(source.outputs.first, source.outputs.count))
+            for (std::size_t output_index = source.outputs.first;
+                 output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count;
+                 ++output_index)
             {
+                const auto &output = program.outputs[output_index];
+                if (output_index >= image.mote_output_recipes.size()) continue;
+                const auto &output_recipe = image.mote_output_recipes[output_index];
                 const auto recipe = std::find_if(std::begin(recipes), std::end(recipes), [&](const auto &v) { return v.shape == output.shape && v.motion == output.motion; });
                 if (recipe == std::end(recipes) || output.source != si || output.profile != VfxOutputProfile::SpriteAdd ||
-                    output.min_quality > static_cast<std::uint32_t>(input.quality) || !Range(output.parameters, program.parameters) || output.parameters.count != 0) continue;
+                    !output_recipe.output_color_valid ||
+                    output_recipe.min_quality > static_cast<std::uint32_t>(input.quality) ||
+                    !Range(output.parameters, program.parameters) || output.parameters.count != 0) continue;
                 VfxFlashSpawnInput base;
                 base.position = position; base.shape = recipe->kind; base.size = recipe->size * scale;
                 base.delay = source.knots[0] * effect.seconds; base.lifetime = (source.knots[1] - source.knots[0]) * effect.seconds;
-                base.event_tick = input.event_tick; base.gradient_row = output.gradient_row; base.hdr = output.hdr;
-                base.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr, output.rgba[2] * output.hdr, output.rgba[3]};
+                base.event_tick = input.event_tick; base.gradient_row = output_recipe.gradient_row; base.hdr = output_recipe.hdr;
+                base.color = output_recipe.color;
                 base.drag = params->drag; base.orbit_rate = recipe->rate;
                 base.orbit_radius = (recipe->kind == VfxImpactShape::LeafMote ? params->curl : recipe->kind == VfxImpactShape::SmallMote ? 0.0f : .15f) * scale;
                 if (!std::isfinite(base.size) || base.size <= 0 || !std::isfinite(base.delay) || !std::isfinite(base.lifetime) || base.lifetime <= 0 ||
                     !std::isfinite(base.orbit_radius) || !std::isfinite(base.hdr) || base.hdr <= 0 || !Finite({base.color.x, base.color.y, base.color.z}) ||
-                    !std::isfinite(base.color.w) || base.color.w < 0 || base.color.w > 1 || !DecodeMask(program, output, input, base)) continue;
+                    !std::isfinite(base.color.w) || base.color.w < 0 || base.color.w > 1 || !DecodeMask(image, output_index, input, base)) continue;
                 // Burst identity depends on semantic IDs and emission index, never frame count or catalog ordering.
                 for (std::uint32_t i = 0; i < params->count; ++i)
                 {
@@ -599,9 +533,10 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &
     return result;
 }
 std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
-    const VfxProgramView &program, std::span<const VfxEventInput> events,
+    const VfxImage &image, VfxEventView events,
     std::span<const VfxPersistentInput> owners)
 {
+    const auto &program = image.program;
     std::vector<VfxOwnedStatusTickMoteCommand> result;
     const auto unique_identity = [&](VfxEffectHandle handle, std::uint64_t id) {
         return std::count_if(program.effect_lookup.begin(), program.effect_lookup.end(),
@@ -643,31 +578,33 @@ std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
             for (std::size_t si = status.sources.first; si < static_cast<std::size_t>(status.sources.first) + status.sources.count; ++si)
             {
                 const auto &source = program.sources[si];
-                const auto params = DecodeParams(program, source);
+                const auto params = DecodeParams(image, si);
                 if (source.effect != status.handle || source.stable_id != Hash("tick_motes") ||
                     source.type != VfxSourceType::CurlMotes || source.knot_count != 2 ||
                     source.knots[0] != 0 || source.knots[1] != 1 || !params || params->count != 3 ||
                     source.parameters.count != 1 || !Range(source.outputs, program.outputs)) continue;
-                for (const auto &output : std::span(program.outputs).subspan(source.outputs.first, source.outputs.count))
+                for (std::size_t output_index = source.outputs.first;
+                     output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count;
+                     ++output_index)
                 {
+                    const auto &output = program.outputs[output_index];
+                    if (output_index >= image.mote_output_recipes.size()) continue;
+                    const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (output.source != si || output.profile != VfxOutputProfile::SpriteAdd ||
                         output.shape != Hash("small_motes") || output.motion != VfxMotionKind::VeryShortLocalDrift ||
                         output.shape_domain != kSpriteDomain || output.shape_scale_rule != kComponentSize ||
                         output.shape_component_kind != kParticle || output.coverage_type != kAnalytic ||
-                        output.coverage_ref != Hash("diamond_spark") || output.min_quality > 2 ||
-                        output.min_quality > static_cast<std::uint32_t>(event.quality) ||
-                        output.min_quality > static_cast<std::uint32_t>(owner.quality) ||
-                        !Range(output.parameters, program.parameters) || output.parameters.count != 0 ||
-                        !std::isfinite(output.hdr) || output.hdr <= 0 ||
-                        std::any_of(output.rgba.begin(), output.rgba.end(), [](float v) { return !std::isfinite(v); }) ||
-                        output.rgba[3] < 0 || output.rgba[3] > 1) continue;
+                        output.coverage_ref != Hash("diamond_spark") ||
+                        !output_recipe.output_color_valid || output_recipe.min_quality > 2 ||
+                        output_recipe.min_quality > static_cast<std::uint32_t>(event.quality) ||
+                        output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality) ||
+                        !Range(output.parameters, program.parameters) || output.parameters.count != 0) continue;
                     VfxFlashSpawnInput base;
                     base.position = anchor; base.shape = VfxImpactShape::SmallMote;
                     base.size = recipes[1].size; base.lifetime = tick.seconds; base.event_tick = event.event_tick;
-                    base.drag = params->drag; base.gradient_row = output.gradient_row; base.hdr = output.hdr;
-                    base.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
-                                  output.rgba[2] * output.hdr, output.rgba[3]};
-                    if (!Finite({base.color.x, base.color.y, base.color.z}) || !DecodeMask(program, output, event, base)) continue;
+                    base.drag = params->drag; base.gradient_row = output_recipe.gradient_row; base.hdr = output_recipe.hdr;
+                    base.color = output_recipe.color;
+                    if (!Finite({base.color.x, base.color.y, base.color.z}) || !DecodeMask(image, output_index, event, base)) continue;
                     const auto seed = Mix(event.stable_seed ^ Mix(static_cast<std::uint32_t>(status_id)) ^
                         Mix(static_cast<std::uint32_t>(status_id >> 32)) ^ Mix(source.stable_id));
                     for (std::uint32_t ordinal = 0; ordinal < params->count; ++ordinal)
@@ -690,9 +627,10 @@ std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
     return result;
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &program,
-    std::span<const VfxEventInput> inputs, double current_tick)
+std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick)
 {
+    const auto &program = image.program;
     std::vector<VfxFlashSpawnInput> result;
     constexpr double lifetime_ticks = 39.0;
     constexpr double lifetime = lifetime_ticks / 60.0;
@@ -710,7 +648,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
                 effect.seconds != .65f || effect.payload_kind != Hash("PointEventPayload") ||
                 !Range(effect.sources, program.sources) || std::count_if(program.effect_lookup.begin(), program.effect_lookup.end(),
                     [&](const auto &v) { return v.handle == effect.handle && v.effect_id == id; }) != 1) continue;
-            AppendRateMotes(program, input, point->position, point->authored_scale, effect, id,
+            AppendRateMotes(image, input, point->position, point->authored_scale, effect, id,
                 (current_tick - input.event_tick), 39.0, result);
             continue;
         }
@@ -737,7 +675,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
             // attack-telegraph owner, which RefreshVfxGroundEventOwners retires.
             const auto elapsed = current_tick - input.geometry_start_tick;
             const auto duration = input.geometry_end_tick - input.geometry_start_tick;
-            AppendRateMotes(program, input, circle->center, circle->radius, effect, input.geometry_effect_id,
+            AppendRateMotes(image, input, circle->center, circle->radius, effect, input.geometry_effect_id,
                                   elapsed, static_cast<double>(duration), result);
             continue;
         }
@@ -768,11 +706,10 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
                 !std::isfinite(source.knots[0]) || !std::isfinite(source.knots[1]) || source.knots[0]<0 ||
                 source.knots[1]<=source.knots[0] || source.knots[1]>1 || !Range(source.parameters,program.parameters) ||
                 source.parameters.count!=1 || !Range(source.outputs,program.outputs)) continue;
-            const auto &parameter=program.parameters[source.parameters.first];
+            if (si >= image.mote_source_recipes.size() ||
+                !image.mote_source_recipes[si].rate_valid) continue;
             // The authored parameter catalog defines rate as an integer count/second.
-            if(parameter.key!=Hash("count_per_second") || parameter.type!=VfxParameterType::Int) continue;
-            const double rate=std::bit_cast<std::int32_t>(parameter.bits);
-            if(!std::isfinite(rate)||rate<=0||rate>1024) continue;
+            const double rate = image.mote_source_recipes[si].rate;
             const double start=source.knots[0]*duration, end=source.knots[1]*duration;
             if(elapsed<start) continue;
             // Integer emission ordinal determines birth time; skipped frames never add duplicate particles.
@@ -781,12 +718,17 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
             if(first_value>last_value || last_value>std::numeric_limits<std::uint32_t>::max()) continue;
             const auto seed=Mix(input.stable_seed ^ Mix(static_cast<std::uint32_t>(identity->effect_id)) ^
                 Mix(static_cast<std::uint32_t>(identity->effect_id>>32)) ^ Mix(source.stable_id));
-            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+            for (std::size_t output_index = source.outputs.first;
+                 output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count;
+                 ++output_index)
             {
+                const auto &output = program.outputs[output_index];
+                if (output_index >= image.mote_output_recipes.size()) continue;
+                const auto &output_recipe = image.mote_output_recipes[output_index];
                 if(output.source!=si||output.profile!=VfxOutputProfile::SpriteAdd||output.shape!=Hash("soft_motes")||
-                    output.motion!=VfxMotionKind::RareInwardDrift||output.min_quality>static_cast<std::uint32_t>(input.quality)||
-                    !Range(output.parameters,program.parameters)||output.parameters.count!=0||
-                    !std::isfinite(output.hdr)||output.hdr<=0||!std::isfinite(output.rgba[3])||output.rgba[3]<0||output.rgba[3]>1)continue;
+                    output.motion!=VfxMotionKind::RareInwardDrift||
+                    !output_recipe.output_color_valid||output_recipe.min_quality>static_cast<std::uint32_t>(input.quality)||
+                    !Range(output.parameters,program.parameters)||output.parameters.count!=0)continue;
                 for(std::uint64_t ordinal=static_cast<std::uint32_t>(first_value);ordinal<=static_cast<std::uint32_t>(last_value);++ordinal)
                 {
                     const double birth=start+static_cast<double>(ordinal)*60.0/rate;
@@ -801,9 +743,9 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
                     mote.initial_velocity={-std::cos(angle)*speed,.08f,-std::sin(angle)*speed};
                     mote.shape=VfxImpactShape::SoftDisc;mote.size=.035f;mote.lifetime=static_cast<float>(lifetime);
                     mote.normalized_age=static_cast<float>((elapsed-birth)/lifetime_ticks);mote.event_tick=input.geometry_start_tick;
-                    mote.gradient_row=output.gradient_row;mote.hdr=output.hdr;
-                    mote.color={output.rgba[0]*output.hdr,output.rgba[1]*output.hdr,output.rgba[2]*output.hdr,output.rgba[3]};
-                    if(Finite(mote.position)&&Finite({mote.color.x,mote.color.y,mote.color.z})&&DecodeMask(program,output,input,mote))result.push_back(mote);
+                    mote.gradient_row=output_recipe.gradient_row;mote.hdr=output_recipe.hdr;
+                    mote.color=output_recipe.color;
+                    if(Finite(mote.position)&&Finite({mote.color.x,mote.color.y,mote.color.z})&&DecodeMask(image,output_index,input,mote))result.push_back(mote);
                 }
             }
         }
@@ -814,9 +756,10 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &
 namespace
 {
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
+    const VfxImage &image, std::span<const VfxPersistentInput> owners,
     VfxPersistentMoteBirthWindow *birth_window, double current_tick)
 {
+    const auto &program = image.program;
     std::vector<VfxFlashSpawnInput> result;
     constexpr double lifetime_ticks = kPersistentMoteLifetimeTicks;
     constexpr double lifetime_seconds = lifetime_ticks / 60.0;
@@ -824,7 +767,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
     {
         if (const auto *circle = std::get_if<VfxCirclePayload>(&owner.payload))
         {
-            AppendPersistentTrapMotes(program, owner, *circle, result, birth_window, current_tick);
+            AppendPersistentTrapMotes(image, owner, *circle, result, birth_window, current_tick);
             continue;
         }
         const auto *entity = std::get_if<VfxEntityPayload>(&owner.payload);
@@ -894,10 +837,9 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
                 source.knots[1] > 1.0f || !Range(source.parameters, program.parameters) ||
                 source.parameters.count != 1 || !Range(source.outputs, program.outputs))
                 continue;
-            const auto &rate_parameter = program.parameters[source.parameters.first];
-            if (rate_parameter.key != Hash("count_per_second") ||
-                rate_parameter.type != VfxParameterType::Int) continue;
-            const auto rate_value = std::bit_cast<std::int32_t>(rate_parameter.bits);
+            if (source_index >= image.mote_source_recipes.size() ||
+                !image.mote_source_recipes[source_index].rate_valid) continue;
+            const auto rate_value = image.mote_source_recipes[source_index].rate;
             if (rate_value <= 0 || rate_value > 1024 ||
                 (charged_overcharge && rate_value != 3) ||
                 (pickup_idle && (rate_value != 3 || source.knots[0] != 0.0f ||
@@ -976,24 +918,24 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
                      ++output_index)
                 {
                     const auto &output = program.outputs[output_index];
+                    if (output_index >= image.mote_output_recipes.size()) continue;
+                    const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (output.source != source_index || output.profile != VfxOutputProfile::SpriteAdd ||
                         output.shape != kSoftMotes || output.shape_domain != kSpriteDomain ||
                         output.shape_scale_rule != kComponentSize ||
                         output.shape_component_kind != kParticle ||
                         output.coverage_type != kAnalytic || output.coverage_ref != kSoftDisc ||
                         output.motion != VfxMotionKind::RareInwardDrift ||
-                        (charged_overcharge && output.min_quality !=
+                        !output_recipe.output_color_valid ||
+                        (charged_overcharge && output_recipe.min_quality !=
                             static_cast<std::uint32_t>(VfxQuality::Medium)) ||
-                        (pickup_idle && output.min_quality !=
+                        (pickup_idle && output_recipe.min_quality !=
                             static_cast<std::uint32_t>(VfxQuality::Medium)) ||
-                        output.min_quality > static_cast<std::uint32_t>(owner.quality) ||
-                        output.min_quality > 2 || !std::isfinite(output.hdr) || output.hdr <= 0.0f ||
-                        std::any_of(output.rgba.begin(), output.rgba.end(),
-                                    [](float value) { return !std::isfinite(value); }) ||
-                        output.rgba[3] < 0.0f || output.rgba[3] > 1.0f)
+                        output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality) ||
+                        output_recipe.min_quality > 2)
                         continue;
                     const auto params = DecodePersistentMoteParameters(
-                        program, output, entity->footprint_radius);
+                        image, output_index, entity->footprint_radius);
                     if (!params) continue;
 
                     VfxFlashSpawnInput mote;
@@ -1008,17 +950,14 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
                                       velocity.z / horizontal};
                     mote.initial_offset = offset;
                     mote.initial_velocity = velocity;
-                    mote.gradient_row = output.gradient_row;
+                    mote.gradient_row = output_recipe.gradient_row;
                     mote.curve_row = params->curve_row;
-                    mote.hdr = output.hdr;
-                    mote.color = {output.rgba[0] * output.hdr,
-                                  output.rgba[1] * output.hdr,
-                                  output.rgba[2] * output.hdr,
-                                  output.rgba[3]};
+                    mote.hdr = output_recipe.hdr;
+                    mote.color = output_recipe.color;
                     if (Finite(mote.position) &&
                         Finite({mote.color.x, mote.color.y, mote.color.z}) &&
                         std::isfinite(mote.color.w) && mote.color.w >= 0.0f &&
-                        mote.color.w <= 1.0f && DecodeMask(program, output, owner, mote))
+                        mote.color.w <= 1.0f && DecodeMask(image, output_index, owner, mote))
                         result.push_back(mote);
                 }
                 if (ordinal == std::numeric_limits<std::uint64_t>::max()) break;
@@ -1030,19 +969,19 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
 } // namespace
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners)
+    const VfxImage &image, std::span<const VfxPersistentInput> owners)
 {
-    return BuildVfxPersistentMoteCommandsImpl(program, owners, nullptr, 0);
+    return BuildVfxPersistentMoteCommandsImpl(image, owners, nullptr, 0);
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
+    const VfxImage &image, std::span<const VfxPersistentInput> owners,
     VfxPersistentMoteBirthWindow &births, Tick current_tick, float interpolation)
 {
     births.Prune(current_tick);
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
-    return BuildVfxPersistentMoteCommandsImpl(program, owners, &births, display_tick);
+    return BuildVfxPersistentMoteCommandsImpl(image, owners, &births, display_tick);
 }
 
 std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
@@ -1092,9 +1031,10 @@ std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
 }
 
 std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
-    const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
+    const VfxImage &image, std::span<const VfxPersistentInput> owners,
     Tick current_tick, float interpolation)
 {
+    const auto &program = image.program;
     std::vector<VfxFlashSpawnInput> result;
     // Keep a short tombstone through the authored expiry. A transiently absent
     // snapshot cannot replay the same ordinal if its owner returns this tick.
@@ -1147,11 +1087,17 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
                 source.knots[0] < 0 || source.knots[1] > 1 ||
                 source.knots[1] <= source.knots[0] ||
                 !Range(source.outputs, program.outputs)) continue;
-            const auto params = DecodeSparkParams(program, source);
-            if (!params) continue;
-            for (const auto &output : std::span(program.outputs).subspan(
-                     source.outputs.first, source.outputs.count))
+            if (source_index >= image.mote_source_recipes.size() ||
+                !image.mote_source_recipes[source_index].spark_valid) continue;
+            const auto &source_recipe = image.mote_source_recipes[source_index];
+            const SparkParams params{source_recipe.count, source_recipe.cone_degrees, source_recipe.drag};
+            for (std::size_t output_index = source.outputs.first;
+                 output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count;
+                 ++output_index)
             {
+                const auto &output = program.outputs[output_index];
+                if (output_index >= image.mote_output_recipes.size() ||
+                    !image.mote_output_recipes[output_index].spark_textures_valid) continue;
                 if (output.source != source_index ||
                     output.profile != VfxOutputProfile::SpriteAdd ||
                     output.shape != Hash("velocity_billboard") ||
@@ -1161,18 +1107,15 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
                     output.coverage_type != Hash("analytic") ||
                     output.coverage_ref != Hash("velocity_streak") ||
                     output.motion != VfxMotionKind::SparseRearwardSparks ||
-                    output.min_quality > static_cast<std::uint32_t>(VfxQuality::High) ||
+                    image.mote_output_recipes[output_index].min_quality > static_cast<std::uint32_t>(VfxQuality::High) ||
                     !Range(output.parameters, program.parameters) ||
-                    output.parameters.count != 0 || !SparkTextures(program, output) ||
-                    !std::isfinite(output.hdr) || output.hdr <= 0 ||
+                    output.parameters.count != 0 ||
                     !std::isfinite(output.motion_rate_hz) || output.motion_rate_hz < 0 ||
                     !std::isfinite(output.motion_amplitude) || output.motion_amplitude < 0 ||
                     output.motion_amplitude > 1 ||
                     !std::isfinite(output.motion_inset_fraction) ||
                     output.motion_inset_fraction < 0 || output.motion_inset_fraction > 1 ||
-                    std::any_of(output.rgba.begin(), output.rgba.end(),
-                        [](float value) { return !std::isfinite(value); }) ||
-                    output.rgba[3] < 0 || output.rgba[3] > 1) continue;
+                    !image.mote_output_recipes[output_index].output_color_valid) continue;
                 auto cursor = std::find_if(cursors_.begin(), cursors_.end(),
                     [&](const Cursor &entry) {
                         return entry.owner_id == owner.stable_id &&
@@ -1203,7 +1146,7 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
                     if (owner_tick < birth_tick) break;
                     ++cursor->next_ordinal;
                     if (owner_tick != birth_tick ||
-                        output.min_quality > static_cast<std::uint32_t>(owner.quality)) continue;
+                        image.mote_output_recipes[output_index].min_quality > static_cast<std::uint32_t>(owner.quality)) continue;
                     const auto seed = Mix(owner.stable_seed ^
                         Mix(static_cast<std::uint32_t>(lookup->effect_id)) ^
                         Mix(static_cast<std::uint32_t>(lookup->effect_id >> 32)) ^
@@ -1221,11 +1164,9 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
                     spark.lifetime = static_cast<float>(spacing);
                     spark.event_tick = current_tick;
                     spark.stable_seed = seed;
-                    spark.gradient_row = output.gradient_row;
-                    spark.hdr = output.hdr;
-                    spark.color = {output.rgba[0] * output.hdr,
-                                   output.rgba[1] * output.hdr,
-                                   output.rgba[2] * output.hdr, output.rgba[3]};
+                    spark.gradient_row = image.mote_output_recipes[output_index].gradient_row;
+                    spark.hdr = image.mote_output_recipes[output_index].hdr;
+                    spark.color = image.mote_output_recipes[output_index].color;
                     spark.drag = params->drag;
                     result.push_back(spark);
                 }

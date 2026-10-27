@@ -1,4 +1,5 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_decal_commands.hpp"
 #include <bit>
 #include <cmath>
@@ -23,7 +24,9 @@ hs::VfxProgramData Program(bool organic=false,bool rune=false)
  add(organic?"Content/Textures/VFX/vfx_organic_decal_array.dds":"Content/Textures/VFX/vfx_fracture_decal_array.dds","texture_array");p.texture_bindings.back().selection=Hash("stable_seed_mod_4");p.texture_bindings.back().slices={0,4};for(std::uint32_t k=0;k<4;++k)p.slice_indices.push_back(k+(rune?4u:0u));o.textures={0,static_cast<std::uint32_t>(p.texture_bindings.size())};p.outputs.push_back(o);return p;
 }
 hs::VfxEventInput Input(){hs::VfxEventInput i;i.effect_handle=1;i.event_tick=100;i.sequence=77;i.stable_seed=6;i.payload=hs::VfxPointPayload{{1,2,3},{},{1,0,0},2};return i;}
-auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick tick=166){return hs::runtime_detail::BuildVfxTypedDecalCommands(p,std::span(&i,1),{},tick);}
+hs::VfxImageData Image(const hs::VfxProgramData&p){hs::VfxImageData d;d.program=p;hs::PrepareVfxDecalRecipes(d.program.View(),d.decal_effect_ranges,d.decal_recipes);return d;}
+auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick tick=166){auto d=Image(p);return hs::runtime_detail::BuildVfxTypedDecalCommands(d.View(),std::span(&i,1),{},tick);}
+auto Owned(const hs::VfxProgramData&p,const hs::VfxPersistentInput&i){auto d=Image(p);return hs::runtime_detail::BuildVfxTypedDecalCommands(d.View(),{},std::span(&i,1),999);}
 void GeometryAndIdentity()
 {
  auto p=Program();auto i=Input();auto a=Run(p,i);Check(a.size()==1&&Near(a[0].radius,2.5f)&&Near(a[0].normalized_age,.5f)&&Near(a[0].alpha,.25f)&&a[0].texture_slice==2&&a[0].voronoi_cells==12&&Near(a[0].edge_glow,.7f)&&a[0].gradient_row==7&&a[0].position.y==2,"fracture contract lost");
@@ -38,7 +41,7 @@ void ResidueAndOwner()
  auto p=Program(true);auto i=Input();auto a=Run(p,i,112);Check(a.size()==1&&Near(a[0].alpha,.25f)&&a[0].texture_slice==2&&a[0].kind==hs::VfxDecalKind::Organic,"scorch fade or slice lost");
  p=Program(true,true);Check(Run(p,i,196)[0].texture_slice==6&&Near(Run(p,i,196)[0].alpha,.25f),"rune slice offset or fade-out lost");
  p=Program(true);p.effects[0].payload_kind=Hash("CircleAreaPayload");p.effects[0].input_mode=1;p.effects[0].timing_kind=1;p.effects[0].seconds=0;hs::VfxPersistentInput owner;owner.effect_handle=1;owner.stable_id=23;owner.stable_seed=6;owner.normalized_age=.4f;hs::VfxCirclePayload c;c.radius=7;c.center={2,0,5};owner.payload=c;
- const auto owned=[&](){return hs::runtime_detail::BuildVfxTypedDecalCommands(p,{},std::span(&owner,1),999);};a=owned();Check(a.size()==1&&a[0].radius==7&&Near(a[0].alpha,.5f),"persistent actual circle/age lost");owner.normalized_age=.8f;Check(Near(owned()[0].alpha,.25f)&&owned()[0].stable_id==a[0].stable_id,"persistent fade or identity changed");owner.normalized_age=1;Check(owned().empty(),"expired owner retained decal");Check(hs::runtime_detail::BuildVfxTypedDecalCommands(p,{},{},999).empty(),"absent owner retained decal");
+ const auto owned=[&](){return Owned(p,owner);};a=owned();Check(a.size()==1&&a[0].radius==7&&Near(a[0].alpha,.5f),"persistent actual circle/age lost");owner.normalized_age=.8f;Check(Near(owned()[0].alpha,.25f)&&owned()[0].stable_id==a[0].stable_id,"persistent fade or identity changed");owner.normalized_age=1;Check(owned().empty(),"expired owner retained decal");Check(([&](){auto d=Image(p);return hs::runtime_detail::BuildVfxTypedDecalCommands(d.View(),{},{},999).empty();})(),"absent owner retained decal");
 }
 void Invalid()
 {

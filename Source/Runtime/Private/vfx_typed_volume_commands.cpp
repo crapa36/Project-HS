@@ -165,7 +165,7 @@ Result Append(const VfxProgramView &program,const VfxEffectRecord &effect,std::u
 } // namespace
 bool IsVfxTypedVolumeEffect(const VfxProgramView &program,VfxEffectHandle handle) noexcept
 {return Allowed(EffectId(program,handle));}
-Result BuildVfxTypedVolumeCommands(const VfxProgramView &program,std::span<const VfxEventInput> events,
+Result BuildVfxTypedVolumeCommands(const VfxProgramView &program,VfxEventView events,
     std::span<const VfxPersistentInput> persistent,double current_tick,VfxQuality admission,std::vector<VfxVolumeInput> &output)
 {
     output.clear();if(admission!=VfxQuality::High)return Result::Success();

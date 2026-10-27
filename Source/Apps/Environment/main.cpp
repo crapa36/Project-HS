@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -116,9 +117,48 @@ void AddInputs(ap::ActionSpec& spec, const fs::path& source_root,
         Require(!relative.empty() && !relative.is_absolute() &&
                 relative.begin() != relative.end() && *relative.begin() != "..",
                 "input escapes source root");
-        spec.inputs.push_back(ap::HashInput(relative.generic_string(), path));
+        const auto logical_id=relative.generic_string();
+        if(std::ranges::none_of(spec.inputs,[&](const auto& input){return input.logical_id==logical_id;}))
+            spec.inputs.push_back(ap::HashInput(logical_id,path));
     }
 }
+
+struct InputSnapshot
+{
+    fs::path source_root;
+    fs::path snapshot_root;
+    std::map<std::string, ap::Input> captured;
+
+    void Capture(const fs::path& snapshot_path)
+    {
+        const auto relative = snapshot_path.lexically_relative(snapshot_root);
+        Require(!relative.empty() && !relative.is_absolute() &&
+                relative.begin() != relative.end() && *relative.begin() != "..",
+                "snapshot input escapes its root");
+        const auto logical_id = relative.generic_string();
+        if (captured.contains(logical_id)) return;
+        const auto source_path = source_root / relative;
+        const auto target_path = snapshot_root / relative;
+        ap::MakeDirectory(target_path.parent_path());
+        captured.emplace(logical_id,
+            ap::CopyAndHashInput(logical_id, source_path, target_path));
+    }
+
+    void SetInputs(ap::ActionSpec& spec, const std::vector<fs::path>& snapshot_paths)
+    {
+        spec.inputs.clear();
+        for (const auto& path : snapshot_paths)
+        {
+            Capture(path);
+            const auto relative = path.lexically_relative(snapshot_root).generic_string();
+            spec.inputs.push_back(captured.at(relative));
+        }
+        std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+        spec.inputs.erase(std::unique(spec.inputs.begin(), spec.inputs.end(),
+            [](const auto& left, const auto& right) { return left.logical_id == right.logical_id; }),
+            spec.inputs.end());
+    }
+};
 
 bool IsCurrent(const fs::path& build_root, const ap::ActionSpec& spec,
                const std::vector<std::string>& names)
@@ -163,7 +203,9 @@ void AddRoleAction(PendingAction& action, const fs::path& source_root,
         (role=="base_color"?gpu_identity:".cpu-bc7");
     action.spec.recipe_version=1;
     action.spec.namespace_path="environment/textures/"+group+"/"+role;
-    AddInputs(action.spec,source_root,hs::content::EnvironmentTextureRoleInputs(texture_source,group,role));
+    auto inputs=hs::content::EnvironmentTextureRoleInputs(texture_source,group,role);
+    inputs.push_back(texture_source/"baked_materials.json");
+    AddInputs(action.spec,source_root,inputs);
     action.names={hs::content::EnvironmentTextureRoleProduct(texture_source,group,role)};
 }
 
@@ -210,6 +252,7 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
     std::vector<hs::content::EnvironmentTextureRoleRequest> requests;
     std::vector<std::string> all_inputs;
     std::vector<bool> current(actions.size());
+    fs::path input_stage;
     try {
     for(size_t i=0;i<actions.size();++i) {
         std::ranges::sort(actions[i].spec.inputs,{},&ap::Input::logical_id);
@@ -233,6 +276,73 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
                 current[i]=IsCurrent(build_root,actions[i].spec,actions[i].names);
         }
     }
+    if(std::ranges::any_of(current,[](bool value){return !value;})) {
+        input_stage=ap::CreateStage(build_root/"Actions/environment/textures");
+        InputSnapshot snapshot{source_root,input_stage,{}};
+        const auto frozen_texture_source=input_stage/"ContentSource/Textures/Environment";
+        snapshot.Capture(frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json");
+        snapshot.Capture(frozen_texture_source/"baked_materials.json");
+        for(size_t i=0;i<actions.size();++i) {
+            auto& action=actions[i];
+            const auto has_same_snapshot_input=[&](const fs::path& frozen_path) {
+                const auto relative=frozen_path.lexically_relative(input_stage).generic_string();
+                const auto frozen=snapshot.captured.find(relative);
+                const auto original=std::ranges::find(action.spec.inputs,relative,&ap::Input::logical_id);
+                return frozen!=snapshot.captured.end() && original!=action.spec.inputs.end() &&
+                    frozen->second.digest==original->digest;
+            };
+            const bool metadata_unchanged=has_same_snapshot_input(
+                frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json") &&
+                (!action.spec.action_id.starts_with("environment.texture.") ||
+                 has_same_snapshot_input(frozen_texture_source/"baked_materials.json"));
+            if(current[i] && metadata_unchanged) continue;
+            if(action.spec.action_id.starts_with("environment.texture.")) {
+                auto paths=hs::content::EnvironmentTextureRoleInputs(
+                    frozen_texture_source,action.group,action.role);
+                paths.push_back(frozen_texture_source/"baked_materials.json");
+                snapshot.SetInputs(action.spec,paths);
+                action.names={hs::content::EnvironmentTextureRoleProduct(
+                    frozen_texture_source,action.group,action.role)};
+            } else {
+                snapshot.SetInputs(action.spec,hs::content::EnvironmentHistogramInputs(frozen_texture_source));
+            }
+            current[i]=IsCurrent(build_root,action.spec,action.names);
+        }
+        need_gpu=false;
+        for(size_t i=0;i<actions.size();++i)
+            if(!current[i] && (actions[i].role=="base_color" || actions[i].spec.action_id=="environment.histogram"))
+                need_gpu=true;
+        if(need_gpu && !device) {
+            device=HardwareCompressor();
+            const auto actual_identity=EncoderIdentity(device.Get());
+            if(actual_identity!=guessed_gpu_identity) {
+                const auto was_current=current;
+                for(auto& action:actions) {
+                    if(action.role=="base_color") action.spec.recipe_id="project-hs.environment.texture-role"+actual_identity;
+                    else if(action.spec.action_id=="environment.histogram")
+                        action.spec.recipe_id="project-hs.environment.histogram"+actual_identity;
+                }
+                for(size_t i=0;i<actions.size();++i) {
+                    current[i]=IsCurrent(build_root,actions[i].spec,actions[i].names);
+                    if(was_current[i] && !current[i]) {
+                        auto& action=actions[i];
+                        if(action.spec.action_id.starts_with("environment.texture.")) {
+                            auto paths=hs::content::EnvironmentTextureRoleInputs(
+                                frozen_texture_source,action.group,action.role);
+                            paths.push_back(frozen_texture_source/"baked_materials.json");
+                            snapshot.SetInputs(action.spec,paths);
+                            action.names={hs::content::EnvironmentTextureRoleProduct(
+                                frozen_texture_source,action.group,action.role)};
+                        } else {
+                            snapshot.SetInputs(action.spec,
+                                hs::content::EnvironmentHistogramInputs(frozen_texture_source));
+                        }
+                        current[i]=IsCurrent(build_root,action.spec,action.names);
+                    }
+                }
+            }
+        }
+    }
     for(size_t i=0;i<actions.size();++i) {
         auto& action=actions[i];
         for(const auto& input:action.spec.inputs) all_inputs.push_back(input.path.generic_string());
@@ -247,9 +357,11 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
             requests.push_back({action.group,action.role,action.stage});
         }
     }
-        if(!requests.empty()) hs::content::CookEnvironmentTextureRoles(texture_source,requests,device.Get());
+        const auto cook_texture_source=input_stage.empty()?texture_source:
+            input_stage/"ContentSource/Textures/Environment";
+        if(!requests.empty()) hs::content::CookEnvironmentTextureRoles(cook_texture_source,requests,device.Get());
         for(auto& action:actions) if(action.needs_cook&&action.spec.action_id=="environment.histogram")
-            hs::content::CookEnvironmentHistogram(texture_source,action.stage,device.Get());
+            hs::content::CookEnvironmentHistogram(cook_texture_source,action.stage,device.Get());
         for(auto& action:actions) if(action.needs_cook) {
             std::vector<ap::Product> products;
             for(const auto& name:action.names)
@@ -272,8 +384,10 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
         ap::AtomicWriteIfDifferent(depfile,dep);
         const auto timestamp=std::chrono::steady_clock::now().time_since_epoch().count();
         ap::AtomicWriteIfDifferent(completion,"environment-texture-family-v1\n"+std::to_string(timestamp)+"\n");
+        if(!input_stage.empty()) { ap::RemoveStage(input_stage); input_stage.clear(); }
     } catch(...) {
         for(auto& action:actions) if(!action.stage.empty()) ap::RemoveStage(action.stage);
+        if(!input_stage.empty()) ap::RemoveStage(input_stage);
         throw;
     }
 }
@@ -311,8 +425,9 @@ void Produce(std::string_view mode, const fs::path& source_root,
         device = HardwareCompressor();
         spec.recipe_id += EncoderIdentity(device.Get());
     } else if (mode == "texture-role") {
-        AddInputs(spec, source_root,
-                  hs::content::EnvironmentTextureRoleInputs(texture_source, group, role));
+        auto inputs=hs::content::EnvironmentTextureRoleInputs(texture_source,group,role);
+        inputs.push_back(texture_source/"baked_materials.json");
+        AddInputs(spec,source_root,inputs);
         names = {hs::content::EnvironmentTextureRoleProduct(texture_source, group, role)};
         spec.action_id = "environment.texture." + group + "." + role;
         spec.recipe_id = "project-hs.environment.texture-role";
@@ -338,31 +453,72 @@ void Produce(std::string_view mode, const fs::path& source_root,
         return;
     }
 
-    const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
+    const auto input_stage=ap::CreateStage(build_root/"Actions"/spec.namespace_path);
     try {
-        if (mode == "histogram")
-            hs::content::CookEnvironmentHistogram(texture_source, stage, device.Get());
-        else if (mode == "texture-role")
-            hs::content::CookEnvironmentTextureRole(texture_source, stage, group, role,
-                                                    device.Get());
-        else if (mode == "textures")
-            hs::content::CookEnvironmentTextures(texture_source, stage, device.Get());
-        else
-            hs::content::CookEnvironmentMeshes(mesh_source, stage);
+        InputSnapshot snapshot{source_root,input_stage,{}};
+        const auto frozen_texture_source=input_stage/"ContentSource/Textures/Environment";
+        const auto frozen_mesh_source=input_stage/"ContentSource/Models/Environment/environment_meshes.json";
+        if(mode=="histogram")
+            snapshot.Capture(frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json");
+        else if(mode=="texture-role" || mode=="textures") {
+            snapshot.Capture(frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json");
+            snapshot.Capture(frozen_texture_source/"baked_materials.json");
+        } else {
+            snapshot.Capture(frozen_mesh_source);
+            snapshot.Capture(frozen_mesh_source.parent_path()/"meadow_surface_meshes.json");
+        }
 
-        std::vector<ap::Product> products;
-        for (const auto& name : names)
-            products.push_back(ap::HashProduct("environment/" + name, name, stage / name));
-        const auto staged_count = std::distance(fs::directory_iterator(stage), fs::directory_iterator{});
-        Require(staged_count == static_cast<std::ptrdiff_t>(names.size()),
-                "producer wrote unexpected staged files");
-        ap::Publish(build_root, spec, stage, std::move(products));
-    } catch (...) {
+        std::vector<fs::path> frozen_inputs;
+        if(mode=="histogram")
+            frozen_inputs=hs::content::EnvironmentHistogramInputs(frozen_texture_source);
+        else if(mode=="texture-role") {
+            frozen_inputs=hs::content::EnvironmentTextureRoleInputs(frozen_texture_source,group,role);
+            frozen_inputs.push_back(frozen_texture_source/"baked_materials.json");
+            names={hs::content::EnvironmentTextureRoleProduct(frozen_texture_source,group,role)};
+        } else if(mode=="textures") {
+            frozen_inputs=hs::content::EnvironmentTextureInputs(frozen_texture_source);
+            names=hs::content::EnvironmentTextureProducts(frozen_texture_source);
+        } else {
+            frozen_inputs={frozen_mesh_source,frozen_mesh_source.parent_path()/"meadow_surface_meshes.json"};
+        }
+        snapshot.SetInputs(spec,frozen_inputs);
+        if(IsCurrent(build_root,spec,names)) {
+            ap::TouchActionResult(build_root/"Actions"/spec.namespace_path/"result.json");
+            ap::RemoveStage(input_stage);
+            std::cout<<spec.action_id<<" current\n";
+            return;
+        }
+
+        const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
+        try {
+            if (mode == "histogram")
+                hs::content::CookEnvironmentHistogram(frozen_texture_source, stage, device.Get());
+            else if (mode == "texture-role")
+                hs::content::CookEnvironmentTextureRole(frozen_texture_source, stage, group, role,
+                                                        device.Get());
+            else if (mode == "textures")
+                hs::content::CookEnvironmentTextures(frozen_texture_source, stage, device.Get());
+            else
+                hs::content::CookEnvironmentMeshes(frozen_mesh_source, stage);
+
+            std::vector<ap::Product> products;
+            for (const auto& name : names)
+                products.push_back(ap::HashProduct("environment/" + name, name, stage / name));
+            const auto staged_count = std::distance(fs::directory_iterator(stage), fs::directory_iterator{});
+            Require(staged_count == static_cast<std::ptrdiff_t>(names.size()),
+                    "producer wrote unexpected staged files");
+            ap::Publish(build_root, spec, stage, std::move(products));
+        } catch (...) {
+            ap::RemoveStage(stage);
+            throw;
+        }
         ap::RemoveStage(stage);
+        ap::RemoveStage(input_stage);
+        std::cout << spec.action_id << " published\n";
+    } catch (...) {
+        ap::RemoveStage(input_stage);
         throw;
     }
-    ap::RemoveStage(stage);
-    std::cout << spec.action_id << " published\n";
 }
 } // namespace
 

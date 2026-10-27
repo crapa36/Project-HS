@@ -290,7 +290,8 @@ add_library(hs_vfx_program_io STATIC EXCLUDE_FROM_ALL Source/RendererD3D12/Priva
 target_include_directories(hs_vfx_program_io PUBLIC Source/RendererD3D12/Public)
 target_link_libraries(hs_vfx_program_io PUBLIC hs_core hs_render_data_values)
 hs_configure_target(hs_vfx_program_io)
-add_library(hs_vfx_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/vfx_image_io.cpp)
+add_library(hs_vfx_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/vfx_image_io.cpp
+    Source/Runtime/Private/vfx_image_identity.cpp)
 target_include_directories(hs_vfx_image_io PUBLIC Source/Runtime/Public)
 target_link_libraries(hs_vfx_image_io PUBLIC hs_vfx_program_io)
 hs_configure_target(hs_vfx_image_io)
@@ -1008,7 +1009,8 @@ add_executable(hs_content_linker Source/Apps/ContentLinker/main.cpp
     Source/Apps/Content/release_vfx_codegen.cpp
     Source/Apps/Content/character_products.cpp)
 target_compile_definitions(hs_content_linker PRIVATE HS_SHIPPING_PACK_RELATIVE_PATH="${HS_SHIPPING_PACK_RELATIVE_PATH}")
-target_link_libraries(hs_content_linker PRIVATE hs_asset_pipeline hs_vfx_image_io hs_geometry_cooker nlohmann_json::nlohmann_json)
+target_link_libraries(hs_content_linker PRIVATE hs_asset_pipeline hs_vfx_image_io hs_geometry_cooker
+    hs_game_rules hs_presentation_io nlohmann_json::nlohmann_json)
 hs_configure_target(hs_content_linker)
 add_executable(hs_environment
     Source/Apps/Environment/main.cpp
@@ -2028,6 +2030,7 @@ file(GENERATE OUTPUT "${HS_RUNTIME_FULL_RESULT_LIST}"
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Shipping/link.stamp"
     BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp"
+        "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.receipt.json"
         "${CMAKE_CURRENT_BINARY_DIR}/${HS_SHIPPING_PACK_RELATIVE_PATH}"
     COMMAND "$<TARGET_FILE:hs_content_linker>" --build-root "${CMAKE_CURRENT_BINARY_DIR}"
         --font "${HS_FONT_DIRECTORY}/NotoSansKR.ttf" ${HS_CHARACTER_LINK_ARGUMENTS}
@@ -2446,6 +2449,7 @@ if(HS_BUILD_TESTS)
             -FixtureParent "${CMAKE_CURRENT_BINARY_DIR}")
     add_executable(hs_vfx_authoring_tests Tests/vfx_authoring_tests.cpp
         Tests/release_vfx_codegen_tests.cpp
+        Tests/vfx_image_identity_tests.cpp
         Source/Apps/Content/release_vfx_codegen.cpp)
     target_link_libraries(hs_vfx_authoring_tests PRIVATE hs_vfx_authoring hs_vfx_image_io nlohmann_json::nlohmann_json)
     target_compile_definitions(hs_vfx_authoring_tests PRIVATE

@@ -1,6 +1,7 @@
 #include "persistent_gpu_scene.hpp"
 #include "renderer_skin_ranges.hpp"
 #include "renderer_geometry.hpp"
+#include "renderer_monster_lod.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -99,6 +100,222 @@ void ChannelUploadsPreserveTables()
     Check(upload() == 3 * hs::kGpuSceneSlotPayloadBytes,
           "fresh native backing initializes all channels even without semantic changes");
 }
+
+void SkinChannelTransactionsPreserveScene()
+{
+    hs::PersistentGpuSceneSlots scene;
+    const auto instance = Instance(4.0f);
+    hs::GpuSceneMetadata initial;
+    initial.asset_id = 101;
+    initial.material_id = 202;
+    initial.skin_flags = 1;
+    initial.skin_vertex_offset = 64;
+    initial.previous_skin_vertex_offset = 32;
+    hs::GpuSceneCanonicalInputs canonical;
+    canonical.supplied_transform_revision = 3;
+    canonical.supplied_material_revision = 5;
+
+    scene.BeginFrame();
+    const auto slot = scene.Upsert({303, 0}, instance, initial, canonical);
+    scene.EndFrame();
+    scene.Commit();
+    const auto revision = scene.ContentRevision();
+    const auto payload_revision = scene.PayloadRevision();
+    const auto transform_revision = scene.Revisions(slot.index).transform;
+    auto next_skin = initial;
+    next_skin.previous_skin_vertex_offset = 96;
+    const auto submitted_instance = scene.Instances()[slot.index];
+    const auto submitted_metadata = scene.Metadata()[slot.index];
+    const auto submitted_material_revision = scene.Revisions(slot.index).material;
+
+    scene.BeginFrame();
+    Check(!scene.Upsert({303, 0}, submitted_instance, next_skin, canonical).conflict,
+        "canonical skin history update retains its stable scene slot");
+    scene.EndFrame();
+    Check(scene.DirtyRanges(hs::GpuSceneChannel::Transform).empty() &&
+          scene.DirtyRanges(hs::GpuSceneChannel::Mesh).empty() &&
+          scene.DirtyRanges(hs::GpuSceneChannel::Skin).size() == 1,
+        "canonical skin-history edit updates only the skin channel");
+    Check(scene.PayloadRevision() == payload_revision + 1,
+        "prepared canonical skin edit advances the prospective GPU payload revision");
+    scene.Abort();
+    Check(scene.Metadata()[slot.index].previous_skin_vertex_offset == initial.previous_skin_vertex_offset &&
+          scene.Metadata()[slot.index].asset_id == submitted_metadata.asset_id &&
+          scene.Metadata()[slot.index].material_id == submitted_metadata.material_id &&
+          scene.Metadata()[slot.index].reserved == submitted_metadata.reserved &&
+          scene.Instances()[slot.index].position.x == submitted_instance.position.x &&
+          scene.Instances()[slot.index].color == submitted_instance.color &&
+          scene.Instances()[slot.index].mesh == submitted_instance.mesh &&
+          scene.Instances()[slot.index].yaw == submitted_instance.yaw &&
+          scene.ContentRevision() == revision &&
+          scene.Revisions(slot.index).transform == transform_revision &&
+          scene.Revisions(slot.index).material == submitted_material_revision && scene.ActiveCount() == 1,
+        "aborted canonical skin edit leaves submitted membership and payload intact");
+    Check(scene.PayloadRevision() == payload_revision,
+        "aborted canonical skin edit does not publish its payload revision");
+
+    scene.BeginFrame();
+    Check(!scene.Upsert({303, 0}, submitted_instance, next_skin, canonical).conflict,
+        "canonical skin update can be retried after abort");
+    scene.EndFrame();
+    scene.Commit();
+    Check(scene.Metadata()[slot.index].previous_skin_vertex_offset == next_skin.previous_skin_vertex_offset &&
+          scene.Metadata()[slot.index].asset_id == submitted_metadata.asset_id &&
+          scene.Metadata()[slot.index].material_id == submitted_metadata.material_id &&
+          scene.Metadata()[slot.index].reserved == submitted_metadata.reserved &&
+          scene.Instances()[slot.index].position.x == submitted_instance.position.x &&
+          scene.Instances()[slot.index].color == submitted_instance.color &&
+          scene.Instances()[slot.index].mesh == submitted_instance.mesh &&
+          scene.Instances()[slot.index].yaw == submitted_instance.yaw &&
+          scene.ContentRevision() == revision &&
+          scene.Revisions(slot.index).transform == submitted_transform_revision &&
+          scene.Revisions(slot.index).material == submitted_material_revision && scene.ActiveCount() == 1,
+        "committed skin history preserves current-scene revisions and active slot identity");
+    Check(scene.PayloadRevision() == payload_revision + 1,
+        "committed canonical skin edit publishes its GPU payload revision");
+}
+
+void PacketSkinConsumerCoverageIsPreparedForEveryView()
+{
+    std::array<hs::RenderViewInput, 2> views{};
+    for (std::size_t i = 0; i < views.size(); ++i)
+    {
+        auto &view = views[i];
+        view.id = {static_cast<std::uint32_t>(i + 1)};
+        view.camera.position = {0.0, 0.0, -5.0};
+        view.camera.target = {0.0, 0.0, 0.0};
+        view.output_extent = {1280, 720};
+        view.render_active = {1280, 720};
+    }
+    hs::LightView local_shadow;
+    local_shadow.type = hs::LightType::Point;
+    local_shadow.position = {0.0f, 0.0f, 0.0f};
+    local_shadow.range = 20.0f;
+    local_shadow.emitter_radius = 0.1f;
+    local_shadow.shadow_flags = hs::kLightShadowRequested;
+    const std::array lights{local_shadow};
+    hs::MonsterLodProjectionInputs inputs;
+    inputs.camera_views = views;
+    inputs.local_lights = lights;
+    inputs.csm_world_texels = {0.1, 0.5, 2.0};
+    inputs.vsm_world_texels = {0.05, 0.2, 0.8};
+    inputs.maximum_error_pixels = 1.0;
+    inputs.local_shadow_face_resolution = 512;
+    inputs.csm_active = inputs.vsm_active = inputs.local_shadows_active = true;
+    inputs.camera_views_complete = inputs.local_lights_complete = true;
+    const auto prepared = hs::PrepareMonsterLodConsumers(inputs);
+    Check(prepared.baseline.valid && prepared.cameras.size() == views.size() &&
+              prepared.local_lights.size() == lights.size(),
+          "packet skin demand retains every camera and requested local-shadow consumer");
+}
+
+void PayloadRevisionRangesTrackRotatingUploads()
+{
+    using Channel = hs::GpuSceneChannel;
+    hs::PersistentGpuSceneSlots scene;
+    std::vector<hs::PersistentGpuSceneRange> ranges;
+
+    scene.BeginFrame();
+    const auto a = scene.Upsert({11, 0}, Instance(1));
+    const auto b = scene.Upsert({22, 0}, Instance(2));
+    const auto c = scene.Upsert({33, 0}, Instance(3));
+    scene.EndFrame();
+    const auto initial_revision = scene.PayloadRevision();
+    scene.CollectDirtyRangesSince(std::uint64_t{0}, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == 0 && ranges[0].count == 3,
+          "revision zero uploads every active row in one union range");
+    scene.Commit();
+    Check(scene.PayloadRevision() == initial_revision,
+          "commit publishes the prepared payload revision");
+
+    const auto baseline = scene.PayloadRevision();
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({11, 0}, Instance(10)));
+    static_cast<void>(scene.Upsert({22, 0}, Instance(2)));
+    static_cast<void>(scene.Upsert({33, 0}, Instance(3)));
+    scene.EndFrame();
+    scene.Commit();
+    const auto transform_revision = scene.PayloadRevision();
+
+    scene.BeginFrame();
+    auto material = scene.Metadata()[b.index];
+    material.material_id = 0x1234;
+    static_cast<void>(scene.Upsert({11, 0}, Instance(10)));
+    static_cast<void>(scene.Upsert({22, 0}, Instance(2), material));
+    static_cast<void>(scene.Upsert({33, 0}, Instance(3)));
+    scene.EndFrame();
+    scene.Commit();
+    const auto material_revision = scene.PayloadRevision();
+    scene.CollectDirtyRangesSince(material_revision, ranges);
+    Check(ranges.empty(), "a backing at the accepted revision reports no pending upload");
+    Check(transform_revision > baseline && material_revision > transform_revision,
+          "payload revision advances independently for committed updates");
+    scene.CollectDirtyRangesSince(Channel::Transform, baseline, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == a.index && ranges[0].count == 1,
+          "channel collection reports transform changes after an older upload");
+    scene.CollectDirtyRangesSince(Channel::Material, baseline, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == b.index && ranges[0].count == 1,
+          "channel collection retains material changes across skipped revisions");
+    scene.CollectDirtyRangesSince(baseline, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == a.index && ranges[0].count == 2,
+          "union collection merges adjacent rows changed in different revisions");
+    scene.CollectDirtyRangesSince(Channel::Bounds, baseline, ranges);
+    Check(ranges.empty(), "unrelated channels do not inherit another channel change");
+
+    const auto before_abort = scene.PayloadRevision();
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({11, 0}, Instance(100)));
+    scene.EndFrame();
+    Check(scene.PayloadRevision() == before_abort + 1,
+          "prepared update exposes its prospective payload revision");
+    scene.Abort();
+    Check(scene.PayloadRevision() == before_abort,
+          "aborting prepared payload changes does not publish a revision");
+    scene.CollectDirtyRangesSince(before_abort, ranges);
+    Check(ranges.empty(), "aborted pending dirty channels are removed");
+
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({11, 0}, Instance(1)));
+    static_cast<void>(scene.Upsert({33, 0}, Instance(3)));
+    scene.EndFrame();
+    scene.Commit();
+    scene.CollectDirtyRangesSince(std::uint64_t{0}, ranges);
+    Check(ranges.size() == 2 && ranges[0].begin == a.index && ranges[0].count == 1 &&
+              ranges[1].begin == c.index && ranges[1].count == 1,
+          "inactive holes are excluded from all-active initialization ranges");
+
+    const auto before_reuse = scene.PayloadRevision();
+    scene.BeginFrame();
+    const auto recycled = scene.Upsert({44, 0}, Instance(4));
+    scene.EndFrame();
+    Check(recycled.index == b.index, "new identity reuses the retired slot");
+    scene.Commit();
+    scene.CollectDirtyRangesSince(Channel::Instance, before_reuse, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == recycled.index,
+          "recycled identities request a fresh row upload");
+
+    const auto before_reset = scene.PayloadRevision();
+    scene.BeginFrame(true);
+    static_cast<void>(scene.Upsert({66, 0}, Instance(6)));
+    scene.EndFrame();
+    scene.Commit();
+    scene.CollectDirtyRangesSince(before_reset, ranges);
+    Check(scene.PayloadRevision() > before_reset && ranges.size() == 1 &&
+              ranges[0].begin == 0 && ranges[0].count == 1,
+          "session reset starts a fresh active table and stamps its rows");
+
+    const auto before_clear = scene.PayloadRevision();
+    scene.Clear();
+    Check(scene.PayloadRevision() == before_clear,
+          "clear preserves the monotonic payload revision epoch");
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({55, 0}, Instance(5)));
+    scene.EndFrame();
+    scene.Commit();
+    scene.CollectDirtyRangesSince(before_clear, ranges);
+    Check(ranges.size() == 1 && ranges[0].begin == 0,
+          "post-clear rows cannot silently match an older uploaded revision");
+}
 } // namespace
 
 int main()
@@ -106,6 +323,9 @@ int main()
     try
     {
         ChannelUploadsPreserveTables();
+        SkinChannelTransactionsPreserveScene();
+        PacketSkinConsumerCoverageIsPreparedForEveryView();
+        PayloadRevisionRangesTrackRotatingUploads();
         hs::PersistentGpuSceneSlots scene;
 
         scene.BeginFrame();
@@ -432,6 +652,12 @@ int main()
                   retained_ranges.Find({20, 0})->offset == 62719 &&
                   retained_ranges.Find({10, 0})->offset == 0,
               "reordered current layout cannot overwrite retained previous-frame offsets");
+        const auto *packet_melee = retained_ranges.Find({20, 0});
+        const auto *packet_archer = retained_ranges.Find({10, 0});
+        Check(packet_melee && packet_archer && packet_melee->offset == 62719 &&
+                  packet_archer->offset == 0 && reordered_ranges.Find({20, 0})->offset != packet_melee->offset &&
+                  reordered_ranges.Find({10, 0})->offset != packet_archer->offset,
+              "later views retain packet-owned current ranges while their previous-frame layout stays independent");
         hs::SkinVertexRanges despawned_ranges;
         Check(despawned_ranges.Resolve({30, 0}, 17803, duplicate_range) &&
                   duplicate_range.offset == 0 && !despawned_ranges.Find({20, 0}) &&

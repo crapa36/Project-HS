@@ -18,9 +18,7 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(const RendererConfig &can
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
             const std::string name(hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                         : kAuthoredMaterialNames[ordinal]);
-            const std::string id = hero ? "render/material/" + name + "/material.rpkg"
-                : ordinal == kTerrainMaterialOrdinal ? "render/material/terrain.rpkg"
-                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg" : "render/" + name + ".rpkg";
+            const auto id = render_data::MaterialProduct(name);
             if (candidate.packed_content || candidate.development_catalog)
             {
                 const auto handle = FindRendererMaterial(candidate, MakeAssetId(id));
@@ -103,18 +101,16 @@ Result D3D12Renderer::Impl::PrepareMaterialSidecars(std::array<AllocationResourc
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::WriteMaterialSidecarDescriptors() noexcept
+void D3D12Renderer::Impl::WriteMaterialSidecarDescriptors(OwnedView &owner, std::uint32_t frame) noexcept
 {
-    for (std::size_t plane = 0; plane < material_sidecars.size(); ++plane)
+    for (std::size_t plane = 0; plane < owner.targets.material_sidecars.size(); ++plane)
     {
         auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += (kMaterialSidecarRtvOffset + plane) * rtv_stride;
+        rtv.ptr += (kFrameCount + frame * kRtvBankStride + kMaterialSidecarRtvOffset + plane) * rtv_stride;
         D3D12_RENDER_TARGET_VIEW_DESC rtv_view{};
         rtv_view.Format = MaterialSidecarFormat(plane);
         rtv_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(material_sidecars[plane].resource.Get(), &rtv_view, rtv);
-        for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        {
+        device->CreateRenderTargetView(owner.targets.material_sidecars[plane].resource.Get(), &rtv_view, rtv);
             auto srv = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             srv.ptr += (frame * kTextureDescriptorCount + kSurfaceDescriptorOffset + 2 + plane) * srv_stride;
             D3D12_SHADER_RESOURCE_VIEW_DESC srv_view{};
@@ -122,16 +118,15 @@ void D3D12Renderer::Impl::WriteMaterialSidecarDescriptors() noexcept
             srv_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srv_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srv_view.Texture2D.MipLevels = 1;
-            device->CreateShaderResourceView(material_sidecars[plane].resource.Get(), &srv_view, srv);
+            device->CreateShaderResourceView(owner.targets.material_sidecars[plane].resource.Get(), &srv_view, srv);
             srv = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             srv.ptr += (frame * kTextureDescriptorCount + kVisibilityUavDescriptorOffset + 12 + plane) * srv_stride;
             D3D12_UNORDERED_ACCESS_VIEW_DESC uav_view{};
             uav_view.Format = MaterialSidecarFormat(plane);
             uav_view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             auto *resource = config.surface_frontend == SurfaceFrontend::VisibilityBuffer
-                ? material_sidecars[plane].resource.Get() : nullptr;
+                ? owner.targets.material_sidecars[plane].resource.Get() : nullptr;
             device->CreateUnorderedAccessView(resource, nullptr, &uav_view, srv);
-        }
     }
 }
 } // namespace hs

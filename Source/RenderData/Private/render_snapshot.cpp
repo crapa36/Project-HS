@@ -46,6 +46,24 @@ constexpr auto kMeadowGroundAsset = ProductAssetId("render/meadow_ground.rpkg");
 constexpr auto kMeadowWaterAsset = ProductAssetId("render/meadow_water.rpkg");
 constexpr auto kGroundDetailMaterial = ProductAssetId("render/material/ground_detail.rpkg");
 constexpr auto kTerrainMaterial = ProductAssetId("render/material/terrain.rpkg");
+constexpr std::array kTreeTrunkMaterials{
+    ProductAssetId("render/material/trunk_0/material.rpkg"),
+    ProductAssetId("render/material/trunk_1/material.rpkg"),
+    ProductAssetId("render/material/trunk_2/material.rpkg")};
+constexpr std::array kTreeCanopyMaterials{
+    ProductAssetId("render/material/leaf_0/material.rpkg"),
+    ProductAssetId("render/material/leaf_1/material.rpkg"),
+    ProductAssetId("render/material/leaf_2/material.rpkg")};
+constexpr std::array kRockMaterials{
+    ProductAssetId("render/material/rock_0/material.rpkg"),
+    ProductAssetId("render/material/rock_1/material.rpkg"),
+    ProductAssetId("render/material/rock_2/material.rpkg"),
+    ProductAssetId("render/material/rock_3/material.rpkg")};
+constexpr std::array kGrassMaterials{
+    ProductAssetId("render/material/grass_0/material.rpkg"),
+    ProductAssetId("render/material/grass_1/material.rpkg"),
+    ProductAssetId("render/material/grass_2/material.rpkg"),
+    ProductAssetId("render/material/grass_3/material.rpkg")};
 
 constexpr std::array kTreeTrunks{
     ProductAssetId("render/trunk_0.rpkg"), ProductAssetId("render/trunk_1.rpkg"),
@@ -126,20 +144,34 @@ AssetId PackagedRenderAsset(RenderMesh mesh, std::uint32_t variant) noexcept
         return {};
     }
 }
+
+AssetId PackagedEnvironmentMaterial(RenderMesh mesh, std::uint32_t variant) noexcept
+{
+    switch (mesh)
+    {
+    case RenderMesh::TreeTrunk: return kTreeTrunkMaterials[variant % kTreeTrunkMaterials.size()];
+    case RenderMesh::TreeCanopy: return kTreeCanopyMaterials[variant % kTreeCanopyMaterials.size()];
+    case RenderMesh::Rock: return kRockMaterials[variant % kRockMaterials.size()];
+    case RenderMesh::Grass: return kGrassMaterials[variant % kGrassMaterials.size()];
+    default: return {};
+    }
+}
 } // namespace
 
 void PopulateRenderInstanceIdentity(RenderInstance &instance) noexcept
 {
     if (instance.asset_id.value == 0)
         instance.asset_id = PackagedRenderAsset(instance.mesh, instance.environment_variant);
-    // Current character/environment packages own the vertex material binding.
-    // Keep that real product identity instead of inventing a separate material
-    // asset before Generation publishes one.
+    // Geometry LOD products own vertices and fallback links; material identity
+    // points at the shared canonical descriptor used by every LOD.
     if (instance.material_id.value == 0 && instance.asset_id.value != 0)
+    {
+        const auto environment_material = PackagedEnvironmentMaterial(instance.mesh, instance.environment_variant);
         instance.material_id = instance.mesh == RenderMesh::GroundDetail
             ? kGroundDetailMaterial : instance.mesh == RenderMesh::MeadowSurface
             ? (instance.environment_variant == 0 ? kTerrainMaterial : kGroundDetailMaterial)
-            : instance.asset_id;
+            : environment_material.value ? environment_material : instance.asset_id;
+    }
 }
 
 RenderInstance::Revisions DeriveRenderInstanceRevisions(

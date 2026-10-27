@@ -336,18 +336,24 @@ Result ProjectDynamicTick(const TickReadView &model,
     snapshot.camera.target_motion_epoch = enemy_animations ? enemy_animations->PlayerMotionEpoch() : 0;
     snapshot.SetStaticScene(std::move(environment_scene));
 
+    const bool terrain_enabled = model.arena_half_extent >= 14.0f;
+    const auto terrain_height = [&](Float2 position) {
+        return terrain_enabled ? MeadowGroundHeight(position) : 0.0f;
+    };
+    struct ProjectileGroundHeights { float current{}, previous{}; };
     const auto grounded = [&](Float3 position) {
-        if (model.arena_half_extent >= 14.0f)
-            position.y += MeadowGroundHeight({position.x, position.z});
+        if (terrain_enabled) position.y += MeadowGroundHeight({position.x, position.z});
         return position;
     };
     // Project simulation-relative heights exactly once, including independent trail endpoints.
-    const auto add_instance = [&](RenderInstance instance) {
-        instance.position = grounded(instance.position);
+    const auto add_instance = [&](RenderInstance instance, const float *prepared_height = nullptr) {
+        if (prepared_height && terrain_enabled) instance.position.y += *prepared_height;
+        else instance.position = grounded(instance.position);
         PopulateRenderInstanceIdentity(instance);
         snapshot.AddInstance(instance);
     };
-    const auto add_visual = [&](PersistentVfxVisual visual) {
+    const auto add_visual = [&](PersistentVfxVisual visual,
+                                const ProjectileGroundHeights *projectile_ground = nullptr) {
         const bool body_trail = visual.projectile_owner_id != 0 &&
             visual.projectile_hitbox_radius > 0.0f &&
             (visual.kind == PersistentVfxKind::ProjectileTrail ||
@@ -357,10 +363,19 @@ Result ProjectDynamicTick(const TickReadView &model,
         // Sampling terrain at that offset would detach it on banks and slopes.
         auto anchor = body_trail ? visual.projectile_current_position : visual.position;
         anchor.y = visual.position.y;
-        visual.position.y = grounded(anchor).y;
+        if (terrain_enabled)
+            visual.position.y += projectile_ground
+                ? projectile_ground->current : MeadowGroundHeight({anchor.x, anchor.z});
         if (visual.projectile_hitbox_radius > 0.0f) {
-            visual.projectile_current_position = grounded(visual.projectile_current_position);
-            visual.projectile_previous_position = grounded(visual.projectile_previous_position);
+            if (terrain_enabled)
+            {
+                visual.projectile_current_position.y += projectile_ground
+                    ? projectile_ground->current
+                    : MeadowGroundHeight({visual.projectile_current_position.x, visual.projectile_current_position.z});
+                visual.projectile_previous_position.y += projectile_ground
+                    ? projectile_ground->previous
+                    : MeadowGroundHeight({visual.projectile_previous_position.x, visual.projectile_previous_position.z});
+            }
         }
         switch (visual.kind) {
         case PersistentVfxKind::RicochetLink:
@@ -888,6 +903,8 @@ Result ProjectDynamicTick(const TickReadView &model,
             default: break;
             }
         }
+        const ProjectileGroundHeights projectile_ground{
+            terrain_height(projectile.position), terrain_height(projectile.previous_position)};
         const auto render_position = projectile.position;
         add_instance(
             {{render_position.x,
@@ -897,7 +914,7 @@ Result ProjectDynamicTick(const TickReadView &model,
              scale, color,
              projectile.player_owned ? RenderMesh::PlayerProjectile
                                       : RenderMesh::EnemyProjectile,
-              kProjectileRenderId | projectile.id.value});
+              kProjectileRenderId | projectile.id.value}, &projectile_ground.current);
         // The head is a persistent snapshot visual whose presence is exactly
         // the actor's presence. Its owner POD is copied from gameplay so the
         // runtime does not infer a future expiry or integrate cosmetic trail
@@ -923,7 +940,7 @@ Result ProjectDynamicTick(const TickReadView &model,
         head.projectile_owner_id = owner_id;
         head.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                       (projectile.homing ? 2u : 0u);
-        add_visual(head);
+        add_visual(head, &projectile_ground);
         const auto projectile_effect_id = [&](std::uint64_t effect_tag,
                                               std::uint64_t episode) {
             std::uint64_t identity = 14695981039346656037ull;
@@ -951,7 +968,7 @@ Result ProjectDynamicTick(const TickReadView &model,
             retarget.skill = static_cast<std::uint8_t>(SkillKind::MultiShot);
             retarget.source_upgrade = 7;
             retarget.effect_asset = MakeAssetId("particle.upgrade.retarget");
-            add_visual(retarget);
+            add_visual(retarget, &projectile_ground);
         }
         if (projectile.skill == SkillKind::BasicAttack && projectile.returning &&
             projectile.source_upgrade == 6 &&
@@ -969,7 +986,7 @@ Result ProjectDynamicTick(const TickReadView &model,
             returning.return_start_position =
                 {projectile.return_start_position.x, render_height,
                  projectile.return_start_position.y};
-            add_visual(returning);
+            add_visual(returning, &projectile_ground);
         }
         if (projectile.skill == SkillKind::RicochetArrow)
         {
@@ -997,7 +1014,7 @@ Result ProjectDynamicTick(const TickReadView &model,
                 extend.projectile_owner_id = owner_id;
                 extend.projectile_state_flags = head.projectile_state_flags;
                 extend.entity_render_id = kProjectileRenderId | owner_id;
-                add_visual(extend);
+                add_visual(extend, &projectile_ground);
             }
         }
         if (projectile.player_owned)
@@ -1041,7 +1058,7 @@ Result ProjectDynamicTick(const TickReadView &model,
             trail.projectile_owner_id = owner_id;
             trail.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                             (projectile.homing ? 2u : 0u);
-            add_visual(trail);
+            add_visual(trail, &projectile_ground);
             if (projectile.skill == SkillKind::RicochetArrow && projectile.returning &&
                 (projectile.upgrade_mask & std::uint8_t{1}) != 0)
             {
@@ -1068,7 +1085,7 @@ Result ProjectDynamicTick(const TickReadView &model,
                     {projectile.return_start_position.x, render_height,
                      projectile.return_start_position.y};
                 returning_link.link_width = std::max(0.01f, projectile.radius);
-                add_visual(returning_link);
+                add_visual(returning_link, &projectile_ground);
             }
             if (projectile.skill == SkillKind::ChargedShot)
             {
@@ -1085,7 +1102,7 @@ Result ProjectDynamicTick(const TickReadView &model,
                 outer.projectile_spawned_tick = projectile.spawned_tick;
                 outer.projectile_owner_id = owner_id;
                 outer.projectile_state_flags = trail.projectile_state_flags;
-                add_visual(outer);
+                add_visual(outer, &projectile_ground);
             }
         }
     }

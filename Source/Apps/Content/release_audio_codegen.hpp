@@ -10,6 +10,7 @@ struct ReleaseAudio
 {
     std::string source;
     std::string pcm;
+    std::string identity;
     std::uint64_t preload_bytes{}, transition_bytes{};
     std::uint32_t preload_samples{}, transition_samples{};
 };

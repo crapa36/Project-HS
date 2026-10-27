@@ -65,6 +65,7 @@ class ActionResultSnapshot
     [[nodiscard]] std::string_view ActionId() const;
     [[nodiscard]] std::string_view ActionKeyValue() const;
     [[nodiscard]] std::size_t ProductCount() const;
+    [[nodiscard]] const Json &InputMetadata() const;
     [[nodiscard]] std::vector<std::string_view> ProductIds() const;
     // On failure output may contain partial bytes; the caller must discard its staging output.
     void CopyProductBytesTo(std::string_view product_id, std::ostream &output,
@@ -122,6 +123,7 @@ class Sha256Stream
                                   const fs::path &path);
 [[nodiscard]] std::string ProductSetId(std::span<const Product> products);
 [[nodiscard]] std::string ActionKey(const ActionSpec &spec);
+[[nodiscard]] std::string_view ProducerRecipeIdentity();
 [[nodiscard]] Json ReadActionResult(const fs::path &build_root,
                                     std::string_view namespace_path,
                                     std::string_view product_id,

@@ -256,9 +256,10 @@ Result D3D12Renderer::Impl::CaptureClusterFrame(std::uint32_t frame_slot)
         return StreamFailure("Cluster residency generation/epoch is invalid.");
     frame.epoch = ++runtime.epoch;
     frame.snapshot = runtime.cpu.pages;
+    const auto &previous_versions = owned_views.at(active_view_id.value)->previous_geometry_page_versions;
     for (auto &page : frame.snapshot)
         if (page.resident && page.physical_page_slot < kGeometryPageCapacity &&
-            previous_geometry_page_versions[page.physical_page_slot] == page.page_version)
+            previous_versions[page.physical_page_slot] == page.page_version)
             page.draw_flags |= kGeometryPreviousPage;
     void *mapped{};
     const D3D12_RANGE no_read{};

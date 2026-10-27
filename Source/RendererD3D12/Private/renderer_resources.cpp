@@ -139,9 +139,11 @@ Result D3D12Renderer::Impl::ResolvePresentation(const RendererConfig &candidate,
         if (auto bound = fsr_session->Initialize(device.Get()); !bound) return bound;
 #endif
     }
+    const bool effective_dynamic_resolution = EffectiveDynamicResolution(
+        candidate.dynamic_resolution, ResolveFeatures(candidate));
     auto result = sdk_presentation.Resolve(device.Get(), request, streamline_session.get(),
         fsr_session.get(), {capacity, output, display.format, display.color_space, candidate.vsync,
-            candidate.dynamic_resolution, static_cast<float>(candidate.target_render_fps)}, true);
+            effective_dynamic_resolution, static_cast<float>(candidate.target_render_fps)}, true);
     if (result) sdk_presentation.ReportFrameGenerationPolicy(candidate.presentation_request, suppressed, candidate.frame_generation_allowed);
     return result;
 }
@@ -194,9 +196,10 @@ Result D3D12Renderer::Impl::RecreatePresentation(const RendererConfig &candidate
     ViewExtent capacity, DisplayState &display, std::optional<bool> cadence_suppression)
 {
     const auto old_config = config;
-    const auto old_display = display_state;
-    const ViewExtent old_output{width, height};
-    const auto old_capacity = view_state.render_capacity;
+    auto &main_view = *owned_views.at(kMainRenderViewId.value);
+    const auto old_display = main_view.display_state;
+    const ViewExtent old_output{main_view.width, main_view.height};
+    const auto old_capacity = main_view.state.render_capacity;
     ComPtr<ID3D12PipelineState> sdr_pipeline, hdr_pipeline;
     if (old_display.format == DXGI_FORMAT_R8G8B8A8_UNORM) sdr_pipeline = ui_pipeline;
     else hdr_pipeline = ui_pipeline;
@@ -252,7 +255,7 @@ Result D3D12Renderer::Impl::RecreatePresentation(const RendererConfig &candidate
         : presentation_guides.ResetAfterCompletion(graph_queue_executor.Completed());
     if (attempted)
     {
-        display_state = display;
+        main_view.display_state = display;
         ui_pipeline = display.format == DXGI_FORMAT_R10G10B10A2_UNORM ? std::move(hdr_pipeline) : std::move(sdr_pipeline);
         back_buffer_completion = {};
         return attempted;
@@ -267,19 +270,19 @@ Result D3D12Renderer::Impl::RecreatePresentation(const RendererConfig &candidate
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             std::format("{}; restoring the previous presentation failed: {}", failure, restored.Message()));
     }
-    display_state = restored_display;
+    main_view.display_state = restored_display;
     return Result::Failure(ErrorCode::TaskFailed, "hs_renderer_d3d12", failure);
 }
 
-Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
+Result D3D12Renderer::Impl::CreateSwapChainAndTargets(OwnedView &view)
 {
     DisplayState candidate_display;
     if (auto queried = QueryDisplayState(adapter.Get(), static_cast<HWND>(config.window),
                                          config, candidate_display); !queried)
         return queried;
-    if (auto resolved = ResolvePresentation(config, {width, height}, view_state.render_capacity, candidate_display); !resolved) return resolved;
+    if (auto resolved = ResolvePresentation(config, {view.width, view.height}, view.state.render_capacity, candidate_display); !resolved) return resolved;
     const auto requested_format = candidate_display.format;
-    if (auto created = CreatePresentationChain(config, {width, height}, candidate_display); !created) return created;
+    if (auto created = CreatePresentationChain(config, {view.width, view.height}, candidate_display); !created) return created;
     if (candidate_display.format != requested_format)
     {
         // PRESENT support is known only after creating a swap chain. Negotiate
@@ -287,15 +290,15 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
         if (auto drained = sdk_presentation.DrainBeforeSwapChainMutation(); !drained) return drained;
         swap_chain.Reset();
         if (auto destroyed = sdk_presentation.DestroyAfterGpuCompletion(true); !destroyed) return destroyed;
-        if (auto resolved = ResolvePresentation(config, {width, height}, view_state.render_capacity, candidate_display); !resolved) return resolved;
-        if (auto created = CreatePresentationChain(config, {width, height}, candidate_display); !created) return created;
+        if (auto resolved = ResolvePresentation(config, {view.width, view.height}, view.state.render_capacity, candidate_display); !resolved) return resolved;
+        if (auto created = CreatePresentationChain(config, {view.width, view.height}, candidate_display); !created) return created;
     }
-    display_state = std::move(candidate_display);
+    view.display_state = std::move(candidate_display);
     factory->MakeWindowAssociation(static_cast<HWND>(config.window), DXGI_MWA_NO_ALT_ENTER);
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
     rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_description.NumDescriptors = kLightingAuxRtvOffset + kLightingAuxRtvCount;
+    rtv_description.NumDescriptors = kFrameCount + kFrameCount * kRtvBankStride;
     auto result = device->CreateDescriptorHeap(&rtv_description, IID_PPV_ARGS(&rtv_heap));
     if (FAILED(result))
     {
@@ -343,42 +346,42 @@ Result D3D12Renderer::Impl::PrepareLightingAuxiliaries(std::array<AllocationReso
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CreatePostProcessTargets()
+Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
-    transient_textures_common = enhanced;
-    gbuffer_base.Reset();
-    gbuffer_normal.Reset();
-    gbuffer_metadata.Reset();
-    gbuffer_material.Reset();
-    gbuffer_motion.Reset();
-    gbuffer_surface_history.Reset();
-    for (auto &sidecar : material_sidecars) sidecar.Reset();
-    visibility_ids.Reset(); visibility_front_face.Reset();
-    visibility_pixels.Reset(); visibility_counts.Reset(); visibility_dispatch_args.Reset();
-    hdr_color.Reset();
-    subsurface_diffuse.Reset();
-    environment_specular.Reset();
-    indirect_diffuse.Reset();
-    oit_accumulation.Reset();
-    oit_revealage.Reset();
-    post_a.Reset();
-    post_b.Reset();
-    for (auto &history : temporal_history) history.Reset();
-    for (auto &history : temporal_normal_history) history.Reset();
-    for (auto &history : temporal_material_history) history.Reset();
-    scene_work.Reset();
-    display_linear.Reset();
-    composite_hdr.Reset();
-    for (auto &history : hzb_history) history.Reset();
-    temporal_history_valid = false;
-    temporal_targets_initialized = false;
-    view_targets_initialized = false;
-    material_sidecars_initialized = false;
-    temporal_read_index = 0;
-    hzb_history_valid = false;
-    hzb_read_index = 0;
-    hzb_layout = MakeHzbLayout(render_width, render_height);
+    owner.transient_textures_common = enhanced;
+    owner.targets.gbuffer_base.Reset();
+    owner.targets.gbuffer_normal.Reset();
+    owner.targets.gbuffer_metadata.Reset();
+    owner.targets.gbuffer_material.Reset();
+    owner.targets.gbuffer_motion.Reset();
+    owner.targets.gbuffer_surface_history.Reset();
+    for (auto &sidecar : owner.targets.material_sidecars) sidecar.Reset();
+    owner.targets.visibility_ids.Reset(); owner.targets.visibility_front_face.Reset();
+    owner.targets.visibility_pixels.Reset(); owner.targets.visibility_counts.Reset(); owner.targets.visibility_dispatch_args.Reset();
+    owner.targets.hdr_color.Reset();
+    owner.targets.subsurface_diffuse.Reset();
+    owner.targets.environment_specular.Reset();
+    owner.targets.indirect_diffuse.Reset();
+    owner.targets.oit_accumulation.Reset();
+    owner.targets.oit_revealage.Reset();
+    owner.targets.post_a.Reset();
+    owner.targets.post_b.Reset();
+    for (auto &history : owner.targets.temporal_history) history.Reset();
+    for (auto &history : owner.targets.temporal_normal_history) history.Reset();
+    for (auto &history : owner.targets.temporal_material_history) history.Reset();
+    owner.targets.scene_work.Reset();
+    owner.targets.display_linear.Reset();
+    owner.targets.composite_hdr.Reset();
+    for (auto &history : owner.targets.hzb_history) history.Reset();
+    owner.temporal_history_valid = false;
+    owner.temporal_targets_initialized = false;
+    owner.view_targets_initialized = false;
+    owner.material_sidecars_initialized = false;
+    owner.temporal_read_index = 0;
+    owner.hzb_history_valid = false;
+    owner.hzb_read_index = 0;
+    owner.targets.hzb_layout = MakeHzbLayout(owner.render_width, owner.render_height);
 
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -388,8 +391,8 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
                              std::uint32_t target_height = 0) -> Result {
         D3D12_RESOURCE_DESC description{};
         description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        description.Width = target_width ? target_width : render_width;
-        description.Height = target_height ? target_height : render_height;
+        description.Width = target_width ? target_width : owner.render_width;
+        description.Height = target_height ? target_height : owner.render_height;
         description.DepthOrArraySize = 1;
         description.MipLevels = 1;
         description.Format = format;
@@ -397,9 +400,9 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer &&
-            (&output == &gbuffer_base || &output == &gbuffer_normal ||
-             &output == &gbuffer_metadata || &output == &gbuffer_material ||
-             &output == &gbuffer_motion || &output == &gbuffer_surface_history))
+            (&output == &owner.targets.gbuffer_base || &output == &owner.targets.gbuffer_normal ||
+             &output == &owner.targets.gbuffer_metadata || &output == &owner.targets.gbuffer_material ||
+             &output == &owner.targets.gbuffer_motion || &output == &owner.targets.gbuffer_surface_history))
             description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         D3D12_CLEAR_VALUE clear{};
         clear.Format = format;
@@ -413,15 +416,15 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     constexpr float metadata_clear[4] = {0, 0, 0, 0};
     constexpr float reveal_clear[4] = {1, 1, 1, 1};
     for (auto [resource, format, clear] : {
-             std::tuple{&gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
-             std::tuple{&gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
-             std::tuple{&gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
-             std::tuple{&hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
-             std::tuple{&oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
-             std::tuple{&gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
-             std::tuple{&gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
-             std::tuple{&gbuffer_surface_history, DXGI_FORMAT_R32G32_FLOAT, black},
+             std::tuple{&owner.targets.gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
+             std::tuple{&owner.targets.gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
+             std::tuple{&owner.targets.gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
+             std::tuple{&owner.targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
+             std::tuple{&owner.targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
+             std::tuple{&owner.targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
+             std::tuple{&owner.targets.gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
+             std::tuple{&owner.targets.gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
+             std::tuple{&owner.targets.gbuffer_surface_history, DXGI_FORMAT_R32G32_FLOAT, black},
          })
     {
         if (auto created = create_target(*resource, format, clear); !created)
@@ -429,41 +432,41 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
             return created;
         }
     }
-    if (auto created = PrepareLightingAuxiliaries({&subsurface_diffuse, &environment_specular, &indirect_diffuse},
-            {render_width, render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
-    if (auto created = create_target(post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                     black, width, height); !created) return created;
+    if (auto created = PrepareLightingAuxiliaries({&owner.targets.subsurface_diffuse, &owner.targets.environment_specular, &owner.targets.indirect_diffuse},
+            {owner.render_width, owner.render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
+    if (auto created = create_target(owner.targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                     black, owner.width, owner.height); !created) return created;
     if (config.bloom || config.outline)
-        if (auto created = create_target(post_b, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                         black, width, height); !created) return created;
-    const bool native_resolve = UsesInternalResolveTargets(reconstruction_plan);
+        if (auto created = create_target(owner.targets.post_b, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                         black, owner.width, owner.height); !created) return created;
+    const bool native_resolve = UsesInternalResolveTargets(owner.reconstruction_plan);
     if (native_resolve)
-    for (auto *resource : {&temporal_history[0], &temporal_history[1]})
+    for (auto *resource : {&owner.targets.temporal_history[0], &owner.targets.temporal_history[1]})
         if (auto created = create_target(*resource, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                         black, width, height); !created)
+                                         black, owner.width, owner.height); !created)
             return created;
     OptionTargets view_targets;
-    if (auto created = PrepareViewTargets(view_targets, render_width, render_height,
-                                          width, height, native_resolve); !created)
+    if (auto created = PrepareViewTargets(view_targets, owner.render_width, owner.render_height,
+                                          owner.width, owner.height, native_resolve); !created)
         return created;
-    temporal_normal_history.swap(view_targets.temporal_normal_history);
-    temporal_material_history.swap(view_targets.temporal_material_history);
+    owner.targets.temporal_normal_history.swap(view_targets.temporal_normal_history);
+    owner.targets.temporal_material_history.swap(view_targets.temporal_material_history);
     using std::swap;
-    swap(scene_work, view_targets.scene_work);
-    swap(display_linear, view_targets.display_linear);
-    swap(composite_hdr, view_targets.composite_hdr);
-    if (!exposure_values[0].resource)
-        if (auto created = PrepareExposureResources(); !created) return created;
-    if (auto created = PrepareMaterialSidecars(material_sidecars, render_width, render_height); !created)
+    swap(owner.targets.scene_work, view_targets.scene_work);
+    swap(owner.targets.display_linear, view_targets.display_linear);
+    swap(owner.targets.composite_hdr, view_targets.composite_hdr);
+    if (!owner.exposure_values[0].resource)
+        if (auto created = PrepareExposureResources(owner); !created) return created;
+    if (auto created = PrepareMaterialSidecars(owner.targets.material_sidecars, owner.render_width, owner.render_height); !created)
         return created;
-    if (hzb_layout.elements >
+    if (owner.targets.hzb_layout.elements >
         std::numeric_limits<std::uint64_t>::max() / sizeof(float))
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "HZB buffer size overflow.");
-    for (auto &history : hzb_history)
+    for (auto &history : owner.targets.hzb_history)
         if (auto created = CreateAllocation(
                 history, allocation,
-                BufferDescription(hzb_layout.elements * sizeof(float),
+                BufferDescription(owner.targets.hzb_layout.elements * sizeof(float),
                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             !created)
@@ -471,16 +474,16 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(kFrameCount) * rtv_stride;
     for (auto [resource, format] : {
-             std::pair{gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
-             std::pair{gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
-             std::pair{hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
-             std::pair{oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
-             std::pair{post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
+             std::pair{owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
+             std::pair{owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
+             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
+             std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
+             std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
+             std::pair{owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
+             std::pair{owner.targets.gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
          })
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
@@ -490,8 +493,8 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kLightingAuxRtvOffset) * rtv_stride;
-    for (auto *resource : {subsurface_diffuse.resource.Get(), environment_specular.resource.Get(), indirect_diffuse.resource.Get()})
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kLightingAuxRtvOffset) * rtv_stride;
+    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get(), owner.targets.indirect_diffuse.resource.Get()})
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -501,8 +504,8 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kTemporalRtvOffset) * rtv_stride;
-    for (auto &history : temporal_history)
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kTemporalRtvOffset) * rtv_stride;
+    for (auto &history : owner.targets.temporal_history)
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -511,12 +514,12 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kSurfaceHistoryRtvOffset) * rtv_stride;
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kSurfaceHistoryRtvOffset) * rtv_stride;
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R32G32_FLOAT;
         view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(gbuffer_surface_history.resource.Get(), &view, rtv);
+        device->CreateRenderTargetView(owner.targets.gbuffer_surface_history.resource.Get(), &view, rtv);
     }
 
     if (!srv_heap)
@@ -543,7 +546,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         InitializeCanonicalDescriptors(srv_cpu_heap.Get());
     }
 
-    if (auto created = CreateVisibilityTargets(); !created) return created;
+    if (auto created = CreateVisibilityTargets(owner); !created) return created;
     for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
     {
         const auto frame_offset = static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount;
@@ -560,16 +563,16 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
                 device->CreateShaderResourceView(resource, &view, srv);
                 srv.ptr += srv_stride;
             };
-             create_srv(gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-            create_srv(gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-            create_srv(gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
-            create_srv(shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-            create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-            create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-            create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(ui_textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+             create_srv(owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            create_srv(owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
+            create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
+            create_srv(owner.targets.shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
+            create_srv(owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+            create_srv(owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+            create_srv(owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.ui.textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
         };
         write_post_table(0);
         write_post_table(kToneMapInputDescriptorOffset);
@@ -587,8 +590,8 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
             device->CreateShaderResourceView(resource, &view, srv);
             srv.ptr += srv_stride;
         };
-        create_srv(gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-        create_srv(gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
+        create_srv(owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        create_srv(owner.targets.gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
         srv = srv_start;
         srv.ptr += (frame_offset +
                     kBloomTextureDescriptorOffset) * srv_stride;
@@ -600,26 +603,27 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         srv = srv_start;
         srv.ptr += (frame_offset +
                     kTemporalTextureDescriptorOffset) * srv_stride;
-        create_srv(temporal_history[0].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        create_srv(temporal_history[1].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(owner.targets.temporal_history[0].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(owner.targets.temporal_history[1].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv = srv_start;
         srv.ptr += (frame_offset + kSurfaceDescriptorOffset) * srv_stride;
-        create_srv(depth.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-        create_srv(gbuffer_surface_history.resource.Get(), DXGI_FORMAT_R32G32_FLOAT);
+        create_srv(owner.targets.depth.resource.Get(), DXGI_FORMAT_R32_FLOAT);
+        create_srv(owner.targets.gbuffer_surface_history.resource.Get(), DXGI_FORMAT_R32G32_FLOAT);
     }
-    WriteMaterialSidecarDescriptors();
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        WriteViewDescriptors(frame, temporal_read_index, 1u - temporal_read_index,
-                             exposure_read_index, 1u - exposure_read_index, 0);
+        WriteMaterialSidecarDescriptors(owner, frame);
+    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+        WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index,
+                             owner.exposure_read_index, 1u - owner.exposure_read_index, 0);
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CreateDepthAndShadow()
+Result D3D12Renderer::Impl::CreateDepthAndShadow(OwnedView &owner)
 {
-    transient_textures_common = enhanced;
+    owner.transient_textures_common = enhanced;
     D3D12_DESCRIPTOR_HEAP_DESC dsv_description{};
     dsv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsv_description.NumDescriptors = 5;
+    dsv_description.NumDescriptors = 5 * kFrameCount;
     auto result = device->CreateDescriptorHeap(&dsv_description, IID_PPV_ARGS(&dsv_heap));
     if (FAILED(result))
     {
@@ -635,15 +639,15 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
 
     D3D12_RESOURCE_DESC depth_description{};
     depth_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depth_description.Width = render_width;
-    depth_description.Height = render_height;
+    depth_description.Width = owner.render_width;
+    depth_description.Height = owner.render_height;
     depth_description.DepthOrArraySize = 1;
     depth_description.MipLevels = 1;
     depth_description.Format = DXGI_FORMAT_R32_TYPELESS;
     depth_description.SampleDesc = {1, 0};
     depth_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     depth_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    if (auto created = CreateAllocation(depth, allocation, depth_description,
+    if (auto created = CreateAllocation(owner.targets.depth, allocation, depth_description,
                                         D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
         !created)
     {
@@ -654,7 +658,7 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
     depth_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     depth_view.Texture2D.MipSlice = 0;
     auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    device->CreateDepthStencilView(depth.resource.Get(), &depth_view, dsv);
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
 
     auto shadow_description = depth_description;
     shadow_description.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -662,7 +666,7 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
     shadow_description.Width = base_shadow * 2u;
     shadow_description.Height = base_shadow * 2u;
     shadow_description.DepthOrArraySize = 1;
-    if (auto created = CreateAllocation(shadow, allocation, shadow_description,
+    if (auto created = CreateAllocation(owner.targets.shadow, allocation, shadow_description,
                                         D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
         !created)
     {
@@ -677,12 +681,12 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
         view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         view.Texture2D.MipSlice = 0;
 
-        device->CreateDepthStencilView(shadow.resource.Get(), &view, shadow_handle);
+        device->CreateDepthStencilView(owner.targets.shadow.resource.Get(), &view, shadow_handle);
         shadow_handle.ptr += dsv_stride;
     }
     depth_view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
     dsv.ptr += static_cast<SIZE_T>(4) * dsv_stride;
-    device->CreateDepthStencilView(depth.resource.Get(), &depth_view, dsv);
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
     return Result::Success();
 }
 
@@ -830,101 +834,86 @@ Result D3D12Renderer::Impl::PrepareOptionPools(
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::CommitOptionTargets(OptionTargets &targets) noexcept
+void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &targets) noexcept
 {
-    hdr_capture_source.Reset();
-    hdr_capture_valid = false;
+    owner.hdr_capture_source.Reset();
+    owner.hdr_capture_valid = false;
     using std::swap;
-    swap(depth, targets.depth);
-    swap(shadow, targets.shadow);
-    swap(gbuffer_base, targets.gbuffer_base);
-    swap(gbuffer_normal, targets.gbuffer_normal);
-    swap(gbuffer_metadata, targets.gbuffer_metadata);
-    swap(gbuffer_material, targets.gbuffer_material);
-    swap(gbuffer_motion, targets.gbuffer_motion);
-    swap(gbuffer_surface_history, targets.gbuffer_surface_history);
-    swap(material_sidecars, targets.material_sidecars);
-    swap(hdr_color, targets.hdr_color);
-    swap(subsurface_diffuse, targets.subsurface_diffuse);
-    swap(environment_specular, targets.environment_specular);
-    swap(indirect_diffuse, targets.indirect_diffuse);
-    swap(oit_accumulation, targets.oit_accumulation);
-    swap(oit_revealage, targets.oit_revealage);
-    swap(post_a, targets.post_a);
-    swap(post_b, targets.post_b);
-    swap(scene_work, targets.scene_work);
-    swap(display_linear, targets.display_linear);
-    swap(composite_hdr, targets.composite_hdr);
-    for (std::size_t i = 0; i < temporal_history.size(); ++i)
-        swap(temporal_history[i], targets.temporal_history[i]);
-    swap(temporal_normal_history, targets.temporal_normal_history);
-    swap(temporal_material_history, targets.temporal_material_history);
-    for (std::size_t i = 0; i < hzb_history.size(); ++i)
-        swap(hzb_history[i], targets.hzb_history[i]);
+    auto &current = owner.targets;
+    swap(current.depth, targets.depth); swap(current.shadow, targets.shadow);
+    swap(current.gbuffer_base, targets.gbuffer_base); swap(current.gbuffer_normal, targets.gbuffer_normal);
+    swap(current.gbuffer_metadata, targets.gbuffer_metadata); swap(current.gbuffer_material, targets.gbuffer_material);
+    swap(current.gbuffer_motion, targets.gbuffer_motion); swap(current.gbuffer_surface_history, targets.gbuffer_surface_history);
+    swap(current.material_sidecars, targets.material_sidecars); swap(current.hdr_color, targets.hdr_color);
+    swap(current.subsurface_diffuse, targets.subsurface_diffuse); swap(current.environment_specular, targets.environment_specular);
+    swap(current.indirect_diffuse, targets.indirect_diffuse); swap(current.oit_accumulation, targets.oit_accumulation);
+    swap(current.oit_revealage, targets.oit_revealage); swap(current.post_a, targets.post_a); swap(current.post_b, targets.post_b);
+    swap(current.scene_work, targets.scene_work); swap(current.display_linear, targets.display_linear);
+    swap(current.composite_hdr, targets.composite_hdr); swap(current.temporal_history, targets.temporal_history);
+    swap(current.temporal_normal_history, targets.temporal_normal_history);
+    swap(current.temporal_material_history, targets.temporal_material_history); swap(current.hzb_history, targets.hzb_history);
     if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer)
     {
-        swap(visibility_ids, targets.visibility_ids);
-        swap(visibility_front_face, targets.visibility_front_face);
-        swap(visibility_pixels, targets.visibility_pixels);
-        swap(visibility_counts, targets.visibility_counts);
-        swap(visibility_dispatch_args, targets.visibility_dispatch_args);
-        visibility_targets_initialized = false;
+        swap(current.visibility_ids, targets.visibility_ids);
+        swap(current.visibility_front_face, targets.visibility_front_face);
+        swap(current.visibility_pixels, targets.visibility_pixels);
+        swap(current.visibility_counts, targets.visibility_counts);
+        swap(current.visibility_dispatch_args, targets.visibility_dispatch_args);
+        owner.visibility_targets_initialized = false;
     }
-    hzb_layout = targets.hzb_layout;
-    hzb_history_valid = false;
-    hzb_read_index = 0;
-    temporal_history_valid = false;
-    temporal_read_index = 0;
-    temporal_targets_initialized = false;
-    view_targets_initialized = false;
-    material_sidecars_initialized = false;
-    SwapOptionPools(targets.transient_pools);
-    WriteOptionTargetDescriptors();
+    current.hzb_layout = targets.hzb_layout;
+    owner.hzb_history_valid = false; owner.hzb_read_index = 0;
+    owner.temporal_history_valid = false; owner.temporal_read_index = 0;
+    owner.temporal_targets_initialized = false; owner.view_targets_initialized = false;
+    owner.material_sidecars_initialized = false;
+    SwapOptionPools(owner, current.transient_pools);
+    (void)owner;
 }
 
-void D3D12Renderer::Impl::SwapOptionPools(
+void D3D12Renderer::Impl::SwapOptionPools(OwnedView &owner,
     std::array<TransientResourcePool, kFrameCount> &pools) noexcept
 {
-    for (std::size_t i = 0; i < transient_pools.size(); ++i)
-        transient_pools[i].Swap(pools[i]);
+    for (std::size_t i = 0; i < owner.targets.transient_pools.size(); ++i)
+        owner.targets.transient_pools[i].Swap(pools[i]);
 }
 
-void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
+void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::uint32_t frame) noexcept
 {
     StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
+    dsv.ptr += static_cast<SIZE_T>(frame * 5) * dsv_stride;
     D3D12_DEPTH_STENCIL_VIEW_DESC depth_view{};
     depth_view.Format = DXGI_FORMAT_D32_FLOAT;
     depth_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     depth_view.Texture2D.MipSlice = 0;
-    device->CreateDepthStencilView(depth.resource.Get(), &depth_view, dsv);
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
     dsv.ptr += dsv_stride;
     D3D12_DEPTH_STENCIL_VIEW_DESC shadow_view{};
     shadow_view.Format = kDepthFormat;
     shadow_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
     {
-        device->CreateDepthStencilView(shadow.resource.Get(), &shadow_view, dsv);
+        device->CreateDepthStencilView(owner.targets.shadow.resource.Get(), &shadow_view, dsv);
         dsv.ptr += dsv_stride;
     }
     depth_view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
     dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    dsv.ptr += static_cast<SIZE_T>(4) * dsv_stride;
-    device->CreateDepthStencilView(depth.resource.Get(), &depth_view, dsv);
+    dsv.ptr += static_cast<SIZE_T>(frame * 5 + 4) * dsv_stride;
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
 
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount) * rtv_stride;
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride) * rtv_stride;
     for (auto [resource, format] : {
-             std::pair{gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
-             std::pair{gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
-             std::pair{hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
-             std::pair{oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
-             std::pair{post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
+             std::pair{owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
+             std::pair{owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
+             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
+             std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
+             std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
+             std::pair{owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
+             std::pair{owner.targets.gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
          })
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
@@ -934,8 +923,8 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kLightingAuxRtvOffset) * rtv_stride;
-    for (auto *resource : {subsurface_diffuse.resource.Get(), environment_specular.resource.Get(), indirect_diffuse.resource.Get()})
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kLightingAuxRtvOffset) * rtv_stride;
+    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get(), owner.targets.indirect_diffuse.resource.Get()})
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -944,8 +933,8 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kTemporalRtvOffset) * rtv_stride;
-    for (auto &history : temporal_history)
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kTemporalRtvOffset) * rtv_stride;
+    for (auto &history : owner.targets.temporal_history)
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -954,23 +943,24 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kSurfaceHistoryRtvOffset) * rtv_stride;
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kSurfaceHistoryRtvOffset) * rtv_stride;
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R32G32_FLOAT;
         view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(gbuffer_surface_history.resource.Get(), &view, rtv);
+        device->CreateRenderTargetView(owner.targets.gbuffer_surface_history.resource.Get(), &view, rtv);
     }
     if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer)
     {
         rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += static_cast<SIZE_T>(kVisibilityRtvOffset) * rtv_stride;
-        device->CreateRenderTargetView(visibility_ids.resource.Get(), nullptr, rtv);
+        rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kVisibilityRtvOffset) * rtv_stride;
+        device->CreateRenderTargetView(owner.targets.visibility_ids.resource.Get(), nullptr, rtv);
         rtv.ptr += rtv_stride;
-        device->CreateRenderTargetView(visibility_front_face.resource.Get(), nullptr, rtv);
+        device->CreateRenderTargetView(owner.targets.visibility_front_face.resource.Get(), nullptr, rtv);
     }
 
-    for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
+    const auto frame_index = frame;
+    {
     {
         const auto frame_offset = static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount;
         const auto srv_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
@@ -986,16 +976,16 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
                 device->CreateShaderResourceView(resource, &view, srv);
                 srv.ptr += srv_stride;
             };
-            create_srv(gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-            create_srv(gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-            create_srv(gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
-            create_srv(shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-            create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-            create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-            create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(ui_textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+            create_srv(owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+            create_srv(owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
+            create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
+            create_srv(owner.targets.shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
+            create_srv(owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+            create_srv(owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+            create_srv(owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(owner.ui.textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
         };
         write_post_table(0);
         write_post_table(kToneMapInputDescriptorOffset);
@@ -1009,29 +999,38 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
         view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(gbuffer_material.resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.gbuffer_material.resource.Get(), &view, srv);
         srv.ptr += srv_stride;
         view.Format = DXGI_FORMAT_R16G16_FLOAT;
-        device->CreateShaderResourceView(gbuffer_motion.resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.gbuffer_motion.resource.Get(), &view, srv);
         srv = srv_start;
         srv.ptr += (frame_offset + kTemporalTextureDescriptorOffset) * srv_stride;
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        device->CreateShaderResourceView(temporal_history[0].resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.temporal_history[0].resource.Get(), &view, srv);
         srv.ptr += srv_stride;
-        device->CreateShaderResourceView(temporal_history[1].resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.temporal_history[1].resource.Get(), &view, srv);
         srv = srv_start;
         srv.ptr += (frame_offset + kSurfaceDescriptorOffset) * srv_stride;
         view.Format = DXGI_FORMAT_R32_FLOAT;
-        device->CreateShaderResourceView(depth.resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.depth.resource.Get(), &view, srv);
         srv.ptr += srv_stride;
         view.Format = DXGI_FORMAT_R32G32_FLOAT;
-        device->CreateShaderResourceView(gbuffer_surface_history.resource.Get(), &view, srv);
+        device->CreateShaderResourceView(owner.targets.gbuffer_surface_history.resource.Get(), &view, srv);
     }
-    ClearTransientDescriptors();
-    WriteMaterialSidecarDescriptors();
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        WriteViewDescriptors(frame, temporal_read_index, 1u - temporal_read_index,
-                             exposure_read_index, 1u - exposure_read_index, 0);
+    WriteMaterialSidecarDescriptors(owner, frame);
+    WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index,
+                         owner.exposure_read_index, 1u - owner.exposure_read_index, 0);
+    D3D12_SHADER_RESOURCE_VIEW_DESC ui_view{};
+    ui_view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    ui_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    ui_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    ui_view.Texture2D.MipLevels = 1;
+    for (const auto table : {0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset})
+    {
+        auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        descriptor.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + table + 9) * srv_stride;
+        device->CreateShaderResourceView(owner.ui.textures[frame].resource.Get(), &ui_view, descriptor);
+    }
 }
 
 void D3D12Renderer::Impl::ClearTransientDescriptors() noexcept
@@ -1050,12 +1049,12 @@ void D3D12Renderer::Impl::ClearTransientDescriptors() noexcept
     for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
     {
         auto rtv = rtv_start;
-        rtv.ptr += static_cast<SIZE_T>(kDistortionRtvOffset + frame_index) * rtv_stride;
+        rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame_index * kRtvBankStride + kDistortionRtvOffset) * rtv_stride;
         device->CreateRenderTargetView(nullptr, &rtv_view, rtv);
         for (std::uint32_t slot = 0; slot < 3; ++slot)
         {
             rtv = rtv_start;
-            rtv.ptr += static_cast<SIZE_T>(kBloomRtvOffset + 3 * frame_index + slot) * rtv_stride;
+            rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame_index * kRtvBankStride + kBloomRtvOffset + slot) * rtv_stride;
             device->CreateRenderTargetView(nullptr, &rtv_view, rtv);
         }
         auto srv = srv_start;

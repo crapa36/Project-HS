@@ -1,8 +1,8 @@
 # DEV_STATE
 
 AI implementation continuity only. Workspace is dirty; preserve staged and unstaged
-edits. No commit/push/worktree requested. Current observed HEAD: 51d5055
-`Expand packed renderer content and frame systems` (2026-10-26 observation).
+edits. No commit/push/worktree requested. Current observed HEAD: 9f91820
+`Refine rendering, streaming, and runtime pipelines` (2026-10-27 observation).
 
 ## Objective and execution policy
 
@@ -12,93 +12,277 @@ No commit/push/worktree; preserve all dirty edits. No Sol subagents; current wor
 are explicit Luna/high. Deferred W12 per-queue timestamp/readback separation stays
 untouched; native resource/fence/state/alias and actual submission contracts remain.
 
-## Current source batch (2026-10-27)
+## Current source batch and execution policy (2026-10-27)
 
-Current source is newer than the last qualified Debug checkpoint. Record:
-.planning/2026-10-23-complete-directives/optimization-20261027-source-batch.md.
-Newest continuation: optimization-20261027-continuation.md in the same directory.
-ValidationOFF actual200 playback now reproducibly DEVICE_HUNG0x887A0006 at49-63
-rendered frames; ordinary validationON900ticks/303frames passed. Turning GPU timing
-OFF and using Legacy also fail; no valid current-source FPS comparison exists.
-DRED shows partial VolumetricDensity dispatch6/8 with timingsOFF/Legacy. The
-timingON first pending AO node is not proof of root cause. No proven queue/CBV/stream
-ownership defect yet. No active Computer Use session; exact failure evidence lives
-in Build/optimization-20261027-continuation/. Narrow earlier pass receipts remain
-valid only for those workloads, not proof the stress game is healthy.
-- T14 exact six-channel dirty ranges replace six-array uploads; frame serialization
-  scratch is reused. Retained slots reuse the authoritative key map; only new keys
-  allocate staging nodes, transferred on Commit. Allocation/rehash moves before
-  actual submission. Full package-once/current-vs-view-previous GPU separation and
-  removal of full previous CPU mirror remain incomplete.
-- T16 authored/masked flags are owned by StaticGpuScene and rebuilt with its source;
-  static/dynamic repeated scans short-circuit. Water/Hero use existing cached ranges.
-- Capture CSV uses retained strings/to_chars without dropping columns/records.
-  Schemas: performance179,GPU-live72,main87,simulation113,timeline6,GPU-pass12.
-- T06 TXM/TextureMetadata v2 range digests flow through producers/linker/compiled+
-  Dev metadata. Frozen admitted targets, one legal reserved mip step, retained
-  prepared data and metadata scratch tickets; no-I/O reserved shrink/fallback.
-  Native loose FILE-to-MEMORY requests batch per pump, with terminal status/event
-  retention and one async verification. Packs retain verified Core file ownership.
-  Full software-chain targets exceeding host cap fail explicitly; legal multi-read
-  software assembly/range coalescing still need review before full T06 completion.
-- T08 SceneProbeBake directly uses renderer; broad runner/relaunch dependency and
-  duplicate layout/output decode/C++ HashInputs removed. Histogram/texture sidecar
-  cache wrappers removed; Action cache retained. Catalog-less closure uses bounded
-  package directory metadata; ghbin/shl1 fallback still reads complete decoder input.
-  The former broad-child20minute timeout is deliberately not recreated; actual
-  native errors/atomic publish/exception stage cleanup remain. Bake warmup/readiness
-  under new mip progression is being reviewed before any quality-completion claim.
+Latest human steering: SOURCE CHANGES FIRST; defer all new builds/tests/cooks/native
+playback/FPS to one later qualification batch. No active build, game or Computer
+Use session. Whole-scope engineering estimate55-60% complete /40-45% remaining,
+including unqualified source and queued51d5055 detailed review; not item counting.
+Queue: .planning/2026-10-23-complete-directives/remaining-work-20261027.md.
+Current worktree is NEWER than all executable receipts below. Never claim its FPS.
 
-## Current verification / live build
+- T05 canonical environment material product: render/material/<name>/material.rpkg;
+  terrain/ground_detail retain their existing special IDs. Geometry LOD products
+  own geometry + checked material reference + LOD0 hierarchy reference; no repeated
+  metadata/program/bindings/parameter/surface chunks. RenderPackage recipe15,
+  RenderScenePackage recipe3 and HLOD/material identity consumers are updated.
+  Release/Dev typed descriptors remain the single material source. Renderer caches
+  only per-material variant facts; per-mesh RockMaterial copies, unused handles and
+  duplicate terrain loading are removed. Selector bounds remain per geometry.
+  Old LOD0 geometry is no longer classified as a material by the linker.
+  Candidate variant data swaps atomically with meshes. Fixture source updated;
+  compilation/cook/runtime compatibility pending the deferred batch. Environment
+  package cache hits now precede texture/mesh source expansion; one Action snapshot
+  per namespace supplies identities. Actual upstream/cached bytes still pass size/
+  digest checks; certified cached hierarchy pages skip repeated geometry decode.
+- T14 packet owner prepares canonical instances, pose indexes, retained surfaces,
+  preview/identity, union-consumer monster LOD and stable draw order once across
+  views. Actual GI voxel and shadow consumers include every view. Scratch capacity
+  is reused; borrowed pose pointers/order validity clear on every Render exit.
+  Owned VFX replacement uses one ID/type index and stable erase instead of3 nested
+  scans; independent legacy-equivalence fixture source added. Dead default-only
+  EnvironmentLod array removed. Current stable-slot reconcile/GpuInstance/canonical
+  conversion now run once per packet. Per-view GpuSceneSkinEntry offsets/strides
+  now live in waited frame-upload scratch; later views retain the common table
+  without a skin mutation transaction or full current-byte comparison.
+  Entity-surface bytes copy on first accepted graph only. Submitted packet skin
+  owner/range directory now defines current deformation across views; per-view
+  skin identity serialization/equality is removed and readers merge completion.
+  Owner publication follows successful graph submission, preventing reuse of
+  uninitialized pre-submit data. Range/slot/geometry validation remains. Focused
+  source fixtures cover abort/retry, stale generation, current sentinels and
+  reordered previous ranges. Full previous CPU GpuInstance copies/rebase/uploads
+  are now removed in source. Submitted pooled current GPU scene owners plus small
+  generation/mesh/motion-epoch facts supply per-view previous transforms directly.
+  The singleton mutable current table and extra current-to-history GPU copy pass
+  are removed. Each backing uploads active channels changed since its accepted
+  payload revision; header/entity-surface publication belongs to that backing.
+  Prospective channel stamps commit only after actual native acceptance and abort
+  cleanly. Pool reuse needs completed readers, no logical leases and same device.
+  Retained frontend identity uses topology/desc/alias pattern, not snapshot native
+  addresses; imports/root SRVs rebind each frame. Unknown native issue retains
+  max completion and faults before reuse; pre-submit failures remain retryable.
+  Direct resource shapes are now collected once per candidate scan into retained
+  scratch. Flat sorted alias occurrences replace per-resource hash-node allocation;
+  first-occurrence labels preserve equality patterns across native rotation.
+  Cold plans refresh shapes after provider preparation. Native certification and
+  final binding checks remain; focused alias fixtures are source-only/unrun.
+  GBuffer visibility resolve declares ComputeRead; raster/transparent/Hero use
+  vertex reads. Current-only shadow/extraction keeps no new history read.
+  Old-coordinate skin/static/wind use the original view projection; pixel motion
+  uses one perspective-correct unjittered clip varying, adding only one float.
+  Current UV comes from the audited active-extent SV_Position, including compute
+  resolve/VRS; motion projection matrix products are removed from each fragment
+  in both GBuffer paths and Hero guide. Finite motion/depth fallback remains.
+  Archer legacy VS consumer closure now covers raster/mesh/visibility/Hero/
+  Fresnel/shadow/GI and static-only probe/fixture boundaries. Its unused128-bone
+  compatibility array, initialization/copy and SkinArcher fallback are removed.
+  FrameConstants is4720 bytes (was12912); all mirrored prefixes and exact offset
+  assertions are updated. Exposure/instance upload offsets derive from the aligned
+  constant size. Actual compute palettes/sampling remain unchanged. Monster's
+  legacy vertex skin/bubble fallback and its unused raster palette descriptor
+  are removed too. Qualified bounds without allocated skin now mean no packet
+  consumer: visibility emits neither visible nor HZB-rejected refs, still writing
+  zero indirect arguments; shadow preparation omits those receivers/casters and
+  preserves prior-caster retirement. Required/unknown-bound/attached/light/GI
+  consumers retain skin admission and explicit failure, with no quality downgrade.
+  Packet-owned instance lookup now serves Fresnel; sorted attachment IDs replace
+  per-instance full effect scans and preserve duplicate-ID demand for every draw.
+  The native owned-view fixture now skips/reappears Preview, rebases the whole
+  packet by1e9, and checks old-basis matrices/cut/epoch plus actual motion readback.
+  It remains opt-in/unbuilt/unrun; slot-reuse/native stress and full quality/FPS
+  qualification are not proved. Root19 is a two-SRV table (history + view skin),
+  keeping root indices and the 64-DWORD budget. Four dedicated descriptors per
+  waited bank retain separate scene/ribbon variants; no pending table overwrite.
+  Generic/raster, visibility, software geometry and Hero use view-local skin;
+  explicit static-table loads remain unchanged. Vertex fallback source closure is
+  complete; native consumer/asset qualification and conditional exact-pose sharing remain.
+  T15 direct OwnedView source cutover now covers
+  initialization, frame/descriptor/lifecycle/capture/reload. Impl mirrors and
+  ExchangeView are removed. Actual accepted submissions choose the three global
+  FrameContexts independently of output index; RTV/DSV/SRV banks wait per slot.
+  View selection switches only retained per-viewport SDK state; real reconfigure/
+  reset/BeforeReuse waits remain. Unbuilt; do not claim native qualification.
+  Parent integration fixed UI texture initialization ownership and shared-slot
+  upload growth/recopy. Existing owned-view fixture now switches different-sized
+  auxiliary owners through a slot. Integration now also routes feature preparation/
+  live admission, main lighting status and HLOD/geometry motion history to actual
+  owners;26 leftover Impl feature/history mirrors are deleted. Shared services and
+  completed-timing fallback remain. Hero retirement consumes samples, checks/reset
+  native service, then folds counters once; status/drains cover retained owners too.
+  Capture now resolves actual submission slot/id, not the independent output
+  index. A separate constants stamp invalidates reused/pre-submit CPU scratch;
+  geometry/visibility reject stale slots and surface diagnostics omit stale CPU
+  metadata while retaining per-view GPU surfaces. Old query timing IDs/storage
+  are untouched. Global timing endpoint map remains keyed by view ID; W12 stays
+  deferred. No current-source native qualification has run.
+- T06 prior exact channel/digest/fixed-target/no-read shrink changes are retained.
+  Mapping-only shrink skips empty-payload decode and frees consumed ranges.
+  New software replacements use fixed-target authenticated mip/slice chunks into
+  an unpublished candidate, complete every copy before final publication, and keep
+  old sampled resource until then. Prepared metadata survives intermediate chunks;
+  payload does not. Cancel/stale paths release only terminal owners and preserve
+  invalid-transition errors. Range-less sources retain complete package path;
+  indivisible ranges exceeding fresh host cap fail explicitly. Chunk fixture source
+  updated; native cancellation/accounting/shrink qualification is deferred.
+  N7 no-I/O reserved coarsening now enters an explicit mapping-only ledger
+  transition; ordinary payload upload still requires Decoded. Native generation/
+  unmap evidence, submission and completion-gated publication are preserved.
+  New fixture sources are unexecuted.
+- T04 Dev admission distinguishes source revision identities from runtime bulk IDs;
+  environment mesh/DDS dependencies retain digest/expected source identity but no
+  source path read. Packed source revision table reused; generation-only explicit
+  product-map path remains compatible. Unknown edges fail; VFX atlas remains bytes.
+  No claimed Release payload savings: linker already excluded non-render sources.
+- T12 successful typed pickup/status flash receipts suppress new legacy emitter
+  generation. Prior pending rows retire under original rules before expansion;
+  Line outputs and later authored ballistic rows remain. New ballistic recipes
+  prepare immutable direct/persistent shape/parameter/LUT contracts once in decoded
+  VfxImage; generated const arrays share that representation. Builders consume
+  prepared rows with original seeds, basis, live input/time/quality. application,
+  Dev/shipping owners, codegen and existing fixture sources migrated; unbuilt.
+  Distortion/decal now also prepare immutable recipes (knots, shape, parameters,
+  texture paths/slices and quality constraints) once in image IO and generated
+  const arrays. Builders bind only live payload/time/quality/seed; accepted range
+  presence drives retention, preserving legacy fallback. Distortion gap anchors
+  borrow live input only until output construction, avoiding a transient vector
+  copy; hot payload hashes are forced compile-time constants. Focused/runtime/
+  codegen fixture source migrated; no Program-based production caller remains.
+  Immutable effect output masks prevent non-ribbon retention. Generated/static
+  and developer images share prepared masks. Common Ground Ring/Fill/Border/Hatch/
+  Preview/Ticks and typed event Flash now use prepared rows, including authored
+  timing/color/quality/mask facts; all Ground/Flash callers use the image-only API.
+  Ground selects only its sorted source range rather than rescanning all effect
+  recipes per source. Existing malformed/geometry/codegen fixtures migrated, and a
+  sparse source-order case added. Specialized Ground handlers, persistent/status
+  Persistent status stamps, fire tongues and owned status-tick Flash now use cold
+  image recipes too, emitted as immutable shipping arrays. Runtime/release views
+  and all three application callers are connected. Live owner/episode, geometry,
+  age/quality/time and deterministic8Hz fire births remain; one mask choice now
+  serves all births of an owner/source. Recipe/codegen fixtures are source-only.
+  Mote source/output parameters, quality-specific masks, size/curve and Spark
+  texture facts now prepare once too, with matching shipping arrays and all six
+  Runtime callers connected. Spark Rebind stays on the cold Program view; live
+  births/cursors/geometry/quality/owner behavior remains. Redundant copied index
+  tags/lookup equality checks are removed; authoritative array bounds remain.
+  Specialized Mote route/window selection, Ground/ribbon and other output recipes
+  remain; T12 is not fully closed. Source fixtures/codegen are unbuilt/unrun.
+- T13 settings-suspended guard now precedes VFX activation/state mutation while
+  retaining bounded ingress/recovery. Pending particle due order sorts only newly
+  appended suffix and merges only on overlap, preserving original birth, ties and
+  accepted-prefix retirement. Raw ingress now follows proven producer FIFO order,
+  and CPU activation retires before Render independently from GPU emission ACK.
+  Profiles borrow canonical indexed rows; four owner-attached outputs share sparse
+  frame bindings while original birth/capture payloads remain unchanged. Membership
+  masks replace per-profile duplicate scans; Materialize/Commit and nine decoded
+  scratch vectors are removed. Unchanged membership skips compaction; expiry
+  remaps existing index entries instead of clearing/rebuilding the whole map.
+  Focused fixture sources cover binding sharing/drop/reset, captures, sectors,
+  stable compaction, rebind and delayed A/B activation. Unbuilt/unexecuted.
+  Frozen native batch storage/identity is now source implemented with retained
+  channel capacity, exact submission ACK, stable rewind retry and reset handling.
+  Public optional identity at the end of RenderVfxFrameInput is now wired into
+  Runtime and renderer. Zero sequence is explicit held clock/no actual batch;
+  nullopt preserves legacy callers. Integer display floor selects due prefixes,
+  collision age/delta/AuthoredParticleClock and last committed tick. Ordinary
+  analytic native ages use display time. Only the first view resets/emits the
+  shared world. Exact session/target/sequence submission ACK precedes handling
+  later view/Present error. Catalog adoption discards old expanded batches and
+  requests particle reset; raw CPU activation and UI receipts remain separate.
+  Native and state fixture sources cover different snapshot/target, no-step and
+  bad session, plus frozen retries/rewind/capacity reuse. All are unexecuted.
+  Full pending/fanout byte admission, first-preparation persistent birth-space
+  retry semantics and wider output coverage still require follow-through. Audit
+  confirms10k particle/32 distortion/64 decal/32 fresnel limits do not bound Ground/
+  Flash/mesh upload or episode/pending bytes. Do not silently treat10k as a shared
+  budget. Avoid a second eligibility scan; finish immutable recipes before a
+  single prepared activation with concrete per-output admission.
+  Sparse binding rows also retain nested RingGaps vector storage between frames.
+  PreparedPairFacts now keys ordered identities by session/publication revisions
+  and counts, never span addresses or unrelated quality/pipeline/static pointers.
+  Resolved values always come from the currently supplied borrowed spans.
+- T17/T19 current-only CSM/VSM/local-shadow callbacks bind current deformation as
+  their unused history fallback and no longer declare previous skin reads. Actual
+  motion consumers keep history. Empty SourceRenderOutputReady omitted when no
+  Full timing or SDK consumer; reference DRS span and SDK tagging completion kept.
+  Final topology is in the early graph key. W12 query ownership is untouched.
+  N6 layout publication matches exact EarlyKey plus low-level plan handle before
+  unused/LRU selection; frame-bank variants no longer overwrite one another just
+  because they share a plan. RC1/N5 now derive effective DRS from the preserved
+  request and resolved SoftwareGI constraints. Controller, actual reporting,
+  provider/capacity preparation and reference timing/key/topology share that value.
+  Device startup recomputes after actual capability admission. Resolver fixtures
+  are source-only; warm-key/native mode transitions remain unqualified.
+- T16 authored/masked facts cache with StaticGpuScene. Capture CSV retains all
+  fields/records with reused strings/to_chars. Do not weaken actual state/fences.
+- Latest9f91820 reanalysis supplied in chat is recorded in queued-51d5055.md.
+  N8 source split graph value/post topology declarations from native lowering;
+  the existing portable test still calls the production topology compiler.
+  N9 retains producer automatic repair; fixture now asserts exact repaired bytes,
+  quarantined complete old set and unchanged independently pinned reader data.
+  No current-source portable/native qualification has run for these changes.
+- S2 projectile body/head/trail/outer share current/previous terrain samples once
+  per projectile. Link targets/return-start retain distinct samples, and low-arena
+  no-op preserves position bits. Existing meadow fixture source extended; unrun.
+- A3 material shader production now shares the existing runtime shader source
+  snapshot helper: authored source/includes are copied and hashed on cache miss;
+  DXC runs in that private snapshot with relative source/include paths, plus owned
+  generated includes. Missing transitive inputs fail rather than falling back to
+  originals. Five omitted common shader includes are now action inputs. Environment
+  producers freeze metadata before deriving/copying consumed inputs and rekey before
+  cooking; valid-hit roles skip payload copies in mixed batches. Snapshot/digest
+  fixture sources extended; concurrent edits/native cooking are not yet qualified.
+  All five material/shader cache paths now parse one ActionResultSnapshot and use
+  its verified owned product bytes, avoiding reopen/digest TOCTOU and repeated
+  manifest parsing. Runtime shader families hash their saved transitive input
+  closure first; valid hits return before stage creation or any DXC scan. Changed/
+  unknown inputs fall back to live dependency discovery and frozen source. Narrow
+  InputMetadata accessor retains existing receipt touch behavior; no raw JSON
+  mirror, fake DXC harness or extra native test target. Actual no-DXC hit and
+  include-change behavior still need the combined producer execution batch.
+- A4 material compilation and runtime compile/dependency scan share bounded DXC
+  exit handling. Timeout/failed wait requests termination then waits at most10s;
+  only confirmed exit permits stage cleanup/diagnostic reads. Unconfirmed exit
+  preserves stage and reports PID/path/wait errors; infinite waits are removed.
+  Native timeout/uncertain-exit qualification remains deferred.
+- RC2 waited descriptor banks retain the actual resource owner, resolved fallback
+  and slice offset/size, skipping unchanged geometry SRV writes. Resident publication
+  transfers the prepared bank snapshot into the active heap; shutdown clears owners.
+  Existing native bank-cycling/reload coverage remains unexecuted for this source.
+  No brittle source-string fixture or extra descriptor validation framework added.
 
-Existing narrow architecture.layers + rendering.persistent-gpu-scene pass2/2:
-Build/verification/verify-20261026T202423531Z-27956.log. Channel patches are compared
-byte-for-byte to a full table serialization oracle, including abort and new backing.
-Current package format test passes after sharing one SupportedVersion policy across
-writer/full reader/directory proof, keeping volume v1 guards and shape bounds.
-Native DirectStorage1.3.0 compile+actual I/O test passes with no SKIP in validation
-root (RelWithDebInfo, HS_WITH_DIRECTSTORAGE=ON):
-Build/verification/verify-20261026T205030635Z-33200.log,
-Build/optimization-20261027-source-batch/native-io-receipt.json.
-Requested cancellation ERROR_OPERATION_ABORTED995 is a cancellation result only;
-other native failures still fail. Fixes also include AssetId namespace, test D3D12MA
-header dependency and SceneProbe SelectedGeneration STRUCT forward declaration.
-No broad test pass/current FPS is claimed from these narrow checks.
+## Latest completed executable checkpoint (before new T05/T14 source)
 
-Central Debug build succeeded, using build-debug.ps1 under
-Build/optimization-20261027-source-batch/. It built ProjectHS,hs_experiment,
-hs_scene_probe_bake and4existing test executables together. Full native stderr is
-in debug-errors.log; terminal exit0 receipt is debug-build-driver.log.
-Current Debug selected checks pass5/5: architecture.layers, persistent-gpu-scene,
-render-package-format, residency-streaming, runtime.integration. Initial sandbox
-denied rename in the latter2; both passed on host retry, without source changes.
-Logs: debug-selected-tests.log + debug-retry-tests.log. Existing native checks also
-pass2/2: integration.render-smoke (180rendered frames+resize) and vfx.showcase.
-Both render.json reports have0validation errors. Enhanced native GBV24frame check
-also passed on RTX4080 with0validation errors and normal exit0. It took about448s;
-this instrumented check is not gameplay FPS evidence. Capture logs are buffered,
-so empty live CSV files do not prove that the first frame has not completed.
-Receipt: Build/optimization-20261027-source-batch/verification-receipt.json.
-Full115gate and new200-enemy FPS comparison were not repeated in this check batch.
-MSVC host access is required for /Zi PDB server. Preserve /Od and checked iterators.
-Temporary caches restored by restore-caches.ps1: Debug HS_BUILD_TESTS=OFF,
-Debug DirectStorage=OFF, validation root DirectStorage=OFF. Both configure-only
-operations succeeded, with no source/default changes or duplicate native build.
-No Computer Use session. No current-source FPS claim.
+Artifacts: Build/optimization-20261027-continuation/.
+Central Debug continuation build exited0; matching native scene-probe cook publishes
+4probes in8frames/~9.4s. Architecture/streaming2/2 and updated real-hardware probe/
+multi-queue GBV fixture pass (probe-hardware-fixture-final.log). T23 readiness,
+transient sampled-mip identity and stale reset are covered. BakeStatus uses fixed
+bake_completion; export/reset retain rolling all-use completion. Later readers
+cannot extend the producer's completion target indefinitely. Ordinary SampleReady
+performs no new full-scene material/texture scan/hash. Permanent GPU-admission
+rejection still has no proof API; no arbitrary timeout is introduced.
 
-T23 source correction now added: exact cached static material owners, sampled mip
-identity/readiness, stale face reset and status-driven producer; canonical SPB1
-revisions remain unchanged. SampleReady skips texture facts/scans. New source has
-not qualified yet. GPU admission API still cannot prove a retained denial permanent;
-no arbitrary timeout/speculative stale-budget failure rule was introduced.
-T06 mapping-only shrink skips empty-payload decode and clears consumed range lists.
-A single Volumetric CBV DESCRIPTORS_VOLATILE flag is an unqualified diagnostic
-candidate; revert if the identical replay does not improve. No claimed root cause.
-One central continuation Debug build is currently running, session1026 at last
-observation, with scripts/logs under Build/optimization-20261027-continuation/.
-Targets ProjectHS,hs_experiment,hs_scene_probe_bake,hs_render_test_runner,
-hs_render_graph_multi_queue_tests,hs_residency_streaming_tests. Sources frozen while
-native build runs; temporary Debug testsON must be restored afterward.
+Old source-batch FNV7bc2f747c4cf4993 reproducibly DEVICE_HUNG0x887A0006 at49-63frames
+in validationOFF200, including timingOFF and Legacy. Partial VolumetricDensity
+breadcrumbs do not prove a root cause. Subsequent T23 binary candidate and original
+binding control both exited0 for1800ticks:422frames and826frames respectively.
+Original CBV descriptor flag is restored; extra volatile flag had no proven benefit.
+Do not assert the historical native hang's sole root cause or long-term resolution.
+Candidate FNV94080dd25a8387c6; original-flag control FNVcac5b8d72cb99d7c; generation
+ee658631a1bf3d9490e6044eaeb179f0fb78e6b02959de73b8264a1907dc0357.
+Candidate392qualified foreground intervals:30.13FPS,1%low22.14,p99=43.20ms.
+Components: capture log0.778ms, upload plan0.069ms, GBuffer6.84ms/AO3.45ms,
+frame-slot wait9.19ms/graph build4.07ms. These overlap and do not prove whole-frame
+improvement. OS GPU sampling is partial; game/per-pass capture is complete.
+Original-flag control results are preserved but not yet analyzed. Goal60FPS unmet.
+
+Other earlier narrow receipts remain valid for their original source/inputs only:
+architecture/persistent scene byte oracle, package formats, native DS1.3 I/O,
+Debug selected5/5, smoke180+resize/VFX showcase0validation errors. Full115 was not
+repeated. Temporary Debug HS_BUILD_TESTS=ON remains for the eventual batch;
+Debug/validation DirectStorage=OFF. Restore temporary test cache after that batch.
+MSVC /Zi PDB needs host access; preserve /Od/assertions/checked iterators.
 
 ## Last qualified checkpoint (before this source batch)
 
@@ -227,7 +411,7 @@ Shared-source changes require focused current-input requalification before claim
 - W09 pose-certified optional lower pages/resident slots, O(1) interval lookup and
   enclosure prepared at adoption; actual own-resident masks per six families.
   18 family/LOD draw ranges route skin, shadow, GI, Fresnel, Hero. Shared package
-  locks first committed common LOD; per-view motion history remains separate.
+  prepares one union-consumer LOD/order; per-view motion history remains separate.
   This is NOT yet T17's distinct-view LOD range directory or legacy skin removal.
   Actual cooked accepted page counts and asset quality remain unknown.
 - Hero work capacity12 contributors/168 diagnostic rows per frame. W10 preserves
@@ -241,8 +425,8 @@ Shared-source changes require focused current-input requalification before claim
   existing copy pass uploads once per actual density/proxy/layout revision. HLOD,
   all raster/visibility/probe readers share its graph handle; delayed diagnostics
   use the frame's CPU owner. refs_dirty survives failed preparation; retired tables
-  and staging wait on their actual completions. Static material facts still need
-  the integrated T16 comparison.
+  and staging wait on their actual completions. Authored/masked material facts are
+  also cached on the StaticGpuScene owner.
 - W11 source restores exact retained layout before declarations on warm path,
   with value-only layouts/current bindings across helpers. Cache publication and
   eviction happen after successful Render return so borrowed spans survive Execute.

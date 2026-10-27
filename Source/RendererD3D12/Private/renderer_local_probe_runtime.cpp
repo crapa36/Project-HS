@@ -28,7 +28,8 @@ constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
 constexpr std::string_view kEnvironment="render/lighting/default_probe.rpkg";
 constexpr UINT kFaceCount=6;
 constexpr UINT kConstantBankCount=kFaceCount+1, kShadowEdge=512;
-constexpr UINT kCaptureDescriptorCount=renderer_detail::kHeroTransparencyDescriptorOffset+kHeroTransparencyTableSize;
+constexpr UINT kCaptureSkinDescriptorOffset=renderer_detail::kHeroTransparencyDescriptorOffset+kHeroTransparencyTableSize;
+constexpr UINT kCaptureDescriptorCount=kCaptureSkinDescriptorOffset+2;
 constexpr UINT kConstantsStride=(sizeof(FrameConstants)+255u)&~255u;
 Result Failure(std::string message)
 { return Result::Failure(ErrorCode::InvalidState,"hs_renderer_local_probe_runtime",std::move(message)); }
@@ -358,6 +359,7 @@ struct LocalProbeCaptureFrame
         list->SetGraphicsRootDescriptorTable(0,sampler_table);
         list->SetGraphicsRootDescriptorTable(5,table(0));
         list->SetGraphicsRootDescriptorTable(13,table(renderer_detail::kPostTextureDescriptorCount));
+        list->SetGraphicsRootDescriptorTable(19,table(kCaptureSkinDescriptorOffset));
         list->SetGraphicsRootDescriptorTable(24,table(renderer_detail::kPostTextureDescriptorCount+
             renderer_detail::kCharacterDescriptorCount+renderer_detail::kMonsterPbrDescriptorCount+
             renderer_detail::kEnvironmentDescriptorCount+renderer_detail::kVfxGradientDescriptorCount+3));
@@ -491,6 +493,18 @@ void CopyCaptureDescriptors(ID3D12Device *device,D3D12_CPU_DESCRIPTOR_HANDLE des
     D3D12_CPU_DESCRIPTOR_HANDLE source)
 {
     device->CopyDescriptorsSimple(kCaptureDescriptorCount,destination,source,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    // Static capture owns no dynamic history or view skin input.
+    const auto stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    destination.ptr+=SIZE_T(kCaptureSkinDescriptorOffset)*stride;
+    D3D12_SHADER_RESOURCE_VIEW_DESC empty{};
+    empty.Format=DXGI_FORMAT_R32_TYPELESS; empty.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+    empty.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    empty.Buffer.NumElements=sizeof(GpuSceneTableHeader)/sizeof(UINT);
+    empty.Buffer.Flags=D3D12_BUFFER_SRV_FLAG_RAW;
+    device->CreateShaderResourceView(nullptr,&empty,destination);
+    destination.ptr+=stride;
+    empty.Buffer.NumElements=sizeof(GpuSceneSkinEntry)/sizeof(UINT);
+    device->CreateShaderResourceView(nullptr,&empty,destination);
 }
 void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capture,
     const RendererConfig &config, RendererPipelineCache *pipeline_cache, bool color,
@@ -1405,7 +1419,7 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
             std::memcpy(frame->mapped,&frame->base,sizeof(frame->base));
             frame->BindPrivate(list,0);
             // The source-base shader bypasses dynamic instances/skin/geometry records.
-            for(UINT root:{1u,2u,11u,12u,14u,16u,17u,18u,19u,20u,25u,27u,28u,31u,35u})
+            for(UINT root:{1u,2u,11u,12u,14u,16u,17u,18u,20u,25u,27u,28u,31u,35u})
                 list->SetGraphicsRootShaderResourceView(root,0);
             list->ClearDepthStencilView(target,D3D12_CLEAR_FLAG_DEPTH,0,0,0,nullptr);
             list->OMSetRenderTargets(0,nullptr,FALSE,&target);

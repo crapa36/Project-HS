@@ -1,9 +1,11 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ground_commands.hpp"
+#include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
 #include <hs/render_data/render_snapshot.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <filesystem>
@@ -34,6 +36,18 @@ constexpr std::uint64_t Hash64(std::string_view value)
     return hash;
 }
 
+hs::VfxImageData PreparedImage(const hs::VfxProgramData &program)
+{
+    hs::VfxImageData image; image.program=program;
+    hs::PrepareVfxGroundRecipes(image.program.View(),image.ground_effect_ranges,image.ground_recipes);
+    return image;
+}
+std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildGround(
+    const hs::VfxProgramData &program,std::span<const hs::VfxPersistentInput> inputs,hs::Tick tick)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedGroundCommands(image.View(),inputs,tick); }
+std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildEventGround(
+    const hs::VfxProgramData &program,hs::VfxEventView inputs,double tick)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedEventGroundCommands(image.View(),inputs,tick); }
 void Require(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -127,7 +141,7 @@ void ConvertsOnlyAuthoredDirectExactRings()
 {
     const auto cooked = Program();
     const std::vector inputs{CircleInput()};
-    const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712);
+    const auto commands = BuildGround(cooked, inputs, 712);
     Require(commands.size() == 2, "direct exact-hitbox output filtering failed");
     const auto &first = commands[0];
     const auto &command = first.command;
@@ -160,29 +174,48 @@ void ConvertsOnlyAuthoredDirectExactRings()
             "multiple authored ring outputs were merged");
 }
 
+void PreservesSparsePreparedSourceOrder()
+{
+    auto cooked = Program();
+    auto late = cooked.sources.front();
+    late.outputs = {static_cast<std::uint32_t>(cooked.outputs.size()), 1};
+    cooked.sources.push_back(late);
+    auto output = cooked.outputs.front();
+    output.source = 2;
+    output.parameters = {2, 1};
+    cooked.outputs.push_back(output);
+    cooked.effects.front().sources.count = 3;
+    const std::array inputs{CircleInput()};
+    const auto commands = BuildGround(cooked, inputs, 712);
+    Require(commands.size() == 3 && Near(commands[0].edge_width_world, .055f) &&
+            Near(commands[1].edge_width_world, .075f) && Near(commands[2].edge_width_world, .09f) &&
+            commands[2].command.sequence != commands[0].command.sequence,
+            "sparse source recipes duplicated, reordered or lost an authored output");
+}
+
 void RejectsUnsupportedOrMissingGeometry()
 {
     auto cooked = Program();
     std::vector inputs{CircleInput()};
     inputs[0].payload = hs::VfxConePayload{};
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).empty(),
+    Require(BuildGround(cooked, inputs, 712).empty(),
             "non-circle input was rendered as a circle");
     inputs[0] = CircleInput();
     cooked.effects[0].payload_kind = Hash32("RingWithGapsPayload");
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).empty(),
+    Require(BuildGround(cooked, inputs, 712).empty(),
             "incompatible authored payload schema was rendered as a circle");
     cooked = Program();
     std::get<hs::VfxCirclePayload>(inputs[0].payload).radius = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).empty(),
+    Require(BuildGround(cooked, inputs, 712).empty(),
             "zero gameplay radius created a fake ring");
     inputs[0] = CircleInput();
     cooked.outputs[0].parameters.count = 0;
     cooked.outputs[4].parameters.count = 0;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).empty(),
+    Require(BuildGround(cooked, inputs, 712).empty(),
             "missing authored world-space edge width was invented");
     cooked = Program();
     cooked.sources[0].type = hs::VfxSourceType::ProjectileFollow;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).empty(),
+    Require(BuildGround(cooked, inputs, 712).empty(),
             "non-direct source was executed as direct geometry");
 }
 
@@ -202,7 +235,7 @@ void PreservesSharedSourceRingAndFill()
     // Ring and interior consume the same Direct source and owner geometry.
     cooked.outputs[1] = fill;
     const std::vector inputs{CircleInput()};
-    const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712);
+    const auto commands = BuildGround(cooked, inputs, 712);
     Require(commands.size() == 3, "shared-source fill was dropped or replaced its ring");
     const auto &body = commands[1];
     Require(body.command.primitive == hs::VfxPrimitive::LowFrequencyFill &&
@@ -215,7 +248,7 @@ void PreservesSharedSourceRingAndFill()
     Require(Near(body.command.start_color.x, 0.18f) &&
             Near(body.command.start_color.w, 0.18f), "fill color was not cooked RGBA/HDR");
     cooked.outputs[1].parameters.count = 0;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, inputs, 712).size() == 2,
+    Require(BuildGround(cooked, inputs, 712).size() == 2,
             "missing flow parameter was silently invented");
 }
 
@@ -242,9 +275,9 @@ void ConvertsFixedTimeCircleEvents()
     cooked.effects[0].timing_kind = 0;
     cooked.effects[0].seconds = 2.0f;
     auto event = CircleEvent();
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 99).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 99).empty(),
             "event before start was rendered");
-    auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 160);
+    auto commands = BuildEventGround(cooked, std::vector{event}, 160);
     Require(commands.size() == 2, "fixed-time circle event was not emitted");
     Require(commands[0].stable_id == event.sequence && commands[0].source_visual_kind == 0xff &&
             commands[0].command.tick == event.event_tick &&
@@ -256,11 +289,11 @@ void ConvertsFixedTimeCircleEvents()
             Near(commands[0].motion.rate_hz, 0.8f), "event authored output fields were lost");
     auto second_event = event;
     second_event.sequence += (static_cast<hs::Sequence>(1) << 32);
-    const auto second_commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    const auto second_commands = BuildEventGround(
         cooked, std::vector{second_event}, 160);
     Require(!second_commands.empty() && second_commands[0].command.sequence != commands[0].command.sequence,
             "event sequence high bits were discarded");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 220).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 220).empty(),
             "event after fixed lifetime was rendered");
 }
 
@@ -274,23 +307,23 @@ void HonorsEventSourceEnvelopeAndSchema()
     cooked.sources[0].knots = {0.2f, 0.4f, 0.6f, 0.8f};
     cooked.sources[0].outputs = {0, 5};
     auto event = CircleEvent();
-    auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 124);
+    auto commands = BuildEventGround(cooked, std::vector{event}, 124);
     Require(commands.empty(), "event before source envelope was rendered");
-    commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 136);
+    commands = BuildEventGround(cooked, std::vector{event}, 136);
     Require(commands.size() == 2 && Near(commands[0].lifetime01, 0.65f) &&
             Near(commands[0].command.start_color.w, 0.4f),
             "four-knot source fade envelope was not applied");
-    commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 184);
+    commands = BuildEventGround(cooked, std::vector{event}, 184);
     Require(commands.size() == 2 && Near(commands[0].command.start_color.w, 0.4f),
             "four-knot source fade out was not applied");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 196).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 196).empty(),
             "source remained visible at its exclusive endpoint");
     cooked.effects[0].payload_kind = Hash32("RingWithGapsPayload");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 136).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 136).empty(),
             "mismatched event payload schema was rendered");
     cooked = Program();
     cooked.effects[0].input_mode = 1;
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 136).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 136).empty(),
             "persistent effect accepted event input");
 }
 
@@ -338,7 +371,7 @@ void ConvertsLineGeometryAndAuthoredParams()
 {
     auto cooked = LineProgram(false);
     auto input = LineInput();
-    auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712);
+    auto commands = BuildGround(cooked, std::vector{input}, 712);
     Require(commands.size() == 1, "line border was not emitted");
     const auto &item = commands[0];
     const float length = std::sqrt(8.0f * 8.0f + 6.0f * 6.0f);
@@ -351,16 +384,16 @@ void ConvertsLineGeometryAndAuthoredParams()
             item.command.start_size_min > 0.0f, "line center or legacy bounding extent missing");
     Require(Near(item.command.start_color.w, 0.8f), "line source envelope was not applied");
     input.normalized_age = 0.3f;
-    commands = hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712);
+    commands = BuildGround(cooked, std::vector{input}, 712);
     Require(commands.size() == 1 && Near(commands[0].command.start_color.w, 0.4f),
             "persistent line fade-in envelope was not applied");
     input.normalized_age = 0.8f;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712).empty(),
+    Require(BuildGround(cooked, std::vector{input}, 712).empty(),
             "persistent line remained visible at its exclusive source endpoint");
 
     cooked = LineProgram(true);
     input.normalized_age = 0.5f;
-    commands = hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712);
+    commands = BuildGround(cooked, std::vector{input}, 712);
     Require(commands.size() == 1 && commands[0].geometry.shape == hs::VfxGroundShape::LineHatch &&
             Near(commands[0].geometry.spacing, 5.0f) && Near(commands[0].geometry.scroll, 1.2f) &&
             Near(commands[0].geometry.edge_width, 0.0f), "line hatch params were not preserved");
@@ -371,21 +404,21 @@ void RejectsMalformedLineGeometryAndCone()
     auto cooked = LineProgram(false);
     auto input = LineInput();
     input.payload = hs::VfxConePayload{};
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712).empty(),
+    Require(BuildGround(cooked, std::vector{input}, 712).empty(),
             "cone payload was converted to a line");
     input = LineInput();
     std::get<hs::VfxLinePayload>(input.payload).end = std::get<hs::VfxLinePayload>(input.payload).start;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712).empty(),
+    Require(BuildGround(cooked, std::vector{input}, 712).empty(),
             "zero-length line was accepted");
     input = LineInput();
     cooked.parameters[0].bits = std::bit_cast<std::uint32_t>(0.0f);
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712).empty(),
+    Require(BuildGround(cooked, std::vector{input}, 712).empty(),
             "zero edge width was invented");
     cooked = LineProgram(false);
     cooked.outputs[0].shape = Hash32("exact_hitbox_ring");
     cooked.outputs[0].motion = hs::VfxMotionKind::StableBoundaryInwardPulse;
     cooked.parameters[0].bits = std::bit_cast<std::uint32_t>(0.055f);
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::vector{input}, 712).empty(),
+    Require(BuildGround(cooked, std::vector{input}, 712).empty(),
             "circle output was synthesized for a line payload");
 }
 
@@ -414,7 +447,7 @@ void ConvertsFixedConeGroundEvents()
     cooked.effects[0].timing_kind = 0;
     cooked.effects[0].seconds = 1.0f;
     auto event = ConeEvent();
-    auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    auto commands = BuildEventGround(
         cooked, std::vector{event}, 115);
     Require(commands.size() == 1, "fixed cone ground event was not emitted");
     const auto &item = commands[0];
@@ -426,30 +459,30 @@ void ConvertsFixedConeGroundEvents()
             Near(item.command.position.x, -4.0f) && Near(item.command.position.z, 2.0f) &&
             Near(item.command.start_size_min, 19.06f),
             "cone geometry or authored border params changed");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 99).empty(), "cone event rendered before its start");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 161).empty(), "cone event rendered after its lifetime");
     cooked.outputs[0].min_quality = 2;
     event.quality = hs::VfxQuality::Low;
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 115).empty(), "cone output ignored quality filtering");
     cooked.outputs[0].min_quality = 0;
     event.quality = hs::VfxQuality::High;
     auto &cone = std::get<hs::VfxConePayload>(event.payload);
     cone.half_angle_degrees = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 115).empty(), "zero cone angle was accepted");
     cone.half_angle_degrees = 181.0f;
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 115).empty(), "overwide cone angle was accepted");
     cone.half_angle_degrees = 73.0f;
     cone.range = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 115).empty(), "zero cone range was accepted");
     cone.range = 19.0f;
     cone.direction = {0.0f, 1.0f, 0.0f};
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+    Require(BuildEventGround(
         cooked, std::vector{event}, 115).empty(), "cone without an XZ direction was accepted");
 }
 
@@ -466,11 +499,11 @@ void ConvertsLineEventTiming()
     event.sequence = 0xabc;
     event.payload = std::get<hs::VfxLinePayload>(persistent.payload);
     event.quality = hs::VfxQuality::High;
-    auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 136);
+    auto commands = BuildEventGround(cooked, std::vector{event}, 136);
     Require(commands.size() == 1 && Near(commands[0].normalized_age, 0.3f) &&
             Near(commands[0].command.start_color.w, 0.4f),
             "line event timing or four-knot fade was changed");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 124).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 124).empty(),
             "line event rendered before its source envelope");
 }
 
@@ -487,11 +520,11 @@ void UsesAuthoritativeWarningWindow()
     event.geometry_owner_id = 51;
     event.geometry_start_tick = 100;
     event.geometry_end_tick = 220;
-    const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 190);
+    const auto commands = BuildEventGround(cooked, std::vector{event}, 190);
     Require(commands.size() == 1 && Near(commands[0].normalized_age,0.75f) &&
             Near(commands[0].command.lifetime_max,2.0f),
             "warning ended at cosmetic recipe time instead of scheduled execution");
-    Require(hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::vector{event}, 220).empty(),
+    Require(BuildEventGround(cooked, std::vector{event}, 220).empty(),
             "warning survived scheduled execution");
 }
 void RingGapsPreservesGeometryAndOwnerAge()
@@ -511,7 +544,7 @@ void RingGapsPreservesGeometryAndOwnerAge()
     ring.center = {17,.4f,-8}; ring.inner_radius=8.875f; ring.outer_radius=8.9f;
     ring.gap_half_width_degrees=7; ring.gap_angles_degrees={-17,43,407,720}; ring.lifetime01=.6f;
     input.payload=ring; input.normalized_age=.1f;
-    auto run = [&] { return hs::runtime_detail::BuildVfxTypedGroundCommands(cooked,std::span(&input,1),700); };
+    auto run = [&] { return BuildGround(cooked,std::span(&input,1),700); };
     auto commands=run();
     Require(commands.size()==2,"ring-with-gaps outputs not decoded");
     const auto &border=commands[0]; const auto &fill=commands[1];
@@ -543,7 +576,7 @@ void RingGapsRejectsMalformedGeometry()
     auto cooked=Program();cooked.effects[0].payload_kind=Hash32("RingWithGapsPayload");
     auto input=CircleInput();hs::VfxRingGapsPayload ring;
     ring.inner_radius=2;ring.outer_radius=3;ring.gap_half_width_degrees=12;ring.lifetime01=.5f;ring.gap_angles_degrees={5,81};input.payload=ring;
-    auto run=[&] {return hs::runtime_detail::BuildVfxTypedGroundCommands(cooked,std::span(&input,1),1);};
+    auto run=[&] {return BuildGround(cooked,std::span(&input,1),1);};
     Require(run().size()==2,"valid ring fixture rejected");
     auto &payload=std::get<hs::VfxRingGapsPayload>(input.payload);
     payload.inner_radius=-1;Require(run().empty(),"negative inner radius accepted");payload.inner_radius=3;Require(run().empty(),"empty annulus accepted");payload.inner_radius=2;
@@ -567,7 +600,7 @@ void CircleWarningUsesOwnerClockAndExactRadius()
     hs::VfxEventInput input;input.effect_handle=1;input.sequence=711;input.event_tick=100;
     input.geometry_owner_id=99;input.geometry_start_tick=100;input.geometry_end_tick=220;
     hs::VfxCirclePayload circle;circle.center={7,.2f,-4};circle.radius=3.7f;input.payload=circle;
-    const auto run=[&](hs::Tick tick){return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked,std::span(&input,1),tick);};
+    const auto run=[&](hs::Tick tick){return BuildEventGround(cooked,std::span(&input,1),tick);};
     auto c=run(160);Require(c.size()==2&&c[0].geometry.shape==hs::VfxGroundShape::CirclePreviewBorder&&
         c[1].geometry.shape==hs::VfxGroundShape::CirclePreviewTicks,"owned circle warning shape pair missing");
     Require(c[0].stable_id==99&&c[1].stable_id==99&&Near(c[0].geometry.outer_radius,3.7f)&&c[0].geometry.inner_radius==0&&
@@ -606,7 +639,7 @@ void OwnedRingPreviewUsesIntegratedPulse()
     hs::VfxEventInput input; input.effect_handle=1; input.event_tick=100; input.geometry_owner_id=99;
     input.geometry_start_tick=100; input.geometry_end_tick=220;
     hs::VfxRingGapsPayload ring; ring.center={7,.2f,-4};ring.inner_radius=3;ring.outer_radius=17;ring.gap_half_width_degrees=11;ring.gap_angles_degrees={-13,51,244}; input.payload=ring;
-    auto run=[&](hs::Tick tick){return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked,std::span(&input,1),tick);};
+    auto run=[&](hs::Tick tick){return BuildEventGround(cooked,std::span(&input,1),tick);};
     auto commands=run(160);
     Require(commands.size()==2&&commands[0].geometry.shape==hs::VfxGroundShape::RingGapsPreviewBorder&&
             commands[1].geometry.shape==hs::VfxGroundShape::RingGapsTicks,"preview shape pair missing");
@@ -646,7 +679,7 @@ void SafeSectorPreservesScheduledFootprint()
     hs::VfxEventInput input; input.effect_handle=1;input.sequence=82;input.event_tick=100;
     input.geometry_owner_id=7;input.geometry_start_tick=100;input.geometry_end_tick=280;
     input.payload=hs::VfxSafeSectorPayload{{4,.3f,-9},{3,5,4},7,19,17,.99f};
-    auto run=[&](hs::Tick tick){return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked,std::span(&input,1),tick);};
+    auto run=[&](hs::Tick tick){return BuildEventGround(cooked,std::span(&input,1),tick);};
     auto commands=run(190);Require(commands.size()==1,"safe-sector output missing");
     const auto &item=commands[0];const auto &g=item.geometry;
     Require(g.shape==hs::VfxGroundShape::SafeSectorMarker && Near(g.inner_radius,7)&&Near(g.outer_radius,19)&&Near(g.range,19)&&
@@ -736,9 +769,15 @@ hs::VfxEventInput ExpandingRingEvent(bool circle_payload = false)
 void ExpandingRingUsesAuthoredSourceIntervalAndPayloadScale()
 {
     auto cooked = ExpandingRingProgram();
+    auto prepared=PreparedImage(cooked);
+    Require(prepared.ground_effect_ranges.size()==1 && prepared.ground_effect_ranges[0].count==1 &&
+            prepared.ground_recipes.size()==1 && prepared.ground_recipes[0].kind==hs::VfxGroundRecipeKind::ExpandingRing &&
+            Near(prepared.ground_recipes[0].primary,.15f) && Near(prepared.ground_recipes[0].secondary,1.25f) &&
+            Near(prepared.ground_recipes[0].tertiary,.07f) && prepared.ground_recipes[0].output_index==0,
+            "expanding-ring authored route and parameters were not prepared once");
     auto event = ExpandingRingEvent();
     const auto run = [&](hs::Tick tick) {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), tick);
+        return BuildEventGround(cooked, std::span(&event, 1), tick);
     };
     Require(run(102).empty(), "expanding ring appeared before source start");
     auto commands = run(103);
@@ -780,7 +819,7 @@ void ExpandingRingRejectsWrongContractAndMalformedParams()
     auto cooked = ExpandingRingProgram();
     auto event = ExpandingRingEvent();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), 118);
+        return BuildEventGround(cooked, std::span(&event, 1), 118);
     };
     cooked.outputs[0].profile = hs::VfxOutputProfile::GroundSdfSoft;
     Require(run().empty(), "wrong expanding-ring profile accepted");
@@ -857,7 +896,7 @@ void CookedExpandingRingsConvertWhenContentIsAvailable()
         else
             throw std::runtime_error("cooked expanding ring has an unsupported payload schema");
         const auto tick = event.event_tick + static_cast<hs::Tick>(std::lround(.3f * effect.seconds * 60.0f));
-        const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        const auto commands = BuildEventGround(
             cooked, std::span(&event, 1), tick);
         converted_count += std::count_if(commands.begin(), commands.end(),
             [](const auto &item) { return item.additive; });
@@ -948,7 +987,7 @@ void CookedRetreatShockwaveCircleStaysWithinGameplayRadiusWhenContentIsAvailable
                                                      gameplay_radius};
                 const auto near_end_tick = event.event_tick +
                     static_cast<hs::Tick>(std::ceil(effect.seconds * source.knots[1] * 60.0f)) - 1;
-                const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+                const auto commands = BuildEventGround(
                     cooked, std::span(&event, 1), near_end_tick);
                 const auto converted = std::find_if(commands.begin(), commands.end(),
                     [](const auto &item) {
@@ -1046,7 +1085,7 @@ void HexConstellationPreservesGeometryMaterialAndMask()
     auto cooked = HexProgram();
     auto event = HexEvent();
     const auto run = [&](hs::Tick tick) {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), tick);
+        return BuildEventGround(cooked, std::span(&event, 1), tick);
     };
     auto commands = run(119);
     Require(commands.size() == 1, "authored hex output missing");
@@ -1086,7 +1125,7 @@ void HexConstellationRejectsMalformedContract()
     auto cooked = HexProgram();
     auto event = HexEvent();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), 119);
+        return BuildEventGround(cooked, std::span(&event, 1), 119);
     };
     cooked.outputs[0].profile = hs::VfxOutputProfile::GroundSdfSoft;
     Require(run().empty(), "wrong hex profile accepted");
@@ -1167,7 +1206,7 @@ void CookedHexConstellationsConvertWhenContentIsAvailable()
         else
             throw std::runtime_error("cooked hex has an unsupported payload schema");
         const auto tick = event.event_tick + static_cast<hs::Tick>(std::lround(.3f * effect.seconds * 60.0f));
-        const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        const auto commands = BuildEventGround(
             cooked, std::span(&event, 1), tick);
         converted_count += std::count_if(commands.begin(), commands.end(), [&](const auto &item) {
             if (item.geometry.shape != hs::VfxGroundShape::HexConstellation || !item.additive) return false;
@@ -1251,7 +1290,7 @@ void BossSignatureKeepsGameplayFootprintsAndSafeGaps()
         auto cooked = BossSignatureProgram(schema);
         auto event = BossSignatureEvent(schema);
         const auto run = [&](hs::Tick tick) {
-            return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), tick);
+            return BuildEventGround(cooked, std::span(&event, 1), tick);
         };
         const auto commands = run(110);
         Require(commands.size() == 1, "boss signature output missing");
@@ -1298,7 +1337,7 @@ void BossSignatureRejectsWrongContractAndInvalidGeometry()
     auto cooked = BossSignatureProgram("RingWithGapsPayload");
     auto event = BossSignatureEvent("RingWithGapsPayload");
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), 110);
+        return BuildEventGround(cooked, std::span(&event, 1), 110);
     };
     cooked.outputs[0].profile = hs::VfxOutputProfile::GroundSdfSoft;
     Require(run().empty(), "wrong boss signature profile accepted");
@@ -1367,7 +1406,7 @@ void CookedBossSignaturesConvertWhenContentIsAvailable()
         else throw std::runtime_error("cooked boss signature has an unsupported payload schema");
         event.effect_handle = effect.handle;
         const auto tick = event.event_tick + static_cast<hs::Tick>(std::lround(.2f * effect.seconds * 60.0f));
-        const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        const auto commands = BuildEventGround(
             cooked, std::span(&event, 1), tick);
         converted_count += std::count_if(commands.begin(), commands.end(),
             [](const auto &item) { return item.additive && item.geometry.animation_phase == 1.0f; });
@@ -1465,7 +1504,7 @@ void ConvertsHealTrapAndAxialWithTheirOwnGeometry()
         const auto cooked = RemainingEventProgram(test.schema, test.shape, test.motion, test.start, test.end);
         auto event = RemainingEvent(test.schema);
         const auto run = [&](hs::Tick tick) {
-            return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), tick);
+            return BuildEventGround(cooked, std::span(&event, 1), tick);
         };
         const auto commands = run(110);
         Require(commands.size() == 1, "remaining event ground output missing");
@@ -1508,7 +1547,7 @@ void RemainingEventsRejectWrongContractsAndGeometry()
                                         hs::VfxMotionKind::RingContractsReleases, 0, .65f);
     auto event = RemainingEvent("PointEventPayload");
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(cooked, std::span(&event, 1), 110);
+        return BuildEventGround(cooked, std::span(&event, 1), 110);
     };
     cooked.outputs[0].profile = hs::VfxOutputProfile::GroundSdfSoft;
     Require(run().empty(), "wrong healing profile accepted");
@@ -1599,7 +1638,7 @@ void PersistentCrownsUseActualOwnerFootprintAndPhase()
         auto cooked = CrownProgram(locked);
         auto input = CrownInput();
         const auto run = [&] {
-            return hs::runtime_detail::BuildVfxTypedGroundCommands(cooked, std::span(&input, 1), 712);
+            return BuildGround(cooked, std::span(&input, 1), 712);
         };
         auto commands = run();
         Require(commands.size() == 1, "persistent crown output missing");
@@ -1684,7 +1723,7 @@ void PlayerStateRingKeepsOwnerAndCookedContract()
     auto cooked = StateRingProgram();
     auto input = StateRingInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(
+        return BuildGround(
             cooked, std::span(&input, 1), 712);
     };
     const auto commands = run();
@@ -1717,7 +1756,7 @@ void PlayerStateRingRejectsWrongTupleAndOwner()
     auto cooked = StateRingProgram();
     auto input = StateRingInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(
+        return BuildGround(
             cooked, std::span(&input, 1), 712);
     };
     cooked.effect_lookup[0].effect_id = Hash64("persistent.boss.phase2_aura");
@@ -1867,7 +1906,7 @@ void ChargedPulseUsesContextRatioAndAuthoredGroundOutputs()
     auto cooked = ChargedPulseProgram();
     auto input = ChargedPulseInput();
     const auto run = [&](hs::Tick tick) {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        return BuildEventGround(
             cooked, std::span(&input, 1), tick);
     };
     const auto commands = run(112);
@@ -1921,7 +1960,7 @@ void ChargedPulseRejectsMalformedContextAndCookedContract()
     auto cooked = ChargedPulseProgram();
     auto input = ChargedPulseInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        return BuildEventGround(
             cooked, std::span(&input, 1), 112);
     };
     const auto reject = [&](const char *message) { Require(run().empty(), message); };
@@ -2014,7 +2053,7 @@ void CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable()
         ++matches;
         auto input = ChargedPulseInput();
         input.effect_handle = lookup.handle;
-        const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+        const auto commands = BuildEventGround(
             cooked, std::span(&input, 1), 112);
         Require(commands.size() == 2 &&
                 commands[0].geometry.shape == hs::VfxGroundShape::StateRing &&
@@ -2104,7 +2143,7 @@ void PickupIdlePolarRunesUsePresenceClockAndRelicMask()
     {
         auto cooked = PickupIdlePolarRuneProgram(names[index], index == 3);
         auto input = PickupIdlePolarRuneInput();
-        const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+        const auto commands = BuildGround(
             cooked, std::span(&input, 1), 712);
         Require(commands.size() == 1, "pickup idle polar rune missing");
         const auto &item = commands.front();
@@ -2134,7 +2173,7 @@ void PickupIdlePolarRunesRejectUnauthorizedContracts()
     auto cooked = PickupIdlePolarRuneProgram("particle.pickup.xp.idle", false);
     auto input = PickupIdlePolarRuneInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(
+        return BuildGround(
             cooked, std::span(&input, 1), 712);
     };
     input.normalized_age = .1f;
@@ -2167,7 +2206,7 @@ void PickupIdlePolarRunesRejectUnauthorizedContracts()
     cooked = StatusPolarRuneProgram("persistent.status.slow");
     input = StatusPolarRuneInput();
     const auto status_run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(
+        return BuildGround(
             cooked, std::span(&input, 1), 712);
     };
     hs::VfxTextureBindingRecord status_mask;
@@ -2189,7 +2228,7 @@ void PersistentStatusPolarRuneUsesOwnerFootprintAndClock()
     {
         auto cooked = StatusPolarRuneProgram(effect_name);
         auto input = StatusPolarRuneInput();
-        const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+        const auto commands = BuildGround(
             cooked, std::span(&input, 1), 712);
         Require(commands.size() == 1, "persistent status polar rune missing");
         const auto &item = commands.front();
@@ -2224,7 +2263,7 @@ void PersistentStatusPolarRuneRejectsWrongContract()
     auto cooked = StatusPolarRuneProgram("persistent.status.slow");
     auto input = StatusPolarRuneInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(
+        return BuildGround(
             cooked, std::span(&input, 1), 712);
     };
     cooked.effect_lookup[0].effect_id = Hash64("persistent.status.bleed");
@@ -2276,7 +2315,7 @@ void PersistentChargedOverchargePolarRuneUsesOwnerChargeRatio()
     input.normalized_age = .75f;
     input.elapsed_seconds = 1.25f;
     std::get<hs::VfxEntityPayload>(input.payload).lifetime01 = .75f;
-    const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+    const auto commands = BuildGround(
         cooked, std::span(&input, 1), 712);
     Require(commands.size() == 1 && !commands.front().additive &&
                 commands.front().geometry.shape == hs::VfxGroundShape::PolarRune &&
@@ -2287,12 +2326,12 @@ void PersistentChargedOverchargePolarRuneUsesOwnerChargeRatio()
 
     input.normalized_age = 1.0f;
     std::get<hs::VfxEntityPayload>(input.payload).lifetime01 = 1.0f;
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(
+    Require(BuildGround(
                 cooked, std::span(&input, 1), 712).size() == 1,
             "charged overcharge rune stopped at a live ratio of one");
 
     cooked.effect_lookup[0].effect_id = Hash64("particle.upgrade.charged.full_ready");
-    Require(hs::runtime_detail::BuildVfxTypedGroundCommands(
+    Require(BuildGround(
                 cooked, std::span(&input, 1), 712).empty(),
             "charged overcharge rune accepted a different effect identity");
 }
@@ -2348,7 +2387,7 @@ void DashWakeChevronsFollowActualLinePath()
     auto cooked = DashWakeProgram();
     auto input = DashWakeInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(cooked,
+        return BuildGround(cooked,
             std::span(&input, 1), 600);
     };
     const auto commands = run();
@@ -2383,7 +2422,7 @@ void DashWakeRejectsWrongContractAndInvalidGeometry()
     auto cooked = DashWakeProgram();
     auto input = DashWakeInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedGroundCommands(cooked,
+        return BuildGround(cooked,
             std::span(&input, 1), 600);
     };
     cooked.outputs[0].profile = hs::VfxOutputProfile::GroundSdfSoft;
@@ -2459,7 +2498,7 @@ void CookedRemainingGroundOutputsConvertWhenContentIsAvailable()
             else throw std::runtime_error("remaining cooked event output has unsupported payload schema");
             input.effect_handle = effect.handle;
             const auto tick = input.event_tick + static_cast<hs::Tick>(std::lround(.3f * effect.seconds * 60));
-            const auto commands = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+            const auto commands = BuildEventGround(
                 cooked, std::span(&input, 1), tick);
             converted_event += std::count_if(commands.begin(), commands.end(), [](const auto &item) {
                 return item.additive && (item.geometry.shape == hs::VfxGroundShape::CrossRing ||
@@ -2472,7 +2511,7 @@ void CookedRemainingGroundOutputsConvertWhenContentIsAvailable()
             authored_crown += crown_count;
             auto input = CrownInput();
             input.effect_handle = effect.handle;
-            const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+            const auto commands = BuildGround(
                 cooked, std::span(&input, 1), 712);
             converted_crown += std::count_if(commands.begin(), commands.end(), [](const auto &item) {
                 return item.additive && (item.geometry.shape == hs::VfxGroundShape::BrokenCrown ||
@@ -2484,7 +2523,7 @@ void CookedRemainingGroundOutputsConvertWhenContentIsAvailable()
             authored_dash += dash_count;
             auto input = DashWakeInput();
             input.effect_handle = effect.handle;
-            const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+            const auto commands = BuildGround(
                 cooked, std::span(&input, 1), 712);
             converted_dash += std::count_if(commands.begin(), commands.end(), [](const auto &item) {
                 return item.additive && item.geometry.shape == hs::VfxGroundShape::RepeatingChevron;
@@ -2528,7 +2567,7 @@ void CookedPlayerStateRingConvertsWhenContentIsAvailable()
         }
         auto input = StateRingInput();
         input.effect_handle = lookup.handle;
-        const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+        const auto commands = BuildGround(
             cooked, std::span(&input, 1), 712);
         converted += commands.size();
         if (!commands.empty())
@@ -2568,7 +2607,7 @@ void CookedPickupIdlePolarRunesConvertWhenContentIsAvailable()
                     "cooked pickup idle lookup has invalid handle");
             auto input = PickupIdlePolarRuneInput();
             input.effect_handle = lookup.handle;
-            const auto commands = hs::runtime_detail::BuildVfxTypedGroundCommands(
+            const auto commands = BuildGround(
                 cooked, std::span(&input, 1), 712);
             Require(commands.size() == 1 &&
                         commands.front().geometry.shape == hs::VfxGroundShape::PolarRune &&
@@ -2628,6 +2667,7 @@ int RunVfxGroundTests()
         RingGapsPreservesGeometryAndOwnerAge();
         RingGapsRejectsMalformedGeometry();
         ConvertsOnlyAuthoredDirectExactRings();
+        PreservesSparsePreparedSourceOrder();
         RejectsUnsupportedOrMissingGeometry();
         PreservesSharedSourceRingAndFill();
         ConvertsFixedTimeCircleEvents();

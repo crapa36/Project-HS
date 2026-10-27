@@ -5,7 +5,7 @@
 namespace hs
 {
 
-Result D3D12Renderer::Impl::CreateUiTexture()
+Result D3D12Renderer::Impl::CreateUiTexture(OwnedView &view)
 {
     auto result = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER,
                                    IID_PPV_ARGS(&ui_wic_factory));
@@ -69,17 +69,10 @@ Result D3D12Renderer::Impl::CreateUiTexture()
     family_names->GetString(family_name_index, ui_font_family.data(), family_name_length + 1);
     ui_font_family.resize(family_name_length);
 
-    UiResources resources;
-    if (auto prepared = PrepareUiResources(resources, width, height); !prepared) return prepared;
-    CommitUiResources(resources);
+    UiResources candidate;
+    if (auto prepared = PrepareUiResources(candidate, view.width, view.height); !prepared) return prepared;
+    CommitUiResources(view, candidate);
     return Result::Success();
-}
-
-D3D12Renderer::Impl::UiResources::~UiResources()
-{
-    for (std::size_t frame = 0; frame < uploads.size(); ++frame)
-        if (uploads[frame].resource && mapped[frame])
-            uploads[frame].resource->Unmap(0, nullptr);
 }
 
 Result D3D12Renderer::Impl::PrepareUiResources(UiResources &resources,
@@ -105,8 +98,6 @@ Result D3D12Renderer::Impl::PrepareUiResources(UiResources &resources,
                                   &resources.rows, &resources.row_bytes, &resources.upload_bytes);
     D3D12MA::ALLOCATION_DESC default_allocation{};
     default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12MA::ALLOCATION_DESC upload_allocation{};
-    upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     D2D1_RENDER_TARGET_PROPERTIES properties{};
     properties.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
     properties.pixelFormat = {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED};
@@ -119,14 +110,7 @@ Result D3D12Renderer::Impl::PrepareUiResources(UiResources &resources,
         if (auto created = CreateAllocation(resources.textures[frame_index], default_allocation,
                 texture_description, D3D12_RESOURCE_STATE_COMMON); !created)
             return created;
-        if (auto created = CreateAllocation(resources.uploads[frame_index], upload_allocation,
-                BufferDescription(resources.upload_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created)
-            return created;
-        const D3D12_RANGE no_read{};
-        void *mapped{};
-        auto result = resources.uploads[frame_index].resource->Map(0, &no_read, &mapped);
-        if (FAILED(result)) return HResultFailure("Map UI upload", result);
-        resources.mapped[frame_index] = static_cast<std::byte *>(mapped);
+        HRESULT result{};
         auto &surface = resources.surfaces[frame_index];
         result = ui_wic_factory->CreateBitmap(output_width, output_height,
                                               GUID_WICPixelFormat32bppPBGRA,
@@ -143,43 +127,28 @@ Result D3D12Renderer::Impl::PrepareUiResources(UiResources &resources,
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::CommitUiResources(UiResources &resources) noexcept
+void D3D12Renderer::Impl::CommitUiResources(OwnedView &owner, UiResources &resources) noexcept
 {
-    // The caller drains GPU users before replacing resources/descriptors. The
-    // candidate then owns the retired resources and their mapped upload pointers.
+    // The caller drains GPU users before replacing these view-owned targets.
     using std::swap;
-    swap(ui_textures, resources.textures);
-    swap(ui_surfaces, resources.surfaces);
-    swap(ui_footprint, resources.footprint);
-    swap(ui_rows, resources.rows);
-    swap(ui_raster_width, resources.raster_width);
-    swap(ui_raster_height, resources.raster_height);
-    swap(ui_row_bytes, resources.row_bytes);
-    swap(ui_upload_bytes, resources.upload_bytes);
+    swap(owner.ui.textures, resources.textures);
+    swap(owner.ui.surfaces, resources.surfaces);
+    swap(owner.ui.footprint, resources.footprint);
+    swap(owner.ui.rows, resources.rows);
+    swap(owner.ui.raster_width, resources.raster_width);
+    swap(owner.ui.raster_height, resources.raster_height);
+    swap(owner.ui.row_bytes, resources.row_bytes);
+    swap(owner.ui.upload_bytes, resources.upload_bytes);
     for (std::size_t index = 0; index < frames.size(); ++index)
     {
-        swap(frames[index].ui_upload, resources.uploads[index]);
-        swap(frames[index].ui_mapped, resources.mapped[index]);
-        frames[index].ui_initialized = false;
-        ui_raster_models[index].clear();
-        ui_dirty[index] = false;
+        owner.ui_initialized[index] = false;
+        owner.ui_models[index].clear();
+        owner.ui_dirty[index] = false;
     }
-    if (!srv_cpu_heap) return; // Startup post tables are written after heap creation.
-    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-    view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    view.Texture2D.MipLevels = 1;
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        for (const auto table : {0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset})
-        {
-            auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            descriptor.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + table + 9) * srv_stride;
-            device->CreateShaderResourceView(ui_textures[frame].resource.Get(), &view, descriptor);
-        }
+    owner.ui.text_layouts.clear();
 }
 
-Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
+Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
                                         std::span<const UiModel> models)
 {
     const auto equal = [](const UiModel &left, const UiModel &right) {
@@ -189,30 +158,71 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
             left.color_rgba == right.color_rgba && left.value == right.value &&
             left.font_pixels == right.font_pixels && left.utf8_text == right.utf8_text;
     };
-    const auto &cached = ui_raster_models[frame_index];
-    auto &surface = ui_surfaces[frame_index];
+    const auto &cached = owner.ui_models[frame_index];
+    auto &surface = owner.ui.surfaces[frame_index];
     if (surface.copy_completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         surface.completed_version = surface.submitted_version;
-    if (ui_surfaces[frame_index].bitmap_valid &&
-        (surface.completed_version == surface.bitmap_version || ui_dirty[frame_index]) &&
-        cached.size() == models.size() && std::equal(cached.begin(), cached.end(), models.begin(), equal))
+    const auto copy_bitmap = [&]() -> Result {
+        auto &frame = frames[frame_index];
+        // WaitForFrame has retired this slot; views share only its upload scratch.
+        if (!frame.ui_upload.resource || frame.ui_upload_bytes < owner.ui.upload_bytes)
+        {
+            AllocationResource upload;
+            D3D12MA::ALLOCATION_DESC allocation{};
+            allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+            if (auto created = CreateAllocation(upload, allocation,
+                    BufferDescription(owner.ui.upload_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created)
+                return created;
+            const D3D12_RANGE no_read{};
+            void *mapped{};
+            const auto mapped_result = upload.resource->Map(0, &no_read, &mapped);
+            if (FAILED(mapped_result)) return HResultFailure("Map UI slot upload", mapped_result);
+            if (frame.ui_upload.resource && frame.ui_mapped) frame.ui_upload.resource->Unmap(0, nullptr);
+            frame.ui_upload = std::move(upload);
+            frame.ui_mapped = static_cast<std::byte *>(mapped);
+            frame.ui_upload_bytes = owner.ui.upload_bytes;
+        }
+        WICRect rectangle{0, 0, static_cast<INT>(owner.ui.raster_width), static_cast<INT>(owner.ui.raster_height)};
+        ComPtr<IWICBitmapLock> bitmap_lock;
+        auto result = surface.bitmap->Lock(&rectangle, WICBitmapLockRead, &bitmap_lock);
+        UINT stride{}, byte_count{};
+        BYTE *pixels{};
+        if (SUCCEEDED(result)) result = bitmap_lock->GetStride(&stride);
+        if (SUCCEEDED(result)) result = bitmap_lock->GetDataPointer(&byte_count, &pixels);
+        if (FAILED(result)) return HResultFailure("Lock UI pixels", result);
+        for (std::uint32_t row = 0; row < owner.ui.rows; ++row)
+            std::memcpy(frame.ui_mapped + owner.ui.footprint.Offset + row * owner.ui.footprint.Footprint.RowPitch,
+                pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(owner.ui.row_bytes));
         return Result::Success();
+    };
+    if (surface.bitmap_valid && cached.size() == models.size() &&
+        std::equal(cached.begin(), cached.end(), models.begin(), equal))
+    {
+        if (surface.completed_version == surface.bitmap_version)
+        {
+            owner.ui_dirty[frame_index] = false;
+            return Result::Success();
+        }
+        if (auto copied = copy_bitmap(); !copied) return copied;
+        owner.ui_dirty[frame_index] = true;
+        return Result::Success();
+    }
     // Candidate layouts and model identity publish only after the whole raster succeeds.
-    ui_text_layouts.resize(std::max(ui_text_layouts.size(), models.size()));
+    owner.ui.text_layouts.resize(std::max(owner.ui.text_layouts.size(), models.size()));
     std::vector<UiTextLayout> candidate_layouts(models.size());
     std::vector<bool> replace_layout(models.size());
     std::vector<UiModel> candidate_models(models.begin(), models.end());
     // A failed raster cannot make the old model a valid bitmap on the next retry.
     surface.bitmap_valid = false;
-    ui_dirty[frame_index] = false;
+    owner.ui_dirty[frame_index] = false;
     // shortcut: whole-surface raster/upload stays until GR25 proves partial bitmap and native-copy equivalence.
     surface.target->BeginDraw();
     surface.target->SetTransform(D2D1_MATRIX_3X2_F{1, 0, 0, 1, 0, 0});
     surface.target->Clear(D2D1_COLOR_F{0, 0, 0, 0});
-    const auto logical_scale = std::min(static_cast<float>(ui_raster_width) / kUiWidth,
-                                       static_cast<float>(ui_raster_height) / kUiHeight);
-    const auto offset_x = (static_cast<float>(ui_raster_width) - kUiWidth * logical_scale) * 0.5f;
-    const auto offset_y = (static_cast<float>(ui_raster_height) - kUiHeight * logical_scale) * 0.5f;
+    const auto logical_scale = std::min(static_cast<float>(owner.ui.raster_width) / kUiWidth,
+                                       static_cast<float>(owner.ui.raster_height) / kUiHeight);
+    const auto offset_x = (static_cast<float>(owner.ui.raster_width) - kUiWidth * logical_scale) * 0.5f;
+    const auto offset_y = (static_cast<float>(owner.ui.raster_height) - kUiHeight * logical_scale) * 0.5f;
     surface.target->SetTransform(D2D1_MATRIX_3X2_F{
         logical_scale, 0, 0, logical_scale, offset_x, offset_y});
 
@@ -288,7 +298,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                                     : D2D1_COLOR_F{1, 1, 1, 1});
         const auto text_width = std::max(text_rectangle.right - text_rectangle.left, 1.0f);
         const auto text_height = std::max(text_rectangle.bottom - text_rectangle.top, 1.0f);
-        auto &cached_layout = ui_text_layouts[model_index];
+        auto &cached_layout = owner.ui.text_layouts[model_index];
         const std::string_view utf8{model.utf8_text.data(), static_cast<std::size_t>(byte_count)};
         if (!cached_layout.layout || cached_layout.utf8 != utf8 || cached_layout.kind != model.kind ||
             cached_layout.font_size != font_size || cached_layout.width != text_width ||
@@ -374,26 +384,12 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
     const auto draw_result = surface.target->EndDraw();
     if (FAILED(draw_result)) return HResultFailure("Rasterize UI", draw_result);
 
-    WICRect lock_rectangle{0, 0, static_cast<INT>(ui_raster_width), static_cast<INT>(ui_raster_height)};
-    ComPtr<IWICBitmapLock> bitmap_lock;
-    auto result = surface.bitmap->Lock(&lock_rectangle, WICBitmapLockRead, &bitmap_lock);
-    UINT stride{};
-    UINT byte_count{};
-    BYTE *pixels{};
-    if (SUCCEEDED(result)) result = bitmap_lock->GetStride(&stride);
-    if (SUCCEEDED(result)) result = bitmap_lock->GetDataPointer(&byte_count, &pixels);
-    if (FAILED(result)) return HResultFailure("Lock UI pixels", result);
-    auto &frame = frames[frame_index];
-    for (std::uint32_t row = 0; row < ui_rows; ++row)
-    {
-        std::memcpy(frame.ui_mapped + ui_footprint.Offset + row * ui_footprint.Footprint.RowPitch,
-                    pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(ui_row_bytes));
-    }
+    if (auto copied = copy_bitmap(); !copied) return copied;
     for (std::size_t index = 0; index < models.size(); ++index)
-        if (replace_layout[index]) ui_text_layouts[index] = std::move(candidate_layouts[index]);
-    ui_text_layouts.resize(models.size());
-    ui_raster_models[frame_index].swap(candidate_models);
-    ui_dirty[frame_index] = true;
+        if (replace_layout[index]) owner.ui.text_layouts[index] = std::move(candidate_layouts[index]);
+    owner.ui.text_layouts.resize(models.size());
+    owner.ui_models[frame_index].swap(candidate_models);
+    owner.ui_dirty[frame_index] = true;
     ++surface.bitmap_version;
     surface.bitmap_valid = true;
     return Result::Success();

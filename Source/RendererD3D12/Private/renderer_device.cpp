@@ -4,24 +4,30 @@
 namespace hs
 {
 
-Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
+Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, OwnedView &view)
 {
     config = configuration;
     validation_status = {};
     validation_status.debug_layer_requested = configuration.validation;
     validation_status.gpu_validation_requested = configuration.gpu_validation;
     native_graphics_capabilities = {};
-    width = std::max(configuration.width, 1u);
-    height = std::max(configuration.height, 1u);
+    view.view_id = kMainRenderViewId;
+    view.role = RenderViewRole::Main;
+    view.width = std::max(configuration.width, 1u);
+    view.height = std::max(configuration.height, 1u);
+    auto reconstruction_configuration = configuration;
+    // Native feature admission is not known until the device capability query
+    // below, so this bootstrap plan must not allocate for requested DRS yet.
+    reconstruction_configuration.dynamic_resolution = false;
     ViewExtent capacity;
-    if (auto resolved = ResolveNativeReconstruction(configuration, {width, height},
-            reconstruction_plan, capacity); !resolved) return resolved;
-    config.temporal_reconstruction = reconstruction_plan.temporal_enabled;
-    render_width = capacity.width;
-    render_height = capacity.height;
-    (void)UpdateViewState(view_state, {width, height}, {render_width, render_height},
-                          reconstruction_plan.render_active);
-    dynamic_resolution_controller.Reset();
+    if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration, {view.width, view.height},
+            view.reconstruction_plan, capacity); !resolved) return resolved;
+    config.temporal_reconstruction = view.reconstruction_plan.temporal_enabled;
+    view.render_width = capacity.width;
+    view.render_height = capacity.height;
+    (void)UpdateViewState(view.state, {view.width, view.height}, {view.render_width, view.render_height},
+                          view.reconstruction_plan.render_active);
+    view.dynamic_resolution_controller.Reset();
 
     // Bootstrap every runtime-selectable Streamline feature before any DXGI or
     // device creation, independently of the initial requested settings.
@@ -183,35 +189,44 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     // selected-generation product and actual native admission remain separate.
     feature_capabilities.adaptive_raster_consumer = true;
     feature_capabilities.adaptive_compute_consumer = true;
+    reconstruction_configuration = config;
+    reconstruction_configuration.dynamic_resolution = EffectiveDynamicResolution(
+        config.dynamic_resolution, ResolveFeatures(config));
+    if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration,
+            {view.width, view.height}, view.reconstruction_plan, capacity); !resolved) return resolved;
+    view.render_width = capacity.width;
+    view.render_height = capacity.height;
+    (void)UpdateViewState(view.state, {view.width, view.height}, capacity,
+        view.reconstruction_plan.render_active);
     // Instrumented PSOs stay in memory; disk identity is shared with ordinary runs.
     if (auto cached = pipeline_cache.Initialize(device.Get(), adapter.Get(),
             configuration.gpu_validation || configuration.artifact_directory.empty() ? std::filesystem::path{} :
                 configuration.artifact_directory / "pso-cache", configuration.capture_timing_stream); !cached) return cached;
     if (auto prepared = PrepareReconstructionProvider(config.reconstruction_request
-            ? &*config.reconstruction_request : nullptr, config.dynamic_resolution,
-            config.dynamic_min_percent, config.dynamic_max_percent, {width, height},
-            reconstruction_plan, capacity, reconstruction_provider, &config); !prepared) return prepared;
-    if (reconstruction_provider)
-        if (auto configured = reconstruction_provider->ConfigureAfterCompletion(capacity); !configured)
+            ? &*config.reconstruction_request : nullptr, reconstruction_configuration.dynamic_resolution,
+            config.dynamic_min_percent, config.dynamic_max_percent, {view.width, view.height},
+            view.reconstruction_plan, capacity, view.reconstruction_provider, &config); !prepared) return prepared;
+    if (view.reconstruction_provider)
+        if (auto configured = view.reconstruction_provider->ConfigureAfterCompletion(capacity); !configured)
         {
             const auto removed = device->GetDeviceRemovedReason();
             if (FAILED(removed)) return CheckDevice(removed, "Configure reconstruction provider");
-            const auto unavailable = reconstruction_provider->Availability();
+            const auto unavailable = view.reconstruction_provider->Availability();
             const auto reason = std::string(configured.Message());
-            if (auto released = reconstruction_provider->ResetAfterCompletion(); !released) return released;
-            reconstruction_provider.reset();
+            if (auto released = view.reconstruction_provider->ResetAfterCompletion(); !released) return released;
+            view.reconstruction_provider.reset();
             // Targets have not been allocated yet, so initial native context
             // failure can resolve the complete InternalTAAU fallback extent.
-            if (auto resolved = ResolveNativeReconstruction(configuration, {width, height},
-                    reconstruction_plan, capacity); !resolved) return resolved;
-            reconstruction_plan.requested_availability = unavailable;
-            reconstruction_plan.fallback = ReconstructionFallback::ProviderUnavailable;
-            reconstruction_plan.fallback_reason = reason;
+            if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration, {view.width, view.height},
+                    view.reconstruction_plan, capacity); !resolved) return resolved;
+            view.reconstruction_plan.requested_availability = unavailable;
+            view.reconstruction_plan.fallback = ReconstructionFallback::ProviderUnavailable;
+            view.reconstruction_plan.fallback_reason = reason;
         }
-    config.temporal_reconstruction = reconstruction_plan.temporal_enabled;
-    render_width = capacity.width;
-    render_height = capacity.height;
-    (void)UpdateViewState(view_state, {width, height}, capacity, reconstruction_plan.render_active);
+    config.temporal_reconstruction = view.reconstruction_plan.temporal_enabled;
+    view.render_width = capacity.width;
+    view.render_height = capacity.height;
+    (void)UpdateViewState(view.state, {view.width, view.height}, capacity, view.reconstruction_plan.render_active);
 
     if (configuration.validation || configuration.gpu_validation)
     {
@@ -929,10 +944,6 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         };
         for (const auto offset : cbv_offsets)
             device->CreateConstantBufferView(nullptr, cpu(offset));
-        auto empty_skin = empty;
-        empty_skin.Format = DXGI_FORMAT_UNKNOWN;
-        empty_skin.Buffer.StructureByteStride = sizeof(DirectX::XMFLOAT4X4);
-        device->CreateShaderResourceView(nullptr, &empty_skin, cpu(kViewDescriptorOffset + 10));
         for (const auto range : uav_ranges)
             for (UINT index = 0; index < range.count; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));

@@ -1,6 +1,7 @@
 #include "release_audio_codegen.hpp"
 #include <hs/runtime/audio_image.hpp>
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/canonical_bytes.hpp>
 #include <hs/core/sha256.hpp>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -116,6 +117,24 @@ ReleaseAudio BuildReleaseAudio(std::string_view catalog_text,
         first = end;
     }
     std::ranges::sort(cues, {}, [](const AudioCueRow &cue) { return cue.id.value; });
+    CanonicalBytes identity("project_hs.release_audio", 1);
+    identity.Scalar(pcm_offset);
+    identity.Sequence(cues, [](CanonicalBytes &bytes, const AudioCueRow &cue) {
+        bytes.Fields(cue.id.value, cue.first_sample, cue.sample_count, cue.max_simultaneous,
+                     cue.retrigger_ms, cue.bus, cue.priority, cue.spatial, cue.preload,
+                     cue.arrow_impact_family, cue.loop);
+    });
+    identity.Sequence(samples, [](CanonicalBytes &bytes, const AudioSampleRow &sample) {
+        bytes.Fields(sample.offset, sample.bytes, sample.sample_rate,
+                     sample.channels, sample.bits_per_sample);
+    });
+    identity.Sequence(chunks, [](CanonicalBytes &bytes, const AudioPcmChunk &chunk) {
+        bytes.Fields(chunk.offset, chunk.bytes, chunk.first_sample,
+                     chunk.sample_count, chunk.preload);
+        bytes.Blob(chunk.digest);
+    });
+    const auto identity_bytes = identity.View();
+    result.identity.assign(reinterpret_cast<const char *>(identity_bytes.data()), identity_bytes.size());
     result.source = "\n#include <hs/runtime/audio_image.hpp>\n#include <array>\nnamespace hs::shipping { namespace {\n";
     result.source += "constinit const std::array<AudioSampleRow," + std::to_string(samples.size()) + "> kAudioSamples{{\n";
     for (const auto &s : samples)

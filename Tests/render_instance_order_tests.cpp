@@ -78,6 +78,65 @@ void CheckOrder(std::span<const RenderInstance> sources, float density, Order &o
             Check(output[index - 1] < output[index], "bucket is not stable in canonical input order");
 }
 
+void TestOwnedVfxReplacementEquivalence()
+{
+    std::mt19937 random(8712);
+    constexpr std::array shapes{VfxGroundShape::Circle,VfxGroundShape::LineBorder,
+        VfxGroundShape::ConeBorder,VfxGroundShape::RingGapsBorder,
+        VfxGroundShape::RingGapsPreviewBorder,VfxGroundShape::CirclePreviewBorder};
+    constexpr std::array meshes{RenderMesh::Area,RenderMesh::PlayerProjectile,
+        RenderMesh::EnemyProjectile,RenderMesh::Archer};
+    std::vector<std::pair<std::uint64_t,std::uint8_t>> scratch;
+    for(unsigned trial=0;trial<64;++trial)
+    {
+        std::vector<RenderInstance> sources(128);
+        for(std::size_t index=0;index<sources.size();++index)
+        {
+            auto &instance=sources[index];
+            instance.mesh=meshes[random()%meshes.size()];
+            instance.stable_id=random()%32;instance.vfx_owner_id=random()%32;
+            instance.position.x=static_cast<float>(index);
+        }
+        std::vector<VfxGroundSpawnInput> ground(trial%17);
+        for(auto &spawn:ground)
+        {
+            spawn.stable_id=random()%32;spawn.geometry.shape=shapes[random()%shapes.size()];
+            spawn.source_visual_kind=(random()&1)?0xff:1;
+            spawn.command.primitive=(random()&1)?VfxPrimitive::LowFrequencyFill:VfxPrimitive::Rune;
+        }
+        std::vector<VfxOwnedMeshInput> heads(trial%13);
+        for(auto &head:heads)head.owner_id=random()%32;
+        auto expected=sources;
+        std::erase_if(expected,[&](const RenderInstance &instance) {
+            return instance.mesh==RenderMesh::Area&&instance.stable_id!=0&&
+                std::ranges::any_of(ground,[&](const auto &spawn) {
+                    return spawn.source_visual_kind!=0xff&&spawn.stable_id==instance.stable_id&&
+                        spawn.geometry.shape==VfxGroundShape::Circle&&spawn.command.primitive==VfxPrimitive::LowFrequencyFill;
+                });
+        });
+        std::erase_if(expected,[&](const RenderInstance &instance) {
+            return instance.mesh==RenderMesh::Area&&instance.vfx_owner_id!=0&&
+                std::ranges::any_of(ground,[&](const auto &spawn) {
+                    return spawn.stable_id==instance.vfx_owner_id&&
+                        ((spawn.source_visual_kind==0xff&&(spawn.geometry.shape==VfxGroundShape::LineBorder||
+                            spawn.geometry.shape==VfxGroundShape::ConeBorder))||
+                         spawn.geometry.shape==VfxGroundShape::RingGapsBorder||
+                         spawn.geometry.shape==VfxGroundShape::RingGapsPreviewBorder||
+                         spawn.geometry.shape==VfxGroundShape::CirclePreviewBorder);
+                });
+        });
+        std::erase_if(expected,[&](const RenderInstance &instance) {
+            return (instance.mesh==RenderMesh::PlayerProjectile||instance.mesh==RenderMesh::EnemyProjectile)&&
+                std::ranges::any_of(heads,[&](const auto &head){return head.owner_id==instance.stable_id;});
+        });
+        FilterRenderInstancesForOwnedVfx(sources,ground,heads,scratch);
+        Check(sources.size()==expected.size(),"indexed VFX filtering changed survivor count");
+        for(std::size_t index=0;index<sources.size();++index)
+            Check(sources[index].position.x==expected[index].position.x,
+                "indexed VFX filtering changed owner matching or stable survivor order");
+    }
+}
+
 void TestExplicitOrderAndReuse()
 {
     std::array<RenderInstance, 10> scene{};
@@ -366,6 +425,7 @@ int main()
         TestMeadowCatalogOrder();
         TestRandomizedEquivalence();
         TestInstanceLookup();
+        TestOwnedVfxReplacementEquivalence();
         TestGrassBenders();
         TestGeometryDemandCells();
         TestRasterIndexSuffix();

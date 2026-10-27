@@ -61,6 +61,7 @@ Result D3D12Renderer::Impl::PrepareDisplayPipeline(
 
 Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
 {
+    auto &owner = *owned_views.at(kMainRenderViewId.value);
     if (!initialized || !device || !adapter || !swap_chain || !rtv_heap || !ui_pipeline)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Display options require an initialized renderer.");
@@ -87,14 +88,14 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Runtime must place the window on the selected display before applying its options.");
 
-    const auto previous = display_state;
-    const auto previous_presented_index = last_presented_index;
+    const auto previous = owner.display_state;
+    const auto previous_presented_index = owner.last_presented_index;
     DXGI_SWAP_CHAIN_DESC1 previous_description{};
     const auto described = swap_chain->GetDesc1(&previous_description);
     if (FAILED(described))
         return preparation_failure(CheckDevice(described, "Query current display swap chain"));
-    if (previous_description.Format != previous.format || previous_description.Width != width ||
-        previous_description.Height != height || previous_description.BufferCount != kFrameCount)
+    if (previous_description.Format != previous.format || previous_description.Width != owner.width ||
+        previous_description.Height != owner.height || previous_description.BufferCount != kFrameCount)
     {
         initialized = false;
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -132,7 +133,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
             const auto acquired = swap_chain->GetBuffer(index, IID_PPV_ARGS(&buffers[index]));
             if (FAILED(acquired)) return CheckDevice(acquired, operation);
             const auto description = buffers[index]->GetDesc();
-            if (description.Format != format || description.Width != width || description.Height != height)
+            if (description.Format != format || description.Width != owner.width || description.Height != owner.height)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                        std::format("{} returned an incompatible back buffer {}.", operation, index));
         }
@@ -161,10 +162,10 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
             const auto queried = swap_chain->GetDesc1(&current);
             if (FAILED(queried))
                 return unusable(failure, CheckDevice(queried, "Query display rollback swap chain").Message());
-            if (current.Format != previous.format || current.Width != width || current.Height != height ||
+            if (current.Format != previous.format || current.Width != owner.width || current.Height != owner.height ||
                 current.BufferCount != kFrameCount)
             {
-                const auto resized = swap_chain->ResizeBuffers(kFrameCount, width, height,
+                const auto resized = swap_chain->ResizeBuffers(kFrameCount, owner.width, owner.height,
                     previous.format, previous_description.Flags);
                 if (FAILED(resized))
                     return unusable(failure, CheckDevice(resized, "Restore original display buffers").Message());
@@ -188,7 +189,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
             back_buffer_contract_devices = {};
             write_rtvs();
             back_buffer_completion = {};
-            last_presented_index = previous_presented_index;
+            owner.last_presented_index = previous_presented_index;
         }
         // Configuration, effective state and UI PSO were never published.
         return failure;
@@ -207,7 +208,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
         config.display_output = std::move(candidate_config.display_output);
         ui_pipeline = candidate.format == DXGI_FORMAT_R10G10B10A2_UNORM
             ? std::move(hdr_pipeline) : std::move(sdr_pipeline);
-        display_state = std::move(candidate);
+        owner.display_state = std::move(candidate);
     };
 
     bool display_applied = false;
@@ -239,7 +240,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
     buffers_released = true;
 
     const auto requested_format = candidate.format;
-    const auto resized = swap_chain->ResizeBuffers(kFrameCount, width, height,
+    const auto resized = swap_chain->ResizeBuffers(kFrameCount, owner.width, owner.height,
         requested_format, previous_description.Flags);
     if (FAILED(resized)) return recover_native_failure(resized, "Resize display buffers");
     if (auto applied = ApplyDisplayState(swap_chain.Get(), candidate); !applied)
@@ -251,7 +252,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
             return recover(Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                            "Display negotiation returned an unexpected buffer format."));
         // Negotiate exactly one SDR resize before acquiring any buffers or RTVs.
-        const auto sdr_resized = swap_chain->ResizeBuffers(kFrameCount, width, height,
+        const auto sdr_resized = swap_chain->ResizeBuffers(kFrameCount, owner.width, owner.height,
             candidate.format, previous_description.Flags);
         if (FAILED(sdr_resized))
             return recover_native_failure(sdr_resized, "Resize negotiated SDR display buffers");
@@ -272,7 +273,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
     }
     write_rtvs();
     back_buffer_completion = {};
-    last_presented_index = swap_chain->GetCurrentBackBufferIndex();
+    owner.last_presented_index = swap_chain->GetCurrentBackBufferIndex();
     publish();
     return Result::Success();
 }

@@ -4,6 +4,7 @@
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 
 #include <algorithm>
 #include <array>
@@ -76,7 +77,7 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     ap::ActionSpec spec;
     spec.action_id = "render.hlod.arena";
     spec.recipe_id = "project-hs.render.scene-hlod";
-    spec.recipe_version = 2;
+    spec.recipe_version = 3;
     spec.namespace_path = "render/hlod/arena";
     spec.inputs.push_back(ap::HashInput("layout/implementation",
         source / "Source/Presentation/Private/environment_layout.cpp"));
@@ -139,8 +140,15 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
         std::uint32_t selectors{};
         for (const auto &vertex : geometry.vertices) selectors = std::max(selectors, std::uint32_t(vertex.material_index) + 1);
         const auto ordinal = static_cast<std::uint32_t>(std::ranges::find(rd::kEnvironmentMaterialNames, name) - rd::kEnvironmentMaterialNames.begin());
-        const auto material_id = rd::EnvironmentGeometryMaterialOrdinal(ordinal) == rd::kGroundDetailMaterialOrdinal
-            ? std::string("render/material/ground_detail.rpkg") : id;
+        const auto reference = std::ranges::find(package.chunks,
+            rd::ChunkType::GeometryMaterialReference, &rd::ChunkView::type);
+        Require(reference != package.chunks.end() && reference->required,
+            "source canonical material reference missing");
+        const auto &material_id = package.dependencies[rd::DecodeGeometryMaterialReference(
+            reference->bytes, package.dependencies)];
+        Require(material_id == rd::MaterialProduct(
+            rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(ordinal)]),
+            "source canonical material does not match its geometry");
         assets.emplace(asset_id.value, Source{id, std::move(geometry), std::vector<std::string>(selectors, material_id)});
     }
     std::vector<hs::geometry_content::SceneHlodCookSource> sources;

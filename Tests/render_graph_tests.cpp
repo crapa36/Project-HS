@@ -95,6 +95,35 @@ std::uint64_t CheckBatchResourceMembership(std::uint32_t count)
     return work.Total();
 }
 
+void ResourceAliasPatterns()
+{
+    std::array<int, 4> natives{};
+    std::vector<hs::render_graph::ResourceAlias> scratch;
+    const auto groups = [&](const std::array<const void *, 7> &resources) {
+        scratch.clear();
+        for (std::uint32_t index = 0; index < resources.size(); ++index)
+            scratch.push_back({resources[index], index, 0u});
+        hs::render_graph::CanonicalizeResourceAliases(scratch);
+        std::array<std::uint32_t, 7> result{};
+        for (const auto &alias : scratch) result[alias.index] = alias.group;
+        return result;
+    };
+    const std::array<std::uint32_t, 7> expected{0, 2, 3, 2, 5, 3, 0};
+    Check(groups({nullptr, &natives[0], &natives[1], &natives[0], &natives[2], &natives[1], nullptr}) == expected,
+        "alias groups retain first-use positions and distinguish absent resources");
+    const auto capacity = scratch.capacity();
+    Check(groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[0], nullptr}) == expected,
+        "rotating native addresses with the same equality pattern preserves the frontend variant");
+    Check(scratch.capacity() == capacity, "alias grouping reuses caller scratch");
+    const auto distinct = groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[2], nullptr});
+    Check(distinct != expected && distinct[5] == 6,
+        "splitting a native alias changes the retained graph identity");
+    Check(groups({}) == std::array<std::uint32_t, 7>{}, "absent resources have no alias group");
+    scratch.clear();
+    hs::render_graph::CanonicalizeResourceAliases(scratch);
+    Check(scratch.empty(), "an empty graph needs no alias storage");
+}
+
 void BatchResourceMembership()
 {
     for (const auto count : {0u, 1u, 31u, 32u, 33u, 1023u, 1024u, 1025u})
@@ -959,6 +988,7 @@ int main(int argc, char **argv)
     try
     {
         BatchResourceMembership();
+        ResourceAliasPatterns();
         HlodSlotSetTest();
         const bool hardware = argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware); Run(fixture,hs::BarrierMode::Legacy,nullptr);

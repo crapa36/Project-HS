@@ -22,6 +22,12 @@ constexpr std::uint64_t Hash64(std::string_view s)
 { std::uint64_t h=14695981039346656037ull;for(const unsigned char c:s){h^=c;h*=1099511628211ull;}return h; }
 void Require(bool v,const char *message) {if(!v)throw std::runtime_error(message);}
 bool Near(float a,float b) {return std::abs(a-b)<.00001f;}
+hs::VfxImageData Prepared(const hs::VfxProgramData &program)
+{
+    hs::VfxImageData image; image.program=program;
+    hs::PrepareVfxMoteRecipes(image.program.View(),image.mote_source_recipes,image.mote_output_recipes);
+    return image;
+}
 hs::VfxProgramData Program()
 {
     hs::VfxProgramData p;
@@ -40,7 +46,7 @@ hs::VfxEventInput Input()
     hs::VfxPointPayload point;point.position={4,.25f,-7};point.authored_scale=2;in.payload=point;return in;
 }
 auto Decode(const hs::VfxProgramData &p,const hs::VfxEventInput &input)
-{return hs::runtime_detail::BuildVfxTypedMoteCommands(p,std::span(&input,1));}
+{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxTypedMoteCommands(image.View(),std::span(&input,1));}
 void BurstAndScale()
 {
     auto p=Program();auto in=Input();const auto a=Decode(p,in);
@@ -95,7 +101,17 @@ hs::VfxEventInput OwnedInput()
     sector.inner_radius=2;sector.outer_radius=8;sector.half_angle_degrees=15;in.payload=sector;return in;
 }
 auto Owned(const hs::VfxProgramData &p,const hs::VfxEventInput &in,double tick)
-{return hs::runtime_detail::BuildVfxOwnedMoteCommands(p,std::span(&in,1),tick);}
+{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxOwnedMoteCommands(image.View(),std::span(&in,1),tick);}
+auto Owned(const hs::VfxProgramData &p,std::span<const hs::VfxEventInput> inputs,double tick)
+{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxOwnedMoteCommands(image.View(),inputs,tick);}
+auto Persistent(const hs::VfxProgramData &p,std::span<const hs::VfxPersistentInput> owners)
+{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxPersistentMoteCommands(image.View(),owners);}
+auto Persistent(const hs::VfxProgramData &p,std::span<const hs::VfxPersistentInput> owners,
+    hs::runtime_detail::VfxPersistentMoteBirthWindow &births,hs::Tick tick,float interpolation=1)
+{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxPersistentMoteCommands(image.View(),owners,births,tick,interpolation);}
+auto EmitSparks(hs::runtime_detail::VfxPersistentSparkState &state,const hs::VfxProgramData &p,
+    std::span<const hs::VfxPersistentInput> owners,hs::Tick tick,float interpolation=1)
+{const auto image=Prepared(p);return state.Emit(image.View(),owners,tick,interpolation);}
 void OwnedRateAndClock()
 {
     auto p=OwnedProgram();auto in=OwnedInput();
@@ -127,7 +143,7 @@ void OwnedRateAndClock()
         "authored source interval start ignored");
     Require(Owned(p,in,160).size()==2&&Owned(p,in,169).size()==1&&Owned(p,in,189).empty(),
         "source interval emitted after end or discarded valid tails");
-    Require(hs::runtime_detail::BuildVfxOwnedMoteCommands(p,{},150).empty(),"cancelled owner left rate particles");
+    Require(Owned(p,std::span<const hs::VfxEventInput>{},150).empty(),"cancelled owner left rate particles");
 }
 void OwnedMalformedAndQuality()
 {
@@ -205,8 +221,7 @@ hs::VfxPersistentInput PersistentMoteOwner(std::uint32_t elapsed_tick)
 auto PersistentMotes(const hs::VfxProgramData &program,
                      const hs::VfxPersistentInput &owner)
 {
-    return hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1));
+    return Persistent(program, std::span(&owner, 1));
 }
 
 void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
@@ -214,12 +229,10 @@ void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
     auto program = PersistentMoteProgram();
     hs::runtime_detail::VfxPersistentMoteBirthWindow births;
     auto owner = PersistentMoteOwner(20);
-    const auto at20 = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1), births, 120);
+    const auto at20 = Persistent(program, std::span(&owner, 1), births, 120);
     Require(at20.size() == 2 && at20[0].stable_seed != at20[1].stable_seed,
             "persistent mote birth cadence or indexed identity missing");
-    const auto repeat = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1), births, 120);
+    const auto repeat = Persistent(program, std::span(&owner, 1), births, 120);
     Require(repeat.size() == at20.size() && repeat[0].stable_seed == at20[0].stable_seed &&
             repeat[0].normalized_age == at20[0].normalized_age,
             "retained birth window accumulated or changed births");
@@ -228,19 +241,16 @@ void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
     fractional_owner.elapsed_ticks = 20.5;
     fractional_owner.normalized_age = 20.5f / 120.0f;
     std::get<hs::VfxEntityPayload>(fractional_owner.payload).lifetime01 = fractional_owner.normalized_age;
-    const auto fractional = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&fractional_owner, 1), births, 121, 0.5f);
+    const auto fractional = Persistent(program, std::span(&fractional_owner, 1), births, 121, 0.5f);
     Require(fractional.size() == at20.size() && fractional[0].stable_seed == at20[0].stable_seed &&
             fractional[0].normalized_age > at20[0].normalized_age,
             "fractional display time dropped or regenerated persistent motes");
     owner = PersistentMoteOwner(40);
-    const auto at40 = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1), births, 140);
+    const auto at40 = Persistent(program, std::span(&owner, 1), births, 140);
     Require(at40.size() == 2 && at40[0].stable_seed == at20[1].stable_seed,
             "skipped persistent frame changed the live ordinal");
     owner.current_transform[12] = 12.0f;
-    const auto moved = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1), births, 140);
+    const auto moved = Persistent(program, std::span(&owner, 1), births, 140);
     Require(moved.size() == at40.size() && moved[0].stable_seed == at40[0].stable_seed &&
             Near(moved[0].position.x, 12.0f),
             "persistent motes did not use the current owner transform");
@@ -398,8 +408,7 @@ void PickupIdleMotesFollowPresentEntity()
     }
     auto pickup_program = PersistentMoteProgram();
     pickup_program.effect_lookup[0].effect_id = Hash64(kPickupIdleEffects[0]);
-    Require(hs::runtime_detail::BuildVfxPersistentMoteCommands(
-                pickup_program, {}).empty(),
+    Require(Persistent(pickup_program, {}).empty(),
             "absent pickup owner retained motes");
 }
 
@@ -570,13 +579,11 @@ void CookedPersistentTrapMotesConvert()
     owner.payload = hs::VfxCirclePayload{
         {4.0f, 0.25f, -2.0f}, {0.0f, 0.0f, 1.0f}, 2.0f, 0.0f, .25f, 0};
 
-    const auto medium = hs::runtime_detail::BuildVfxPersistentMoteCommands(
-        program, std::span(&owner, 1));
+    const auto medium = Persistent(program, std::span(&owner, 1));
     Require(!medium.empty(), "cooked trap armed medium-quality mote was not authored");
 
     owner.quality = hs::VfxQuality::Low;
-    Require(hs::runtime_detail::BuildVfxPersistentMoteCommands(
-                program, std::span(&owner, 1)).empty(),
+    Require(Persistent(program, std::span(&owner, 1)).empty(),
             "cooked trap armed low-quality mote was not filtered");
 }
 
@@ -620,6 +627,11 @@ void AuthoredMask()
     for(char c:path)p.strings.push_back(static_cast<std::byte>(c));p.texture_resources.push_back({4,{0,static_cast<std::uint32_t>(path.size())}});
     hs::VfxTextureBindingRecord b;b.role=Hash("authored_mask_array");b.catalog_slot=4;b.selection=Hash("stable_seed_mod_group_size");b.strength=.38f;b.slices={0,3};
     p.texture_bindings.push_back(b);p.slice_indices={3,4,5};p.outputs[0].textures={0,1};auto decoded=Decode(p,in);
+    const auto image=Prepared(p);
+    Require(image.mote_source_recipes.size()==1&&image.mote_source_recipes[0].common_params_valid&&
+        image.mote_source_recipes[0].count==10&&image.mote_output_recipes.size()==1&&
+        image.mote_output_recipes[0].mask_present_mask==7&&image.mote_output_recipes[0].mask_quality_mask==7,
+        "Mote immutable source/mask preparation lost an authored row");
     Require(decoded.size()==10&&decoded[0].mask_slice==p.slice_indices[in.stable_seed%3]&&Near(decoded[0].mask_strength,.38f),"mask binding missing");
     Require(decoded[0].mask_slice==decoded[9].mask_slice,"authored event mask selection changed per particle");
     p.slice_indices[0]=12;Require(Decode(p,in).empty(),"out of range mask accepted");
@@ -710,7 +722,7 @@ void PersistentSparksUseOnlyLiveBirthPositions()
     hs::runtime_detail::VfxPersistentSparkState state;
     auto owner = SparkOwner(3);
     const auto emit = [&](hs::Tick tick) {
-        return state.Emit(program, std::span(&owner, 1), tick);
+        return EmitSparks(state, program, std::span(&owner, 1), tick);
     };
     const auto first = emit(103);
     Require(first.size() == 1 && first[0].shape == hs::VfxImpactShape::Spark &&
@@ -752,29 +764,29 @@ void PersistentSparksSkipMissedTicksAndReset()
     const auto program = SparkProgram();
     hs::runtime_detail::VfxPersistentSparkState reference;
     auto owner = SparkOwner(14);
-    const auto expected = reference.Emit(program, std::span(&owner, 1), 114);
+    const auto expected = EmitSparks(reference, program, std::span(&owner, 1), 114);
     Require(expected.size() == 1, "reference second ordinal missing");
     hs::runtime_detail::VfxPersistentSparkState state;
     owner = SparkOwner(4);
-    Require(state.Emit(program, std::span(&owner, 1), 104).empty(),
+    Require(EmitSparks(state, program, std::span(&owner, 1), 104).empty(),
             "late owner snapshot fabricated missed first spark");
     owner = SparkOwner(14);
-    const auto actual = state.Emit(program, std::span(&owner, 1), 114);
+    const auto actual = EmitSparks(state, program, std::span(&owner, 1), 114);
     Require(actual.size() == 1 && actual[0].stable_seed == expected[0].stable_seed &&
             Near(actual[0].direction.x, expected[0].direction.x),
             "ordinal identity depended on skipped frames");
-    Require(state.Emit(program, {}, 114).empty(), "absent owner emitted a spark");
-    Require(state.Emit(program, std::span(&owner, 1), 114).empty(),
+    Require(EmitSparks(state, program, {}, 114).empty(), "absent owner emitted a spark");
+    Require(EmitSparks(state, program, std::span(&owner, 1), 114).empty(),
             "transient missing owner replayed the same birth");
     state.Clear();
-    Require(state.Emit(program, std::span(&owner, 1), 114).size() == 1,
+    Require(EmitSparks(state, program, std::span(&owner, 1), 114).size() == 1,
             "session/catalog reset failed to clear ordinal state");
     owner = SparkOwner(25);
     owner.quality = hs::VfxQuality::Low;
-    Require(state.Emit(program, std::span(&owner, 1), 125).empty(),
+    Require(EmitSparks(state, program, std::span(&owner, 1), 125).empty(),
             "low-quality spark was not filtered");
     owner.quality = hs::VfxQuality::Medium;
-    Require(state.Emit(program, std::span(&owner, 1), 125).empty(),
+    Require(EmitSparks(state, program, std::span(&owner, 1), 125).empty(),
             "quality change replayed a skipped ordinal");
 }
 
@@ -784,7 +796,7 @@ void PersistentSparksRejectWrongContracts()
     auto owner = SparkOwner(3);
     const auto run = [&] {
         hs::runtime_detail::VfxPersistentSparkState state;
-        return state.Emit(program, std::span(&owner, 1), 103);
+        return EmitSparks(state, program, std::span(&owner, 1), 103);
     };
     program.effect_lookup[0].effect_id = Hash64("particle.enemy.ranged.release");
     Require(run().empty(), "unrelated projectile effect accepted");
@@ -829,7 +841,7 @@ void PersistentSparksFollowCookedTuning()
     {
         auto owner = SparkOwner(age_tick);
         owner.quality = hs::VfxQuality::High;
-        const auto born = state.Emit(program, std::span(&owner, 1), 100 + age_tick);
+        const auto born = EmitSparks(state, program, std::span(&owner, 1), 100 + age_tick);
         if (!born.empty())
         {
             Require(born.size() == 1 && Near(born[0].hdr, 2) &&
@@ -878,7 +890,7 @@ void CookedPersistentSparksConvertWhenAvailable()
         {
             auto owner = SparkOwner(age_tick);
             owner.effect_handle = lookup.handle;
-            converted += state.Emit(program, std::span(&owner, 1), 100 + age_tick).size();
+            converted += EmitSparks(state, program, std::span(&owner, 1), 100 + age_tick).size();
         }
     }
     if (authored != 6 || converted != authored * 3)

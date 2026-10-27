@@ -32,11 +32,9 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
     std::vector<AllocationResource> uploads;
     std::array<bool, kAuthoredMaterialNames.size()> material_bindings_initialized{};
     const auto load_compiled_material = [&](std::uint32_t ordinal, std::uint32_t layer,
-        render_data::RockMaterial &material, EnvironmentMaterialBindingsGpu &bindings,
-        std::string &scene_shader, std::string &shadow_shader) -> Result {
+        render_data::RockMaterial &material, EnvironmentMaterialBindingsGpu &bindings) -> Result {
         const std::string name(kAuthoredMaterialNames[ordinal]);
-        const auto id = ordinal == kTerrainMaterialOrdinal || ordinal == render_data::kGroundDetailMaterialOrdinal
-            ? "render/material/" + name + ".rpkg" : "render/" + name + ".rpkg";
+        const auto id = render_data::MaterialProduct(name);
         const auto handle = FindRendererMaterial(config, MakeAssetId(id));
         if (!handle) throw std::runtime_error("Compiled environment material is missing");
         const auto &descriptor = config.packed_materials[handle.value];
@@ -48,9 +46,6 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         material.alpha_mask = (descriptor.flags & render_data::kMaterialFlagAlphaMask) != 0;
         if (ordinal == kTerrainMaterialOrdinal && (material.two_sided || material.alpha_mask || descriptor.textures.size() != 6))
             throw std::runtime_error("Compiled terrain requires opaque single-sided material and six textures");
-        for (const auto &program : descriptor.programs)
-            if (program.kind == render_data::MaterialProgramKind::MaskedShadowPS) shadow_shader = program.product_id;
-            else scene_shader = program.product_id;
         for (const auto &texture : descriptor.textures)
         {
             const render_data::MaterialTextureDefinition definition{"slot_" + std::to_string(texture.slot),
@@ -76,111 +71,57 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         if (auto resolved = ResolveRendererAsset(config, logical_id, path); !resolved)
             return resolved;
         std::vector<std::byte> bytes;
-        if (config.packed_content || config.development_catalog || index % 3 != 0 ||
-            geometry_ordinal >= render_data::kGroundDetailGeometryBegin)
-            if (auto read = ReadBinary(path, bytes); !read) return read;
+        if (auto read = ReadBinary(path, bytes); !read) return read;
         render_data::GeometryMetadata geometry_metadata;
         std::string page_id;
         RendererAssetSource page_path;
         std::uint32_t fallback_page_slot = UINT32_MAX;
-        render_data::RockMaterial packaged_material;
-        std::string program_shader;
-        std::string program_shadow_shader;
         try
         {
-            const auto package = !config.packed_content && !config.development_catalog && index % 3 == 0 &&
-                geometry_ordinal < render_data::kGroundDetailGeometryBegin ? material_headers[material_ordinal].view
-                : MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(bytes, MakeAssetId(logical_id)); });
+            const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate,
+                [&] { return render_data::ReadPackage(bytes, MakeAssetId(logical_id)); });
             const render_data::ChunkView *geometry_chunk = nullptr;
-            const render_data::ChunkView *material_chunk = nullptr;
-            const render_data::ChunkView *program_chunk = nullptr;
-            const render_data::ChunkView *bindings_chunk = nullptr;
+            const render_data::ChunkView *material_reference = nullptr;
             const render_data::ChunkView *hierarchy_chunk = nullptr;
             for (const auto &chunk : package.chunks)
             {
                 if (chunk.type == render_data::ChunkType::GeometryMetadata)
                     geometry_chunk = &chunk;
-                else if (chunk.type == render_data::ChunkType::MaterialMetadata)
-                    material_chunk = &chunk;
-                else if (chunk.type == render_data::ChunkType::MaterialProgram)
-                    program_chunk = &chunk;
-                else if (chunk.type == render_data::ChunkType::MaterialBindings)
-                    bindings_chunk = &chunk;
+                else if (chunk.type == render_data::ChunkType::GeometryMaterialReference)
+                    material_reference = &chunk;
                 else if (chunk.type == render_data::ChunkType::GeometryHierarchyReference)
                     hierarchy_chunk = &chunk;
             }
             const std::string name(kEnvironmentMaterialNames[index / 3]);
             const bool masked = name.starts_with("leaf_") || name.starts_with("grass_");
-            if (!geometry_chunk || !geometry_chunk->required || geometry_chunk->version != 1 ||
-                geometry_chunk->stride != render_data::kGeometryMetadataStride || geometry_chunk->count != 1)
-                throw std::runtime_error("Environment geometry metadata is missing or invalid");
-            if (!config.packed_content)
-            {
-                const auto layout_chunk = std::ranges::find(package.chunks,
-                    render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
-                if (layout_chunk == package.chunks.end() || !layout_chunk->required ||
-                    layout_chunk->version != 1 || layout_chunk->count != 1 || layout_chunk->stride != 32 ||
-                    MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout_chunk->bytes); }) !=
-                        material_parameter_layouts[material_ordinal])
-                    throw std::runtime_error("environment material parameter layout mismatch");
-                const auto surface_chunk = std::ranges::find(package.chunks,
-                    render_data::ChunkType::MaterialSurfaceLayout, &render_data::ChunkView::type);
-                if (surface_chunk == package.chunks.end() || !surface_chunk->required ||
-                    surface_chunk->version != 1 || surface_chunk->count != 1 ||
-                    surface_chunk->stride != render_data::kMaterialSurfaceLayoutStride)
-                    throw std::runtime_error("environment material surface layout is missing or invalid");
-                if (MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes); }) !=
-                    material_surface_layouts[material_ordinal])
-                    throw std::runtime_error("environment surface profile differs across LOD headers");
-                if (package.chunks.size() != (index % 3 == 0 ? 7u : 6u) ||
-                    !geometry_chunk || !material_chunk || !program_chunk || !bindings_chunk ||
-                    (index % 3 == 0 && (!hierarchy_chunk || !hierarchy_chunk->required ||
-                        hierarchy_chunk->version != 1 || hierarchy_chunk->count != 1 ||
-                        hierarchy_chunk->stride != render_data::kGeometryHierarchyReferenceStride)) ||
-                    (index % 3 != 0 && hierarchy_chunk != nullptr) ||
-                    geometry_chunk->version != 1 || material_chunk->version != 1 ||
-                    !geometry_chunk->required || !material_chunk->required ||
-                    geometry_chunk->stride != render_data::kGeometryMetadataStride ||
-                    geometry_chunk->count != 1 ||
-                    bindings_chunk->version != 1 || !bindings_chunk->required ||
-                    bindings_chunk->stride != render_data::kMaterialBindingStride ||
-                    bindings_chunk->count != render_data::kMaterialTextureSlots)
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                           "Invalid render package chunks: " + path.path.string());
-                if (program_chunk)
-                {
-                    if (program_chunk->version != 1 || !program_chunk->required ||
-                        program_chunk->stride != render_data::kMaterialProgramStride ||
-                        program_chunk->count != (masked ? 2u : 1u))
-                        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                               "Invalid material program chunk: " + path.path.string());
-                    const auto programs = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialPrograms(
-                        program_chunk->bytes, package.dependencies); });
-                    const auto scene_id = "render/shader/" + material_name + "_scene.dxil";
-                    const auto shadow_id = "render/shader/" + material_name + "_shadow.dxil";
-                    if (programs.size() != (masked ? 2u : 1u) ||
-                        programs[0].kind != (masked
-                            ? render_data::MaterialProgramKind::MaskedScenePS
-                            : render_data::MaterialProgramKind::OpaqueScenePS) ||
-                        package.dependencies[programs[0].dependency_index] != scene_id ||
-                        (masked && (programs[1].kind !=
-                            render_data::MaterialProgramKind::MaskedShadowPS ||
-                            package.dependencies[programs[1].dependency_index] != shadow_id)))
-                        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                               "Invalid material program identity: " + path.path.string());
-                    program_shader = package.dependencies[programs[0].dependency_index];
-                    if (masked)
-                        program_shadow_shader = package.dependencies[programs[1].dependency_index];
-            }
-            packaged_material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeRockMaterial(material_chunk->bytes,
-                                                                 package.dependencies); });
-            if ((render_data::ClassifyEnvironmentMaterial(packaged_material) ==
-                 render_data::EnvironmentMaterialVariant::MaskedTwoSided) != masked)
+            if (package.chunks.size() != (index % 3 == 0 ? 3u : 2u) || !geometry_chunk ||
+                !geometry_chunk->required || geometry_chunk->version != 1 ||
+                geometry_chunk->stride != render_data::kGeometryMetadataStride || geometry_chunk->count != 1 ||
+                !material_reference || !material_reference->required || material_reference->version != 1 ||
+                material_reference->stride != render_data::kGeometryMaterialReferenceStride ||
+                (index % 3 == 0 && (!hierarchy_chunk || !hierarchy_chunk->required ||
+                    hierarchy_chunk->version != 1 || hierarchy_chunk->count != 1 ||
+                    hierarchy_chunk->stride != render_data::kGeometryHierarchyReferenceStride)) ||
+                (index % 3 != 0 && hierarchy_chunk))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                       "Material program domain mismatch: " + path.path.string());
-            }
+                    "Invalid geometry package chunks: " + path.path.string());
+            const auto material_dependency = render_data::DecodeGeometryMaterialReference(
+                material_reference->bytes, package.dependencies);
+            const auto expected_material_product = render_data::MaterialProduct(material_name);
+            if (package.dependencies[material_dependency] != expected_material_product)
+                throw std::runtime_error("Environment geometry references a different canonical material product");
             for (const auto &dependency : package.dependencies)
             {
+                if (RendererIsSourceRevision(config, dependency))
+                {
+                    if (RendererProductDigest(config, dependency).empty())
+                        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                            "Geometry package references an unauthenticated source revision " + dependency);
+                    continue;
+                }
+                if (!RendererIsAdmittedRuntimeProduct(config, dependency))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Geometry package dependency is absent from runtime and provenance catalogs: " + dependency);
                 RendererAssetSource dependency_path;
                 if (config.packed_content ? RendererProductDigest(config, dependency).empty() :
                     !ResolveRendererAsset(config, dependency, dependency_path))
@@ -222,49 +163,83 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 if (fallback_page_slot == UINT32_MAX)
                     throw std::runtime_error("environment fallback metadata has no geometry page slot");
             }
-            const std::uint32_t required_layer = masked
-                ? (name.starts_with("grass_") ? 1u : 2u) : geometry_metadata.max_material_index;
-            EnvironmentMaterialBindingsGpu selected_bindings;
-            if (config.packed_content || config.development_catalog)
-            {
-                if (auto loaded = load_compiled_material(material_ordinal, required_layer, packaged_material,
-                    selected_bindings, program_shader, program_shadow_shader); !loaded) return loaded;
-                if ((render_data::ClassifyEnvironmentMaterial(packaged_material) ==
-                    render_data::EnvironmentMaterialVariant::MaskedTwoSided) != masked)
-                    throw std::runtime_error("Compiled environment material program domain mismatch");
-            }
-            else
-            {
-                const auto bindings = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialBindings(
-                    bindings_chunk->bytes, package.dependencies); });
-                for (const auto &binding : bindings)
-                {
-                    const auto slot = binding.slot;
-                    if (binding.dependency_index == 0xffff)
-                    {
-                        if (!packaged_material.textures[slot].empty())
-                            throw std::runtime_error("material metadata declares an absent texture binding");
-                        continue;
-                    }
-                    const auto &texture_id = package.dependencies[binding.dependency_index];
-                    if (packaged_material.textures[slot] != texture_id)
-                        throw std::runtime_error("material metadata and typed texture binding disagree");
-                    const render_data::MaterialTextureDefinition definition{
-                        "slot_" + std::to_string(slot), texture_id, binding.dimension, binding.semantic};
-                    if (auto loaded = LoadEnvironmentMaterialTexture(definition, required_layer, uploads,
-                            selected_bindings.texture_indices[slot]); !loaded)
-                        return loaded;
-                    selected_bindings.product_ids[slot] = texture_id;
-                }
-            }
             auto &material_bindings = environment_material_bindings[material_ordinal];
+            const std::uint32_t required_layer = material_ordinal == kTerrainMaterialOrdinal
+                ? std::max(3u, geometry_metadata.max_material_index)
+                : masked ? (name.starts_with("grass_") ? 1u : 2u) : geometry_metadata.max_material_index;
             if (!material_bindings_initialized[material_ordinal])
             {
+                render_data::RockMaterial packaged_material;
+                EnvironmentMaterialBindingsGpu selected_bindings;
+                if (config.packed_content || config.development_catalog)
+                {
+                    if (auto loaded = load_compiled_material(material_ordinal, required_layer,
+                        packaged_material, selected_bindings); !loaded) return loaded;
+                }
+                else
+                {
+                    const auto &material_package = material_headers[material_ordinal].view;
+                    const auto find_chunk = [&](render_data::ChunkType type) -> const render_data::ChunkView & {
+                        const auto found = std::ranges::find(material_package.chunks, type, &render_data::ChunkView::type);
+                        if (found == material_package.chunks.end() || !found->required)
+                            throw std::runtime_error("Canonical environment material chunk is missing");
+                        return *found;
+                    };
+                    packaged_material = render_data::DecodeRockMaterial(
+                        find_chunk(render_data::ChunkType::MaterialMetadata).bytes, material_package.dependencies);
+                    const auto programs = render_data::DecodeMaterialPrograms(
+                        find_chunk(render_data::ChunkType::MaterialProgram).bytes, material_package.dependencies);
+                    const auto scene_id = "render/shader/" + material_name + "_scene.dxil";
+                    const auto shadow_id = "render/shader/" + material_name + "_shadow.dxil";
+                    if (programs.size() != (masked ? 2u : 1u) ||
+                        programs[0].kind != (masked ? render_data::MaterialProgramKind::MaskedScenePS :
+                            render_data::MaterialProgramKind::OpaqueScenePS) ||
+                        material_package.dependencies[programs[0].dependency_index] != scene_id ||
+                        (masked && (programs[1].kind != render_data::MaterialProgramKind::MaskedShadowPS ||
+                            material_package.dependencies[programs[1].dependency_index] != shadow_id)))
+                        throw std::runtime_error("Canonical environment material program identity is invalid");
+                    const auto bindings = render_data::DecodeMaterialBindings(
+                        find_chunk(render_data::ChunkType::MaterialBindings).bytes, material_package.dependencies);
+                    for (const auto &binding : bindings)
+                    {
+                        const auto slot = binding.slot;
+                        if (binding.dependency_index == 0xffff)
+                        {
+                            if (!packaged_material.textures[slot].empty())
+                                throw std::runtime_error("material metadata declares an absent texture binding");
+                            continue;
+                        }
+                        const auto &texture_id = material_package.dependencies[binding.dependency_index];
+                        if (packaged_material.textures[slot] != texture_id)
+                            throw std::runtime_error("material metadata and typed texture binding disagree");
+                        const render_data::MaterialTextureDefinition definition{
+                            "slot_" + std::to_string(slot), texture_id, binding.dimension, binding.semantic};
+                        if (auto loaded = LoadEnvironmentMaterialTexture(definition, required_layer, uploads,
+                                selected_bindings.texture_indices[slot]); !loaded) return loaded;
+                        selected_bindings.product_ids[slot] = texture_id;
+                    }
+                }
+                const auto variant = render_data::ClassifyEnvironmentMaterial(packaged_material);
+                if (material_ordinal == kTerrainMaterialOrdinal &&
+                    std::ranges::any_of(packaged_material.textures, [](const auto &id) { return id.empty(); }))
+                    throw std::runtime_error("Terrain requires all six canonical texture bindings");
+                if ((variant ==
+                    render_data::EnvironmentMaterialVariant::MaskedTwoSided) != masked)
+                    throw std::runtime_error("Canonical environment material program domain mismatch");
+                environment_material_variants[material_ordinal] = variant;
                 material_bindings = std::move(selected_bindings);
                 material_bindings_initialized[material_ordinal] = true;
             }
-            else if (material_bindings.product_ids != selected_bindings.product_ids)
-                throw std::runtime_error("material texture bindings differ between mesh LOD packages");
+            // Every geometry selector must fit, including later meshes sharing this material.
+            for (const auto texture_index : material_bindings.texture_indices)
+            {
+                if (texture_index == UINT32_MAX) continue;
+                const auto &description = texture_index < kEnvironmentTextureCount
+                    ? environment_texture_descriptions[texture_index]
+                    : environment_material_textures.at(texture_index - kEnvironmentTextureCount).description;
+                if (required_layer >= description.array_size)
+                    throw std::runtime_error("Environment geometry selector exceeds its canonical material texture");
+            }
         }
         catch (const std::exception &error)
         {
@@ -277,9 +252,6 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                                          sphere[2] * sphere[2]) + sphere[3];
         environment_variant_radii[index / 3] = std::max(
             environment_variant_radii[index / 3], mesh.bounding_radius);
-        mesh.material = std::move(packaged_material);
-        mesh.program_shader = std::move(program_shader);
-        mesh.program_shadow_shader = std::move(program_shadow_shader);
         mesh.metadata = geometry_metadata;
         mesh.page_slot = static_cast<std::uint32_t>(index);
         mesh.fallback_page_slot = fallback_page_slot;
@@ -329,100 +301,6 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         if (auto created = MeasureStartupOperation(RendererStartupOperation::GeometryPrepare, [&] { return CreateGeometryPage(mesh, geometry_metadata, page_bytes,
                 MakeAssetId(page_id), static_cast<std::uint32_t>(index), command_list.Get(), uploads, &preparation); });
             !created) return created;
-    }
-    // Terrain is a material package; its geometry is the shared procedural page.
-    {
-        constexpr std::string_view logical_id = "render/material/terrain.rpkg";
-        RendererAssetSource path;
-        if (auto resolved = ResolveRendererAsset(config, logical_id, path); !resolved) return resolved;
-        std::vector<std::byte> bytes;
-        try
-        {
-            if (config.packed_content || config.development_catalog)
-            {
-                EnvironmentMaterialBindingsGpu selected;
-                std::string scene_shader, shadow_shader;
-                if (auto loaded = load_compiled_material(kTerrainMaterialOrdinal, 3, terrain_material,
-                    selected, scene_shader, shadow_shader); !loaded) return loaded;
-                if (material_bindings_initialized[kTerrainMaterialOrdinal] &&
-                    environment_material_bindings[kTerrainMaterialOrdinal].product_ids != selected.product_ids)
-                    throw std::runtime_error("Terrain texture bindings differ from its mesh packages");
-                environment_material_bindings[kTerrainMaterialOrdinal] = std::move(selected);
-            }
-            else
-            {
-                const auto &package = material_headers[kTerrainMaterialOrdinal].view;
-                const render_data::ChunkView *metadata = nullptr, *program = nullptr, *bindings = nullptr;
-                for (const auto &chunk : package.chunks)
-                {
-                    if (chunk.type == render_data::ChunkType::MaterialMetadata) metadata = &chunk;
-                    if (chunk.type == render_data::ChunkType::MaterialProgram) program = &chunk;
-                    if (chunk.type == render_data::ChunkType::MaterialBindings) bindings = &chunk;
-            }
-            const auto layout_chunk = std::ranges::find(package.chunks,
-                render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
-            if (layout_chunk == package.chunks.end() || !layout_chunk->required ||
-                layout_chunk->version != 1 || layout_chunk->count != 1 || layout_chunk->stride != 32 ||
-                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout_chunk->bytes); }) !=
-                    material_parameter_layouts[kTerrainMaterialOrdinal])
-                throw std::runtime_error("terrain material parameter layout mismatch");
-            const auto surface_chunk = std::ranges::find(package.chunks,
-                render_data::ChunkType::MaterialSurfaceLayout, &render_data::ChunkView::type);
-            if (surface_chunk == package.chunks.end() || !surface_chunk->required ||
-                surface_chunk->version != 1 || surface_chunk->count != 1 ||
-                surface_chunk->stride != render_data::kMaterialSurfaceLayoutStride)
-                throw std::runtime_error("terrain material surface layout is missing or invalid");
-            if (MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes); }) !=
-                material_surface_layouts[kTerrainMaterialOrdinal])
-                throw std::runtime_error("terrain surface profile changed during initialization");
-            if (package.chunks.size() != 5 || !metadata || !program || !bindings ||
-                !metadata->required || metadata->version != 1 || metadata->count != 1 ||
-                !program->required || program->version != 1 || program->count != 1 ||
-                program->stride != render_data::kMaterialProgramStride ||
-                !bindings->required || bindings->version != 1 ||
-                bindings->count != render_data::kMaterialTextureSlots ||
-                bindings->stride != render_data::kMaterialBindingStride)
-                throw std::runtime_error("terrain material package has invalid required chunks");
-            for (const auto &dependency : package.dependencies)
-            {
-                RendererAssetSource dependency_path;
-                if (auto resolved = ResolveRendererAsset(config, dependency, dependency_path); !resolved) return resolved;
-            }
-            const auto programs = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialPrograms(program->bytes, package.dependencies); });
-            if (programs.size() != 1 || programs[0].kind != render_data::MaterialProgramKind::OpaqueScenePS ||
-                package.dependencies[programs[0].dependency_index] != "render/shader/terrain_scene.dxil")
-                throw std::runtime_error("terrain material program identity is invalid");
-            auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeRockMaterial(metadata->bytes, package.dependencies); });
-            if (render_data::ClassifyEnvironmentMaterial(material) !=
-                    render_data::EnvironmentMaterialVariant::OpaqueSingleSided)
-                throw std::runtime_error("terrain material must be opaque and single sided");
-            const auto decoded = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialBindings(bindings->bytes, package.dependencies); });
-            EnvironmentMaterialBindingsGpu selected;
-            for (const auto &binding : decoded)
-            {
-                if (binding.dependency_index == 0xffff || binding.slot >= render_data::kMaterialTextureSlots)
-                    throw std::runtime_error("terrain requires all six authored texture bindings");
-                const auto &texture_id = package.dependencies[binding.dependency_index];
-                if (material.textures[binding.slot] != texture_id)
-                    throw std::runtime_error("terrain metadata and texture binding disagree");
-                const render_data::MaterialTextureDefinition definition{
-                    "slot_" + std::to_string(binding.slot), texture_id, binding.dimension, binding.semantic};
-                if (auto loaded = LoadEnvironmentMaterialTexture(definition, 3, uploads,
-                        selected.texture_indices[binding.slot]); !loaded) return loaded;
-                selected.product_ids[binding.slot] = texture_id;
-            }
-            if (material_bindings_initialized[kTerrainMaterialOrdinal] &&
-                environment_material_bindings[kTerrainMaterialOrdinal].product_ids != selected.product_ids)
-                throw std::runtime_error("terrain texture bindings differ from its mesh packages");
-            terrain_material = std::move(material);
-            environment_material_bindings[kTerrainMaterialOrdinal] = std::move(selected);
-            }
-        }
-        catch (const std::exception &error)
-        {
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Invalid terrain material package " + path.path.string() + ": " + error.what());
-        }
     }
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close mesh upload", result);

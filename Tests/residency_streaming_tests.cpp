@@ -34,6 +34,25 @@ void CheckAsyncAssetPreparation()
         hs::NextTextureTransactionTarget(4, 2, true, false, 4) == 4 &&
         hs::NextTextureTransactionTarget(4, 2, false, false, 4) == 2,
         "fixed texture transaction target skipped a legal resident mip step");
+    const std::array<std::uint32_t, 3> replacement_subresources{0, 1, 2};
+    std::array<hs::render_data::TextureSubresourceLayout, 3> replacement_layouts{};
+    replacement_layouts[0].byte_count = 5; replacement_layouts[1].byte_count = 7;
+    replacement_layouts[2].byte_count = 3;
+    for (auto &layout : replacement_layouts) layout.has_digest = true;
+    const auto first_chunk = hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 0, 12);
+    const auto final_chunk = hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, first_chunk, 12);
+    Check(first_chunk == 2 && first_chunk != replacement_subresources.size() &&
+        final_chunk == replacement_subresources.size() &&
+        hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 0, 4) == 0,
+        "software replacement chunking split an authenticated range or marked a partial candidate complete");
+    replacement_layouts[1].has_digest = false;
+    Check(hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 0, 12) == 1 &&
+        hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 1, 12) == 1,
+        "software replacement planner accepted an unauthenticated or indivisible range");
+    replacement_layouts[1].has_digest = true;
+    const std::array<std::uint32_t, 1> invalid_subresource{3};
+    Check(hs::TextureReadChunkEnd(invalid_subresource, replacement_layouts, 0, 12) == 0,
+        "software replacement planner accepted an out-of-range subresource index");
     hs::ResidencyManager mip_budget;
     mip_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
     const auto mip_payload = mip_budget.ReserveHost(512);
@@ -256,6 +275,10 @@ void CheckPackAssetReads(bool native)
         config.product_paths[std::string(source_id)] = path;
         config.product_digests[std::string(source_id)] = "wrong loose digest";
         Check(bool(hs::ValidatePackedRevisionCatalog(config)), "valid revision catalog rejected");
+        Check(hs::RendererIsSourceRevision(config, source_id) &&
+            !hs::RendererIsSourceRevision(config, "environment/unadmitted.meshbin") &&
+            !hs::RendererIsSourceRevision(config, "vfx/vfx_mesh_atlas.hsbin"),
+            "source revision role did not require an admitted provenance row");
         const auto digest = hs::RendererProductDigest(config, source_id);
         Check(digest == hs::RendererProductDigest(config, shader_id), "source digest differs from authenticated bulk digest");
         hs::RendererAssetSource resolved;
@@ -533,7 +556,8 @@ int main()
 
         const auto live = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
                                             "mips:0-3", "generation-c", 100);
-        Check(streaming.BeginRead(live), "live request did not enter Reading");
+        Check(!streaming.BeginUpload(live, "generation-c") && streaming.BeginRead(live),
+              "payload upload bypassed the read/decode gate");
         Check(streaming.CompleteRead(live, "generation-c"), "live read completion failed");
         Check(streaming.BeginUpload(live, "generation-c"), "live upload did not begin");
         Check(!streaming.TryPublish(live, "generation-c", {}), "unsubmitted upload was published");
@@ -549,6 +573,31 @@ int main()
               "retiring page reclaimed before all queue consumers completed");
         Check(streaming.Collect({4, 2, 7}) == 1,
               "retiring page was not reclaimed after CompletionSet");
+
+        const auto mapping_only = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
+            "mips:3-4-unmap", "generation-map", 100);
+        Check(mapping_only &&
+              !streaming.BeginMappingOnly(mapping_only, "stale-generation"),
+              "mapping-only admission accepted a stale request generation");
+        const auto mapping_requested = streaming.Find(mapping_only);
+        Check(mapping_requested && mapping_requested->state == hs::StreamingPageState::Requested &&
+              !mapping_requested->read_submitted && !mapping_requested->read_finished &&
+              !streaming.BeginUpload(mapping_only, "generation-map"),
+              "failed mapping-only evidence changed the request or opened the payload upload transition");
+        Check(streaming.BeginMappingOnly(mapping_only, "generation-map"),
+              "valid reserved-resource coarsening did not enter its explicit mapping-only state");
+        Check(streaming.SubmitUpload(mapping_only, "generation-map", {0, 0, 11}) &&
+              !streaming.TryPublish(mapping_only, "generation-map", {0, 0, 10}) &&
+              streaming.TryPublish(mapping_only, "generation-map", {0, 0, 11}) &&
+              streaming.Retire(mapping_only, {0, 0, 11}) &&
+              streaming.Collect({0, 0, 11}) == 1,
+              "mapping-only transition skipped its queue completion/publication lifecycle");
+        const auto cancelled_mapping = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
+            "mips:4-5-unmap", "generation-map-cancel", 100);
+        Check(cancelled_mapping && streaming.BeginMappingOnly(cancelled_mapping,
+              "generation-map-cancel") &&
+              streaming.Cancel(cancelled_mapping) && streaming.Collect({}) == 1,
+              "unsubmitted mapping-only request could not be cancelled and collected");
 
         const auto texture = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
                                                "mips:0-3", "generation-d", 100);

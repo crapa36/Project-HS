@@ -14,7 +14,6 @@ cbuffer FrameConstants : register(b0)
     float4x4 ShadowViewProjection[3];
     float4 ShadowAtlasScaleOffset[3];
     float4 ShadowAtlasTexelSize;
-    row_major float4x4 ArcherBones[128];
     uint4 MonsterAssetMeta[6];
     uint4 MonsterClipMeta[6][5];
     float4 RenderOptions;
@@ -61,6 +60,7 @@ cbuffer FrameConstants : register(b0)
     float4 PreviousGrassBenderGrid;
     uint4 PreviousGrassBenderMasks[16];
     float4 ParticleTerrain; // Scene origin, canonical meadow collision enabled.
+    row_major float4x4 PreviousInstanceUnjitteredViewProjection;
 };
 
 cbuffer PassConstants : register(b1)
@@ -132,7 +132,7 @@ struct InstanceData
 };
 #include "gpu_scene_tables.hlsli"
 ByteAddressBuffer SkinPreviousVertices : register(t3, space3);
-StructuredBuffer<InstanceData> SkinPreviousInstances : register(t4, space3);
+ByteAddressBuffer HsPreviousSceneTables : register(t4, space3);
 ByteAddressBuffer SkinCurrentVertices : register(t5, space3);
 
 struct FresnelShellGpu
@@ -194,11 +194,6 @@ StructuredBuffer<ParticleSpawnCommandGpu> ParticleSpawnCommands : register(t12);
 StructuredBuffer<float> GroundGapAngles : register(t11, space3);
 StructuredBuffer<uint> DrawAliveIndices : register(t13);
 StructuredBuffer<uint> ParticleSpawnOwners : register(t17);
-struct MonsterSkinMatrixElement
-{
-    row_major float4x4 value;
-};
-StructuredBuffer<MonsterSkinMatrixElement> MonsterSkinMatrices : register(t18);
 RWStructuredBuffer<ParticleData> WritableParticles : register(u0);
 RWByteAddressBuffer IndirectArguments : register(u1);
 #ifdef HS_CAPTURE_HERO_WORK
@@ -314,7 +309,8 @@ struct SceneOutput
     float3 EnvironmentStableWorld : TEXCOORD9;
     nointerpolation uint AnimationClip : TEXCOORD10;
     nointerpolation float AnimationProgress : TEXCOORD11;
-    float3 PreviousWorldPosition : TEXCOORD12;
+    // Projection jitter leaves z/w unchanged, so this also supplies previous device depth.
+    float4 PreviousUnjitteredClipPosition : TEXCOORD12;
     nointerpolation uint MaterialId : TEXCOORD13;
     nointerpolation uint SurfaceFlags : TEXCOORD14;
     nointerpolation float HistoryConfidence : TEXCOORD15;
@@ -461,52 +457,6 @@ float4 UnpackColor(uint packed)
         ((packed >> 24) & 0xff) / 255.0);
 }
 
-void SkinArcher(inout float3 position, inout float3 normal, inout float3 tangent,
-                SceneInput input, uint mesh)
-{
-    if (mesh != 0)
-    {
-        return;
-    }
-    const float4x4 skin =
-        ArcherBones[input.BoneIndices.x] * input.BoneWeights.x +
-        ArcherBones[input.BoneIndices.y] * input.BoneWeights.y +
-        ArcherBones[input.BoneIndices.z] * input.BoneWeights.z +
-        ArcherBones[input.BoneIndices.w] * input.BoneWeights.w;
-    position = mul(skin, float4(position, 1.0)).xyz;
-    normal = normalize(mul((float3x3)skin, normal));
-    tangent = normalize(mul((float3x3)skin, tangent));
-}
-
-void SkinMonster(inout float3 position, inout float3 normal, inout float3 tangent,
-                 SceneInput input, InstanceData instance, uint mesh)
-{
-    if (mesh < 10 || mesh > 15) return;
-    const uint asset = mesh - 10;
-    const uint clip = min((instance.Mesh >> 8) & 0xff, 4);
-    const uint4 clip_meta = MonsterClipMeta[asset][clip];
-    const uint frame = min((uint)(saturate(instance.Padding) * (clip_meta.y - 1)),
-                           clip_meta.y - 1);
-    const uint matrix_base = MonsterAssetMeta[asset].x + clip_meta.x +
-                             frame * clip_meta.w;
-    const float4x4 skin =
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.x].value * input.BoneWeights.x +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.y].value * input.BoneWeights.y +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.z].value * input.BoneWeights.z +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.w].value * input.BoneWeights.w;
-    position = mul(skin, float4(position, 1.0)).xyz;
-    // Squash/stretch needs the inverse transpose, including for blended
-    // matrices with shear. Normalization removes the determinant magnitude.
-    const float3x3 linear_skin = (float3x3)skin;
-    const float3x3 cofactor = float3x3(
-        cross(linear_skin[1], linear_skin[2]),
-        cross(linear_skin[2], linear_skin[0]),
-        cross(linear_skin[0], linear_skin[1]));
-    const float determinant = dot(linear_skin[0], cofactor[0]);
-    normal = normalize(mul(cofactor, normal) * (determinant < 0.0 ? -1.0 : 1.0));
-    tangent = normalize(mul((float3x3)skin, tangent));
-}
-
 float3 ShapePlaceholder(float3 position, uint mesh)
 {
     // Runtime-only primitives: boxes, tapered boxes, wedges, and planes.
@@ -622,21 +572,6 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         local_normal = asfloat(SkinCurrentVertices.Load3(cached_offset + 12u));
         local_tangent = asfloat(SkinCurrentVertices.Load3(cached_offset + 24u));
     }
-    else
-    {
-        SkinArcher(local_position, local_normal, local_tangent, input, mesh);
-        SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
-    }
-    // Sampling the charge timeline makes the bubbling reverse with a cancelled draw.
-    if (!cached_skin && mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2)
-    {
-        const float progress = saturate(instance.Padding);
-        const float phase = progress * 48.0;
-        const float bubble = sin(input.Position.x * 43.0 + phase) *
-            sin(input.Position.y * 37.0 - phase * 0.73) *
-            sin(input.Position.z * 41.0 + phase * 0.61);
-        local_position += local_normal * (0.006 * progress * bubble);
-    }
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
@@ -658,6 +593,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     float3 previous_world = world;
     const bool previous_static_grass = context.geometryValid &&
         (context.geometry.Flags & 12u) == 12u;
+    // A retained static lease keeps the same native instance/vertex coordinates.
+    const bool previous_static_instance = evaluate_history && previous_static_grass &&
+        PreviousGrassState.z > 0.5 && SurfaceViewOrigin.w > 0.5;
+    bool previous_instance_basis = previous_static_instance;
     const bool previous_dynamic_grass = context.gpuSceneRefs && context.geometryValid &&
         (context.geometry.Flags & 8u) != 0u && (draw.MeshFlags & 0x200000u) != 0u;
     const bool grass_history = evaluate_history && wind_deformed &&
@@ -666,13 +605,13 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     if (grass_history)
     {
         const float3 previous_stable = previous_dynamic_grass
-            ? InstanceWorldPosition(SkinPreviousInstances[draw.InstanceIndex], local_position) + PreviousGrassOriginDelta.xyz
+            ? InstanceWorldPosition(HsLoadGpuSceneInstance(HsPreviousSceneTables, draw.InstanceIndex), local_position)
             : stable_world;
-        // The immutable static lease retains old scene coordinates; dynamic transforms were rebased on the CPU.
         previous_world = HsDeformGrass(previous_stable, grass_local,
             float3(0, 0, 0), PreviousGrassState.x, PreviousGrassBenders,
             (uint)PreviousGrassState.y, PreviousGrassBenderGrid,
-            PreviousGrassBenderMasks, false).position - PreviousGrassOriginDelta.xyz;
+            PreviousGrassBenderMasks, false).position;
+        previous_instance_basis = true;
     }
     if (cached_skin_history)
     {
@@ -680,7 +619,8 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         const float3 previous_local = asfloat(
             SkinPreviousVertices.Load3(previous_vertex * context.skinVertexStrides.y));
         previous_world = InstanceWorldPosition(
-            SkinPreviousInstances[skin_slot], previous_local);
+            HsLoadGpuSceneInstance(HsPreviousSceneTables, skin_slot), previous_local);
+        previous_instance_basis = true;
     }
     const float3 scale_sign = float3(instance.Scale.x < 0.0 ? -1.0 : 1.0,
         instance.Scale.y < 0.0 ? -1.0 : 1.0, instance.Scale.z < 0.0 ? -1.0 : 1.0);
@@ -703,7 +643,8 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = normal;
     output.WorldPosition = world;
-    output.PreviousWorldPosition = previous_world;
+    output.PreviousUnjitteredClipPosition = mul(float4(previous_world, 1.0),
+        previous_instance_basis ? PreviousInstanceUnjitteredViewProjection : PreviousUnjitteredViewProjection);
     output.Color = UnpackColor(instance.Color);
     output.Mesh = mesh;
     output.Uv = input.Uv;
@@ -728,7 +669,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
                     : 0x20000000u + (context.geometry.PageSlot << 16u) + input.Material);
         if ((context.geometry.Flags & 32u) != 0u)
             output.MaterialId = context.geometry.Lod;
-        if (environment && !wind_deformed && (context.geometry.Flags & 12u) == 12u)
+        if (environment && !wind_deformed && previous_static_instance)
             output.HistoryConfidence = 1.0;
     }
     // A resident previous page cannot establish the previous instance's LOD
@@ -1171,24 +1112,16 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
 #if HS_SURFACE_SIDECAR_PLANES > 1
     output.Sidecar1 = 0u;
 #endif
-    const float4 current_clip = mul(float4(input.WorldPosition, 1.0), ViewProjection);
-    const float4 previous_clip = mul(float4(input.PreviousWorldPosition, 1.0),
-                                     PreviousViewProjection);
-    const float4 current_unjittered_clip = mul(float4(input.WorldPosition, 1.0),
-        CurrentUnjitteredViewProjection);
-    const float4 previous_unjittered_clip = mul(float4(input.PreviousWorldPosition, 1.0),
-        PreviousUnjitteredViewProjection);
+    const float2 current_uv = input.Position.xy * ScreenSize.zw - SurfaceJitterUv.xy;
+    const float4 previous_unjittered_clip = input.PreviousUnjitteredClipPosition;
     const bool history_valid = input.HistoryConfidence > 0.0 &&
         SurfaceViewOrigin.w > 0.5 &&
-        current_clip.w > 0.0 && previous_clip.w > 0.0 &&
-        current_unjittered_clip.w > 0.0 && previous_unjittered_clip.w > 0.0 &&
-        all(isfinite(current_clip)) && all(isfinite(previous_clip)) &&
-        all(isfinite(current_unjittered_clip)) && all(isfinite(previous_unjittered_clip));
+        input.Position.w > 0.0 && previous_unjittered_clip.w > 0.0 &&
+        all(isfinite(input.Position)) && all(isfinite(current_uv)) && all(isfinite(previous_unjittered_clip));
     if (history_valid)
     {
-        const float2 motion = HsSurfaceClipUv(previous_unjittered_clip) -
-            HsSurfaceClipUv(current_unjittered_clip);
-        const float previous_depth = previous_clip.z / previous_clip.w;
+        const float2 motion = HsSurfaceClipUv(previous_unjittered_clip) - current_uv;
+        const float previous_depth = previous_unjittered_clip.z / previous_unjittered_clip.w;
         if (all(isfinite(motion)) && isfinite(previous_depth))
         {
             output.Motion = motion;
@@ -1316,18 +1249,15 @@ GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ct
     output.Normal = HsEncodeSurfaceNormal(normal);
     output.Metadata = uint2(input.MaterialId, input.SurfaceFlags);
     output.Material = float4(surface.roughness, saturate(surface.metallic), surface.ao, 0.0);
-    const float4 current_clip = mul(float4(input.WorldPosition, 1.0), ViewProjection);
-    const float4 previous_clip = mul(float4(input.PreviousWorldPosition, 1.0), PreviousViewProjection);
-    const float4 current_unjittered = mul(float4(input.WorldPosition, 1.0), CurrentUnjitteredViewProjection);
-    const float4 previous_unjittered = mul(float4(input.PreviousWorldPosition, 1.0), PreviousUnjitteredViewProjection);
+    const float2 current_uv = input.Position.xy * ScreenSize.zw - SurfaceJitterUv.xy;
+    const float4 previous_unjittered = input.PreviousUnjitteredClipPosition;
     const bool history_valid = input.HistoryConfidence > 0.0 && SurfaceViewOrigin.w > 0.5 &&
-        current_clip.w > 0.0 && previous_clip.w > 0.0 && current_unjittered.w > 0.0 && previous_unjittered.w > 0.0 &&
-        all(isfinite(current_clip)) && all(isfinite(previous_clip)) &&
-        all(isfinite(current_unjittered)) && all(isfinite(previous_unjittered));
+        input.Position.w > 0.0 && previous_unjittered.w > 0.0 &&
+        all(isfinite(input.Position)) && all(isfinite(current_uv)) && all(isfinite(previous_unjittered));
     if (history_valid)
     {
-        const float2 motion = HsSurfaceClipUv(previous_unjittered) - HsSurfaceClipUv(current_unjittered);
-        const float previous_depth = previous_clip.z / previous_clip.w;
+        const float2 motion = HsSurfaceClipUv(previous_unjittered) - current_uv;
+        const float previous_depth = previous_unjittered.z / previous_unjittered.w;
         if (all(isfinite(motion)) && isfinite(previous_depth))
         {
             output.Motion = motion;
@@ -2687,17 +2617,21 @@ HeroTransparentGuideOutput HsHeroSurfaceGuides(SceneOutput input,HsSurfaceClosur
     output.Classification=float4(HsEncodeSurfaceNormal(surface.normal),saturate(surface.opacity),surface.roughness);
     output.Metadata=input.InstanceKey;
     output.Transport=float2(surface.solid_transmission_weight>0.0?1.0:0.0,any(surface.emission>0.0)?1.0:0.0);
-    const float4 current=mul(float4(input.WorldPosition,1.0),CurrentUnjitteredViewProjection);
-    const float4 previous=mul(float4(input.PreviousWorldPosition,1.0),PreviousUnjitteredViewProjection);
-    const float4 previous_jittered=mul(float4(input.PreviousWorldPosition,1.0),PreviousViewProjection);
+    const float2 current_uv=input.Position.xy*ScreenSize.zw-SurfaceJitterUv.xy;
+    const float4 previous=input.PreviousUnjitteredClipPosition;
     const bool valid=input.HistoryConfidence>0.0 && SurfaceViewOrigin.w>0.5 &&
-        current.w>0.0 && previous.w>0.0 && previous_jittered.w>0.0 &&
-        all(isfinite(current)) && all(isfinite(previous)) && all(isfinite(previous_jittered)) &&
+        input.Position.w>0.0 && previous.w>0.0 &&
+        all(isfinite(input.Position)) && all(isfinite(current_uv)) && all(isfinite(previous)) &&
         HeroOverflow.Load(int3(int2(input.Position.xy),0))==0u;
     if(valid)
     {
-        output.Motion=HsSurfaceClipUv(previous)-HsSurfaceClipUv(current);
-        output.History=float2(previous_jittered.z/previous_jittered.w,input.HistoryConfidence);
+        const float2 motion=HsSurfaceClipUv(previous)-current_uv;
+        const float previous_depth=previous.z/previous.w;
+        if(all(isfinite(motion))&&isfinite(previous_depth))
+        {
+            output.Motion=motion;
+            output.History=float2(previous_depth,input.HistoryConfidence);
+        }
     }
     return output;
 }

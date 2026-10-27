@@ -64,7 +64,7 @@ Result D3D12Renderer::Impl::AddGeometryDrawRecord(
                                "Geometry mesh dispatch exceeds the hardware group limit.");
     packed_pass = (static_cast<std::uint32_t>(records.size()) << 2) | view;
     if (page.raster_index_offset != 0) flags |= kGeometryRasterPrimitiveRemap;
-    if (previous_geometry_page_versions[page.page_slot] == page.generation)
+    if (owned_views.at(active_view_id.value)->previous_geometry_page_versions[page.page_slot] == page.generation)
         flags |= kGeometryPreviousPage;
     records.push_back({page.page_slot, 0, page.index_count, 0,
         page.meshlet_count, visible_base, instance_count, flags,

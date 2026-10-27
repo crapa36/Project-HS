@@ -1,4 +1,5 @@
 #include <hs/game_rules/simulation_rules.hpp>
+#include "../Source/Apps/ContentLinker/simulation_identity.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -30,6 +31,12 @@ int main()
 
     const auto first_image = hs::CanonicalSimulationRulesBytes(first);
     const auto second_image = hs::CanonicalSimulationRulesBytes(second);
+    const auto first_values = hs::content_identity::Simulation(first);
+    if (first_values != hs::content_identity::Simulation(second))
+    {
+        std::cerr << "SimulationRules padding changed the semantic image identity.\n";
+        return 1;
+    }
     if (first_image.size() != sizeof(first) || first_image != second_image ||
         first_image[10] != std::byte{0} || first_image[717] != std::byte{0})
     {
@@ -44,6 +51,11 @@ int main()
     if (hs::CanonicalSimulationRulesBytes(second) == first_image)
     {
         std::cerr << "A semantic rule field was omitted from the ABI image.\n";
+        return 1;
+    }
+    if (hs::content_identity::Simulation(second) == first_values)
+    {
+        std::cerr << "A semantic rule field was omitted from the shipping identity.\n";
         return 1;
     }
     return 0;

@@ -1110,8 +1110,15 @@ void TestWarningOwnerRefresh()
     hs::runtime_detail::PreparedPairFacts facts;
     facts.Prepare({}, {}, owners, {}, {});
     hs::runtime_detail::RefreshVfxGroundEventOwners(events, owners, 130, &facts);
+    auto refreshed_single = line;
+    Check(hs::runtime_detail::RefreshVfxGroundEventOwner(refreshed_single, owners, 130, &facts),
+          "single owner refresh discarded a valid warning");
     Check(events.size() == 2 && events[1].geometry_owner_id == original_sibling.geometry_owner_id,
           "owner refresh removed or altered an unrelated event");
+    Check(refreshed_single.geometry_start_tick == events[0].geometry_start_tick &&
+              std::get<hs::VfxLinePayload>(refreshed_single.payload).start.x ==
+                  std::get<hs::VfxLinePayload>(events[0].payload).start.x,
+          "vector refresh diverged from single-row owner binding");
     const auto &updated_line = std::get<hs::VfxLinePayload>(events[0].payload);
     Check(std::abs(updated_line.start.x - (-6.0f)) < 0.0001f &&
               std::abs(updated_line.end.x - 16.0f) < 0.0001f &&
@@ -2021,8 +2028,7 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
 
     PreparedPairFacts facts;
     PreparedPairFacts::Key key{.session_id = 11, .previous_publication = 2,
-        .current_publication = 3, .quality = 1, .binding_revision = 5,
-        .geometry_revision = 6};
+        .current_publication = 3};
     facts.Prepare(key, previous, current, instances, captures);
     Check(facts.Previous(current_owner.stable_id, current_owner.kind, previous)->position.x == 1.0f &&
           facts.Current(7, PersistentVfxKind::ProjectileHead, current)->position.x == 4.0f,
@@ -2031,6 +2037,17 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
           facts.Capture(11, 22, 33, 44, captures)->instance.position.x == 6.0f,
           "pair facts changed first instance/capture match");
 
+    auto copied_previous = previous;
+    auto copied_current = current;
+    auto copied_instances = instances;
+    auto copied_captures = captures;
+    copied_current[0].position.x = 12.0f;
+    facts.Prepare(key, copied_previous, copied_current, copied_instances, copied_captures);
+    Check(facts.Current(7, PersistentVfxKind::ProjectileHead, copied_current) == &copied_current[0] &&
+          facts.Instance(91, copied_instances) == &copied_instances[0] &&
+          facts.Capture(11, 22, 33, 44, copied_captures) == &copied_captures[0],
+          "semantic pair indexes must resolve against the current borrowed storage after relocation");
+
     auto changed_prior = prior; changed_prior.position.x = 9.0f;
     const std::array republished_previous{changed_prior};
     key.previous_publication = 3;
@@ -2038,6 +2055,14 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     facts.Prepare(key, republished_previous, current, instances, captures);
     Check(facts.Previous(current_owner.stable_id, current_owner.kind, republished_previous)->position.x == 9.0f,
           "new publication pair reused stale adaptation indexes");
+
+    std::array unidentified{current_owner};
+    facts.Prepare({}, {}, unidentified, {}, {});
+    unidentified[0].stable_id = 99;
+    facts.Prepare({}, {}, unidentified, {}, {});
+    Check(!facts.Current(7, PersistentVfxKind::ProjectileHead, unidentified) &&
+          facts.Current(99, PersistentVfxKind::ProjectileHead, unidentified) == &unidentified[0],
+          "inputs without semantic publication identity must not reuse an unknown index");
 }
 
 int main()

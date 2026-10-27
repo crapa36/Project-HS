@@ -272,6 +272,8 @@ void PersistentGpuSceneSlots::EndFrame()
         if (++pending_content_revision_ == 0) ++pending_content_revision_;
     // Native submission commits these owners; any allocation must fail before it.
     entries_.reserve(instances_.size());
+    payload_slot_revisions_.resize(instances_.size());
+    pending_payload_channels_.resize(instances_.size());
     free_slots_.reserve(free_slots_.size() + changes_.destroyed);
     if (!pending_new_slots_.empty())
         slots_.reserve(reset_scene_ ? pending_new_slots_.size() : slots_.size() + pending_new_slots_.size());
@@ -285,8 +287,11 @@ void PersistentGpuSceneSlots::Commit()
     {
         slots_.clear();
         free_slots_.clear();
+        for (auto &revisions : payload_slot_revisions_) revisions.fill(0);
         instances_.resize(pending_reset_slots_);
         metadata_.resize(pending_reset_slots_);
+        payload_slot_revisions_.resize(pending_reset_slots_);
+        pending_payload_channels_.resize(pending_reset_slots_);
     }
     else
     {
@@ -298,8 +303,10 @@ void PersistentGpuSceneSlots::Commit()
             slots_.erase(entry.key);
             entry.active = false;
             free_slots_.push_back(slot);
+            if (slot < payload_slot_revisions_.size()) payload_slot_revisions_[slot].fill(0);
         }
     }
+    CommitPayloadChanges();
     entries_.resize(instances_.size());
     for (const auto slot : pending_active_slots_)
         entries_[slot] = pending_entries_[slot];
@@ -324,11 +331,14 @@ void PersistentGpuSceneSlots::Abort() noexcept
     instances_.resize(entries_.size());
     metadata_.resize(entries_.size());
     for (const auto slot : pending_active_slots_) pending_seen_[slot] = 0;
+    for (const auto dirty : dirty_slots_)
+        if (dirty.slot < pending_payload_channels_.size()) pending_payload_channels_[dirty.slot] = 0;
     pending_active_slots_.clear();
     pending_new_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
+    payload_change_pending_ = false;
     preparing_ = false;
 }
 
@@ -366,6 +376,8 @@ void PersistentGpuSceneSlots::Clear() noexcept
     pending_seen_.clear();
     instances_.clear();
     metadata_.clear();
+    payload_slot_revisions_.clear();
+    pending_payload_channels_.clear();
     free_slots_.clear();
     dirty_slots_.clear();
     dirty_ranges_.clear();
@@ -375,6 +387,7 @@ void PersistentGpuSceneSlots::Clear() noexcept
     changes_ = {};
     content_revision_ = pending_content_revision_ = 0;
     content_changed_ = false;
+    payload_change_pending_ = false;
     dirty_ranges_valid_ = true;
 }
 
@@ -382,7 +395,90 @@ void PersistentGpuSceneSlots::MarkDirty(std::uint32_t slot, std::uint8_t channel
 {
     if (channels == 0) return;
     dirty_slots_.push_back({slot, channels});
+    if (slot >= pending_payload_channels_.size())
+        pending_payload_channels_.resize(std::size_t(slot) + 1);
+    pending_payload_channels_[slot] |= channels;
+    payload_change_pending_ = true;
     dirty_ranges_valid_ = false;
+}
+
+std::uint64_t PersistentGpuSceneSlots::PayloadRevision() const noexcept
+{
+    return payload_change_pending_ && payload_revision_ != std::numeric_limits<std::uint64_t>::max()
+        ? payload_revision_ + 1 : payload_revision_;
+}
+
+void PersistentGpuSceneSlots::CommitPayloadChanges() noexcept
+{
+    if (!payload_change_pending_) return;
+    if (payload_revision_ == std::numeric_limits<std::uint64_t>::max())
+        payload_revision_exhausted_ = true;
+    else
+        ++payload_revision_;
+    for (const auto dirty : dirty_slots_)
+    {
+        if (dirty.slot >= payload_slot_revisions_.size()) continue;
+        auto &revisions = payload_slot_revisions_[dirty.slot];
+        for (std::size_t channel = 0; channel < kGpuSceneChannelCount; ++channel)
+            if (dirty.channels & (1u << channel)) revisions[channel] = payload_revision_;
+        if (dirty.slot < pending_payload_channels_.size()) pending_payload_channels_[dirty.slot] = 0;
+    }
+    payload_change_pending_ = false;
+}
+
+void PersistentGpuSceneSlots::CollectDirtyRangesSince(
+    GpuSceneChannel channel, std::uint64_t uploaded_revision,
+    std::vector<PersistentGpuSceneRange> &out) const
+{
+    const auto index = static_cast<std::size_t>(channel);
+    if (index >= kGpuSceneChannelCount)
+    {
+        out.clear();
+        return;
+    }
+    CollectDirtyRangesSince(static_cast<std::uint8_t>(1u << index), uploaded_revision, out);
+}
+
+void PersistentGpuSceneSlots::CollectDirtyRangesSince(
+    std::uint64_t uploaded_revision, std::vector<PersistentGpuSceneRange> &out) const
+{
+    CollectDirtyRangesSince(kGpuSceneAllChannels, uploaded_revision, out);
+}
+
+void PersistentGpuSceneSlots::CollectDirtyRangesSince(
+    std::uint8_t channels, std::uint64_t uploaded_revision,
+    std::vector<PersistentGpuSceneRange> &out) const
+{
+    out.clear();
+    const auto pending_revision = PayloadRevision();
+    const bool pending_is_newer = payload_change_pending_ && uploaded_revision < pending_revision;
+    const bool all_active = uploaded_revision == 0 || payload_revision_exhausted_;
+    if (!all_active && uploaded_revision == pending_revision) return;
+    const auto append = [&](std::uint32_t slot) {
+        if (!out.empty() && out.back().begin + out.back().count == slot)
+            ++out.back().count;
+        else
+            out.push_back({slot, 1});
+    };
+    for (std::uint32_t slot = 0; slot < SlotCount(); ++slot)
+    {
+        const bool active = preparing_
+            ? slot < pending_seen_.size() && pending_seen_[slot] != 0
+            : slot < entries_.size() && entries_[slot].active;
+        if (!active) continue;
+        bool changed = all_active;
+        if (!changed && slot < payload_slot_revisions_.size())
+            for (std::size_t channel = 0; channel < kGpuSceneChannelCount; ++channel)
+                if ((channels & (1u << channel)) &&
+                    payload_slot_revisions_[slot][channel] > uploaded_revision)
+                {
+                    changed = true;
+                    break;
+                }
+        if (!changed && pending_is_newer && slot < pending_payload_channels_.size())
+            changed = (pending_payload_channels_[slot] & channels) != 0;
+        if (changed) append(slot);
+    }
 }
 
 void PersistentGpuSceneSlots::RebuildDirtyRanges()

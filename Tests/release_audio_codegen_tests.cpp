@@ -34,7 +34,8 @@ void TestReleaseAudioCodegen()
     };
     const auto release = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
     const auto repeated = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
-    check(release.source == repeated.source && release.pcm == repeated.pcm);
+    check(release.source == repeated.source && release.pcm == repeated.pcm &&
+          release.identity == repeated.identity && !release.identity.empty());
     check(release.pcm == wave(2).substr(44) + wave(1).substr(44));
     check(release.preload_samples == 1 && release.transition_samples == 1 &&
           release.preload_bytes == 12 && release.transition_bytes == 12);
@@ -49,13 +50,20 @@ void TestReleaseAudioCodegen()
     grouped_catalog.replace(grouped_catalog.find("\"music.wav\""), std::string_view("\"music.wav\"").size(), "\"music.wav\",\"music2.wav\"");
     grouped_catalog.replace(grouped_catalog.find("\"impact.wav\""), std::string_view("\"impact.wav\"").size(), "\"impact.wav\",\"impact2.wav\"");
     const auto grouped = hs::audio_content::BuildReleaseAudio(grouped_catalog, read, 64);
+    check(grouped.identity != release.identity);
+    auto metadata_catalog = catalog;
+    metadata_catalog.replace(metadata_catalog.find("\"minimum_retrigger_ms\":30"),
+                             std::string_view("\"minimum_retrigger_ms\":30").size(),
+                             "\"minimum_retrigger_ms\":31");
+    const auto metadata_changed = hs::audio_content::BuildReleaseAudio(metadata_catalog, read, 64);
+    check(metadata_changed.pcm == release.pcm && metadata_changed.identity != release.identity);
     check(grouped.pcm == wave(2).substr(44) + wave(2).substr(44) + wave(1).substr(44) + wave(1).substr(44));
     check(grouped.source.find("std::array<AudioPcmChunk,3>") != std::string::npos &&
           grouped.source.find("{64ull,12ull,0u,1u,false,{") != std::string::npos &&
           grouped.source.find("{76ull,12ull,1u,1u,false,{") != std::string::npos &&
           grouped.source.find("{88ull,24ull,2u,2u,true,{" + digest_text(wave(1).substr(44) + wave(1).substr(44)) + "}}") != std::string::npos);
     const auto relocated = hs::audio_content::BuildReleaseAudio(grouped_catalog, read, 256);
-    check(relocated.pcm == grouped.pcm && relocated.source.find(
+    check(relocated.identity != grouped.identity && relocated.pcm == grouped.pcm && relocated.source.find(
         "{280ull,24ull,2u,2u,true,{" + digest_text(wave(1).substr(44) + wave(1).substr(44)) + "}}") != std::string::npos);
     bool rejected = false;
     try

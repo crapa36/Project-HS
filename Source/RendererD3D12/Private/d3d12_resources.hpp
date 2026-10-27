@@ -113,6 +113,7 @@ struct FrameContext
     std::uint32_t static_input_ref_count{}, dynamic_input_ref_count{};
     std::shared_ptr<const std::vector<GpuStaticDrawRef>> static_input_refs;
     std::vector<GpuSceneSerializedSlot> scene_serialization_scratch;
+    std::vector<PersistentGpuSceneRange> scene_dirty_scratch, scene_channel_dirty_scratch;
     AllocationResource skin_cache_vertices;
     AllocationResource skin_cache_bounds;
     std::size_t static_visible_capacity{};
@@ -134,6 +135,7 @@ struct FrameContext
     std::uint64_t timing_layout_generation{};
     std::uint32_t timing_layout_capacity{};
     std::uint64_t submitted_frame_id{};
+    std::uint64_t constants_submission_id{};
     std::uint32_t submitted_view_id{};
     GpuFrameTimingKind timing_kind{GpuFrameTimingKind::Unavailable};
     std::uint64_t timing_generation{}, timing_resize_epoch{};
@@ -159,11 +161,11 @@ struct FrameContext
     AllocationResource timestamp_readback;
     std::uint64_t *mapped_timestamps{};
     std::uint32_t timestamp_capacity{};
+    std::uint64_t ui_upload_bytes{};
     std::vector<GpuPassTiming> timestamp_passes;
     std::vector<std::uint64_t> timestamp_frequencies;
     std::vector<std::uint32_t> timestamp_pass_query_slots;
     std::vector<std::uint32_t> timestamp_query_slots;
-    bool ui_initialized{};
 };
 
 } // namespace hs

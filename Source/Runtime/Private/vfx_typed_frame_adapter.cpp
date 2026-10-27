@@ -701,11 +701,13 @@ void PreparedPairFacts::Prepare(Key key,
     std::span<const RenderInstance> instances,
     std::span<const CapturedRenderInstance> captures)
 {
-    key.previous_data = previous.data(); key.previous_count = previous.size();
-    key.current_data = current.data(); key.current_count = current.size();
-    key.instance_data = instances.data(); key.instance_count = instances.size();
-    key.capture_data = captures.data(); key.capture_count = captures.size();
-    if (prepared_ && key_ == key) return;
+    key.previous_count = previous.size();
+    key.current_count = current.size();
+    key.instance_count = instances.size();
+    key.capture_count = captures.size();
+    const bool identified = key.current_publication != 0 &&
+        (previous.empty() || key.previous_publication != 0);
+    if (prepared_ && identified && key_ == key) return;
     key_ = key;
     prepared_ = true;
     previous_.clear(); current_.clear(); instances_.clear(); captures_.clear();
@@ -1634,33 +1636,23 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
     return result;
 }
 
-void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
-                                 std::span<const PersistentVfxVisual> owners,
-                                 Tick current_tick,
-                                 const PreparedPairFacts *pair_facts,
-                                 std::span<const PersistentVfxVisual> previous, float interpolation)
+bool RefreshVfxGroundEventOwner(VfxEventInput &event,
+    std::span<const PersistentVfxVisual> owners, Tick current_tick,
+    const PreparedPairFacts *pair_facts,
+    std::span<const PersistentVfxVisual> previous, float interpolation)
 {
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
-    std::size_t retained{};
-    const auto retain = [&](VfxEventInput &event) {
-        if (&events[retained] != &event) events[retained] = std::move(event);
-        ++retained;
-    };
-    for (auto &event : events)
-    {
         if (event.geometry_owner_id == 0)
         {
-            retain(event);
-            continue;
+            return true;
         }
         if (event.event_tick > display_tick)
         {
-            retain(event);
-            continue;
+            return true;
         }
         const auto binding = WarningBinding(event.geometry_effect_id);
-        if (!binding || !WarningShapeMatches(*binding, event.payload)) continue;
+        if (!binding || !WarningShapeMatches(*binding, event.payload)) return false;
         const bool line = binding->payload_kind == kLinePayload;
         const auto expected_kind = binding->kind;
         const PersistentVfxVisual *found{};
@@ -1688,8 +1680,7 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
             if (!prior)
             {
                 event.geometry_start_tick = current_tick;
-                retain(event);
-                continue;
+                return true;
             }
             if (!found || prior->status_episode_generation != found->status_episode_generation ||
                 prior->active_tick != found->active_tick || prior->cast_id != found->cast_id ||
@@ -1715,17 +1706,17 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
                 found = &sample;
             }
         }
-        if (!found || !FiniteWarningOwner(*found, display_tick)) continue;
+        if (!found || !FiniteWarningOwner(*found, display_tick)) return false;
         const auto &owner = *found;
         const float age = static_cast<float>(display_tick - owner.active_tick) /
             static_cast<float>(owner.expires - owner.active_tick);
-        if (!std::isfinite(age) || age < 0.0f || age >= 1.0f) continue;
+        if (!std::isfinite(age) || age < 0.0f || age >= 1.0f) return false;
         event.world_transform = Transform(owner.position, owner.yaw);
         event.geometry_start_tick = owner.active_tick;
         event.geometry_end_tick = owner.expires;
         if (line)
         {
-            if (!std::isfinite(owner.length) || owner.length <= 0.0f) continue;
+            if (!std::isfinite(owner.length) || owner.length <= 0.0f) return false;
             const Float3 direction{std::sin(owner.yaw), 0.0f, std::cos(owner.yaw)};
             auto &payload = std::get<VfxLinePayload>(event.payload);
             payload.start = {owner.position.x - direction.x * owner.length * 0.5f,
@@ -1743,22 +1734,22 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
             VfxPayload ring_payload;
             if (!MakeRingGaps(owner, age, ring_payload) ||
                 !MakeSafeSector(std::get<VfxRingGapsPayload>(ring_payload), event.geometry_sector_index, event.payload))
-                continue;
+                return false;
         }
         else if (binding->payload_kind == kRingGapsPayload)
         {
-            if (!MakeRingGaps(owner, age, event.payload)) continue;
+            if (!MakeRingGaps(owner, age, event.payload)) return false;
         }
         else if (binding->payload_kind == kCirclePayload)
         {
-            if (!MakeCircle(owner, age, event.payload)) continue;
+            if (!MakeCircle(owner, age, event.payload)) return false;
         }
         else
         {
             if (!std::isfinite(owner.cone_half_angle_degrees) ||
                 owner.cone_half_angle_degrees <= 0.0f ||
                 owner.cone_half_angle_degrees > 180.0f)
-                continue;
+                return false;
             const Float3 direction{std::sin(owner.yaw), 0.0f, std::cos(owner.yaw)};
             auto &payload = std::get<VfxConePayload>(event.payload);
             payload.origin = owner.position;
@@ -1767,11 +1758,24 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
             payload.half_angle_degrees = owner.cone_half_angle_degrees;
             payload.lifetime01 = age;
         }
-        retain(event);
+        return true;
+    }
+
+void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
+    std::span<const PersistentVfxVisual> owners, Tick current_tick,
+    const PreparedPairFacts *pair_facts,
+    std::span<const PersistentVfxVisual> previous, float interpolation)
+{
+    std::size_t retained{};
+    for (auto &event : events)
+    {
+        if (!RefreshVfxGroundEventOwner(event, owners, current_tick, pair_facts,
+                                        previous, interpolation)) continue;
+        if (&events[retained] != &event) events[retained] = std::move(event);
+        ++retained;
     }
     events.resize(retained);
 }
-
 void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
                                 std::vector<VfxEventInput> &events)
 {

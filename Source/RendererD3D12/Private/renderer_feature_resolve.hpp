@@ -62,6 +62,14 @@ struct RendererFeaturePlan
     RendererFeatureFallbackReason shadow_reason{RendererFeatureFallbackReason::None};
 };
 
+// Software GI owns a fixed render extent. Preserve the user's DRS request in
+// settings, but report and execute DRS only when that extent constraint allows it.
+[[nodiscard]] constexpr bool EffectiveDynamicResolution(bool requested,
+    const RendererFeaturePlan &plan) noexcept
+{
+    return requested && !plan.software_gi_enabled;
+}
+
 // Preserve the complete native/software transport input contract, even without SSS materials.
 [[nodiscard]] constexpr std::array<bool, 3> LightingAuxiliaryTargets(
     const RendererFeaturePlan &plan, bool have_subsurface) noexcept

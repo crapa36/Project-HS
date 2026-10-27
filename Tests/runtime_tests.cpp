@@ -27,6 +27,7 @@
 #include "recording_io.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
+#include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
 #include "vfx_typed_ground_commands.hpp"
 #include "vfx_typed_flash_commands.hpp"
@@ -378,6 +379,7 @@ void TestProductionVfxDecoding()
               test_generation::ProductPath("vfx/vfx_program.hsbin"), catalog).Succeeded(),
           "production VFX catalog");
     const auto &program = catalog.Program();
+    const auto &vfx_image = catalog.Image();
     const auto handle = [&](std::string_view id) {
         for (const auto &entry : program.effect_lookup)
             if (entry.effect_id == hs::MakeAssetId(id).value) return entry.handle;
@@ -390,14 +392,14 @@ void TestProductionVfxDecoding()
     hs::VfxRingGapsPayload ring;
     ring.inner_radius = 2; ring.outer_radius = 9; ring.gap_half_width_degrees = 12;
     ring.gap_angles_degrees = {23, 113, 203, 293}; warning.payload = ring;
-    const auto ground = hs::runtime_detail::BuildVfxTypedEventGroundCommands(program, std::span(&warning,1),160);
+    const auto ground = hs::runtime_detail::BuildVfxTypedEventGroundCommands(vfx_image, std::span(&warning,1),160);
     Check(ground.size() == 2, "both actual cooked shockwave preview outputs decode");
     Check(ground[1].geometry.shape == hs::VfxGroundShape::RingGapsTicks && ground[1].geometry.tick_count == 12,
           "actual cooked tick_count reaches geometry");
     hs::VfxEventInput explosion;
     explosion.effect_handle = handle("particle.common.explosion_large");
     hs::VfxCirclePayload circle; circle.center = {1,.15f,2}; circle.radius = 3; explosion.payload = circle;
-    const auto sprites = hs::runtime_detail::BuildVfxTypedFlashCommands(program,std::span(&explosion,1));
+    const auto sprites = hs::runtime_detail::BuildVfxTypedFlashCommands(vfx_image,std::span(&explosion,1));
     bool flame = false, smoke = false, core = false;
     for (const auto &sprite : sprites)
     {
@@ -407,7 +409,7 @@ void TestProductionVfxDecoding()
             sprite.smoke_frame_count == 32 && sprite.smoke_fps > 0;
     }
     Check(flame && smoke && core, "actual cooked explosion decodes authoritative-size core, flame and six-way smoke");
-    const auto shards=hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&explosion,1));
+    const auto shards=hs::runtime_detail::BuildVfxTypedBallisticCommands(vfx_image,std::span(&explosion,1));
     Check(shards.size()==8,"actual cooked explosion preserves ballistic burst count");
     for(const auto &shard:shards)
         Check(shard.authored_ballistic && shard.count==1 && shard.mesh_index==3 &&
@@ -433,7 +435,7 @@ void TestProductionVfxDecoding()
             for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
                 if(output.profile==hs::VfxOutputProfile::MeshEmissiveOit){expected+=count;++ballistic_outputs;}
         }
-        if(expected) Check(hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&event,1)).size()==expected,
+        if(expected) Check(hs::runtime_detail::BuildVfxTypedBallisticCommands(vfx_image,std::span(&event,1)).size()==expected,
             "production ballistic recipe rejected: handle "+std::to_string(effect.handle));
     }
     Check(ballistic_outputs==56,"production ballistic coverage inventory changed");
@@ -491,7 +493,7 @@ void TestProductionVfxDecoding()
         if(!expected)continue;
         std::size_t decoded=0;
         for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
-            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDistortionCommands(program,std::span(&input,1),{},tick).size());
+            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDistortionCommands(catalog.Image(),std::span(&input,1),{},tick).size());
         Check(decoded==expected,"actual cooked distortion recipe rejected: handle "+std::to_string(effect.handle));
         distortion_outputs+=decoded;
     }
@@ -506,7 +508,7 @@ void TestProductionVfxDecoding()
         if(!expected)continue;
         hs::VfxPersistentInput input;input.stable_id=73;input.effect_handle=effect.handle;
         hs::VfxProjectilePayload payload;payload.velocity={0,0,5};payload.hitbox_radius=.25f;input.payload=payload;
-        Check(hs::runtime_detail::BuildVfxTypedDistortionCommands(program,{},std::span(&input,1),10).size()==expected,
+        Check(hs::runtime_detail::BuildVfxTypedDistortionCommands(catalog.Image(),{},std::span(&input,1),10).size()==expected,
             "actual live projectile distortion recipe rejected");
         distortion_outputs+=expected;
     }
@@ -528,13 +530,13 @@ void TestProductionVfxDecoding()
             else if(effect.payload_kind==hash32("CircleAreaPayload")){hs::VfxCirclePayload p;p.radius=2;input.payload=p;}
             else Check(false,"unexpected authored decal payload");
             for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
-                decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDecalCommands(program,std::span(&input,1),{},tick).size());
+                decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDecalCommands(catalog.Image(),std::span(&input,1),{},tick).size());
         }
         else
         {
             hs::VfxPersistentInput input;input.effect_handle=effect.handle;input.stable_id=75;input.normalized_age=.5f;
             hs::VfxCirclePayload p;p.radius=2;input.payload=p;
-            decoded=hs::runtime_detail::BuildVfxTypedDecalCommands(program,{},std::span(&input,1),30).size();
+            decoded=hs::runtime_detail::BuildVfxTypedDecalCommands(catalog.Image(),{},std::span(&input,1),30).size();
         }
         Check(decoded==expected,"actual cooked decal recipe rejected: handle "+std::to_string(effect.handle));
         decal_outputs+=decoded;
@@ -556,7 +558,7 @@ void TestProductionVfxDecoding()
     mini_owner.stable_id=901; mini_owner.active_tick=100; mini_owner.expires=160; mini_owner.radius=1.6f;
     hs::runtime_detail::RefreshVfxGroundEventOwners(typed_mini.events,std::span(&mini_owner,1),130);
     Check(typed_mini.events.size()==1,"mini-bomb warning survives owner refresh");
-    const auto mini_ground=hs::runtime_detail::BuildVfxTypedEventGroundCommands(program,typed_mini.events,130);
+    const auto mini_ground=hs::runtime_detail::BuildVfxTypedEventGroundCommands(vfx_image,typed_mini.events,130);
     Check(mini_ground.size()==2 && mini_ground[0].stable_id==901 &&
           mini_ground[0].geometry.shape==hs::VfxGroundShape::CirclePreviewBorder &&
           mini_ground[0].geometry.outer_radius==1.6f && mini_ground[1].geometry.tick_count==12,
@@ -591,10 +593,10 @@ void TestProductionVfxDecoding()
         contact.world_transform[12]=1; contact.world_transform[13]=.45f;
         hs::VfxProjectilePayload geometry; geometry.velocity={12,0,0}; geometry.hitbox_radius=.2f;
         geometry.hitbox_half_extents={.2f,.2f,.2f}; contact.payload=geometry;
-        const auto flash=hs::runtime_detail::BuildVfxTypedFlashCommands(program,std::span(&contact,1));
+        const auto flash=hs::runtime_detail::BuildVfxTypedFlashCommands(vfx_image,std::span(&contact,1));
         Check(flash.size()==1 && flash[0].size==.2f && flash[0].direction.x==1 && flash[0].position.x==1,
               "actual cooked projectile contact preserves hitbox and velocity");
-        const auto debris=hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&contact,1));
+        const auto debris=hs::runtime_detail::BuildVfxTypedBallisticCommands(vfx_image,std::span(&contact,1));
         const std::size_t expected=std::string_view(id)=="particle.enemy.ranged.impact" ? 5 :
             (std::string_view(id)=="particle.skill.charged_shot.impact" ? 7 : 0);
         Check(debris.size()==expected,"actual cooked projectile ballistic fan count");
@@ -684,6 +686,49 @@ void TestVfxCatalog()
                 "half-quality emitter count");
           Check(full[index].seed == half[index].seed, "deterministic emitter seed");
       }
+
+    {
+        auto pickup = event;
+        pickup.sequence = 403;
+        pickup.asset = hs::MakeAssetId("particle.pickup.xp_collect");
+        pickup.position = {2.0f, 0.4f, -3.0f};
+        pickup.parameters = hs::EncodeVfxParameters({
+            {0.0f, 0.0f, 1.0f}, 1.0f, {7.0f, 1.0f, 5.0f},
+            static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget)});
+        const auto typed = hs::runtime_detail::BuildVfxTypedFrameInputs(
+            catalog.Program(), std::span(&pickup, 1), {}, {}, pickup.tick);
+        std::vector<hs::Sequence> superseded;
+        const auto flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
+            catalog.Image(), typed.events, &superseded);
+        Check(flashes.size() == 1 && superseded == std::vector<hs::Sequence>{pickup.sequence},
+              "typed pickup flash identifies its exact replaced legacy event");
+        std::vector<hs::ParticleSpawnCommand> suppressed;
+        std::vector<hs::VfxLineSpawnCommand> pickup_lines;
+        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, superseded).Succeeded() &&
+                  suppressed.empty() && pickup_lines.empty(),
+              "successful typed pickup flash suppresses legacy generation before command creation");
+        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines).Succeeded() &&
+                  suppressed.size() == 2,
+              "pickup without typed replacement retains both legacy emitters");
+        const std::array unrelated_sequence{pickup.sequence + 1};
+        suppressed.clear();
+        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, unrelated_sequence).Succeeded() &&
+                  suppressed.size() == 2,
+              "nonmatching typed replacement sequence retains legacy emitters");
+        auto unadapted_pickup = pickup;
+        unadapted_pickup.sequence++;
+        unadapted_pickup.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, 0});
+        const auto rejected_typed = hs::runtime_detail::BuildVfxTypedFrameInputs(
+            catalog.Program(), std::span(&unadapted_pickup, 1), {}, {}, unadapted_pickup.tick);
+        std::vector<hs::Sequence> no_replacements;
+        const auto rejected_flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
+            catalog.Image(), rejected_typed.events, &no_replacements);
+        suppressed.clear();
+        Check(rejected_flashes.empty() && no_replacements.empty() &&
+                  catalog.ExpandEvent(unadapted_pickup, 1.0f, suppressed, pickup_lines, no_replacements).Succeeded() &&
+                  suppressed.size() == 2,
+              "typed pickup rejection retains the compatibility emitters");
+    }
 
       constexpr std::array new_effects{
           "particle.common.player_hit",
@@ -775,6 +820,11 @@ void TestVfxCatalog()
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
+    const std::array replaced_line_sequence{event.sequence};
+    lines.clear();
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines, replaced_line_sequence).Succeeded() &&
+              lines.size() == 1 && lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
+          "particle replacement receipts do not suppress legacy line outputs");
 
     const auto check_visual = [&](std::string_view id, hs::VfxRenderer renderer,
                                   hs::VfxPrimitive primitive) {
@@ -1884,19 +1934,20 @@ void TestVfxActiveEffectStoreOwnsPayloadOnce()
     hs::VfxEventInput input;
     input.effect_handle = 3; input.sequence = 9; input.event_tick = 12;
     input.world_transform[12] = 5.0f;
-    std::vector<hs::VfxEventInput> ground, light;
-    store.Append(Profile::Ground, input, ground);
-    store.Append(Profile::Light, input, light);
+    store.Append(Profile::Ground, input);
+    store.Append(Profile::Light, input);
+    const auto ground = store.ProfileEvents(Profile::Ground);
+    const auto light = store.ProfileEvents(Profile::Light);
     Check(store.Size() == 1 && ground.size() == 1 && light.size() == 1,
           "profile memberships duplicated the active event payload");
-    ground[0].world_transform[12] = 99.0f;
-    store.Commit(Profile::Ground, ground);
+    Check(ground[0].world_transform[12] == 5.0f && light[0].world_transform[12] == 5.0f,
+          "borrowed canonical profile views changed source payload");
+    store.EraseIf(Profile::Ground, [](const hs::VfxEventInput &) { return true; });
     Check(store.Get(0)->world_transform[12] == 5.0f,
-          "frame scratch mutation replaced the authoritative event payload");
-    store.Commit(Profile::Ground, {});
+          "profile removal replaced the authoritative event payload");
     store.Compact();
     Check(store.Size() == 1, "active profile failed to retain shared event row");
-    store.Commit(Profile::Light, {});
+    store.EraseIf(Profile::Light, [](const hs::VfxEventInput &) { return true; });
     store.Compact();
     Check(store.Size() == 0, "stable compaction retained an unreferenced event row");
     const auto retired = store.Intern(input);
@@ -1914,6 +1965,89 @@ void TestVfxActiveEffectStoreOwnsPayloadOnce()
               store.Get(captures[0].row)->sequence == 10 &&
               store.Get(captures[0].row)->effect_handle == 7,
           "catalog rebind retires incompatible captures and remaps retained canonical rows");
+}
+
+void TestVfxProfileBindingsAndCaptureRetention()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    using Profile = Store::Profile;
+    Store store;
+    hs::VfxEventInput event;
+    event.sequence = 101; event.event_tick = 10; event.effect_handle = 4;
+    event.geometry_owner_id = 900; event.world_transform[12] = 1.0f;
+    for (const auto profile : {Profile::Ground, Profile::Light, Profile::Distortion,
+                               Profile::Decal, Profile::Ribbon, Profile::Screen, Profile::Volume,
+                               Profile::EntitySurface})
+        store.Append(profile, event);
+
+    store.BeginFrameBindings();
+    std::uint32_t refresh_count{};
+    const auto refresh = [&](hs::VfxEventInput &bound) {
+        ++refresh_count;
+        bound.world_transform[12] = 7.0f;
+        return true;
+    };
+    for (const auto profile : {Profile::Ground, Profile::Light, Profile::Distortion, Profile::Decal})
+        store.RefreshProfile(profile, refresh);
+    Check(refresh_count == 1 && store.ProfileEvents(Profile::Ground)[0].world_transform[12] == 7.0f &&
+              store.ProfileEvents(Profile::Light)[0].world_transform[12] == 7.0f &&
+              store.ProfileEvents(Profile::Distortion)[0].world_transform[12] == 7.0f &&
+              store.ProfileEvents(Profile::Decal)[0].world_transform[12] == 7.0f,
+          "owner-attached profiles share one frame binding");
+    Check(store.Get(store.Find(event))->world_transform[12] == 1.0f &&
+              store.ProfileEvents(Profile::Ribbon)[0].world_transform[12] == 1.0f &&
+              store.ProfileEvents(Profile::Screen)[0].world_transform[12] == 1.0f &&
+              store.ProfileEvents(Profile::Volume)[0].world_transform[12] == 1.0f &&
+              store.ProfileEvents(Profile::EntitySurface)[0].world_transform[12] == 1.0f,
+          "canonical birth and non-attached profiles keep original event data");
+
+    store.BeginFrameBindings();
+    refresh_count = 0;
+    const auto next_frame_refresh = [&](hs::VfxEventInput &bound) {
+        ++refresh_count; bound.world_transform[12] = 8.0f; return true;
+    };
+    store.RefreshProfile(Profile::Ground, next_frame_refresh);
+    store.RefreshProfile(Profile::Light, next_frame_refresh);
+    Check(refresh_count == 1 && store.ProfileEvents(Profile::Ground)[0].world_transform[12] == 8.0f,
+          "next frame refreshes the shared owner binding once");
+
+    store.EraseIf(Profile::Ground, [](const hs::VfxEventInput &) { return true; });
+    store.EraseIf(Profile::Light, [](const hs::VfxEventInput &) { return true; });
+    hs::VfxEventInput dropped = event;
+    dropped.sequence = 102;
+    store.Append(Profile::Ground, dropped);
+    store.Append(Profile::Light, dropped);
+    store.BeginFrameBindings();
+    std::uint32_t drop_refresh_count{};
+    store.RefreshProfile(Profile::Ground, [&](hs::VfxEventInput &) { ++drop_refresh_count; return false; });
+    store.RefreshProfile(Profile::Light, [&](hs::VfxEventInput &) { ++drop_refresh_count; return true; });
+    Check(drop_refresh_count == 1 && store.ProfileEvents(Profile::Ground).empty() &&
+              store.ProfileEvents(Profile::Light).empty(),
+          "dropped owner binding removes the event from every attached profile");
+
+    hs::VfxEventInput captured = event;
+    captured.sequence = 103; captured.geometry_owner_id = 0;
+    store.Append(Profile::Ground, captured);
+    const auto captured_row = store.Find(captured);
+    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> captures(1);
+    captures[0].row = captured_row;
+    store.EraseIf(Profile::Ground, [](const hs::VfxEventInput &row) { return row.sequence == 103; });
+    store.Compact(captures);
+    Check(store.Get(captures[0].row) && store.Get(captures[0].row)->sequence == 103,
+          "capture-only event survives profile removal and compaction");
+    captures.clear();
+    store.Compact(captures);
+    Check(store.Find(captured) == std::numeric_limits<Store::Row>::max(),
+          "capture-only event retires after its final capture disappears");
+
+    Store prepared;
+    hs::VfxEventInput swapped = event; swapped.sequence = 104;
+    prepared.Append(Profile::Ribbon, swapped);
+    store.Swap(prepared);
+    Check(store.Find(swapped) != std::numeric_limits<Store::Row>::max() &&
+              store.ProfileEvents(Profile::Ribbon).size() == 1 &&
+              store.ProfileEvents(Profile::Ribbon)[0].sequence == swapped.sequence,
+          "store swap transfers canonical rows and profile indices together");
 }
 
 void TestUiPacketReceiptFollowsExactPresentedFrame()
@@ -1993,32 +2127,27 @@ void TestVfxSessionReset()
     const auto &first = state.raw_events.Prepare(100, 1);
     Check(first.entries.size() == 1 && first.entries[0].event.sequence == 9,
           "current VFX event was lost");
-    state.raw_events.Acknowledge();
+    state.raw_events.AcknowledgeActivation();
     Check(state.MarkPersistentBurst(77, 3), "first persistent burst was lost");
     state.ClearDecoded(); // A successful catalog reload retains semantic episode history.
     Check(!state.MarkPersistentBurst(77, 3) && state.MarkPersistentBurst(77, 4),
           "catalog reload replayed an active burst or merged distinct visual kinds");
     state.decoded.flashes.emplace_back();
-    state.decoded.ground_events.emplace_back();
-    state.decoded.ribbon_events.emplace_back();
-    state.decoded.light_events.emplace_back();
-    state.decoded.distortion_events.emplace_back();
-    state.decoded.decal_events.emplace_back();
     state.decoded.particle_spawns.emplace_back();
     state.decoded.effect_lines.emplace_back();
-    Check(state.Synchronize(2) && state.decoded.flashes.empty() && state.decoded.ground_events.empty() &&
-              state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty() && state.decoded.ribbon_events.empty() && state.decoded.light_events.empty() && state.decoded.distortion_events.empty() && state.decoded.decal_events.empty(),
+    state.decoded.flashes.emplace_back();
+    Check(state.Synchronize(2) && state.decoded.flashes.empty() &&
+              state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty(),
           "session restart retained an old visual");
     Check(state.persistent_mote_births.size() == 0,
           "session restart retained previous-session mote unit data");
     Check(state.MarkPersistentBurst(77, 3),
           "new simulation session retained an old burst episode");
-    Check(state.raw_events.Enqueue(old_event), "delayed old event enqueue"); // Delayed cross-thread delivery.
     Check(state.raw_events.Prepare(1, 2).entries.empty(), "reset clock replayed an old/future event");
     const auto &second = state.raw_events.Prepare(2, 2);
     Check(second.entries.size() == 1 && second.entries[0].event.sequence == 10,
           "event arriving before its session snapshot was dropped");
-    state.raw_events.Acknowledge();
+    state.raw_events.AcknowledgeActivation();
     Check(!state.Synchronize(2) && state.raw_events.Prepare(100, 2).entries.empty(),
           "old VFX replayed when the next session caught up to its tick");
 }
@@ -2462,6 +2591,36 @@ std::vector<std::uint64_t> LineFields(const hs::VfxLineSpawnCommand &c)
         c.width,c.lifetime,c.uv_repeat,c.scroll_speed}) f.push_back(std::bit_cast<std::uint32_t>(v));
     return f;
 }
+void TestPreparedVfxOutputMembership()
+{
+    hs::VfxProgramData program;
+    program.effects.resize(2);
+    program.effects[0].sources = {0, 2};
+    program.effects[1].sources = {2, 1};
+    program.sources.resize(3);
+    program.sources[0].outputs = {0, 2};
+    program.sources[1].outputs = {2, 1};
+    program.sources[2].outputs = {3, 1};
+    program.outputs.resize(4);
+    program.outputs[0].profile = hs::VfxOutputProfile::Distortion;
+    program.outputs[1].profile = hs::VfxOutputProfile::Decal;
+    program.outputs[2].profile = hs::VfxOutputProfile::Distortion;
+    program.outputs[3].profile = hs::VfxOutputProfile::RibbonAdd;
+    hs::VfxImageData prepared;
+    hs::PrepareVfxOutputProfiles(program.View(), prepared.effect_output_profiles);
+    const auto image = prepared.View();
+    Check(image.HasOutput(1, hs::VfxOutputProfile::Distortion) &&
+          image.HasOutput(1, hs::VfxOutputProfile::Decal) &&
+          !image.HasOutput(1, hs::VfxOutputProfile::RibbonAdd) &&
+          image.HasOutput(2, hs::VfxOutputProfile::RibbonAdd) &&
+          !image.HasOutput(3, hs::VfxOutputProfile::RibbonAdd),
+          "prepared output membership must preserve effect/source boundaries and merge duplicates");
+    program.effects[0].sources = {100, 1};
+    hs::PrepareVfxOutputProfiles(program.View(), prepared.effect_output_profiles);
+    Check(!prepared.View().HasOutput(1, hs::VfxOutputProfile::Distortion),
+          "reprepare must clear stale output membership");
+}
+
 void TestCompiledVfxImage()
 {
     hs::VfxCatalog loaded,compiled;
@@ -2474,6 +2633,8 @@ void TestCompiledVfxImage()
         image.definitions.size()==ref.definitions.size() && image.emitters.size()==ref.emitters.size(),"compiled VFX identity and extents");
     Check(std::ranges::equal(image.authored_mesh_indices,ref.authored_mesh_indices) &&
         std::ranges::equal(image.decorative_definitions,ref.decorative_definitions),"compiled legacy static policies");
+    Check(std::ranges::equal(image.effect_output_profiles,ref.effect_output_profiles),
+          "compiled output admission must match developer preparation");
     Check(image.program.effect_lookup.size()==ref.program.effect_lookup.size(),"compiled VFX lookup extent");
     for(std::size_t i=0;i<ref.program.effect_lookup.size();++i)
         Check(image.program.effect_lookup[i].effect_id==ref.program.effect_lookup[i].effect_id &&
@@ -2522,6 +2683,7 @@ void TestCompiledVfxImage()
 
 void TestCompiledShippingTables()
 {
+    TestPreparedVfxOutputMembership();
     TestCompiledVfxImage();
     hs::ShippedContentOwner owner;
     Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), hs::shipping::ImageInfo(), owner).Succeeded(),
@@ -2674,6 +2836,7 @@ int main(int argc, char **argv)
         TestSimulationSignalFanout();
         TestVfxSessionReset();
         TestVfxActiveEffectStoreOwnsPayloadOnce();
+        TestVfxProfileBindingsAndCaptureRetention();
         TestUiPacketReceiptFollowsExactPresentedFrame();
         TestCameraPoseContinuity();
         TestDpiWindowCoordinates();

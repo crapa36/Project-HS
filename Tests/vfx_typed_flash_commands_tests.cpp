@@ -1,5 +1,6 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_flash_commands.hpp"
+#include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
 #include <hs/render_data/render_snapshot.hpp>
 
@@ -39,6 +40,30 @@ constexpr std::uint64_t Hash64(std::string_view value)
     return hash;
 }
 
+hs::VfxImageData PreparedImage(const hs::VfxProgramData &program)
+{
+    hs::VfxImageData image; image.program=program;
+    hs::PrepareVfxFlashRecipes(image.program.View(),image.flash_effect_ranges,image.flash_recipes);
+    hs::PrepareVfxPersistentFlashRecipes(image.program.View(),
+        image.persistent_stamp_effect_ranges,image.persistent_stamp_recipes,
+        image.persistent_fire_effect_ranges,image.persistent_fire_recipes,
+        image.owned_status_tick_effect_ranges,image.owned_status_tick_recipes);
+    return image;
+}
+std::vector<hs::VfxFlashSpawnInput> BuildFlash(
+    const hs::VfxProgramData &program,hs::VfxEventView inputs,
+    std::vector<hs::Sequence> *superseded=nullptr)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedFlashCommands(image.View(),inputs,superseded); }
+std::vector<hs::VfxFlashSpawnInput> BuildPersistentStamps(
+    const hs::VfxProgramData &program, std::span<const hs::VfxPersistentInput> inputs)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxPersistentStatusStampCommands(image.View(),inputs); }
+std::vector<hs::VfxFlashSpawnInput> BuildPersistentFire(
+    const hs::VfxProgramData &program, std::span<const hs::VfxPersistentInput> inputs, double tick)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxPersistentFireFlameCommands(image.View(),inputs,tick); }
+std::vector<hs::runtime_detail::VfxOwnedStatusTickFlashCommand> BuildOwnedStatusTicks(
+    const hs::VfxProgramData &program, hs::VfxEventView events,
+    std::span<const hs::VfxPersistentInput> inputs)
+{ const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxOwnedStatusTickFlashCommands(image.View(),events,inputs); }
 void Require(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -240,7 +265,7 @@ void DecodesOnlyAuthoredContactFlash()
 {
     const auto cooked = Program();
     const std::vector inputs{HitInput(), hs::VfxEventInput{}};
-    const auto spawns = hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, inputs);
+    const auto spawns = BuildFlash(cooked, inputs);
     Require(spawns.size() == 1, "contact flash decoder emitted unrelated input");
 
     const auto &spawn = spawns.front();
@@ -264,7 +289,7 @@ void HonorsCookedTimingChanges()
     cooked.sources[0].knots[0] = 0.1f;
     cooked.sources[0].knots[1] = 0.35f;
     const std::vector inputs{HitInput()};
-    const auto spawns = hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, inputs);
+    const auto spawns = BuildFlash(cooked, inputs);
     Require(spawns.size() == 1, "valid cooked timing disabled the flash");
     Require(Near(spawns[0].delay, 0.028f) && Near(spawns[0].lifetime, 0.07f),
             "authored start and end knots were not applied");
@@ -279,7 +304,7 @@ void DecodesEveryMatchingEffectAndRejectsUnsupportedOutput()
     auto unrelated = HitInput();
     unrelated.effect_handle = 3;
     const std::vector inputs{HitInput(), second, unrelated};
-    const auto spawns = hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, inputs);
+    const auto spawns = BuildFlash(cooked, inputs);
     Require(spawns.size() == 2, "matching contact flashes were not executed once per event");
     Require(Near(spawns[1].lifetime, 0.1f) &&
             Near(spawns[1].color.x, 1.0f) &&
@@ -288,7 +313,7 @@ void DecodesEveryMatchingEffectAndRejectsUnsupportedOutput()
             Near(spawns[1].color.w, 0.4f) && spawns[1].event_tick == 27,
             "second effect did not preserve its cooked output");
     cooked.outputs[1].profile = hs::VfxOutputProfile::SpriteSdfAdd;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, inputs).size() == 1,
+    Require(BuildFlash(cooked, inputs).size() == 1,
             "unsupported output profile was executed");
 }
 
@@ -320,7 +345,7 @@ void AuthoredSdfShapesAndContext()
         auto input = HitInput();
         auto &point = std::get<hs::VfxPointPayload>(input.payload);
         point.authored_scale = 2; point.direction = {3, 0, 4};
-        auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(c, std::span(&input, 1)); };
+        auto run = [&] { return BuildFlash(c, std::span(&input, 1)); };
         auto decoded = run();
         Require(decoded.size() == 1 && decoded[0].shape == test.kind && Near(decoded[0].size, test.size * 2), "SDF shape or metre scale missing");
         Require(!decoded[0].interpolate_owner_position,
@@ -361,7 +386,7 @@ void MasksQualityAndMalformedInputs()
     binding.slices = {0, 3}; binding.strength = .48f; binding.min_quality = 1;
     c.slice_indices = {0, 1, 2}; c.texture_bindings.push_back(binding); c.outputs[0].textures = {0, 1};
     auto input = HitInput(); input.stable_seed = 5;
-    auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(c, std::span(&input, 1)); };
+    auto run = [&] { return BuildFlash(c, std::span(&input, 1)); };
     auto result = run();
     Require(result.size() == 1 && result[0].mask_slice == 2 && Near(result[0].mask_strength, .48f), "stable authored mask selection missing");
     c.effects[0].sources = {1, 1};
@@ -396,7 +421,7 @@ void ProjectileContactRecipes()
     hs::VfxProjectilePayload projectile;projectile.velocity={3,0,4};projectile.hitbox_radius=.27f;input.payload=projectile;
     input.world_transform[12]=7;input.world_transform[13]=.4f;input.world_transform[14]=-2;
     c.parameters={{Hash32("scale_curve_ref"),hs::VfxParameterType::CurveRow,0}};c.outputs[0].parameters={0,1};c.outputs[0].profile=hs::VfxOutputProfile::SpriteSdfAdd;
-    const auto run=[&]{return hs::runtime_detail::BuildVfxTypedFlashCommands(c,std::span(&input,1));};
+    const auto run=[&]{return BuildFlash(c,std::span(&input,1));};
     const std::string_view names[]{"particle.enemy.ranged.impact","particle.boss.volley.projectile_impact","particle.skill.charged_shot.impact"};
     const std::string_view shapes[]{"three_prong_bite_sdf","boss_crest_contact_sdf","needle_star_sdf"};
     const hs::VfxMotionKind motions[]{hs::VfxMotionKind::CompressSnapOutward,hs::VfxMotionKind::SingleFrameSnapShrink,hs::VfxMotionKind::InstantCompressionAxialSplit};
@@ -419,7 +444,7 @@ void CircleAdditiveImpactRecipes()
 {
     auto c=Program();auto input=HitInput();c.effects[0].payload_kind=Hash32("CircleAreaPayload");
     hs::VfxCirclePayload circle;circle.center={3,.025f,-4};circle.direction={1,0,0};circle.radius=4.75f;input.payload=circle;
-    const auto run=[&]{return hs::runtime_detail::BuildVfxTypedFlashCommands(c,std::span(&input,1));};
+    const auto run=[&]{return BuildFlash(c,std::span(&input,1));};
     auto result=run();Require(result.size()==1&&result[0].shape==hs::VfxImpactShape::SoftDisc&&
         Near(result[0].size,4.75f)&&!result[0].oit,"circle contact flash ignored gameplay radius");
     Require(result[0].position.x==3&&result[0].position.z==-4&&result[0].direction.x==1&&
@@ -455,7 +480,7 @@ void MuzzleConeFlashRecipes()
     auto cooked = SecondaryFanProgram();
     auto input = SecondaryFanInput();
     const auto run = [&] {
-        return hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, std::span(&input, 1));
+        return BuildFlash(cooked, std::span(&input, 1));
     };
 
     struct Case { const char *effect_id; float seconds; };
@@ -490,22 +515,22 @@ void MuzzleConeFlashRecipes()
     auto malformed = input;
     auto &cone = std::get<hs::VfxConePayload>(malformed.payload);
     cone.range = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cooked, std::span(&malformed, 1)).empty(),
             "zero Cone range was accepted by flash decoder");
     cone = std::get<hs::VfxConePayload>(input.payload);
     cone.half_angle_degrees = 90.0f;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cooked, std::span(&malformed, 1)).empty(),
             "wide Cone half angle was accepted by flash decoder");
     cone = std::get<hs::VfxConePayload>(input.payload);
     cone.direction = {};
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cooked, std::span(&malformed, 1)).empty(),
             "zero Cone direction was accepted by flash decoder");
     cone = std::get<hs::VfxConePayload>(input.payload);
     cone.origin.x = std::numeric_limits<float>::infinity();
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cooked, std::span(&malformed, 1)).empty(),
             "nonfinite Cone origin was accepted by flash decoder");
 
@@ -536,7 +561,7 @@ void BossEnergyConeAndRingFlashRecipes()
                                          Hash32("ConePayload"), 0.58f);
     auto cone_input = BossEnergyInput(false);
     const auto run_cone = [&] {
-        return hs::runtime_detail::BuildVfxTypedFlashCommands(
+        return BuildFlash(
             cone_cooked, std::span(&cone_input, 1));
     };
     auto result = run_cone();
@@ -565,12 +590,12 @@ void BossEnergyConeAndRingFlashRecipes()
     cone_cooked.outputs[2].motion = hs::VfxMotionKind::DirectionalTurbulence;
     auto malformed_cone = cone_input;
     std::get<hs::VfxConePayload>(malformed_cone.payload).range = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cone_cooked, std::span(&malformed_cone, 1)).empty(),
             "boss volley Cone accepted nonpositive range");
     malformed_cone = cone_input;
     std::get<hs::VfxConePayload>(malformed_cone.payload).half_angle_degrees = 90.0f;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 cone_cooked, std::span(&malformed_cone, 1)).empty(),
             "boss volley Cone accepted an invalid half angle");
     cone_input.payload = BossEnergyInput(true).payload;
@@ -580,7 +605,7 @@ void BossEnergyConeAndRingFlashRecipes()
                                          Hash32("RingWithGapsPayload"), 0.7f);
     auto ring_input = BossEnergyInput(true);
     const auto run_ring = [&] {
-        return hs::runtime_detail::BuildVfxTypedFlashCommands(
+        return BuildFlash(
             ring_cooked, std::span(&ring_input, 1));
     };
     result = run_ring();
@@ -606,13 +631,13 @@ void BossEnergyConeAndRingFlashRecipes()
     ring_cooked.outputs[2].profile = hs::VfxOutputProfile::SpriteNoiseOit;
     auto malformed_ring = ring_input;
     std::get<hs::VfxRingGapsPayload>(malformed_ring.payload).outer_radius = 0.0f;
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 ring_cooked, std::span(&malformed_ring, 1)).empty(),
             "boss shockwave ring accepted nonpositive outer radius");
     malformed_ring = ring_input;
     std::get<hs::VfxRingGapsPayload>(malformed_ring.payload).gap_angles_degrees[0] =
         std::numeric_limits<float>::infinity();
-    Require(hs::runtime_detail::BuildVfxTypedFlashCommands(
+    Require(BuildFlash(
                 ring_cooked, std::span(&malformed_ring, 1)).empty(),
             "boss shockwave ring accepted a nonfinite gap angle");
     ring_input.payload = BossEnergyInput(false).payload;
@@ -623,7 +648,7 @@ void AuthoredOitRecipes()
 {
     auto c=Program();auto input=HitInput();
     auto scalar=[](std::string_view name,float v){return hs::VfxParameterRecord{Hash32(name),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(v)};};
-    auto run=[&]{return hs::runtime_detail::BuildVfxTypedFlashCommands(c,std::span(&input,1));};
+    auto run=[&]{return BuildFlash(c,std::span(&input,1));};
     c.outputs[0].shape=Hash32("warped_flame_disc");c.outputs[0].motion=hs::VfxMotionKind::RadialLobesUpward;
     c.outputs[0].profile=hs::VfxOutputProfile::SpriteFlameOit;
     c.parameters={{Hash32("fbm_octaves"),hs::VfxParameterType::Int,4},scalar("domain_warp",.22f)};
@@ -772,12 +797,84 @@ hs::VfxPersistentInput StatusTickOwner(bool bleed)
     return owner;
 }
 
+hs::VfxProgramData PersistentFireProgram()
+{
+    hs::VfxProgramData program;
+    hs::VfxEffectRecord effect;
+    effect.handle = 1; effect.input_mode = 1; effect.timing_kind = 1;
+    effect.payload_kind = Hash32("CircleAreaPayload"); effect.sources = {0,1};
+    program.effects.push_back(effect);
+    program.effect_lookup.push_back({Hash64("persistent.area.fire"),1});
+    hs::VfxSourceRecord source;
+    source.effect = 1; source.stable_id = Hash32("high_quality_flame_tongues");
+    source.type = hs::VfxSourceType::CurlMotes; source.knot_count = 2; source.knots = {0,1,0,0};
+    source.parameters = {0,3}; source.outputs = {0,1};
+    program.sources.push_back(source);
+    program.parameters = {
+        {Hash32("count_per_second"),hs::VfxParameterType::Int,8},
+        {Hash32("spawn_domain"),hs::VfxParameterType::Enum,Hash32("inside_binding_radius")},
+        {Hash32("spawn_radius_scale"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.5f)},
+        {Hash32("fbm_octaves"),hs::VfxParameterType::Int,3},
+        {Hash32("size"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.4f)},
+        {Hash32("domain_warp"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.2f)},
+        {Hash32("flow_speed"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.7f)},
+    };
+    hs::VfxOutputRecord output;
+    output.source=0; output.profile=hs::VfxOutputProfile::SpriteFlameOit;
+    output.min_quality=2; output.motion=hs::VfxMotionKind::ProceduralFlameTongue;
+    output.shape=Hash32("warped_flame_disc"); output.coverage_type=Hash32("analytic");
+    output.coverage_ref=Hash32("warped_flame_disc"); output.parameters={3,4};
+    output.rgba={1.0f,.5f,.25f,.8f}; output.hdr=2.0f; output.gradient_row=31;
+    output.textures={0,1};
+    program.outputs.push_back(output);
+    const std::string path="Content/Textures/VFX/vfx_authored_mask_array.dds";
+    program.strings.resize(path.size());
+    std::transform(path.begin(),path.end(),program.strings.begin(),[](char c){return std::byte(c);});
+    program.texture_resources.push_back({1,{0,static_cast<std::uint32_t>(path.size())}});
+    hs::VfxTextureBindingRecord mask;
+    mask.role=Hash32("authored_mask_array"); mask.catalog_slot=1; mask.min_quality=2;
+    mask.selection=Hash32("stable_seed_mod_group_size"); mask.strength=.45f; mask.slices={0,2};
+    program.texture_bindings.push_back(mask); program.slice_indices={2,4};
+    return program;
+}
+
+void PersistentFireFlameUsesPreparedRecipeAndLiveAge()
+{
+    const auto program=PersistentFireProgram();
+    hs::VfxPersistentInput owner;
+    owner.effect_handle=1; owner.source_visual_kind=static_cast<std::uint8_t>(hs::PersistentVfxKind::FireArea);
+    owner.stable_id=91; owner.stable_seed=314; owner.quality=hs::VfxQuality::High;
+    owner.elapsed_seconds=.5f; owner.source_duration_seconds=1.0f;
+    hs::VfxCirclePayload circle; circle.center={3,1,4}; circle.radius=2;
+    owner.payload=circle;
+    const std::array owners{owner};
+    const auto first=BuildPersistentFire(program,owners,100.0);
+    const auto second=BuildPersistentFire(program,owners,100.0);
+    Require(first.size()==5 && second.size()==first.size(),
+        "prepared persistent fire recipe changed the authored 8 Hz birth schedule");
+    constexpr std::array<hs::Tick,5> ticks{70,78,85,93,100};
+    const auto mix=[](std::uint32_t v){v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;return v^(v>>16);};
+    const auto source_seed=mix(owner.stable_seed ^ mix(Hash32("high_quality_flame_tongues")) ^
+        mix(static_cast<std::uint32_t>(Hash64("persistent.area.fire"))) ^
+        mix(static_cast<std::uint32_t>(Hash64("persistent.area.fire")>>32)));
+    Require(first[0].stable_seed==mix(source_seed ^ mix(1)),
+        "prepared fire recipe changed the source and ordinal seed contract");
+    for(std::size_t i=0;i<first.size();++i)
+        Require(first[i].stable_seed==second[i].stable_seed &&
+            Near(first[i].position.x,3) && Near(first[i].position.z,4) &&
+            first[i].mask_slice==2 && Near(first[i].mask_strength,.45f) &&
+            first[i].gradient_row==31 && first[i].event_tick==ticks[i],
+            "prepared fire recipe changed owner seed, mask, live position, or birth timing");
+    Require(Near(first.back().normalized_age,0) && Near(first.back().lifetime,.5f),
+        "persistent fire did not evaluate its final tongue from live source age");
+}
+
 void OwnedStatusTickPulseUsesLiveOwnerAndEventClock()
 {
     const auto cooked = StatusTickProgram();
     const std::array events{StatusTickEvent(true), StatusTickEvent(false)};
     const std::array owners{StatusTickOwner(true), StatusTickOwner(false)};
-    const auto commands = hs::runtime_detail::BuildVfxOwnedStatusTickFlashCommands(cooked, events, owners);
+    const auto commands = BuildOwnedStatusTicks(cooked, events, owners);
     Require(commands.size() == 2, "live bleed and burn ticks were not paired");
     const auto &bleed = commands[0].flash;
     const auto &burn = commands[1].flash;
@@ -800,7 +897,7 @@ void OwnedStatusTickRejectsMissingOrWrongOwner()
     const auto cooked = StatusTickProgram();
     auto event = StatusTickEvent(true);
     auto owner = StatusTickOwner(true);
-    const auto run = [&] { return hs::runtime_detail::BuildVfxOwnedStatusTickFlashCommands(
+    const auto run = [&] { return BuildOwnedStatusTicks(
         cooked, std::span(&event, 1), std::span(&owner, 1)); };
     Require(event.status_episode_generation == owner.status_episode_generation &&
             run().size() == 1, "matching status episode rejected");
@@ -833,7 +930,7 @@ void OwnedStatusTickRejectsMalformedRecipe()
     const auto event = StatusTickEvent(true);
     const auto owner = StatusTickOwner(true);
     const auto run = [&](const hs::VfxProgramData &cooked) {
-        return hs::runtime_detail::BuildVfxOwnedStatusTickFlashCommands(
+        return BuildOwnedStatusTicks(
             cooked, std::span(&event, 1), std::span(&owner, 1));
     };
     auto cooked = StatusTickProgram();
@@ -982,8 +1079,7 @@ void PersistentStatusStamps()
     {
         auto program = PersistentStampProgram(test.name, test.fixed);
         auto owner = PersistentStampOwner(test.kind);
-        const auto run = [&] { return hs::runtime_detail::BuildVfxPersistentStatusStampCommands(
-            program, std::span(&owner, 1)); };
+        const auto run = [&] { return BuildPersistentStamps(program, std::span(&owner, 1)); };
         auto commands = run();
         Require(commands.size() == 1 && commands[0].shape == hs::VfxImpactShape::StatusStamp &&
                 Near(commands[0].position.x, 3) && Near(commands[0].size, .7f) &&
@@ -1045,8 +1141,7 @@ void UpgradeStatusStampsUseAuthoredGeometry()
             Hash32("EntityAttachmentPayload");
         auto program = PersistentStampProgram(test.name, true, payload, test.seconds);
         auto owner = PersistentStampOwner(test.kind);
-        const auto run = [&] { return hs::runtime_detail::BuildVfxPersistentStatusStampCommands(
-            program, std::span(&owner, 1)); };
+        const auto run = [&] { return BuildPersistentStamps(program, std::span(&owner, 1)); };
         const auto commands = run();
         Require(commands.size() == 1, "upgrade status stamp was not decoded");
         const auto &command = commands.front();
@@ -1161,8 +1256,7 @@ void ProductionUpgradeStatusStampsDecode()
         else
             std::get<hs::VfxEntityPayload>(owner.payload).lifetime01 = owner.normalized_age;
         owner.quality = hs::VfxQuality::Medium;
-        const auto commands = hs::runtime_detail::BuildVfxPersistentStatusStampCommands(
-            cooked, std::span(&owner, 1));
+        const auto commands = BuildPersistentStamps(cooked, std::span(&owner, 1));
         Require(commands.size() == 1 && commands[0].shape == hs::VfxImpactShape::StatusStamp &&
                 Near(commands[0].size, test.path ? .18f : .7f) &&
                 Near(commands[0].position.x, test.path ? 8.0f : 3.0f) &&
@@ -1217,7 +1311,7 @@ void PickupCollectorImpactUsesLinkSource()
         std::vector<hs::Sequence> superseded;
         const auto run = [&] {
             superseded.clear();
-            return hs::runtime_detail::BuildVfxTypedFlashCommands(
+            return BuildFlash(
                 cooked, std::span(&input, 1), &superseded);
         };
         auto commands = run();
@@ -1240,7 +1334,7 @@ void PickupCollectorImpactUsesLinkSource()
             std::numeric_limits<float>::quiet_NaN();
         const std::array mixed{input, rejected};
         superseded.clear();
-        Require(hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, mixed, &superseded).size() == 1 &&
+        Require(BuildFlash(cooked, mixed, &superseded).size() == 1 &&
                     superseded == std::vector<hs::Sequence>{12},
                 "partially rejected pickup batch suppressed an unconverted event");
         link.target_position = link.source_position;
@@ -1286,8 +1380,7 @@ void ProductionStatusAndPickupOutputsDecode()
         owner.elapsed_seconds = .2f * test.duration;
         owner.normalized_age = .2f;
         std::get<hs::VfxEntityPayload>(owner.payload).lifetime01 = owner.normalized_age;
-        const auto commands = hs::runtime_detail::BuildVfxPersistentStatusStampCommands(
-            cooked, std::span(&owner, 1));
+        const auto commands = BuildPersistentStamps(cooked, std::span(&owner, 1));
         Require(commands.size() == 1,
                 "production player owner did not decode its status stamp");
     }
@@ -1308,7 +1401,7 @@ void ProductionStatusAndPickupOutputsDecode()
         link.target_position = {7, .3f, 9};
         event.payload = link;
         std::vector<hs::Sequence> superseded;
-        const auto commands = hs::runtime_detail::BuildVfxTypedFlashCommands(
+        const auto commands = BuildFlash(
             cooked, std::span(&event, 1), &superseded);
         Require(commands.size() == 1 && superseded == std::vector<hs::Sequence>{event.sequence},
                 "production pickup link did not decode its collection burst");
@@ -1322,6 +1415,7 @@ int RunVfxFlashTests()
     {
         AuthoredSdfShapesAndContext();
         AuthoredOitRecipes();
+        PersistentFireFlameUsesPreparedRecipeAndLiveAge();
         OwnedStatusTickPulseUsesLiveOwnerAndEventClock();
         OwnedStatusTickRejectsMissingOrWrongOwner();
         OwnedStatusTickRejectsMalformedRecipe();

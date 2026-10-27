@@ -23,6 +23,7 @@ inline constexpr std::uint32_t kSkinnedPoseErrorMethodAbi = 2;
 inline constexpr std::uint32_t kGeometryMetadataStride = 96;
 inline constexpr std::uint32_t kGeometrySubmeshStride = 20;
 inline constexpr std::uint32_t kGeometryMeshletStride = 64;
+inline constexpr std::uint32_t kGeometryMaterialReferenceStride = 4;
 inline constexpr std::uint32_t kGeometryFlagSkinned = 1;
 inline constexpr std::uint32_t kGeometryFlagTwoSided = 2;
 inline constexpr std::uint32_t kGeometryFlagWind = 4;
@@ -82,6 +83,10 @@ struct GeometryData
 [[nodiscard]] GeometryMetadata DecodeGeometryMetadata(
     std::span<const std::byte> bytes, std::span<const std::string> dependencies,
     std::string_view metadata_product_id);
+[[nodiscard]] std::vector<std::byte> EncodeGeometryMaterialReference(
+    std::uint16_t dependency_index, std::span<const std::string> dependencies);
+[[nodiscard]] std::uint16_t DecodeGeometryMaterialReference(
+    std::span<const std::byte> bytes, std::span<const std::string> dependencies);
 void ValidateGeometryData(const GeometryData &geometry);
 void ValidateGeometryPage(const GeometryMetadata &metadata, const GeometryData &geometry);
 [[nodiscard]] std::vector<std::byte> BuildGeometryPage(

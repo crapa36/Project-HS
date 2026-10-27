@@ -19,24 +19,26 @@ bool SameSidecarLayout(const render_data::MaterialSidecarLayout &a,
 }
 Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
 {
+    const auto &owner = *owned_views.at(kMainRenderViewId.value);
+    auto &candidate_owner = *next.owned_views.at(kMainRenderViewId.value);
     const auto &cfg = next.config;
-    const auto capacity = view_state.render_capacity;
+    const auto capacity = owner.state.render_capacity;
     const CompletionSet unused;
 #define HS_PREPARE(expression) if (auto prepared = (expression); !prepared) return prepared
     AdaptiveShadingCandidate adaptive;
-    HS_PREPARE(next.PrepareAdaptiveShading(cfg, capacity, adaptive));
+    HS_PREPARE(next.PrepareAdaptiveShading(owner, cfg, capacity, adaptive));
     AmbientOcclusionCandidate ambient;
-    HS_PREPARE(next.PrepareAmbientOcclusion(cfg, capacity, ambient, adaptive.Status().compute_ready));
-    HS_PREPARE(next.adaptive_shading.Commit(std::move(adaptive), unused));
-    HS_PREPARE(next.ambient_occlusion.Commit(std::move(ambient), unused));
+    HS_PREPARE(next.PrepareAmbientOcclusion(owner, cfg, capacity, ambient, adaptive.Status().compute_ready));
+    HS_PREPARE(candidate_owner.adaptive_shading.Commit(std::move(adaptive), unused));
+    HS_PREPARE(candidate_owner.ambient_occlusion.Commit(std::move(ambient), unused));
     SubsurfaceCandidate diffusion;
     ScreenReflectionsCandidate reflections;
-    HS_PREPARE(next.PrepareSurfaceLighting(cfg, capacity, diffusion, reflections));
-    HS_PREPARE(next.subsurface.Commit(std::move(diffusion), unused));
-    HS_PREPARE(next.screen_reflections.Commit(std::move(reflections), unused));
+    HS_PREPARE(next.PrepareSurfaceLighting(owner, cfg, capacity, diffusion, reflections));
+    HS_PREPARE(candidate_owner.subsurface.Commit(std::move(diffusion), unused));
+    HS_PREPARE(candidate_owner.screen_reflections.Commit(std::move(reflections), unused));
     HeroTransparencyCandidate transparency;
-    HS_PREPARE(next.PrepareHeroTransparency(cfg, capacity, transparency));
-    HS_PREPARE(next.hero_transparency.Commit(std::move(transparency), unused));
+    HS_PREPARE(next.PrepareHeroTransparency(owner, cfg, capacity, transparency));
+    HS_PREPARE(candidate_owner.hero_transparency.Commit(std::move(transparency), unused));
     LightingProbeCandidate probe;
     HS_PREPARE(next.PrepareLightingProbe(cfg, probe));
     HS_PREPARE(next.lighting_probe.Commit(std::move(probe), unused));
@@ -44,46 +46,48 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     HS_PREPARE(next.PrepareLtcLut(cfg, ltc));
     HS_PREPARE(next.ltc_lut.Commit(std::move(ltc), unused));
     HdrPostCandidate post;
-    HS_PREPARE(next.PrepareHdrPost(cfg, capacity, {width, height}, post));
-    HS_PREPARE(next.hdr_post.Commit(std::move(post), unused));
+    HS_PREPARE(next.PrepareHdrPost(owner, cfg, capacity, {owner.width, owner.height}, post));
+    HS_PREPARE(candidate_owner.hdr_post.Commit(std::move(post), unused));
     ScreenOverlayCandidate overlay;
     HS_PREPARE(next.PrepareScreenOverlay(cfg, capacity, overlay));
-    HS_PREPARE(next.screen_overlay.Commit(std::move(overlay), unused));
+    HS_PREPARE(candidate_owner.screen_overlay.Commit(std::move(overlay), unused));
     DecalSurfaceCandidate decals;
     HS_PREPARE(next.PrepareDecalSurface(cfg, capacity, false, decals));
-    HS_PREPARE(next.decal_surface.Commit(std::move(decals), unused));
+    HS_PREPARE(candidate_owner.decal_surface.Commit(std::move(decals), unused));
     LightListCandidate lights;
-    HS_PREPARE(next.PrepareLightList(cfg, capacity, lights));
-    HS_PREPARE(next.light_list.Commit(std::move(lights), unused));
+    HS_PREPARE(next.PrepareLightList(owner, cfg, capacity, lights));
+    HS_PREPARE(candidate_owner.light_list.Commit(std::move(lights), unused));
     SceneGeometryCandidate geometry;
     HS_PREPARE(next.PrepareSceneGeometry(cfg, geometry));
     HS_PREPARE(next.scene_geometry.Commit(std::move(geometry), unused));
     BrixelizerCandidate brixelizer;
-    HS_PREPARE(next.PrepareBrixelizerGi(cfg, view_state.render_active, brixelizer));
-    HS_PREPARE(next.brixelizer_gi.Commit(std::move(brixelizer), unused));
+    HS_PREPARE(next.PrepareBrixelizerGi(owner, cfg, owner.state.render_active, brixelizer));
+    HS_PREPARE(candidate_owner.brixelizer_gi.Commit(std::move(brixelizer), unused));
     VirtualShadowCandidate virtual_shadow;
-    HS_PREPARE(next.PrepareVirtualShadows(cfg, capacity, virtual_shadow));
-    HS_PREPARE(next.virtual_shadows.Commit(std::move(virtual_shadow), unused));
+    HS_PREPARE(next.PrepareVirtualShadows(owner, cfg, capacity, virtual_shadow));
+    HS_PREPARE(candidate_owner.virtual_shadows.Commit(std::move(virtual_shadow), unused));
     AdditionalShadowPrepared shadows;
-    HS_PREPARE(next.PrepareAdditionalShadows(cfg, capacity, shadows));
-    HS_PREPARE(next.CommitAdditionalShadows(std::move(shadows)));
+    HS_PREPARE(next.PrepareAdditionalShadows(owner, cfg, capacity, shadows));
+    HS_PREPARE(candidate_owner.local_shadows.Commit(std::move(shadows.local), unused));
     VolumetricPrepared volume;
-    HS_PREPARE(next.PrepareVolumetrics(cfg, capacity, volume));
-    HS_PREPARE(next.CommitVolumetrics(std::move(volume)));
+    HS_PREPARE(next.PrepareVolumetrics(owner, cfg, capacity, volume));
+    HS_PREPARE(candidate_owner.volumetrics.Commit(std::move(volume.service), unused));
+    next.volumetric_media = std::move(volume.media);
+    next.volumetric_revision = volume.revision;
     LocalProbeRuntimeCandidate local_probe;
     HS_PREPARE(next.PrepareLocalProbes(cfg, local_probe));
     HS_PREPARE(next.local_probes.Commit(std::move(local_probe), unused));
-    if (reconstruction_provider)
+    if (owner.reconstruction_provider)
     {
         ReconstructionGuidesCandidate guides;
-        HS_PREPARE(next.PrepareReconstructionGuides(cfg, capacity, {width, height}, guides,
-            reconstruction_provider->NeedsCompositionGuide()));
-        HS_PREPARE(next.reconstruction_guides.Commit(std::move(guides), unused));
+        HS_PREPARE(next.PrepareReconstructionGuides(owner, cfg, capacity, {owner.width, owner.height}, guides,
+            owner.reconstruction_provider->NeedsCompositionGuide()));
+        HS_PREPARE(candidate_owner.reconstruction_guides.Commit(std::move(guides), unused));
     }
     if (sdk_presentation.IsEnabled())
     {
         PresentationGuidesCandidate guides;
-        HS_PREPARE(next.PreparePresentationGuides(cfg, {width, height}, capacity, display_state, guides));
+        HS_PREPARE(next.PreparePresentationGuides(cfg, {owner.width, owner.height}, capacity, owner.display_state, guides));
         HS_PREPARE(next.presentation_guides.Commit(std::move(guides), unused));
     }
 #undef HS_PREPARE
@@ -91,7 +95,10 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
 }
 void D3D12Renderer::Impl::SwapResidentServices(Impl &next) noexcept
 {
+    auto &owner = *owned_views.at(kMainRenderViewId.value);
+    auto &candidate_owner = *next.owned_views.at(kMainRenderViewId.value);
 #define HS_SWAP_SERVICE(field) field.SwapState(next.field)
+#define HS_SWAP_VIEW_SERVICE(field) owner.field.SwapState(candidate_owner.field)
     quality_profiles.swap(next.quality_profiles);
     HS_SWAP_SERVICE(asset_io);
     HS_SWAP_SERVICE(texture_streaming);
@@ -101,31 +108,32 @@ void D3D12Renderer::Impl::SwapResidentServices(Impl &next) noexcept
     std::swap(environment_texture_stream_ids, next.environment_texture_stream_ids);
     environment_material_texture_stream_ids.swap(next.environment_material_texture_stream_ids);
     std::swap(material_texture_stream_ids, next.material_texture_stream_ids);
-    HS_SWAP_SERVICE(ambient_occlusion);
-    HS_SWAP_SERVICE(adaptive_shading);
-    HS_SWAP_SERVICE(subsurface);
-    HS_SWAP_SERVICE(screen_reflections);
-    HS_SWAP_SERVICE(hero_transparency);
+    HS_SWAP_VIEW_SERVICE(ambient_occlusion);
+    HS_SWAP_VIEW_SERVICE(adaptive_shading);
+    HS_SWAP_VIEW_SERVICE(subsurface);
+    HS_SWAP_VIEW_SERVICE(screen_reflections);
+    HS_SWAP_VIEW_SERVICE(hero_transparency);
     HS_SWAP_SERVICE(lighting_probe);
     HS_SWAP_SERVICE(ltc_lut);
-    HS_SWAP_SERVICE(hdr_post);
-    HS_SWAP_SERVICE(screen_overlay);
-    HS_SWAP_SERVICE(decal_surface);
+    HS_SWAP_VIEW_SERVICE(hdr_post);
+    HS_SWAP_VIEW_SERVICE(screen_overlay);
+    HS_SWAP_VIEW_SERVICE(decal_surface);
     decal_material_programs.swap(next.decal_material_programs);
     decal_material_policies.swap(next.decal_material_policies);
     decal_parameter_bases.swap(next.decal_parameter_bases);
     decal_parameter_counts.swap(next.decal_parameter_counts);
     decal_parameter_layouts.swap(next.decal_parameter_layouts);
-    HS_SWAP_SERVICE(light_list);
+    HS_SWAP_VIEW_SERVICE(light_list);
     HS_SWAP_SERVICE(scene_geometry);
-    HS_SWAP_SERVICE(brixelizer_gi);
-    std::swap(brixelizer_history_valid, next.brixelizer_history_valid);
-    HS_SWAP_SERVICE(virtual_shadows);
-    HS_SWAP_SERVICE(local_shadows);
-    HS_SWAP_SERVICE(volumetrics);
+    HS_SWAP_VIEW_SERVICE(brixelizer_gi);
+    std::swap(owner.brixelizer_history_valid, candidate_owner.brixelizer_history_valid);
+    HS_SWAP_VIEW_SERVICE(virtual_shadows);
+    HS_SWAP_VIEW_SERVICE(local_shadows);
+    HS_SWAP_VIEW_SERVICE(volumetrics);
     HS_SWAP_SERVICE(local_probes);
-    if (reconstruction_provider) HS_SWAP_SERVICE(reconstruction_guides);
+    if (owner.reconstruction_provider) HS_SWAP_VIEW_SERVICE(reconstruction_guides);
     if (sdk_presentation.IsEnabled()) HS_SWAP_SERVICE(presentation_guides);
+#undef HS_SWAP_VIEW_SERVICE
 #undef HS_SWAP_SERVICE
     volumetric_media.swap(next.volumetric_media);
     std::swap(volumetric_revision, next.volumetric_revision);
@@ -212,6 +220,7 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
 }
 Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_config)
 {
+    auto &main_owner = *owned_views.at(kMainRenderViewId.value);
     // Failed preparations can hold submitted uploads. Prove their retirement
     // before allocating another overlapping candidate against the same budget.
     if (!unresolved_resident_candidates.empty())
@@ -221,10 +230,8 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         {
             if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return drained;
             if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->decal_surface.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
+            for (auto &[id, owner] : retained->owned_views)
+                if (auto retired = ResetOwnedViewAfterCompletion(*owner); !retired) return retired;
             retained->resident_utility_submissions.clear();
             retained->material_parameter_upload_pending = false;
             retained->environment_brdf_init_pending = false;
@@ -264,15 +271,16 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         if (binding.sprite >= next->vfx_sprite_count || !binding.frame_columns || !binding.frame_rows)
             return reject(ResidentReloadFailure("Candidate status sprite bindings exceed the actual resident VFX atlas or have invalid frame dimensions."));
     const bool replace_sidecars = !SameSidecarLayout(material_sidecar_layout, next->material_sidecar_layout);
+    auto &candidate_owner = *next->owned_views.at(kMainRenderViewId.value);
     const auto next_auxiliaries = next->RequiredLightingAuxiliaries(next->config);
     const bool replace_auxiliaries = next_auxiliaries != RequiredLightingAuxiliaries(config);
     if (replace_auxiliaries)
-        if (auto prepared = next->PrepareLightingAuxiliaries({&next->subsurface_diffuse,
-                &next->environment_specular, &next->indirect_diffuse}, view_state.render_capacity,
+        if (auto prepared = next->PrepareLightingAuxiliaries({&candidate_owner.targets.subsurface_diffuse,
+                &candidate_owner.targets.environment_specular, &candidate_owner.targets.indirect_diffuse}, main_owner.state.render_capacity,
                 next_auxiliaries); !prepared) return reject(prepared);
     if (replace_sidecars)
-        if (auto prepared = next->PrepareMaterialSidecars(next->material_sidecars,
-                view_state.render_capacity.width, view_state.render_capacity.height); !prepared) return reject(prepared);
+        if (auto prepared = next->PrepareMaterialSidecars(candidate_owner.targets.material_sidecars,
+                main_owner.state.render_capacity.width, main_owner.state.render_capacity.height); !prepared) return reject(prepared);
     if (auto prepared = PrepareResidentServices(*next); !prepared) return reject(prepared);
     if (auto prepared = PrepareResidentPublication(*next); !prepared) return reject(prepared);
     diagnostics.ObserveTransition(DiagnosticsMemory());
@@ -294,10 +302,8 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     {
         if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return reject(drained);
         if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->decal_surface.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
+        for (auto &[id, owner] : retained->owned_views)
+            if (auto retired = ResetOwnedViewAfterCompletion(*owner); !retired) return reject(retired);
         retained->resident_utility_submissions.clear();
         retained->material_parameter_upload_pending = false;
         retained->environment_brdf_init_pending = false;
@@ -305,7 +311,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     unresolved_resident_candidates.clear();
     resident_utility_submissions.clear();
 
-    if (auto archived = ArchiveHeroWork(hero_transparency); !archived) return reject(archived);
+    if (auto archived = RetireHeroTransparency(main_owner.hero_transparency); !archived) return reject(archived);
     // No allocation, native preparation or fallible Commit below this boundary.
     PublishResidentAssetDescriptors(*next);
     SwapResidentAssetData(*next);
@@ -313,16 +319,18 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     SwapResidentServices(*next);
     if (replace_auxiliaries)
     {
-        std::swap(subsurface_diffuse, next->subsurface_diffuse);
-        std::swap(environment_specular, next->environment_specular);
-        std::swap(indirect_diffuse, next->indirect_diffuse);
-        WriteOptionTargetDescriptors();
+        std::swap(main_owner.targets.subsurface_diffuse, candidate_owner.targets.subsurface_diffuse);
+        std::swap(main_owner.targets.environment_specular, candidate_owner.targets.environment_specular);
+        std::swap(main_owner.targets.indirect_diffuse, candidate_owner.targets.indirect_diffuse);
+        for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+            WriteOptionTargetDescriptors(main_owner, frame);
     }
     if (replace_sidecars)
     {
-        material_sidecars.swap(next->material_sidecars);
-        material_sidecars_initialized = false;
-        WriteMaterialSidecarDescriptors();
+        main_owner.targets.material_sidecars.swap(candidate_owner.targets.material_sidecars);
+        main_owner.material_sidecars_initialized = false;
+        for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+            WriteMaterialSidecarDescriptors(main_owner, frame);
     }
     if (replace_vfx_execution) particles_initialized = false;
     ++pipeline_revision;
@@ -331,10 +339,11 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     baked_generation_pipeline_revision = pipeline_revision;
     static_gpu_scene.reset();
     InvalidateCanonicalDeformationAfterCompletion();
-    previous_geometry_page_versions.fill(0);
-    dynamic_lod_states = {};
-    temporal_history_valid = false;
-    hzb_history_valid = false;
+    main_owner.previous_geometry_page_versions.fill(0);
+    main_owner.dynamic_lod_states = {};
+    main_owner.temporal_history_valid = false;
+    main_owner.hzb_history_valid = false;
+    main_owner.previous_volumetric_camera = {};
     using std::swap;
     swap(config, next->config);
     resource_generation_id.swap(next->resource_generation_id);
@@ -343,12 +352,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     adopted = true;
     // Old futures/assets live inside next, with their original reader lease,
     // until destruction finishes after the already-proved queue drain.
-    if (next)
-        if (auto retired = next->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired)
-        {
-            OutputDebugStringA("Adopted resident generation; old software GI cleanup retained.\n");
-            unresolved_resident_candidates.push_back(std::move(next));
-        }
     if (next)
     {
         const auto completed = graph_queue_executor.Completed();
@@ -360,8 +363,9 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         };
         if (!retain_on_failure(next->scene_geometry.ResetAfterCompletion(completed),
                 "Adopted resident generation; old scene geometry cleanup retained.\n")) return Result::Success();
-        if (!retain_on_failure(next->decal_surface.ResetAfterCompletion(completed),
-                "Adopted resident generation; old decal Surface cleanup retained.\n")) return Result::Success();
+        for (auto &[id, owner] : next->owned_views)
+            if (!retain_on_failure(ResetOwnedViewAfterCompletion(*owner),
+                    "Adopted resident generation; old view service cleanup retained.\n")) return Result::Success();
     }
     return Result::Success();
     }

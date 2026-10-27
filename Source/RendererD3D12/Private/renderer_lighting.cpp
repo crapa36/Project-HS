@@ -18,7 +18,7 @@ Result D3D12Renderer::Impl::PrepareLocalProbes(const RendererConfig &candidate_c
     return local_probes.Prepare(device.Get(), allocator, root_signature.Get(), selected,
         resource_generation_id, candidate, &pipeline_cache);
 }
-Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, VolumetricPrepared &candidate) const
 {
     candidate = {};
@@ -52,7 +52,7 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_c
         catch (const std::exception &error)
         { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
     }
-    return volumetrics.Prepare(device.Get(), allocator, root_signature.Get(),
+    return owner.volumetrics.Prepare(device.Get(), allocator, root_signature.Get(),
         candidate_config.volumetric_quality, QualityProfileFor(candidate_config.volumetric_quality == GraphicsOptionalQuality::Off
             ? GraphicsQuality::Low : static_cast<GraphicsQuality>(static_cast<unsigned>(candidate_config.volumetric_quality) - 1u)), capacity, kFrameCount, 256,
         [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
@@ -61,12 +61,12 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_c
             return ReadBinary(path, bytes);
         }, candidate.service, &pipeline_cache, candidate_config.vfx_quality == VfxQuality::High);
 }
-Result D3D12Renderer::Impl::CommitVolumetrics(VolumetricPrepared &&candidate)
+Result D3D12Renderer::Impl::CommitVolumetrics(OwnedView &owner, VolumetricPrepared &&candidate)
 {
-    if (auto committed = volumetrics.Commit(std::move(candidate.service), graph_queue_executor.Completed()); !committed) return committed;
+    if (auto committed = owner.volumetrics.Commit(std::move(candidate.service), graph_queue_executor.Completed()); !committed) return committed;
     volumetric_media = std::move(candidate.media);
     volumetric_revision = candidate.revision;
-    previous_volumetric_camera = {};
+    owner.previous_volumetric_camera = {};
     return Result::Success();
 }
 RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &request) const noexcept
@@ -118,17 +118,17 @@ std::array<bool, 3> D3D12Renderer::Impl::RequiredLightingAuxiliaries(const Rende
     });
     return LightingAuxiliaryTargets(ResolveFeatures(request), have_subsurface);
 }
-Result D3D12Renderer::Impl::PrepareLightList(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareLightList(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, LightListCandidate &candidate) const
 {
-    return light_list.Prepare(device.Get(), allocator, capacity, 128, kFrameCount,
+    return owner.light_list.Prepare(device.Get(), allocator, capacity, 128, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, QualityProfileFor(candidate_config.lighting_quality).lighting_cluster_capacity);
 }
-Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareVirtualShadows(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, VirtualShadowCandidate &candidate) const
 {
     constexpr std::array products{"render/shader/virtual_shadow_init_cs.dxil",
@@ -176,28 +176,28 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidat
     profile.render_capacity = capacity;
     profile.fixed_root_depth_span = candidate_config.shadow_distance_m * 2.0f;
     if(auto loaded=VirtualShadowSystem::LoadBake(candidate_config,profile,baked_shadow_source);!loaded) return loaded;
-    return virtual_shadows.Prepare(device.Get(), allocator, profile,
+    return owner.virtual_shadows.Prepare(device.Get(), allocator, profile,
         [candidate_config](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate, &pipeline_cache);
 }
-Result D3D12Renderer::Impl::PrepareHdrPost(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareHdrPost(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent render_capacity, ViewExtent output_extent, HdrPostCandidate &candidate) const
 {
     HdrPostSettings settings;
     settings.motion_blur = candidate_config.motion_blur;
     settings.depth_of_field = candidate_config.depth_of_field;
     settings.color_grading = candidate_config.color_grading;
-    return hdr_post.Prepare(device.Get(), allocator, render_capacity, output_extent, settings,
+    return owner.hdr_post.Prepare(device.Get(), allocator, render_capacity, output_extent, settings,
         kFrameCount, [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
         }, candidate);
 }
-Result D3D12Renderer::Impl::PrepareAdditionalShadows(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareAdditionalShadows(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, AdditionalShadowPrepared &candidate) const
 {
     candidate = {};
@@ -217,14 +217,14 @@ Result D3D12Renderer::Impl::PrepareAdditionalShadows(const RendererConfig &candi
     local.byte_budget = UINT64(quality.local_shadow_budget_mib) * mib;
     local.max_casters = 65536; local.max_draw_groups = 128; local.command_capacity = 65536;
     local.frame_slots = kFrameCount;
-    if (auto prepared = local_shadows.Prepare(device.Get(), allocator, local, shader_reader,
+    if (auto prepared = owner.local_shadows.Prepare(device.Get(), allocator, local, shader_reader,
             candidate.local, &pipeline_cache); !prepared) return prepared;
     return Result::Success();
 }
-Result D3D12Renderer::Impl::CommitAdditionalShadows(AdditionalShadowPrepared &&candidate)
+Result D3D12Renderer::Impl::CommitAdditionalShadows(OwnedView &owner, AdditionalShadowPrepared &&candidate)
 {
     const auto completed = graph_queue_executor.Completed();
-    if (auto result = local_shadows.Commit(std::move(candidate.local), completed); !result) return result;
+    if (auto result = owner.local_shadows.Commit(std::move(candidate.local), completed); !result) return result;
     return Result::Success();
 }
 Result D3D12Renderer::Impl::PrepareSceneGeometry(const RendererConfig &candidate_config,
@@ -258,7 +258,7 @@ Result D3D12Renderer::Impl::PrepareLtcLut(const RendererConfig &candidate_config
     if (auto read = ReadBinary(path, bytes); !read) return read;
     return ltc_lut.Prepare(device.Get(), allocator, bytes, candidate);
 }
-Result D3D12Renderer::Impl::PrepareAdaptiveShading(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareAdaptiveShading(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, AdaptiveShadingCandidate &candidate) const
 {
     const auto plan = ResolveFeatures(candidate_config);
@@ -280,7 +280,7 @@ Result D3D12Renderer::Impl::PrepareAdaptiveShading(const RendererConfig &candida
         if (!profile.byte_budget)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "No native memory budget remains for adaptive shading preparation.");
     }
-    return adaptive_shading.Prepare(device.Get(), allocator, profile,
+    return owner.adaptive_shading.Prepare(device.Get(), allocator, profile,
         [&](std::string_view id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
@@ -300,8 +300,7 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
             if (config.packed_content || config.development_catalog)
             {
                 const std::string name(kAuthoredMaterialNames[ordinal]);
-                const auto id = ordinal == kTerrainMaterialOrdinal || ordinal == render_data::kGroundDetailMaterialOrdinal
-                    ? "render/material/" + name + ".rpkg" : "render/" + name + ".rpkg";
+                const auto id = render_data::MaterialProduct(name);
                 const auto handle = FindRendererMaterial(config, MakeAssetId(id));
                 if (!handle) throw std::runtime_error("Compiled adaptive material is missing");
                 const auto &material = config.packed_materials[handle.value];
@@ -341,10 +340,10 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
     catch (const std::exception &error)
     { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
 }
-Result D3D12Renderer::Impl::PrepareAmbientOcclusion(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareAmbientOcclusion(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, AmbientOcclusionCandidate &candidate, bool adaptive_compute) const
 {
-    return ambient_occlusion.Prepare(device.Get(), allocator, capacity,
+    return owner.ambient_occlusion.Prepare(device.Get(), allocator, capacity,
         candidate_config.ao_quality, QualityProfileFor(candidate_config.ao_quality), ResolveFeatures(candidate_config).ao_mode == GraphicsAoMode::GTAO,
         candidate_config.contact_shadows, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
@@ -353,7 +352,7 @@ Result D3D12Renderer::Impl::PrepareAmbientOcclusion(const RendererConfig &candid
             return ReadBinary(path, bytes);
         }, candidate, adaptive_compute);
 }
-Result D3D12Renderer::Impl::PrepareSurfaceLighting(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareSurfaceLighting(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, SubsurfaceCandidate &diffusion, ScreenReflectionsCandidate &reflections) const
 {
     const auto read_shader = [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
@@ -365,15 +364,15 @@ Result D3D12Renderer::Impl::PrepareSurfaceLighting(const RendererConfig &candida
         return (layout.capability_mask & static_cast<std::uint32_t>(
             render_data::MaterialClosureCapability::Subsurface)) != 0;
     });
-    if (auto prepared = subsurface.Prepare(device.Get(), allocator, capacity, have_subsurface,
+    if (auto prepared = owner.subsurface.Prepare(device.Get(), allocator, capacity, have_subsurface,
             kFrameCount, read_shader, diffusion); !prepared) return prepared;
     const bool screen_space = ResolveFeatures(candidate_config).reflection_mode == GraphicsReflectionMode::ScreenSpace;
     const auto quality = screen_space ? static_cast<GraphicsOptionalQuality>(
         static_cast<unsigned>(candidate_config.reflection_quality) + 1u) : GraphicsOptionalQuality::Off;
-    return screen_reflections.Prepare(device.Get(), allocator, capacity, quality, QualityProfileFor(candidate_config.reflection_quality),
+    return owner.screen_reflections.Prepare(device.Get(), allocator, capacity, quality, QualityProfileFor(candidate_config.reflection_quality),
         kFrameCount, read_shader, reflections);
 }
-Result D3D12Renderer::Impl::PrepareHeroTransparency(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareHeroTransparency(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, HeroTransparencyCandidate &candidate) const
 {
     const bool authored_transmission = std::ranges::any_of(material_surface_layouts, [](const auto &layout) {
@@ -386,7 +385,7 @@ Result D3D12Renderer::Impl::PrepareHeroTransparency(const RendererConfig &candid
         std::min(QualityProfileFor(row).hero_refraction_layers,
             QualityProfileFor(candidate_config.transparency_quality).hero_refraction_layers);
     const bool enabled = authored_transmission && layers != 0;
-    return hero_transparency.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
+    return owner.hero_transparency.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
         layers, enabled, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;

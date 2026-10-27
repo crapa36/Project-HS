@@ -81,6 +81,7 @@ enum class ChunkType : std::uint32_t
     DecalMaterialMetadata = 43,
     QualityProfiles = 44,
     AutoFgCadence = 45,
+    GeometryMaterialReference = 46,
     GeometryMetadata = 13,
     GeometryVertices = 14,
     GeometryIndices = 15,

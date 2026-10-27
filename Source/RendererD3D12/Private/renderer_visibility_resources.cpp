@@ -46,28 +46,28 @@ Result D3D12Renderer::Impl::PrepareVisibilityTargets(OptionTargets &targets,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CreateVisibilityTargets()
+Result D3D12Renderer::Impl::CreateVisibilityTargets(OwnedView &owner)
 {
     if (config.surface_frontend != SurfaceFrontend::VisibilityBuffer) return Result::Success();
     OptionTargets targets;
-    if (auto result = PrepareVisibilityTargets(targets, render_width, render_height); !result)
+    if (auto result = PrepareVisibilityTargets(targets, owner.render_width, owner.render_height); !result)
         return result;
     using std::swap;
-    swap(visibility_ids, targets.visibility_ids);
-    swap(visibility_front_face, targets.visibility_front_face);
-    swap(visibility_pixels, targets.visibility_pixels);
-    swap(visibility_counts, targets.visibility_counts);
-    swap(visibility_dispatch_args, targets.visibility_dispatch_args);
-    visibility_targets_initialized = false;
+    swap(owner.targets.visibility_ids, targets.visibility_ids);
+    swap(owner.targets.visibility_front_face, targets.visibility_front_face);
+    swap(owner.targets.visibility_pixels, targets.visibility_pixels);
+    swap(owner.targets.visibility_counts, targets.visibility_counts);
+    swap(owner.targets.visibility_dispatch_args, targets.visibility_dispatch_args);
+    owner.visibility_targets_initialized = false;
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kVisibilityRtvOffset) * rtv_stride;
-    device->CreateRenderTargetView(visibility_ids.resource.Get(), nullptr, rtv);
+    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kVisibilityRtvOffset) * rtv_stride;
+    device->CreateRenderTargetView(owner.targets.visibility_ids.resource.Get(), nullptr, rtv);
     rtv.ptr += rtv_stride;
-    device->CreateRenderTargetView(visibility_front_face.resource.Get(), nullptr, rtv);
+    device->CreateRenderTargetView(owner.targets.visibility_front_face.resource.Get(), nullptr, rtv);
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::WriteVisibilityDescriptors(std::uint32_t frame_slot,
+Result D3D12Renderer::Impl::WriteVisibilityDescriptors(OwnedView &owner, std::uint32_t frame_slot,
     ID3D12Resource *static_scene, ID3D12Resource *dynamic_scene,
     ID3D12Resource *static_refs, std::uint64_t static_ref_offset,
     std::uint32_t static_ref_count,
@@ -149,10 +149,10 @@ Result D3D12Renderer::Impl::WriteVisibilityDescriptors(std::uint32_t frame_slot,
         descriptor.ptr += srv_stride;
     };
     raw_uav(visibility.raster_records.resource.Get());
-    for (auto *resource : {gbuffer_base.resource.Get(), gbuffer_normal.resource.Get(),
-            gbuffer_metadata.resource.Get(), gbuffer_material.resource.Get(),
-            gbuffer_motion.resource.Get(), gbuffer_surface_history.resource.Get(),
-            visibility_ids.resource.Get(), visibility_front_face.resource.Get()})
+    for (auto *resource : {owner.targets.gbuffer_base.resource.Get(), owner.targets.gbuffer_normal.resource.Get(),
+            owner.targets.gbuffer_metadata.resource.Get(), owner.targets.gbuffer_material.resource.Get(),
+            owner.targets.gbuffer_motion.resource.Get(), owner.targets.gbuffer_surface_history.resource.Get(),
+            owner.targets.visibility_ids.resource.Get(), owner.targets.visibility_front_face.resource.Get()})
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
         view.Format = resource->GetDesc().Format;
@@ -160,8 +160,8 @@ Result D3D12Renderer::Impl::WriteVisibilityDescriptors(std::uint32_t frame_slot,
         device->CreateUnorderedAccessView(resource, nullptr, &view, descriptor);
         descriptor.ptr += srv_stride;
     }
-    raw_uav(visibility_pixels.resource.Get()); raw_uav(visibility_counts.resource.Get());
-    raw_uav(visibility_dispatch_args.resource.Get());
+    raw_uav(owner.targets.visibility_pixels.resource.Get()); raw_uav(owner.targets.visibility_counts.resource.Get());
+    raw_uav(owner.targets.visibility_dispatch_args.resource.Get());
     return Result::Success();
 }
 } // namespace hs

@@ -2,12 +2,14 @@
 #include "../Source/Runtime/Private/process_scene.hpp"
 #include <type_traits>
 #include <hs/presentation/meadow_surface.hpp>
+#include <hs/presentation/presentation_catalog_io.hpp>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <filesystem>
 #include <numbers>
@@ -23,6 +25,40 @@ namespace gameplay_test
 
 namespace
 {
+void TestCanonicalPresentationCatalogBytes()
+{
+    hs::PresentationCatalog first{}, second{};
+    std::memset(&first, 0xa5, sizeof(first));
+    std::memset(&second, 0x5a, sizeof(second));
+    for (auto *catalog : {&first, &second})
+    {
+        catalog->camera.yaw_degrees = 1.0f;
+        catalog->camera.pitch_degrees = 2.0f;
+        catalog->camera.vertical_fov_degrees = 60.0f;
+        catalog->camera.distance_m = 4.0f;
+        catalog->camera.minimum_distance_percent = 50;
+        catalog->camera.maximum_distance_percent = 200;
+        for (auto &name : catalog->relic_names) name.fill('\0');
+        for (auto &rule : catalog->relic_rules) rule.fill('\0');
+    }
+    first.relic_names[0][0] = second.relic_names[0][0] = 'A';
+    first.relic_names[0][2] = 'x'; second.relic_names[0][2] = 'y';
+    first.relic_rules[0][0] = second.relic_rules[0][0] = 'R';
+    Check(hs::CanonicalPresentationCatalogBytes(first) == hs::CanonicalPresentationCatalogBytes(second),
+          "presentation identity ignores struct padding and bytes after string terminators");
+    second.relic_names[1][0] = 'B';
+    Check(hs::CanonicalPresentationCatalogBytes(first) != hs::CanonicalPresentationCatalogBytes(second),
+          "presentation identity preserves relic ordinal order");
+    second = first;
+    second.relic_rules[0][0] = 'S';
+    Check(hs::CanonicalPresentationCatalogBytes(first) != hs::CanonicalPresentationCatalogBytes(second),
+          "presentation identity includes relic rule strings");
+    second = first;
+    second.camera.yaw_degrees += 1.0f;
+    Check(hs::CanonicalPresentationCatalogBytes(first) != hs::CanonicalPresentationCatalogBytes(second),
+          "presentation identity includes explicit camera fields");
+}
+
 void CheckSettingsTelemetry(hs::GameSimulation &simulation)
 {
     for (const auto &descriptor : hs::GraphicsSettingDescriptors())
@@ -1282,6 +1318,28 @@ void TestMeadowPresentationGrounding()
             if (hs::MeadowGroundHeight(point) < hs::MeadowGroundHeight(low)) low = point;
         }
     Check(hs::MeadowGroundHeight(low) < -.005f, "meadow grounding test requires a real depression");
+    const auto height_at = [](hs::Float2 point) { return hs::MeadowGroundHeight(point); };
+    hs::Float2 uneven{}, distinct{};
+    bool found_uneven = false, found_distinct = false;
+    for (int z = -44; z <= 44 && !found_uneven; ++z)
+        for (int x = -44; x <= 44; ++x)
+        {
+            const hs::Float2 point{float(x) * .25f, float(z) * .25f};
+            if (std::abs(height_at(point) - height_at(low)) > .01f)
+            { uneven = point; found_uneven = true; break; }
+        }
+    for (int z = -44; z <= 44 && !found_distinct; ++z)
+        for (int x = -44; x <= 44; ++x)
+        {
+            const hs::Float2 point{float(x) * .25f, float(z) * .25f};
+            if (std::abs(height_at(point) - height_at(low)) > .01f &&
+                std::abs(height_at(point) - height_at(uneven)) > .01f &&
+                (point.x != uneven.x || point.y != uneven.y))
+            { distinct = point; found_distinct = true; break; }
+        }
+    Check(found_uneven && found_distinct &&
+          std::abs(height_at(low) - height_at(uneven)) > .01f,
+          "projectile grounding fixture requires separated terrain heights");
     hs::DomainSignal signal{};
     signal.kind = hs::DomainSignalKind::ExperienceCollected;
     signal.position = {low.x, .3f, low.y};
@@ -1309,6 +1367,7 @@ void TestMeadowPresentationGrounding()
     Check(signal.position.y == .3f && signal.target.y == .55f, "one-shot projection mutated its source signal");
 
     hs::GameReadModelStorage model;
+    model.tick = 20;
     model.arena_half_extent = 16;
     model.arena_boundary.count = 4;
     model.arena_boundary.points[0] = {-16,-16}; model.arena_boundary.points[1] = {-16,16};
@@ -1316,8 +1375,17 @@ void TestMeadowPresentationGrounding()
     model.player.position = low;
     hs::ProjectileView projectile{};
     projectile.id = {42}; projectile.player_owned = true; projectile.radius = .15f;
-    projectile.position = low; projectile.previous_position = {low.x + .5f, low.y};
+    projectile.position = low; projectile.previous_position = uneven;
+    projectile.skill = hs::SkillKind::ChargedShot;
     model.AddProjectile(projectile);
+    hs::ProjectileView returning_projectile{};
+    returning_projectile.id = {43}; returning_projectile.player_owned = true;
+    returning_projectile.position = uneven; returning_projectile.previous_position = low;
+    returning_projectile.return_start_position = distinct;
+    returning_projectile.skill = hs::SkillKind::RicochetArrow;
+    returning_projectile.returning = true; returning_projectile.upgrade_mask = 1;
+    returning_projectile.return_started_tick = 10; returning_projectile.radius = .15f;
+    model.AddProjectile(returning_projectile);
     const auto project = [&] {
         hs::RenderSnapshotStorage snapshot(16, 4, 4, 16);
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
@@ -1325,14 +1393,39 @@ void TestMeadowPresentationGrounding()
         const auto view = snapshot.View();
         const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
         const auto head = std::ranges::find_if(view.persistent_vfx, [](const auto &v) { return v.kind == hs::PersistentVfxKind::ProjectileHead; });
+        const auto charged_trail = std::ranges::find_if(view.persistent_vfx, [](const auto &v) {
+            return v.kind == hs::PersistentVfxKind::ProjectileTrail && v.projectile_owner_id == 42;
+        });
+        const auto charged_outer = std::ranges::find_if(view.persistent_vfx, [](const auto &v) {
+            return v.kind == hs::PersistentVfxKind::ProjectileTrailOuter && v.projectile_owner_id == 42;
+        });
+        const auto returning_link = std::ranges::find_if(view.persistent_vfx, [](const auto &v) {
+            return v.kind == hs::PersistentVfxKind::RicochetReturnLink && v.projectile_owner_id == 43;
+        });
         const auto height = model.arena_half_extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
+        const auto previous_height = model.arena_half_extent >= 14 ? hs::MeadowGroundHeight(uneven) : 0.0f;
+        const auto return_start_height = model.arena_half_extent >= 14 ? hs::MeadowGroundHeight(distinct) : 0.0f;
         Check(actor != view.instances.end() && std::abs(actor->position.y - height) < 1e-6f &&
               std::abs(snapshot.camera.target.y - height) < 1e-6f, "actor/camera lost terrain contact or double-offset");
         Check(head != view.persistent_vfx.end() && std::abs(head->position.y - (1.05f + height)) < 1e-6f &&
               head->projectile_current_position.y == head->position.y &&
-              std::abs(head->projectile_previous_position.y - (1.05f + (model.arena_half_extent >= 14 ?
-                  hs::MeadowGroundHeight(projectile.previous_position) : 0.0f))) < 1e-6f,
+              std::abs(head->projectile_previous_position.y - (1.05f + previous_height)) < 1e-6f &&
+              std::abs(head->projectile_current_position.y - head->projectile_previous_position.y) > .01f,
               "projectile endpoints must independently follow their sampled ground heights");
+        const auto body_center = 1.05f + .228f * .5f;
+        const auto body = std::ranges::find_if(view.instances, [](const auto &v) {
+            return v.mesh == hs::RenderMesh::PlayerProjectile;
+        });
+        Check(body != view.instances.end() && std::abs(body->position.y - (1.05f + height)) < 1e-6f &&
+              charged_trail != view.persistent_vfx.end() && charged_outer != view.persistent_vfx.end() &&
+              std::abs(charged_trail->position.y - (body_center + height)) < 1e-6f &&
+              std::abs(charged_outer->position.y - (body_center + height)) < 1e-6f,
+              "projectile body, head, trail and outer trail share current terrain height");
+        Check(returning_link != view.persistent_vfx.end() &&
+              std::abs(returning_link->projectile_current_position.y - (1.05f + previous_height)) < 1e-6f &&
+              std::abs(returning_link->link_target_position.y - (1.05f + height)) < 1e-6f &&
+              std::abs(returning_link->return_start_position.y - (1.05f + return_start_height)) < 1e-6f,
+              "return link keeps independently grounded body, target and return-start endpoints");
         Check(model.player.position.x == low.x && model.player.position.y == low.y,
               "terrain presentation mutated 2D simulation coordinates");
         if (model.arena_half_extent >= 14) {
@@ -2326,6 +2419,7 @@ void TestBorrowedProjectionOwnsPublication()
 
 void RunGameplayPresentationTests()
 {
+    TestCanonicalPresentationCatalogBytes();
     TestBorrowedProjectionOwnsPublication();
     TestBossDeathCaptureWithoutPriorSnapshot();
     TestPresentationCompletePacket();

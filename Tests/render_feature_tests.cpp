@@ -1,4 +1,4 @@
-#include "renderer_post_subgraphs.hpp"
+#include "renderer_post_subgraph_plan.hpp"
 #include "renderer_feature_resolve.hpp"
 
 #include <algorithm>
@@ -238,7 +238,15 @@ int main()
         plan.software_gi_enabled = true;
         Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
             "software GI retains all backing signals");
+        Check(!EffectiveDynamicResolution(true, plan),
+            "requested DRS is ineffective while software GI owns a fixed extent");
+        Check(!EffectiveDynamicResolution(false, plan),
+            "requested DRS off remains ineffective with software GI");
         plan.software_gi_enabled = false;
+        Check(!EffectiveDynamicResolution(false, plan),
+            "requested DRS off stays off when software GI is inactive");
+        Check(EffectiveDynamicResolution(true, plan),
+            "qualified DRS request is effective when software GI is inactive");
         ConfiguredPostTopology();
         ExternalPostTopology();
         IdentityFxaaTopology();

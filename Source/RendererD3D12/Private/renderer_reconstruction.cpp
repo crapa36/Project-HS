@@ -150,23 +150,23 @@ Result D3D12Renderer::Impl::PrepareReconstructionProvider(
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CommitReconstructionProvider(std::unique_ptr<ReconstructionProvider> &candidate,
+Result D3D12Renderer::Impl::CommitReconstructionProvider(OwnedView &owner, std::unique_ptr<ReconstructionProvider> &candidate,
     ReconstructionGuidesCandidate &&guides, ViewExtent capacity)
 {
-    if (reconstruction_provider)
-        if (auto reset = reconstruction_provider->ResetAfterCompletion(); !reset)
+    if (owner.reconstruction_provider)
+        if (auto reset = owner.reconstruction_provider->ResetAfterCompletion(); !reset)
         { initialized = false; return reset; }
     const auto restore = [&]() -> Result {
         if (candidate) if (auto reset = candidate->ResetAfterCompletion(); !reset) return reset;
-        if (reconstruction_provider)
-            return reconstruction_provider->ConfigureAfterCompletion(reconstruction_provider->RenderCapacity());
+        if (owner.reconstruction_provider)
+            return owner.reconstruction_provider->ConfigureAfterCompletion(owner.reconstruction_provider->RenderCapacity());
         return Result::Success();
     };
     Result result = Result::Success();
     if (candidate) result = candidate->ConfigureAfterCompletion(capacity);
     if (result) result = candidate
-        ? reconstruction_guides.Commit(std::move(guides), graph_queue_executor.Completed())
-        : reconstruction_guides.ResetAfterCompletion(graph_queue_executor.Completed());
+        ? owner.reconstruction_guides.Commit(std::move(guides), graph_queue_executor.Completed())
+        : owner.reconstruction_guides.ResetAfterCompletion(graph_queue_executor.Completed());
     if (!result)
     {
         if (auto restored = restore(); !restored)
@@ -177,14 +177,14 @@ Result D3D12Renderer::Impl::CommitReconstructionProvider(std::unique_ptr<Reconst
         }
         return result;
     }
-    reconstruction_provider = std::move(candidate);
+    owner.reconstruction_provider = std::move(candidate);
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareReconstructionGuides(const RendererConfig &candidate_config,
+Result D3D12Renderer::Impl::PrepareReconstructionGuides(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, ViewExtent output, ReconstructionGuidesCandidate &candidate, bool composition) const
 {
-    return reconstruction_guides.Prepare(device.Get(), allocator, capacity, output, kFrameCount,
+    return owner.reconstruction_guides.Prepare(device.Get(), allocator, capacity, output, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;

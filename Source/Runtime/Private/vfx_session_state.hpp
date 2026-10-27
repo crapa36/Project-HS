@@ -6,12 +6,15 @@
 #include "vfx_typed_entity_surface_commands.hpp"
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_typed_screen_commands.hpp"
-#include <hs/render_data/vfx_frame_input.hpp>
+#include "vfx_event_view.hpp"
+#include <hs/render_data/render_frame_input.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -48,72 +51,115 @@ class ActiveEffectStore
         if (const auto found = event_rows_.find(key); found != event_rows_.end())
             return found->second;
         const auto row = static_cast<Row>(rows_.size());
-        rows_.push_back({input});
+        rows_.push_back(input);
+        profile_masks_.push_back(0);
+        binding_indices_.push_back(VfxEventView::kNoBinding);
         event_rows_.try_emplace(key, row);
+        membership_dirty_ = true;
         return row;
     }
 
     [[nodiscard]] bool Add(Profile profile, Row row)
     {
         if (row >= rows_.size()) return false;
-        auto &refs = profiles_[static_cast<std::size_t>(profile)];
-        if (std::ranges::find(refs, row) != refs.end()) return false;
-        refs.push_back(row);
+        const auto bit = ProfileBit(profile);
+        if (profile_masks_[row] & bit) return false;
+        profiles_[static_cast<std::size_t>(profile)].push_back(row);
+        profile_masks_[row] |= bit;
+        membership_dirty_ = true;
         return true;
     }
 
-    void Append(Profile profile, const VfxEventInput &input,
-                std::vector<VfxEventInput> &scratch)
+    void Append(Profile profile, const VfxEventInput &input)
     {
-        const auto row = Intern(input);
-        if (Add(profile, row)) scratch.push_back(rows_[row].input);
+        (void)Add(profile, Intern(input));
     }
 
     [[nodiscard]] const VfxEventInput *Get(Row row) const noexcept
-    { return row < rows_.size() ? &rows_[row].input : nullptr; }
-    [[nodiscard]] VfxEventInput *Get(Row row) noexcept
-    { return row < rows_.size() ? &rows_[row].input : nullptr; }
+    { return row < rows_.size() ? &rows_[row] : nullptr; }
     [[nodiscard]] Row Find(const VfxEventInput &input) const noexcept
     {
         const auto found = event_rows_.find(KeyFor(input));
         return found == event_rows_.end() ? std::numeric_limits<Row>::max() : found->second;
     }
 
-    void Materialize(Profile profile, std::vector<VfxEventInput> &scratch) const
+    [[nodiscard]] VfxEventView ProfileEvents(Profile profile) const noexcept
+    {
+        const auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        if (UsesOwnerBinding(profile))
+            return {rows_, refs, std::span<const VfxEventInput>(bound_rows_).first(bound_row_count_), binding_indices_};
+        return {rows_, refs};
+    }
+
+    // Only attached outputs share current owner geometry; birth/capture inputs stay immutable.
+    void BeginFrameBindings() noexcept
+    {
+        for (const auto row : bound_row_ids_) binding_indices_[row] = VfxEventView::kNoBinding;
+        bound_row_ids_.clear();
+        bound_row_count_ = 0;
+    }
+
+    void RefreshProfile(Profile profile, auto &&refresh)
+    {
+        assert(UsesOwnerBinding(profile));
+        auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        std::erase_if(refs, [&](Row row) {
+            if (rows_[row].geometry_owner_id == 0) return false;
+            auto &binding = binding_indices_[row];
+            if (binding == VfxEventView::kNoBinding)
+            {
+                if (bound_row_count_ == bound_rows_.size())
+                    bound_rows_.push_back(rows_[row]);
+                else
+                    bound_rows_[bound_row_count_] = rows_[row];
+                if (refresh(bound_rows_[bound_row_count_]))
+                {
+                    binding = static_cast<Row>(bound_row_count_++);
+                }
+                else binding = kDroppedBinding;
+                bound_row_ids_.push_back(row);
+            }
+            if (binding != kDroppedBinding) return false;
+            RemoveMembership(profile, row);
+            return true;
+        });
+    }
+
+    void EraseIf(Profile profile, auto &&expired)
+    {
+        auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        std::erase_if(refs, [&](Row row) {
+            const auto binding = binding_indices_[row];
+            const auto &input = UsesOwnerBinding(profile) && binding < bound_row_count_
+                ? bound_rows_[binding] : rows_[row];
+            if (!expired(input)) return false;
+            RemoveMembership(profile, row);
+            return true;
+        });
+    }
+
+    void CopyProfileForRebind(Profile profile, std::vector<VfxEventInput> &scratch) const
     {
         const auto &refs = profiles_[static_cast<std::size_t>(profile)];
         scratch.clear();
         scratch.reserve(refs.size());
-        for (const auto row : refs) if (row < rows_.size()) scratch.push_back(rows_[row].input);
-    }
-
-    void Commit(Profile profile, std::span<const VfxEventInput> scratch)
-    {
-        auto &refs = profiles_[static_cast<std::size_t>(profile)];
-        if (scratch.empty()) { refs.clear(); return; }
-        scratch_rows_.clear();
-        scratch_rows_.reserve(scratch.size());
-        live_rows_.assign(rows_.size(), 0);
-        for (const auto &input : scratch)
-            if (const auto found = event_rows_.find(KeyFor(input)); found != event_rows_.end() &&
-                !live_rows_[found->second])
-            {
-                live_rows_[found->second] = 1;
-                scratch_rows_.push_back(found->second);
-            }
-        refs.swap(scratch_rows_);
+        for (const auto row : refs) scratch.push_back(rows_[row]);
     }
 
     void RebindRows(auto &&rebind, std::vector<RetainedVfxEntitySurfaceCapture> &captures)
     {
         std::vector<std::uint8_t> live(rows_.size(), 1);
         for (std::size_t i = 0; i < rows_.size(); ++i)
-            if (!rebind(rows_[i].input)) live[i] = 0;
+            if (!rebind(rows_[i])) live[i] = 0;
         for (auto &profile : profiles_)
             std::erase_if(profile, [&](Row row) { return row >= live.size() || !live[row]; });
+        for (std::size_t i = 0; i < rows_.size(); ++i)
+            if (!live[i]) profile_masks_[i] = 0;
         std::erase_if(captures, [&](const auto &capture) {
             return capture.row >= live.size() || !live[capture.row];
         });
+        membership_dirty_ = index_dirty_ = true;
+        BeginFrameBindings();
         Compact(captures);
     }
 
@@ -122,39 +168,69 @@ class ActiveEffectStore
         auto &refs = profiles_[static_cast<std::size_t>(profile)];
         std::vector<Row> surviving;
         surviving.reserve(rebound.size());
+        const auto bit = ProfileBit(profile);
+        for (const auto row : refs) profile_masks_[row] &= ~bit;
         for (const auto &input : rebound)
             for (const auto row : refs)
-                if (row < rows_.size() && SameEpisode(rows_[row].input, input))
+                if (SameEpisode(rows_[row], input))
                 {
-                    rows_[row].input = input;
-                    if (std::ranges::find(surviving, row) == surviving.end()) surviving.push_back(row);
+                    rows_[row] = input;
+                    if (!(profile_masks_[row] & bit))
+                    {
+                        surviving.push_back(row);
+                        profile_masks_[row] |= bit;
+                    }
                     break;
                 }
         refs.swap(surviving);
+        membership_dirty_ = true;
+        BeginFrameBindings();
         RebuildIndex();
     }
 
     void Compact(std::span<RetainedVfxEntitySurfaceCapture> captures = {})
     {
-        live_rows_.assign(rows_.size(), 0);
-        for (const auto &profile : profiles_) for (const auto row : profile)
-            if (row < live_rows_.size()) live_rows_[row] = 1;
+        if (!membership_dirty_ && !capture_only_rows_) return;
+        live_rows_.resize(rows_.size());
+        for (std::size_t i = 0; i < rows_.size(); ++i) live_rows_[i] = profile_masks_[i] != 0;
+        capture_only_rows_ = false;
         for (const auto &capture : captures)
-            if (capture.row < live_rows_.size()) live_rows_[capture.row] = 1;
-        if (std::ranges::all_of(live_rows_, [](auto live) { return live != 0; })) return;
+            if (capture.row < live_rows_.size())
+            {
+                live_rows_[capture.row] = 1;
+                capture_only_rows_ |= profile_masks_[capture.row] == 0;
+            }
+        membership_dirty_ = false;
+        if (std::ranges::all_of(live_rows_, [](auto live) { return live != 0; }))
+        {
+            if (index_dirty_) RebuildIndex();
+            return;
+        }
+        BeginFrameBindings();
         scratch_rows_.assign(rows_.size(), std::numeric_limits<Row>::max());
         Row next{};
         for (std::size_t i = 0; i < rows_.size(); ++i)
+        {
+            const auto key = KeyFor(rows_[i]);
             if (live_rows_[i])
             {
                 scratch_rows_[i] = next;
-                if (next != i) rows_[next] = std::move(rows_[i]);
+                if (next != i)
+                {
+                    rows_[next] = std::move(rows_[i]);
+                    profile_masks_[next] = profile_masks_[i];
+                    if (!index_dirty_) event_rows_.at(key) = next;
+                }
                 ++next;
             }
+            else if (!index_dirty_) event_rows_.erase(key);
+        }
         for (auto &profile : profiles_) for (auto &row : profile) row = scratch_rows_[row];
         for (auto &capture : captures) capture.row = scratch_rows_[capture.row];
         rows_.resize(next);
-        RebuildIndex();
+        profile_masks_.resize(next);
+        binding_indices_.resize(next);
+        if (index_dirty_) RebuildIndex();
     }
 
     void RebuildIndex()
@@ -162,19 +238,31 @@ class ActiveEffectStore
         event_rows_.clear();
         event_rows_.reserve(rows_.size());
         for (std::size_t i = 0; i < rows_.size(); ++i)
-            event_rows_.try_emplace(KeyFor(rows_[i].input), static_cast<Row>(i));
+            event_rows_.try_emplace(KeyFor(rows_[i]), static_cast<Row>(i));
+        index_dirty_ = false;
     }
 
     void Clear() noexcept
     {
-        rows_.clear(); event_rows_.clear();
+        rows_.clear(); profile_masks_.clear(); event_rows_.clear();
+        binding_indices_.clear(); bound_rows_.clear(); bound_row_ids_.clear();
+        bound_row_count_ = 0;
         scratch_rows_.clear(); live_rows_.clear();
         for (auto &profile : profiles_) profile.clear();
+        membership_dirty_ = capture_only_rows_ = index_dirty_ = false;
     }
     void Swap(ActiveEffectStore &other) noexcept
     {
         rows_.swap(other.rows_); event_rows_.swap(other.event_rows_);
         profiles_.swap(other.profiles_);
+        profile_masks_.swap(other.profile_masks_);
+        binding_indices_.swap(other.binding_indices_);
+        bound_rows_.swap(other.bound_rows_); bound_row_ids_.swap(other.bound_row_ids_);
+        std::swap(bound_row_count_, other.bound_row_count_);
+        scratch_rows_.swap(other.scratch_rows_); live_rows_.swap(other.live_rows_);
+        std::swap(membership_dirty_, other.membership_dirty_);
+        std::swap(capture_only_rows_, other.capture_only_rows_);
+        std::swap(index_dirty_, other.index_dirty_);
     }
     [[nodiscard]] std::size_t Size() const noexcept { return rows_.size(); }
 
@@ -201,7 +289,19 @@ class ActiveEffectStore
             return hash;
         }
     };
-    struct StoredRow { VfxEventInput input; };
+    static constexpr Row kDroppedBinding = VfxEventView::kNoBinding - 1;
+    static constexpr std::uint16_t ProfileBit(Profile profile) noexcept
+    { return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile)); }
+    static constexpr bool UsesOwnerBinding(Profile profile) noexcept
+    {
+        return profile == Profile::Ground || profile == Profile::Light ||
+            profile == Profile::Distortion || profile == Profile::Decal;
+    }
+    void RemoveMembership(Profile profile, Row row) noexcept
+    {
+        profile_masks_[row] &= ~ProfileBit(profile);
+        membership_dirty_ = true;
+    }
     static EventKey KeyFor(const VfxEventInput &input) noexcept
     {
         return {input.sequence, input.status_episode_generation,
@@ -214,11 +314,16 @@ class ActiveEffectStore
             a.geometry_owner_id == b.geometry_owner_id && a.geometry_effect_id == b.geometry_effect_id &&
             a.event_tick == b.event_tick && a.geometry_sector_index == b.geometry_sector_index;
     }
-    std::vector<StoredRow> rows_;
+    std::vector<VfxEventInput> rows_;
+    std::vector<std::uint16_t> profile_masks_;
     std::unordered_map<EventKey, Row, EventKeyHash> event_rows_;
     std::array<std::vector<Row>, static_cast<std::size_t>(Profile::Count)> profiles_;
     std::vector<Row> scratch_rows_;
     std::vector<std::uint8_t> live_rows_;
+    std::vector<Row> binding_indices_, bound_row_ids_;
+    std::vector<VfxEventInput> bound_rows_;
+    std::size_t bound_row_count_{};
+    bool membership_dirty_{}, capture_only_rows_{}, index_dirty_{};
 };
 
 struct DecodedVfxState
@@ -226,16 +331,18 @@ struct DecodedVfxState
     std::vector<ParticleSpawnCommand> particle_spawns;
     std::vector<VfxLineSpawnCommand> effect_lines;
     std::vector<VfxFlashSpawnInput> flashes;
-    std::vector<VfxEventInput> ground_events;
-    std::vector<VfxEventInput> ribbon_events;
-    std::vector<VfxEventInput> light_events;
-    std::vector<VfxEventInput> distortion_events;
-    std::vector<VfxEventInput> decal_events;
-    std::vector<VfxEventInput> volume_events;
-    std::vector<VfxEventInput> screen_events;
-    std::vector<VfxEventInput> entity_surface_events;
     std::vector<RetainedVfxEntitySurfaceCapture> entity_surface_captures;
-    std::vector<VfxEventInput> point_rate_events;
+
+    void SortNewParticleSpawns(std::size_t retained_count)
+    {
+        assert(retained_count <= particle_spawns.size());
+        if (retained_count == particle_spawns.size()) return;
+        const auto appended = particle_spawns.begin() + retained_count;
+        const auto due = [](const auto &a, const auto &b) { return a.tick < b.tick; };
+        std::stable_sort(appended, particle_spawns.end(), due);
+        if (retained_count && due(*appended, *(appended - 1)))
+            std::inplace_merge(particle_spawns.begin(), appended, particle_spawns.end(), due);
+    }
 
     // Member swaps preserve the original allocation-free publication operation,
     // including implementations with debug iterator bookkeeping on moves.
@@ -244,16 +351,7 @@ struct DecodedVfxState
         particle_spawns.swap(prepared.particle_spawns);
         effect_lines.swap(prepared.effect_lines);
         flashes.swap(prepared.flashes);
-        ground_events.swap(prepared.ground_events);
-        ribbon_events.swap(prepared.ribbon_events);
-        light_events.swap(prepared.light_events);
-        distortion_events.swap(prepared.distortion_events);
-        decal_events.swap(prepared.decal_events);
-        volume_events.swap(prepared.volume_events);
-        screen_events.swap(prepared.screen_events);
-        entity_surface_events.swap(prepared.entity_surface_events);
         entity_surface_captures.swap(prepared.entity_surface_captures);
-        point_rate_events.swap(prepared.point_rate_events);
     }
 
     void Clear() noexcept
@@ -261,23 +359,7 @@ struct DecodedVfxState
         particle_spawns.clear();
         effect_lines.clear();
         flashes.clear();
-        ground_events.clear();
-        ribbon_events.clear();
-        light_events.clear();
-        distortion_events.clear();
-        decal_events.clear();
-        volume_events.clear();
-        screen_events.clear();
-        entity_surface_events.clear();
         entity_surface_captures.clear();
-        point_rate_events.clear();
-    }
-
-    void ClearEventScratch() noexcept
-    {
-        ground_events.clear(); ribbon_events.clear(); light_events.clear();
-        distortion_events.clear(); decal_events.clear(); volume_events.clear();
-        screen_events.clear(); entity_surface_events.clear(); point_rate_events.clear();
     }
 };
 
@@ -292,40 +374,35 @@ struct TerminalPresentationClock
 // a session ID keeps a reset simulation clock from replaying the previous run.
 struct VfxSessionState
 {
-    // Due order is stable across equal ticks and pending storage remains bounded.
+    struct NativeEmissionBatch
+    {
+        RenderVfxWorldBatch identity;
+        std::vector<ParticleSpawnCommand> particle_spawns;
+        std::vector<VfxLineSpawnCommand> effect_lines;
+    };
+
+    // The single simulation producer publishes monotone session/tick order.
     struct RawEventScheduler
     {
         static constexpr std::size_t kCapacity = 4096;
         struct Entry
         {
             PresentationEvent event;
-            std::uint64_t ordinal{};
         };
         struct ReadyBatch
         {
             std::vector<Entry> entries;
         };
 
-        // Session first lets future-session events wait without repeated pop/reinsert.
-        static bool Later(const Entry &a, const Entry &b) noexcept
-        {
-            if (a.event.session_id != b.event.session_id)
-                return a.event.session_id > b.event.session_id;
-            if (a.event.tick != b.event.tick) return a.event.tick > b.event.tick;
-            return a.ordinal > b.ordinal;
-        }
-
         [[nodiscard]] bool HasCapacity() const noexcept
         {
-            return pending.size() + in_flight.entries.size() < kCapacity &&
-                next_ordinal != std::numeric_limits<std::uint64_t>::max();
+            return pending.size() + in_flight.entries.size() < kCapacity;
         }
 
         [[nodiscard]] bool Enqueue(PresentationEvent event)
         {
             if (!HasCapacity()) return false;
-            pending.push_back({std::move(event), next_ordinal++});
-            std::push_heap(pending.begin(), pending.end(), Later);
+            pending.push_back({std::move(event)});
             return true;
         }
 
@@ -337,36 +414,31 @@ struct VfxSessionState
                 const auto &next = pending.front().event;
                 if (next.session_id > session ||
                     (next.session_id == session && next.tick > tick)) break;
-                std::pop_heap(pending.begin(), pending.end(), Later);
-                auto entry = std::move(pending.back());
-                pending.pop_back();
+                auto entry = std::move(pending.front());
+                pending.pop_front();
                 if (entry.event.session_id < session) continue;
                 in_flight.entries.push_back(std::move(entry));
             }
             return in_flight;
         }
 
-        // A failed preparation/render leaves this owned batch ready to retry.
-        void Acknowledge() noexcept
+        // A failed CPU activation retains this batch; native submission owns its decoded queues.
+        void AcknowledgeActivation() noexcept
         {
             in_flight.entries.clear();
-            if (pending.empty()) next_ordinal = 0;
         }
 
         void DiscardBeforeSession(std::uint64_t session)
         {
-            std::erase_if(pending, [session](const Entry &entry) {
-                return entry.event.session_id < session;
-            });
+            while (!pending.empty() && pending.front().event.session_id < session)
+                pending.pop_front();
             std::erase_if(in_flight.entries, [session](const Entry &entry) {
                 return entry.event.session_id < session;
             });
-            std::make_heap(pending.begin(), pending.end(), Later);
         }
 
-        std::vector<Entry> pending;
+        std::deque<Entry> pending;
         ReadyBatch in_flight;
-        std::uint64_t next_ordinal{};
     };
     struct PersistentBurstKey
     {
@@ -391,6 +463,70 @@ struct VfxSessionState
     ActiveEffectStore active_effects;
     DecodedVfxState decoded;
     std::unordered_set<PersistentBurstKey, PersistentBurstHash> seen_persistent_bursts;
+    NativeEmissionBatch native_batch;
+    bool native_batch_active{};
+    Tick last_committed_stateful_target{};
+    std::uint64_t next_native_batch_sequence{1};
+    bool has_committed_stateful_target{};
+    bool particle_reset_pending{};
+
+    void DiscardNativeBatch() noexcept
+    {
+        native_batch.particle_spawns.clear();
+        native_batch.effect_lines.clear();
+        native_batch_active = false;
+    }
+
+    // Freeze due prefixes once. A retry returns the same owned vectors and identity;
+    // later decoded output stays pending for the next batch.
+    NativeEmissionBatch *PrepareNativeBatch(Tick target, bool stateful_step_needed)
+    {
+        const bool rewound = has_committed_stateful_target && !particle_reset_pending &&
+            target < last_committed_stateful_target;
+        if (rewound || (native_batch_active && target < native_batch.identity.stateful_target))
+        {
+            DiscardNativeBatch();
+            particle_reset_pending = true;
+        }
+        if (native_batch_active) return &native_batch;
+
+        std::size_t particle_count{};
+        while (particle_count < decoded.particle_spawns.size() &&
+               decoded.particle_spawns[particle_count].tick <= target)
+            ++particle_count;
+        std::size_t line_count{};
+        while (line_count < decoded.effect_lines.size() && decoded.effect_lines[line_count].tick <= target)
+            ++line_count;
+        if (!particle_count && !line_count && !stateful_step_needed && !particle_reset_pending)
+            return nullptr;
+
+        native_batch.identity = {session_id, target, next_native_batch_sequence++, particle_reset_pending};
+        native_batch.particle_spawns.clear();
+        native_batch.effect_lines.clear();
+        native_batch.particle_spawns.reserve(particle_count);
+        native_batch.effect_lines.reserve(line_count);
+        for (std::size_t i = 0; i < particle_count; ++i)
+            native_batch.particle_spawns.push_back(std::move(decoded.particle_spawns[i]));
+        for (std::size_t i = 0; i < line_count; ++i)
+            native_batch.effect_lines.push_back(std::move(decoded.effect_lines[i]));
+        decoded.particle_spawns.erase(decoded.particle_spawns.begin(), decoded.particle_spawns.begin() + particle_count);
+        decoded.effect_lines.erase(decoded.effect_lines.begin(), decoded.effect_lines.begin() + line_count);
+        native_batch_active = true;
+        return &native_batch;
+    }
+
+    [[nodiscard]] bool AcknowledgeNativeBatch(RenderVfxWorldBatch receipt, bool submitted) noexcept
+    {
+        if (!submitted || !native_batch_active || receipt.session != native_batch.identity.session ||
+            receipt.stateful_target != native_batch.identity.stateful_target ||
+            receipt.sequence != native_batch.identity.sequence)
+            return false;
+        last_committed_stateful_target = receipt.stateful_target;
+        has_committed_stateful_target = true;
+        if (native_batch.identity.reset_particle_state) particle_reset_pending = false;
+        DiscardNativeBatch();
+        return true;
+    }
 
     bool MarkPersistentBurst(std::uint64_t stable_id, std::uint8_t visual_kind)
     {
@@ -445,6 +581,11 @@ struct VfxSessionState
         persistent_mote_births.Clear();
         active_effects.Clear();
         ClearDecoded();
+        DiscardNativeBatch();
+        last_committed_stateful_target = 0;
+        next_native_batch_sequence = 1;
+        has_committed_stateful_target = false;
+        particle_reset_pending = false;
         seen_persistent_bursts.clear();
         raw_events.DiscardBeforeSession(session_id);
         return true;

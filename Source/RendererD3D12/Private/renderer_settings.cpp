@@ -252,6 +252,7 @@ CapabilityAdmission Either(CapabilityAdmission a, CapabilityAdmission b)
 
 GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
                                        const RendererConfig &config,
+                                       bool effective_dynamic_resolution,
                                        const DisplayState &display,
                                        const RendererLightingStatus &lighting,
                                        const RendererReconstructionStatus &reconstruction,
@@ -263,7 +264,7 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.hdr_mode = display.hdr_active ? GraphicsHdrMode::On : GraphicsHdrMode::Off;
     actual.hdr_paper_white_nits = display.paper_white_nits;
     actual.hdr_peak_nits = display.peak_nits;
-    actual.dynamic_resolution = config.dynamic_resolution;
+    actual.dynamic_resolution = effective_dynamic_resolution;
     actual.target_render_fps = config.target_render_fps;
     actual.dynamic_min_percent = config.dynamic_min_percent;
     actual.dynamic_max_percent = config.dynamic_max_percent;
@@ -349,13 +350,16 @@ GraphicsSettingsResolutionSummary ResolveSummary(
 
 Result D3D12Renderer::InitializeGraphicsSettings(const GraphicsSettings &requested)
 {
+    const auto &main_view = *impl_->owned_views.at(kMainRenderViewId.value);
     try
     {
         const auto reconstruction = GetReconstructionStatus();
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
+        const auto feature_plan = impl_->ResolveFeatures(impl_->config);
         const auto actual = ActualAppliedGraphics(requested, impl_->config,
-            impl_->display_state, lighting, reconstruction, presentation);
+            EffectiveDynamicResolution(impl_->config.dynamic_resolution, feature_plan),
+            main_view.display_state, lighting, reconstruction, presentation);
         SettingsApplyResult status;
         status.generation = 0;
         status.state = SettingsApplyState::Applied;
@@ -481,13 +485,17 @@ SettingsApplyResult D3D12Renderer::GetGraphicsSettingsStatus() const
         status = impl_->graphics_settings_status;
         if (!impl_->last_applied_graphics_request_available)
             return status;
+        const auto found = impl_->owned_views.find(kMainRenderViewId.value);
+        if (found == impl_->owned_views.end()) return status;
 
         const auto &requested = impl_->last_applied_graphics_request;
         const auto reconstruction = GetReconstructionStatus();
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
+        const auto feature_plan = impl_->ResolveFeatures(impl_->config);
         status.actual_applied = ActualAppliedGraphics(requested, impl_->config,
-            impl_->display_state, lighting, reconstruction, presentation);
+            EffectiveDynamicResolution(impl_->config.dynamic_resolution, feature_plan),
+            found->second->display_state, lighting, reconstruction, presentation);
         status.actual_applied_available = true;
         status.resolution = ResolveSummary(requested, reconstruction, presentation);
         return status;
@@ -504,11 +512,12 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
 {
     GraphicsCapabilitiesView view;
     if (!impl_ || !impl_->initialized) return view;
+    const auto &main_view = *impl_->owned_views.at(kMainRenderViewId.value);
     const auto &cfg = impl_->config;
     const auto sr_requested = cfg.reconstruction_request ? cfg.reconstruction_request->provider.value : "internal_taau";
-    const auto sr_selected = sr_requested == "auto" ? impl_->reconstruction_plan.effective_provider.value : sr_requested;
+    const auto sr_selected = sr_requested == "auto" ? main_view.reconstruction_plan.effective_provider.value : sr_requested;
     const auto &fg_requested = cfg.presentation_request.provider.value;
-    const ViewExtent output{impl_->width, impl_->height};
+    const ViewExtent output{main_view.width, main_view.height};
     constexpr CapabilityAdmission available{true, GraphicsCapabilityReason::None};
     constexpr CapabilityAdmission unsupported{false, GraphicsCapabilityReason::Unsupported};
     constexpr CapabilityAdmission incompatible{false, GraphicsCapabilityReason::Incompatible};

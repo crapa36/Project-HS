@@ -72,11 +72,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                                    : kAuthoredMaterialNames[ordinal];
             const std::string id = "render/material/" +
                 std::string(name) + "/parameters.rpkg";
-            const std::string material_id = hero ? "render/material/" + std::string(name) + "/material.rpkg"
-                : ordinal == kTerrainMaterialOrdinal
-                ? "render/material/terrain.rpkg"
-                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg"
-                : "render/" + std::string(kAuthoredMaterialNames[ordinal]) + ".rpkg";
+            const auto material_id = render_data::MaterialProduct(name);
             if (candidate.packed_content || candidate.development_catalog)
             {
                 const auto handle = FindRendererMaterial(candidate, MakeAssetId(material_id));
@@ -104,10 +100,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                         "Material parameter declaration is missing: " + std::string(required));
             material_parameter_candidate_layouts[ordinal] =
                 render_data::MaterialParameterLayoutHash(definitions);
-            if (auto resolved = ResolveRendererAsset(candidate, material_id, path); !resolved) return resolved;
-            std::vector<std::byte> material_bytes;
-            if (auto read = ReadBinary(path, material_bytes); !read) return read;
-            const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(material_bytes, MakeAssetId(material_id)); });
+            const auto &material = material_headers[ordinal].view;
             const auto layout = std::ranges::find(material.chunks,
                 render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
             if (layout == material.chunks.end() || !layout->required || layout->version != 1 ||
@@ -497,11 +490,23 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
     {
         const auto descriptor = config.development_catalog->FindTexture(MakeAssetId(binding.product_id));
         if (!descriptor || std::ranges::any_of(descriptor->dependencies, [&](AssetId asset) {
-                return !config.development_catalog->Contains(asset); }))
+                if (!config.development_catalog->Contains(asset)) return true;
+                return !RendererIsSourceRevision(config, asset) &&
+                    !config.development_catalog->HasRuntimeProduct(asset); }))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture dependency is absent.");
     }
     else if (!config.packed_content) for (const auto &dependency : package.dependencies)
     {
+        if (RendererIsSourceRevision(config, dependency))
+        {
+            if (RendererProductDigest(config, dependency).empty())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Texture package references an unauthenticated source revision " + dependency);
+            continue;
+        }
+        if (!RendererIsAdmittedRuntimeProduct(config, dependency))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Texture package dependency is absent from runtime and provenance catalogs: " + dependency);
         RendererAssetSource dependency_path;
         if (auto resolved = ResolveRendererAsset(config, dependency, dependency_path); !resolved)
             return resolved;
@@ -743,7 +748,7 @@ Result D3D12Renderer::Impl::DemandEnvironmentTexture(std::uint32_t priority)
     const auto error = std::bit_cast<float>(priority);
     if (priority && (!std::isfinite(error) || error <= 0.0f))
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Texture demand requires positive ordered error.");
-    const auto demand_frame = frame_number + 1u;
+    const auto demand_frame = rendered_submission_count + 1u;
     if (stream.last_demand_frame != demand_frame) stream.priority = 0u;
     stream.priority = std::max(stream.priority, priority);
     stream.last_demand_frame = demand_frame;
@@ -819,7 +824,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     if (!page) return Result::Success();
     if (page->state == StreamingPageState::Requested)
     {
-        if (!stream.priority || stream.last_demand_frame < frame_number) return Result::Success();
+        if (!stream.priority || stream.last_demand_frame < rendered_submission_count) return Result::Success();
         std::uint64_t file_bytes{};
         if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
         if (!file_bytes || file_bytes > UINT64_MAX / 3u ||
@@ -893,7 +898,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
                                 resource_generation_id))
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Environment texture stream read completion was stale.");
-    if (!stream.priority || stream.last_demand_frame < frame_number)
+    if (!stream.priority || stream.last_demand_frame < rendered_submission_count)
         return Result::Success(); // Preserve the decoded package until a view needs it again.
 
     D3D12_RESOURCE_DESC description{};

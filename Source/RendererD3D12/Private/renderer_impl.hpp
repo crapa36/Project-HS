@@ -20,9 +20,13 @@
 #include "renderer_geometry_demand.hpp"
 #include "renderer_skin_ranges.hpp"
 #include "render_graph.hpp"
+#include "render_graph_membership.hpp"
 
 #include "d3d12_resources.hpp"
 #include "persistent_gpu_scene.hpp"
+#include "renderer_entity_surface.hpp"
+#include "renderer_instance_order.hpp"
+#include "renderer_monster_lod.hpp"
 #include "render_instance_lookup.hpp"
 #include "renderer_diagnostics.hpp"
 #include "renderer_lod.hpp"
@@ -198,7 +202,8 @@ constexpr std::uint32_t kSceneFrameTableCount = kHeroTransparencyDescriptorOffse
 constexpr std::uint32_t kSceneGeometryTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
 constexpr std::uint32_t kVolumetricFrameTableOffset = kSceneGeometryTableOffset + kSceneFrameTableCount;
 constexpr std::uint32_t kBrixelizerFrameTableOffset = kVolumetricFrameTableOffset + kSceneFrameTableCount;
-constexpr std::uint32_t kTextureDescriptorCount = kBrixelizerFrameTableOffset + 4 * kSceneFrameTableCount;
+constexpr std::uint32_t kViewSkinDescriptorOffset = kBrixelizerFrameTableOffset + 4 * kSceneFrameTableCount;
+constexpr std::uint32_t kTextureDescriptorCount = kViewSkinDescriptorOffset + 4;
 constexpr std::uint32_t kArcherGeometryPage =
     static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount);
 constexpr std::uint32_t kMonsterGeometryPage = kArcherGeometryPage + 1;
@@ -222,8 +227,9 @@ constexpr std::uint32_t kMaterialSidecarRtvOffset = kVisibilityRtvOffset + 2;
 constexpr std::uint32_t kViewRtvOffset = kMaterialSidecarRtvOffset + 2;
 constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
+constexpr std::uint32_t kOutputRtvOffset = kLightingAuxRtvOffset + kLightingAuxRtvCount;
+constexpr std::uint32_t kRtvBankStride = kOutputRtvOffset + kFrameCount;
 constexpr std::uint32_t kLightingAuxRtvCount = 3;
-constexpr std::uint32_t kInstanceDataOffset = 14 * 1024;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Scene Buffer Upload", "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
     "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
@@ -365,6 +371,26 @@ struct GeometryPageGpu
     }
 };
 
+struct GeometryPageDescriptorCache
+{
+    struct View
+    {
+        std::uint64_t offset{}, size{};
+    };
+    ComPtr<ID3D12Resource> resource_owner;
+    std::array<View, kGeometryBuffersPerPage> views{};
+    std::uint32_t resolved_page_slot{UINT32_MAX};
+    bool valid{};
+};
+
+struct GeometryPageDescriptorBank
+{
+    ComPtr<ID3D12DescriptorHeap> heap_owner;
+    SIZE_T heap_start{};
+    UINT stride{};
+    std::array<GeometryPageDescriptorCache, kGeometryPageCapacity> pages{};
+};
+
 struct MonsterAsset : GeometryPageGpu
 {
     std::vector<render_data::CharacterMaterialBinding> owned_material_bindings;
@@ -466,7 +492,6 @@ struct FrameConstants
     DirectX::XMFLOAT4X4 shadow_view_projection[3];
     DirectX::XMFLOAT4 shadow_atlas_scale_offset[3];
     DirectX::XMFLOAT4 shadow_atlas_texel_size;
-    DirectX::XMFLOAT4X4 archer_bones[kMaxCharacterBones];
     DirectX::XMUINT4 monster_asset_meta[6];
     DirectX::XMUINT4 monster_clip_meta[6][static_cast<std::size_t>(CharacterAnimationClip::Count)];
     DirectX::XMFLOAT4 render_options;
@@ -510,24 +535,26 @@ struct FrameConstants
     DirectX::XMFLOAT4 previous_grass_bender_grid;
     std::array<DirectX::XMUINT4, 16> previous_grass_bender_masks;
     DirectX::XMFLOAT4 particle_terrain;
+    DirectX::XMFLOAT4X4 previous_instance_unjittered_view_projection;
 };
 
-constexpr std::uint32_t kExposureConstantsOffset = kInstanceDataOffset - 256;
-static_assert(sizeof(FrameConstants) == 12848);
+constexpr std::uint32_t kExposureConstantsOffset = (sizeof(FrameConstants) + 255u) & ~255u;
+constexpr std::uint32_t kInstanceDataOffset = kExposureConstantsOffset + 256u;
+static_assert(sizeof(FrameConstants) == 4720);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
-static_assert(offsetof(FrameConstants, lod_clock) == 11200);
-static_assert(offsetof(FrameConstants, output_size) == 11392);
-static_assert(offsetof(FrameConstants, probe_options) == 11712);
-static_assert(offsetof(FrameConstants, previous_grass_benders) == 11728);
-static_assert(offsetof(FrameConstants, previous_grass_state) == 12240);
-static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 12256);
-static_assert(offsetof(FrameConstants, scene_table_bounds) == 12272);
-static_assert(offsetof(FrameConstants, grass_bender_grid) == 12288);
-static_assert(offsetof(FrameConstants, grass_bender_masks) == 12304);
-static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 12560);
-static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 12576);
-static_assert(offsetof(FrameConstants, particle_terrain) == 12832);
-static_assert(sizeof(FrameConstants) <= kExposureConstantsOffset);
+static_assert(offsetof(FrameConstants, lod_clock) == 3008);
+static_assert(offsetof(FrameConstants, output_size) == 3200);
+static_assert(offsetof(FrameConstants, probe_options) == 3520);
+static_assert(offsetof(FrameConstants, previous_grass_benders) == 3536);
+static_assert(offsetof(FrameConstants, previous_grass_state) == 4048);
+static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 4064);
+static_assert(offsetof(FrameConstants, scene_table_bounds) == 4080);
+static_assert(offsetof(FrameConstants, grass_bender_grid) == 4096);
+static_assert(offsetof(FrameConstants, grass_bender_masks) == 4112);
+static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 4368);
+static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 4384);
+static_assert(offsetof(FrameConstants, particle_terrain) == 4640);
+static_assert(offsetof(FrameConstants, previous_instance_unjittered_view_projection) == 4656);
 
 struct ExposureConstants
 {
@@ -697,7 +724,7 @@ struct ExposureGraphLayout
 
 struct FinalGraphLayout
 {
-    bool reference_timing{}, presentation{};
+    bool reference_timing{}, output_ready{}, presentation{};
     std::array<std::uint32_t, 2> pass_indices{};
     ResourceVersion back_buffer{};
 };
@@ -793,6 +820,7 @@ struct FrameGraphLayout
         bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{}, static_scene_present{};
         bool exposure_initialization{}, ui_upload{}, temporal_initialization{}, offscreen_initialization{};
         bool static_scene_upload{}, static_refs_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
+        bool separate_previous_instance_scene{};
         bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{};
         bool composite_gradient_read{};
         bool dynamic_lod_initialized{}, static_lod_initialized{}, dynamic_lod_prefix{}, static_lod_prefix{};
@@ -801,6 +829,7 @@ struct FrameGraphLayout
         bool bloom{}, outline{}, fxaa_identity{}, post_target_initialization{};
         bool screen_overlay_requested{}, entity_surface{}, decal_commands{};
         bool hdr_motion{}, hdr_dof{}, hdr_grade{}, sdk_presentation{}, devtools_ui{};
+        bool reference_timing{}, output_ready{};
         bool software_gi{}, contact_shadows{}, adaptive_raster{}, adaptive_compute{}, overlap_ao_csm{};
         GraphicsAoMode ao_mode{};
         GraphicsGiMode gi_mode{};
@@ -958,10 +987,9 @@ struct D3D12Renderer::Impl
     };
     struct UiResources
     {
-        ~UiResources();
-        std::array<AllocationResource, kFrameCount> textures, uploads;
-        std::array<std::byte *, kFrameCount> mapped{};
+        std::array<AllocationResource, kFrameCount> textures;
         std::array<UiCpuSurface, kFrameCount> surfaces;
+        std::vector<UiTextLayout> text_layouts;
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         std::uint32_t rows{}, raster_width{}, raster_height{};
         std::uint64_t row_bytes{}, upload_bytes{};
@@ -993,7 +1021,6 @@ struct D3D12Renderer::Impl
         SkinVertexRanges vertex_ranges;
         bool skin_cache_valid{};
         std::uint64_t package_id{};
-        std::vector<std::byte> identity;
     };
     static AllocationResource RetainViewAllocation(const AllocationResource &source)
     {
@@ -1006,26 +1033,35 @@ struct D3D12Renderer::Impl
         retained.graph_completion = source.graph_completion;
         return retained;
     }
+    struct InstanceHistory
+    {
+        std::uint32_t generation{}, mesh{};
+        Sequence motion_epoch{};
+    };
     struct SubmittedInstanceFrame
     {
-        std::vector<GpuInstance> instances;
-        std::vector<std::uint32_t> generations;
-        std::vector<Sequence> motion_epochs;
-        RenderWorldPosition scene_origin;
+        AllocationResource scene;
+        std::vector<InstanceHistory> identities;
+        ID3D12Device *device{};
         std::uint64_t package_id{};
-        RenderSnapshotHeader sample;
+        std::uint64_t uploaded_revision{}, surface_package_id{};
+        std::size_t capacity{}, slot_count{};
+        bool submitted{}, initialized{};
     };
-    // Dormant views own their complete GPU/history state. All queues drain
-    // before exchange because execution RTV/DSV banks are shared scratch.
+    // View targets/history persist across selections; submission slots own the waited banks.
     // Scene/assets/canonical deformation remain common owners.
     struct OwnedView
     {
+        ViewId view_id{kMainRenderViewId};
         RenderViewRole role{RenderViewRole::Main};
         OptionTargets targets;
         UiResources ui;
         std::array<ComPtr<ID3D12Resource>, kFrameCount> outputs;
         std::array<AllocationResource, kFrameCount> offscreen_allocations;
         std::array<CompletionSet, kFrameCount> output_completion{};
+        std::array<NativeResourceContract, kFrameCount> output_contracts{};
+        std::array<std::uint64_t, kFrameCount> output_contract_generations{};
+        std::array<ID3D12Device *, kFrameCount> output_contract_devices{};
         AllocationResource hdr_capture_source;
         ViewExtent hdr_capture_extent;
         bool hdr_capture_valid{}, hdr_capture_pre_exposed{};
@@ -1065,7 +1101,7 @@ struct D3D12Renderer::Impl
         SkinCache skin_history;
         ClusterViewRuntime cluster_view;
         std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation;
-        std::shared_ptr<const SubmittedInstanceFrame> previous_instances;
+        std::shared_ptr<SubmittedInstanceFrame> previous_instances;
         RenderSnapshotHeader last_rendered_sample;
         bool has_rendered_sample{};
         std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
@@ -1087,6 +1123,8 @@ struct D3D12Renderer::Impl
         std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
+        std::uint32_t last_submitted_frame_slot{UINT32_MAX};
+        std::uint64_t last_submitted_frame_id{};
         std::uint32_t exposure_read_index{}, temporal_read_index{}, hzb_read_index{};
         bool exposure_initialized{}, view_targets_initialized{}, temporal_history_valid{},
             temporal_targets_initialized{}, hzb_history_valid{}, material_sidecars_initialized{},
@@ -1109,7 +1147,6 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareOwnedView(const RenderViewInput &, std::unique_ptr<OwnedView> &, bool decal_work);
     [[nodiscard]] Result PrepareDecalSurface(const RendererConfig &, ViewExtent, bool, DecalSurfaceCandidate &) const;
     [[nodiscard]] Result ActivateView(ViewId);
-    void ExchangeView(OwnedView &) noexcept;
     [[nodiscard]] Result ResetOwnedViewAfterCompletion(OwnedView &);
     [[nodiscard]] Result ResetOwnedViewsAfterCompletion();
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
@@ -1158,11 +1195,6 @@ struct D3D12Renderer::Impl
         bool submitted{};
         std::uint32_t instance_generation{};
         bool has_authored_material{}, has_masked_material{};
-    };
-    struct RetiredDynamicInstanceBuffer
-    {
-        AllocationResource instances;
-        CompletionSet completion{};
     };
     struct RetiredStreamingTexture
     {
@@ -1312,10 +1344,10 @@ struct D3D12Renderer::Impl
             retiring = false;
         }
     };
-    [[nodiscard]] Result CreateDevice(const RendererConfig &configuration);
-    [[nodiscard]] Result CreateSwapChainAndTargets();
-    [[nodiscard]] Result CreateDepthAndShadow();
-    [[nodiscard]] Result CreatePostProcessTargets();
+    [[nodiscard]] Result CreateDevice(const RendererConfig &configuration, OwnedView &view);
+    [[nodiscard]] Result CreateSwapChainAndTargets(OwnedView &view);
+    [[nodiscard]] Result CreateDepthAndShadow(OwnedView &view);
+    [[nodiscard]] Result CreatePostProcessTargets(OwnedView &view);
     [[nodiscard]] std::array<bool, 3> RequiredLightingAuxiliaries(const RendererConfig &) const noexcept;
     [[nodiscard]] Result PrepareLightingAuxiliaries(std::array<AllocationResource *, 3>,
         ViewExtent, std::array<bool, 3>);
@@ -1334,16 +1366,16 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareViewTargets(OptionTargets &, std::uint32_t capacity_width,
         std::uint32_t capacity_height, std::uint32_t output_width, std::uint32_t output_height,
         bool native_resolve);
-    [[nodiscard]] Result PrepareExposureResources();
-    void WriteViewDescriptors(std::uint32_t frame, std::uint32_t history_read,
+    [[nodiscard]] Result PrepareExposureResources(OwnedView &view);
+    void WriteViewDescriptors(OwnedView &owner, std::uint32_t frame, std::uint32_t history_read,
         std::uint32_t history_write, std::uint32_t exposure_read, std::uint32_t exposure_write,
         D3D12_GPU_VIRTUAL_ADDRESS exposure_constants) noexcept;
-    void CommitOptionTargets(OptionTargets &targets) noexcept;
+    void CommitOptionTargets(OwnedView &owner, OptionTargets &targets) noexcept;
     [[nodiscard]] Result PrepareLodStateBuffer(GpuLodStateBuffer &buffer, std::size_t capacity);
     void CommitLodStateBuffer(GpuLodStateBuffer &buffer);
-    void SwapOptionPools(std::array<TransientResourcePool, kFrameCount> &pools) noexcept;
+    void SwapOptionPools(OwnedView &owner, std::array<TransientResourcePool, kFrameCount> &pools) noexcept;
     void ClearTransientDescriptors() noexcept;
-    void WriteOptionTargetDescriptors() noexcept;
+    void WriteOptionTargetDescriptors(OwnedView &owner, std::uint32_t frame) noexcept;
     [[nodiscard]] Result CreatePipeline(const RendererConfig &pipeline_config);
     [[nodiscard]] Result SelectTextureFeedbackShaders(const RendererConfig &, RendererConfig &) const;
     void InitializeCanonicalDescriptors(ID3D12DescriptorHeap *) const noexcept;
@@ -1355,9 +1387,9 @@ struct D3D12Renderer::Impl
         const RendererConfig *candidate_config = nullptr);
     [[nodiscard]] Result InitializeReconstructionSessionsBeforeDevice();
     [[nodiscard]] Result BindReconstructionSessionsToDevice();
-    [[nodiscard]] Result CommitReconstructionProvider(std::unique_ptr<ReconstructionProvider> &candidate,
+    [[nodiscard]] Result CommitReconstructionProvider(OwnedView &owner, std::unique_ptr<ReconstructionProvider> &candidate,
         ReconstructionGuidesCandidate &&guides, ViewExtent capacity);
-    [[nodiscard]] Result PrepareReconstructionGuides(const RendererConfig &, ViewExtent capacity,
+    [[nodiscard]] Result PrepareReconstructionGuides(const OwnedView &, const RendererConfig &, ViewExtent capacity,
         ViewExtent output, ReconstructionGuidesCandidate &, bool composition = false) const;
     [[nodiscard]] Result PrepareDisplayPipeline(const RendererConfig &, DXGI_FORMAT,
                                                  ComPtr<ID3D12PipelineState> &);
@@ -1400,7 +1432,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareMaterialSidecars(std::array<AllocationResource, 2> &targets,
                                                std::uint32_t width, std::uint32_t height);
     [[nodiscard]] DXGI_FORMAT MaterialSidecarFormat(std::size_t plane) const noexcept;
-    void WriteMaterialSidecarDescriptors() noexcept;
+    void WriteMaterialSidecarDescriptors(OwnedView &owner, std::uint32_t frame) noexcept;
     [[nodiscard]] Result CreateEnvironmentBrdfLut(const RendererConfig &lut_config,
                                                 AllocationResource &lut,
                                                 std::vector<AllocationResource> *upload_batch = nullptr);
@@ -1410,27 +1442,27 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreateClusterViewResources(ClusterViewRuntime &);
     void ResetClusterViewResources(ClusterViewRuntime &) noexcept;
     void ResetInactiveClusterViewResources() noexcept;
-    [[nodiscard]] Result PrepareAmbientOcclusion(const RendererConfig &,
+    [[nodiscard]] Result PrepareAmbientOcclusion(const OwnedView &, const RendererConfig &,
         ViewExtent capacity, AmbientOcclusionCandidate &, bool adaptive_compute = false) const;
-    [[nodiscard]] Result PrepareAdaptiveShading(const RendererConfig &,
+    [[nodiscard]] Result PrepareAdaptiveShading(const OwnedView &, const RendererConfig &,
         ViewExtent capacity, AdaptiveShadingCandidate &) const;
     [[nodiscard]] Result BuildAdaptiveMaterialPolicies(std::vector<AdaptiveShadingMaterialPolicy> &) const;
-    [[nodiscard]] Result PrepareSurfaceLighting(const RendererConfig &,
+    [[nodiscard]] Result PrepareSurfaceLighting(const OwnedView &, const RendererConfig &,
         ViewExtent capacity, SubsurfaceCandidate &, ScreenReflectionsCandidate &) const;
-    [[nodiscard]] Result PrepareHeroTransparency(const RendererConfig &,
+    [[nodiscard]] Result PrepareHeroTransparency(const OwnedView &, const RendererConfig &,
         ViewExtent capacity, HeroTransparencyCandidate &) const;
     [[nodiscard]] Result PrepareLightingProbe(const RendererConfig &, LightingProbeCandidate &) const;
     [[nodiscard]] Result PrepareLtcLut(const RendererConfig &, LtcLutCandidate &) const;
-    [[nodiscard]] Result PrepareHdrPost(const RendererConfig &, ViewExtent render_capacity,
+    [[nodiscard]] Result PrepareHdrPost(const OwnedView &, const RendererConfig &, ViewExtent render_capacity,
         ViewExtent output_extent, HdrPostCandidate &) const;
     [[nodiscard]] Result PrepareScreenOverlay(const RendererConfig &, ViewExtent,
         ScreenOverlayCandidate &) const;
     [[nodiscard]] Result PrepareSceneGeometry(const RendererConfig &, SceneGeometryCandidate &) const;
-    [[nodiscard]] Result PrepareBrixelizerGi(const RendererConfig &, ViewExtent, BrixelizerCandidate &) const;
-    [[nodiscard]] Result PrepareVirtualShadows(const RendererConfig &, ViewExtent, VirtualShadowCandidate &) const;
+    [[nodiscard]] Result PrepareBrixelizerGi(const OwnedView &, const RendererConfig &, ViewExtent, BrixelizerCandidate &) const;
+    [[nodiscard]] Result PrepareVirtualShadows(const OwnedView &, const RendererConfig &, ViewExtent, VirtualShadowCandidate &) const;
     struct AdditionalShadowPrepared { LocalShadowCandidate local; };
-    [[nodiscard]] Result PrepareAdditionalShadows(const RendererConfig &, ViewExtent, AdditionalShadowPrepared &) const;
-    [[nodiscard]] Result CommitAdditionalShadows(AdditionalShadowPrepared &&);
+    [[nodiscard]] Result PrepareAdditionalShadows(const OwnedView &, const RendererConfig &, ViewExtent, AdditionalShadowPrepared &) const;
+    [[nodiscard]] Result CommitAdditionalShadows(OwnedView &owner, AdditionalShadowPrepared &&);
     [[nodiscard]] Result PrepareLocalProbes(const RendererConfig &, LocalProbeRuntimeCandidate &) const;
     [[nodiscard]] Result AppendHlodPages(ClusterRuntimeState &);
     [[nodiscard]] Result BeginHlodViewPackage(const RenderFrameInput &);
@@ -1461,10 +1493,10 @@ struct D3D12Renderer::Impl
         std::vector<VolumetricVolume> media;
         std::uint64_t revision{};
     };
-    [[nodiscard]] Result PrepareVolumetrics(const RendererConfig &, ViewExtent, VolumetricPrepared &) const;
-    [[nodiscard]] Result CommitVolumetrics(VolumetricPrepared &&);
+    [[nodiscard]] Result PrepareVolumetrics(const OwnedView &, const RendererConfig &, ViewExtent, VolumetricPrepared &) const;
+    [[nodiscard]] Result CommitVolumetrics(OwnedView &owner, VolumetricPrepared &&);
     [[nodiscard]] RendererFeaturePlan ResolveFeatures(const RendererConfig &) const noexcept;
-    [[nodiscard]] Result PrepareLightList(const RendererConfig &, ViewExtent, LightListCandidate &) const;
+    [[nodiscard]] Result PrepareLightList(const OwnedView &, const RendererConfig &, ViewExtent, LightListCandidate &) const;
     [[nodiscard]] Result PrepareHeroBindings(ID3D12GraphicsCommandList *,
         std::vector<AllocationResource> &uploads);
     [[nodiscard]] ClusterFrameRecordData PrepareClusterFrameRecordData(std::uint32_t frame_slot,
@@ -1476,15 +1508,15 @@ struct D3D12Renderer::Impl
         ResourceVersion static_scene, ClusterFrameGraph &state,
         const ClusterFrameRecordData &, ClusterGraphLayout *capture = nullptr,
         const ClusterGraphLayout *retained = nullptr);
-    [[nodiscard]] Result AddClusterOcclusionPass(std::uint32_t frame_slot,
+    [[nodiscard]] Result AddClusterOcclusionPass(OwnedView &, std::uint32_t frame_slot,
         ClusterFrameGraph &, ResourceVersion hzb, bool retest,
         ClusterGraphLayout *capture = nullptr, const ClusterGraphLayout *retained = nullptr);
     void ReadClusterFrame(PassBuilder &, const ClusterFrameGraph &, bool draw, bool retest = false) const;
     [[nodiscard]] Result DrawClusterGeometry(ID3D12GraphicsCommandList *,
         std::uint32_t frame_slot, std::uint32_t view, bool retest = false);
-    [[nodiscard]] Result CommitClusterFrameGraph(std::uint32_t frame_slot,
+    [[nodiscard]] Result CommitClusterFrameGraph(OwnedView &, std::uint32_t frame_slot,
         ClusterFrameGraph &, const CompletionSet &);
-    [[nodiscard]] Result PrepareClusterFrame(std::uint32_t frame_slot,
+    [[nodiscard]] Result PrepareClusterFrame(OwnedView &, std::uint32_t frame_slot,
         const std::array<ClusterCutInput, kEnvironmentMaterialNames.size()> &inputs);
     [[nodiscard]] Result CaptureClusterFrame(std::uint32_t frame_slot);
     [[nodiscard]] Result DemandClusterPage(std::uint32_t logical_slot,
@@ -1511,10 +1543,10 @@ struct D3D12Renderer::Impl
         PreparedGeometryUpload *preparation = nullptr);
     [[nodiscard]] Result CreateProceduralGeometry(
         ID3D12GraphicsCommandList *list, std::vector<AllocationResource> &uploads);
-    [[nodiscard]] Result CreateVisibilityTargets();
+    [[nodiscard]] Result CreateVisibilityTargets(OwnedView &view);
     [[nodiscard]] Result PrepareVisibilityTargets(OptionTargets &targets,
         std::uint32_t target_width, std::uint32_t target_height);
-    [[nodiscard]] Result WriteVisibilityDescriptors(std::uint32_t frame_slot,
+    [[nodiscard]] Result WriteVisibilityDescriptors(OwnedView &, std::uint32_t frame_slot,
         ID3D12Resource *static_scene, ID3D12Resource *dynamic_scene,
         ID3D12Resource *static_refs, std::uint64_t static_ref_offset,
         std::uint32_t static_ref_count,
@@ -1528,6 +1560,7 @@ struct D3D12Renderer::Impl
         const GeometryPageGpu &page, const AllocationResource &upload) const;
     [[nodiscard]] const GeometryPageGpu *FindGeometryPage(std::uint32_t page_slot) const noexcept;
     void WriteGeometryPageDescriptors(std::uint32_t frame_slot);
+    [[nodiscard]] FrameContext *SubmittedFrame(const OwnedView &owner) noexcept;
     [[nodiscard]] Result BeginGeometryDrawRecords(std::uint32_t frame_slot);
     [[nodiscard]] Result AddGeometryDrawRecord(std::uint32_t frame_slot,
         const GeometryPageGpu &page, std::uint32_t visible_base,
@@ -1541,11 +1574,11 @@ struct D3D12Renderer::Impl
         std::uint32_t frame_slot, ID3D12PipelineState *indexed_pipeline,
         const GeometryPageGpu &page, std::uint32_t packed_pass,
         ID3D12Resource *arguments = nullptr, std::uint64_t argument_offset = 0);
-    [[nodiscard]] Result CreateUiTexture();
+    [[nodiscard]] Result CreateUiTexture(OwnedView &view);
     [[nodiscard]] Result PrepareUiResources(UiResources &, std::uint32_t output_width,
                                             std::uint32_t output_height);
-    void CommitUiResources(UiResources &) noexcept;
-    [[nodiscard]] Result RasterizeUi(std::uint32_t frame_index,
+    void CommitUiResources(OwnedView &owner, UiResources &) noexcept;
+    [[nodiscard]] Result RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
                                      std::span<const UiModel> models);
     [[nodiscard]] Result CreateAllocation(AllocationResource &output,
                                           const D3D12MA::ALLOCATION_DESC &allocation,
@@ -1661,13 +1694,8 @@ struct D3D12Renderer::Impl
     bool static_scene_fence_unreliable{};
     std::uint64_t static_scene_upload_count{};
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
-    AllocationResource dynamic_instances;
     PersistentGpuSceneSlots dynamic_scene_slots;
     SkinCache skin_cache;
-    std::vector<RetiredDynamicInstanceBuffer> retired_dynamic_instance_buffers;
-    std::size_t dynamic_instance_capacity{};
-    std::size_t dynamic_instance_slot_count{};
-    bool dynamic_instances_shader_read{};
     std::ofstream dynamic_instance_upload_log;
     std::array<ComPtr<ID3D12Resource>, kFrameCount> back_buffers;
     // DXGI owns these swapchain surfaces independently of application placed heaps.
@@ -1676,14 +1704,9 @@ struct D3D12Renderer::Impl
     std::array<std::uint64_t, kFrameCount> back_buffer_contract_generations{};
     std::array<ID3D12Device *, kFrameCount> back_buffer_contract_devices{};
     std::array<CompletionSet, kFrameCount> back_buffer_completion{};
-    AllocationResource depth;
-    AllocationResource shadow;
     GeometryPageGpu archer_geometry;
     GeometryPageGpu gel_projectile_geometry;
     GeometryPageGpu procedural_geometry;
-    AllocationResource visibility_ids, visibility_front_face;
-    bool visibility_targets_initialized{};
-    AllocationResource visibility_pixels, visibility_counts, visibility_dispatch_args;
     std::array<MonsterAsset, 6> monster_assets;
     std::array<std::array<GeometryPageGpu, 2>, 6> monster_reduced_geometry;
     AllocationResource monster_skin_matrices;
@@ -1719,13 +1742,6 @@ struct D3D12Renderer::Impl
     AllocationResource particle_dead;
     AllocationResource particle_counters;
     AllocationResource indirect_arguments;
-    AllocationResource gbuffer_base;
-    AllocationResource gbuffer_normal;
-    AllocationResource gbuffer_metadata;
-    AllocationResource gbuffer_material;
-    AllocationResource gbuffer_motion;
-    AllocationResource gbuffer_surface_history;
-    std::array<AllocationResource, 2> material_sidecars;
     std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_surface_layouts;
     render_data::MaterialSidecarLayout material_sidecar_layout;
     bool material_sidecars_initialized{};
@@ -1798,75 +1814,30 @@ struct D3D12Renderer::Impl
         std::array<Entry, kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots> entries;
     };
     mutable std::array<EnvironmentDescriptorBank, kFrameCount> environment_descriptor_banks;
-    render_data::RockMaterial terrain_material;
+    std::array<render_data::EnvironmentMaterialVariant, kAuthoredMaterialNames.size()> environment_material_variants;
     struct EnvironmentMeshGpu : GeometryPageGpu
     {
         float bounding_radius{};
-        render_data::RockMaterial material;
-        std::string program_shader;
-        std::string program_shadow_shader;
     };
     std::array<EnvironmentMeshGpu, kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount> environment_meshes;
     std::array<EnvironmentClusterCatalog, kEnvironmentMaterialNames.size()> environment_cluster_catalogs;
     std::unique_ptr<ClusterRuntimeState> cluster_runtime;
-    AmbientOcclusionSystem ambient_occlusion;
-    AdaptiveShadingSystem adaptive_shading;
-    SubsurfaceSystem subsurface;
     LightingProbeSystem lighting_probe;
     LtcLutSystem ltc_lut;
-    HdrPostSystem hdr_post;
-    ScreenOverlaySystem screen_overlay;
     SceneGeometrySystem scene_geometry;
-    BrixelizerGiSystem brixelizer_gi;
-    bool brixelizer_history_valid{};
-    VirtualShadowSystem virtual_shadows;
-    LocalShadowSystem local_shadows;
     LocalProbeRuntime local_probes;
     std::unique_ptr<HlodRuntime> hlod_runtime;
-    VolumetricSystem volumetrics;
     std::vector<VolumetricVolume> volumetric_media;
     std::uint64_t volumetric_revision{};
-    VolumetricCamera previous_volumetric_camera;
-    ShadowCasterMap previous_shadow_casters;
-    LightListSystem light_list;
-    DecalSurfaceSystem decal_surface;
-    ScreenReflectionsSystem screen_reflections;
-    HeroTransparencySystem hero_transparency;
-    ReconstructionPlan reconstruction_plan;
     std::unique_ptr<StreamlineSession> streamline_session;
     NativeGraphicsCapabilitySnapshot native_graphics_capabilities;
     std::unique_ptr<FsrSession> fsr_session;
-    std::unique_ptr<ReconstructionProvider> reconstruction_provider;
-    SdkCamera sdk_camera;
-    SdkFrameIdentity sdk_frame_identity;
     SdkPresentation sdk_presentation;
     PresentationGuides presentation_guides;
     ComPtr<ID3D12Device> streamline_device_proxy;
     ComPtr<ID3D12CommandQueue> streamline_queue_proxy;
     ComPtr<IDXGIFactory2> streamline_factory_proxy;
     std::uint8_t native_input_phase{};
-    ReconstructionGuidesSystem reconstruction_guides;
-    AllocationResource hdr_color;
-    AllocationResource subsurface_diffuse, environment_specular, indirect_diffuse;
-    AllocationResource oit_accumulation;
-    AllocationResource oit_revealage;
-    AllocationResource post_a;
-    AllocationResource hdr_capture_source;
-    ViewExtent hdr_capture_extent;
-    bool hdr_capture_valid{}, hdr_capture_pre_exposed{};
-    std::uint64_t hdr_capture_submission_id{}, hdr_capture_package_id{}, hdr_capture_snapshot_tick{};
-    std::string hdr_capture_source_name{"reconstructed_hdr_before_post"};
-    AllocationResource post_b;
-    std::array<AllocationResource, 2> temporal_history;
-    std::array<AllocationResource, 2> temporal_normal_history, temporal_material_history;
-    AllocationResource scene_work, display_linear, composite_hdr;
-    std::array<AllocationResource, 2> exposure_values;
-    AllocationResource exposure_histogram, initial_exposure;
-    std::uint32_t exposure_read_index{};
-    bool exposure_initialized{};
-    bool view_targets_initialized{};
-    std::chrono::steady_clock::time_point exposure_sample_time{};
-    std::chrono::steady_clock::time_point render_submission_time{};
     std::map<std::uint32_t, std::unique_ptr<OwnedView>> owned_views;
     std::vector<std::unique_ptr<OwnedView>> unresolved_view_candidates;
     ViewId active_view_id{kMainRenderViewId};
@@ -1877,23 +1848,53 @@ struct D3D12Renderer::Impl
     const RenderFrameInput *explicit_frame{};
     bool legacy_frame_bridge{}, render_scene_inputs{true};
     std::uint32_t active_native_viewport_id{}, next_native_viewport_id{1};
-    RenderWorldPosition previous_scene_origin{}, previous_view_origin{};
-    bool previous_origins_valid{};
     std::uint64_t view_configuration_revision{1}, rendered_submission_count{}, render_package_id{}, active_render_package_id{};
-    std::uint64_t view_session_id{};
     std::chrono::steady_clock::time_point render_package_time;
     float render_package_alpha{1.0f};
     RenderSceneSample render_scene_sample;
+    struct PreparedScenePackage
+    {
+        std::vector<RenderInstance> instances;
+        std::vector<RenderInstance> ordered_instances;
+        // Bound to owned ordered_instances, refreshed after packet ordering.
+        RenderInstanceLookup instance_lookup;
+        std::vector<std::uint64_t> skin_attachment_ids;
+        std::vector<std::uint32_t> ordered_source_indices, order_scratch;
+        std::vector<std::uint16_t> selected_lods, ordered_lods;
+        std::vector<PersistentGpuSceneSlot> gpu_slots;
+        std::optional<MonsterLodInstanceOrder> order;
+        std::unordered_map<std::uint64_t, const AnimationPoseRef *> poses_by_id;
+        std::vector<const AnimationPoseRef *> poses_by_source;
+        EntitySurfaceFrame entity_surfaces;
+        std::vector<std::pair<std::uint64_t,std::uint8_t>> vfx_replacements;
+        std::vector<MonsterLodPreparedLocalLight> local_shadow_consumers;
+        std::shared_ptr<CanonicalSkinFrame> skin_deformation;
+        bool monster_lod_consumers_valid{}, vsm_skin_consumer{};
+        bool ready{}, gpu_slots_ready{};
+
+        void ReleaseBorrowed() noexcept
+        {
+            poses_by_id.clear();
+            poses_by_source.clear();
+            gpu_slots.clear();
+            local_shadow_consumers.clear();
+            skin_deformation.reset();
+            order.reset();
+            monster_lod_consumers_valid = false;
+            vsm_skin_consumer = false;
+            ready = false;
+            gpu_slots_ready = false;
+        }
+    } prepared_scene_package;
     struct PreparedArcherPalette
     {
         RenderPoseKey key;
         std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> bones{};
     };
     std::vector<PreparedArcherPalette> prepared_archer_palettes;
-    std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation, canonical_skin_current;
-    std::shared_ptr<const SubmittedInstanceFrame> previous_instances, canonical_instance_current;
-    std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
-    DirectX::XMFLOAT4 previous_grass_state{};
+    std::shared_ptr<CanonicalSkinFrame> canonical_skin_current;
+    std::shared_ptr<SubmittedInstanceFrame> canonical_instance_current;
+    std::vector<std::shared_ptr<SubmittedInstanceFrame>> instance_history_frames;
     std::vector<std::shared_ptr<CanonicalSkinFrame>> canonical_skin_frames;
     GraphicsSettings applied_graphics;
     std::shared_ptr<const render_data::QualityProfiles> quality_profiles;
@@ -1909,9 +1910,6 @@ struct D3D12Renderer::Impl
     std::uint64_t graphics_settings_generation_high_watermark{};
     SettingsApplyResult graphics_settings_status;
     RendererDiagnosticsRecorder diagnostics;
-    ViewState view_state;
-    DisplayState display_state;
-    DynamicResolutionController dynamic_resolution_controller;
     GpuPassTimings completed_gpu_timings;
     struct SourceTimingHistory
     {
@@ -1919,46 +1917,19 @@ struct D3D12Renderer::Impl
         DynamicResolutionSample qualified;
     };
     mutable std::unordered_map<std::uint32_t, SourceTimingHistory> timing_previous_source_endpoints;
-    std::uint64_t timing_source_sequence{};
-    CompletionSet timing_source_output_completion;
-    ViewExtent timing_last_active;
-    const ReconstructionProvider *timing_last_provider{};
     // Capture-only pending completion snapshots. Both frame count and pass count are bounded.
     mutable std::vector<GpuPassTimings> pending_gpu_timings;
     mutable std::size_t pending_gpu_timing_passes{};
     mutable bool gpu_timing_stream_overflowed{};
     std::vector<RendererHeroWorkSample> hero_work_pending;
     RendererHeroWorkStatus hero_work_retired;
-    [[nodiscard]] Result ArchiveHeroWork(HeroTransparencySystem &);
-    std::uint64_t dynamic_resolution_sample_id{};
-    std::array<AllocationResource, 2> hzb_history;
-    HzbLayout hzb_layout{};
-    std::uint32_t hzb_read_index{};
-    bool hzb_history_valid{};
-    bool temporal_history_valid{};
-    bool temporal_targets_initialized{}; // Allocation initialization, independent of history validity.
-    std::uint32_t temporal_read_index{};
-    DirectX::XMFLOAT4X4 previous_view_projection{};
-    DirectX::XMFLOAT4X4 previous_unjittered_view_projection{};
-    DirectX::XMFLOAT4 previous_projection_depth{};
-    DirectX::XMFLOAT2 previous_jitter_uv{};
-    Float3 temporal_previous_eye{};
-    float temporal_previous_fov{};
-    std::array<AllocationResource, kFrameCount> ui_textures;
-    std::array<UiCpuSurface, kFrameCount> ui_surfaces;
-    std::array<std::vector<UiModel>, kFrameCount> ui_raster_models;
-    std::vector<UiTextLayout> ui_text_layouts;
-    std::array<bool, kFrameCount> ui_dirty{};
+    [[nodiscard]] Result RetireHeroTransparency(HeroTransparencySystem &);
     ComPtr<IWICImagingFactory> ui_wic_factory;
     ComPtr<ID2D1Factory> ui_d2d_factory;
     ComPtr<IDWriteFactory5> ui_dwrite_factory;
     ComPtr<IDWriteInMemoryFontFileLoader> ui_font_loader;
     ComPtr<IDWriteFontCollection1> ui_font_collection;
     std::wstring ui_font_family;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT ui_footprint{};
-    std::uint32_t ui_raster_width{}, ui_raster_height{};
-    std::uint64_t ui_row_bytes{}, ui_upload_bytes{};
-    std::uint32_t ui_rows{};
     ComPtr<ID3D12RootSignature> root_signature;
     ComPtr<ID3D12RootSignature> cluster_root_signature;
     ComPtr<ID3D12PipelineState> cluster_count_pipeline, cluster_prefix_pipeline, cluster_emit_pipeline;
@@ -2042,22 +2013,15 @@ struct D3D12Renderer::Impl
     float archer_ground_offset{};
     RenderGraphBuilder graph;
     std::array<FrameGraphLayout, 8> graph_layouts{};
+    std::vector<FrameGraphLayout::ResourceShape> graph_direct_shapes_scratch;
+    std::vector<render_graph::ResourceAlias> graph_alias_scratch;
     std::uint64_t graph_layout_use_serial{};
     RenderGraphQueueExecutor graph_queue_executor;
-    std::array<TransientResourcePool,kFrameCount> transient_pools;
     UINT rtv_stride{};
     UINT dsv_stride{};
     UINT srv_stride{};
-    std::uint32_t width{};
-    std::uint32_t height{};
-    std::uint32_t render_width{};
-    std::uint32_t render_height{};
-    std::uint32_t last_presented_index{};
-    std::uint64_t frame_number{};
-    GpuLodStateBuffer dynamic_lod_states;
-    std::uint32_t lod_session_epoch{};
     bool frame_submission_faulted{};
-    std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
+    std::array<GeometryPageDescriptorBank, kFrameCount> geometry_page_descriptor_banks{};
     std::uint64_t validation_errors{};
     RendererValidationStatus validation_status{};
     std::uint32_t last_particle_count{};
@@ -2065,7 +2029,6 @@ struct D3D12Renderer::Impl
     bool mesh_shader_supported{};
     bool mesh_shader_enabled{};
     bool dred_enabled{};
-    bool transient_textures_common{};
     bool particles_initialized{};
     bool particle_input_is_a{true};
     bool initialized{};

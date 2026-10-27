@@ -2,6 +2,7 @@
 #include "scene_hlod_cooker.hpp"
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 
 #include <algorithm>
 #include <array>
@@ -375,8 +376,8 @@ void TestGroundDetailCanonicalLayoutDigest()
         if (!assets.insert(instance.asset_id.value).second) continue;
         const auto ordinal = rd::EnvironmentGeometryOrdinal(instance.mesh,instance.environment_variant);
         const auto id = "render/" + std::string(rd::kEnvironmentMaterialNames[ordinal]) + ".rpkg";
-        materials.push_back({instance.mesh == hs::RenderMesh::GroundDetail
-            ? std::string("render/material/ground_detail.rpkg") : id});
+        materials.push_back({rd::MaterialProduct(
+            rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(ordinal)])});
         sources.push_back({instance.asset_id,id,&geometry,materials.back()});
     }
     gc::SceneHlodCookOptions options; options.error_worker_count = 1;

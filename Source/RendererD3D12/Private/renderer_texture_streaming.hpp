@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -31,6 +32,26 @@ struct TextureStreamingCapabilities
 {
     bool tiled_resources{}, sampler_feedback{}, packed_mip_arrays{}, unified_memory{};
 };
+// Select whole authenticated subresources under a host-payload limit. A single
+// subresource is never split because its digest authenticates the full range.
+[[nodiscard]] inline std::size_t TextureReadChunkEnd(
+    std::span<const std::uint32_t> subresources,
+    std::span<const render_data::TextureSubresourceLayout> layouts,
+    std::size_t first, std::uint64_t byte_budget) noexcept
+{
+    if (first > subresources.size()) return first;
+    std::uint64_t bytes{};
+    auto end = first;
+    while (end < subresources.size())
+    {
+        const auto index = subresources[end];
+        if (index >= layouts.size() || !layouts[index].has_digest || !layouts[index].byte_count ||
+            layouts[index].byte_count > byte_budget - bytes) break;
+        bytes += layouts[index].byte_count;
+        ++end;
+    }
+    return end;
+}
 struct TextureStreamRegistration
 {
     std::string generation, logical_id;

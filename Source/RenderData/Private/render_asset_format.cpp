@@ -3,6 +3,7 @@
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/geometry_package.hpp>
 #include <hs/render_data/geometry_hierarchy.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/character_animation_extension.hpp>
 
 #include <algorithm>
@@ -147,7 +148,7 @@ bool ValidId(std::string_view id)
     return id.find("..") == std::string_view::npos;
 }
 
-constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::AutoFgCadence);
+constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference);
 
 bool Known(std::uint32_t type)
 {
@@ -235,6 +236,9 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
     else if (type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
         Require(stride == kGeometryHierarchyReferenceStride && count == 1 && size == stride,
                 "invalid geometry hierarchy reference chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
+        Require(stride == kGeometryMaterialReferenceStride && count == 1 && size == stride,
+                "invalid geometry material reference chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::CharacterMaterialBindings))
         Require(stride == kCharacterMaterialBindingStride && count > 0 && count <= 131070u &&
                 size == CheckedMul(count, stride), "invalid character material binding chunk");
@@ -367,6 +371,8 @@ std::vector<std::byte> BuildPackage(AssetId asset_id,
                 ValidateEncodedVertices(chunk.bytes);
             else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
                 (void)DecodeGeometryHierarchyReference(chunk.bytes, dependencies);
+            else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
+                (void)DecodeGeometryMaterialReference(chunk.bytes, dependencies);
         }
         total = CheckedAdd(total, chunk.bytes.size());
     }
@@ -583,6 +589,8 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
             (void)DecodeMaterialSurfaceLayout(chunk_bytes);
         else if (type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
             (void)DecodeGeometryHierarchyReference(chunk_bytes, view.dependencies);
+        else if (type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
+            (void)DecodeGeometryMaterialReference(chunk_bytes, view.dependencies);
         view.chunks.push_back({static_cast<ChunkType>(type), version, flags == 1, chunk_bytes,
                                item_count, item_stride});
     }

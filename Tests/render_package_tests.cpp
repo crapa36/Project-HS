@@ -68,8 +68,8 @@ void TestMonsterLodDrawOrder()
     sources[2].mesh = hs::RenderMesh::MonsterRanged;
     sources[3].mesh = hs::RenderMesh::MonsterMelee;
     const std::array<std::uint16_t, 4> lods{0, 2, 1, 0};
-    std::vector<std::uint32_t> indices;
-    const auto order = hs::BuildRenderInstanceOrderWithMonsterLods(sources, lods, 1.0f, indices);
+    std::vector<std::uint32_t> indices, order_scratch;
+    const auto order = hs::BuildRenderInstanceOrderWithMonsterLods(sources, lods, 1.0f, indices, order_scratch);
     Require(order.has_value() && indices == std::vector<std::uint32_t>{0, 3, 1, 2},
         "monster LOD partition changed canonical draw identity");
     Require(order->monster_lod_ranges[0] == std::pair<std::size_t, std::size_t>{1, 1} &&
@@ -78,7 +78,7 @@ void TestMonsterLodDrawOrder()
         "monster family LOD ranges are not contiguous");
     auto invalid = lods;
     invalid[1] = 3;
-    Require(!hs::BuildRenderInstanceOrderWithMonsterLods(sources, invalid, 1.0f, indices),
+    Require(!hs::BuildRenderInstanceOrderWithMonsterLods(sources, invalid, 1.0f, indices, order_scratch),
         "unsupported monster LOD was accepted");
 
     std::array<hs::render_data::GeometryMetadata, 3> pages{};
@@ -413,7 +413,7 @@ void TestMaterialDescriptors()
         rd::MaterialParameterDefinition p; p.id = std::move(id); p.type = rd::MaterialParameterType::Float;
         p.default_words[0] = std::bit_cast<std::uint32_t>(value); return p;
     };
-    const std::string env_id = "render/rock_0.rpkg";
+    const std::string env_id = "render/material/rock_0/material.rpkg";
     const std::string env_parameters = rd::MaterialParametersProduct(env_id);
     const std::array parameters{scalar("metallic", 0.25f), scalar("roughness_scale", 1.2f)};
     const std::array definitions{
@@ -481,6 +481,8 @@ void TestMaterialDescriptors()
     Reject([&] { (void)rd::CompileMaterialDescriptor(env_id,material_bytes,incompatible,bulk_index(assets,env_id),assets,textures); },
            "material compiler accepted mismatched parameter layout");
     Require(rd::IsMaterialDescriptorProduct(env_id) && rd::IsMaterialDescriptorProduct("render/material/terrain.rpkg") &&
+            rd::MaterialProduct("rock_0") == env_id &&
+            !rd::IsMaterialDescriptorProduct("render/rock_0.rpkg") &&
             !rd::IsMaterialDescriptorProduct("render/rock_0_lod1.rpkg") && !rd::IsMaterialDescriptorProduct("render/crate_intact.rpkg"),
             "material descriptor selection included geometry-only products");
 
@@ -1487,7 +1489,7 @@ void TestGroundDetailCatalogMapping()
         hs::PopulateRenderInstanceRevisions(instance);
         Require(instance.asset_id.value==hs::MakeAssetId("render/"+std::string(rd::kEnvironmentMaterialNames[ordinal])+".rpkg").value,
                 "core geometry asset identity differs from the cooked catalog");
-        Require(instance.material_id.value==(ordinal<14?instance.asset_id.value:ordinal==33?hs::MakeAssetId("render/material/terrain.rpkg").value:hs::MakeAssetId("render/material/ground_detail.rpkg").value),
+        Require(instance.material_id.value==(ordinal<14?hs::MakeAssetId(rd::MaterialProduct(rd::kAuthoredMaterialNames[ordinal])).value:ordinal==33?hs::MakeAssetId("render/material/terrain.rpkg").value:hs::MakeAssetId("render/material/ground_detail.rpkg").value),
                 "detail material identity differs from the actual standalone product");
     }
     Require(!rd::IsEnvironmentMesh(hs::RenderMesh::DirtPatch) &&
@@ -2268,6 +2270,21 @@ void TestGeometryPackage()
         Require(chunk.bytes.data()>=page.data() && chunk.bytes.data()+chunk.bytes.size()<=page.data()+page.size(),
             "prepared package must borrow original page bytes");
     Require(decoded.vertices.size()==6 && decoded.indices==g.indices && decoded.canonical_primitive_remap==g.canonical_primitive_remap && decoded.meshlets.size()==2,"geometry roundtrip/duplicate occurrences");
+    const std::vector<std::string> material_dependencies{"render/geometry/fixture.rpage",
+        "render/material/rock_0/material.rpkg"};
+    const auto material_reference = rd::EncodeGeometryMaterialReference(1, material_dependencies);
+    Require(rd::DecodeGeometryMaterialReference(material_reference, material_dependencies) == 1,
+        "canonical geometry material reference changed");
+    Reject([&] { (void)rd::EncodeGeometryMaterialReference(0, material_dependencies); },
+        "geometry page accepted as material owner");
+    auto invalid_reference = material_reference;
+    invalid_reference[2] = std::byte{1};
+    Reject([&] { (void)rd::DecodeGeometryMaterialReference(invalid_reference, material_dependencies); },
+        "geometry material reference reserved bits accepted");
+    invalid_reference = material_reference;
+    invalid_reference[0] = std::byte{2};
+    Reject([&] { (void)rd::DecodeGeometryMaterialReference(invalid_reference, material_dependencies); },
+        "geometry material dependency index out of range accepted");
     Reject([&]{(void)rd::DecodeGeometryMetadata(metadata,deps,"render/other.rpkg");},"wrong page product accepted");
     auto reserved=metadata;reserved[88]=std::byte{1};Reject([&]{(void)rd::DecodeGeometryMetadata(reserved,deps,"render/fixture.rpkg");},"metadata reserved accepted");
     auto bad=g;bad.canonical_primitive_remap[1]=1;Reject([&]{rd::ValidateGeometryData(bad);},"duplicate primitive occurrence accepted");

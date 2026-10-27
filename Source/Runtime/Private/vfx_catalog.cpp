@@ -64,8 +64,9 @@ const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
 }
 
 Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_fraction,
-                          std::vector<ParticleSpawnCommand> &particles,
-                          std::vector<VfxLineSpawnCommand> &lines) const
+                           std::vector<ParticleSpawnCommand> &particles,
+                           std::vector<VfxLineSpawnCommand> &lines,
+                           std::span<const Sequence> replaced_particle_sequences) const
 {
     if (event.kind != PresentationKind::Vfx)
         return Result::Success();
@@ -89,6 +90,9 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX event parameters are invalid.");
     const Float3 forward{parameters.direction.x / direction_length, 0.0f, parameters.direction.z / direction_length};
     const Float3 right{forward.z, 0.0f, -forward.x};
+    if (definition->kind != VfxDefinitionKind::Line &&
+        std::ranges::find(replaced_particle_sequences, event.sequence) != replaced_particle_sequences.end())
+        return Result::Success();
     if (definition->kind == VfxDefinitionKind::Line)
     {
         if ((parameters.flags & static_cast<std::uint32_t>(VfxEventFlag::HasTarget)) == 0)

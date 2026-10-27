@@ -327,12 +327,12 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
         if (staticSource)
             skin = HsLoadGpuSceneSkin(HsStaticScene, draw.InstanceIndex);
         else
-            skin = HsLoadGpuSceneSkin(HsDynamicScene, draw.InstanceIndex);
+            skin = HsLoadGpuSceneSkin(draw.InstanceIndex);
         context.skinSlot = skin.x;
         context.skinVertexOffsets = skin.zw;
         context.skinVertexStrides = staticSource
             ? HsLoadGpuSceneSkinStrides(HsStaticScene, draw.InstanceIndex)
-            : HsLoadGpuSceneSkinStrides(HsDynamicScene, draw.InstanceIndex);
+            : HsLoadGpuSceneSkinStrides(draw.InstanceIndex);
     }
     context.instance.Mesh |= draw.MeshFlags;
     const uint resolvedMesh = context.instance.Mesh & 0xffu;
@@ -429,8 +429,8 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
                                                    c.WorldNormal, sample.barycentric));
     output.WorldPosition = HsInterpolate3(a.WorldPosition, b.WorldPosition,
                                            c.WorldPosition, sample.barycentric);
-    output.PreviousWorldPosition = HsInterpolate3(a.PreviousWorldPosition,
-        b.PreviousWorldPosition, c.PreviousWorldPosition, sample.barycentric);
+    output.PreviousUnjitteredClipPosition = a.PreviousUnjitteredClipPosition * sample.barycentric.x +
+        b.PreviousUnjitteredClipPosition * sample.barycentric.y + c.PreviousUnjitteredClipPosition * sample.barycentric.z;
     output.Color = a.Color * sample.barycentric.x + b.Color * sample.barycentric.y +
                    c.Color * sample.barycentric.z;
     output.Uv = HsInterpolate2(a.Uv, b.Uv, c.Uv, sample.barycentric);

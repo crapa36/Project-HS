@@ -1087,7 +1087,7 @@ std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
 
 std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
     const VfxProgramView &cooked,
-    std::span<const VfxEventInput> events,
+    VfxEventView events,
     double current_tick)
 {
     std::vector<VfxRibbonSourceInput> result;

@@ -1,4 +1,5 @@
 #pragma once
+#include "vfx_event_view.hpp"
 
 #include <hs/render_data/vfx_ribbon_input.hpp>
 #include <hs/renderer/vfx_program.hpp>
@@ -11,6 +12,6 @@ namespace hs::runtime_detail
 
 [[nodiscard]] std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
     const VfxProgramView &cooked,
-    std::span<const VfxEventInput> events,
+    VfxEventView events,
     double current_tick);
 }

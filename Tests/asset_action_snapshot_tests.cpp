@@ -1,4 +1,5 @@
 #include "../Source/Apps/AssetPipeline/action.hpp"
+#include "../Source/Apps/AssetPipeline/shader_source_snapshot.hpp"
 
 #include <stdexcept>
 #include <sstream>
@@ -16,13 +17,25 @@ void TestAssetActionSnapshot()
         spec.recipe_id = "snapshot.fixture";
         spec.recipe_version = 1;
         spec.namespace_path = "snapshot/fixture";
+        const auto input_path = root / "fixture.input";
+        constexpr std::string_view input_bytes = "receipt input";
+        const auto bytes = [](std::string_view value) { return std::as_bytes(std::span(value.data(), value.size())); };
+        ap::WriteBytes(input_path, bytes(input_bytes));
+        spec.inputs.push_back(ap::HashInput("fixture/input", input_path));
         const auto stage = ap::CreateStage(root / "Actions" / spec.namespace_path);
         constexpr std::string_view original = "verified bytes";
-        const auto bytes = [](std::string_view value) { return std::as_bytes(std::span(value.data(), value.size())); };
         ap::WriteBytes(stage / "fixture.bin", bytes(original));
         ap::Publish(root, spec, stage,
                     {ap::HashProduct("fixture/payload", "fixture.bin", stage / "fixture.bin")});
         const ap::ActionResultSnapshot snapshot(root, spec.namespace_path);
+        const auto &input_metadata = snapshot.InputMetadata();
+        if (!input_metadata.is_array() || input_metadata.size() != 1 ||
+            input_metadata.at(0).at("logical_id") != "fixture/input" ||
+            input_metadata.at(0).at("digest") != spec.inputs.front().digest)
+            throw std::runtime_error("snapshot input receipt metadata differs");
+        ap::WriteBytes(input_path, bytes("changed input"));
+        if (snapshot.InputMetadata().at(0).at("digest") != spec.inputs.front().digest)
+            throw std::runtime_error("snapshot input receipt changed with source file");
         if (!snapshot.HasProduct("fixture/payload") || snapshot.HasProduct("fixture/other"))
             throw std::runtime_error("snapshot product membership differs");
         ap::UpstreamProduct dependency;
@@ -60,6 +73,23 @@ void TestAssetActionSnapshot()
         rejects([&] { std::ostringstream out; out.setstate(std::ios::badbit); snapshot.CopyProductBytesTo("fixture/payload",out,dependency); });
         if (snapshot.ReadProductBytes("fixture/payload", dependency) != original)
             throw std::runtime_error("repaired product did not reopen");
+
+        const auto source = root / "sources" / "Content/Shaders";
+        ap::MakeDirectory(source);
+        ap::WriteBytes(source / "fixture.hlsl", bytes("#include \"fixture.hlsli\"\n"));
+        ap::WriteBytes(source / "fixture.hlsli", bytes("original include"));
+        const std::vector shader_inputs{
+            ap::HashInput("Content/Shaders/fixture.hlsl", source / "fixture.hlsl"),
+            ap::HashInput("Content/Shaders/fixture.hlsli", source / "fixture.hlsli")};
+        const auto shader_stage = ap::CreateStage(root / "shader-actions");
+        const auto frozen = hs::shader_content::CreateShaderSourceSnapshot(shader_inputs, shader_stage);
+        ap::WriteBytes(source / "fixture.hlsl", bytes("changed source"));
+        ap::WriteBytes(source / "fixture.hlsli", bytes("changed include"));
+        if (ap::ReadBytes(frozen / "Content/Shaders/fixture.hlsl") != "#include \"fixture.hlsli\"\n" ||
+            ap::ReadBytes(frozen / "Content/Shaders/fixture.hlsli") != "original include")
+            throw std::runtime_error("source edit changed the compiler snapshot");
+        const auto changed_stage = ap::CreateStage(root / "shader-actions");
+        rejects([&] { (void)hs::shader_content::CreateShaderSourceSnapshot(shader_inputs, changed_stage); });
     }
     catch (...)
     {

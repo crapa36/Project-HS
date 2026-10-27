@@ -70,6 +70,7 @@ class RendererDevelopmentCatalog
     std::vector<render_data::MaterialDescriptorStorage> material_storage_;
     std::vector<render_data::MaterialDescriptor> material_views_;
     std::unordered_set<std::uint64_t> closure_ids_;
+    std::unordered_set<std::uint64_t> source_revision_assets_;
 
 public:
     std::vector<render_data::RendererBulkDescriptor> bulks;
@@ -81,6 +82,20 @@ public:
         config.packed_materials = material_views_;
     }
     [[nodiscard]] bool Contains(AssetId asset) const noexcept { return closure_ids_.contains(asset.value); }
+    [[nodiscard]] bool HasSourceRevision(std::string_view id) const
+    {
+        return HasSourceRevision(MakeAssetId(id));
+    }
+    [[nodiscard]] bool HasSourceRevision(AssetId asset) const noexcept
+    {
+        return source_revision_assets_.contains(asset.value);
+    }
+    [[nodiscard]] bool HasRuntimeProduct(AssetId asset) const noexcept
+    {
+        const auto found = std::lower_bound(bulks.begin(), bulks.end(), asset.value,
+            [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
+        return found != bulks.end() && found->asset_id.value == asset.value;
+    }
 
     [[nodiscard]] std::uint32_t BulkIndex(AssetId asset) const
     {
@@ -371,6 +386,17 @@ public:
                 throw std::runtime_error("Developer Generation AssetId collision");
             if (id.starts_with("render/") || id == "vfx/vfx_mesh_atlas.hsbin")
                 products.emplace_back(MakeAssetId(id), id);
+            else
+            {
+                const auto digest = config.product_digests.find(id);
+                if (!MakeAssetId(id).value || digest == config.product_digests.end() ||
+                    digest->second.size() != 71 || !digest->second.starts_with("sha256:") ||
+                    !std::ranges::all_of(std::string_view(digest->second).substr(7), [](char value) {
+                        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+                    }))
+                    throw std::runtime_error("Invalid developer source revision identity: " + id);
+                result->source_revision_assets_.insert(MakeAssetId(id).value);
+            }
         }
         std::ranges::sort(products, {}, [](const auto &entry) { return entry.first.value; });
         if (products.empty() || products.size() > UINT32_MAX)

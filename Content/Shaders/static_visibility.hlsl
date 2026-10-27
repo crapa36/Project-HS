@@ -14,7 +14,6 @@ cbuffer FrameConstants : register(b0)
     float4x4 ShadowViewProjection[3];
     float4 ShadowAtlasScaleOffset[3];
     float4 ShadowAtlasTexelSize;
-    row_major float4x4 ArcherBones[128];
     uint4 MonsterAssetMeta[6];
     uint4 MonsterClipMeta[6][5];
     float4 RenderOptions;
@@ -566,18 +565,22 @@ void StaticVisibilityCS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIn
         if (local < range.Count)
         {
             draw = StaticSceneDraws[range.Begin + local];
-            const InstanceData instance = HsLoadGpuSceneInstance(draw.InstanceIndex);
-            float3 center;
-            float radius;
-            ResolveVisibilitySphere(instance, draw, center, radius);
-            visible = SphereInFrustum(center, radius, view_projection) &&
-                ((GeometryDrawRecords.Load(range.DrawRecordBase * 64u + 28u) & 4u) == 0u ||
-                (HsHlodLeafViewMask(draw.InstanceIndex, draw.InstanceGeneration) & (1u << group_id.y)) != 0u);
-            if (visible && group_id.y == 0 && GrassDeformationRadius >= 0.0)
+            // Qualified bounds without allocated skin have no package consumer.
+            if ((draw.MeshFlags & 0x440000u) != 0x400000u)
             {
-                rejected = SphereOccludedByHzb(
-                    center, radius, PreviousViewProjection);
-                visible = !rejected;
+                const InstanceData instance = HsLoadGpuSceneInstance(draw.InstanceIndex);
+                float3 center;
+                float radius;
+                ResolveVisibilitySphere(instance, draw, center, radius);
+                visible = SphereInFrustum(center, radius, view_projection) &&
+                    ((GeometryDrawRecords.Load(range.DrawRecordBase * 64u + 28u) & 4u) == 0u ||
+                    (HsHlodLeafViewMask(draw.InstanceIndex, draw.InstanceGeneration) & (1u << group_id.y)) != 0u);
+                if (visible && group_id.y == 0 && GrassDeformationRadius >= 0.0)
+                {
+                    rejected = SphereOccludedByHzb(
+                        center, radius, PreviousViewProjection);
+                    visible = !rejected;
+                }
             }
         }
         visible_flags[thread_id] = visible ? 1u : 0u;

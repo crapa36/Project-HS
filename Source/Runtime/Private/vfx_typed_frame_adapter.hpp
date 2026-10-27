@@ -21,8 +21,8 @@ struct VfxTypedFrameInputs
     std::vector<std::uint64_t> unsupported_effect_ids;
 };
 
-// Indexes the one retained publication pair without owning snapshots or rows.
-// Duplicate identities deliberately retain the first source-order match.
+// Indexes ordered row identities of the retained publication pair, never its addresses.
+// Duplicate identities retain the first source-order match; unidentified inputs rebuild.
 class PreparedPairFacts
 {
   public:
@@ -30,9 +30,6 @@ class PreparedPairFacts
     {
         std::uint64_t session_id{};
         Sequence previous_publication{}, current_publication{};
-        std::uint32_t quality{};
-        std::uint64_t binding_revision{}, geometry_revision{};
-        const void *previous_data{}, *current_data{}, *instance_data{}, *capture_data{};
         std::size_t previous_count{}, current_count{}, instance_count{}, capture_count{};
         bool operator==(const Key &) const = default;
     };
@@ -120,8 +117,15 @@ class VfxUpgradeMovementState
     std::vector<Owner> owners_;
 };
 
-// Refresh retained warning events from their authoritative persistent
-// owner. Events without owner metadata are preserved unchanged.
+// Refresh one retained warning event from its authoritative persistent owner.
+// False means its owner/recipe/age contract is no longer retainable.
+[[nodiscard]] bool RefreshVfxGroundEventOwner(
+    VfxEventInput &event, std::span<const PersistentVfxVisual> owners,
+    Tick current_tick, const PreparedPairFacts *pair_facts = nullptr,
+    std::span<const PersistentVfxVisual> previous = {}, float interpolation = 1.0f);
+
+// Refresh retained warning events from their authoritative persistent owners.
+// Events without owner metadata are preserved unchanged.
 void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
                                  std::span<const PersistentVfxVisual> owners,
                                  Tick current_tick,

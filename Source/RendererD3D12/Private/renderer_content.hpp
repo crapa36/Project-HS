@@ -270,6 +270,44 @@ inline Result ResolveRendererAsset(const RendererConfig &config, std::string_vie
     return Result::Success();
 }
 
+inline bool RendererIsSourceRevision(const RendererConfig &config, std::string_view id)
+{
+    const auto asset = MakeAssetId(id).value;
+    if (!asset) return false;
+    if (config.packed_content)
+    {
+        const auto entries = config.packed_source_revisions;
+        const auto found = std::lower_bound(entries.begin(), entries.end(), asset,
+            [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
+        return found != entries.end() && found->asset_id.value == asset && found->product_id == id;
+    }
+    return config.development_catalog && config.development_catalog->HasSourceRevision(id);
+}
+
+inline bool RendererIsSourceRevision(const RendererConfig &config, AssetId asset)
+{
+    if (!asset.value) return false;
+    if (config.packed_content)
+    {
+        const auto entries = config.packed_source_revisions;
+        const auto found = std::lower_bound(entries.begin(), entries.end(), asset.value,
+            [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
+        return found != entries.end() && found->asset_id.value == asset.value;
+    }
+    return config.development_catalog && config.development_catalog->HasSourceRevision(asset);
+}
+
+inline bool RendererIsAdmittedRuntimeProduct(const RendererConfig &config, std::string_view id)
+{
+    const auto asset = MakeAssetId(id);
+    if (!asset.value || RendererIsSourceRevision(config, id)) return false;
+    if (config.packed_content) return FindRendererBulk(config, id) != nullptr;
+    if (config.development_catalog) return config.development_catalog->HasRuntimeProduct(asset);
+    // Without an admitted runtime or provenance table, preserve the legacy leased
+    // Generation behavior: ResolveProduct and its digest map authenticate the edge.
+    return config.product_paths.contains(std::string(id));
+}
+
 inline Result ReadRendererMaterialProgram(const RendererConfig &config,
     const render_data::MaterialProgramDescriptor &program, std::vector<std::byte> &output)
 {

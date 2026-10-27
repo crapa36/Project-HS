@@ -27,9 +27,12 @@ std::string Vector(Float4 value)
 {
     return "{" + F(value.x) + "," + F(value.y) + "," + F(value.z) + "," + F(value.w) + "}";
 }
-std::string Vector(const std::array<float, 4> &value)
+template <std::size_t N>
+std::string Vector(const std::array<float, N> &value)
 {
-    return "{" + F(value[0]) + "," + F(value[1]) + "," + F(value[2]) + "," + F(value[3]) + "}";
+    std::string result="{";
+    for(std::size_t i=0;i<N;++i){if(i)result+=",";result+=F(value[i]);}
+    return result+"}";
 }
 std::string Row(const CookedVfxDefinition &r)
 {
@@ -109,6 +112,100 @@ std::string Row(const VfxLightRecipe &r)
         F(r.seconds) + "," + F(r.radius) + "," + Vector(r.knots) + "," + Vector(r.rgb) + "," + F(r.hdr) + "," + F(r.alpha) + "," +
         Range(r.curve_keys) + "," + U(r.interpolation) + "," + (r.hero ? "true" : "false") + "}";
 }
+std::string Row(const VfxBallisticRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.source_stable_id) + "," +
+        U(r.payload_kind) + "," + U(r.importance) + "," + U(r.timing_kind) + "," + U(r.shape) + "," + U(r.min_quality) + "," +
+        U(r.gradient_row) + "," + U(r.mesh_index) + "," + U(r.count) + "," + U(r.knot_count) + "," +
+        Enum("VfxSourceType",r.source_type) + "," + Enum("VfxMotionKind",r.motion) + "," + Vector(r.knots) + "," +
+        F(r.seconds) + "," + F(r.min_size) + "," + F(r.max_size) + "," + F(r.min_speed) + "," + F(r.max_speed) + "," +
+        F(r.gravity) + "," + F(r.bounce) + "," + F(r.drag) + "," + F(r.speed) + "," + F(r.cone) + "," + F(r.min_spin) + "," +
+        F(r.max_spin) + "," + Vector(r.color) + "," + F(r.hdr) + "," + (r.persistent_status ? "true" : "false") + "}";
+}
+std::string Row(const VfxDistortionRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_stable_id) + "," + U(r.payload_kind) + "," + U(r.importance) + "," +
+        U(r.input_mode) + "," + U(r.timing_kind) + "," + U(r.min_quality) + "," + U(r.knot_count) + "," + Enum("VfxDistortionShape",r.kind) + "," +
+        Enum("VfxMotionKind",r.motion) + "," + Vector(r.knots) + "," + F(r.seconds) + "," + F(r.radius) + "," + F(r.strength) + "," + F(r.alpha) + "}";
+}
+std::string Row(const VfxDecalRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_stable_id) + "," + U(r.payload_kind) + "," + U(r.importance) + "," +
+        U(r.input_mode) + "," + U(r.timing_kind) + "," + U(r.min_quality) + "," + U(r.knot_count) + "," + Enum("VfxDecalKind",r.kind) + "," +
+        Vector(r.knots) + "," + F(r.seconds) + "," + F(r.hdr) + "," + F(r.alpha) + "," + F(r.edge_glow) + "," + Vector(r.linear_rgb) + "," +
+        U(r.gradient_row) + "," + U(r.voronoi_cells) + "," + U(r.texture_slice_base) + "," + U(r.texture_min_quality) + "}";
+}
+std::string Row(const VfxGroundRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.source_stable_id) + "," + U(r.output_index) + "," + U(r.gradient_row) + "," +
+        U(r.payload_kind) + "," + U(r.timing_kind) + "," + U(r.min_quality) + "," + Enum("VfxSourceType",r.source_type) + "," +
+        Enum("VfxOutputProfile",r.profile) + "," + Enum("VfxMotionKind",r.motion) + "," + Enum("VfxGroundRecipeKind",r.kind) + "," + U(r.knot_count) + "," +
+        Vector(r.knots) + "," + Range(r.pulse_curve_keys) + "," + U(r.pulse_curve_interpolation) + "," + U(r.tick_count) + "," +
+        F(r.seconds) + "," + F(r.primary) + "," + F(r.secondary) + "," + Vector(r.rgb) + "," + F(r.hdr) + "," + F(r.alpha) + "," +
+        F(r.motion_rate_hz) + "," + F(r.motion_amplitude) + "," + F(r.motion_inset_fraction) + "," + F(r.tertiary) + "," +
+        "{{" + Range(r.mask_variants[0].slices) + "," + F(r.mask_variants[0].strength) + "," + (r.mask_variants[0].valid?"true":"false") + "," + (r.mask_variants[0].present?"true":"false") + "},{" +
+        Range(r.mask_variants[1].slices) + "," + F(r.mask_variants[1].strength) + "," + (r.mask_variants[1].valid?"true":"false") + "," + (r.mask_variants[1].present?"true":"false") + "},{" +
+        Range(r.mask_variants[2].slices) + "," + F(r.mask_variants[2].strength) + "," + (r.mask_variants[2].valid?"true":"false") + "," + (r.mask_variants[2].present?"true":"false") + "}}," +
+        (r.texture_contract_valid?"true":"false") + "," + U(r.source_output_count) + "," + (r.source_parameters_empty?"true":"false") + "}";
+}
+std::string Row(const VfxFlashSpawnInput &r)
+{
+    return "{" + Vector(r.position) + "," + Vector(r.color) + "," + F(r.size) + "," + F(r.delay) + "," + F(r.lifetime) + "," +
+        U(r.event_tick) + "," + U(r.stable_seed) + "," + U(r.gradient_row) + "," + F(r.hdr) + "," + F(r.normalized_age) + "," +
+        Enum("VfxImpactShape",r.shape) + "," + Vector(r.direction) + "," + F(r.aspect) + "," + U(r.curve_row) + "," + U(r.mask_slice) + "," +
+        F(r.mask_strength) + "," + Vector(r.initial_offset) + "," + Vector(r.initial_velocity) + "," + F(r.orbit_radius) + "," + F(r.orbit_phase) + "," +
+        F(r.orbit_rate) + "," + F(r.drag) + "," + (r.oit?"true":"false") + "," + (r.ground_base_anchor?"true":"false") + "," +
+        U(r.fbm_octaves) + "," + U(r.smoke_first_frame) + "," + U(r.smoke_frame_count) + "," + F(r.domain_warp) + "," + F(r.smoke_fps) + "," +
+        F(r.opacity_scale) + "," + F(r.motion_strength) + "," + F(r.procedural_flow_speed) + "," + Vector(r.previous_position) + "," +
+        (r.interpolate_owner_position?"true":"false") + "}";
+}
+std::string Row(const VfxFlashRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.source_stable_id) + "," + U(r.output_index) + "," +
+        U(r.payload_kind) + "," + U(r.min_quality) + "," + Vector(r.knots) + "," + F(r.seconds) + "," + U(r.coverage_quality) + "," + Row(r.spawn) + "," +
+        "{" + Range(r.mask_slice_ranges[0]) + "," + Range(r.mask_slice_ranges[1]) + "," + Range(r.mask_slice_ranges[2]) + "}," +
+        Vector(r.mask_strengths) + "," + U(r.supported_quality_mask) + "," + U(r.mask_present_mask) + "," +
+        (r.unique_effect_identity?"true":"false") + "}";
+}
+std::string Row(const VfxPersistentStampRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_visual_kind) + "," +
+        U(r.payload_kind) + "," + U(r.source_stable_id) + "," + U(r.timing_kind) + "," +
+        F(r.fixed_seconds) + "," + F(r.source_end) + "," + Row(r.spawn) + ",{" +
+        Range(r.mask_slices[0]) + "," + Range(r.mask_slices[1]) + "," + Range(r.mask_slices[2]) + "}," +
+        Vector(r.mask_strengths) + "," + U(r.supported_quality_mask) + "," + U(r.mask_present_mask) + "," +
+        (r.bleed_extend ? "true" : "false") + "}";
+}
+std::string Row(const VfxPersistentFireRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_stable_id) + "," +
+        U(r.rate) + "," + F(r.radius_scale) + "," + Row(r.spawn) + "," + Range(r.mask_slices) + "," +
+        F(r.mask_strength) + "}";
+}
+std::string Row(const VfxOwnedStatusTickRecipe &r)
+{
+    return "{" + U64(r.tick_effect_id) + "," + U64(r.status_effect_id) + "," +
+        U(r.tick_effect_handle) + "," + U(r.status_effect_handle) + "," + U(r.min_quality) + "," +
+        F(r.tick_seconds) + "," + F(r.delay_fraction) + "," + F(r.lifetime_fraction) + "," +
+        Row(r.spawn) + ",{ " + U(r.mask_slices[0]) + "," +
+        U(r.mask_slices[1]) + "," + U(r.mask_slices[2]) + "}," + F(r.mask_strength) + "," +
+        (r.bleed ? "true" : "false") + "}";
+}
+std::string Row(const VfxMoteSourceRecipe &r)
+{
+    return "{" + U(r.count) + "," + std::to_string(r.rate) + "," +
+        F(r.curl) + "," + F(r.drag) + "," + F(r.speed) + "," + F(r.cone_degrees) + "," +
+        (r.common_params_valid ? "true" : "false") + "," + (r.rate_valid ? "true" : "false") + "," +
+        (r.residual_valid ? "true" : "false") + "," + (r.spark_valid ? "true" : "false") + "}";
+}
+std::string Row(const VfxMoteOutputRecipe &r)
+{
+    return "{" + U(r.min_quality) + "," + U(r.gradient_row) + ",{" + Range(r.mask_slices[0]) + "," + Range(r.mask_slices[1]) + "," +
+        Range(r.mask_slices[2]) + "},{" + Vector(r.mask_strengths) + "}," + U(r.persistent_curve_row) + "," +
+        F(r.persistent_size) + "," + F(r.hdr) + "," + Vector(r.color) + "," + U(r.mask_present_mask) + "," + U(r.mask_quality_mask) + "," +
+        (r.output_color_valid ? "true" : "false") + "," +
+        (r.persistent_params_valid ? "true" : "false") + "," + (r.spark_textures_valid ? "true" : "false") + "}";
+}
 std::string Row(std::uint32_t value) { return U(value); }
 std::string Row(std::uint8_t value) { return U(value); }
 std::string Row(std::byte value) { return "std::byte{" + U(std::to_integer<std::uint32_t>(value)) + "}"; }
@@ -148,6 +245,25 @@ std::string EmitReleaseVfxCpp(const VfxImage &image)
     Array(source, "std::uint32_t", "kVfxUpgradeSequences", image.program.upgrade_sequences);
     Array(source, "VfxRange", "kLightRanges", image.light_effect_ranges);
     Array(source, "VfxLightRecipe", "kLightRecipes", image.light_recipes);
+    Array(source, "VfxRange", "kBallisticRanges", image.ballistic_effect_ranges);
+    Array(source, "VfxBallisticRecipe", "kBallisticRecipes", image.ballistic_recipes);
+    Array(source, "std::uint32_t", "kEffectOutputProfiles", image.effect_output_profiles);
+    Array(source, "VfxRange", "kDistortionRanges", image.distortion_effect_ranges);
+    Array(source, "VfxDistortionRecipe", "kDistortionRecipes", image.distortion_recipes);
+    Array(source, "VfxRange", "kDecalRanges", image.decal_effect_ranges);
+    Array(source, "VfxDecalRecipe", "kDecalRecipes", image.decal_recipes);
+    Array(source, "VfxRange", "kGroundRanges", image.ground_effect_ranges);
+    Array(source, "VfxGroundRecipe", "kGroundRecipes", image.ground_recipes);
+    Array(source, "VfxRange", "kFlashRanges", image.flash_effect_ranges);
+    Array(source, "VfxFlashRecipe", "kFlashRecipes", image.flash_recipes);
+    Array(source, "VfxRange", "kPersistentStampRanges", image.persistent_stamp_effect_ranges);
+    Array(source, "VfxPersistentStampRecipe", "kPersistentStampRecipes", image.persistent_stamp_recipes);
+    Array(source, "VfxRange", "kPersistentFireRanges", image.persistent_fire_effect_ranges);
+    Array(source, "VfxPersistentFireRecipe", "kPersistentFireRecipes", image.persistent_fire_recipes);
+    Array(source, "VfxRange", "kOwnedStatusTickRanges", image.owned_status_tick_effect_ranges);
+    Array(source, "VfxOwnedStatusTickRecipe", "kOwnedStatusTickRecipes", image.owned_status_tick_recipes);
+    Array(source, "VfxMoteSourceRecipe", "kMoteSourceRecipes", image.mote_source_recipes);
+    Array(source, "VfxMoteOutputRecipe", "kMoteOutputRecipes", image.mote_output_recipes);
     source +=
         "constinit const VfxImage kVfx{\n"
         "    kVfxDefinitions,kVfxEmitters,kVfxSprites,kVfxAuthoredMeshes,kVfxDecorativeDefinitions,\n"
@@ -160,7 +276,11 @@ std::string EmitReleaseVfxCpp(const VfxImage &image)
         Row(image.sprite_bindings.slow_status_sprite) + "," + Row(image.sprite_bindings.mark_status_sprite) + "," +
         Row(image.sprite_bindings.trap_sprite) + "," + Row(image.sprite_bindings.fire_area_sprite) + "},";
     source += image.has_required_sprite_bindings ? "true,\n" : "false,\n";
-    source += "kLightRanges,kLightRecipes};\n}\nconst VfxImage &Vfx() noexcept { return kVfx; }\n}\n";
+    source += "kLightRanges,kLightRecipes,kBallisticRanges,kBallisticRecipes,kEffectOutputProfiles,kDistortionRanges,kDistortionRecipes,kDecalRanges,kDecalRecipes,"
+        "kGroundRanges,kGroundRecipes,kFlashRanges,kFlashRecipes,kPersistentStampRanges,kPersistentStampRecipes,"
+        "kPersistentFireRanges,kPersistentFireRecipes,kOwnedStatusTickRanges,kOwnedStatusTickRecipes,"
+        "kMoteSourceRecipes,kMoteOutputRecipes};\n}\n"
+        "const VfxImage &Vfx() noexcept { return kVfx; }\n}\n";
     return source;
 }
 }

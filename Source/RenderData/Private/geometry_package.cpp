@@ -1,5 +1,6 @@
 #include <hs/render_data/geometry_package.hpp>
 #include <hs/render_data/geometry_descriptor.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <algorithm>
 #include <bit>
@@ -100,6 +101,23 @@ GeometryMetadata DecodeGeometryMetadata(std::span<const std::byte>b,std::span<co
     m.abi=Get(b,0);m.flags=Get(b,4);m.vertex_count=Get(b,8);m.index_count=Get(b,12);m.submesh_count=Get(b,16);m.meshlet_count=Get(b,20);m.vertex_ref_count=Get(b,24);m.max_material_index=Get(b,28);
     m.page_dependency_index=std::uint16_t(Get(b,32,2));m.fallback_dependency_index=std::uint16_t(Get(b,34,2));m.lod=std::uint16_t(Get(b,36,2));m.terminal_fallback_dependency_index=std::uint16_t(Get(b,38,2));
     for(std::size_t i=0;i<3;++i){m.bounds.minimum[i]=GF(b,40+i*4);m.bounds.maximum[i]=GF(b,52+i*4);}for(std::size_t i=0;i<4;++i)m.bounds.sphere[i]=GF(b,64+i*4);m.geometric_error=GF(b,80);m.error_method_abi=Get(b,84);Shape(m);Dependencies(m,d,id);return m;
+}
+std::vector<std::byte> EncodeGeometryMaterialReference(std::uint16_t index,
+    std::span<const std::string> dependencies)
+{
+    Require(index<dependencies.size()&&IsMaterialDescriptorProduct(dependencies[index]),
+        "material reference does not name a canonical material product");
+    std::vector<std::byte> bytes(kGeometryMaterialReferenceStride);Put(bytes,0,index,2);return bytes;
+}
+std::uint16_t DecodeGeometryMaterialReference(std::span<const std::byte> bytes,
+    std::span<const std::string> dependencies)
+{
+    Require(bytes.size()==kGeometryMaterialReferenceStride&&Get(bytes,2,2)==0,
+        "invalid geometry material reference size/reserved");
+    const auto index=static_cast<std::uint16_t>(Get(bytes,0,2));
+    Require(index<dependencies.size()&&IsMaterialDescriptorProduct(dependencies[index]),
+        "geometry material reference does not name a canonical material product");
+    return index;
 }
 namespace
 {

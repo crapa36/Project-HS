@@ -29,7 +29,7 @@ using Json = nlohmann::json;
 
 constexpr std::string_view kActionId = "audio";
 constexpr std::string_view kRecipeId = "project-hs.audio-copy";
-constexpr std::uint32_t kRecipeVersion = 2;
+constexpr std::uint32_t kRecipeVersion = 3;
 constexpr std::uint32_t kActionKeySchemaVersion = 1;
 
 [[noreturn]] void Fail(const std::string &message)
@@ -132,7 +132,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
     const ap::ActionResultSnapshot snapshot(build_root, "audio");
     Require(snapshot.ActionId() == spec.action_id, "cached audio Action ID changed");
     if (snapshot.ActionKeyValue() != key) return false;
-    Require(snapshot.ProductCount() == spec.inputs.size() + 2, "cached audio product set changed");
+    Require(snapshot.ProductCount() == spec.inputs.size() + 3, "cached audio product set changed");
     std::vector<ap::Product> products;
     fs::path directory;
     const auto verify = [&](const std::string &id, const std::string &filename, std::string_view source_digest = {}) {
@@ -154,6 +154,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
     }
     verify("audio/release-cpp", "release_audio.cpp");
     verify("audio/release-pcm", "release_audio.pcm");
+    verify("audio/release-identity", "release_audio.identity");
     std::ranges::sort(products, {}, &ap::Product::logical_id);
     Require(ap::ProductSetId(products) == directory.filename().string(), "cached audio ProductSet identity changed");
     std::size_t count{};
@@ -204,7 +205,7 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
     if (Current(build_root, spec, action_key))
     {
         ap::TouchActionResult(actions / "result.json");
-        std::cout << "audio current files=" << waves.size() + 3 << '\n';
+        std::cout << "audio current files=" << waves.size() + 4 << '\n';
         return;
     }
     const auto stage = ap::CreateStage(actions);
@@ -231,8 +232,10 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
             [&](std::string_view name) { return ap::ReadBytes(stage / std::string(name)); }, 64);
         ap::WriteBytes(stage / "release_audio.cpp", std::as_bytes(std::span(release.source.data(), release.source.size())));
         ap::WriteBytes(stage / "release_audio.pcm", std::as_bytes(std::span(release.pcm.data(), release.pcm.size())));
+        ap::WriteBytes(stage / "release_audio.identity", std::as_bytes(std::span(release.identity.data(), release.identity.size())));
         products.push_back(ap::HashProduct("audio/release-cpp", "release_audio.cpp", stage / "release_audio.cpp"));
         products.push_back(ap::HashProduct("audio/release-pcm", "release_audio.pcm", stage / "release_audio.pcm"));
+        products.push_back(ap::HashProduct("audio/release-identity", "release_audio.identity", stage / "release_audio.identity"));
         std::cout << "shipping-audio PCM preload_samples=" << release.preload_samples
                   << " preload_bytes=" << release.preload_bytes
                   << " transition_samples=" << release.transition_samples
@@ -242,7 +245,7 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
         const auto product_set_id = ap::ProductSetId(products);
         ap::Publish(build_root, spec, stage, std::move(products));
         std::cout << "audio action_key=" << action_key << " product_set_id="
-                  << product_set_id << " files=" << waves.size() + 3 << '\n';
+                  << product_set_id << " files=" << waves.size() + 4 << '\n';
     }
     catch (...)
     {

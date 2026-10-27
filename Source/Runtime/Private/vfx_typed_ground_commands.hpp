@@ -1,7 +1,8 @@
 #pragma once
+#include "vfx_event_view.hpp"
 
 #include <hs/render_data/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program.hpp>
+#include <hs/runtime/vfx_image.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <span>
@@ -30,13 +31,13 @@ struct VfxTypedGroundCommand
 // Callers retain the owner identity and world-space edge width alongside the
 // legacy spawn command until the renderer's exact-ring path consumes them.
 [[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
-    const VfxProgramView &cooked,
+    const VfxImage &image,
     std::span<const VfxPersistentInput> inputs,
     Tick current_tick);
 
 [[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
-    const VfxProgramView &cooked,
-    std::span<const VfxEventInput> inputs,
+    const VfxImage &image,
+    VfxEventView inputs,
     double current_tick);
 
 } // namespace hs::runtime_detail

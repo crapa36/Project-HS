@@ -16,6 +16,15 @@
 
 namespace hs
 {
+FrameContext *D3D12Renderer::Impl::SubmittedFrame(const OwnedView &owner) noexcept
+{
+    if (owner.last_submitted_frame_slot >= kFrameCount || !owner.last_submitted_frame_id) return nullptr;
+    auto &frame = frames[owner.last_submitted_frame_slot];
+    return frame.submitted_view_id == owner.view_id.value &&
+        frame.submitted_frame_id == owner.last_submitted_frame_id &&
+        frame.constants_submission_id == owner.last_submitted_frame_id ? &frame : nullptr;
+}
+
 namespace
 {
 // PNG is an SDR preview. HDR readback keeps its native packed representation
@@ -144,7 +153,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         return result;
     }
 
-    const auto description = impl_->back_buffers[impl_->last_presented_index]->GetDesc();
+    const auto description = impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index]->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rows{};
     UINT64 row_size{};
@@ -176,7 +185,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     {
         return HResultFailure("Reset capture list", result);
     }
-    impl_->TransitionTexture(impl_->back_buffers[impl_->last_presented_index].Get(),
+    impl_->TransitionTexture(impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get(),
                              D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE);
@@ -186,7 +195,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = impl_->back_buffers[impl_->last_presented_index].Get();
+    source.pResource = impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get();
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     impl_->command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     impl_->TransitionBuffer(
@@ -202,7 +211,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_COPY_SOURCE,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
-    impl_->TransitionTexture(impl_->back_buffers[impl_->last_presented_index].Get(),
+    impl_->TransitionTexture(impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get(),
                              D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT);
@@ -227,10 +236,10 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     std::vector<std::byte> preview;
     if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
     {
-        HdrPreview(png_pixels, png_pitch, impl_->width, impl_->height,
-                   impl_->display_state.paper_white_nits, preview);
+        HdrPreview(png_pixels, png_pitch, impl_->owned_views.at(impl_->active_view_id.value)->width, impl_->owned_views.at(impl_->active_view_id.value)->height,
+                   impl_->owned_views.at(impl_->active_view_id.value)->display_state.paper_white_nits, preview);
         png_pixels = preview.data();
-        png_pitch = impl_->width * 4;
+        png_pitch = impl_->owned_views.at(impl_->active_view_id.value)->width * 4;
     }
     const auto write = impl_->WritePng(path, png_pixels, png_pitch);
     std::array<D3D12_DRAW_ARGUMENTS, kParticleDrawBinCount> particle_draws{};
@@ -488,20 +497,21 @@ namespace
 template <typename Impl>
 [[nodiscard]] Result CaptureHdrColor(Impl &impl, const std::filesystem::path &path)
 {
+    auto &owner = *impl.owned_views.at(impl.active_view_id.value);
     // The source is published by the successful frame transaction. It is the
     // reconstructed scene HDR result before post processing/display encoding.
     // In particular, do not substitute display_linear or the back buffer here:
     // both can already contain display encoding or tone mapping.
-    if (!impl.hdr_capture_valid || !impl.hdr_capture_source.resource)
+    if (!owner.hdr_capture_valid || !owner.hdr_capture_source.resource)
         return HdrCaptureFailure(
             "HDR capture has no successfully published reconstructed scene HDR source for this view.");
-    if (!impl.hdr_capture_extent.width || !impl.hdr_capture_extent.height)
+    if (!owner.hdr_capture_extent.width || !owner.hdr_capture_extent.height)
         return HdrCaptureFailure("HDR capture source has no published active extent.");
 
     if (auto result = impl.WaitForGpu(); !result)
         return result;
 
-    auto &source_resource = impl.hdr_capture_source;
+    auto &source_resource = owner.hdr_capture_source;
     const auto source_description = source_resource.resource->GetDesc();
     if (source_description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
         source_description.DepthOrArraySize != 1 || source_description.MipLevels != 1 ||
@@ -513,8 +523,8 @@ template <typename Impl>
             "HDR capture source is not a single-sample RGBA floating-point texture.");
     }
 
-    const auto width = impl.hdr_capture_extent.width;
-    const auto height = impl.hdr_capture_extent.height;
+    const auto width = owner.hdr_capture_extent.width;
+    const auto height = owner.hdr_capture_extent.height;
     if (source_description.Width < width || source_description.Height < height)
         return HdrCaptureFailure("HDR capture source is smaller than its published active extent.");
 
@@ -639,8 +649,8 @@ template <typename Impl>
     if (!metadata)
         return Result::Failure(ErrorCode::TaskFailed, "hs_renderer_d3d12",
                                "Could not open HDR capture metadata output.");
-    const auto source_name = impl.hdr_capture_source_name.empty()
-        ? std::string{} : impl.hdr_capture_source_name;
+    const auto source_name = owner.hdr_capture_source_name.empty()
+        ? std::string{} : owner.hdr_capture_source_name;
     metadata << "{\n"
              << "  \"schema_version\": 1,\n"
              << "  \"capture_kind\": \"hdr_color\",\n"
@@ -660,18 +670,18 @@ template <typename Impl>
              << "  \"color_space\": \"rec709_linear\",\n"
              << "  \"units\": \"pre_exposed_scene_linear\",\n"
              << "  \"pre_exposure_semantics\": \""
-             << (impl.hdr_capture_pre_exposed ? "pre_exposed_scene_linear"
+             << (owner.hdr_capture_pre_exposed ? "pre_exposed_scene_linear"
                                                : "scene_linear")
              << "\",\n"
-             << "  \"display_hdr_active\": " << (impl.display_state.hdr_active ? "true" : "false")
+             << "  \"display_hdr_active\": " << (owner.display_state.hdr_active ? "true" : "false")
              << ",\n"
              << "  \"frame\": {\n"
-             << "    \"submission_id\": " << JsonNumber(impl.hdr_capture_submission_id) << ",\n"
+             << "    \"submission_id\": " << JsonNumber(owner.hdr_capture_submission_id) << ",\n"
              << "    \"submitted_view_id\": " << JsonNumber(impl.active_view_id.value) << ",\n"
-             << "    \"render_frame_id\": " << JsonNumber(impl.frame_number) << ",\n"
-             << "    \"render_package_id\": " << JsonNumber(impl.hdr_capture_package_id) << ",\n"
-             << "    \"view_session_id\": " << JsonNumber(impl.view_session_id) << ",\n"
-             << "    \"snapshot_tick\": " << JsonNumber(impl.hdr_capture_snapshot_tick) << ",\n"
+             << "    \"render_frame_id\": " << JsonNumber(owner.frame_number) << ",\n"
+             << "    \"render_package_id\": " << JsonNumber(owner.hdr_capture_package_id) << ",\n"
+             << "    \"view_session_id\": " << JsonNumber(owner.view_session_id) << ",\n"
+             << "    \"snapshot_tick\": " << JsonNumber(owner.hdr_capture_snapshot_tick) << ",\n"
              << "    \"content_generation\": "
              << (impl.resource_generation_id.empty() ? "null"
                                                        : JsonString(impl.resource_generation_id))
@@ -694,6 +704,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     {
         return result;
     }
+    const auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
     if (!path.parent_path().empty())
     {
         std::error_code error;
@@ -707,65 +718,65 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
     std::vector<SurfaceCapture> surfaces{
-        SurfaceCapture{"gbuffer_metadata", &impl_->gbuffer_metadata,
+        SurfaceCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
                        DXGI_FORMAT_R32G32_UINT, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_normal", &impl_->gbuffer_normal,
+        SurfaceCapture{"gbuffer_normal", &owner.targets.gbuffer_normal,
                        DXGI_FORMAT_R16G16_SNORM, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_material", &impl_->gbuffer_material,
+        SurfaceCapture{"gbuffer_material", &owner.targets.gbuffer_material,
                        DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_motion", &impl_->gbuffer_motion,
+        SurfaceCapture{"gbuffer_motion", &owner.targets.gbuffer_motion,
                        DXGI_FORMAT_R16G16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"surface_history", &impl_->gbuffer_surface_history,
+        SurfaceCapture{"surface_history", &owner.targets.gbuffer_surface_history,
                        DXGI_FORMAT_R32G32_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"depth", &impl_->depth, DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
-        SurfaceCapture{"gbuffer_base", &impl_->gbuffer_base,
+        SurfaceCapture{"depth", &owner.targets.depth, DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
+        SurfaceCapture{"gbuffer_base", &owner.targets.gbuffer_base,
                        DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
-        SurfaceCapture{"lighting_hdr", &impl_->hdr_color,
+        SurfaceCapture{"lighting_hdr", &owner.targets.hdr_color,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"composite_hdr", &impl_->composite_hdr,
+        SurfaceCapture{"composite_hdr", &owner.targets.composite_hdr,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"scene_work", &impl_->scene_work,
+        SurfaceCapture{"scene_work", &owner.targets.scene_work,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"oit_accumulation", &impl_->oit_accumulation,
+        SurfaceCapture{"oit_accumulation", &owner.targets.oit_accumulation,
                        DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"oit_revealage", &impl_->oit_revealage,
+        SurfaceCapture{"oit_revealage", &owner.targets.oit_revealage,
                        DXGI_FORMAT_R16_FLOAT, Access::ShaderRead},
     };
     // A proved VSM-only frame never writes or initializes the CSM atlas.
-    if (impl_->virtual_shadows.CacheStatus().guarantee.csm_required)
-        surfaces.push_back(SurfaceCapture{"shadow_atlas", &impl_->shadow,
+    if (owner.virtual_shadows.CacheStatus().guarantee.csm_required)
+        surfaces.push_back(SurfaceCapture{"shadow_atlas", &owner.targets.shadow,
                            DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite});
     for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
         surfaces.push_back(SurfaceCapture{plane == 0 ? "material_sidecar_0" : "material_sidecar_1",
-            &impl_->material_sidecars[plane], impl_->MaterialSidecarFormat(plane), Access::ShaderRead});
+            &owner.targets.material_sidecars[plane], impl_->MaterialSidecarFormat(plane), Access::ShaderRead});
     const auto append_diagnostic = [&](const char *name, const AllocationResource *resource) {
         if (resource && resource->resource && resource->graph_access != Access::Undefined)
             surfaces.push_back(SurfaceCapture{name, resource, resource->resource->GetDesc().Format,
                                                resource->graph_access});
     };
-    const auto history_current = impl_->temporal_read_index;
+    const auto history_current = owner.temporal_read_index;
     const auto history_previous = 1u - history_current;
-    append_diagnostic("temporal_current", &impl_->temporal_history[history_current]);
-    append_diagnostic("temporal_previous", &impl_->temporal_history[history_previous]);
-    append_diagnostic("temporal_normal_previous", &impl_->temporal_normal_history[history_previous]);
-    append_diagnostic("temporal_material_previous", &impl_->temporal_material_history[history_previous]);
-    append_diagnostic("exposure_current", &impl_->exposure_values[impl_->exposure_read_index]);
-    append_diagnostic("exposure_previous", &impl_->exposure_values[1u - impl_->exposure_read_index]);
-    append_diagnostic("exposure_histogram", &impl_->exposure_histogram);
+    append_diagnostic("temporal_current", &owner.targets.temporal_history[history_current]);
+    append_diagnostic("temporal_previous", &owner.targets.temporal_history[history_previous]);
+    append_diagnostic("temporal_normal_previous", &owner.targets.temporal_normal_history[history_previous]);
+    append_diagnostic("temporal_material_previous", &owner.targets.temporal_material_history[history_previous]);
+    append_diagnostic("exposure_current", &owner.exposure_values[owner.exposure_read_index]);
+    append_diagnostic("exposure_previous", &owner.exposure_values[1u - owner.exposure_read_index]);
+    append_diagnostic("exposure_histogram", &owner.exposure_histogram);
     constexpr std::array ao_names{"ao_raw", "ao_resolved", "ao_contact", "ao_history", "ao_previous_history"};
-    const auto ao_resources = impl_->ambient_occlusion.DiagnosticResources();
+    const auto ao_resources = owner.ambient_occlusion.DiagnosticResources();
     for (std::size_t index = 0; index < ao_resources.size(); ++index)
         append_diagnostic(ao_names[index], ao_resources[index]);
-    const auto adaptive_resources = impl_->adaptive_shading.DiagnosticResources();
+    const auto adaptive_resources = owner.adaptive_shading.DiagnosticResources();
     append_diagnostic("adaptive_density", adaptive_resources[0]);
     append_diagnostic("adaptive_rate", adaptive_resources[1]);
     constexpr std::array shadow_names{"virtual_shadow_metadata", "virtual_shadow_pages",
         "virtual_shadow_static", "virtual_shadow_dynamic", "virtual_shadow_counts"};
-    const auto shadow_resources = impl_->virtual_shadows.DiagnosticResources();
+    const auto shadow_resources = owner.virtual_shadows.DiagnosticResources();
     for (std::size_t index = 0; index < shadow_resources.size(); ++index)
         append_diagnostic(shadow_names[index], shadow_resources[index]);
     constexpr std::array light_names{"light_records", "light_ranges", "light_inline", "light_spill"};
-    const auto light_resources = impl_->light_list.DiagnosticResources();
+    const auto light_resources = owner.light_list.DiagnosticResources();
     for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
         append_diagnostic(light_names[index], light_resources.resources[index]);
     for (auto &surface : surfaces)
@@ -1045,14 +1056,15 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     }
     metadata_output << "],\n";
     constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular", "indirect_diffuse"};
-    const auto &captured_constants = *reinterpret_cast<const FrameConstants *>(
-        impl_->frames[impl_->last_presented_index].mapped);
+    const auto *captured_frame = impl_->SubmittedFrame(owner);
     metadata_output << std::format("  \"grass\": {{\"pixels\": {}, \"historical_pixels\": {}, \"moving_pixels\": {}, \"max_motion_pixels\": {}}},\n",
         grass_pixels, historical_grass_pixels, moving_grass_pixels, grass_motion_max_pixels);
-    if (impl_->frames[impl_->last_presented_index].submitted_view_id == impl_->active_view_id.value)
+    if (captured_frame)
     {
+        const auto &captured_constants = *reinterpret_cast<const FrameConstants *>(captured_frame->mapped);
         metadata_output << "  \"temporal_inputs\": {\n";
         metadata_output << std::format("    \"emission_word\": {},\n", captured_constants.material_sidecar_offsets[1].x);
+        metadata_output.precision(std::numeric_limits<float>::max_digits10);
         const auto write_floats = [&](const char *name, const float *values, std::size_t count) {
             metadata_output << "    \"" << name << "\": [";
             for (std::size_t i = 0; i < count; ++i)
@@ -1070,11 +1082,14 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             static_cast<std::uint32_t>(std::clamp(captured_constants.previous_grass_state.y, 0.0f, 32.0f)) * 4u);
         write_floats("current_vp", &captured_constants.current_unjittered_view_projection._11, 16);
         write_floats("previous_vp", &captured_constants.previous_unjittered_view_projection._11, 16);
+        write_floats("current_jittered_vp", &captured_constants.view_projection._11, 16);
+        write_floats("previous_instance_unjittered_view_projection", &captured_constants.previous_instance_unjittered_view_projection._11, 16);
         metadata_output << std::format("    \"view_id\": {}, \"frame\": {}, \"history_current_index\": {}\n  }},\n",
-            impl_->active_view_id.value, impl_->frame_number, history_current);
+            impl_->active_view_id.value, impl_->owned_views.at(impl_->active_view_id.value)->frame_number, history_current);
     }
     else metadata_output << "  \"temporal_inputs\": null,\n";
-    const std::array auxiliary_resources{&impl_->subsurface_diffuse, &impl_->environment_specular, &impl_->indirect_diffuse};
+    const std::array auxiliary_resources{&owner.targets.subsurface_diffuse, &owner.targets.environment_specular,
+        &owner.targets.indirect_diffuse};
     metadata_output << "  \"auxiliary_targets\": [\n";
     for (std::size_t index = 0; index < auxiliary_resources.size(); ++index)
     {
@@ -1110,6 +1125,7 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
     }
     if (auto result = impl_->WaitForGpu(); !result)
         return result;
+    const auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
     if (!path.parent_path().empty())
     {
         std::error_code error;
@@ -1122,7 +1138,9 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
     const auto contract_failure = [](std::string message) {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
-    auto &frame = impl_->frames[impl_->last_presented_index];
+    auto *submitted_frame = impl_->SubmittedFrame(owner);
+    if (!submitted_frame) return contract_failure("This view's geometry submission slot has been reused or was not submitted.");
+    auto &frame = *submitted_frame;
     const auto used_records = frame.geometry_draw_records_cpu.size();
     if (used_records == 0)
         return contract_failure("Geometry diagnostics have no CPU draw records.");
@@ -1419,6 +1437,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     }
     if (auto result = impl_->WaitForGpu(); !result)
         return result;
+    const auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
     if (!path.parent_path().empty())
     {
         std::error_code error;
@@ -1464,12 +1483,13 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
 
-    if (impl_->last_presented_index >= kFrameCount)
-        return invalid("Last presented frame index is outside the frame ring.");
-    auto &frame = impl_->frames[impl_->last_presented_index];
-    auto &visibility_frame = impl_->visibility_frames[impl_->last_presented_index];
+    auto *submitted_frame = impl_->SubmittedFrame(owner);
+    if (!submitted_frame)
+        return invalid("This view's visibility submission slot has been reused or was not submitted.");
+    auto &frame = *submitted_frame;
+    auto &visibility_frame = impl_->visibility_frames[owner.last_submitted_frame_slot];
     auto *cluster_frame = impl_->cluster_runtime
-        ? &impl_->cluster_runtime->frames[impl_->last_presented_index] : nullptr;
+        ? &impl_->cluster_runtime->frames[owner.last_submitted_frame_slot] : nullptr;
 
     struct CommandDiagnostic
     {
@@ -1566,10 +1586,10 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         CaptureNativeAccess native{};
     };
     std::array textures{
-        TextureCapture{"visibility_ids", &impl_->visibility_ids, DXGI_FORMAT_R32G32_UINT, 8},
-        TextureCapture{"visibility_front_face", &impl_->visibility_front_face,
+        TextureCapture{"visibility_ids", &owner.targets.visibility_ids, DXGI_FORMAT_R32G32_UINT, 8},
+        TextureCapture{"visibility_front_face", &owner.targets.visibility_front_face,
                        DXGI_FORMAT_R8_UINT, 1},
-        TextureCapture{"gbuffer_metadata", &impl_->gbuffer_metadata,
+        TextureCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
                        DXGI_FORMAT_R32G32_UINT, 8},
     };
     struct BufferCapture
@@ -1584,8 +1604,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     };
     std::vector<BufferCapture> buffers;
     buffers.reserve(3 + 2 + 7 * cuts.size());
-    buffers.push_back({"visibility_pixels", &impl_->visibility_pixels});
-    buffers.push_back({"visibility_counts", &impl_->visibility_counts});
+    buffers.push_back({"visibility_pixels", &owner.targets.visibility_pixels});
+    buffers.push_back({"visibility_counts", &owner.targets.visibility_counts});
     buffers.push_back({"raster_records", &visibility_frame.raster_records});
     const auto geometry_buffer_index = buffers.size();
     buffers.push_back({"geometry_draw_records", &frame.geometry_draw_records});
@@ -1633,8 +1653,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 texture.name));
         const auto description = texture.resource->resource->GetDesc();
         if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-            description.Format != texture.format || description.Width != impl_->render_width ||
-            description.Height != impl_->render_height || description.DepthOrArraySize != 1 ||
+            description.Format != texture.format || description.Width != impl_->owned_views.at(impl_->active_view_id.value)->render_width ||
+            description.Height != impl_->owned_views.at(impl_->active_view_id.value)->render_height || description.DepthOrArraySize != 1 ||
             description.MipLevels != 1)
             return invalid(std::format(
                 "Visibility diagnostic texture {} has an unexpected native description.",
@@ -1699,7 +1719,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             return invalid("Visibility diagnostic readback size overflowed.");
         readback_size += buffer.size;
     }
-    if (buffers[0].size < static_cast<UINT64>(impl_->render_width) * impl_->render_height * 4u ||
+    if (buffers[0].size < static_cast<UINT64>(impl_->owned_views.at(impl_->active_view_id.value)->render_width) * impl_->owned_views.at(impl_->active_view_id.value)->render_height * 4u ||
         buffers[1].size < kVisibilityVariantCount * 3u * sizeof(std::uint32_t) || buffers[1].size % sizeof(std::uint32_t) ||
         buffers[2].size < kRasterRecordStride || buffers[2].size % kRasterRecordStride)
         return invalid("Visibility diagnostic buffers are smaller than their declared ABI.");
@@ -1779,7 +1799,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         return invalid(std::move(message));
     };
 
-    const auto pixel_count = static_cast<std::size_t>(impl_->render_width) * impl_->render_height;
+    const auto pixel_count = static_cast<std::size_t>(impl_->owned_views.at(impl_->active_view_id.value)->render_width) * impl_->owned_views.at(impl_->active_view_id.value)->render_height;
     if (pixel_count > std::numeric_limits<std::size_t>::max() / 8u)
         return fail_mapped("Visibility diagnostic pixel count overflowed.");
     std::vector<std::uint32_t> visibility_ids(pixel_count * 2);
@@ -2311,8 +2331,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                                "Could not open visibility diagnostic metadata output.");
     output << "{\n  \"schema_version\": 1,\n  \"execution_valid\": true,\n"
               "  \"width\": "
-           << impl_->render_width << ",\n  \"height\": " << impl_->render_height
-            << ",\n  \"frame_slot\": " << impl_->last_presented_index
+           << impl_->owned_views.at(impl_->active_view_id.value)->render_width << ",\n  \"height\": " << impl_->owned_views.at(impl_->active_view_id.value)->render_height
+            << ",\n  \"frame_slot\": " << owner.last_submitted_frame_slot
            << ",\n  \"valid_pixel_count\": " << valid_pixel_count
            << ",\n  \"invalid_pixel_count\": " << invalid_pixel_count
            << ",\n  \"variant_counts\": [";
@@ -2410,11 +2430,12 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
                 "Scene-probe package capture is renderer-wide and requires the main view ID.");
         if(auto waited=impl_->WaitForGpu();!waited) return waited;
         const auto completed=impl_->graph_queue_executor.Completed();
-        impl_->transient_pools[0].ResetCompletedClaims(completed);
+        auto &capture_pool = impl_->owned_views.at(impl_->active_view_id.value)->targets.transient_pools[0];
+        capture_pool.ResetCompletedClaims(completed);
         std::vector<std::byte> bytes;
         const auto barriers=impl_->enhanced?BarrierMode::Enhanced:BarrierMode::Legacy;
         if(auto exported=impl_->local_probes.ExportBakedPackage(impl_->graph_queue_executor,
-                impl_->transient_pools[0],0,barriers,bytes);!exported) return exported;
+                capture_pool,0,barriers,bytes);!exported) return exported;
 
         std::error_code directory_error;
         if(!request.path.parent_path().empty())
@@ -2460,13 +2481,13 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         }
         return result;
     };
-    if (impl_->frame_number == 0)
+    if (impl_->owned_views.at(request.view_id.value)->frame_number == 0)
     {
         return restore(Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                        "Capture view has not produced a successful rendered output."));
     }
     if ((request.kind == CaptureKind::GeometryDiagnostics || request.kind == CaptureKind::VisibilityDiagnostics) &&
-        impl_->frames[impl_->last_presented_index].submitted_view_id != request.view_id.value)
+        !impl_->SubmittedFrame(*impl_->owned_views.at(request.view_id.value)))
     {
         return restore(Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "This view has no completed submitted frame available for capture."));

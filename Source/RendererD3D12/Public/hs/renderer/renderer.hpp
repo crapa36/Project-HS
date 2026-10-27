@@ -509,6 +509,7 @@ struct RendererFrameResult
     bool vfx_world_step_submitted{};
     Tick vfx_world_tick{};
     std::uint64_t vfx_world_session_id{};
+    std::uint64_t vfx_world_batch_sequence{};
     // Main Present accepted this UI packet; this is not a display scanout timestamp.
     std::uint64_t presented_ui_packet_generation{};
     // At least one view accepted its graph/service submissions, even if Present failed.

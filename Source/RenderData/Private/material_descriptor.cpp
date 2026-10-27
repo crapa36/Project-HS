@@ -19,17 +19,12 @@ std::string_view Name(std::string_view product) noexcept
     if (product.starts_with("render/material/") && product.ends_with("/material.rpkg"))
     {
         const auto name = product.substr(16, product.size() - 16 - 14);
-        if (std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() ||
+        if (std::ranges::find(kAuthoredMaterialNames, name) != kAuthoredMaterialNames.end() ||
+            std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() ||
             std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end()) return name;
     }
     if (product == "render/material/terrain.rpkg") return "terrain";
     if (product == "render/material/ground_detail.rpkg") return "ground_detail";
-    if (product.starts_with("render/") && product.ends_with(".rpkg"))
-    {
-        const auto name = product.substr(7, product.size() - 12);
-        if (std::ranges::find(kAuthoredMaterialNames, name) != kAuthoredMaterialNames.end() &&
-            name != "terrain" && name != "ground_detail") return name;
-    }
     return {};
 }
 std::uint32_t BulkIndex(AssetId id, std::span<const AssetId> assets)
@@ -67,6 +62,15 @@ void Surface(MaterialSurfaceLayout layout)
 } // namespace
 
 bool IsMaterialDescriptorProduct(std::string_view product_id) noexcept { return !Name(product_id).empty(); }
+std::string MaterialProduct(std::string_view name)
+{
+    Require(std::ranges::find(kAuthoredMaterialNames, name) != kAuthoredMaterialNames.end() ||
+            std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() ||
+            std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end(),
+            "unknown material name");
+    if (name == "terrain" || name == "ground_detail") return "render/material/" + std::string(name) + ".rpkg";
+    return "render/material/" + std::string(name) + "/material.rpkg";
+}
 std::string MaterialParametersProduct(std::string_view material_product)
 {
     const auto name = Name(material_product);
