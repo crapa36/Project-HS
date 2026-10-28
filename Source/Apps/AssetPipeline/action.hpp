@@ -137,6 +137,8 @@ void RequireDirectory(const fs::path &path);
 void MakeDirectory(const fs::path &path);
 [[nodiscard]] fs::path CreateStage(const fs::path &actions);
 void RemoveStage(const fs::path &stage);
+// Best-effort cleanup while propagating an earlier producer failure.
+void RemoveStageAfterFailure(const fs::path &stage) noexcept;
 void Publish(const fs::path &build_root, const ActionSpec &spec,
              const fs::path &stage, std::vector<Product> products);
 [[nodiscard]] std::string DiagnosticPath(const fs::path &path);

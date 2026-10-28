@@ -2,6 +2,8 @@
 #include <hs/render_data/vfx_spawn_command.hpp>
 #include <hs/core/types.hpp>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <variant>
 #include <vector>
@@ -11,6 +13,36 @@ namespace hs
 using VfxEffectHandle = std::uint32_t;
 inline constexpr VfxEffectHandle kInvalidVfxEffectHandle = 0xffffffffu;
 enum class VfxQuality : std::uint8_t { Low, Medium, High };
+enum class VfxGapAngleFormula : std::uint8_t { EventSpacing, OwnerNormalized };
+// Event and owner inputs retain their original float order and wrapping.
+struct VfxUniformRingGaps
+{
+    float offset_degrees{};
+    std::uint8_t count{};
+    VfxGapAngleFormula formula{VfxGapAngleFormula::EventSpacing};
+
+    [[nodiscard]] bool Active() const noexcept { return count != 0; }
+    [[nodiscard]] bool Valid() const noexcept
+    {
+        return !Active() || (std::isfinite(offset_degrees) &&
+            (formula == VfxGapAngleFormula::EventSpacing || formula == VfxGapAngleFormula::OwnerNormalized));
+    }
+    [[nodiscard]] float AngleDegrees(std::uint32_t index) const noexcept
+    {
+        if (formula == VfxGapAngleFormula::OwnerNormalized)
+        {
+            const auto degrees = offset_degrees + 360.0f * static_cast<float>(index) / static_cast<float>(count);
+            return std::fmod(std::fmod(degrees, 360.0f) + 360.0f, 360.0f);
+        }
+        return offset_degrees + (360.0f / static_cast<float>(count)) * static_cast<float>(index);
+    }
+    [[nodiscard]] float GroundRadians(std::uint32_t index) const noexcept
+    {
+        float wrapped = std::fmod(AngleDegrees(index), 360.0f);
+        if (wrapped < 0.0f) wrapped += 360.0f;
+        return wrapped * (3.14159265358979323846f / 180.0f);
+    }
+};
 struct VfxGroundMotion
 {
     float rate_hz{};
@@ -32,6 +64,14 @@ struct VfxGroundGeometry
     std::uint32_t spokes{}, rings{};
     std::uint32_t mask_slice{0xffffffffu};
     float mask_strength{};
+    VfxUniformRingGaps uniform_gaps{};
+
+    [[nodiscard]] std::size_t GapCount() const noexcept
+    { return uniform_gaps.Active() ? uniform_gaps.count : gap_angles_radians.size(); }
+    [[nodiscard]] float GapAngleRadians(std::size_t index) const noexcept
+    { return uniform_gaps.Active() ? uniform_gaps.GroundRadians(static_cast<std::uint32_t>(index)) : gap_angles_radians[index]; }
+    [[nodiscard]] bool GapStorageConsistent() const noexcept
+    { return uniform_gaps.Valid() && (!uniform_gaps.Active() || gap_angles_radians.empty()); }
 };
 using VfxTransform = std::array<float, 16>;
 inline constexpr VfxTransform kVfxIdentityTransform{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
@@ -45,7 +85,19 @@ struct VfxProjectilePathPayload { Float3 current_position{}, previous_position{}
 struct VfxCirclePayload { Float3 center{}, direction{}; float radius{}, inner_radius{}, lifetime01{}; std::uint32_t state_flags{}; };
 struct VfxConePayload { Float3 origin{}, direction{}; float range{}, half_angle_degrees{}, lifetime01{}; std::uint32_t state_flags{}; };
 struct VfxLinePayload { Float3 start{}, end{}, direction{}; float width{}, lifetime01{}; std::uint32_t state_flags{}; };
-struct VfxRingGapsPayload { Float3 center{}; float inner_radius{}, outer_radius{}, gap_half_width_degrees{}, lifetime01{}; std::uint32_t state_flags{}; std::vector<float> gap_angles_degrees; };
+struct VfxRingGapsPayload
+{
+    Float3 center{}; float inner_radius{}, outer_radius{}, gap_half_width_degrees{}, lifetime01{};
+    std::uint32_t state_flags{}; std::vector<float> gap_angles_degrees;
+    VfxUniformRingGaps uniform_gaps{};
+
+    [[nodiscard]] std::size_t GapCount() const noexcept
+    { return uniform_gaps.Active() ? uniform_gaps.count : gap_angles_degrees.size(); }
+    [[nodiscard]] float GapAngleDegrees(std::size_t index) const noexcept
+    { return uniform_gaps.Active() ? uniform_gaps.AngleDegrees(static_cast<std::uint32_t>(index)) : gap_angles_degrees[index]; }
+    [[nodiscard]] bool GapStorageConsistent() const noexcept
+    { return uniform_gaps.Valid() && (!uniform_gaps.Active() || gap_angles_degrees.empty()); }
+};
 struct VfxSafeSectorPayload { Float3 center{}, direction{}; float inner_radius{}, outer_radius{}, half_angle_degrees{}, lifetime01{}; };
 struct VfxEntityPayload { float footprint_radius{}, lifetime01{}, health_fraction{1}; std::uint32_t state_flags{}; std::uint64_t render_instance_id{}; };
 struct VfxLinkPayload { Float3 source_position{}, target_position{}; std::uint64_t source_id{}, target_id{}; float lifetime01{}, width{}; std::uint32_t state_flags{}; };

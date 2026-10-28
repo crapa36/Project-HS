@@ -7,7 +7,9 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <stdexcept>
 #include <string_view>
+#include <type_traits>
 
 namespace hs::runtime_detail
 {
@@ -44,19 +46,15 @@ template<class T> bool ValidRange(VfxRange r, std::span<const T> v)
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 }
 
-void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
+void PrepareVfxTypedFlashOutputs(const VfxImage &image, VfxEventView inputs,
     std::span<const Sequence> excluded_sorted_sequences,
-    std::vector<VfxFlashSpawnInput> &result,
-    std::vector<Sequence> *superseded_pickup_sequences)
+    std::vector<VfxPreparedFlashOutput> &prepared)
 {
     const auto cooked=image.program;
-    const auto old_result_size = result.size();
-    const auto old_sequence_size = superseded_pickup_sequences
-        ? superseded_pickup_sequences->size() : 0;
-    try
+    prepared.clear();
+    for (std::size_t event_index = 0; event_index < inputs.size(); ++event_index)
     {
-      for (const auto &input : inputs)
-      {
+        const auto &input = inputs[event_index];
         if (!excluded_sorted_sequences.empty() &&
             std::ranges::binary_search(excluded_sorted_sequences, input.sequence)) continue;
         if (input.effect_handle == 0 || input.effect_handle > image.flash_effect_ranges.size() ||
@@ -113,7 +111,8 @@ void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
                 !std::isfinite(ring->outer_radius) || ring->outer_radius <= ring->inner_radius ||
                 !std::isfinite(ring->gap_half_width_degrees) || ring->gap_half_width_degrees < 0.0f ||
                 ring->gap_half_width_degrees > 180.0f ||
-                (!ring->gap_angles_degrees.empty() && ring->gap_half_width_degrees == 0.0f) ||
+                !ring->GapStorageConsistent() ||
+                (ring->GapCount() != 0 && ring->gap_half_width_degrees == 0.0f) ||
                 std::any_of(ring->gap_angles_degrees.begin(), ring->gap_angles_degrees.end(),
                     [](float angle) { return !std::isfinite(angle); }))
                 continue;
@@ -149,9 +148,11 @@ void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
         if (!std::isfinite(magnitude) || (cone_geometry && magnitude <= 0.0001f)) continue;
         direction = magnitude > 0.0001f ? Float3{direction.x / magnitude, direction.y / magnitude, direction.z / magnitude}
                                       : Float3{0, 0, 1};
-        const auto first_flash = result.size();
-        for (const auto &recipe : recipes)
+        for (std::size_t recipe_index = recipe_range.first;
+             recipe_index < static_cast<std::size_t>(recipe_range.first) + recipe_range.count;
+             ++recipe_index)
         {
+            const auto &recipe = image.flash_recipes[recipe_index];
             if(recipe.effect_handle!=input.effect_handle || !(recipe.supported_quality_mask&(1u<<static_cast<unsigned>(input.quality))))continue;
             const bool contact=recipe.spawn.shape==VfxImpactShape::ThreeProngBite||recipe.spawn.shape==VfxImpactShape::BossCrestContact||recipe.spawn.shape==VfxImpactShape::NeedleStar;
             if(contact!=projectile_geometry)continue;
@@ -163,34 +164,132 @@ void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
                     recipe.spawn.shape==VfxImpactShape::BossCrestContact?Hash64("particle.boss.volley.projectile_impact"):Hash64("particle.skill.charged_shot.impact");
                 if(effect_id!=expected)continue;
             }
-            auto spawn=recipe.spawn;
-            spawn.size=circle_geometry?scale:spawn.size*scale;
-            spawn.ground_base_anchor=circle_geometry&&(spawn.shape==VfxImpactShape::SoftDisc||spawn.shape==VfxImpactShape::NoiseDisc||
-                spawn.shape==VfxImpactShape::Flame||spawn.shape==VfxImpactShape::Smoke6Way||spawn.shape==VfxImpactShape::RadialEnergy);
-            spawn.position=position;spawn.direction=direction;
-            spawn.event_tick=input.event_tick;spawn.stable_seed=input.stable_seed;
-            if(spawn.oit&&spawn.shape==VfxImpactShape::Smoke6Way&&input.quality!=VfxQuality::High)spawn.motion_strength=0;
+            const float spawn_size = circle_geometry ? scale : recipe.spawn.size * scale;
+            if (!std::isfinite(spawn_size) || spawn_size <= 0) continue;
+            std::uint32_t importance{};
+            bool cosmetic{};
+            if (recipe.source_index < cooked.sources.size())
+            {
+                const auto &source = cooked.sources[recipe.source_index];
+                if (source.effect == input.effect_handle &&
+                    source.type == VfxSourceType::ImpactSprite && source.authoritative == 0)
+                    cosmetic = true;
+            }
+            auto mask_slice = std::uint32_t{0xffffffffu};
+            float mask_strength{};
             if(recipe.mask_present_mask&(1u<<static_cast<unsigned>(input.quality)))
             {
                 const auto slices=recipe.mask_slice_ranges[static_cast<unsigned>(input.quality)];
                 if(!ValidRange(slices,cooked.slice_indices)||!slices.count)continue;
-                spawn.mask_slice=cooked.slice_indices[slices.first+(input.stable_seed%slices.count)];
-                spawn.mask_strength=recipe.mask_strengths[static_cast<unsigned>(input.quality)];
+                mask_slice=cooked.slice_indices[slices.first+(input.stable_seed%slices.count)];
+                mask_strength=recipe.mask_strengths[static_cast<unsigned>(input.quality)];
             }
-            if (!std::isfinite(spawn.size) || spawn.size <= 0) continue;
-            result.push_back(spawn);
+            if (input.effect_handle <= cooked.effects.size())
+            {
+                const auto &effect = cooked.effects[input.effect_handle - 1];
+                if (effect.handle == input.effect_handle) importance = effect.importance;
+            }
+            const bool ground_base_anchor = circle_geometry &&
+                (recipe.spawn.shape == VfxImpactShape::SoftDisc ||
+                 recipe.spawn.shape == VfxImpactShape::NoiseDisc ||
+                 recipe.spawn.shape == VfxImpactShape::Flame ||
+                 recipe.spawn.shape == VfxImpactShape::Smoke6Way ||
+                 recipe.spawn.shape == VfxImpactShape::RadialEnergy);
+            prepared.push_back({&recipe, &input, event_index, 1, 1, importance,
+                pickup_collect ? input.sequence : Sequence{}, position, direction, scale,
+                mask_strength, mask_slice, cosmetic, pickup_collect, circle_geometry,
+                ground_base_anchor,
+                recipe.spawn.oit && recipe.spawn.shape == VfxImpactShape::Smoke6Way &&
+                    input.quality != VfxQuality::High});
         }
-        if (pickup_collect && result.size() != first_flash && superseded_pickup_sequences)
-            superseded_pickup_sequences->push_back(input.sequence);
-      }
     }
-    catch (...)
+}
+
+void AppendVfxPreparedFlashOutputs(std::span<const VfxPreparedFlashOutput> prepared,
+    std::vector<VfxFlashSpawnInput> &result,
+    std::vector<Sequence> *superseded_pickup_sequences)
+{
+    static_assert(std::is_nothrow_copy_constructible_v<VfxFlashSpawnInput>);
+    static_assert(std::is_nothrow_copy_constructible_v<Sequence>);
+    std::size_t row_count{};
+    std::size_t pickup_count{};
+    std::size_t index{};
+    while (index < prepared.size())
     {
-        result.resize(old_result_size);
-        if (superseded_pickup_sequences)
-            superseded_pickup_sequences->resize(old_sequence_size);
-        throw;
+        const auto event_index = prepared[index].event_index;
+        auto end = index + 1;
+        while (end < prepared.size() && prepared[end].event_index == event_index) ++end;
+        bool emitted_pickup{};
+        for (auto i = index; i < end; ++i)
+        {
+            const auto &plan = prepared[i];
+            if (plan.count != 1 || plan.admitted_count > plan.count)
+                throw std::invalid_argument("invalid prepared flash admission count");
+            if (plan.admitted_count == 0) continue;
+            if (row_count == std::numeric_limits<std::size_t>::max())
+                throw std::length_error("prepared flash row count overflow");
+            ++row_count;
+            emitted_pickup = emitted_pickup || plan.pickup_collect;
+        }
+        if (superseded_pickup_sequences && emitted_pickup)
+        {
+            if (pickup_count == std::numeric_limits<std::size_t>::max())
+                throw std::length_error("prepared pickup sequence count overflow");
+            ++pickup_count;
+        }
+        index = end;
     }
+    if (row_count > result.max_size() - result.size() ||
+        (superseded_pickup_sequences &&
+         pickup_count > superseded_pickup_sequences->max_size() - superseded_pickup_sequences->size()))
+        throw std::length_error("prepared flash append exceeds vector capacity");
+    if (row_count != 0) result.reserve(result.size() + row_count);
+    if (superseded_pickup_sequences && pickup_count != 0)
+        superseded_pickup_sequences->reserve(superseded_pickup_sequences->size() + pickup_count);
+
+    index = 0;
+    while (index < prepared.size())
+    {
+        const auto event_index = prepared[index].event_index;
+        auto end = index + 1;
+        while (end < prepared.size() && prepared[end].event_index == event_index) ++end;
+        bool emitted_pickup{};
+        Sequence pickup_sequence{};
+        for (auto i = index; i < end; ++i)
+        {
+            const auto &plan = prepared[i];
+            if (plan.admitted_count == 0) continue;
+            auto spawn = plan.recipe->spawn;
+            spawn.size = plan.circle_geometry ? plan.scale : spawn.size * plan.scale;
+            spawn.ground_base_anchor = plan.ground_base_anchor;
+            spawn.position = plan.position;
+            spawn.direction = plan.direction;
+            spawn.event_tick = plan.input->event_tick;
+            spawn.stable_seed = plan.input->stable_seed;
+            if (plan.suppress_smoke_motion) spawn.motion_strength = 0;
+            spawn.mask_slice = plan.mask_slice;
+            spawn.mask_strength = plan.mask_strength;
+            result.push_back(spawn);
+            if (plan.pickup_collect)
+            {
+                emitted_pickup = true;
+                pickup_sequence = plan.pickup_sequence;
+            }
+        }
+        if (superseded_pickup_sequences && emitted_pickup)
+            superseded_pickup_sequences->push_back(pickup_sequence);
+        index = end;
+    }
+}
+
+void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
+    std::span<const Sequence> excluded_sorted_sequences,
+    std::vector<VfxFlashSpawnInput> &result,
+    std::vector<Sequence> *superseded_pickup_sequences)
+{
+    std::vector<VfxPreparedFlashOutput> prepared;
+    PrepareVfxTypedFlashOutputs(image, inputs, excluded_sorted_sequences, prepared);
+    AppendVfxPreparedFlashOutputs(prepared, result, superseded_pickup_sequences);
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxImage &image,
@@ -205,6 +304,7 @@ void PrepareVfxPersistentFireSources(const VfxImage &image,
     std::span<const VfxPersistentInput> inputs, double current_tick,
     std::vector<VfxPreparedFireSource> &prepared)
 {
+    static_assert(std::numeric_limits<decltype(VfxPersistentFireRecipe::rate)>::digits <= 32);
     prepared.clear();
     const auto mix = [](std::uint32_t v) {
         v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; return v ^ (v >> 16);
@@ -248,22 +348,12 @@ void PrepareVfxPersistentFireSources(const VfxImage &image,
                 base.mask_strength = recipe.mask_strength;
             }
             // Births are integral ticks, so ceil(ordinal * 60 / rate) <= age
-            // is equivalent to ordinal <= floor(age) * rate / 60. Split the
-            // product to keep that bound checked without visiting old ordinals.
+            // is equivalent to ordinal <= floor(age) * rate / 60.
             const auto whole_elapsed = std::min(
                 static_cast<std::uint64_t>(std::floor(elapsed)), duration - 1);
-            const auto whole_groups = whole_elapsed / 60;
-            const auto remainder_ticks = whole_elapsed % 60;
-            if (whole_groups > std::numeric_limits<std::uint64_t>::max() / recipe.rate)
-                continue;
-            const auto grouped_ordinals = whole_groups * recipe.rate;
-            const auto partial_product = remainder_ticks * static_cast<std::uint64_t>(recipe.rate);
-            if (grouped_ordinals >= std::numeric_limits<std::uint64_t>::max() - partial_product / 60)
-                continue;
-            const auto schedule_max = grouped_ordinals + partial_product / 60;
+            // The admitted duration and rate each fit uint32, so their product fits uint64.
+            const auto schedule_max = whole_elapsed * recipe.rate / 60;
             const auto legacy_max = elapsed * recipe.rate / 60;
-            if (!std::isfinite(legacy_max) || legacy_max < 0.0 ||
-                legacy_max >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) continue;
             const auto eligible_ordinals = std::min(
                 schedule_max, static_cast<std::uint64_t>(std::floor(legacy_max))) + 1;
             prepared.push_back({base, elapsed, duration, started, eligible_ordinals, 0,

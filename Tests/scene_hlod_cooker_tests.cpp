@@ -17,6 +17,7 @@
 namespace gc = hs::geometry_content;
 namespace rd = hs::render_data;
 void TestAssetActionSnapshot();
+void TestGameDataFloatConversion();
 namespace
 {
 void Check(bool condition, const char *reason)
@@ -462,6 +463,7 @@ int main()
     try
     {
         TestAssetActionSnapshot();
+        TestGameDataFloatConversion();
         TestCertifiedTriangleDistanceBound();
         TestAnalyticErrorSurfaces();
         TestGeometryErrorQualificationFallback();

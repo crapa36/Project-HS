@@ -83,13 +83,13 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t local_byte
             const auto &mesh = environment_meshes[stream.target_index];
             if (stream.retiring || stream.upload_pending || stream.upload_submitted || !mesh.storage.resource ||
                 !stream.request || residency.IsPinned(mesh.residency) ||
-                (stream.last_demand_frame >= frame_number && stream.priority >= priority)) continue;
+                (stream.last_demand_frame >= rendered_submission_count && stream.priority >= priority)) continue;
             consider(stream.priority, stream.last_demand_frame, 1u, ordinal);
         }
         const auto &texture = environment_stream;
         if (texture.fine_resident && !texture.retiring && !texture.upload_pending && !texture.upload_submitted &&
             texture.candidate.resource && texture.request && !residency.IsPinned(texture.candidate_residency) &&
-            (texture.last_demand_frame < frame_number || texture.priority < priority))
+            (texture.last_demand_frame < rendered_submission_count || texture.priority < priority))
             consider(texture.priority, texture.last_demand_frame, 2u, 0u);
     }
     if (kind == UINT32_MAX) return Result::Success();

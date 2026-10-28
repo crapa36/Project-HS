@@ -1,4 +1,5 @@
 #include "content_cooker.hpp"
+#include "game_data_numbers.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -119,7 +121,31 @@ void RequireParameterKeys(const Json &entry, std::string_view file, std::string_
 float Number(const Json &entry, std::string_view file, const std::string &path,
              std::string_view key)
 {
-    return static_cast<float>(ParameterNumber(entry, file, path, key));
+    const auto source = ParameterNumber(entry, file, path, key);
+    try
+    {
+        return detail::CheckedFloat(source);
+    }
+    catch (const std::logic_error &)
+    {
+        ThrowValidationError(file, path + "/parameters/" + std::string(key),
+                             "number is not representable as a finite float");
+    }
+}
+
+float PositiveProjectileSpeed(const Json &entry, std::string_view file,
+                              const std::string &path)
+{
+    const auto source = ParameterNumber(entry, file, path, "projectile_speed");
+    try
+    {
+        return detail::CheckedPositiveFloat(source);
+    }
+    catch (const std::logic_error &)
+    {
+        ThrowValidationError(file, path + "/parameters/projectile_speed",
+                             "projectile speed must be representable as a positive float");
+    }
 }
 
 template <typename Type>
@@ -465,6 +491,8 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         if (index == 7) { s.forward_roll_distance = n("forward_roll_distance"); s.range = s.forward_roll_distance; s.forward_roll_duration_ticks = ticks("forward_roll_duration"); s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.active_duration_ticks = ticks("active_duration"); s.duration_ticks = s.active_duration_ticks; s.detection_radius = n("detection_radius"); s.explosion_radius = n("explosion_radius"); s.area_radius = s.explosion_radius; s.damage_coefficient = n("damage_multiplier"); s.slow_fraction = n("slow_fraction"); s.slow_duration_ticks = ticks("slow_duration"); }
         if (index == 8) { s.forced_move_duration_ticks = ticks("forced_move_duration"); s.duration_ticks = s.forced_move_duration_ticks; s.forced_move_distance = n("forced_move_distance"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.projectile_range = n("projectile_range"); s.range = s.projectile_range; s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); }
     }
+    data.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed =
+        PositiveProjectileSpeed(skills[0], "skills", "$/entries/0");
 
     const auto &upgrade_groups = sources.documents.at("upgrades")["groups"];
     constexpr std::array upgrade_skill_ids{"skill.basic_attack", "skill.piercing_shot", "skill.multishot", "skill.charged_shot", "skill.explosive_arrow", "skill.ricochet_arrow", "skill.arrow_rain", "skill.trap", "skill.retreat_shot"};
@@ -552,7 +580,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             ? static_cast<float>(RequireNumber(enemy_entries[index], "enemies", path, "collision_radius"))
             : common_enemy_radius;
         if (index == 0) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"attack_range","telegraph_duration","base_damage","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"attack_range"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); }
-        if (index == 1) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"maximum_hold_distance","telegraph_duration","base_damage","projectile_speed","projectile_range","projectile_collision_radius","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"maximum_hold_distance"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); enemy.projectile_speed=Number(enemy_entries[index],"enemies",path,"projectile_speed"); enemy.projectile_range=Number(enemy_entries[index],"enemies",path,"projectile_range"); enemy.projectile_collision_radius=Number(enemy_entries[index],"enemies",path,"projectile_collision_radius"); enemy.ranged_projectile_radius=enemy.projectile_collision_radius; }
+        if (index == 1) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"maximum_hold_distance","telegraph_duration","base_damage","projectile_speed","projectile_range","projectile_collision_radius","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"maximum_hold_distance"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); enemy.projectile_speed=PositiveProjectileSpeed(enemy_entries[index],"enemies",path); enemy.projectile_range=Number(enemy_entries[index],"enemies",path,"projectile_range"); enemy.projectile_collision_radius=Number(enemy_entries[index],"enemies",path,"projectile_collision_radius"); enemy.ranged_projectile_radius=enemy.projectile_collision_radius; }
         if (index == 2) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"stop_distance","telegraph_duration","explosion_radius","base_damage"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"stop_distance"); enemy.suicide_stop_distance=enemy.attack_range; enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.suicide_explosion_radius=Number(enemy_entries[index],"enemies",path,"explosion_radius"); enemy.projectile_range=enemy.suicide_explosion_radius; }
     }
     for (std::size_t index = 0; index < enemy_entries.size(); ++index) {
@@ -576,7 +604,23 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto relic_number = [&](std::size_t index,std::string_view key){return Number(relics[index],"relics","$/entries/"+std::to_string(index),key);}; const auto relic_ticks=[&](std::size_t index,std::string_view key){return ToTicks(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));}; const auto relic_count=[&](std::size_t index,std::string_view key){return CheckedInteger<std::uint32_t>(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));};
     data.relics.bleed_kill_heal={relic_number(0,"maximum_hp_heal_fraction"),relic_ticks(0,"internal_cooldown")}; data.relics.burn_propagation={relic_number(1,"search_radius"),relic_number(1,"copied_burn_strength"),relic_count(1,"maximum_targets")}; data.relics.kill_cooldown_surge={relic_count(2,"kills_per_trigger"),relic_ticks(2,"all_active_cooldown_reduction")}; data.relics.bleed_burn_explosion={relic_number(3,"radius"),relic_number(3,"damage_multiplier"),relic_ticks(3,"per_target_cooldown")}; data.relics.radial_basic_attack={relic_count(4,"cadence_interval"),relic_count(4,"direction_count"),relic_number(4,"damage_multiplier")}; data.relics.basic_kill_tracker={relic_number(5,"search_radius"),relic_number(5,"damage_multiplier"),relic_count(5,"maximum_triggers_per_original_attack")}; data.relics.movement_echo={relic_number(6,"required_cumulative_distance"),relic_ticks(6,"position_history_age"),relic_number(6,"damage_multiplier")}; data.relics.alternating_skills={relic_ticks(7,"window"),relic_number(7,"cooldown_refund_fraction")}; data.relics.different_skill_tracker={relic_ticks(8,"window"),relic_number(8,"damage_multiplier"),relic_ticks(8,"per_target_cooldown")}; data.relics.damage_knockback={relic_number(9,"radius"),relic_number(9,"push_distance"),relic_number(9,"slow_fraction"),relic_ticks(9,"slow_duration"),relic_ticks(9,"cooldown")}; data.relics.once_revive={relic_number(10,"revive_hp_fraction"),relic_ticks(10,"invulnerability_duration"),relic_count(10,"maximum_triggers_per_session")}; data.relics.combat_hit_chain={relic_count(11,"direct_hits_per_trigger"),relic_number(11,"search_radius"),relic_count(11,"maximum_targets"),relic_number(11,"damage_multiplier")}; data.relics.projectile_cadence_reward={relic_count(12,"hits_per_trigger"),relic_ticks(12,"cooldown_reduction")}; data.relics.pre_damage_guard={relic_number(13,"damage_reduction_fraction"),relic_ticks(13,"cooldown")}; data.relics.slow_synergy={relic_number(14,"damage_multiplier"),relic_ticks(14,"per_target_cooldown")}; data.relics.area_resonance={relic_number(15,"damage_multiplier"),relic_ticks(15,"cooldown")}; data.relics.boss_pressure={relic_number(16,"damage_multiplier"),relic_ticks(16,"per_target_cooldown")}; data.relics.hit_streak_reward={relic_count(17,"direct_hits_per_trigger"),relic_number(17,"damage_multiplier")}; data.relics.pickup_reward={relic_number(18,"attack_power_fraction"),relic_ticks(18,"duration")}; data.relics.low_health_survival={relic_number(19,"health_threshold_fraction"),relic_number(19,"damage_reduction_fraction"),relic_ticks(19,"cooldown")};
 
-    const auto &spawn = sources.documents.at("spawn_schedule"); const auto &intervals=spawn["continuous_intervals"]; const auto &compositions=spawn["compositions"]; const auto rate_at=[&](std::int64_t seconds){for(const auto &interval:intervals) if(seconds>=interval["start_seconds"].get<std::int64_t>()&&seconds<interval["end_seconds"].get<std::int64_t>()) return static_cast<float>(interval["rate_per_second"].get<double>()); ThrowValidationError("spawn_schedule","$/continuous_intervals","composition is outside intervals");}; for(std::size_t index=0;index<compositions.size();++index){const auto seconds=RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"start_seconds"); data.spawn_stages[index]={CheckedInteger<std::uint16_t>(seconds/60,"spawn_schedule","$/compositions/start_seconds"),ToTicks(static_cast<double>(seconds),"spawn_schedule","$/compositions/start_seconds"),rate_at(seconds),{CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"melee_weight"),"spawn_schedule","$/compositions/melee_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"ranged_weight"),"spawn_schedule","$/compositions/ranged_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"suicide_weight"),"spawn_schedule","$/compositions/suicide_weight")}};}
+    const auto &spawn = sources.documents.at("spawn_schedule"); const auto &intervals=spawn["continuous_intervals"]; const auto &compositions=spawn["compositions"]; const auto rate_at = [&](std::int64_t seconds) {
+        for (std::size_t interval_index = 0; interval_index < intervals.size(); ++interval_index)
+        {
+            const auto &interval = intervals[interval_index];
+            if (seconds < interval["start_seconds"].get<std::int64_t>() ||
+                seconds >= interval["end_seconds"].get<std::int64_t>()) continue;
+            const auto path = "$/continuous_intervals/" + std::to_string(interval_index);
+            const auto rate = RequireNumber(interval, "spawn_schedule", path, "rate_per_second");
+            try { return detail::CheckedSpawnRate(rate); }
+            catch (const std::logic_error &)
+            {
+                ThrowValidationError("spawn_schedule", path + "/rate_per_second",
+                    "spawn rate must remain positive and permit float accumulator progress");
+            }
+        }
+        ThrowValidationError("spawn_schedule", "$/continuous_intervals", "composition is outside intervals");
+    }; for(std::size_t index=0;index<compositions.size();++index){const auto seconds=RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"start_seconds"); data.spawn_stages[index]={CheckedInteger<std::uint16_t>(seconds/60,"spawn_schedule","$/compositions/start_seconds"),ToTicks(static_cast<double>(seconds),"spawn_schedule","$/compositions/start_seconds"),rate_at(seconds),{CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"melee_weight"),"spawn_schedule","$/compositions/melee_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"ranged_weight"),"spawn_schedule","$/compositions/ranged_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"suicide_weight"),"spawn_schedule","$/compositions/suicide_weight")}};}
     const auto &waves=spawn["waves"]; for(std::size_t index=0;index<waves.size();++index){const auto path="$/waves/"+std::to_string(index); const auto seconds=RequireNumber(waves[index],"spawn_schedule",path,"start_seconds"); const auto duration=ToTicks(RequireNumber(waves[index],"spawn_schedule",path,"duration_seconds"),"spawn_schedule",path+"/duration_seconds"); if(duration!=CheckedInteger<hs::Tick>(RequireInteger(waves[index],"spawn_schedule",path,"duration_ticks"),"spawn_schedule",path+"/duration_ticks")) ThrowValidationError("spawn_schedule",path,"duration ticks disagree with seconds"); data.waves[index]={CheckedInteger<std::uint16_t>(seconds/60.0,"spawn_schedule",path+"/start_seconds"),ToTicks(seconds,"spawn_schedule",path+"/start_seconds"),CheckedInteger<std::uint16_t>(RequireInteger(waves[index],"spawn_schedule",path,"total_count"),"spawn_schedule",path+"/total_count"),duration};}
     const auto &placement=sources.documents.at("spawn_schedule")["placement"]; data.spawn_placement={static_cast<float>(RequireNumber(placement,"spawn_schedule","$/placement","minimum_player_distance_m")),static_cast<float>(RequireNumber(placement,"spawn_schedule","$/placement","maximum_player_distance_m")),placement["require_inside_arena"].get<bool>(),placement["require_outside_max_zoom_view"].get<bool>(),ToTicks(RequireNumber(placement,"spawn_schedule","$/placement","fallback_warning_seconds"),"spawn_schedule","$/placement/fallback_warning_seconds"),SpawnFallbackLocation::FarthestArenaEdge,spawn_view.min_forward,spawn_view.max_forward,spawn_view.half_right,spawn_view.forward_x,spawn_view.forward_z};
 
@@ -655,7 +699,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             {
                 RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "fan_angle", "projectile_count", "projectile_speed", "damage"});
                 out.logic=BossPatternLogic::FanProjectiles; out.fan_angle_degrees=n("fan_angle"); out.projectile_count=i("projectile_count");
-                out.projectile_speed=n("projectile_speed"); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
             }
             else if (logic == "predicted_position_ground_areas")
             {
@@ -675,7 +719,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             else if (logic == "double_offset_fan_projectiles")
             {
                 RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "volley_count", "interval", "projectiles_per_volley", "second_volley_angle_offset", "projectile_speed", "damage"});
-                out.logic=BossPatternLogic::DoubleOffsetFanProjectiles; out.volley_count=i("volley_count"); out.interval_ticks=d("interval"); out.projectiles_per_volley=i("projectiles_per_volley"); out.second_volley_angle_offset_degrees=n("second_volley_angle_offset"); out.projectile_speed=n("projectile_speed"); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                out.logic=BossPatternLogic::DoubleOffsetFanProjectiles; out.volley_count=i("volley_count"); out.interval_ticks=d("interval"); out.projectiles_per_volley=i("projectiles_per_volley"); out.second_volley_angle_offset_degrees=n("second_volley_angle_offset"); out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
             }
             else ThrowValidationError("bosses", path + "/id", "unknown boss pattern ID");
         }

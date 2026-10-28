@@ -788,7 +788,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         }
         cut.occlusion_constants.resource->Unmap(0, nullptr);
         ref_base += output_capacity;
-        WriteClusterCutDescriptors(frame_slot, ordinal);
+        WriteClusterCutDescriptors(owner, frame_slot, ordinal);
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC records{};
     records.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -802,7 +802,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::WriteClusterCutDescriptors(std::uint32_t frame_slot,
+void D3D12Renderer::Impl::WriteClusterCutDescriptors(OwnedView &owner, std::uint32_t frame_slot,
                                                   std::uint32_t ordinal)
 {
     auto &runtime = *cluster_runtime;

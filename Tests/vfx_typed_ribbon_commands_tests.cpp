@@ -298,10 +298,10 @@ void TestBossDashWakeRibbon()
               scratch.Storage()[0].outputs.data() == output_backing &&
               scratch.Storage()[0].outputs.capacity() == output_capacity,
           "warm persistent ribbon append replaced retained source/output storage");
-    auto malformed = input;
-    std::get<hs::VfxLinePayload>(malformed.payload).lifetime01 = 1.0f;
+    auto malformed_scratch = input;
+    std::get<hs::VfxLinePayload>(malformed_scratch.payload).lifetime01 = 1.0f;
     scratch.Reset();
-    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{malformed}, scratch);
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{malformed_scratch}, scratch);
     Check(scratch.Sources().empty() && scratch.Storage().size() == 1 &&
               scratch.Storage()[0].outputs.empty(),
           "rejected persistent ribbon exposed an inactive scratch row");

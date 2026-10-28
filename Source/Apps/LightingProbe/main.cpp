@@ -370,7 +370,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
         const auto path=stage/"default_probe.rpkg"; ap::WriteBytes(path,bytes);
         ap::Publish(buildRoot,spec,stage,{ap::HashProduct(std::string(kProduct),"default_probe.rpkg",path)});
     }
-    catch(...) { ap::RemoveStage(stage); throw; }
+    catch(...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage); std::cout<<spec.action_id<<" published\n";
 }
 } // namespace

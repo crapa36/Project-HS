@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <utility>
 
 namespace hs
@@ -72,6 +73,20 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
                            bool particles_replaced, bool mesh_replaced,
                            VfxLegacyGroundSuppression ground_suppression) const
 {
+    VfxPreparedLegacyEvent prepared;
+    std::vector<std::uint32_t> indices;
+    if (auto result = PrepareEvent(event, decorative_fraction, prepared, indices,
+            particles_replaced, mesh_replaced, ground_suppression); !result) return result;
+    return AppendPreparedEvent(prepared, indices, particles, lines);
+}
+
+Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative_fraction,
+    VfxPreparedLegacyEvent &prepared, std::vector<std::uint32_t> &emitter_indices,
+    bool particles_replaced, bool mesh_replaced,
+    VfxLegacyGroundSuppression ground_suppression) const
+{
+    prepared = {};
+    const auto old_index_size = emitter_indices.size();
     if (event.kind != PresentationKind::Vfx)
         return Result::Success();
     const auto *definition = FindEffect(event.asset);
@@ -94,19 +109,26 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX event parameters are invalid.");
     const Float3 forward{parameters.direction.x / direction_length, 0.0f, parameters.direction.z / direction_length};
     const Float3 right{forward.z, 0.0f, -forward.x};
-    if (definition->kind != VfxDefinitionKind::Line &&
-        (particles_replaced || ground_suppression.all_particles))
+    VfxPreparedLegacyEvent candidate;
+    candidate.event = &event; candidate.definition = definition;
+    candidate.parameters = parameters; candidate.forward = forward; candidate.right = right;
+    candidate.decorative_fraction = decorative_fraction; candidate.decorative = decorative;
+    candidate.particles_replaced = particles_replaced; candidate.mesh_replaced = mesh_replaced;
+    candidate.first_index = old_index_size;
+    const auto typed = std::lower_bound(image_.effect_lookup_by_id.begin(), image_.effect_lookup_by_id.end(),
+        event.asset.value, [](const auto &effect, std::uint64_t id) { return effect.effect_id < id; });
+    if (typed != image_.effect_lookup_by_id.end() && typed->effect_id == event.asset.value &&
+        typed->handle && typed->handle <= image_.program.effects.size())
+        candidate.importance = image_.program.effects[typed->handle - 1].importance;
+    if (definition->kind != VfxDefinitionKind::Line && ground_suppression.all_particles)
         return Result::Success();
     if (definition->kind == VfxDefinitionKind::Line)
     {
         if ((parameters.flags & static_cast<std::uint32_t>(VfxEventFlag::HasTarget)) == 0)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX line has no target.");
-        lines.push_back({event.sequence, event.tick, event.position, parameters.target,
-                         definition->line_color, definition->line_width * parameters.scale,
-                         definition->line_lifetime, definition->line_sprite,
-                         definition->line_frame_columns, definition->line_frame_rows,
-                         definition->line_uv_repeat, definition->line_scroll_speed,
-                         definition->line_primitive});
+        candidate.required_count = candidate.maximum_required_count = 1;
+        candidate.replacement_counts_ready = true;
+        prepared = candidate;
         return Result::Success();
     }
     // The legacy release ring expands across safe gaps and disagrees with the
@@ -114,21 +136,153 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     // owns this boundary for the area's entire lifetime.
     const bool typed_wavefront = event.asset.value == kShockwaveRelease.value &&
         event.geometry.kind == PresentationGeometryKind::RingGaps && image_.has_typed_wavefront;
-    for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
+    try
     {
-        const auto &emitter = image_.emitters[definition->first_emitter + index];
-        if (mesh_replaced && emitter.renderer == VfxRenderer::Mesh &&
-            (emitter.primitive != VfxPrimitive::ShockShell || event.asset.value == kExplosiveArrowMain.value))
+        for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
+        {
+            const auto emitter_index = definition->first_emitter + index;
+            const auto &emitter = image_.emitters[emitter_index];
+            if ((ground_suppression.ground_ring && emitter.renderer == VfxRenderer::Ground &&
+                 emitter.primitive == VfxPrimitive::Ring) ||
+                (ground_suppression.ground_disc && emitter.renderer == VfxRenderer::Ground &&
+                 emitter.primitive == VfxPrimitive::Disc) ||
+                (ground_suppression.segment_solid_trail && emitter.renderer == VfxRenderer::Segment &&
+                 emitter.primitive == VfxPrimitive::SolidTrail))
+                continue;
+            if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
+                continue;
+            emitter_indices.push_back(emitter_index);
+        }
+    }
+    catch (...)
+    {
+        emitter_indices.resize(old_index_size);
+        prepared = {};
+        return Result::Failure(ErrorCode::TaskFailed, "hs_vfx", "Preparing legacy VFX emitter indices failed.");
+    }
+    candidate.index_count = emitter_indices.size() - candidate.first_index;
+    if (auto result = SetPreparedReplacements(candidate, emitter_indices,
+            particles_replaced, mesh_replaced); !result)
+    {
+        emitter_indices.resize(old_index_size);
+        prepared = {};
+        return result;
+    }
+    prepared = candidate;
+    return Result::Success();
+}
+
+Result VfxCatalog::SetPreparedReplacements(VfxPreparedLegacyEvent &prepared,
+    std::span<const std::uint32_t> emitter_indices,
+    bool particles_replaced, bool mesh_replaced) const
+{
+    if (!prepared.definition)
+        return prepared.event ? Result::Failure(ErrorCode::InvalidArgument, "hs_vfx",
+            "Prepared legacy VFX definition is missing.") : Result::Success();
+    if (!prepared.event)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX event is missing.");
+    if (prepared.definition->kind == VfxDefinitionKind::Line)
+    {
+        prepared.particles_replaced = particles_replaced;
+        prepared.mesh_replaced = mesh_replaced;
+        prepared.maximum_required_count = prepared.required_count = 1;
+        prepared.count = prepared.admitted_count = 0;
+        prepared.replacement_counts_ready = true;
+        return Result::Success();
+    }
+    if (prepared.first_index > emitter_indices.size() ||
+        prepared.index_count > emitter_indices.size() - prepared.first_index)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX range is invalid.");
+    if (prepared.replacement_counts_ready && prepared.particles_replaced == particles_replaced &&
+        prepared.mesh_replaced == mesh_replaced)
+        return Result::Success();
+
+    for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
+        if (emitter_index < prepared.definition->first_emitter ||
+            emitter_index - prepared.definition->first_emitter >= prepared.definition->emitter_count)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX emitter index is invalid.");
+
+    prepared.particles_replaced = particles_replaced;
+    prepared.mesh_replaced = mesh_replaced;
+    prepared.maximum_required_count = 0;
+    prepared.required_count = 0;
+    prepared.count = 0;
+    prepared.admitted_count = 0;
+    for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
+    {
+        const auto &emitter = image_.emitters[emitter_index];
+        const bool optional = prepared.decorative && emitter.renderer != VfxRenderer::Ground;
+        if (!optional) ++prepared.maximum_required_count;
+        if (particles_replaced ||
+            (mesh_replaced && emitter.renderer == VfxRenderer::Mesh &&
+             (emitter.primitive != VfxPrimitive::ShockShell ||
+              prepared.event->asset.value == kExplosiveArrowMain.value)))
             continue;
-        if ((ground_suppression.ground_ring && emitter.renderer == VfxRenderer::Ground &&
-             emitter.primitive == VfxPrimitive::Ring) ||
-            (ground_suppression.ground_disc && emitter.renderer == VfxRenderer::Ground &&
-             emitter.primitive == VfxPrimitive::Disc) ||
-            (ground_suppression.segment_solid_trail && emitter.renderer == VfxRenderer::Segment &&
-             emitter.primitive == VfxPrimitive::SolidTrail))
+        if (optional) ++prepared.count;
+        else ++prepared.required_count;
+    }
+    prepared.admitted_count = prepared.count;
+    prepared.replacement_counts_ready = true;
+    return Result::Success();
+}
+
+Result VfxCatalog::AppendPreparedEvent(const VfxPreparedLegacyEvent &prepared,
+    std::span<const std::uint32_t> emitter_indices,
+    std::vector<ParticleSpawnCommand> &particles, std::vector<VfxLineSpawnCommand> &lines) const
+{
+    if (!prepared.definition) return Result::Success();
+    if (!prepared.event || !prepared.replacement_counts_ready || prepared.admitted_count > prepared.count ||
+        prepared.first_index > emitter_indices.size() ||
+        prepared.index_count > emitter_indices.size() - prepared.first_index)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX range or admission is invalid.");
+    const auto &event = *prepared.event;
+    const auto *definition = prepared.definition;
+    const auto &parameters = prepared.parameters;
+    const auto forward = prepared.forward, right = prepared.right;
+    const auto decorative = prepared.decorative;
+    const auto decorative_fraction = prepared.decorative_fraction;
+    if (definition->kind == VfxDefinitionKind::Line)
+    {
+        if (prepared.maximum_required_count != 1 || prepared.required_count != 1 ||
+            prepared.count != 0 || prepared.admitted_count != 0 || prepared.index_count != 0)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared VFX line admission is invalid.");
+        if (prepared.required_count)
+            lines.push_back({event.sequence, event.tick, event.position, parameters.target,
+                definition->line_color, definition->line_width * parameters.scale,
+                definition->line_lifetime, definition->line_sprite,
+                definition->line_frame_columns, definition->line_frame_rows,
+                definition->line_uv_repeat, definition->line_scroll_speed,
+                definition->line_primitive});
+        return Result::Success();
+    }
+    for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
+        if (emitter_index < definition->first_emitter ||
+            emitter_index - definition->first_emitter >= definition->emitter_count)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX emitter index is invalid.");
+    if (prepared.maximum_required_count > prepared.index_count ||
+        prepared.count > prepared.index_count - prepared.maximum_required_count ||
+        prepared.required_count > prepared.index_count ||
+        prepared.admitted_count > prepared.index_count - prepared.required_count)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX counts exceed the emitter range.");
+    if (prepared.required_count > particles.max_size() - particles.size() ||
+        prepared.admitted_count > particles.max_size() - particles.size() - prepared.required_count)
+        throw std::length_error("Prepared legacy VFX output exceeds vector capacity");
+    particles.reserve(particles.size() + prepared.required_count + prepared.admitted_count);
+    auto remaining = prepared.admitted_count;
+    for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
+    {
+        const auto &emitter = image_.emitters[emitter_index];
+        if (prepared.particles_replaced ||
+            (prepared.mesh_replaced && emitter.renderer == VfxRenderer::Mesh &&
+             (emitter.primitive != VfxPrimitive::ShockShell ||
+              event.asset.value == kExplosiveArrowMain.value)))
             continue;
-        if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
-            continue;
+        const auto index = emitter_index - definition->first_emitter;
+        if (decorative && emitter.renderer != VfxRenderer::Ground)
+        {
+            if (!remaining) continue;
+            --remaining;
+        }
         const auto scaled = parameters.scale;
         ParticleSpawnCommand command;
         command.sequence = event.sequence;
@@ -141,7 +295,7 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
         command.facing = emitter.facing;
         command.renderer = emitter.renderer;
         if (emitter.renderer == VfxRenderer::Mesh)
-            command.mesh_index = image_.authored_mesh_indices[definition->first_emitter + index];
+            command.mesh_index = image_.authored_mesh_indices[emitter_index];
         command.primitive = emitter.primitive;
         command.sprite = emitter.sprite;
         command.frame_columns = emitter.frame_columns;

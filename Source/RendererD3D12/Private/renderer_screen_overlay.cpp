@@ -70,7 +70,7 @@ std::uint64_t ScreenOverlayCandidate::AllocatedBytes() const noexcept{return tar
 std::uint64_t ScreenOverlaySystem::AllocatedBytes() const noexcept{return targets_?targets_->bytes:0;}
 Result ScreenOverlaySystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ViewExtent capacity,
     std::uint32_t frames,const ShaderReader &read,bool enabled,RendererPipelineCache &pipelineCache,
-    ScreenOverlayCandidate &candidate) const
+    ScreenOverlayCandidate &candidate)
 {
     candidate={};
     if(!enabled){candidate.prepared_=true;return Result::Success();}

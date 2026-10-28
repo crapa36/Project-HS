@@ -266,7 +266,7 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
         ap::RemoveStage(stage);
         std::cout << spec.action_id << " published native DXIL pipelines=" << shaders.size() << " noise_textures=16\n";
     }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
 }
 } // namespace
 

@@ -93,7 +93,7 @@ void BuildVfxTypedFrameInputs(
     Tick current_tick,
     VfxTypedFrameInputs &result,
     const PreparedPairFacts *pair_facts = nullptr,
-    float interpolation = 1.0f);
+    float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
 
 // Retain only the captured endpoints of a successful second retreat. The
 // movement is instantaneous in gameplay; fixed authored seconds own the fade.
@@ -105,7 +105,7 @@ class VfxUpgradeMovementState
         const VfxImage &image,
         std::span<const PresentationEvent> dispatched_events,
         Tick current_tick, std::vector<VfxPersistentInput> &output,
-        float interpolation = 1.0f);
+        float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
     void Clear() noexcept { owners_.clear(); staged_owners_.clear(); }
     [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
     [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,

@@ -208,14 +208,14 @@ void PreservesBossOwnerAndAuthoredShells()
 void AppendPreservesOwnerPrefixAndCapacity()
 {
     const auto program=Program(true);
-    VfxImageData data;
+    hs::VfxImageData data;
     data.program=program;
-    PrepareVfxFresnelRecipes(data.program.View(),data.fresnel_effect_recipes,data.fresnel_recipes);
+    hs::PrepareVfxFresnelRecipes(data.program.View(),data.fresnel_effect_recipes,data.fresnel_recipes);
     auto image=data.View();
     auto owner=Input();
-    std::vector<VfxFresnelInput> result;
+    std::vector<hs::VfxFresnelInput> result;
     result.reserve(4);
-    VfxFresnelInput prefix;prefix.stable_id=77;result.push_back(prefix);
+    hs::VfxFresnelInput prefix;prefix.stable_id=77;result.push_back(prefix);
     const auto capacity=result.capacity();
     hs::runtime_detail::AppendVfxTypedFresnelCommands(image,{},result);
     auto rejected=owner;rejected.stable_id=0;
@@ -224,7 +224,7 @@ void AppendPreservesOwnerPrefixAndCapacity()
             "empty/rejected Fresnel append changed prefix or capacity");
     hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&owner,1),result);
     Require(result.size()==2&&result[1].stable_id==owner.stable_id&&
-            result[1].render_instance_id==std::get<VfxEntityPayload>(owner.payload).render_instance_id&&
+            result[1].render_instance_id==std::get<hs::VfxEntityPayload>(owner.payload).render_instance_id&&
             result.capacity()==capacity,
             "Fresnel append lost owner binding or reused capacity");
 }

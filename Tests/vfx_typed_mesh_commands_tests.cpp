@@ -88,9 +88,9 @@ int RunVfxMeshTests()
         data.program=p;
         hs::PrepareVfxMeshRecipes(data.program.View(),data.mesh_effect_recipes,data.mesh_recipes);
         auto image=data.View();
-        std::vector<VfxOwnedMeshInput> appended;
+        std::vector<hs::VfxOwnedMeshInput> appended;
         appended.reserve(4);
-        VfxOwnedMeshInput prefix;prefix.owner_id=77;appended.push_back(prefix);
+        hs::VfxOwnedMeshInput prefix;prefix.owner_id=77;appended.push_back(prefix);
         const auto capacity=appended.capacity();
         hs::runtime_detail::AppendVfxTypedMeshCommands(image,{},appended);
         auto rejected=owner;rejected.effect_handle=0;

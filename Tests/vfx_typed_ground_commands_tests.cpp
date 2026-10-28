@@ -47,10 +47,10 @@ std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildGround(
     const hs::VfxProgramData &program,std::span<const hs::VfxPersistentInput> inputs,hs::Tick tick)
 { const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedGroundCommands(image.View(),inputs,tick); }
 std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildEventGround(
-    const hs::VfxProgramData &program,hs::VfxEventView inputs,double tick)
+    const hs::VfxProgramData &program,hs::runtime_detail::VfxEventView inputs,double tick)
 { const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedEventGroundCommands(image.View(),inputs,tick); }
 std::vector<hs::runtime_detail::VfxGroundBirthSuppressionFacts> GroundBirthFacts(
-    const hs::VfxProgramData &program, hs::VfxEventView inputs)
+    const hs::VfxProgramData &program, hs::runtime_detail::VfxEventView inputs)
 {
     const auto image = PreparedImage(program);
     std::vector<hs::runtime_detail::VfxGroundBirthSuppressionFacts> facts;
@@ -653,6 +653,32 @@ void RingGapsPreservesGeometryAndOwnerAge()
     std::get<hs::VfxRingGapsPayload>(input.payload).gap_angles_degrees.clear();
     std::get<hs::VfxRingGapsPayload>(input.payload).gap_half_width_degrees=180;
     commands=run();Require(commands.size()==2&&commands[0].geometry.gap_angles_radians.empty(),"empty gaps invented sectors");
+    auto &compact_input=std::get<hs::VfxRingGapsPayload>(input.payload);
+    constexpr std::uint8_t compact_count=7;
+    for(std::uint32_t index=0;index<compact_count;++index)
+    {
+        const float degrees=719.0f+360.0f*static_cast<float>(index)/static_cast<float>(compact_count);
+        compact_input.gap_angles_degrees.push_back(std::fmod(std::fmod(degrees,360.0f)+360.0f,360.0f));
+    }
+    const auto expanded_commands=run();
+    compact_input.gap_angles_degrees.clear();
+    compact_input.uniform_gaps={719.0f,compact_count,hs::VfxGapAngleFormula::OwnerNormalized};
+    const auto compact_commands=run();
+    Require(compact_commands.size()==expanded_commands.size()&&compact_commands.size()==2,
+        "compact ring changed the ground output routes");
+    for(std::size_t row=0;row<compact_commands.size();++row)
+    {
+        const auto &compact=compact_commands[row].geometry;
+        Require(compact.GapCount()==compact_count&&compact.gap_angles_radians.capacity()==0,
+            "compact ground output materialized its angle list");
+        for(std::size_t index=0;index<compact.GapCount();++index)
+            Require(std::bit_cast<std::uint32_t>(compact.GapAngleRadians(index))==
+                std::bit_cast<std::uint32_t>(expanded_commands[row].geometry.GapAngleRadians(index)),
+                "compact ground output changed flattened radians");
+    }
+    compact_input.gap_angles_degrees.push_back(19);
+    Require(run().empty(),"ground accepted simultaneous compact and explicit angle storage");
+    compact_input.gap_angles_degrees.clear();
     cooked.outputs[1].min_quality=2;commands=run();Require(commands.size()==1,"ring gap quality ignored");
     cooked.effects[0].payload_kind=Hash32("CircleAreaPayload");Require(run().empty(),"ring geometry coerced into Circle schema");
 }
@@ -2302,6 +2328,95 @@ void GroundEventAdmissionMatchesPreviousRules()
             "ground effect admission summary was not prepared from direct outputs");
 }
 
+void GroundAdmissionProducerCoversPreparedRoutes()
+{
+    const auto event = [] {
+        auto input = ExpandingRingEvent();
+        input.event_tick = 100;
+        return input;
+    };
+
+    auto add_program = ExpandingRingProgram();
+    auto add_image = PreparedImage(add_program);
+    auto add = event();
+    const auto add_admission = hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(add_image.View(), add);
+    Require(add_image.ground_effect_ranges[0].count == 1 &&
+            add_image.ground_recipes[0].event_admission_profiles == hs::kVfxGroundEventDirectAdd &&
+            add_admission.accepted &&
+            BuildEventGround(add_program, std::span(&add, 1), 112).size() == 1,
+            "prepared Direct Add recipe did not admit and produce its event output");
+
+    auto mixed_program = add_program;
+    mixed_program.effects[0].sources.count = 2;
+    mixed_program.sources.push_back(mixed_program.sources[0]);
+    mixed_program.sources[1].stable_id = Hash32("mixed_soft");
+    mixed_program.sources[1].outputs = {1, 1};
+    mixed_program.parameters.push_back({Hash32("edge_width_world"), hs::VfxParameterType::Float,
+        std::bit_cast<std::uint32_t>(.055f)});
+    auto soft = mixed_program.outputs[0];
+    soft.profile = hs::VfxOutputProfile::GroundSdfSoft;
+    soft.shape = Hash32("exact_hitbox_ring");
+    soft.motion = hs::VfxMotionKind::StableBoundaryInwardPulse;
+    soft.parameters = {3, 1};
+    soft.source = 1;
+    mixed_program.outputs.push_back(soft);
+    auto mixed_image = PreparedImage(mixed_program);
+    Require(mixed_image.ground_effect_ranges[0].count == 2 &&
+            mixed_image.ground_recipes[0].event_admission_profiles ==
+                (hs::kVfxGroundEventDirectAdd | hs::kVfxGroundEventDirectSoft) &&
+            hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(mixed_image.View(), add).accepted &&
+            !BuildEventGround(mixed_program, std::span(&add, 1), 112).empty(),
+            "mixed Direct Add/Soft recipes were not summarized after effect preparation");
+
+    auto empty_program = add_program;
+    empty_program.outputs[0].shape = Hash32("unsupported_ground_shape");
+    auto empty_image = PreparedImage(empty_program);
+    Require(empty_image.ground_effect_ranges[0].count == 0 &&
+            !hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(empty_image.View(), add).accepted &&
+            BuildEventGround(empty_program, std::span(&add, 1), 112).empty(),
+            "empty prepared Ground range was admitted or produced output");
+
+    auto non_direct_program = add_program;
+    non_direct_program.sources[0].type = hs::VfxSourceType::ProjectileFollow;
+    auto non_direct_image = PreparedImage(non_direct_program);
+    Require(non_direct_image.ground_effect_ranges[0].count == 0 &&
+            !hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(non_direct_image.View(), add).accepted,
+            "non-Direct source contributed Ground admission");
+
+    auto charged_program = ChargedPulseProgram();
+    auto charged_image = PreparedImage(charged_program);
+    auto charged = ChargedPulseInput();
+    const auto charged_admission = hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(
+        charged_image.View(), charged);
+    Require(charged_image.ground_recipes[0].event_admission_profiles == hs::kVfxGroundEventDirectSoft &&
+            charged_admission.accepted && charged_admission.replace_context_owner &&
+            BuildEventGround(charged_program, std::span(&charged, 1), 100).size() == 2,
+            "prepared charged pulse Soft recipe did not admit and produce its event outputs");
+
+    auto wave_program = ChargedPulseProgram();
+    wave_program.effect_lookup[0].effect_id = Hash64("particle.session.wave_start");
+    auto wave_image = PreparedImage(wave_program);
+    auto wave = ChargedPulseInput();
+    wave.payload = hs::VfxContextPayload{0, {}, 0.0f, 10.0f, 0.0f};
+    Require(wave_image.ground_recipes[0].event_admission_profiles == hs::kVfxGroundEventDirectSoft &&
+            hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(wave_image.View(), wave).accepted &&
+            BuildEventGround(wave_program, std::span(&wave, 1), 100).size() == 2,
+            "prepared wave-start Soft recipes did not admit and produce their event outputs");
+
+    hs::VfxPersistentInput timer;
+    timer.stable_id = 0x456;
+    timer.effect_handle = 1;
+    timer.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::WaveTimer);
+    timer.normalized_age = .5f;
+    timer.payload = hs::VfxContextPayload{0, {}, 0.0f, 10.0f, 0.0f};
+    const auto timer_commands = BuildGround(wave_program, std::span(&timer, 1), 100);
+    Require(timer_commands.size() == 2 &&
+            timer_commands[0].source_visual_kind == timer.source_visual_kind &&
+            Near(timer_commands[0].command.lifetime_min, 2.0f / 60.0f) &&
+            Near(timer_commands[1].command.lifetime_max, 2.0f / 60.0f),
+            "persistent WaveTimer lost its prepared source outputs or short lifetime");
+}
+
 void CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable()
 {
     const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
@@ -2921,6 +3036,7 @@ int RunVfxGroundTests()
         ChargedPulseRejectsMalformedContextAndCookedContract();
         GroundBirthSuppressionMatchesAcceptedEventOutputs();
         GroundEventAdmissionMatchesPreviousRules();
+        GroundAdmissionProducerCoversPreparedRoutes();
         CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable();
         PersistentStatusPolarRuneUsesOwnerFootprintAndClock();
         PersistentStatusPolarRuneRejectsWrongContract();

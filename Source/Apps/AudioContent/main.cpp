@@ -249,7 +249,7 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);

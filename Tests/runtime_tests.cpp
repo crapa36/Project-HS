@@ -27,6 +27,7 @@
 #include "recording_io.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
+#include "renderer_receipts.hpp"
 #include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
 #include "vfx_typed_ground_commands.hpp"
@@ -612,102 +613,6 @@ void TestProductionVfxDecoding()
     }
 }
 
-void TestLegacyMeshReplacement()
-{
-    std::array<hs::CookedParticleEmitter, 4> emitters{};
-    for (auto &emitter : emitters) emitter.count = 3;
-    emitters[0].renderer = hs::VfxRenderer::Mesh;
-    emitters[0].primitive = hs::VfxPrimitive::Arrow;
-    emitters[1].renderer = hs::VfxRenderer::Mesh;
-    emitters[1].primitive = hs::VfxPrimitive::ShockShell;
-    emitters[2].renderer = hs::VfxRenderer::Sprite;
-    emitters[3].renderer = hs::VfxRenderer::Ground;
-    emitters[3].primitive = hs::VfxPrimitive::Ring;
-    const std::array<std::uint8_t, 4> meshes{1, 2, 0, 0};
-    const std::array<std::uint8_t, 1> decorative{0};
-    for (const auto name : {"particle.fixture.mesh", "particle.skill.explosive_arrow.main"})
-    {
-        const auto id = hs::MakeAssetId(name);
-        const std::array definitions{hs::CookedVfxDefinition{id.value, 0, 4}};
-        hs::VfxImage image;
-        image.definitions = definitions;
-        image.emitters = emitters;
-        image.authored_mesh_indices = meshes;
-        image.decorative_definitions = decorative;
-        hs::VfxCatalog catalog;
-        catalog.Bind(image);
-        hs::PresentationEvent event;
-        event.kind = hs::PresentationKind::Vfx;
-        event.asset = id;
-        event.sequence = 27;
-        event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
-        std::vector<hs::ParticleSpawnCommand> original, actual(1);
-        actual.front().sequence = 99;
-        std::vector<hs::VfxLineSpawnCommand> lines;
-        Check(catalog.ExpandEvent(event, 1.0f, original, lines).Succeeded() &&
-                  catalog.ExpandEvent(event, 1.0f, actual, lines, false, true).Succeeded(),
-              "legacy mesh replacement expansion failed");
-        const bool replaces_shell = id.value == hs::MakeAssetId("particle.skill.explosive_arrow.main").value;
-        std::size_t kept = 1;
-        for (const auto &command : original)
-        {
-            if (command.renderer == hs::VfxRenderer::Mesh &&
-                (command.primitive != hs::VfxPrimitive::ShockShell || replaces_shell)) continue;
-            Check(kept < actual.size() && actual[kept].seed == command.seed &&
-                      actual[kept].count == command.count && actual[kept].renderer == command.renderer &&
-                      actual[kept].primitive == command.primitive,
-                  "mesh replacement changed retained accents, emitter order or seeds");
-            ++kept;
-        }
-        Check(original.size() == 4 && actual.size() == kept && actual.front().sequence == 99 &&
-                  kept == (replaces_shell ? 3 : 4),
-              "mesh replacement removed unrelated outputs or retained replaced mesh");
-    }
-}
-
-void TestLegacyGroundSuppression()
-{
-    std::array<hs::CookedParticleEmitter, 5> emitters{};
-    for (auto &emitter : emitters) emitter.count = 2;
-    emitters[0].renderer = hs::VfxRenderer::Ground;
-    emitters[0].primitive = hs::VfxPrimitive::Ring;
-    emitters[1].renderer = hs::VfxRenderer::Ground;
-    emitters[1].primitive = hs::VfxPrimitive::Disc;
-    emitters[2].renderer = hs::VfxRenderer::Segment;
-    emitters[2].primitive = hs::VfxPrimitive::SolidTrail;
-    emitters[3].renderer = hs::VfxRenderer::Sprite;
-    emitters[4].renderer = hs::VfxRenderer::Ground;
-    emitters[4].primitive = hs::VfxPrimitive::ShockShell;
-    const std::array<std::uint8_t, 1> decorative{0};
-    const auto id = hs::MakeAssetId("particle.fixture.ground_suppression");
-    const std::array definitions{hs::CookedVfxDefinition{id.value, 0, 5}};
-    hs::VfxImage image;
-    image.definitions = definitions;
-    image.emitters = emitters;
-    image.decorative_definitions = decorative;
-    hs::VfxCatalog catalog;
-    catalog.Bind(image);
-
-    hs::PresentationEvent event;
-    event.kind = hs::PresentationKind::Vfx;
-    event.asset = id;
-    event.sequence = 27;
-    event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
-    std::vector<hs::ParticleSpawnCommand> actual;
-    std::vector<hs::VfxLineSpawnCommand> lines;
-    const hs::VfxLegacyGroundSuppression matching{false, true, true, true};
-    Check(catalog.ExpandEvent(event, 1.0f, actual, lines, false, false, matching).Succeeded() &&
-              actual.size() == 2 && actual[0].renderer == hs::VfxRenderer::Sprite &&
-              actual[1].renderer == hs::VfxRenderer::Ground &&
-              actual[1].primitive == hs::VfxPrimitive::ShockShell,
-          "ground suppression changed unrelated accents or ShockShell ordering");
-    actual.clear();
-    Check(catalog.ExpandEvent(event, 1.0f, actual, lines, false, false,
-              hs::VfxLegacyGroundSuppression{true, false, false, false}).Succeeded() &&
-              actual.empty(),
-          "full typed replacement retained legacy particle rows");
-}
-
 void TestVfxCatalog()
 {
     hs::VfxCatalog catalog;
@@ -911,6 +816,10 @@ void TestVfxCatalog()
         }), "authoritative wavefront replaces only legacy ring that crosses safe gaps");
     event.geometry = {};
       event.asset = hs::MakeAssetId("particle.line.ricochet");
+    hs::VfxPreparedLegacyEvent line_plan;
+    std::vector<std::uint32_t> line_indices;
+    Check(!catalog.PrepareEvent(event, 1.0f, line_plan, line_indices).Succeeded() &&
+              line_plan.event == nullptr && line_indices.empty(), "line target required before prepared admission");
     Check(!catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded(), "line target required");
     parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
     parameters.target = {4.0f, 0.0f, 5.0f};
@@ -919,6 +828,17 @@ void TestVfxCatalog()
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
+    Check(catalog.PrepareEvent(event, 1.0f, line_plan, line_indices, true).Succeeded() &&
+              line_plan.required_count == 1 && line_plan.maximum_required_count == 1,
+          "particle replacement suppressed required prepared line output");
+    Check(catalog.SetPreparedReplacements(line_plan, line_indices, false, false).Succeeded() &&
+              line_plan.required_count == 1,
+          "replacement reselection changed protected line requirement");
+    std::vector<hs::VfxLineSpawnCommand> prepared_lines;
+    std::vector<hs::ParticleSpawnCommand> prepared_particles;
+    Check(catalog.AppendPreparedEvent(line_plan, line_indices, prepared_particles, prepared_lines).Succeeded() &&
+              prepared_lines.size() == 1 && prepared_lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
+          "prepared line did not retain HasTarget output contract");
     lines.clear();
     Check(catalog.ExpandEvent(event, 1.0f, full, lines, true).Succeeded() &&
               lines.size() == 1 && lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
@@ -2268,6 +2188,60 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
           "visible graphics settings ignored a new model owner");
 }
 
+void TestRendererReceiptsSurviveLaterFailure()
+{
+    hs::runtime_detail::VfxSessionState state;
+    (void)state.Synchronize(7);
+    hs::runtime_detail::UiDrawPackets packets;
+    auto ui = std::make_shared<hs::UiFrame>();
+    ui->generation = 10;
+    ui->session_id = 7;
+    hs::RendererFrameResult frame;
+    frame.rendered_view.output_extent = {1920, 1080};
+    frame.presented_ui_packet_generation = 10;
+    const auto set_native_receipt = [&](hs::Tick tick) {
+        const auto identity = state.PrepareNativeBatch(tick, true)->identity;
+        frame.vfx_world_session_id = identity.session;
+        frame.vfx_world_tick = identity.stateful_target;
+        frame.vfx_world_batch_sequence = identity.sequence;
+        frame.vfx_world_step_submitted = true;
+    };
+    set_native_receipt(5);
+    // Receipts describe accepted work even if Render later returns a failure.
+    auto facts = hs::runtime_detail::AcceptRendererReceipts(frame, packets, ui, 7, state);
+    Check(facts.native_batch_accepted && !facts.ui_receipt_rejected &&
+          !state.native_batch_active &&
+          packets.presented_ui_packet.load(std::memory_order_acquire)->frame == ui,
+          "accepted UI and native receipts precede overall Render failure handling");
+    const auto shown = packets.presented_ui_packet.load(std::memory_order_acquire);
+
+    set_native_receipt(6);
+    frame.presented_ui_packet_generation = 0;
+    frame.vfx_world_step_submitted = false;
+    facts = hs::runtime_detail::AcceptRendererReceipts(frame, packets, ui, 7, state);
+    Check(!facts.native_batch_accepted && !facts.ui_receipt_rejected && state.native_batch_active &&
+          packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "unsubmitted work and absent Present leave both pending owners unchanged");
+    frame.vfx_world_step_submitted = true;
+    ++frame.vfx_world_batch_sequence;
+    facts = hs::runtime_detail::AcceptRendererReceipts(frame, packets, ui, 7, state);
+    Check(!facts.native_batch_accepted && state.native_batch_active,
+          "mismatched native receipt cannot consume the frozen batch");
+    --frame.vfx_world_batch_sequence;
+    frame.presented_ui_packet_generation = 11;
+    facts = hs::runtime_detail::AcceptRendererReceipts(frame, packets, ui, 7, state);
+    Check(facts.native_batch_accepted && facts.ui_receipt_rejected && !state.native_batch_active &&
+          packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "rejected UI receipt cannot prevent acknowledgement of accepted GPU work");
+
+    set_native_receipt(7);
+    frame.presented_ui_packet_generation = 0;
+    facts = hs::runtime_detail::AcceptRendererReceipts(frame, packets, ui, 7, state);
+    Check(facts.native_batch_accepted && !state.native_batch_active &&
+          packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "Present failure leaves UI unchanged while accepted world mutation stays acknowledged");
+}
+
 void TestVfxSessionReset()
 {
     hs::runtime_detail::VfxSessionState state;
@@ -2969,8 +2943,6 @@ int main(int argc, char **argv)
             return 0;
         }
         TestVfxCatalog();
-        TestLegacyMeshReplacement();
-        TestLegacyGroundSuppression();
         TestShippingImage();
         TestCompiledShippingTables();
         TestProductionVfxDecoding();
@@ -2998,6 +2970,7 @@ int main(int argc, char **argv)
         TestVfxActiveEffectStoreOwnsPayloadOnce();
         TestVfxProfileBindingsAndCaptureRetention();
         TestUiPacketReceiptFollowsExactPresentedFrame();
+        TestRendererReceiptsSurviveLaterFailure();
         TestCameraPoseContinuity();
         TestDpiWindowCoordinates();
         std::filesystem::remove_all(root, error);

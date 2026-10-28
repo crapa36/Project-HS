@@ -27,6 +27,71 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
+void CheckSoftwareTransactionSupersession()
+{
+    Check(hs::TextureSoftwareTransactionSuperseded(2, 4, true) &&
+        !hs::TextureSoftwareTransactionSuperseded(2, 1, true) &&
+        !hs::TextureSoftwareTransactionSuperseded(2, 2, true) &&
+        !hs::TextureSoftwareTransactionSuperseded(2, 4, false),
+        "software transaction supersession did not distinguish pressure from expiring demand");
+
+    hs::ResidencyManager residency;
+    hs::ResidencyBudgetSnapshot transaction_budget{true, 1000, 0, 1000, 0, true, 1000};
+    transaction_budget.nonlocal_valid = true;
+    residency.UpdateBudget(transaction_budget);
+    const auto candidate = residency.ReserveGpu(600);
+    const auto upload_window = residency.ReserveGpu(100, hs::ResidencySegment::NonLocal);
+    const auto metadata = residency.ReserveHost(128);
+    Check(candidate && upload_window && metadata && residency.CommitHost(metadata, 128),
+        "software candidate, upload window, or decoded metadata reservation failed");
+
+    hs::StreamingManager streaming;
+    const auto completed_chunk = streaming.Request("render/texture/test.rtex", "mip-2-chunk-0", "generation-a", 10);
+    Check(completed_chunk && streaming.BeginRead(completed_chunk) &&
+        streaming.CompleteRead(completed_chunk, "generation-a") &&
+        streaming.BeginUpload(completed_chunk, "generation-a") &&
+        streaming.SubmitUpload(completed_chunk, "generation-a", {1, 0, 0}) &&
+        streaming.TryPublish(completed_chunk, "generation-a", {1, 0, 0}) &&
+        streaming.Retire(completed_chunk, {1, 0, 0}) && streaming.Collect({1, 0, 0}) == 1 &&
+        residency.Contains(upload_window),
+        "intermediate software chunk released its owner-retained upload window");
+    const auto request = streaming.Request("render/texture/test.rtex", "mip-2", "generation-a", 10);
+    Check(request && streaming.BeginRead(request) && streaming.CompleteRead(request, "generation-a") &&
+        streaming.Find(request)->state == hs::StreamingPageState::Decoded,
+        "software transaction fixture did not reach its safe decoded state");
+
+    // A finer desired mip keeps the fixed coarser transaction alive.
+    Check(!hs::TextureSoftwareTransactionSuperseded(2, 1, true) &&
+        !hs::TextureSoftwareTransactionSuperseded(2, 4, false) && residency.Contains(candidate) &&
+        residency.Contains(upload_window) && residency.Contains(metadata) &&
+        streaming.Find(request)->state == hs::StreamingPageState::Decoded,
+        "finer desired mip abandoned an in-progress software transaction");
+
+    // A budget reduction leaves the old candidate admitted but prevents another chunk.
+    transaction_budget.local_budget = 700;
+    residency.UpdateBudget(transaction_budget);
+    Check(!residency.CanAdmit(50), "GPU budget reduction did not block the next software chunk");
+    if (hs::TextureSoftwareTransactionSuperseded(2, 4, true) &&
+        streaming.Find(request)->state == hs::StreamingPageState::Decoded)
+    {
+        Check(streaming.Cancel(request) && residency.ReleaseNow(metadata) &&
+            residency.ReleaseNow(upload_window) && residency.ReleaseNow(candidate),
+            "safe superseded software transaction cleanup failed");
+    }
+    Check(streaming.Find(request)->state == hs::StreamingPageState::Cancelled &&
+        !residency.Contains(candidate) && !residency.Contains(upload_window) &&
+        residency.HostAdmissionFacts().held_bytes == 0 && residency.CanStage(1000) && residency.CanAdmit(400),
+        "superseded software transaction retained admission or blocked coarse work");
+
+    const auto coarse_candidate = residency.ReserveGpu(400);
+    const auto coarse_request = streaming.Request("render/texture/test.rtex", "mip-4", "generation-a", 10);
+    Check(coarse_candidate && coarse_request && streaming.BeginRead(coarse_request) &&
+        streaming.CompleteRead(coarse_request, "generation-a") &&
+        streaming.Find(coarse_request)->state == hs::StreamingPageState::Decoded,
+        "coarser replacement transaction could not make progress after cleanup");
+    Check(residency.ReleaseNow(coarse_candidate), "coarser fixture candidate release failed");
+}
+
 void CheckAsyncAssetPreparation()
 {
     Check(hs::NextTextureTransactionTarget(4, 2, true, true, 4) == 3 &&
@@ -50,9 +115,22 @@ void CheckAsyncAssetPreparation()
         hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 1, 12) == 1,
         "software replacement planner accepted an unauthenticated or indivisible range");
     replacement_layouts[1].has_digest = true;
+    std::uint64_t packed_upload_bytes{};
+    std::uint64_t beyond_window_bytes{};
     const std::array<std::uint32_t, 1> invalid_subresource{3};
     Check(hs::TextureReadChunkEnd(invalid_subresource, replacement_layouts, 0, 12) == 0,
         "software replacement planner accepted an out-of-range subresource index");
+    const std::array<std::uint64_t, 3> native_footprints{5, 3, 4};
+    Check(hs::TextureUploadPackAppend(5, 3, 4, 12, packed_upload_bytes) &&
+        packed_upload_bytes == 11 && !hs::TextureUploadPackAppend(packed_upload_bytes, 4, 4, 12,
+            beyond_window_bytes) &&
+        hs::TextureReadChunkEndWithinUploadWindow(replacement_subresources, replacement_layouts,
+            native_footprints, 0, 100, 4, 12) == 2 &&
+        hs::TextureReadChunkEndWithinUploadWindow(replacement_subresources, replacement_layouts,
+            native_footprints, 1, 100, 4, 12) == 3 &&
+        hs::TextureReadChunkEndWithinUploadWindow(replacement_subresources, replacement_layouts,
+            native_footprints, 0, 11, 4, 12) == 1,
+        "software replacement chunk ignored the aligned upload-window or host-payload boundary");
     hs::render_data::TextureDescription target_description{8, 4, 1, 3, 98};
     std::array<hs::render_data::TextureSubresourceLayout, 3> target_layouts{};
     target_layouts[0].byte_count = 11; target_layouts[1].byte_count = 5; target_layouts[2].byte_count = 2;
@@ -67,6 +145,17 @@ void CheckAsyncAssetPreparation()
         hs::TextureReadMinimumHostMip(target_description, target_layouts, 8, 9, minimum_host_mip) &&
         minimum_host_mip == target_description.mip_count,
         "optional mip admission did not clamp below, at, and above the intrinsic authenticated-range cap");
+    const auto temporary_coarse_target = hs::TextureReadTargetMip(target_description,
+        target_layouts, 0, 2, 8, 18, 2);
+    Check(temporary_coarse_target == 1 &&
+        hs::TextureHostFootprintFitsBudget(8, target_layouts[0].byte_count,
+            hs::kMaximumHostStagingBudgetBytes) &&
+        hs::TextureHostFootprintFitsBudget(8, 0, hs::kMaximumHostStagingBudgetBytes),
+        "temporary coarse host-fit target was not deferred while its source unit remained possible");
+    Check(!hs::TextureHostFootprintFitsBudget(8,
+            hs::kMaximumHostStagingBudgetBytes - 8 + 1,
+            hs::kMaximumHostStagingBudgetBytes),
+        "source unit beyond the maximum host staging ceiling was not classified impossible");
     Check(hs::TextureEffectiveHostTargetMip(0, 2, 1, 2, 0, true) == 0 &&
         hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 1, true) == 1 &&
         hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 2, false) == 2,
@@ -635,12 +724,29 @@ int main()
               "residency explicit release accounting mismatch");
 
         // Admission uses cached domain totals; verify mutations and overflow recovery against the ledger.
+        const auto pressure_matches_accounting = [](const hs::ResidencyManager &manager) {
+            const auto facts = manager.GpuPressureFacts();
+            const auto accounting = manager.Accounting();
+            const auto &a = facts.budget;
+            const auto &b = accounting.budget;
+            return a.valid == b.valid && a.local_budget == b.local_budget && a.local_usage == b.local_usage &&
+                a.nonlocal_budget == b.nonlocal_budget && a.nonlocal_usage == b.nonlocal_usage &&
+                a.host_budget_valid == b.host_budget_valid && a.host_staging_budget == b.host_staging_budget &&
+                a.nonlocal_valid == b.nonlocal_valid && a.local_fresh == b.local_fresh &&
+                a.nonlocal_fresh == b.nonlocal_fresh && a.host_fresh == b.host_fresh &&
+                a.unified_memory == b.unified_memory &&
+                facts.growth_since_snapshot == accounting.gpu_growth_since_snapshot &&
+                facts.local_growth_since_snapshot == accounting.local_growth_since_snapshot &&
+                facts.nonlocal_growth_since_snapshot == accounting.nonlocal_growth_since_snapshot;
+        };
         hs::ResidencyManager admission;
         Check(!admission.CanAdmit(1) && !admission.CanStage(1),
             "optional native or host work was admitted without an initial observation");
+        Check(pressure_matches_accounting(admission), "unknown GPU pressure facts diverged from accounting");
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         const auto gpu_reservation = admission.ReserveGpu(300);
         const auto host_reservation = admission.ReserveHost(700);
+        Check(pressure_matches_accounting(admission), "reserved GPU pressure facts diverged from accounting");
         auto host_facts = admission.HostAdmissionFacts();
         Check(gpu_reservation && host_reservation && admission.CanAdmit(600) && !admission.CanAdmit(601) &&
             admission.CanStage(300) && !admission.CanStage(301) &&
@@ -648,8 +754,15 @@ int main()
             !host_facts.held_overflow, "reservation admission boundaries or live host facts changed");
         Check(!admission.CommitHost(host_reservation, 701) && !admission.CommitHost(host_reservation, 0) &&
             !admission.CanStage(301), "failed host commit changed admission");
+        Check(pressure_matches_accounting(admission), "rejected host commit changed GPU pressure facts");
         Check(admission.CommitHost(host_reservation, 400) && admission.CanStage(600) && !admission.CanStage(601),
             "host commit did not shrink held admission");
+        Check(pressure_matches_accounting(admission), "host commit changed GPU pressure facts");
+        const auto second_host_reservation = admission.ReserveHost(600);
+        host_facts = admission.HostAdmissionFacts();
+        Check(second_host_reservation && host_facts.held_bytes == 1000 && !admission.ReserveHost(1),
+            "successive host reservations exceeded the live shared cap");
+        Check(admission.ReleaseNow(second_host_reservation), "second host reservation release failed");
         host_facts = admission.HostAdmissionFacts();
         Check(host_facts.held_bytes == 400 && !host_facts.held_overflow &&
             admission.Retire(gpu_reservation, {1, 0, 0}) &&
@@ -657,7 +770,9 @@ int main()
             !admission.CanAdmit(601) && admission.Collect({1, 0, 0}) == 0 &&
             admission.Collect({2, 0, 0}) == 1 && admission.CanAdmit(900),
             "retiring reservation admission changed before completion");
+        Check(pressure_matches_accounting(admission), "retired GPU reservation facts diverged from accounting");
         Check(admission.ReleaseNow(host_reservation) && admission.CanStage(1000), "host abort leaked admission");
+        Check(pressure_matches_accounting(admission), "released host reservation changed GPU pressure facts");
         for (const auto storage : {hs::ResidencyStorage::GpuReservation, hs::ResidencyStorage::HostReservation,
                                    hs::ResidencyStorage::HostStaging})
         {
@@ -666,11 +781,13 @@ int main()
             const auto huge = admission.Register(hs::ResidencyCategory::Staging, UINT64_MAX, false, storage);
             const auto extra = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
             Check(huge && extra, "overflow test could not create its tracked ledger entries");
+            Check(pressure_matches_accounting(admission), "overflow reservation facts diverged from accounting");
             const auto allowed = [&](std::uint64_t bytes) {
                 return storage == hs::ResidencyStorage::GpuReservation ? admission.CanAdmit(bytes, 0) : admission.CanStage(bytes);
             };
             Check(!allowed(0), "overflowed admission sum accepted");
             Check(admission.ReleaseNow(extra) && allowed(0) && !allowed(1), "overflow release did not restore exact maximum");
+            Check(pressure_matches_accounting(admission), "released overflow facts diverged from accounting");
             const auto again = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
             Check(again && !allowed(0) && admission.Retire(again, {2, 0, 0}) &&
                 admission.Collect({1, 0, 0}) == 0 && !allowed(0) &&
@@ -680,6 +797,7 @@ int main()
                 const auto staged = admission.Register(hs::ResidencyCategory::Staging, 1, false, hs::ResidencyStorage::HostStaging);
                 Check(staged && !allowed(0) && admission.CommitHost(huge, UINT64_MAX - 1) && allowed(0),
                     "overflow host commit recovery failed");
+                Check(pressure_matches_accounting(admission), "overflow host commit changed GPU pressure facts");
                 Check(admission.ReleaseNow(staged), "mixed host staging release failed");
             }
             Check(admission.ReleaseNow(huge) && allowed(UINT64_MAX), "domain release retained cached bytes");
@@ -703,8 +821,19 @@ int main()
             hs::ResidencyStorage::GpuAllocation, hs::ResidencySegment::NonLocal);
         Check(observations.Accounting().gpu_growth_since_snapshot == 0,
             "logical allocation bytes were treated as observed native growth");
+        hs::ResidencyManager local_pressure;
+        hs::ResidencyBudgetSnapshot split_budget{true, 1'000, 0, 1'000, 0};
+        split_budget.nonlocal_valid = true;
+        local_pressure.UpdateBudget(split_budget);
+        local_pressure.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 120);
+        const auto split_pressure = local_pressure.GpuPressureFacts();
+        Check(split_pressure.growth_since_snapshot == 120 && split_pressure.local_growth_since_snapshot == 0 &&
+            split_pressure.nonlocal_growth_since_snapshot == 120 && local_pressure.CanAdmit(900) &&
+            !local_pressure.CanAdmit(901),
+            "non-local native growth consumed local-only texture pressure headroom");
         observations.RecordNativeGrowth(hs::ResidencySegment::Local, 100);
         observations.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 120);
+        Check(pressure_matches_accounting(observations), "segmented growth facts diverged from accounting");
         observations.UpdateBudget({});
         auto domain_accounting = observations.Accounting();
         Check(local_growth && nonlocal_growth && domain_accounting.budget.valid &&
@@ -712,6 +841,7 @@ int main()
             domain_accounting.nonlocal_growth_since_snapshot == 120 &&
             !observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
             !observations.CanStage(1), "failed refresh erased last-valid data or left stale admission open");
+        Check(pressure_matches_accounting(observations), "stale GPU pressure facts diverged from accounting");
         hs::ResidencyBudgetSnapshot local_only{true, 1'000, 220, 0, 0, false, 0};
         observations.UpdateBudget(local_only);
         domain_accounting = observations.Accounting();
@@ -721,6 +851,7 @@ int main()
             observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
             !observations.CanAdmit(1, 10, hs::ResidencySegment::NonLocal),
             "partial refresh absorbed or replaced another segment's growth/last-valid observation");
+        Check(pressure_matches_accounting(observations), "partial-refresh pressure facts diverged from accounting");
         hs::ResidencyBudgetSnapshot nonlocal_only{};
         nonlocal_only.nonlocal_valid = true;
         nonlocal_only.nonlocal_budget = 1'000;
@@ -730,11 +861,20 @@ int main()
         Check(domain_accounting.nonlocal_growth_since_snapshot == 0 &&
             domain_accounting.budget.local_usage == 220 && domain_accounting.budget.nonlocal_usage == 320,
             "successful non-local refresh did not independently absorb only its own growth");
+        observations.RecordNativeGrowth(hs::ResidencySegment::Local, UINT64_MAX);
+        observations.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 1);
+        const auto saturated_pressure = observations.GpuPressureFacts();
+        Check(saturated_pressure.growth_since_snapshot == UINT64_MAX &&
+            saturated_pressure.local_growth_since_snapshot == UINT64_MAX &&
+            saturated_pressure.nonlocal_growth_since_snapshot == 1 &&
+            pressure_matches_accounting(observations),
+            "GPU pressure growth did not preserve saturating segmented totals");
 
         hs::ResidencyManager unified;
         hs::ResidencyBudgetSnapshot unified_budget{true, 1'000, 0, 0, 0, true, 1'000};
         unified_budget.unified_memory = true;
         unified.UpdateBudget(unified_budget);
+        Check(pressure_matches_accounting(unified), "UMA GPU pressure facts diverged from accounting");
         {
             hs::ScopedGpuAdmission admission(unified, 500, 400);
             Check(admission && unified.Accounting().gpu_reserved_by_segment[0] == 900 &&
@@ -835,6 +975,7 @@ int main()
         const auto after_reset = streaming.Request("render/geometry/trunk_0.rpage", "page", "generation-f", 100);
         Check(after_reset.value > cancelled.value && !streaming.BeginRead(geometry),
             "reset aliased an old asynchronous request identity");
+        CheckSoftwareTransactionSupersession();
         CheckAsyncAssetPreparation();
         CheckPackAssetReads(false);
         CheckPackAssetReads(true);

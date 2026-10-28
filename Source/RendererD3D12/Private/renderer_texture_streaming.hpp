@@ -10,12 +10,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace hs
 {
+[[nodiscard]] constexpr bool TextureHostFootprintFitsBudget(std::uint64_t metadata_bytes,
+    std::uint64_t payload_bytes, std::uint64_t budget_bytes) noexcept
+{
+    return metadata_bytes <= budget_bytes && payload_bytes <= budget_bytes - metadata_bytes;
+}
 struct TextureStreamId
 {
     std::uint32_t value{};
@@ -29,6 +35,9 @@ struct TextureStreamId
     return reserved && desired_mip < actual_mip
         ? std::max(desired_mip, actual_mip - 1u) : desired_mip;
 }
+[[nodiscard]] constexpr bool TextureSoftwareTransactionSuperseded(
+    std::uint32_t transaction_target_mip, std::uint32_t desired_mip, bool budget_constrained) noexcept
+{ return budget_constrained && desired_mip > transaction_target_mip; }
 struct TextureStreamingCapabilities
 {
     bool tiled_resources{}, sampler_feedback{}, packed_mip_arrays{}, unified_memory{};
@@ -49,6 +58,42 @@ struct TextureStreamingCapabilities
         if (index >= layouts.size() || !layouts[index].has_digest || !layouts[index].byte_count ||
             layouts[index].byte_count > byte_budget - bytes) break;
         bytes += layouts[index].byte_count;
+        ++end;
+    }
+    return end;
+}
+[[nodiscard]] inline bool TextureUploadPackAppend(std::uint64_t packed_bytes,
+    std::uint64_t footprint_bytes, std::uint64_t placement_alignment,
+    std::uint64_t window_width, std::uint64_t &next_packed_bytes) noexcept
+{
+    if (!footprint_bytes || !placement_alignment) return false;
+    const auto remainder = packed_bytes % placement_alignment;
+    const auto padding = remainder ? placement_alignment - remainder : 0u;
+    if (packed_bytes > UINT64_MAX - padding) return false;
+    const auto offset = packed_bytes + padding;
+    if (footprint_bytes > UINT64_MAX - offset) return false;
+    next_packed_bytes = offset + footprint_bytes;
+    return next_packed_bytes <= window_width;
+}
+[[nodiscard]] inline std::size_t TextureReadChunkEndWithinUploadWindow(
+    std::span<const std::uint32_t> subresources,
+    std::span<const render_data::TextureSubresourceLayout> layouts,
+    std::span<const std::uint64_t> footprint_bytes,
+    std::size_t first, std::uint64_t payload_budget,
+    std::uint64_t placement_alignment, std::uint64_t window_width) noexcept
+{
+    if (first > subresources.size() || footprint_bytes.size() != subresources.size()) return first;
+    std::uint64_t payload{}, packed{};
+    auto end = first;
+    while (end < subresources.size())
+    {
+        const auto index = subresources[end];
+        if (index >= layouts.size() || !layouts[index].has_digest || !layouts[index].byte_count ||
+            layouts[index].byte_count > payload_budget - payload) break;
+        std::uint64_t next{};
+        if (!TextureUploadPackAppend(packed, footprint_bytes[end], placement_alignment, window_width, next)) break;
+        payload += layouts[index].byte_count;
+        packed = next;
         ++end;
     }
     return end;
@@ -248,6 +293,8 @@ class RendererTextureStreaming
         const CompletionSet &) const noexcept;
     [[nodiscard]] TextureStreamingProductStatus ProductStatus(std::string_view logical_id,
         const StreamingManager &, const CompletionSet &) const noexcept;
+    [[nodiscard]] std::optional<bool> RequiredSourceMipFitsMaximumHostBudget(
+        TextureStreamId, std::uint32_t required_mip) const noexcept;
   private:
     [[nodiscard]] Result AddPendingPassesImpl(RenderGraphBuilder &, ExternalQueueBinding,
         std::uint32_t, std::vector<TextureStreamingGraphBinding> &,

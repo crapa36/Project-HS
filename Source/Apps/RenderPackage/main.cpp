@@ -4,6 +4,7 @@
 #include "../Content/geometry_hierarchy_cooker.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/render_asset_format.hpp>
@@ -395,7 +396,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);
@@ -854,7 +855,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);

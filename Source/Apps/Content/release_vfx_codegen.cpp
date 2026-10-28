@@ -23,6 +23,10 @@ std::string Enum(const char *type, T value)
     return std::string(type) + "(" + U(static_cast<std::uint32_t>(value)) + ")";
 }
 std::string Range(VfxRange value) { return "{" + U(value.first) + "," + U(value.count) + "}"; }
+std::string RangeArray(const std::array<VfxRange, 3> &value)
+{
+    return "{{" + Range(value[0]) + "," + Range(value[1]) + "," + Range(value[2]) + "}}";
+}
 std::string Vector(Float3 value) { return "{" + F(value.x) + "," + F(value.y) + "," + F(value.z) + "}"; }
 std::string Vector(Float4 value)
 {
@@ -186,7 +190,7 @@ std::string Row(const VfxGroundRecipe &r)
 std::string Row(const VfxFlashSpawnInput &r)
 {
     return "{" + Vector(r.position) + "," + Vector(r.color) + "," + F(r.size) + "," + F(r.delay) + "," + F(r.lifetime) + "," +
-        U(r.event_tick) + "," + U(r.stable_seed) + "," + U(r.gradient_row) + "," + F(r.hdr) + "," + F(r.normalized_age) + "," +
+        U64(r.event_tick) + "," + U(r.stable_seed) + "," + U(r.gradient_row) + "," + F(r.hdr) + "," + F(r.normalized_age) + "," +
         Enum("VfxImpactShape",r.shape) + "," + Vector(r.direction) + "," + F(r.aspect) + "," + U(r.curve_row) + "," + U(r.mask_slice) + "," +
         F(r.mask_strength) + "," + Vector(r.initial_offset) + "," + Vector(r.initial_velocity) + "," + F(r.orbit_radius) + "," + F(r.orbit_phase) + "," +
         F(r.orbit_rate) + "," + F(r.drag) + "," + (r.oit?"true":"false") + "," + (r.ground_base_anchor?"true":"false") + "," +
@@ -198,7 +202,7 @@ std::string Row(const VfxFlashRecipe &r)
 {
     return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.source_stable_id) + "," + U(r.output_index) + "," +
         U(r.payload_kind) + "," + U(r.min_quality) + "," + Vector(r.knots) + "," + F(r.seconds) + "," + U(r.coverage_quality) + "," + Row(r.spawn) + "," +
-        "{" + Range(r.mask_slice_ranges[0]) + "," + Range(r.mask_slice_ranges[1]) + "," + Range(r.mask_slice_ranges[2]) + "}," +
+        RangeArray(r.mask_slice_ranges) + "," +
         Vector(r.mask_strengths) + "," + U(r.supported_quality_mask) + "," + U(r.mask_present_mask) + "," +
         (r.unique_effect_identity?"true":"false") + "}";
 }
@@ -206,8 +210,7 @@ std::string Row(const VfxPersistentStampRecipe &r)
 {
     return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_visual_kind) + "," +
         U(r.payload_kind) + "," + U(r.source_stable_id) + "," + U(r.timing_kind) + "," +
-        F(r.fixed_seconds) + "," + F(r.source_end) + "," + Row(r.spawn) + ",{" +
-        Range(r.mask_slices[0]) + "," + Range(r.mask_slices[1]) + "," + Range(r.mask_slices[2]) + "}," +
+        F(r.fixed_seconds) + "," + F(r.source_end) + "," + Row(r.spawn) + "," + RangeArray(r.mask_slices) + "," +
         Vector(r.mask_strengths) + "," + U(r.supported_quality_mask) + "," + U(r.mask_present_mask) + "," +
         (r.bleed_extend ? "true" : "false") + "}";
 }
@@ -239,8 +242,8 @@ std::string Row(const VfxMoteSourceRecipe &r)
 }
 std::string Row(const VfxMoteOutputRecipe &r)
 {
-    return "{" + U(r.min_quality) + "," + U(r.gradient_row) + ",{" + Range(r.mask_slices[0]) + "," + Range(r.mask_slices[1]) + "," +
-        Range(r.mask_slices[2]) + "},{" + Vector(r.mask_strengths) + "}," + U(r.persistent_curve_row) + "," +
+    return "{" + U(r.min_quality) + "," + U(r.gradient_row) + "," + RangeArray(r.mask_slices) + "," +
+        Vector(r.mask_strengths) + "," + U(r.persistent_curve_row) + "," +
         F(r.persistent_size) + "," + F(r.hdr) + "," + Vector(r.color) + "," + U(r.mask_present_mask) + "," + U(r.mask_quality_mask) + "," +
         (r.output_color_valid ? "true" : "false") + "," +
         (r.persistent_params_valid ? "true" : "false") + "," + (r.spark_textures_valid ? "true" : "false") + "," + U(r.common_recipe_index) + "," +
@@ -339,9 +342,9 @@ std::string Row(const VfxRibbonLinkDetailRecipe &r)
 }
 std::string LinkDetails(const std::array<VfxRibbonLinkDetailRecipe,3> &rows)
 {
-    std::string value="{";
+    std::string value="std::array<VfxRibbonLinkDetailRecipe,3>{{";
     for(std::size_t i=0;i<rows.size();++i){if(i)value+=",";value+=Row(rows[i]);}
-    return value+"}";
+    return value+"}}";
 }
 std::string Row(const VfxRibbonLinkOutputRecipe &r)
 {

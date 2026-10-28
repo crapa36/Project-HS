@@ -81,6 +81,19 @@ void ExactBossGeometry()
           wave[0].gap_angles_degrees==ring.gap_angles_degrees&&
           wave[0].position.x==-1&&wave[0].position.z==8,
           "boss shockwave distortion lost annulus or explicit safe gaps");
+    auto compact_ring=ring;
+    compact_ring.gap_angles_degrees.clear();
+    compact_ring.uniform_gaps={7.0f,3,hs::VfxGapAngleFormula::EventSpacing};
+    i.payload=compact_ring;
+    const auto compact_wave=Run(p,i);
+    Check(compact_wave.size()==1&&compact_wave[0].GapCount()==3&&
+        compact_wave[0].gap_angles_degrees.capacity()==0&&
+        compact_wave[0].GapAngleDegrees(0)==7&&compact_wave[0].GapAngleDegrees(1)==127&&
+        compact_wave[0].GapAngleDegrees(2)==247&&compact_wave[0].radius==wave[0].radius&&
+        compact_wave[0].inner_radius==wave[0].inner_radius,
+        "compact distortion lost its gap descriptor or materialized angle storage");
+    compact_ring.gap_angles_degrees.push_back(19);i.payload=compact_ring;
+    Check(Run(p,i).empty(),"distortion accepted simultaneous compact and explicit angle storage");
     ring.gap_angles_degrees[1]=std::numeric_limits<float>::quiet_NaN();i.payload=ring;
     Check(Run(p,i).empty(),"nonfinite shockwave gap accepted");
     p=Program(hs::VfxMotionKind::QuickHeatShock);i=Input();

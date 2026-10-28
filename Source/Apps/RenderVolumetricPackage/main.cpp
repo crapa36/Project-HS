@@ -84,7 +84,7 @@ void Produce(const fs::path &source, const fs::path &build)
         auto product = ap::HashProduct(std::string(kId), "volumetric_media.rpkg", stage / "volumetric_media.rpkg");
         ap::Publish(build, spec, stage, {std::move(product)});
     }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage); std::cout << spec.action_id << " published\n";
 }
 }

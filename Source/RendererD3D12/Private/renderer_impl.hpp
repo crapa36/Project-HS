@@ -228,9 +228,9 @@ constexpr std::uint32_t kMaterialSidecarRtvOffset = kVisibilityRtvOffset + 2;
 constexpr std::uint32_t kViewRtvOffset = kMaterialSidecarRtvOffset + 2;
 constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
+constexpr std::uint32_t kLightingAuxRtvCount = 3;
 constexpr std::uint32_t kOutputRtvOffset = kLightingAuxRtvOffset + kLightingAuxRtvCount;
 constexpr std::uint32_t kRtvBankStride = kOutputRtvOffset + kFrameCount;
-constexpr std::uint32_t kLightingAuxRtvCount = 3;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Scene Buffer Upload", "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
     "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
@@ -539,7 +539,10 @@ struct FrameConstants
     DirectX::XMFLOAT4X4 previous_instance_unjittered_view_projection;
 };
 
-constexpr std::uint32_t kExposureConstantsOffset = (sizeof(FrameConstants) + 255u) & ~255u;
+constexpr std::uint32_t kDisabledVolumetricConstantsOffset = (sizeof(FrameConstants) + 255u) & ~255u;
+constexpr std::uint32_t kDisabledVolumetricConstantsSize = (sizeof(VolumetricConstants) + 255u) & ~255u;
+constexpr std::uint32_t kExposureConstantsOffset =
+    kDisabledVolumetricConstantsOffset + kDisabledVolumetricConstantsSize;
 constexpr std::uint32_t kInstanceDataOffset = kExposureConstantsOffset + 256u;
 static_assert(sizeof(FrameConstants) == 4720);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
@@ -1046,6 +1049,9 @@ struct D3D12Renderer::Impl
         ID3D12Device *device{};
         std::uint64_t package_id{};
         std::uint64_t uploaded_revision{}, surface_package_id{};
+        std::uint64_t clock_epoch{};
+        RenderClockMode clock_mode{RenderClockMode::Scripted};
+        std::chrono::nanoseconds simulation_time{};
         std::size_t capacity{}, slot_count{};
         bool submitted{}, initialized{};
     };
@@ -1057,6 +1063,7 @@ struct D3D12Renderer::Impl
         RenderViewRole role{RenderViewRole::Main};
         OptionTargets targets;
         UiResources ui;
+        std::vector<ParticleSpawnCommand> particle_spawn_scratch;
         std::array<ComPtr<ID3D12Resource>, kFrameCount> outputs;
         std::array<AllocationResource, kFrameCount> offscreen_allocations;
         std::array<CompletionSet, kFrameCount> output_completion{};
@@ -1552,7 +1559,7 @@ struct D3D12Renderer::Impl
         std::uint32_t ordinal, const CompletionSet &completion);
     void RecordClusterPageUpload(ID3D12GraphicsCommandList *, std::uint32_t logical_slot) const;
     void RecordClusterPageTableUpload(ID3D12GraphicsCommandList *, std::uint32_t frame_slot) const;
-    void WriteClusterCutDescriptors(std::uint32_t frame_slot, std::uint32_t ordinal);
+    void WriteClusterCutDescriptors(OwnedView &, std::uint32_t frame_slot, std::uint32_t ordinal);
     void MarkClusterFrameUse(std::uint32_t frame_slot, const CompletionSet &) noexcept;
     [[nodiscard]] const GeometryPageGpu *FindClusterGeometryPage(std::uint32_t physical_slot) const noexcept;
     [[nodiscard]] bool ClusterHierarchyReady(std::uint32_t ordinal) const noexcept;

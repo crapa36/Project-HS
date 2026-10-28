@@ -12,6 +12,7 @@
 #include <hs/render_data/texture_package.hpp>
 
 #include <bit>
+#include <cassert>
 #include <fstream>
 #include <map>
 #include <limits>
@@ -511,7 +512,21 @@ void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capt
     std::span<const bool> selected={}, INT depth_bias=-800, bool procedural_two_sided=false)
 {
     auto *root=capture->root.Get();
-    const auto vertex=ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil");
+    assert(selected.empty() || selected.size()==rd::kAuthoredMaterialNames.size());
+    const auto selected_material=[&](std::size_t i) { return selected.empty() || selected[i]; };
+    // Each capture owner retains one root/bias variant for its lifetime.
+    bool needs_material{},needs_shadow{};
+    for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
+    {
+        if(!selected_material(i))continue;
+        needs_material|=color&&!capture->materials[i];
+        needs_shadow|=!capture->shadows[i] ||
+            (procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow);
+    }
+    const bool needs_sky=color&&!capture->sky;
+    if(!needs_material&&!needs_shadow&&!needs_sky)return;
+    const auto vertex=needs_material||needs_shadow
+        ?ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil"):std::vector<std::byte>{};
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
         {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
         {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
@@ -541,27 +556,34 @@ void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capt
     p.DSVFormat=DXGI_FORMAT_D32_FLOAT; p.SampleDesc={1,0};
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
     {
-        if(!selected.empty() && !selected[i]) continue;
+        if(!selected_material(i)) continue;
         p.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
-        if(color)
+        const bool create_material=color&&!capture->materials[i];
+        const bool create_shadow=!capture->shadows[i];
+        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow;
+        if(create_material)
         {
             const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
             p.PS={pixel.data(),pixel.size()};
             Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->materials[i])),"Create static local-probe material capture PSO");
         }
-        const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
-        auto depth=p; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
-        for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
-        // Virtual pages use zero constant bias; probes retain their directional bias.
-        depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
-        Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i])),"Create pure-static capture shadow PSO");
-        if(procedural_two_sided && i==rd::kTerrainMaterialOrdinal)
+        if(create_shadow||create_procedural_shadow)
         {
-            depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
-            Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow)),"Create virtual procedural shadow PSO");
+            const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
+            auto depth=p; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
+            for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
+            // Virtual pages use zero constant bias; probes retain their directional bias.
+            depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
+            if(create_shadow)
+                Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i])),"Create pure-static capture shadow PSO");
+            if(create_procedural_shadow)
+            {
+                depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+                Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow)),"Create virtual procedural shadow PSO");
+            }
         }
     }
-    if(color)
+    if(needs_sky)
     {
         const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
         const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
@@ -570,6 +592,11 @@ void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capt
         p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
         Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky)),"Create local-probe global sky capture PSO");
     }
+#ifndef NDEBUG
+    if(color)assert(capture->sky);
+    for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
+        if(selected_material(i))assert((!color||capture->materials[i])&&capture->shadows[i]);
+#endif
 }
 } // namespace
 
@@ -852,7 +879,14 @@ Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInp
     try
     {
         Require(in.config&&in.pipeline_cache,"Native probe capture needs the selected pipeline inputs");
-        if(!impl_->capture->sky)PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true);
+        if(auto materials=PrepareCaptureMaterialOrdinals(in.scene,in.foliage_density);!materials)return materials;
+        std::array<bool,rd::kAuthoredMaterialNames.size()> selected{};
+        for(const auto ordinal:CachedCaptureMaterialOrdinals(in.scene,in.foliage_density))
+        {
+            assert(ordinal<selected.size());
+            selected[ordinal]=true;
+        }
+        PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true,selected);
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result{
             try{output=ReadProduct(*in.config,id);return Result::Success();}
             catch(const std::exception &error){return Failure(error.what());}

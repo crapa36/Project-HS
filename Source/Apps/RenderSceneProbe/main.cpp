@@ -276,7 +276,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
         auto product=ap::HashProduct(std::string(kProduct),"local_probes.spkg",path); product.dependencies=std::move(dependencies);
         ap::Publish(buildRoot,spec,stage,{std::move(product)});
     }
-    catch(...) { ap::RemoveStage(stage); throw; }
+    catch(...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage); std::cout<<spec.action_id<<" published\n";
 }
 } // namespace

@@ -258,7 +258,7 @@ int ProduceStaticShadow(int argc, char **argv,
             index_product.dependencies.emplace_back(kPages);
             ap::Publish(build, spec, stage, {std::move(index_product), std::move(page_product)});
         }
-        catch (...) { ap::RemoveStage(stage); throw; }
+        catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
         ap::RemoveStage(stage);
         std::cout << kAction << " published\n";
         return 0;

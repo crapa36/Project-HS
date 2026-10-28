@@ -79,9 +79,10 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
     {
         Require(!config.content_generation_id.empty() && static_cast<bool>(read), "cluster catalog requires a selected Generation and reader");
         const auto reference = std::ranges::find(main_package.chunks, rd::ChunkType::GeometryHierarchyReference, &rd::ChunkView::type);
-        Require(main_package.chunks.size() == 7 && reference != main_package.chunks.end() &&
+        Require(reference != main_package.chunks.end() &&
                 reference->required && reference->version == 1 && reference->count == 1 &&
-                reference->stride == rd::kGeometryHierarchyReferenceStride, "LOD0 hierarchy reference is missing or invalid");
+                reference->stride == rd::kGeometryHierarchyReferenceStride,
+                "LOD0 hierarchy reference is missing or invalid");
         const auto dependency = rd::DecodeGeometryHierarchyReference(reference->bytes, main_package.dependencies, main_product_id);
         const auto &logical_id = main_package.dependencies[dependency];
         if (generation_ == config.content_generation_id && logical_id_ == logical_id) return Result::Success();

@@ -451,9 +451,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     const bool new_session = scene_new_session || snapshot.header.session_id != owned_view.view_session_id;
     const auto *last_sample = owned_view.previous_instances.get();
     const bool clock_discontinuity = last_sample &&
-        (last_sample->sample.clock.epoch != snapshot.header.clock.epoch ||
-         last_sample->sample.clock.mode != snapshot.header.clock.mode ||
-         snapshot.header.simulation_time < last_sample->sample.simulation_time);
+        (last_sample->clock_epoch != snapshot.header.clock.epoch ||
+         last_sample->clock_mode != snapshot.header.clock.mode ||
+         snapshot.header.simulation_time < last_sample->simulation_time);
     const bool motion_history_reset = new_session || clock_discontinuity;
     if (motion_history_reset)
     {
@@ -538,11 +538,11 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 const auto kind = i % 3;
                 const auto scale = kind == 0 ? 1.25f : kind == 1 ? 1.40625f : 1.5625f;
                 RenderInstance preview{};
-                preowned_view.position = {x, 0.0f, z};
-                preowned_view.scale = {scale, scale, scale};
-                preowned_view.color_rgba = 0xffffffffu;
-                preowned_view.mesh = static_cast<RenderMesh>(10 + kind);
-                preowned_view.stable_id = 0x53504c4d00000000ull | static_cast<std::uint64_t>(i + 1);
+                preview.position = {x, 0.0f, z};
+                preview.scale = {scale, scale, scale};
+                preview.color_rgba = 0xffffffffu;
+                preview.mesh = static_cast<RenderMesh>(10 + kind);
+                preview.stable_id = 0x53504c4d00000000ull | static_cast<std::uint64_t>(i + 1);
                 prepared_instances.push_back(preview);
                 if (kind == 2)
                 {
@@ -567,8 +567,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             if (found != prepared_instances.end())
             {
                 auto preview = *found;
-                preowned_view.position = {};
-                preowned_view.yaw = 0.0f;
+                preview.position = {};
+                preview.yaw = 0.0f;
                 prepared_instances.assign(1, preview);
             }
             else
@@ -1567,12 +1567,13 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 visibility_frame); !result) return result;
     }
     const auto particle_spawn_prepare_start = capture_clock();
-    std::vector<ParticleSpawnCommand> frame_particle_spawns;
+    auto &frame_particle_spawns = owned_view.particle_spawn_scratch;
+    frame_particle_spawns.clear();
     frame_particle_spawns.reserve(particle_spawns.size());
     if (impl_->config.slime_family_preview_count == 0)
     {
-        frame_particle_spawns.insert(frame_particle_spawns.end(),
-                                     particle_spawns.begin(), particle_spawns.end());
+        for (const auto &spawn : particle_spawns)
+            if (spawn.count != 0) frame_particle_spawns.push_back(spawn);
     }
     if (new_persistent_tick)
     {
@@ -2095,16 +2096,16 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     std::size_t ground_gap_count{};
     for (const auto &spawn : typed_ground_spawns)
     {
-        if (spawn.geometry.gap_angles_radians.size() > std::numeric_limits<UINT>::max() - ground_gap_count)
+        if (spawn.geometry.GapCount() > std::numeric_limits<UINT>::max() - ground_gap_count)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Ground gap index overflow.");
-        ground_gap_count += spawn.geometry.gap_angles_radians.size();
+        ground_gap_count += spawn.geometry.GapCount();
     }
     for (const auto &distortion : typed_distortions)
     {
         if (distortion.shape != VfxDistortionShape::GappedAnnulus) continue;
-        if (distortion.gap_angles_degrees.size() > std::numeric_limits<UINT>::max() - ground_gap_count)
+        if (distortion.GapCount() > std::numeric_limits<UINT>::max() - ground_gap_count)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Distortion gap index overflow.");
-        ground_gap_count += distortion.gap_angles_degrees.size();
+        ground_gap_count += distortion.GapCount();
     }
     if (std::max<std::size_t>(ground_gap_count, 1) > (std::numeric_limits<std::size_t>::max() - ground_gap_offset) / sizeof(float))
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Ground gap upload overflow.");
@@ -2698,8 +2699,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 if (preview) gpu_ring.end_color = {geometry.progress, geometry.animation_phase,
                     std::bit_cast<float>(geometry.tick_count), 0.0f};
                 gpu_ring.modes.x = gap_write_index;
-                gpu_ring.modes.y = static_cast<std::uint32_t>(geometry.gap_angles_radians.size());
-                for (float angle : geometry.gap_angles_radians) gpu_ground_gaps[gap_write_index++] = angle;
+                gpu_ring.modes.y = static_cast<std::uint32_t>(geometry.GapCount());
+                for (std::uint32_t index = 0; index < geometry.GapCount(); ++index)
+                    gpu_ground_gaps[gap_write_index++] = geometry.GapAngleRadians(index);
             }
             if (boss_signature)
             {
@@ -2908,10 +2910,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     DirectX::XMFLOAT4X4 lod_view{}, lod_projection{};
     DirectX::XMStoreFloat4x4(&lod_view, view);
     DirectX::XMStoreFloat4x4(&lod_projection, projection);
-    constants->lod_view_right = {lod_owned_view._11, lod_owned_view._21, lod_owned_view._31, 0};
-    constants->lod_view_up = {lod_owned_view._12, lod_owned_view._22, lod_owned_view._32, 0};
-    constants->lod_view_forward = {lod_owned_view._13, lod_owned_view._23, lod_owned_view._33, 0};
-    const auto lod_shadow_pixels = static_cast<float>(lod_shadow_resolution);
+    constants->lod_view_right = {lod_view._11, lod_view._21, lod_view._31, 0};
+    constants->lod_view_up = {lod_view._12, lod_view._22, lod_view._32, 0};
+    constants->lod_view_forward = {lod_view._13, lod_view._23, lod_view._33, 0};
+    const auto lod_shadow_pixels = static_cast<float>(std::clamp(impl_->config.shadow_resolution, 1024u, 2048u));
     const auto shadow_distance = impl_->config.shadow_distance_m;
     const std::array cascade_extents{shadow_distance * (18.0f / 160.0f),
                                     shadow_distance * (48.0f / 160.0f), shadow_distance};
@@ -3001,9 +3003,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     sdk_camera.current_unjittered_view_projection = constants->current_unjittered_view_projection;
     sdk_camera.previous_unjittered_view_projection = constants->previous_unjittered_view_projection;
     sdk_camera.position = current_temporal_eye;
-    sdk_camera.right = {lod_owned_view._11, lod_owned_view._21, lod_owned_view._31};
-    sdk_camera.up = {lod_owned_view._12, lod_owned_view._22, lod_owned_view._32};
-    sdk_camera.forward = {lod_owned_view._13, lod_owned_view._23, lod_owned_view._33};
+    sdk_camera.right = {lod_view._11, lod_view._21, lod_view._31};
+    sdk_camera.up = {lod_view._12, lod_view._22, lod_view._32};
+    sdk_camera.forward = {lod_view._13, lod_view._23, lod_view._33};
     sdk_camera.reset_history = !owned_view.temporal_history_valid || new_session;
         if (sdk_camera.reset_history) sdk_camera.previous_view = sdk_camera.view;
     else DirectX::XMStoreFloat4x4(&sdk_camera.previous_view,
@@ -3078,21 +3080,29 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 ? GraphicsQuality::Low : impl_->config.vfx_quality == VfxQuality::Medium
                     ? GraphicsQuality::Medium : GraphicsQuality::High;
     const auto &vfx_quality_profile = impl_->QualityProfileFor(vfx_graphics_quality);
+    const float vfx_tangent_y = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
+    const float vfx_tangent_x = vfx_tangent_y * static_cast<float>(owned_view.render_width) / owned_view.render_height;
+    const float vfx_plane_x_scale = std::sqrt(1.0f + vfx_tangent_x * vfx_tangent_x);
+    const float vfx_plane_y_scale = std::sqrt(1.0f + vfx_tangent_y * vfx_tangent_y);
+    const auto vfx_light_limit = static_cast<UINT>(std::floor(impl_->config.vfx_light_count *
+        vfx_quality_profile.vfx_light_fraction));
+    const auto vfx_distortion_limit = static_cast<UINT>(std::floor(kMaxDistortions *
+        vfx_quality_profile.vfx_distortion_fraction));
+    const auto vfx_decal_limit = static_cast<UINT>(std::floor(kMaxDecals *
+        vfx_quality_profile.vfx_decal_fraction));
     struct LightCandidate { const VfxLightInput *light; float screen_area; };
     std::vector<LightCandidate> light_candidates;
     for (const auto &source : typed_lights)
     {
-        if (source.intensity == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_light_limit == 0 || source.intensity == 0 || impl_->config.slime_family_preview_count != 0) continue;
         const auto world = DirectX::XMVectorSet(source.position.x, source.position.y, source.position.z, 1);
         DirectX::XMFLOAT3 view_position;
         DirectX::XMStoreFloat3(&view_position, DirectX::XMVector3TransformCoord(world, view));
         bool on_screen = view_position.z + source.radius > near_plane && view_position.z - source.radius < far_plane;
         const float distance = std::max(view_position.z, near_plane);
-        const float tangent_y = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
-        const float tangent_x = tangent_y * static_cast<float>(owned_view.render_width) / owned_view.render_height;
         // Sphere distance to each slanted frustum plane, not a box at center depth.
-        if (std::abs(view_position.x) - view_position.z * tangent_x > source.radius * std::sqrt(1.0f+tangent_x*tangent_x) ||
-            std::abs(view_position.y) - view_position.z * tangent_y > source.radius * std::sqrt(1.0f+tangent_y*tangent_y)) on_screen = false;
+        if (std::abs(view_position.x) - view_position.z * vfx_tangent_x > source.radius * vfx_plane_x_scale ||
+            std::abs(view_position.y) - view_position.z * vfx_tangent_y > source.radius * vfx_plane_y_scale) on_screen = false;
         light_candidates.push_back({&source, on_screen ? std::min(1.0f, source.radius * source.radius / (distance * distance)) : 0.0f});
     }
     std::sort(light_candidates.begin(), light_candidates.end(), [](const auto &a, const auto &b) {
@@ -3104,10 +3114,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     for (const auto &candidate : light_candidates)
     {
         const auto &source = *candidate.light;
-        const auto limit = static_cast<UINT>(std::floor(impl_->config.vfx_light_count *
-            vfx_quality_profile.vfx_light_fraction));
         const auto index = constants->vfx_light_count.x;
-        if (index >= limit) continue;
+        if (index >= vfx_light_limit) break;
         constants->vfx_light_position_radius[index] = {source.position.x,source.position.y,source.position.z,source.radius};
         constants->vfx_light_color_intensity[index] = {source.linear_rgb.x,source.linear_rgb.y,source.linear_rgb.z,source.intensity};
         LightView point;
@@ -3128,17 +3136,15 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     std::vector<DistortionCandidate> distortion_candidates;
     for (const auto &source : typed_distortions)
     {
-        if (source.alpha == 0 || source.strength == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_distortion_limit == 0 || source.alpha == 0 || source.strength == 0 || impl_->config.slime_family_preview_count != 0) continue;
         DirectX::XMFLOAT3 center;
         DirectX::XMStoreFloat3(&center, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y,source.position.z,1),view));
         const float radius = source.radius;
         if (center.z + radius <= near_plane || center.z - radius >= far_plane) continue;
-        const float ty = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
-        const float tx = ty * static_cast<float>(owned_view.render_width) / owned_view.render_height;
-        if (std::abs(center.x) - center.z * tx > radius * std::sqrt(1 + tx*tx) ||
-            std::abs(center.y) - center.z * ty > radius * std::sqrt(1 + ty*ty)) continue;
+        if (std::abs(center.x) - center.z * vfx_tangent_x > radius * vfx_plane_x_scale ||
+            std::abs(center.y) - center.z * vfx_tangent_y > radius * vfx_plane_y_scale) continue;
         const float distance = std::max(center.z - radius,near_plane);
-        const float area = std::min(1.0f, 3.14159265f * radius * radius / (4 * distance * distance * tx * ty));
+        const float area = std::min(1.0f, 3.14159265f * radius * radius / (4 * distance * distance * vfx_tangent_x * vfx_tangent_y));
         distortion_candidates.push_back({&source,area});
     }
     std::stable_sort(distortion_candidates.begin(),distortion_candidates.end(),[](const auto &a,const auto &b) {
@@ -3152,10 +3158,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     float distortion_area{};
     for (const auto &candidate : distortion_candidates)
     {
+        if (distortion_count >= vfx_distortion_limit) break;
         const auto &source = *candidate.source;
         const auto fraction = vfx_quality_profile.vfx_distortion_fraction;
-        if (distortion_count >= static_cast<UINT>(std::floor(kMaxDistortions * fraction)) ||
-            distortion_area + candidate.area > impl_->config.distortion_coverage * fraction) continue;
+        if (distortion_area + candidate.area > impl_->config.distortion_coverage * fraction) continue;
         auto &gpu = gpu_distortions[distortion_count++];
         gpu.position_radius = {source.position.x,source.position.y,source.position.z,source.radius};
         gpu.direction_strength = {source.direction.x,source.direction.y,source.direction.z,source.strength};
@@ -3163,25 +3169,23 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         gpu.geometry = {source.inner_radius,
                         DirectX::XMConvertToRadians(source.half_angle_degrees),
                         DirectX::XMConvertToRadians(source.gap_half_width_degrees),0.0f};
-        gpu.gap_range = {gap_write_index,static_cast<UINT>(source.gap_angles_degrees.size()),0,0};
-        for (const float degrees : source.gap_angles_degrees)
-            gpu_ground_gaps[gap_write_index++] = DirectX::XMConvertToRadians(degrees);
+        gpu.gap_range = {gap_write_index,static_cast<UINT>(source.GapCount()),0,0};
+        for (std::uint32_t index = 0; index < source.GapCount(); ++index)
+            gpu_ground_gaps[gap_write_index++] = DirectX::XMConvertToRadians(source.GapAngleDegrees(index));
         distortion_area += candidate.area;
     }
     struct DecalCandidate { const VfxDecalInput *source; float area; };
     std::vector<DecalCandidate> decal_candidates;
     for (const auto &source : typed_decals)
     {
-        if (source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_decal_limit == 0 || source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
         // Ground-only projector slab follows its source anchor, including elevated death events.
         DirectX::XMFLOAT3 center;
         DirectX::XMStoreFloat3(&center,DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y-.825f,source.position.z,1),view));
         const float radius = std::hypot(source.radius,1.175f);
-        const float ty = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees)*.5f);
-        const float tx = ty*static_cast<float>(owned_view.render_width)/owned_view.render_height;
         if (center.z+radius <= near_plane || center.z-radius >= far_plane ||
-            std::abs(center.x)-center.z*tx > radius*std::sqrt(1+tx*tx) ||
-            std::abs(center.y)-center.z*ty > radius*std::sqrt(1+ty*ty)) continue;
+            std::abs(center.x)-center.z*vfx_tangent_x > radius*vfx_plane_x_scale ||
+            std::abs(center.y)-center.z*vfx_tangent_y > radius*vfx_plane_y_scale) continue;
         const float distance = std::max(center.z,near_plane);
         decal_candidates.push_back({&source,std::min(1.0f,source.radius*source.radius/(distance*distance))});
     }
@@ -3196,8 +3200,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     for(const auto &candidate:decal_candidates)
     {
         const auto &source=*candidate.source;
-        const auto limit=static_cast<UINT>(std::floor(kMaxDecals * vfx_quality_profile.vfx_decal_fraction));
-        if(constants->vfx_decal_count.x>=limit) continue;
+        if(constants->vfx_decal_count.x>=vfx_decal_limit) break;
         auto &gpu=gpu_decals[constants->vfx_decal_count.x++];
         std::uint32_t hash=source.stable_seed*747796405u+2891336453u; hash=(hash^(hash>>16))*2246822519u;
         const float angle=std::atan2(source.direction.z,source.direction.x)+static_cast<float>(hash&0x00ffffffu)*(6.283185307f/16777216.0f);
@@ -4771,15 +4774,15 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         auto &hlod_views = hlod_view->frames[frame_slot].views;
         for (std::size_t index = 0; index < active_view_count; ++index)
         {
-            auto &hlod_view = hlod_views[index];
-            hlod_owned_view.origin_near = {constants->camera_time.x, constants->camera_time.y,
+            auto &hlod_constants = hlod_views[index];
+            hlod_constants.origin_near = {constants->camera_time.x, constants->camera_time.y,
                 constants->camera_time.z, constants->lod_options.z};
-            hlod_owned_view.forward = constants->lod_view_forward;
+            hlod_constants.forward = constants->lod_view_forward;
             for (std::size_t plane = 0; plane < 6; ++plane)
-                hlod_owned_view.frustum_planes[plane] = demand_planes[index][plane];
+                hlod_constants.frustum_planes[plane] = demand_planes[index][plane];
             const float projection_scale = index == 0 ? constants->lod_projection.x
                 : index == 1 ? constants->lod_projection.y : index == 2 ? constants->lod_projection.z : constants->lod_projection.w;
-            hlod_owned_view.error_policy = {projection_scale, constants->lod_options.x, 0.15f, index == 0 ? 0.0f : 1.0f};
+            hlod_constants.error_policy = {projection_scale, constants->lod_options.x, 0.15f, index == 0 ? 0.0f : 1.0f};
         }
     }
     for (auto &input : cluster_inputs) input.constants.active_view_mask = active_view_mask;
@@ -4854,7 +4857,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
                 {
                     const double upper = consumer == 0
-                        ? GeometryDemandCellErrorUpperBound(cell, radius, error, lod_owned_view.m,
+                        ? GeometryDemandCellErrorUpperBound(cell, radius, error, lod_view.m,
                             constants->lod_projection.x, constants->lod_options.z)
                         : error * shadow_demand_projection[consumer - 1];
                     if (upper <= geometry_demand[ordinal]) continue;
@@ -5137,10 +5140,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         frame.upload.resource->GetGPUVirtualAddress() + kExposureConstantsOffset);
     // Optional fog sampling reads VmCounts even when fog is Off. Replace the
     // view's null default before descriptor clones; active fog overrides this.
-    constexpr std::size_t disabled_volumetric_offset =
-        (sizeof(FrameConstants) + 255u) & ~std::size_t{255u};
-    constexpr UINT disabled_volumetric_size =
-        (sizeof(VolumetricConstants) + 255u) & ~UINT{255u};
+    constexpr auto disabled_volumetric_offset = kDisabledVolumetricConstantsOffset;
+    constexpr auto disabled_volumetric_size = kDisabledVolumetricConstantsSize;
     static_assert(disabled_volumetric_offset + disabled_volumetric_size <= kExposureConstantsOffset);
     static_assert(kExposureConstantsOffset < kInstanceDataOffset);
     std::memset(frame.mapped + disabled_volumetric_offset, 0, disabled_volumetric_size);
@@ -5210,10 +5211,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     temporal_cpu.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
                          kTemporalTextureDescriptorOffset) * impl_->srv_stride;
     D3D12_SHADER_RESOURCE_VIEW_DESC temporal_view{};
-    temporal_owned_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    temporal_owned_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    temporal_owned_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    temporal_owned_view.Texture2D.MipLevels = 1;
+    temporal_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    temporal_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    temporal_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    temporal_view.Texture2D.MipLevels = 1;
     impl_->device->CreateShaderResourceView(
         owned_view.temporal_history_valid
             ? owned_view.targets.temporal_history[temporal_read_index].resource.Get() : nullptr, &temporal_view,
@@ -6437,13 +6438,16 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 if(found==by_id.end())return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
                     "Static probe material has no admitted texture binding.");
                 const auto &binding=*found->second;
-                if(capture_demand&&binding.effective_desired_mip>binding.required_mip)
-                    return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
-                        "Scene-probe texture target is outside the current streaming admission: "+std::string(binding.logical_id)+
-                        " (admitted mip "+std::to_string(binding.effective_desired_mip)+", required mip "+
-                        std::to_string(binding.required_mip)+").");
                 if(seen.insert(id.value).second)
+                {
+                    if(capture_demand)
+                        if(const auto fits=impl_->texture_streaming.RequiredSourceMipFitsMaximumHostBudget(
+                                id,binding.required_mip);fits&&!*fits)
+                            return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
+                                "Scene-probe required texture source mip exceeds the maximum host staging budget: "+
+                                std::string(binding.logical_id)+" (required mip "+std::to_string(binding.required_mip)+").");
                     local_probe_texture_facts.push_back({binding.logical_id,binding.resident_mip,binding.ready});
+                }
             }
     }
     local_probe_inputs.texture_facts=local_probe_texture_facts;
@@ -7357,7 +7361,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             auto *list =
                 static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_compute(list);
-            list->SetPipelineState(owned_view.skin_history_pipeline.Get());
+            list->SetPipelineState(impl_->skin_cache_pipeline.Get());
             for (const auto &dispatch : skin_dispatches)
             {
                 list->SetComputeRootShaderResourceView(16, dispatch.source);
@@ -8344,7 +8348,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     struct PendingFrameEffects
     {
         Impl &renderer;
-        OwnedView &view;
+        Impl::OwnedView &view;
         FrameContext &frame;
         CompletionSet completion;
         bool ambient{}, reconstruction{}, diffusion{}, reflections{}, transparency{}, probe{}, ltc{}, hdr_post{}, lights{}, scene_geometry{}, shadows{};
@@ -9958,8 +9962,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         overlay_inputs.render_active = owned_view.state.render_active;
         overlay_inputs.output_active = {owned_view.width, owned_view.height};
         const auto inverse_view = DirectX::XMMatrixInverse(nullptr, view);
-        DirectX::XMStoreFloat3(&overlay_inputs.camera_right, inverse_owned_view.r[0]);
-        DirectX::XMStoreFloat3(&overlay_inputs.camera_up, inverse_owned_view.r[1]);
+        DirectX::XMStoreFloat3(&overlay_inputs.camera_right, inverse_view.r[0]);
+        DirectX::XMStoreFloat3(&overlay_inputs.camera_up, inverse_view.r[1]);
         overlay_inputs.intensity = screen_intensity;
         overlay_inputs.frame_slot = frame_slot;
         overlay_inputs.completed = impl_->graph_queue_executor.Completed();
@@ -9983,10 +9987,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         else
         {
             D3D12_SHADER_RESOURCE_VIEW_DESC null_view{};
-            null_owned_view.Format = DXGI_FORMAT_R8_UNORM;
-            null_owned_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            null_owned_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            null_owned_view.Texture2D.MipLevels = 1;
+            null_view.Format = DXGI_FORMAT_R8_UNORM;
+            null_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            null_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            null_view.Texture2D.MipLevels = 1;
             impl_->device->CreateShaderResourceView(nullptr, &null_view, target);
         }
     }
@@ -10747,6 +10751,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     current_instance_snapshot->uploaded_revision = impl_->dynamic_scene_slots.PayloadRevision();
     current_instance_snapshot->slot_count = required_slots;
     current_instance_snapshot->surface_package_id = impl_->active_render_package_id;
+    current_instance_snapshot->clock_epoch = snapshot.header.clock.epoch;
+    current_instance_snapshot->clock_mode = snapshot.header.clock.mode;
+    current_instance_snapshot->simulation_time = snapshot.header.simulation_time;
     current_instance_snapshot->initialized = current_instance_snapshot->submitted = true;
     impl_->canonical_instance_current = current_instance_snapshot;
     std::shared_ptr<Impl::CanonicalSkinFrame> current_skin_deformation;

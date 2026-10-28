@@ -183,7 +183,7 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);

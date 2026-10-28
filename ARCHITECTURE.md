@@ -167,10 +167,60 @@ references. Profile consumers borrow indexed views; attached ground/light/decal/
 distortion outputs share one sparse current-owner binding without overwriting
 birth/capture inputs. Membership masks avoid duplicate scans; a count of rows
 without profile references skips compaction when only live rows were added.
+Activation plans unique keys and membership order before materializing new payloads
+or index nodes. New-row staging reserves by unique keys; first-request indices
+preserve canonical first-input semantics without retaining caller pointers.
 Capture-only rows remain eligible for retirement, and expiry remaps the existing
 episode index incrementally.
+Gameplay's uniform ring gaps travel as count/offset plus the original event/owner
+angle formula through Runtime profiles and typed ground/distortion values. Only
+the native upload expands them into the existing flat angle buffer; shaders and
+cooked formats retain their ABI. Raw irregular vectors remain checked inputs.
 Raw events retain the simulation producer's session/tick FIFO order; CPU activation
 retires that ingress independently from pending native emission submission.
+The raw ring grows with occupancy under the existing combined4096-entry bound.
+Ready-prefix staging leaves pending ownership unchanged until allocation completes.
+Persistent birth tombstones are sorted keys; reusable key staging/union and command
+reservation finish before publishing either keys or commands.
+CommitPreparedActivation checks the staged profile batch before birth reservation,
+including retained EntitySurface capture capacity, then publishes CPU births/profiles
+and acknowledges raw ingress on the render thread.
+AcceptRendererReceipts consumes actual native submission and UI Present facts before
+overall Render error handling; neither receipt is inferred from the other's success.
+Performance capture samples simultaneous retained, raw, prepared, frozen-native and
+frame-scratch logical capacities at selected preparation boundaries. Those samples
+  are neither process RSS nor a whole-VFX admission limit. Cosmetic growth limits
+  do not certify mandatory warning capacity, profile cardinality or GPU residency.
+Runtime prepares cosmetic event-profile masks once per VFX image generation from
+source/output ownership and authority. Ground, EntitySurface, PointRate, replacement
+contexts and unidentified contributors stay required. Retained profile admission
+unions required memberships before choosing cosmetic memberships by importance and
+original order; payload copies and index nodes follow the choice. The shared logical
+growth allowance covers this boundary, not a physical or whole-pipeline memory cap.
+  Raw flash, ballistic, mote and compatibility output plans expose fanout before sampling. Required storage is reserved
+first; decoration spends only the remaining shared capacity across prepared,
+retained and visible destinations. Empty retained queues transfer ownership by swap.
+Birth reservation and selection share a private helper that measures held capacity
+after required storage and ordering scratch are reserved. Retained flashes expire
+before selection; later display preparation handles only newly appended births,
+preserving the retained/birth/spark order without evaluating retained ages twice.
+An empty prepared birth vector can transfer its reserved allocation to an empty
+retained destination, including shard-only activations. Mixed native due prefixes
+can exchange empty prepared allocations into the frozen owner; active batches keep
+their original buffers and identity until receipt. Renderer particle assembly uses
+view-owned CPU scratch; native upload and GPU completion ownership stay separate.
+Retirement compacts canceled rows in its existing scans and carries forward the
+surviving old-prefix length for stable merging with new births. Later frame
+admission counts empty prepared storage as reusable native-copy capacity.
+Live spark admission also accounts for its pending workspace. Priority affects
+selection, while emission retains original source order and ordinal seeds.
+  Typed birth selection accounts for distinct copies and prospective native-prefix
+  storage. Compatibility decorations use remaining headroom after actual typed
+  emission; intentional cosmetic drops suppress equivalent legacy output, while
+  failed conversion keeps its fallback. Essential status shard/tombstone and
+  fire/stamp suffix capacity is prepared before optional rows are admitted.
+Runtime supplies actual VFX quality during adaptation and updates retained profiles
+only when that quality changes, preserving episode identity and clocks.
 PreparedPairFacts indexes only the retained snapshot pair by its
 semantic publication revisions and row counts. It stores row ordinals, never
 borrowed data addresses; frame adapters still recompute live age and geometry.
@@ -307,6 +357,14 @@ capacity, charging successful native allocation sizes only during that startup
 scope. Static capacity is never reported as currently available memory or used for
 optional streaming/candidate admission. Those paths retain observed OS budgets.
 Standard pools resolve by heap type; only CUSTOM heaps resolve by L0/L1 preference.
+
+Authenticated ranged software textures admit their unpublished candidate and one
+bounded reusable UPLOAD window together before payload IO. Device footprint plans
+belong to that fixed transaction; chunks batch within host and native window limits.
+Copy completion permits window reuse, and final publication or safe cancellation
+releases it. Existing one-shot and reserved/mapping-only paths keep their contracts.
+Local texture pressure excludes nonlocal upload heaps on discrete adapters; total
+physical-memory diagnostics still report both segments.
 
 Sequential views retain their own temporal and native reconstruction state.
 There is no parallel semantic history-resource registry: resources and history

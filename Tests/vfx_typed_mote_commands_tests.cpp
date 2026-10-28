@@ -1,5 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_mote_commands.hpp"
+#include "../Source/Runtime/Private/vfx_visible_outputs.hpp"
 #include "test_generation_paths.hpp"
 #include <hs/render_data/render_snapshot.hpp>
 #include <bit>
@@ -92,6 +94,56 @@ void PreparedResidualAndTickRoutesRequireTwoKnots()
     tick.sources[0].knot_count=0;image=Prepared(tick);
     Require(!image.mote_source_recipes[0].tick_route_valid,"status tick route accepted a non-two-knot source");
 }
+void VisibleMoteProjectionPreservesSplitFlashPrefixAndSuffix()
+{
+    hs::VfxImage image;
+    hs::runtime_detail::VfxSessionState session;
+    hs::runtime_detail::VfxPersistentSparkState sparks;
+    std::vector<hs::VfxFlashSpawnInput> visible;
+    const auto flash = [](hs::Sequence sequence, hs::Tick tick, float delay, float lifetime) {
+        hs::VfxFlashSpawnInput row;
+        row.stable_seed = static_cast<std::uint32_t>(sequence);
+        row.event_tick = tick;
+        row.delay = delay;
+        row.lifetime = lifetime;
+        return row;
+    };
+    session.decoded.flashes.push_back(flash(11, 90, 0, 10)); // Retained and already projected.
+    session.decoded.flashes.push_back(flash(12, 0, 0, 1));   // Retained but expired.
+    session.decoded.flashes.push_back(flash(13, 100, 1, 3)); // Retained but delayed.
+    session.decoded.AppendVisibleFlashes(100, visible);
+    const auto retained_prefix = session.decoded.flashes.size();
+    Require(visible.size() == 1 && visible.front().stable_seed == 11 && retained_prefix == 2,
+        "visible-flash setup did not establish a retained prefix");
+
+    session.decoded.flashes.push_back(flash(14, 100, 0, 2)); // Newly visible.
+    session.decoded.flashes.push_back(flash(15, 100, 2, 3)); // Newly delayed.
+    session.decoded.flashes.push_back(flash(16, 0, 0, 1));   // Newly expired.
+    constexpr std::size_t required_suffix = 3;
+    std::size_t held_measurements{};
+    bool held_measured_after_reserve = true;
+    const auto admission = hs::runtime_detail::PrepareVisibleMoteOutputs(
+        image, session, sparks, {}, 100.0, 100, 1.0f, retained_prefix, required_suffix,
+        visible, {0, 4, 2}, [&]() noexcept {
+            ++held_measurements;
+            held_measured_after_reserve &=
+                visible.capacity() >= session.decoded.flashes.size() + required_suffix;
+            return std::size_t{0};
+        });
+
+    Require(held_measurements == 2 && held_measured_after_reserve && visible.size() == 2 &&
+            visible[0].stable_seed == 11 && visible[1].stable_seed == 14,
+        "visible-mote projection duplicated its retained prefix or changed flash order");
+    Require(session.decoded.flashes.size() == 4 &&
+            session.decoded.flashes[0].stable_seed == 11 &&
+            session.decoded.flashes[1].stable_seed == 13 &&
+            session.decoded.flashes[2].stable_seed == 14 &&
+            session.decoded.flashes[3].stable_seed == 15,
+        "visible-mote projection did not retain deferred rows or discard expired rows");
+    Require(visible.capacity() >= visible.size() + required_suffix &&
+            admission.requested_rows == 4 && admission.admitted_rows == 2 && admission.budget_limited,
+        "visible-mote projection lost required suffix capacity or typed admission metrics");
+}
 void BurstAndScale()
 {
     auto p=Program();auto in=Input();const auto a=Decode(p,in);
@@ -168,6 +220,28 @@ void AppendAndConsumedSequenceSemantics()
         tick_image.View(),events,owners,converted,sequences);
     Require(converted.size()==3&&sequences==std::vector<hs::Sequence>(3,event.sequence),
         "owned status Mote conversion did not report each consumed output row");
+    std::vector<hs::runtime_detail::VfxPreparedMoteBurst> tick_plans;
+    hs::runtime_detail::PrepareVfxOwnedStatusTickMoteBursts(
+        tick_image.View(), events, owners, tick_plans);
+    Require(tick_plans.size() == 1 && tick_plans.front().sampler ==
+            hs::runtime_detail::VfxPreparedMoteSampler::StatusTick &&
+            tick_plans.front().count == 3 && tick_plans.front().admitted_count == 3 &&
+            !tick_plans.front().cosmetic && tick_plans.front().event_sequence == event.sequence,
+            "owned status tick did not prepare its full required three-row burst");
+    hs::VfxFlashSpawnInput tick_prefix; tick_prefix.stable_seed = 0x9988u;
+    std::vector<hs::VfxFlashSpawnInput> prepared_flashes{tick_prefix};
+    std::vector<hs::Sequence> prepared_sequences{17};
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(
+        tick_plans, prepared_flashes, &prepared_sequences);
+    Require(prepared_flashes.size() == 4 && prepared_flashes.front().stable_seed == tick_prefix.stable_seed &&
+            prepared_sequences == std::vector<hs::Sequence>{17,event.sequence,event.sequence,event.sequence},
+            "prepared status tick append lost caller prefixes or row-level sequence facts");
+    for (std::size_t i = 0; i < converted.size(); ++i)
+        Require(prepared_flashes[i + 1].stable_seed == converted[i].stable_seed &&
+                prepared_flashes[i + 1].initial_offset.x == converted[i].initial_offset.x &&
+                prepared_flashes[i + 1].initial_velocity.y == converted[i].initial_velocity.y &&
+                prepared_flashes[i + 1].orbit_phase == 0.0f,
+                "prepared status tick changed its original sampler or orbit phase");
     std::ranges::sort(sequences); sequences.erase(std::unique(sequences.begin(),sequences.end()),sequences.end());
     std::vector<hs::VfxFlashSpawnInput> unpaired;
     hs::runtime_detail::AppendVfxTypedMoteCommands(tick_image.View(),events,sequences,unpaired);
@@ -177,6 +251,139 @@ void AppendAndConsumedSequenceSemantics()
     Require(returning.size()==converted.size()&&returning[0].event_sequence==event.sequence&&
         returning.back().flash.stable_seed==converted.back().stable_seed,
         "returning owned Mote helper diverged from append output");
+}
+void PreparedBurstAdmissionPreservesPriorityAndOrdinals()
+{
+    auto program=Program();
+    program.effects[0].importance=1;
+    program.effects[0].sources={0,2};
+    auto required=program.sources[0];
+    required.stable_id=Hash("required_motes");
+    required.authoritative=1;
+    required.parameters={2,2};
+    required.outputs={1,1};
+    program.sources.push_back(required);
+    auto high=program.sources[0];
+    high.effect=2;
+    high.stable_id=Hash("high_priority_motes");
+    high.parameters={4,2};
+    high.outputs={2,1};
+    program.sources.push_back(high);
+    auto second=program.effects[0];
+    second.handle=2;
+    second.importance=9;
+    second.sources={2,1};
+    program.effects.push_back(second);
+    program.effect_lookup.push_back({0x123456789ull,2});
+    program.parameters.push_back({Hash("count"),hs::VfxParameterType::Int,3});
+    program.parameters.push_back({Hash("curl"),hs::VfxParameterType::Float,
+        std::bit_cast<std::uint32_t>(.2f)});
+    program.parameters.push_back({Hash("count"),hs::VfxParameterType::Int,4});
+    program.parameters.push_back({Hash("curl"),hs::VfxParameterType::Float,
+        std::bit_cast<std::uint32_t>(.3f)});
+    auto required_output=program.outputs[0];
+    required_output.source=1;
+    required_output.shape=Hash("small_motes");
+    required_output.motion=hs::VfxMotionKind::VeryShortLocalDrift;
+    program.outputs.push_back(required_output);
+    auto high_output=program.outputs[0];
+    high_output.source=2;
+    high_output.shape=Hash("diamond_motes");
+    high_output.motion=hs::VfxMotionKind::ShortUpwardSpiral;
+    program.outputs.push_back(high_output);
+
+    auto first=Input();
+    first.sequence=801;
+    auto second_input=first;
+    second_input.sequence=802;
+    second_input.effect_handle=2;
+    const std::array inputs{first,second_input};
+    const auto image=Prepared(program);
+    auto both=hs::runtime_detail::BuildVfxTypedMoteCommands(image.View(),inputs);
+    Require(both.size()==17,"raw mote plans lost the 1024/3/4 authored fanout fixture");
+
+    std::vector<hs::runtime_detail::VfxPreparedMoteBurst> prepared;
+    std::vector<std::size_t> order;
+    hs::runtime_detail::PrepareVfxTypedMoteBursts(image.View(),inputs,{},prepared);
+    Require(prepared.size()==3&&prepared[0].cosmetic&& !prepared[1].cosmetic&&
+        prepared[0].count==10&&prepared[1].count==3&&prepared[2].count==4&&
+        prepared[2].importance>prepared[0].importance,
+        "prepared plans lost source classification, counts, or effect importance");
+    const auto zero=hs::runtime_detail::SelectVfxPreparedMoteBursts(prepared,0,order);
+    Require(zero.required_rows==3&&zero.requested_decorative_rows==14&&
+        zero.admitted_decorative_rows==0,"zero decorative quota blocked required rows");
+    hs::VfxFlashSpawnInput prefix;prefix.stable_seed=0xabcdef;
+    std::vector<hs::VfxFlashSpawnInput> output{prefix};
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(prepared,output);
+    Require(output.size()==4&&output.front().stable_seed==prefix.stable_seed&&
+        output[1].stable_seed==both[10].stable_seed&&output[3].stable_seed==both[12].stable_seed,
+        "zero quota changed required row ordinals or caller prefix");
+
+    const auto one=hs::runtime_detail::SelectVfxPreparedMoteBursts(prepared,1,order);
+    output.assign(1,prefix);
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(prepared,output);
+    Require(one.required_rows==3&&one.requested_decorative_rows==14&&
+        one.admitted_decorative_rows==1&&output.size()==5&&
+        output[1].stable_seed==both[10].stable_seed&&output[3].stable_seed==both[12].stable_seed&&
+        output[4].stable_seed==both[13].stable_seed,
+        "importance selection changed original plan order or admitted a non-prefix ordinal");
+
+    const auto all=hs::runtime_detail::SelectVfxPreparedMoteBursts(
+        prepared,std::numeric_limits<std::size_t>::max(),order);
+    output.clear();
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(prepared,output);
+    Require(all.required_rows==3&&all.requested_decorative_rows==14&&
+        all.admitted_decorative_rows==14&&output.size()==both.size()&&order.empty(),
+        "unlimited prepared selection changed the full route fanout");
+    for(std::size_t index=0;index<output.size();++index)
+        Require(output[index].stable_seed==both[index].stable_seed&&
+            output[index].initial_offset.x==both[index].initial_offset.x&&
+            output[index].initial_velocity.y==both[index].initial_velocity.y,
+            "prepared unlimited emission changed source order, seed, or sampling");
+
+    auto tied_program=program;
+    tied_program.effects[1].importance=tied_program.effects[0].importance;
+    const auto tied_image=Prepared(tied_program);
+    std::vector<hs::runtime_detail::VfxPreparedMoteBurst> tied_plan;
+    hs::runtime_detail::PrepareVfxTypedMoteBursts(tied_image.View(),inputs,{},tied_plan);
+    const auto tied=hs::runtime_detail::SelectVfxPreparedMoteBursts(tied_plan,1,order);
+    output.clear();
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(tied_plan,output);
+    Require(tied.admitted_decorative_rows==1&&output.size()==4&&
+        tied_plan[0].admitted_count==1&&tied_plan[1].admitted_count==3&&tied_plan[2].admitted_count==0&&
+        output.front().stable_seed==both[0].stable_seed&&
+        output[1].stable_seed==both[10].stable_seed&&output.back().stable_seed==both[12].stable_seed,
+        "equal importance did not keep the original plan order");
+
+    auto max_program=Program();
+    max_program.parameters[0].bits=1024;
+    const auto max_image=Prepared(max_program);
+    std::vector<hs::runtime_detail::VfxPreparedMoteBurst> max_plan;
+    hs::runtime_detail::PrepareVfxTypedMoteBursts(max_image.View(),std::span(&first,1),{},max_plan);
+    const auto max_selection=hs::runtime_detail::SelectVfxPreparedMoteBursts(
+        max_plan,std::numeric_limits<std::size_t>::max(),order);
+    std::vector<hs::VfxFlashSpawnInput> max_rows;
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(max_plan,max_rows);
+    Require(max_plan.size()==1&&max_plan[0].count==1024&&
+        max_selection.requested_decorative_rows==1024&&max_rows.size()==1024,
+        "prepared common route did not preserve its maximum authored fanout");
+    max_program.parameters[0].bits=std::numeric_limits<std::uint32_t>::max();
+    const auto invalid_image=Prepared(max_program);
+    hs::runtime_detail::PrepareVfxTypedMoteBursts(invalid_image.View(),std::span(&first,1),{},max_plan);
+    Require(max_plan.empty(),"raw prepared route accepted an unsupported over-1024 count");
+
+    bool overflow=false;
+    max_plan.push_back({});
+    max_plan[0].count=std::numeric_limits<std::size_t>::max();
+    max_plan[0].admitted_count=max_plan[0].count;
+    max_plan[0].cosmetic=false;
+    max_plan.push_back({});
+    max_plan[1].count=1;
+    max_plan[1].admitted_count=1;
+    max_plan[1].cosmetic=false;
+    try { (void)hs::runtime_detail::SelectVfxPreparedMoteBursts(max_plan,0,order); }
+    catch(const std::length_error &) { overflow=true; }
+    Require(overflow,"prepared required-row sum did not fail explicitly on overflow");
 }
 void CatalogOrderAndMotions()
 {
@@ -209,6 +416,9 @@ hs::VfxProgramData OwnedProgram()
     p.sources[0].knots={0,1,0,0};p.sources[0].parameters={0,1};
     p.parameters[0]={Hash("count_per_second"),hs::VfxParameterType::Int,3};
     p.outputs[0].shape=Hash("soft_motes");p.outputs[0].motion=hs::VfxMotionKind::RareInwardDrift;
+    p.outputs[0].shape_domain=Hash("sprite");p.outputs[0].shape_scale_rule=Hash("component_size");
+    p.outputs[0].shape_component_kind=Hash("particle");p.outputs[0].coverage_type=Hash("analytic");
+    p.outputs[0].coverage_ref=Hash("soft_disc");
     p.outputs[0].min_quality=1;return p;
 }
 hs::VfxEventInput OwnedInput()
@@ -237,6 +447,60 @@ void OwnedRateAndClock()
     hs::runtime_detail::AppendVfxOwnedMoteCommands(image.View(),std::span(&in,1),120,appended);
     Require(appended.size()==at20.size()+1&&appended.front().stable_seed==prefix.stable_seed&&
         appended[1].stable_seed==at20[0].stable_seed,"owned Mote append changed caller order");
+    for (const std::size_t limit : {std::size_t{0}, std::size_t{1}, std::size_t{32}})
+    {
+        hs::runtime_detail::VfxMoteRowQuota quota{limit};
+        std::vector<hs::VfxFlashSpawnInput> bounded{prefix};
+        hs::runtime_detail::AppendVfxOwnedMoteCommands(
+            image.View(), std::span(&in,1), 120, bounded, &quota);
+        const auto admitted = std::min(limit, at20.size());
+        Require(bounded.size() == admitted + 1 && bounded.front().stable_seed == prefix.stable_seed &&
+                quota.requested_rows == at20.size() && quota.admitted_rows == admitted &&
+                quota.remaining_rows == limit - admitted,
+                "owned decorative mote quota counters or prefix length changed");
+        for (std::size_t i = 0; i < admitted; ++i)
+            Require(bounded[i + 1].stable_seed == at20[i].stable_seed,
+                    "owned decorative quota changed source ordinal or seed");
+    }
+    std::vector<hs::VfxFlashSpawnInput> full_capacity;
+    full_capacity.reserve(4);
+    full_capacity.resize(full_capacity.capacity(), prefix);
+    const auto full_capacity_size = full_capacity.size();
+    const auto full_capacity_rows = full_capacity.capacity();
+    hs::runtime_detail::VfxMoteRowQuota no_rows{0};
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(
+        image.View(), std::span(&in,1), 120, full_capacity, &no_rows);
+    Require(full_capacity.size() == full_capacity_size &&
+            full_capacity.capacity() == full_capacity_rows && no_rows.requested_rows == 2,
+            "zero-row quota grew a full output buffer or changed candidate accounting");
+    hs::runtime_detail::VfxMoteRowQuota one_row{1};
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(
+        image.View(), std::span(&in,1), 120, full_capacity, &one_row);
+    Require(full_capacity.size() == full_capacity_size + 1 &&
+            full_capacity.capacity() <= full_capacity_size + 1 &&
+            full_capacity.back().stable_seed == at20.front().stable_seed &&
+            one_row.requested_rows == 2 && one_row.admitted_rows == 1,
+            "one-row quota reserved beyond its admitted prefix or changed the ordinal");
+    std::vector<hs::VfxFlashSpawnInput> warm_reuse;
+    warm_reuse.reserve(16);
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(
+        image.View(), std::span(&in,1), 120, warm_reuse);
+    const auto warm_rows_capacity = warm_reuse.capacity();
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(
+        image.View(), std::span(&in,1), 120, warm_reuse);
+    Require(warm_reuse.capacity() == warm_rows_capacity,
+            "unlimited owned rows failed to reuse warmed vector capacity");
+    auto authoritative = p;
+    authoritative.sources[0].authoritative = 1;
+    auto authoritative_image = Prepared(authoritative);
+    hs::runtime_detail::VfxMoteRowQuota authoritative_quota{0};
+    std::vector<hs::VfxFlashSpawnInput> authoritative_rows;
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(
+        authoritative_image.View(), std::span(&in,1), 120, authoritative_rows,
+        &authoritative_quota);
+    Require(authoritative_rows.size() == at20.size() && authoritative_quota.remaining_rows == 0 &&
+            authoritative_quota.requested_rows == 0 && authoritative_quota.admitted_rows == 0,
+            "authoritative mote rows consumed or were blocked by decorative quota");
     const auto between=Owned(p,in,119.5);
     Require(between.size()==1&&between[0].stable_seed==birth[0].stable_seed&&
             between[0].normalized_age>birth[0].normalized_age,
@@ -360,6 +624,32 @@ void PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry()
     const auto at20 = Persistent(program, std::span(&owner, 1));
     Require(at20.size() == 2 && at20[0].stable_seed != at20[1].stable_seed,
             "persistent mote birth cadence or indexed identity missing");
+    auto quota_image = Prepared(program);
+    for (const std::size_t limit : {std::size_t{0}, std::size_t{1}, std::size_t{32}})
+    {
+        hs::runtime_detail::VfxMoteRowQuota quota{limit};
+        std::vector<hs::VfxFlashSpawnInput> bounded;
+        hs::runtime_detail::AppendVfxPersistentMoteCommands(
+            quota_image.View(), std::span(&owner,1), bounded, &quota);
+        const auto admitted = std::min(limit, at20.size());
+        Require(bounded.size() == admitted && quota.requested_rows == at20.size() &&
+                quota.admitted_rows == admitted && quota.remaining_rows == limit - admitted,
+                "persistent decorative quota counters or prefix length changed");
+        for (std::size_t i = 0; i < admitted; ++i)
+            Require(bounded[i].stable_seed == at20[i].stable_seed,
+                    "persistent quota changed source ordinal or seed");
+    }
+    auto authoritative_program = program;
+    authoritative_program.sources[0].authoritative = 1;
+    const auto authoritative_image = Prepared(authoritative_program);
+    hs::runtime_detail::VfxMoteRowQuota persistent_authoritative_quota{0};
+    std::vector<hs::VfxFlashSpawnInput> authoritative_rows;
+    hs::runtime_detail::AppendVfxPersistentMoteCommands(authoritative_image.View(),
+        std::span(&owner,1), authoritative_rows, &persistent_authoritative_quota);
+    Require(authoritative_rows.size() == at20.size() &&
+            persistent_authoritative_quota.requested_rows == 0 &&
+            persistent_authoritative_quota.admitted_rows == 0,
+            "authoritative persistent rows were gated by decorative quota");
     const auto mix = [](std::uint32_t value) {
         value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
         value *= 0x846ca68bu; return value ^ (value >> 16);
@@ -426,6 +716,7 @@ void PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry()
             owner_clock_rewind[0].normalized_age == at20[0].normalized_age &&
             owner_clock_rewind[0].initial_offset.x == at20[0].initial_offset.x,
             "nonmonotonic owner age changed deterministic persistent output");
+    owner = PersistentMoteOwner(40);
     auto reordered = program;
     auto extra_effect = reordered.effects.front();
     extra_effect.handle = 2;
@@ -800,6 +1091,53 @@ void AuthoredMask()
         "Mote immutable source/mask preparation lost an authored row");
     Require(decoded.size()==10&&decoded[0].mask_slice==p.slice_indices[in.stable_seed%3]&&Near(decoded[0].mask_strength,.38f),"mask binding missing");
     Require(decoded[0].mask_slice==decoded[9].mask_slice,"authored event mask selection changed per particle");
+    auto residual=p;
+    residual.effects[0].payload_kind=Hash("EntityAttachmentPayload");
+    residual.effect_lookup[0].effect_id=Hash64("particle.skill.charged_shot.cancel");
+    residual.sources[0].stable_id=Hash("residual_motes");
+    residual.sources[0].knots={0,1,0,0};
+    residual.parameters[1]={Hash("inward_speed"),hs::VfxParameterType::Float,
+        std::bit_cast<std::uint32_t>(.5f)};
+    residual.outputs[0].shape=Hash("camera_billboard");
+    residual.outputs[0].motion=hs::VfxMotionKind::ParticlesPulledInward;
+    auto residual_input=in;
+    residual_input.sequence=77;
+    hs::VfxEntityPayload entity;entity.render_instance_id=1;entity.footprint_radius=1;
+    residual_input.payload=entity;
+    residual_input.world_transform[12]=4;
+    residual_input.world_transform[13]=.25f;
+    residual_input.world_transform[14]=-7;
+    const auto residual_rows=Decode(residual,residual_input);
+    Require(residual_rows.size()==10,"residual mote burst lost its prepared fanout");
+    for(const auto &row:residual_rows)
+        Require(row.mask_slice==decoded[0].mask_slice&&Near(row.mask_strength,.38f)&&
+            Near(std::hypot(row.initial_offset.x,row.initial_offset.z),.45f)&&
+            Near(std::hypot(row.initial_velocity.x,row.initial_velocity.z),.5f)&&
+            row.event_tick==in.event_tick&&Near(row.lifetime,.9f),
+            "residual mask preparation changed the birth geometry or clock");
+    auto residual64=residual;
+    residual64.parameters[0].bits=64;
+    const auto residual64_image=Prepared(residual64);
+    std::vector<hs::runtime_detail::VfxPreparedMoteBurst> residual64_plan;
+    std::vector<std::size_t> residual64_order;
+    hs::runtime_detail::PrepareVfxTypedMoteBursts(residual64_image.View(),
+        std::span(&residual_input,1),{},residual64_plan);
+    const auto residual64_selection=hs::runtime_detail::SelectVfxPreparedMoteBursts(
+        residual64_plan,1,residual64_order);
+    std::vector<hs::VfxFlashSpawnInput> residual64_rows;
+    hs::runtime_detail::AppendVfxPreparedMoteBursts(residual64_plan,residual64_rows);
+    Require(residual64_plan.size()==1&&residual64_plan[0].count==64&&
+        residual64_selection.requested_decorative_rows==64&&
+        residual64_selection.admitted_decorative_rows==1&&residual64_rows.size()==1,
+        "residual prepared burst lost the 64-row quota boundary");
+    residual.slice_indices[0]=12;
+    const auto invalid_residual=Prepared(residual);
+    std::vector<hs::VfxFlashSpawnInput> retained_prefix{decoded[0]};
+    const auto retained_capacity=retained_prefix.capacity();
+    hs::runtime_detail::AppendVfxTypedMoteCommands(invalid_residual.View(),
+        std::span(&residual_input,1),{},retained_prefix);
+    Require(retained_prefix.size()==1&&retained_prefix.capacity()==retained_capacity,
+        "invalid residual mask grew or modified the caller's birth prefix");
     p.slice_indices[0]=12;Require(Decode(p,in).empty(),"out of range mask accepted");
 }
 
@@ -1099,6 +1437,44 @@ void PersistentSparksUseOnlyLiveBirthPositions()
             "expired owner cursor was not released for a reused projectile identity");
 }
 
+void PersistentSparkQuotaConsumesSkippedOrdinalAndPreservesPrefix()
+{
+    const auto program = SparkProgram();
+    const auto image = Prepared(program);
+    hs::runtime_detail::VfxPersistentSparkState state;
+    auto owner = SparkOwner(3);
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed = 0x445566u;
+    std::vector<hs::VfxFlashSpawnInput> output{prefix};
+    hs::runtime_detail::VfxMoteRowQuota exhausted{0};
+    state.Append(image.View(), std::span(&owner,1), 103, 1.0f, output, &exhausted);
+    Require(output.size() == 1 && output.front().stable_seed == prefix.stable_seed &&
+            exhausted.requested_rows == 1 && exhausted.admitted_rows == 0,
+            "spark quota failure changed prefix or row accounting");
+
+    // Re-evaluating the same owner clock must not retry the quota-rejected row.
+    state.Append(image.View(), std::span(&owner,1), 103, 1.0f, output, &exhausted);
+    Require(output.size() == 1, "quota-rejected spark ordinal was replayed at the same owner clock");
+    hs::runtime_detail::VfxPersistentSparkState admitted_state;
+    auto admitted_owner = SparkOwner(3);
+    std::vector<hs::VfxFlashSpawnInput> admitted_output{prefix};
+    hs::runtime_detail::VfxMoteRowQuota one_row{1};
+    admitted_state.Append(image.View(), std::span(&admitted_owner,1), 103, 1.0f,
+                          admitted_output, &one_row);
+    Require(admitted_output.size() == 2 && one_row.requested_rows == 1 &&
+            one_row.admitted_rows == 1 && admitted_state.PendingCapacityRows() <= 1,
+            "one-row spark quota exceeded pending capacity or changed admission");
+
+    owner = SparkOwner(14);
+    state.Append(image.View(), std::span(&owner,1), 114, 1.0f, output, nullptr);
+    hs::runtime_detail::VfxPersistentSparkState reference_state;
+    std::vector<hs::VfxFlashSpawnInput> reference;
+    reference_state.Append(image.View(), std::span(&owner,1), 114, 1.0f, reference);
+    Require(output.size() == 2 && reference.size() == 1 &&
+            output.front().stable_seed == prefix.stable_seed &&
+            output.back().stable_seed == reference.front().stable_seed,
+            "spark quota changed later ordinal provenance after owner-clock advance");
+}
+
 void PersistentSparksSkipMissedTicksAndReset()
 {
     const auto program = SparkProgram();
@@ -1242,6 +1618,6 @@ void CookedPersistentSparksConvertWhenAvailable()
 }
 int RunVfxMoteTests()
 {
-    try {PreparedRoutesCloseAuthoredWindows();PreparedResidualAndTickRoutesRequireTwoKnots();BurstAndScale();AppendAndConsumedSequenceSemantics();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();SafeGapSectorAcceptsNonAmbientSourceId();OwnedMalformedAndQuality();PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparkIndexMatchesOriginalLinearModel();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
+    try {PreparedRoutesCloseAuthoredWindows();PreparedResidualAndTickRoutesRequireTwoKnots();VisibleMoteProjectionPreservesSplitFlashPrefixAndSuffix();BurstAndScale();AppendAndConsumedSequenceSemantics();PreparedBurstAdmissionPreservesPriorityAndOrdinals();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();SafeGapSectorAcceptsNonAmbientSourceId();OwnedMalformedAndQuality();PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparkIndexMatchesOriginalLinearModel();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparkQuotaConsumesSkippedOrdinalAndPreservesPrefix();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

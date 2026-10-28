@@ -4,6 +4,8 @@
 
 #include <Windows.h>
 
+#include <filesystem>
+#include <string>
 #include <stdexcept>
 
 namespace hs::shader_content
@@ -13,6 +15,23 @@ class DxcStageInUseError final : public std::runtime_error
   public:
     using std::runtime_error::runtime_error;
 };
+
+inline std::string ReadDxcDiagnostics(const std::filesystem::path &diagnostics)
+{
+    try
+    {
+        if (!std::filesystem::exists(diagnostics)) return "no diagnostic output";
+        return asset_pipeline::ReadBytes(diagnostics);
+    }
+    catch (const std::exception &error)
+    {
+        return "diagnostic output unavailable: " + std::string(error.what());
+    }
+    catch (...)
+    {
+        return "diagnostic output unavailable: unknown read error";
+    }
+}
 
 inline DWORD WaitForDxcExit(const PROCESS_INFORMATION &process,
                           const std::filesystem::path &stage,
@@ -37,7 +56,7 @@ inline DWORD WaitForDxcExit(const PROCESS_INFORMATION &process,
                 ", exit wait=" + std::to_string(exit_wait) +
                 ", exit wait error=" + std::to_string(exit_wait_error) + ").");
         throw std::runtime_error("DXC " + std::string(wait == WAIT_TIMEOUT ? "timed out" : "wait failed") + ": " +
-            (std::filesystem::exists(diagnostics) ? asset_pipeline::ReadBytes(diagnostics) : "no diagnostic output"));
+            ReadDxcDiagnostics(diagnostics));
     }
     DWORD code{};
     const auto got_code = GetExitCodeProcess(process.hProcess, &code);

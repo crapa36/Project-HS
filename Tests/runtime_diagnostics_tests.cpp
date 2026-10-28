@@ -1,11 +1,73 @@
 #include "../Source/Runtime/Private/runtime_diagnostics.hpp"
+#include "../Source/Runtime/Private/frame_performance_schema.hpp"
+#include "../Source/Runtime/Private/vfx_workspace_size.hpp"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 void Check(bool ok) { if (!ok) throw std::runtime_error("diagnostic contract"); }
 std::uint64_t clock_ticks{};
 std::uint64_t FakeClock() noexcept { return ++clock_ticks; }
+
+void CheckFramePerformanceSchema()
+{
+    const auto header = hs::runtime_detail::FramePerformanceCsvHeader();
+    std::string sentinel_row;
+    std::size_t sentinel_index{};
+#define HS_FRAME_PERFORMANCE_FIELD(name, expression) \
+    hs::runtime_detail::AppendCsvValue(sentinel_row, sentinel_index++);
+#define HS_FRAME_PERFORMANCE_TASKS() \
+    for (std::size_t task = 0; task < hs::runtime_detail::kFramePerformanceTaskNames.size(); ++task) \
+    { \
+        hs::runtime_detail::AppendCsvValue(sentinel_row, sentinel_index++); \
+        hs::runtime_detail::AppendCsvValue(sentinel_row, sentinel_index++); \
+    }
+#include "../Source/Runtime/Private/frame_performance_fields.inc"
+#undef HS_FRAME_PERFORMANCE_TASKS
+#undef HS_FRAME_PERFORMANCE_FIELD
+    std::istringstream csv(header + "\n" + sentinel_row + "\n");
+    std::string header_line, row_line;
+    std::getline(csv, header_line);
+    std::getline(csv, row_line);
+    const auto split = [](const std::string &line) {
+        std::vector<std::string> fields;
+        std::istringstream input(line);
+        for (std::string field; std::getline(input, field, ',');) fields.push_back(std::move(field));
+        return fields;
+    };
+    const auto names = split(header_line);
+    const auto values = split(row_line);
+    Check(names.size() == values.size() && names.size() == sentinel_index);
+    auto unique_names = names;
+    std::sort(unique_names.begin(), unique_names.end());
+    Check(std::adjacent_find(unique_names.begin(), unique_names.end()) == unique_names.end());
+    for (std::size_t index = 0; index < values.size(); ++index)
+        Check(values[index] == std::to_string(index));
+    std::cout << "FRAME_SCHEMA_HEADER:" << header << '\n';
+    std::cout << "FRAME_SCHEMA_ROW:" << sentinel_row << '\n';
+}
+
+void CheckNativeCopyHeadroom()
+{
+    using hs::runtime_detail::vfx_retained_size::NativeCopyGrowthBytes;
+    std::vector<int> pending, frozen, prepared;
+    prepared.reserve(64);
+    pending.resize(prepared.capacity());
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
+    prepared.push_back(1);
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == pending.size() * sizeof(int));
+    frozen.reserve(pending.size());
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
+    pending.resize(frozen.capacity() + 1);
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == sizeof(int));
+    prepared.clear();
+    prepared.reserve(pending.size());
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
+}
 struct FailedSink : std::streambuf
 {
     std::streamsize xsputn(const char*,std::streamsize) override { return 0; }
@@ -13,6 +75,8 @@ struct FailedSink : std::streambuf
 };
 int main()
 {
+    CheckFramePerformanceSchema();
+    CheckNativeCopyHeadroom();
     using hs::runtime_detail::DiagnosticLog;
     hs::runtime_detail::DiagnosticSample sample{};
     { hs::runtime_detail::DiagnosticScope scope(sample, nullptr); }
@@ -26,6 +90,17 @@ int main()
     Check(sample.ticks == 2 && sample.calls == 1 && clock_ticks == 3);
     Check(hs::runtime_detail::CsvField("") == "\"\"");
     Check(hs::runtime_detail::CsvField("pass, \"native\"\nnext") == "\"pass, \"\"native\"\"\nnext\"");
+    hs::runtime_detail::VfxWorkspacePeak workspace_peak;
+    workspace_peak.Observe({.retained_bytes = 4, .raw_event_bytes = 3,
+        .prepared_bytes = 2, .frozen_native_bytes = 1, .frame_scratch_bytes = 5});
+    Check(workspace_peak.TotalBytes() == 15 &&
+          workspace_peak.Sample().raw_event_bytes == 3);
+    workspace_peak.Observe({.retained_bytes = 9});
+    Check(workspace_peak.TotalBytes() == 15);
+    workspace_peak.Observe({.retained_bytes = std::numeric_limits<std::size_t>::max(),
+        .raw_event_bytes = 1});
+    Check(workspace_peak.TotalBytes() == std::numeric_limits<std::size_t>::max() &&
+          workspace_peak.Sample().raw_event_bytes == 1);
     hs::runtime_detail::PerformanceLogState performance;
     Check(performance.FrameInterval(1000) == 0);
     Check(performance.FrameInterval(2100) == 1100); // Includes work and pacing before the next frame.

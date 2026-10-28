@@ -572,7 +572,7 @@ Result D3D12Renderer::Impl::RefreshBudgetObservations()
     {
         snapshot.host_budget_valid = true;
         snapshot.host_staging_budget = std::min<std::uint64_t>(
-            host_budget_observation.last_valid.ullAvailPhys / 8u, 512ull * 1024u * 1024u);
+            host_budget_observation.last_valid.ullAvailPhys / 8u, kMaximumHostStagingBudgetBytes);
     }
     SampleAllocatorBudgetStats(SUCCEEDED(local_budget_observation.last_result),
         nonlocal_budget_observation.supported && SUCCEEDED(nonlocal_budget_observation.last_result));
@@ -1001,7 +1001,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     empty_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     empty_uav.Buffer.NumElements = 1;
     const auto heap_start = heap->GetCPUDescriptorHandleForHeapStart();
-    static_assert((kTextureDescriptorCount - kSceneGeometryTableOffset) % kSceneFrameTableCount == 0);
+    static_assert((kViewSkinDescriptorOffset - kSceneGeometryTableOffset) % kSceneFrameTableCount == 0);
     for (UINT frame = 0; frame < count / kTextureDescriptorCount; ++frame)
     {
         const auto frame_offset = static_cast<SIZE_T>(frame) * kTextureDescriptorCount;
@@ -1019,7 +1019,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         // Every private geometry/GI/volume bank uses the same root32 layout. Seed
         // it from the typed canonical table; builders later copy current
         // canonical values and overwrite their active service suffix only.
-        for (UINT offset = kSceneGeometryTableOffset; offset < kTextureDescriptorCount;
+        for (UINT offset = kSceneGeometryTableOffset; offset < kViewSkinDescriptorOffset;
              offset += kSceneFrameTableCount)
             device->CopyDescriptorsSimple(kSceneFrameTableCount, cpu(offset),
                 cpu(kTemporalTextureDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);

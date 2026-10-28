@@ -2140,7 +2140,8 @@ if(HS_BUILD_TESTS)
         set_tests_properties(rendering.hzb-region-gpu rendering.hzb-region-warp
             PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
     endif()
-    add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp Tests/vfx_image_header.cpp)
+    add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp
+        Tests/vfx_profile_admission_tests.cpp Tests/vfx_image_header.cpp)
     target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_runtime_contracts)
     target_include_directories(hs_vfx_session_state_tests PRIVATE
         Source/Runtime/Private)
@@ -2464,6 +2465,17 @@ if(HS_BUILD_TESTS)
     add_test(NAME content.vfx-v4-protect-source COMMAND hs_vfx_prepare --prepare "${CMAKE_CURRENT_SOURCE_DIR}/contentsource/vfx-invalid-output")
     set_tests_properties(content.vfx-v4-protect-source PROPERTIES WILL_FAIL TRUE)
     add_test(NAME content.vfx-v4-contract COMMAND hs_vfx_authoring_tests)
+    set_tests_properties(content.vfx-v4-contract PROPERTIES FIXTURES_SETUP vfx-codegen)
+    add_test(NAME content.vfx-release-codegen-compiled
+        COMMAND ${CMAKE_COMMAND}
+            "-DCXX=${CMAKE_CXX_COMPILER}" "-DCOMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
+            "-DCONFIG=$<CONFIG>" "-DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DFIXTURE_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/vfx-codegen"
+            "-DWORK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/vfx-codegen/compiled"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_release_vfx_codegen.cmake"
+        BUILD_DEPENDS hs_vfx_authoring_tests)
+    set_tests_properties(content.vfx-release-codegen-compiled PROPERTIES
+        FIXTURES_REQUIRED vfx-codegen TIMEOUT 90)
     add_test(NAME tools.content-status COMMAND hs_generation --verify
         --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope runtime-full
         BUILD_DEPENDS hs_content_generation)
@@ -2756,7 +2768,8 @@ if(HS_BUILD_TESTS)
         Tests/vfx_typed_light_commands_tests.cpp
         Tests/vfx_typed_mesh_commands_tests.cpp
         Tests/vfx_typed_entity_surface_commands_tests.cpp
-        Tests/vfx_upgrade_dispatch_tests.cpp)
+        Tests/vfx_upgrade_dispatch_tests.cpp
+        Tests/vfx_legacy_commands_tests.cpp)
     target_link_libraries(hs_vfx_synthetic_tests PRIVATE hs_runtime hs_vfx_image_io hs_gameplay_development)
     target_include_directories(hs_vfx_synthetic_tests PRIVATE
         Source/Runtime/Private Source/RendererD3D12/Public Source/Presentation/Public)
@@ -2767,6 +2780,7 @@ if(HS_BUILD_TESTS)
     add_test(NAME runtime.vfx-typed-mesh COMMAND hs_vfx_synthetic_tests mesh)
     add_test(NAME runtime.vfx-typed-entity-surface COMMAND hs_vfx_synthetic_tests entity_surface)
     add_test(NAME runtime.vfx-upgrade-dispatch COMMAND hs_vfx_synthetic_tests upgrade_dispatch)
+    add_test(NAME runtime.vfx-legacy-prepared COMMAND hs_vfx_synthetic_tests legacy)
 
     add_executable(hs_vfx_cooked_tests
         Tests/vfx_cooked_tests.cpp

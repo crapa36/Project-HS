@@ -56,7 +56,7 @@ D3D12Renderer::D3D12Renderer() : impl_(std::make_unique<Impl>())
 Result D3D12Renderer::Impl::PrepareScreenOverlay(const RendererConfig &candidate_config,
     ViewExtent capacity, ScreenOverlayCandidate &candidate) const
 {
-    return screen_overlay.Prepare(device.Get(), allocator, capacity, kFrameCount,
+    return ScreenOverlaySystem::Prepare(device.Get(), allocator, capacity, kFrameCount,
         [&](std::string_view name, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, "render/shader/" + std::string(name), path);

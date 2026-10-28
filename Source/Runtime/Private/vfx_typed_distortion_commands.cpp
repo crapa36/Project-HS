@@ -17,7 +17,7 @@ constexpr auto kRingGapsPayload = Hash("RingWithGapsPayload");
 constexpr auto kProjectilePayload = Hash("ProjectilePayload");
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
-struct Anchor{Float3 position{},direction{};float scale{1},circle_radius{},inner_radius{},half_angle_degrees{},gap_half_width_degrees{};std::span<const float> gap_angles_degrees;bool projectile{},cone{},ring_gaps{};};
+struct Anchor{Float3 position{},direction{};float scale{1},circle_radius{},inner_radius{},half_angle_degrees{},gap_half_width_degrees{};std::span<const float> gap_angles_degrees;VfxUniformRingGaps uniform_gaps{};bool projectile{},cone{},ring_gaps{};};
 std::optional<Anchor> EventAnchor(const VfxEventInput &in,std::uint32_t schema)
 {
  Anchor a;
@@ -34,10 +34,11 @@ std::optional<Anchor> EventAnchor(const VfxEventInput &in,std::uint32_t schema)
   if(schema!=kRingGapsPayload||!Finite(v->center)||!std::isfinite(v->inner_radius)||
      !std::isfinite(v->outer_radius)||v->inner_radius<0||v->outer_radius<=v->inner_radius||
      !std::isfinite(v->gap_half_width_degrees)||v->gap_half_width_degrees<0||v->gap_half_width_degrees>180||
-     (!v->gap_angles_degrees.empty()&&v->gap_half_width_degrees==0)||
+     !v->GapStorageConsistent()||(v->GapCount()!=0&&v->gap_half_width_degrees==0)||
      std::any_of(v->gap_angles_degrees.begin(),v->gap_angles_degrees.end(),[](float angle){return !std::isfinite(angle);}))return {};
   a.position=v->center;a.circle_radius=v->outer_radius;a.inner_radius=v->inner_radius;
-  a.gap_half_width_degrees=v->gap_half_width_degrees;a.gap_angles_degrees=v->gap_angles_degrees;a.ring_gaps=true;
+  a.gap_half_width_degrees=v->gap_half_width_degrees;a.gap_angles_degrees=v->gap_angles_degrees;
+  a.uniform_gaps=v->uniform_gaps;a.ring_gaps=true;
  }
  else if(const auto*v=std::get_if<VfxProjectilePayload>(&in.payload)){if(schema!=kProjectilePayload||!std::isfinite(v->hitbox_radius)||v->hitbox_radius<=0)return {};a.position={in.world_transform[12],in.world_transform[13],in.world_transform[14]};a.direction=v->velocity;a.projectile=true;}
  else return {};
@@ -62,7 +63,9 @@ void Append(const VfxDistortionRecipe&r,const Anchor&a,float age,std::uint64_t o
  VfxDistortionInput command{stable,a.position,radius,a.direction,r.strength,local_age,r.alpha*(*envelope),
    a.cone?VfxDistortionShape::ConeSector:a.ring_gaps?VfxDistortionShape::GappedAnnulus:r.kind,quality,importance,seed};
  command.inner_radius=a.inner_radius;command.half_angle_degrees=a.half_angle_degrees;
- command.gap_half_width_degrees=a.gap_half_width_degrees;command.gap_angles_degrees.assign(a.gap_angles_degrees.begin(),a.gap_angles_degrees.end());result.push_back(std::move(command));
+ command.gap_half_width_degrees=a.gap_half_width_degrees;command.uniform_gaps=a.uniform_gaps;
+ if(!command.uniform_gaps.Active())command.gap_angles_degrees.assign(a.gap_angles_degrees.begin(),a.gap_angles_degrees.end());
+ result.push_back(std::move(command));
 }
 }
 std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,std::span<const VfxPersistentInput>persistent,double current_tick)

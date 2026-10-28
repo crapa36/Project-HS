@@ -6,6 +6,7 @@
 #include <hs/render_data/vfx_spawn_command.hpp>
 #include <hs/runtime/vfx_image.hpp>
 #include <memory>
+#include <cstddef>
 
 #include <filesystem>
 #include <span>
@@ -21,6 +22,20 @@ struct VfxLegacyGroundSuppression
     bool ground_ring{};
     bool ground_disc{};
     bool segment_solid_trail{};
+};
+
+// Borrows the event and immutable catalog through the current activation only.
+// Emitter offsets address caller-owned shared scratch, which may grow during preparation.
+struct VfxPreparedLegacyEvent
+{
+    const PresentationEvent *event{};
+    const CookedVfxDefinition *definition{};
+    VfxEventParameters parameters{};
+    Float3 forward{}, right{};
+    std::size_t first_index{}, index_count{}, maximum_required_count{}, required_count{}, count{}, admitted_count{};
+    std::uint32_t importance{};
+    float decorative_fraction{1};
+    bool decorative{}, particles_replaced{}, mesh_replaced{}, replacement_counts_ready{};
 };
 
 class VfxCatalog
@@ -50,6 +65,16 @@ class VfxCatalog
                                 bool particles_replaced = false,
                                 bool mesh_replaced = false,
                                 VfxLegacyGroundSuppression ground_suppression = {}) const;
+    [[nodiscard]] Result PrepareEvent(const PresentationEvent &event, float decorative_fraction,
+        VfxPreparedLegacyEvent &prepared, std::vector<std::uint32_t> &emitter_indices,
+        bool particles_replaced = false, bool mesh_replaced = false,
+        VfxLegacyGroundSuppression ground_suppression = {}) const;
+    [[nodiscard]] Result SetPreparedReplacements(VfxPreparedLegacyEvent &prepared,
+        std::span<const std::uint32_t> emitter_indices,
+        bool particles_replaced, bool mesh_replaced) const;
+    [[nodiscard]] Result AppendPreparedEvent(const VfxPreparedLegacyEvent &prepared,
+        std::span<const std::uint32_t> emitter_indices,
+        std::vector<ParticleSpawnCommand> &particles, std::vector<VfxLineSpawnCommand> &lines) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return image_.payload_hash; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return image_.sprite_count; }
     [[nodiscard]] const VfxProgramView &Program() const noexcept { return image_.program; }

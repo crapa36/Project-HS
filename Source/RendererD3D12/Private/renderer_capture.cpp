@@ -78,6 +78,9 @@ void HdrPreview(const std::byte *source, std::uint32_t source_pitch,
 Result D3D12Renderer::Impl::WritePng(const std::filesystem::path &path,
                                      const std::byte *pixels, std::uint32_t row_pitch) const
 {
+    const auto &view = *owned_views.at(kMainRenderViewId.value);
+    const auto width = view.width;
+    const auto height = view.height;
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
 
@@ -153,7 +156,9 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         return result;
     }
 
-    const auto description = impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index]->GetDesc();
+    const auto &main_view = *impl_->owned_views.at(kMainRenderViewId.value);
+    const auto output_index = main_view.last_presented_index;
+    const auto description = impl_->back_buffers[output_index]->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rows{};
     UINT64 row_size{};
@@ -185,7 +190,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     {
         return HResultFailure("Reset capture list", result);
     }
-    impl_->TransitionTexture(impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get(),
+    impl_->TransitionTexture(impl_->back_buffers[output_index].Get(),
                              D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE);
@@ -195,7 +200,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get();
+    source.pResource = impl_->back_buffers[output_index].Get();
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     impl_->command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     impl_->TransitionBuffer(
@@ -211,7 +216,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_COPY_SOURCE,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
-    impl_->TransitionTexture(impl_->back_buffers[impl_->owned_views.at(kMainRenderViewId.value)->last_presented_index].Get(),
+    impl_->TransitionTexture(impl_->back_buffers[output_index].Get(),
                              D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT);
@@ -236,10 +241,10 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     std::vector<std::byte> preview;
     if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
     {
-        HdrPreview(png_pixels, png_pitch, impl_->owned_views.at(impl_->active_view_id.value)->width, impl_->owned_views.at(impl_->active_view_id.value)->height,
-                   impl_->owned_views.at(impl_->active_view_id.value)->display_state.paper_white_nits, preview);
+        HdrPreview(png_pixels, png_pitch, main_view.width, main_view.height,
+                   main_view.display_state.paper_white_nits, preview);
         png_pixels = preview.data();
-        png_pitch = impl_->owned_views.at(impl_->active_view_id.value)->width * 4;
+        png_pitch = main_view.width * 4;
     }
     const auto write = impl_->WritePng(path, png_pixels, png_pitch);
     std::array<D3D12_DRAW_ARGUMENTS, kParticleDrawBinCount> particle_draws{};
@@ -1437,7 +1442,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     }
     if (auto result = impl_->WaitForGpu(); !result)
         return result;
-    const auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
+    auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
     if (!path.parent_path().empty())
     {
         std::error_code error;

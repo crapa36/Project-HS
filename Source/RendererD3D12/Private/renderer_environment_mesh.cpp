@@ -343,9 +343,10 @@ Result D3D12Renderer::Impl::DemandEnvironmentGeometry(std::uint32_t ordinal,
     const auto error = std::bit_cast<float>(priority);
     if (!std::isfinite(error) || error <= 0.0f)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Geometry demand requires positive ordered error.");
-    if (stream.last_demand_frame != frame_number + 1u) stream.priority = 0u;
+    const auto demand_frame = rendered_submission_count + 1u;
+    if (stream.last_demand_frame != demand_frame) stream.priority = 0u;
     stream.priority = std::max(stream.priority, priority);
-    stream.last_demand_frame = frame_number + 1u;
+    stream.last_demand_frame = demand_frame;
     if (stream.request && !stream.retiring) static_cast<void>(streaming.UpdatePriority(stream.request, stream.priority));
     if (resource_generation_id.empty() || stream.source.empty() || stream.logical_id.empty() ||
         stream.target_index >= environment_meshes.size())
@@ -429,7 +430,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         if (!page) return Result::Success();
         if (page->state == StreamingPageState::Requested)
         {
-            if (stream.last_demand_frame < frame_number) return Result::Success();
+            if (stream.last_demand_frame < rendered_submission_count) return Result::Success();
             std::uint64_t file_bytes{};
             if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
             const auto peak_factor = stream.compiled_geometry ? 1u : 3u;
@@ -536,7 +537,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         }
         if (!page || page->state != StreamingPageState::Decoded)
             return Result::Success();
-        if (stream.last_demand_frame < frame_number) return Result::Success();
+        if (stream.last_demand_frame < rendered_submission_count) return Result::Success();
 
         const auto &metadata = stream.metadata;
         const std::array<std::uint64_t, kGeometryBuffersPerPage> sizes{

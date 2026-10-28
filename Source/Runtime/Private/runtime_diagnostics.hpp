@@ -3,7 +3,9 @@
 #include <array>
 #include <bitset>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <new>
 #include <ostream>
@@ -17,6 +19,44 @@ using DiagnosticClock = std::uint64_t (*)() noexcept;
 struct DiagnosticSample
 {
     std::uint64_t ticks{}, calls{};
+};
+
+// Capture inventory for selected render-frame VFX checkpoints, not process RSS.
+struct VfxWorkspaceSample
+{
+    std::size_t retained_bytes{};
+    std::size_t raw_event_bytes{};
+    std::size_t prepared_bytes{};
+    std::size_t frozen_native_bytes{};
+    std::size_t frame_scratch_bytes{};
+
+    [[nodiscard]] std::size_t TotalBytes() const noexcept
+    {
+        const auto add = [](std::size_t a, std::size_t b) noexcept {
+            return b > std::numeric_limits<std::size_t>::max() - a
+                ? std::numeric_limits<std::size_t>::max() : a + b;
+        };
+        return add(add(add(add(retained_bytes, raw_event_bytes), prepared_bytes),
+            frozen_native_bytes), frame_scratch_bytes);
+    }
+};
+
+class VfxWorkspacePeak
+{
+  public:
+    void Observe(VfxWorkspaceSample sample) noexcept
+    {
+        if (!observed_ || sample.TotalBytes() > sample_.TotalBytes())
+        {
+            sample_ = sample;
+            observed_ = true;
+        }
+    }
+    [[nodiscard]] VfxWorkspaceSample Sample() const noexcept { return sample_; }
+    [[nodiscard]] std::size_t TotalBytes() const noexcept { return sample_.TotalBytes(); }
+  private:
+    VfxWorkspaceSample sample_{};
+    bool observed_{};
 };
 
 // A null clock leaves ordinary play free of diagnostic clock reads.

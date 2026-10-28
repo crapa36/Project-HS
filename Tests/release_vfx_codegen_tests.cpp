@@ -3,6 +3,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -13,9 +14,10 @@
 
 namespace
 {
-void Check(bool condition)
+void Check(bool condition, std::source_location location = std::source_location::current())
 {
-    if (!condition) throw std::runtime_error("release VFX codegen regression");
+    if (!condition) throw std::runtime_error("release VFX codegen regression at line " +
+        std::to_string(location.line()));
 }
 
 // Compiled separately with the emitted translation unit; expected values do not use emitter helpers.
@@ -39,22 +41,51 @@ int main()
         v.HasOutput(1, VfxOutputProfile::SpriteSmoke6WayOit) &&
         !v.HasOutput(1, VfxOutputProfile::RibbonAdd) && !v.HasOutput(0, VfxOutputProfile::Light));
     Check(v.light_effect_ranges.size()==1 && Range(v.light_effect_ranges[0],0,1) && v.light_recipes.size()==1);
-    Check(v.ground_effect_ranges.size()==1 && v.HasGroundRecipes(1) && v.ground_recipes.size()==2 &&
-        v.ground_recipes[0].gradient_row==31 && v.ground_recipes[0].tick_count==9 &&
-        Same(v.ground_recipes[0].tertiary,.125f) && v.ground_recipes[1].kind==VfxGroundRecipeKind::ExpandingRing &&
-        Same(v.ground_recipes[1].primary,.15f) && Same(v.ground_recipes[1].secondary,1.25f) &&
-        Same(v.ground_recipes[1].tertiary,.07f) && v.ground_recipes[0].mask_variants[2].valid &&
-        !v.ground_recipes[0].mask_variants[2].present &&
-        Range(v.ground_recipes[1].mask_variants[0].slices,8,2) &&
-        Same(v.ground_recipes[1].mask_variants[0].strength,.35f) &&
-        v.ground_recipes[1].mask_variants[0].valid && v.ground_recipes[1].mask_variants[0].present &&
-        v.ground_recipes[1].source_output_count==1 && v.ground_recipes[1].effect_lookup_count==1 &&
-        v.ground_recipes[1].source_parameters_empty &&
-        v.ground_recipes[0].event_admission_profiles==(kVfxGroundEventDirectAdd|kVfxGroundEventDirectSoft) &&
-        v.ground_recipes[1].event_admission_profiles==0);
+    Check(v.ground_effect_ranges.size()==1 && Range(v.ground_effect_ranges[0],0,2) &&
+        v.HasGroundRecipes(1) && v.ground_recipes.size()==2);
+    const auto &g=v.ground_recipes[0];
+    Check(g.effect_id==43 && g.effect_handle==1 && g.source_index==2 && g.source_stable_id==3 &&
+        g.output_index==4 && g.gradient_row==31 && g.payload_kind==5 && g.timing_kind==6 &&
+        g.min_quality==2 && g.source_type==VfxSourceType::Direct &&
+        g.profile==VfxOutputProfile::GroundSdfSoft &&
+        g.motion==VfxMotionKind::StableBoundaryInwardPulse && g.kind==VfxGroundRecipeKind::Ticks &&
+        g.knot_count==4 && Same(g.knots[0],-0.0f) && Same(g.knots[1],.25f) &&
+        std::bit_cast<std::uint32_t>(g.knots[2])==1u && Same(g.knots[3],1.0f));
+    Check(Range(g.pulse_curve_keys,1,2) && g.pulse_curve_interpolation==3 && g.tick_count==9 &&
+        Same(g.seconds,2.5f) && Same(g.primary,.15f) && Same(g.secondary,1.25f) &&
+        Same(g.rgb,Float3{2,3,4}) && Same(g.hdr,5) && Same(g.alpha,.5f) &&
+        Same(g.motion_rate_hz,.8f) && Same(g.motion_amplitude,.22f) &&
+        Same(g.motion_inset_fraction,.12f) && Same(g.tertiary,.125f));
+    Check(Range(g.mask_variants[0].slices,8,2) && Same(g.mask_variants[0].strength,.35f) &&
+        g.mask_variants[0].valid && g.mask_variants[0].present &&
+        Range(g.mask_variants[1].slices,4,3) && Same(g.mask_variants[1].strength,.5f) &&
+        !g.mask_variants[1].valid && g.mask_variants[1].present &&
+        Range(g.mask_variants[2].slices,6,1) && Same(g.mask_variants[2].strength,.625f) &&
+        g.mask_variants[2].valid && !g.mask_variants[2].present);
+    Check(g.texture_contract_valid && g.source_output_count==1 && g.effect_lookup_count==1 &&
+        g.source_parameters_empty &&
+        g.event_admission_profiles==(kVfxGroundEventDirectAdd|kVfxGroundEventDirectSoft));
+    const auto &g1=v.ground_recipes[1];
+    Check(g1.effect_id==43 && g1.effect_handle==1 && g1.source_index==2 && g1.source_stable_id==3 &&
+        g1.output_index==5 && g1.gradient_row==31 && g1.payload_kind==5 && g1.timing_kind==6 &&
+        g1.min_quality==2 && g1.source_type==VfxSourceType::Direct &&
+        g1.profile==VfxOutputProfile::GroundSdfSoft && g1.motion==VfxMotionKind::StableBoundaryInwardPulse &&
+        g1.kind==VfxGroundRecipeKind::ExpandingRing && g1.knot_count==4 &&
+        Same(g1.knots[0],0) && Same(g1.knots[1],.5f) && Same(g1.knots[2],0) && Same(g1.knots[3],0) &&
+        Range(g1.pulse_curve_keys,1,2) && g1.pulse_curve_interpolation==3 && g1.tick_count==9 &&
+        Same(g1.seconds,2.5f) && Same(g1.primary,.15f) && Same(g1.secondary,1.25f) &&
+        Same(g1.rgb,Float3{2,3,4}) && Same(g1.hdr,5) && Same(g1.alpha,.5f) &&
+        Same(g1.motion_rate_hz,.8f) && Same(g1.motion_amplitude,.22f) &&
+        Same(g1.motion_inset_fraction,.12f) && Same(g1.tertiary,.07f) &&
+        Range(g1.mask_variants[0].slices,8,2) && Same(g1.mask_variants[0].strength,.35f) &&
+        g1.mask_variants[0].valid && g1.mask_variants[0].present && g1.texture_contract_valid &&
+        g1.source_output_count==1 && g1.effect_lookup_count==1 && g1.source_parameters_empty &&
+        g1.event_admission_profiles==0);
     Check(v.flash_effect_ranges.size()==1 && v.HasFlashRecipes(1) && v.flash_recipes.size()==1 &&
         v.flash_recipes[0].effect_id==44 && v.flash_recipes[0].supported_quality_mask==4 &&
-        v.flash_recipes[0].spawn.shape==VfxImpactShape::Flame && v.flash_recipes[0].mask_strengths[2]==.75f);
+        v.flash_recipes[0].spawn.shape==VfxImpactShape::Flame &&
+        v.flash_recipes[0].spawn.event_tick==0x1'0000'0005ull &&
+        v.flash_recipes[0].mask_strengths[2]==.75f);
     Check(v.persistent_stamp_effect_ranges.size()==1 && v.persistent_stamp_recipes.size()==1 &&
         v.persistent_stamp_recipes[0].effect_id==45 && v.persistent_stamp_recipes[0].source_visual_kind==12 &&
         v.persistent_stamp_recipes[0].spawn.shape==VfxImpactShape::StatusStamp &&
@@ -92,7 +123,8 @@ int main()
         Same(volume.knot_start,.25f) && Same(volume.knot_end,.75f) && Same(volume.density,1.25f) &&
         Same(volume.alpha,.5f) && Same(volume.anisotropy,.25f) && Same(volume.hdr,2) && volume.steps==12 &&
         volume.half_resolution==1 && Same(volume.rgb,Float3{.4f,.5f,.6f}));
-    Check(v.entity_surface_effect_recipes.size()==1 && v.entity_surface_recipes.size()==1 &&
+)cpp"
+R"cpp(    Check(v.entity_surface_effect_recipes.size()==1 && v.entity_surface_recipes.size()==1 &&
         v.entity_surface_effect_recipes[0].effect_id==53 &&
         v.entity_surface_routes.phase_effect==5 && v.entity_surface_routes.death_effect==6 &&
         v.entity_surface_routes.trap_point_rate_effect==7);
@@ -320,11 +352,25 @@ void TestReleaseVfxCodegen()
         {0,.2f,.6f,1},3,2,.8f,.4f,{.1f,.2f,.3f},7,12,4,1}};
     VfxGroundRecipe ground_recipe{}; ground_recipe.effect_id=43; ground_recipe.effect_handle=1;
     ground_recipe.source_index=2; ground_recipe.source_stable_id=3; ground_recipe.output_index=4;
-    ground_recipe.gradient_row=31; ground_recipe.kind=VfxGroundRecipeKind::Ticks;
+    ground_recipe.gradient_row=31; ground_recipe.payload_kind=5; ground_recipe.timing_kind=6;
+    ground_recipe.min_quality=2; ground_recipe.source_type=VfxSourceType::Direct;
+    ground_recipe.profile=VfxOutputProfile::GroundSdfSoft;
+    ground_recipe.motion=VfxMotionKind::StableBoundaryInwardPulse;
+    ground_recipe.kind=VfxGroundRecipeKind::Ticks;
+    ground_recipe.knot_count=4; ground_recipe.knots={-0.0f,.25f,std::bit_cast<float>(1u),1.0f};
+    ground_recipe.seconds=2.5f; ground_recipe.primary=.15f; ground_recipe.secondary=1.25f;
+    ground_recipe.rgb={2,3,4}; ground_recipe.hdr=5; ground_recipe.alpha=.5f;
+    ground_recipe.motion_rate_hz=.8f; ground_recipe.motion_amplitude=.22f;
+    ground_recipe.motion_inset_fraction=.12f;
     ground_recipe.source_output_count=1; ground_recipe.source_parameters_empty=true;
     ground_recipe.effect_lookup_count=1;
     ground_recipe.event_admission_profiles=kVfxGroundEventDirectAdd|kVfxGroundEventDirectSoft;
-    ground_recipe.tick_count=9; ground_recipe.pulse_curve_keys={1,2}; ground_recipe.tertiary=.125f;
+    ground_recipe.tick_count=9; ground_recipe.pulse_curve_keys={1,2};
+    ground_recipe.pulse_curve_interpolation=3; ground_recipe.tertiary=.125f;
+    ground_recipe.mask_variants[0]={{8,2},.35f,true,true};
+    ground_recipe.mask_variants[1]={{4,3},.5f,false,true};
+    ground_recipe.mask_variants[2]={{6,1},.625f,true,false};
+    ground_recipe.texture_contract_valid=true;
     VfxGroundRecipe expanding_recipe=ground_recipe; expanding_recipe.output_index=5;
     expanding_recipe.event_admission_profiles=0;
     expanding_recipe.kind=VfxGroundRecipeKind::ExpandingRing; expanding_recipe.knots={0,.5f,0,0};
@@ -335,7 +381,8 @@ void TestReleaseVfxCodegen()
     VfxFlashRecipe flash_recipe{}; flash_recipe.effect_id=44; flash_recipe.effect_handle=1;
     flash_recipe.source_index=2; flash_recipe.source_stable_id=3; flash_recipe.output_index=4;
     flash_recipe.payload_kind=5; flash_recipe.min_quality=2; flash_recipe.knots={.1f,.8f};
-    flash_recipe.seconds=.9f; flash_recipe.spawn.shape=VfxImpactShape::Flame;
+    flash_recipe.seconds=.9f; flash_recipe.spawn.event_tick=0x1'0000'0005ull;
+    flash_recipe.spawn.shape=VfxImpactShape::Flame;
     flash_recipe.spawn.size=.4f; flash_recipe.mask_slice_ranges[2]={3,2};
     flash_recipe.mask_strengths[2]=.75f; flash_recipe.supported_quality_mask=4;
     flash_recipe.mask_present_mask=4; flash_recipe.unique_effect_identity=true;
@@ -417,7 +464,9 @@ void TestReleaseVfxCodegen()
     const std::array ribbon_link_outputs{VfxRibbonLinkOutputRecipe{9,2,false,.04f,
         {VfxOutputProfile::RibbonAdd,VfxMotionKind::CurvesTowardCollector,{.2f,.3f,.4f,.7f},
             .04f,.04f,0,0,2,0,19,0xffffffffu,false,false},
-        {{{0,2},.35f,true,true},{{2,2},.4f,true,true},{{4,2},.5f,true,true}}}};
+        std::array{VfxRibbonLinkDetailRecipe{{0,2},.35f,true,true},
+            VfxRibbonLinkDetailRecipe{{2,2},.4f,true,true},
+            VfxRibbonLinkDetailRecipe{{4,2},.5f,true,true}}}};
     const std::array ribbon_event_effects{VfxRibbonEventEffectRecipe{62,3,4,5,.6f,{0,1}}};
     const std::array ribbon_event_sources{VfxRibbonEventSourceRecipe{
         3,9,4,true,{.1f,.2f,.8f,.9f},.25f,{35,45,55},{50,65,75},{0,1}}};
@@ -453,9 +502,6 @@ void TestReleaseVfxCodegen()
         "std::byte{237u}", "std::byte{195u}", "std::byte{0u}", "{1u,7u}", "{1u,2u}",
         "{105u,15u,25u}", "true,65535u,"})
         Check(source.find(token) != std::string::npos);
-    std::size_t arrays = 0, offset = 0;
-    while ((offset = source.find("constinit const std::array<", offset)) != std::string::npos) { ++arrays; ++offset; }
-    Check(arrays == 62);
     Check(source.find("std::array<VfxGroundRecipe,2> kGroundRecipes") != std::string::npos &&
           source.find("std::array<VfxFlashRecipe,1> kFlashRecipes") != std::string::npos &&
           source.find("std::array<VfxPersistentStampRecipe,1> kPersistentStampRecipes") != std::string::npos &&

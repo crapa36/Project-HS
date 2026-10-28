@@ -987,7 +987,6 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
 
     const auto frame_index = frame;
     {
-    {
         const auto frame_offset = static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount;
         const auto srv_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         const auto write_post_table = [&](std::uint32_t offset) {

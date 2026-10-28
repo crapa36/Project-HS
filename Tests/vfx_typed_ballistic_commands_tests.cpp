@@ -42,7 +42,8 @@ float LegacyRandom(std::uint32_t seed,std::uint32_t lane){return static_cast<flo
 hs::Float3 LegacyNormalize(hs::Float3 value){const float length=std::hypot(value.x,value.y,value.z);return length>.0001f?hs::Float3{value.x/length,value.y/length,value.z/length}:hs::Float3{0,1,0};}
 hs::Float3 LegacyCross(hs::Float3 a,hs::Float3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 std::vector<hs::ParticleSpawnCommand> LegacyPointBallistic(
- const hs::VfxImage &image,const hs::VfxEventInput &input)
+ const hs::VfxImage &image,const hs::VfxEventInput &input,
+ std::uint32_t ordinal_count=std::numeric_limits<std::uint32_t>::max())
 {
  const auto range=image.ballistic_effect_ranges[input.effect_handle-1];
  const auto &point=std::get<hs::VfxPointPayload>(input.payload);
@@ -62,7 +63,7 @@ std::vector<hs::ParticleSpawnCommand> LegacyPointBallistic(
   const hs::Float3 axis=LegacyNormalize(point.normal);
   const hs::Float3 right=LegacyNormalize(LegacyCross(std::abs(axis.y)<.9f?hs::Float3{0,1,0}:hs::Float3{1,0,0},axis));
   const hs::Float3 up=LegacyCross(axis,right);
-  for(std::uint32_t i=0;i<r.count;++i)
+  for(std::uint32_t i=0;i<std::min(r.count,ordinal_count);++i)
   {
    hs::ParticleSpawnCommand cmd;cmd.seed=LegacyMix(source_seed^LegacyMix(i+1));cmd.sequence=0;cmd.count=1;
    cmd.authored_ballistic=true;cmd.renderer=hs::VfxRenderer::Mesh;cmd.primitive=hs::VfxPrimitive::Shard;
@@ -154,7 +155,7 @@ void TimingIdentityAndScale()
 }
 void BatchBallisticAppendPreservesOracleAndProvenance()
 {
- auto p=Program();auto accepted=Input();accepted.sequence=700;
+ auto p=Program();p.parameters[0].bits=1024;auto accepted=Input();accepted.sequence=700;
  auto rejected=accepted;rejected.effect_handle=2;rejected.event_tick=111;
  auto duplicate=accepted;duplicate.stable_seed=456;duplicate.event_tick=130;
  const std::array inputs{accepted,rejected,duplicate};
@@ -174,6 +175,78 @@ void BatchBallisticAppendPreservesOracleAndProvenance()
  for(std::size_t index=0;index<expected.size();++index)
      Check(SameBallisticCommand(output[index+1],expected[index]),
            "ballistic batch append changed the independent original command formula or order");
+
+ const auto output_capacity=output.capacity(),index_capacity=emitted_indices.capacity();
+ output.clear();output.push_back(prefix);emitted_indices.assign(1,42);
+ hs::runtime_detail::AppendVfxTypedBallisticCommands(
+     prepared.image,inputs,output,&emitted_indices);
+ Check(output.capacity()==output_capacity&&emitted_indices.capacity()==index_capacity&&
+       output.size()==expected.size()+1&&emitted_indices==std::vector<std::size_t>{42,0,2},
+       "warm ballistic append grew retained output or provenance storage");
+
+ auto raw_rejected=accepted;raw_rejected.effect_handle=0;
+ std::vector<hs::ParticleSpawnCommand> rejected_output{prefix};
+ std::vector<std::size_t> rejected_indices{77};
+ hs::runtime_detail::AppendVfxTypedBallisticCommands(prepared.image,
+     std::span(&raw_rejected,1),rejected_output,&rejected_indices);
+ Check(rejected_output.size()==1&&rejected_output.front().seed==prefix.seed&&
+       rejected_indices==std::vector<std::size_t>{77},
+       "raw ballistic rejection changed the caller output or provenance prefix");
+
+ std::vector<hs::runtime_detail::VfxPreparedBallisticBurst> plans;
+ hs::runtime_detail::PrepareVfxTypedBallisticBursts(prepared.image,inputs,plans);
+ Check(plans.size()==2&&plans[0].event_index==0&&plans[1].event_index==2&&
+       plans[0].count==1024&&plans[0].admitted_count==1024&&plans[0].cosmetic,
+       "ballistic preparation lost source order, authored count or eligible cosmetic classification");
+ plans[0].admitted_count=7;
+ plans[1].admitted_count=0;
+ std::vector<hs::ParticleSpawnCommand> partial{prefix};
+ std::vector<std::size_t> partial_indices{77};
+ hs::runtime_detail::AppendVfxPreparedBallisticBursts(plans,partial,&partial_indices);
+ const auto partial_expected=LegacyPointBallistic(prepared.image,accepted,7);
+ Check(partial.size()==partial_expected.size()+1&&partial_indices==std::vector<std::size_t>{77,0}&&
+       partial.front().seed==prefix.seed&&plans[1].count==1024&&plans[1].admitted_count==0,
+       "partial or zero ballistic admission changed its count or provenance");
+ for(std::size_t index=0;index<partial_expected.size();++index)
+     Check(SameBallisticCommand(partial[index+1],partial_expected[index]),
+           "partial ballistic admission changed original ordinal sampling");
+
+ auto invalid_sampling=plans[0];invalid_sampling.admitted_count=1;invalid_sampling.scale=0;
+ std::vector<hs::ParticleSpawnCommand> empty_sampling{prefix};
+ std::vector<std::size_t> empty_sampling_indices{88};
+ hs::runtime_detail::AppendVfxPreparedBallisticBursts(
+     std::span(&invalid_sampling,1),empty_sampling,&empty_sampling_indices);
+ Check(invalid_sampling.count==1024&&invalid_sampling.admitted_count==1&&
+       empty_sampling.size()==1&&empty_sampling_indices==std::vector<std::size_t>{88},
+       "invalid sampling was confused with an intentionally zero-admitted burst");
+
+ auto malformed=plans[0];malformed.admitted_count=malformed.count+1;
+ std::vector<hs::ParticleSpawnCommand> guarded{prefix};
+ std::vector<std::size_t> guarded_indices{91};bool rejected_plan=false;
+ try{hs::runtime_detail::AppendVfxPreparedBallisticBursts(
+       std::span(&malformed,1),guarded,&guarded_indices);}
+ catch(const std::invalid_argument&){rejected_plan=true;}
+ Check(rejected_plan&&guarded.size()==1&&guarded.front().seed==prefix.seed&&
+       guarded_indices==std::vector<std::size_t>{91},
+       "invalid prepared admission changed the caller prefix");
+
+ auto classified=Program();classified.effects[0].must_match_logic=1;
+ auto classified_image=Prepare(classified);std::vector<hs::runtime_detail::VfxPreparedBallisticBurst> classified_plans;
+ hs::runtime_detail::PrepareVfxTypedBallisticBursts(classified_image.image,
+     hs::runtime_detail::VfxEventView(std::span(&accepted,1)),classified_plans);
+ Check(classified_plans.size()==1&&classified_plans[0].cosmetic,
+       "must_match_logic alone promoted ballistic output to protected");
+ classified.sources[0].authoritative=1;classified_plans.clear();classified_image=Prepare(classified);
+ hs::runtime_detail::PrepareVfxTypedBallisticBursts(classified_image.image,
+     hs::runtime_detail::VfxEventView(std::span(&accepted,1)),classified_plans);
+ Check(classified_plans.size()==1&&!classified_plans[0].cosmetic,
+       "authoritative ballistic source was classified as cosmetic");
+ classified.sources[0].authoritative=0;classified.sources[0].type=hs::VfxSourceType::ProjectileFollow;
+ classified_plans.clear();classified_image=Prepare(classified);
+ hs::runtime_detail::PrepareVfxTypedBallisticBursts(classified_image.image,
+     hs::runtime_detail::VfxEventView(std::span(&accepted,1)),classified_plans);
+ Check(classified_plans.empty(),
+       "owner-follow source entered the raw ballistic recipe route");
 }
 void GeometryAndRecipes()
 {

@@ -252,6 +252,8 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     {
             const auto &source = input.command;
             const auto &geometry = input.geometry;
+            if (!geometry.GapStorageConsistent())
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored ring-gap storage.");
             const bool line = geometry.shape == VfxGroundShape::LineBorder ||
                               geometry.shape == VfxGroundShape::LineHatch;
             const bool cone = geometry.shape == VfxGroundShape::ConeBorder ||
@@ -283,7 +285,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                 !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= geometry.inner_radius ||
                 !std::isfinite(geometry.edge_width) || geometry.edge_width < 0 ||
                 ((geometry.shape == VfxGroundShape::RingGapsBorder || geometry.shape == VfxGroundShape::RingGapsPreviewBorder || geometry.shape == VfxGroundShape::CirclePreviewBorder) && geometry.edge_width == 0) ||
-                (circle_preview && (geometry.inner_radius != 0 || !geometry.gap_angles_radians.empty() || geometry.gap_half_angle_radians != 0)) ||
+                (circle_preview && (geometry.inner_radius != 0 || geometry.GapCount() != 0 || geometry.gap_half_angle_radians != 0)) ||
                 !std::isfinite(geometry.gap_half_angle_radians) || geometry.gap_half_angle_radians < 0 ||
                 geometry.gap_half_angle_radians > std::numbers::pi_v<float> ||
                 std::ranges::any_of(geometry.gap_angles_radians, [](float angle) { return !std::isfinite(angle); })))
@@ -329,7 +331,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                 !std::isfinite(source.stretch) ||
                 std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
                 geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
-                !geometry.gap_angles_radians.empty()))
+                geometry.GapCount() != 0))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored state ring.");
             if (polar_rune && (input.additive || source.primitive != VfxPrimitive::ExactRing ||
                 geometry.spokes != 6 || geometry.rings != 2 ||
@@ -348,7 +350,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                 !std::isfinite(source.stretch) ||
                 std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
                 geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
-                !geometry.gap_angles_radians.empty()))
+                geometry.GapCount() != 0))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored polar rune.");
             const float authored_radius = geometry.outer_radius;
             const float authored_edge = geometry.edge_width;
@@ -459,6 +461,8 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     for (const auto &source : input.vfx.distortions)
     {
         const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        if (!source.GapStorageConsistent())
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored distortion gap storage.");
         if (!finite(source.position) || !finite(source.direction) || !std::isfinite(source.radius) || source.radius <= 0 ||
             !std::isfinite(source.strength) || source.strength < 0 || !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 ||
             !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1 ||
@@ -470,16 +474,16 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         if ((cone && (!std::isfinite(source.half_angle_degrees) || source.half_angle_degrees <= 0 ||
                       source.half_angle_degrees > 180 || !std::isfinite(horizontal_direction) ||
                       horizontal_direction <= .0001f || source.inner_radius != 0 ||
-                      source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())) ||
+                      source.gap_half_width_degrees != 0 || source.GapCount() != 0)) ||
             (annulus && (!std::isfinite(source.inner_radius) || source.inner_radius < 0 ||
                          source.inner_radius >= source.radius || !std::isfinite(source.gap_half_width_degrees) ||
                          source.gap_half_width_degrees < 0 || source.gap_half_width_degrees > 180 ||
                          source.half_angle_degrees != 0 ||
-                         (!source.gap_angles_degrees.empty() && source.gap_half_width_degrees == 0) ||
+                         (source.GapCount() != 0 && source.gap_half_width_degrees == 0) ||
                          std::any_of(source.gap_angles_degrees.begin(),source.gap_angles_degrees.end(),
                              [](float angle){return !std::isfinite(angle); }))) ||
             (!cone && !annulus && (source.inner_radius != 0 || source.half_angle_degrees != 0 ||
-                                   source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())))
+                                   source.gap_half_width_degrees != 0 || source.GapCount() != 0)))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid exact distortion geometry.");
     }
     for (const auto &source : input.vfx.decals)
@@ -530,9 +534,9 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     }
     if (auto r = ValidateVfxHeroVolumes(input.vfx.volumes, vfx_gradient_rows); !r) return r;
     std::uint64_t gaps{};
-    for (const auto &ground : input.vfx.ground) gaps += ground.geometry.gap_angles_radians.size();
+    for (const auto &ground : input.vfx.ground) gaps += ground.geometry.GapCount();
     for (const auto &distortion : input.vfx.distortions)
-        if (distortion.shape == VfxDistortionShape::GappedAnnulus) gaps += distortion.gap_angles_degrees.size();
+        if (distortion.shape == VfxDistortionShape::GappedAnnulus) gaps += distortion.GapCount();
     if (gaps > UINT32_MAX || input.vfx.ground.size() > UINT32_MAX || input.vfx.flashes.size() > UINT32_MAX || input.vfx.meshes.size() > UINT32_MAX)
         return ViewFailure("Authored VFX upload counts exceed their native index capacity.");
     auto snapshot = input.snapshots.has_current ? input.snapshots.current : RenderSnapshot{};
@@ -649,7 +653,9 @@ Result D3D12Renderer::Impl::ActivateView(ViewId id)
 Result D3D12Renderer::Impl::PrepareDecalSurface(const RendererConfig &candidate_config,
     ViewExtent capacity, bool admitted_work, DecalSurfaceCandidate &candidate) const
 {
-    return decal_surface.Prepare(device.Get(), allocator, root_signature.Get(), pipeline_cache, capacity, kFrameCount,
+    // Prepare produces a candidate independently; the selected OwnedView takes
+    // ownership when it commits the candidate after its own completion checks.
+    return DecalSurfaceSystem{}.Prepare(device.Get(), allocator, root_signature.Get(), pipeline_cache, capacity, kFrameCount,
         admitted_work, [&](std::string_view name, std::vector<std::byte> &bytes) {
             if (candidate_config.packed_content && name == "decal_surface_cs.dxil")
             {

@@ -130,7 +130,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     if (code != 0)
         throw std::runtime_error("hs_render_material_shader: DXC compilation failed for " +
             output.filename().string() + ": " +
-            (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
+            hs::shader_content::ReadDxcDiagnostics(diagnostics));
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
@@ -344,7 +344,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);
@@ -439,7 +439,7 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);
@@ -550,7 +550,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
         ap::Publish(build_root, spec, stage, std::move(products));
     }
     catch (const hs::shader_content::DxcStageInUseError &) { throw; }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage); std::cout << spec.action_id << " published\n";
 }
 
@@ -668,7 +668,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         ap::Publish(build_root, spec, stage, std::move(products));
     }
     catch (const hs::shader_content::DxcStageInUseError &) { throw; }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage);
     std::cout << spec.action_id << " published\n";
 }
@@ -853,7 +853,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);

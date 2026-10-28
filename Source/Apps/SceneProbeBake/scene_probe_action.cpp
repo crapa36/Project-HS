@@ -151,7 +151,7 @@ int ProduceSceneProbe(int argc,char **argv)
             product.dependencies=layout.dependencies;
             ap::Publish(build,spec,stage,{std::move(product)});
         }
-        catch(...) { ap::RemoveStage(stage); throw; }
+        catch(...) { ap::RemoveStageAfterFailure(stage); throw; }
         ap::RemoveStage(stage); std::cout<<kAction<<" published\n"; return 0;
     }
     catch(const std::exception &error) { ap::ReportFailure(kAction,error.what(),{{"build_root",build.string()}}); return 1; }

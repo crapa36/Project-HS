@@ -10,6 +10,7 @@ namespace D3D12MA { class Allocator; }
 
 namespace hs
 {
+inline constexpr std::uint64_t kMaximumHostStagingBudgetBytes = 512ull * 1024u * 1024u;
 
 enum class ResidencyCategory : std::uint8_t
 {
@@ -108,6 +109,13 @@ struct ResidencyHostAdmissionFacts
     bool held_overflow{};
 };
 
+struct ResidencyGpuPressureFacts
+{
+    ResidencyBudgetSnapshot budget;
+    std::uint64_t growth_since_snapshot{};
+    std::uint64_t local_growth_since_snapshot{}, nonlocal_growth_since_snapshot{};
+};
+
 class ResidencyManager
 {
   public:
@@ -141,6 +149,11 @@ class ResidencyManager
     [[nodiscard]] ResidencyHostAdmissionFacts HostAdmissionFacts() const noexcept
     {
         return {budget_, host_held_, host_held_overflow_};
+    }
+    [[nodiscard]] ResidencyGpuPressureFacts GpuPressureFacts() const noexcept
+    {
+        return {budget_, gpu_growth_since_snapshot_, segment_growth_since_snapshot_[0],
+            segment_growth_since_snapshot_[1]};
     }
     [[nodiscard]] ResidencyAccounting Accounting() const noexcept;
 

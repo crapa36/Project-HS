@@ -5,11 +5,37 @@
 #include <hs/renderer/vfx_program.hpp>
 #include <hs/runtime/vfx_image.hpp>
 
+#include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 
 namespace hs::runtime_detail
 {
+
+// Borrowed recipe/event references are valid only through the immediate
+// prepare-to-append window; the image and event backing storage must outlive it.
+struct VfxPreparedFlashOutput
+{
+    const VfxFlashRecipe *recipe{};
+    const VfxEventInput *input{};
+    std::size_t event_index{};
+    std::size_t count{1}, admitted_count{1};
+    std::uint32_t importance{};
+    Sequence pickup_sequence{};
+    Float3 position{}, direction{};
+    float scale{1.0f}, mask_strength{};
+    std::uint32_t mask_slice{0xffffffffu};
+    bool cosmetic{}, pickup_collect{}, circle_geometry{}, ground_base_anchor{};
+    bool suppress_smoke_motion{};
+};
+
+void PrepareVfxTypedFlashOutputs(const VfxImage &image, VfxEventView inputs,
+    std::span<const Sequence> excluded_sorted_sequences,
+    std::vector<VfxPreparedFlashOutput> &prepared);
+void AppendVfxPreparedFlashOutputs(std::span<const VfxPreparedFlashOutput> prepared,
+    std::vector<VfxFlashSpawnInput> &result,
+    std::vector<Sequence> *superseded_pickup_sequences = nullptr);
 
 // Decoded additive impact sprites. Runtime owns age/retention after decode;
 // this record carries the authored event tick so repeated render frames cannot

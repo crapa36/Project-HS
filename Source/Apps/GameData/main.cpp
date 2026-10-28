@@ -238,7 +238,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
     }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
     ap::RemoveStage(stage);

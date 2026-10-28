@@ -34,7 +34,13 @@
 #include "vfx_typed_flash_commands.hpp"
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_typed_ballistic_commands.hpp"
+#include "vfx_birth_admission.hpp"
+#include "vfx_profile_admission.hpp"
+#include "vfx_birth_retirement.hpp"
+#include "vfx_visible_outputs.hpp"
+#include "frame_performance_schema.hpp"
 #include "vfx_session_state.hpp"
+#include "renderer_receipts.hpp"
 #include "renderer_settings_projection.hpp"
 #include "startup_graphics_settings.hpp"
 #include "window.hpp"
@@ -72,6 +78,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -549,11 +556,6 @@ constexpr std::array<std::string_view, 8> kMainTaskNames{
 constexpr std::array<std::string_view, 13> kSimulationTaskNames{
     "iteration", "input_harness", "tick_fixed", "enemy_harness", "borrow_observe", "enemy_animation",
     "signal_fanout", "record_io", "snapshot_wait", "project", "publication", "replay_validate", "heartbeat_io"};
-constexpr std::array<std::string_view, 23> kVfxTaskNames{
-    "vfx_event_drain", "vfx_snapshot_acquire", "vfx_session_dispatch", "vfx_legacy_expand", "vfx_frame_adapter",
-    "vfx_entity_surface", "vfx_movement", "vfx_ballistic", "vfx_status", "vfx_ground", "vfx_local_outputs", "vfx_ground_events",
-    "vfx_flashes", "vfx_motes", "vfx_mesh", "vfx_ribbons", "vfx_spawn_sort", "vfx_screen", "vfx_volume", "vfx_light", "vfx_distortion", "vfx_decal", "vfx_fresnel"};
-
 std::string TaskColumns(std::span<const std::string_view> names)
 {
     std::string result;
@@ -1337,6 +1339,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::vector<VfxFlashSpawnInput> visible_flashes;
         std::vector<VfxFlashSpawnInput> status_stamp_flashes;
         std::vector<runtime_detail::VfxPreparedFireSource> prepared_fire_sources;
+        std::vector<runtime_detail::VfxPreparedMoteBurst> prepared_mote_bursts;
+        std::vector<runtime_detail::VfxPreparedMoteBurst> prepared_status_mote_bursts;
+        std::vector<runtime_detail::VfxPreparedFlashOutput> prepared_flash_outputs;
+        std::vector<runtime_detail::VfxPreparedBallisticBurst> prepared_ballistic_bursts;
+        std::vector<VfxPreparedLegacyEvent> prepared_legacy_events;
+        std::vector<std::uint32_t> prepared_legacy_emitters;
+        std::vector<runtime_detail::vfx_retained_size::BirthRequest> birth_requests;
+        std::vector<std::size_t> birth_order;
         runtime_detail::VfxRibbonInputScratch ribbon_inputs;
         runtime_detail::DecodedVfxState prepared_births;
         std::vector<runtime_detail::VfxEntitySurfaceEventCapture> surface_capture_inputs;
@@ -1353,22 +1363,35 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         using VfxEventStore = runtime_detail::ActiveEffectStore;
         using VfxEventProfile = VfxEventStore::Profile;
         std::vector<VfxEventStore::AppendRequest> profile_additions;
+        std::vector<std::uint16_t> cosmetic_profile_masks;
+        std::uint64_t cosmetic_profile_generation{};
         VfxEventStore::PreparedAppendBatch prepared_profiles;
         const auto profile_bit = [](VfxEventProfile profile) -> std::uint16_t {
             return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
         };
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
-        const auto vfx_workspace_bytes = [&]() noexcept {
+        const auto vfx_workspace_breakdown = [&]() noexcept {
             using namespace runtime_detail::vfx_retained_size;
-            auto bytes = vfx_session.TrackedLogicalCapacityBytes();
-            const auto charge = [&](std::size_t owned) { bytes = Add(bytes, owned); };
+            runtime_detail::VfxWorkspaceSample sample;
+            sample.retained_bytes = Add(active_effects.LogicalCapacityBytes(),
+                Add(vfx_session.decoded.LogicalCapacityBytes(), Add(vfx_session.PersistentBurstCapacityBytes(),
+                    Add(vfx_pair_facts.RetainedCapacityBytes(), Add(persistent_sparks.RetainedCapacityBytes(),
+                        vfx_upgrade_movements.RetainedCapacityBytes())))));
+            sample.raw_event_bytes = vfx_session.raw_events.LogicalCapacityBytes();
+            sample.prepared_bytes = Add(prepared_births.LogicalCapacityBytes(),
+                Add(prepared_profiles.LogicalCapacityBytes(),
+                    Add(Vector(cosmetic_profile_masks),
+                        Add(Vector(profile_additions), Vector(prepared_mote_bursts)))));
+            for (const auto bytes : {Vector(prepared_status_mote_bursts), Vector(prepared_flash_outputs),
+                    Vector(prepared_ballistic_bursts), Vector(prepared_legacy_events),
+                    Vector(prepared_legacy_emitters), Vector(birth_requests), Vector(birth_order)})
+                sample.prepared_bytes = Add(sample.prepared_bytes, bytes);
+            sample.frozen_native_bytes = vfx_session.native_batch.LogicalCapacityBytes();
+            const auto charge = [&](std::size_t owned) {
+                sample.frame_scratch_bytes = Add(sample.frame_scratch_bytes, owned);
+            };
             const auto vectors = [&](const auto &...items) { (charge(Vector(items)), ...); };
-            charge(vfx_pair_facts.RetainedCapacityBytes());
-            charge(prepared_births.LogicalCapacityBytes());
-            charge(prepared_profiles.LogicalCapacityBytes());
-            charge(persistent_sparks.RetainedCapacityBytes());
-            charge(vfx_upgrade_movements.RetainedCapacityBytes());
             vectors(typed_vfx.events, typed_vfx.persistent, typed_vfx.unsupported_effect_ids,
                 ready_events, frame_events, dispatched_event_scratch, typed_screen, typed_volumes,
                 typed_lights, typed_distortions, typed_decals, typed_surfaces, typed_mesh_spawns,
@@ -1377,7 +1400,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 surface_persistent, ground_birth_suppressions, replaced_particle_sequences,
                 superseded_pickup_sequences, owned_status_sequences, owned_status_mote_sequences,
                 replaced_legacy_mesh_sequences, replaced_burst_shell_sequences, vfx_row_indices,
-                status_burst_keys, status_shard_commands, profile_additions);
+                status_burst_keys, status_shard_commands);
             for (const auto &input : typed_vfx.events) charge(RingGapPayload(input.payload));
             for (const auto &input : typed_vfx.persistent) charge(RingGapPayload(input.payload));
             for (const auto &capture : surface_capture_inputs) charge(RingGapPayload(capture.input.payload));
@@ -1387,11 +1410,29 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             for (const auto &command : typed_distortions) charge(Vector(command.gap_angles_degrees));
             charge(Multiply(ribbon_inputs.StorageCapacity(), sizeof(VfxRibbonSourceInput)));
             for (const auto &source : ribbon_inputs.Storage()) charge(Vector(source.outputs));
-            return bytes;
+            return sample;
+        };
+        runtime_detail::VfxWorkspacePeak vfx_workspace_sampled_peak;
+        runtime_detail::VfxWorkspacePeak vfx_workspace_frame_peak;
+        std::size_t vfx_activation_raw_rows{}, vfx_activation_typed_rows{}, vfx_activation_birth_rows{};
+        const auto sample_vfx_workspace = [&] {
+            const auto sample = vfx_workspace_breakdown();
+            vfx_workspace_sampled_peak.Observe(sample);
+            vfx_workspace_frame_peak.Observe(sample);
         };
         auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
         auto &pending_effect_lines = vfx_session.decoded.effect_lines;
         auto &active_vfx_flashes = vfx_session.decoded.flashes;
+        const auto vfx_admission_held_bytes = [&]() noexcept {
+            using namespace runtime_detail::vfx_retained_size;
+            // A later partial-prefix freeze may need a separate native copy.
+            auto held = vfx_workspace_breakdown().TotalBytes();
+            held = Add(held, NativeCopyGrowthBytes(pending_particle_spawns,
+                vfx_session.native_batch.particle_spawns, prepared_births.particle_spawns));
+            held = Add(held, NativeCopyGrowthBytes(pending_effect_lines,
+                vfx_session.native_batch.effect_lines, prepared_births.effect_lines));
+            return held;
+        };
         const auto write_diagnostics_status = [&](std::string_view text) {
             std::ofstream status(config.artifact_directory / "diagnostics.json", std::ios::binary);
             status.write(text.data(), static_cast<std::streamsize>(text.size()));
@@ -1434,7 +1475,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                     "Could not initialize performance capture files."));
             performance_lines.emplace(performance_file, true,
-                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_frontend_reused,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us,target_render_fps,vfx_fire_admission_bytes,vfx_fire_requested,vfx_fire_admitted,vfx_fire_budget_limited\n", capture_clock);
+                runtime_detail::FramePerformanceCsvHeader() + "\n", capture_clock);
             gpu_live_lines.emplace(gpu_live_file, true,
                 "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated,source_frame_id,source_frame_sequence,quality_generation,provider_generation,is_generated_frame,clock_gpu_before,clock_cpu_before,clock_gpu_after,clock_cpu_after,clock_gpu_frequency,clock_cpu_frequency,clock_anchors_valid,source_ready_cadence_ms,output_dependency_span_ms,calibration_valid,calibration_drift,cadence_valid,span_valid,gpu_backlog_proven,cadence_gap,closure_span_gap,cadence_exclusions_valid,cpu_supply_gap,pacing_gap,closure_clock_valid,closure_gap_checked\n", capture_clock);
         }
@@ -1584,6 +1625,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t vfx_catalog_generation{1};
         std::uint64_t typed_vfx_flash_submitted_total{};
         std::uint64_t vfx_fire_budget_limited_frames{};
+        std::uint64_t vfx_mote_budget_limited_frames{};
+        std::size_t vfx_mote_requested_rows{}, vfx_mote_allowed_rows{};
+        std::uint64_t vfx_birth_budget_limited_frames{};
+        std::size_t vfx_birth_requested_rows{}, vfx_birth_allowed_rows{};
+        std::uint64_t vfx_profile_budget_limited_frames{};
+        std::size_t vfx_profile_requested_memberships{}, vfx_profile_admitted_memberships{};
         std::size_t vfx_fire_admission_peak_bytes{};
         std::uint64_t typed_vfx_unsupported_inputs{};
         bool captured{};
@@ -1601,7 +1648,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::string performance_row;
         for (;;)
         {
-            std::array<runtime_detail::DiagnosticSample, kVfxTaskNames.size()> vfx_work{};
+            std::array<runtime_detail::DiagnosticSample,
+                runtime_detail::kFramePerformanceTaskNames.size()> vfx_work{};
+            vfx_workspace_frame_peak = {};
+            vfx_activation_raw_rows = vfx_activation_typed_rows = vfx_activation_birth_rows = 0;
             const auto loop_start_qpc = performance_lines ? read_performance_qpc() : 0;
 #if defined(HS_DEVELOPMENT_TOOLS)
             const auto generation_now = std::chrono::steady_clock::now();
@@ -1940,10 +1990,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 renderer_settings_suspended = false;
                             active_frame_cap = effective.frame_cap;
                             active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
-                            active_vfx_quality = active_graphics.particle_quality == GraphicsQuality::Low
+                            const auto next_vfx_quality = active_graphics.particle_quality == GraphicsQuality::Low
                                 ? VfxQuality::Low
                                 : active_graphics.particle_quality == GraphicsQuality::Medium
                                     ? VfxQuality::Medium : VfxQuality::High;
+                            if (next_vfx_quality != active_vfx_quality)
+                            {
+                                active_vfx_quality = next_vfx_quality;
+                                active_effects.SetQuality(active_vfx_quality);
+                            }
                             record_renderer_features(renderer_settings.generation);
                         }
                         else
@@ -2104,7 +2159,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_showcase_injected = false;
                 }
                 prepared_births.Clear();
-                const auto retained_particle_count = pending_particle_spawns.size();
+                visible_flashes.clear();
+                vfx_session.decoded.AppendVisibleFlashes(display_tick, visible_flashes);
+                const auto retained_flash_count = active_vfx_flashes.size();
+                auto retained_particle_count = pending_particle_spawns.size();
                 const auto &ready_batch = vfx_session.raw_events.Prepare(
                     current_snapshot.header.tick, vfx_session.session_id);
                 ready_events.clear();
@@ -2206,8 +2264,99 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_catalog.Image(), frame_events,
                     current_vfx, previous_vfx,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    typed_vfx, &vfx_pair_facts, sample_alpha);
+                    typed_vfx, &vfx_pair_facts, sample_alpha, active_vfx_quality);
                 frame_adapter_scope.Stop();
+                // Reserve retained profile storage before generating the birth fanout.
+                const auto phase_effect = vfx_catalog.Image().entity_surface_routes.phase_effect;
+                const auto death_effect = vfx_catalog.Image().entity_surface_routes.death_effect;
+                const auto trap_effect = vfx_catalog.Image().entity_surface_routes.trap_point_rate_effect;
+                const auto is_effect = [](const VfxEventInput &input, std::uint32_t handle) {
+                    return handle != 0 && input.effect_handle == handle;
+                };
+                {
+                    runtime_detail::DiagnosticScope profile_prepare_scope(vfx_work[10], capture_clock);
+                    profile_additions.clear();
+                    const auto &image = vfx_catalog.Image();
+                    if (cosmetic_profile_generation != vfx_catalog_generation)
+                    {
+                        cosmetic_profile_masks.resize(image.program.effects.size());
+                        for (std::size_t i = 0; i < cosmetic_profile_masks.size(); ++i)
+                            cosmetic_profile_masks[i] = image.program.effects[i].handle == i + 1
+                                ? runtime_detail::ClassifyCosmeticVfxEventProfiles(
+                                    image, image.program.effects[i].handle, UINT16_MAX, false) : 0;
+                        cosmetic_profile_generation = vfx_catalog_generation;
+                    }
+                    for (const auto &input : typed_vfx.events)
+                    {
+                        std::uint16_t mask{};
+                        const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
+                        if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
+                        if (is_effect(input, phase_effect) || is_effect(input, death_effect))
+                            mask |= profile_bit(VfxEventProfile::EntitySurface);
+                        if (is_effect(input, trap_effect)) mask |= profile_bit(VfxEventProfile::PointRate);
+                        if (input.effect_handle != 0 && input.effect_handle <= image.program.effects.size())
+                        {
+                            if (input.effect_handle <= image.light_effect_ranges.size() &&
+                                image.light_effect_ranges[input.effect_handle - 1].count != 0)
+                                mask |= profile_bit(VfxEventProfile::Light);
+                            if (image.HasDistortionRecipes(input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Distortion);
+                            if (image.HasDecalRecipes(input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Decal);
+                            if (runtime_detail::IsVfxTypedVolumeEffect(image, input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Volume);
+                            if (runtime_detail::IsVfxTypedScreenEffect(image, input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Screen);
+                        }
+                        if (input.effect_handle != 0 && input.effect_handle <= image.ribbon_effect_recipes.size() &&
+                            (image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonAdd) ||
+                             image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonOit)))
+                        {
+                            const auto &effect = image.ribbon_effect_recipes[input.effect_handle - 1];
+                            if (effect.input_mode == 0 && effect.timing_kind == 0 &&
+                                std::isfinite(effect.seconds) && effect.seconds > 0.0f &&
+                                (std::holds_alternative<VfxPointPayload>(input.payload) ||
+                                 std::holds_alternative<VfxProjectilePayload>(input.payload) ||
+                                 std::holds_alternative<VfxConePayload>(input.payload) ||
+                                 std::holds_alternative<VfxCirclePayload>(input.payload) ||
+                                 std::holds_alternative<VfxEntityPayload>(input.payload) ||
+                                 std::holds_alternative<VfxContextPayload>(input.payload) ||
+                                 std::holds_alternative<VfxLinkPayload>(input.payload)))
+                                mask |= profile_bit(VfxEventProfile::Ribbon);
+                        }
+                        if (mask)
+                        {
+                            const auto cosmetic = static_cast<std::uint16_t>(
+                                !ground_admission.replace_context_owner && input.effect_handle != 0 &&
+                                input.effect_handle <= cosmetic_profile_masks.size()
+                                ? mask & cosmetic_profile_masks[input.effect_handle - 1] : 0u);
+                            const auto importance = input.effect_handle != 0 &&
+                                input.effect_handle <= image.program.effects.size()
+                                ? image.program.effects[input.effect_handle - 1].importance : 0u;
+                            profile_additions.push_back({&input, mask,
+                                ground_admission.replace_context_owner, cosmetic, importance});
+                        }
+                    }
+                    VfxEventStore::ProfileAdmission admission{
+                        vfx_workspace_breakdown().TotalBytes(),
+                        runtime_detail::kVfxWorkspaceSoftBudgetBytes, birth_order};
+                    if (!profile_additions.empty() &&
+                        !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles, &admission))
+                    {
+                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                            "VFX event profiles could not be prepared."));
+                        break;
+                    }
+                    using runtime_detail::vfx_retained_size::Add;
+                    vfx_profile_requested_memberships = Add(vfx_profile_requested_memberships,
+                        admission.requested_cosmetic_memberships);
+                    vfx_profile_admitted_memberships = Add(vfx_profile_admitted_memberships,
+                        admission.admitted_cosmetic_memberships);
+                    vfx_profile_budget_limited_frames += admission.admitted_cosmetic_memberships <
+                        admission.requested_cosmetic_memberships;
+                    vfx_session.ReserveSurfaceCaptures(profile_additions.empty() ? 0 :
+                        prepared_profiles.AdditionalProfileRows(VfxEventProfile::EntitySurface));
+                }
                 runtime_detail::DiagnosticScope ground_birth_scope(vfx_work[11], capture_clock);
                 ground_birth_suppressions.clear();
                 runtime_detail::AppendVfxTypedEventGroundBirthSuppression(
@@ -2240,41 +2389,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent,
                         prepared_births.flashes, owned_status_sequences);
                     std::ranges::sort(owned_status_sequences);
-                    runtime_detail::AppendVfxTypedFlashCommands(
+                    runtime_detail::PrepareVfxTypedFlashOutputs(
                         vfx_catalog.Image(), typed_vfx.events, owned_status_sequences,
-                        prepared_births.flashes, &superseded_pickup_sequences);
-                    replaced_particle_sequences.reserve(owned_status_sequences.size() + superseded_pickup_sequences.size());
-                    replaced_particle_sequences.insert(replaced_particle_sequences.end(),
-                        owned_status_sequences.begin(), owned_status_sequences.end());
-                    replaced_particle_sequences.insert(replaced_particle_sequences.end(),
-                        superseded_pickup_sequences.begin(), superseded_pickup_sequences.end());
-                    std::ranges::sort(replaced_particle_sequences);
+                        prepared_flash_outputs);
                 }
                 const auto ballistic_first = prepared_births.particle_spawns.size();
+                auto ballistic_end = ballistic_first;
                 replaced_legacy_mesh_sequences.clear();
                 replaced_burst_shell_sequences.clear();
                 {
                     runtime_detail::DiagnosticScope ballistic_prepare_scope(vfx_work[7], capture_clock);
-                    const auto &lookup = vfx_catalog.Program().effect_lookup;
-                    vfx_row_indices.clear();
-                    runtime_detail::AppendVfxTypedBallisticCommands(
-                        vfx_catalog.Image(), typed_vfx.events, prepared_births.particle_spawns,
-                        &vfx_row_indices);
-                    replaced_legacy_mesh_sequences.reserve(vfx_row_indices.size());
-                    replaced_burst_shell_sequences.reserve(vfx_row_indices.size());
-                    for (const auto index : vfx_row_indices)
-                    {
-                        const auto &input = typed_vfx.events[index];
-                        replaced_legacy_mesh_sequences.push_back(input.sequence);
-                        if (input.effect_handle != 0 && input.effect_handle <= lookup.size() &&
-                            lookup[input.effect_handle - 1].effect_id == explosive_arrow_main)
-                            replaced_burst_shell_sequences.push_back(input.sequence);
-                    }
-                    std::ranges::sort(replaced_legacy_mesh_sequences);
-                    std::ranges::sort(replaced_burst_shell_sequences);
+                    prepared_ballistic_bursts.clear();
+                    runtime_detail::PrepareVfxTypedBallisticBursts(
+                        vfx_catalog.Image(), typed_vfx.events, prepared_ballistic_bursts);
                 }
-                const auto ballistic_end = prepared_births.particle_spawns.size();
                 runtime_detail::DiagnosticScope legacy_scope(vfx_work[3], capture_clock);
+                prepared_legacy_events.clear();
+                prepared_legacy_emitters.clear();
+                prepared_legacy_events.reserve(frame_events.size());
                 for (const auto &ready_event : frame_events)
                 {
                     const auto fact = std::ranges::lower_bound(ground_birth_suppressions,
@@ -2285,20 +2417,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             ? VfxLegacyGroundSuppression{fact->all_particles, fact->ground_ring,
                                   fact->ground_disc, fact->segment_solid_trail}
                             : VfxLegacyGroundSuppression{};
-                    const auto prefix = prepared_births.MarkBirths();
-                    if (auto expanded = vfx_catalog.ExpandEvent(
-                            ready_event, active_decorative_particle_fraction,
-                            prepared_births.particle_spawns, prepared_births.effect_lines,
-                            std::ranges::binary_search(replaced_particle_sequences, ready_event.sequence),
-                            std::ranges::binary_search(replaced_legacy_mesh_sequences, ready_event.sequence),
-                            ground_suppression); !expanded)
+                    VfxPreparedLegacyEvent prepared;
+                    if (auto expanded = vfx_catalog.PrepareEvent(
+                            ready_event, active_decorative_particle_fraction, prepared,
+                            prepared_legacy_emitters, false, false, ground_suppression); !expanded)
                     {
-                        prepared_births.RollbackBirths(prefix);
 #if defined(HS_DEVELOPMENT_TOOLS)
                         record_thread_failure(expanded);
                         break;
 #endif
                     }
+                    else if (prepared.definition) prepared_legacy_events.push_back(prepared);
                 }
                 legacy_scope.Stop();
                 if (channels.stop_requested.load(std::memory_order_acquire)) break;
@@ -2361,77 +2490,180 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
 
+                std::size_t fire_requested{}, fire_admitted{}, fire_admission_bytes{};
+                std::size_t required_fire{}, decorative_fire{};
+                bool fire_budget_limited{};
+                bool birth_budget_limited{};
+                runtime_detail::VfxMoteBurstSelection mote_birth_selection;
                 {
                     runtime_detail::DiagnosticScope mote_birth_scope(vfx_work[13], capture_clock);
+                    using namespace runtime_detail::vfx_retained_size;
+                    status_stamp_flashes.clear();
+                    runtime_detail::AppendVfxPersistentStatusStampCommands(
+                        vfx_catalog.Image(), typed_vfx.persistent, status_stamp_flashes);
+                    runtime_detail::PrepareVfxPersistentFireSources(vfx_catalog.Image(),
+                        typed_vfx.persistent, display_tick, prepared_fire_sources);
+                    for (const auto &source : prepared_fire_sources)
+                    {
+                        fire_requested = Add(fire_requested, source.eligible_ordinals);
+                        auto &count = source.authoritative ? required_fire : decorative_fire;
+                        count = Add(count, source.eligible_ordinals);
+                    }
                     owned_status_mote_sequences.clear();
-                    runtime_detail::AppendVfxOwnedStatusTickMoteFlashes(
+                    runtime_detail::PrepareVfxOwnedStatusTickMoteBursts(
                         vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent,
-                        prepared_births.flashes, owned_status_mote_sequences);
+                        prepared_status_mote_bursts);
+                    owned_status_mote_sequences.reserve(prepared_status_mote_bursts.size());
+                    for (const auto &burst : prepared_status_mote_bursts)
+                        owned_status_mote_sequences.push_back(burst.event_sequence);
                     std::ranges::sort(owned_status_mote_sequences);
                     owned_status_mote_sequences.erase(std::unique(owned_status_mote_sequences.begin(),
                         owned_status_mote_sequences.end()), owned_status_mote_sequences.end());
-                    runtime_detail::AppendVfxTypedMoteCommands(
+                    runtime_detail::PrepareVfxTypedMoteBursts(
                         vfx_catalog.Image(), typed_vfx.events, owned_status_mote_sequences,
-                        prepared_births.flashes);
-                }
-                const auto phase_effect = vfx_catalog.Image().entity_surface_routes.phase_effect;
-                const auto death_effect = vfx_catalog.Image().entity_surface_routes.death_effect;
-                const auto trap_effect = vfx_catalog.Image().entity_surface_routes.trap_point_rate_effect;
-                const auto is_effect = [](const VfxEventInput &input, std::uint32_t handle) {
-                    return handle != 0 && input.effect_handle == handle;
-                };
-                {
-                    runtime_detail::DiagnosticScope profile_prepare_scope(vfx_work[10], capture_clock);
-                    profile_additions.clear();
-                    const auto &image = vfx_catalog.Image();
-                    for (const auto &input : typed_vfx.events)
+                        prepared_mote_bursts);
+
+                    // Reserve later essential shard births before spending on decorations.
+                    status_burst_keys.clear();
+                    status_shard_commands.clear();
+                    vfx_session.SelectUnseenPersistentBurstOwners(typed_vfx.persistent, vfx_row_indices);
+                    status_burst_keys.reserve(vfx_row_indices.size());
+                    for (const auto index : vfx_row_indices)
                     {
-                        std::uint16_t mask{};
-                        const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
-                        if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
-                        if (is_effect(input, phase_effect) || is_effect(input, death_effect))
-                            mask |= profile_bit(VfxEventProfile::EntitySurface);
-                        if (is_effect(input, trap_effect)) mask |= profile_bit(VfxEventProfile::PointRate);
-                        if (input.effect_handle != 0 && input.effect_handle <= image.program.effects.size())
-                        {
-                            if (input.effect_handle <= image.light_effect_ranges.size() &&
-                                image.light_effect_ranges[input.effect_handle - 1].count != 0)
-                                mask |= profile_bit(VfxEventProfile::Light);
-                            if (image.HasDistortionRecipes(input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Distortion);
-                            if (image.HasDecalRecipes(input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Decal);
-                            if (runtime_detail::IsVfxTypedVolumeEffect(image, input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Volume);
-                            if (runtime_detail::IsVfxTypedScreenEffect(image, input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Screen);
-                        }
-                        if (input.effect_handle != 0 && input.effect_handle <= image.ribbon_effect_recipes.size() &&
-                            (image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonAdd) ||
-                             image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonOit)))
-                        {
-                            const auto &effect = image.ribbon_effect_recipes[input.effect_handle - 1];
-                            if (effect.input_mode == 0 && effect.timing_kind == 0 &&
-                                std::isfinite(effect.seconds) && effect.seconds > 0.0f &&
-                                (std::holds_alternative<VfxPointPayload>(input.payload) ||
-                                 std::holds_alternative<VfxProjectilePayload>(input.payload) ||
-                                 std::holds_alternative<VfxConePayload>(input.payload) ||
-                                 std::holds_alternative<VfxCirclePayload>(input.payload) ||
-                                 std::holds_alternative<VfxEntityPayload>(input.payload) ||
-                                 std::holds_alternative<VfxContextPayload>(input.payload) ||
-                                 std::holds_alternative<VfxLinkPayload>(input.payload)))
-                                mask |= profile_bit(VfxEventProfile::Ribbon);
-                        }
-                        if (mask) profile_additions.push_back({&input, mask, ground_admission.replace_context_owner});
+                        const auto &owner = typed_vfx.persistent[index];
+                        status_burst_keys.push_back({owner.stable_id, owner.source_visual_kind});
                     }
-                    if (!profile_additions.empty() &&
-                        !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles))
+                    runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
+                        vfx_catalog.Image(), typed_vfx.persistent, vfx_row_indices,
+                        snapshots.current.header.tick, status_shard_commands);
+                    vfx_session.ReservePersistentBursts(status_burst_keys.size());
+
+                    // Required rows, including compatibility fallback, are outside the soft cap.
+                    std::array required_rows{Add(prepared_births.particle_spawns.size(), status_shard_commands.size()),
+                        prepared_births.effect_lines.size(), prepared_births.flashes.size()};
+                    birth_requests.clear();
+                    birth_requests.reserve(Add(Add(prepared_flash_outputs.size(), prepared_ballistic_bursts.size()),
+                        std::max(prepared_mote_bursts.size(), prepared_legacy_events.size())));
+                    const auto prepare_row = [&](auto &plan, std::size_t storage) {
+                        plan.admitted_count = plan.count;
+                        if (plan.cosmetic)
+                            birth_requests.push_back({plan.count, &plan.admitted_count, plan.importance, storage});
+                        else required_rows[storage] = Add(required_rows[storage], plan.count);
+                    };
+                    for (auto &plan : prepared_flash_outputs) prepare_row(plan, 2);
+                    for (auto &plan : prepared_ballistic_bursts) prepare_row(plan, 0);
+                    for (const auto &plan : prepared_status_mote_bursts)
+                        required_rows[2] = Add(required_rows[2], plan.count);
+                    for (const auto &burst : prepared_mote_bursts)
                     {
-                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                            "VFX event profiles could not be prepared."));
-                        break;
+                        auto &count = burst.cosmetic ? mote_birth_selection.requested_decorative_rows :
+                            mote_birth_selection.required_rows;
+                        count = Add(count, burst.count);
                     }
+                    for (auto &plan : prepared_mote_bursts) prepare_row(plan, 2);
+                    for (const auto &plan : prepared_legacy_events)
+                        required_rows[plan.definition->kind == VfxDefinitionKind::Line ? 1 : 0] =
+                            Add(required_rows[plan.definition->kind == VfxDefinitionKind::Line ? 1 : 0],
+                                plan.maximum_required_count);
+                    const auto required_suffix = Add(status_stamp_flashes.size(), required_fire);
+                    const auto select_birth_rows = [&](std::array<std::size_t, 3> &rows) {
+                        runtime_detail::vfx_birth_admission::ReserveAndSelectBirthRows(rows,
+                            birth_requests, birth_order,
+                            [&]() noexcept { return vfx_workspace_breakdown().TotalBytes(); },
+                            prepared_births.particle_spawns, pending_particle_spawns,
+                            vfx_session.native_batch.particle_spawns,
+                            prepared_births.effect_lines, pending_effect_lines,
+                            vfx_session.native_batch.effect_lines,
+                            prepared_births.flashes, active_vfx_flashes, visible_flashes,
+                            required_suffix, runtime_detail::kVfxWorkspaceSoftBudgetBytes);
+                        for (const auto &request : birth_requests)
+                        {
+                            vfx_birth_requested_rows = Add(vfx_birth_requested_rows, request.count);
+                            vfx_birth_allowed_rows = Add(vfx_birth_allowed_rows, *request.admitted);
+                            birth_budget_limited |= *request.admitted < request.count;
+                        }
+                    };
+                    select_birth_rows(required_rows);
+
+                    runtime_detail::AppendVfxPreparedFlashOutputs(prepared_flash_outputs,
+                        prepared_births.flashes, &superseded_pickup_sequences);
+                    replaced_particle_sequences.insert(replaced_particle_sequences.end(),
+                        owned_status_sequences.begin(), owned_status_sequences.end());
+                    // A deliberate cosmetic drop must not resurrect the same legacy decoration.
+                    for (const auto &plan : prepared_flash_outputs)
+                        if (plan.pickup_collect) replaced_particle_sequences.push_back(plan.pickup_sequence);
+                    std::ranges::sort(replaced_particle_sequences);
+                    vfx_row_indices.clear();
+                    runtime_detail::AppendVfxPreparedBallisticBursts(prepared_ballistic_bursts,
+                        prepared_births.particle_spawns, &vfx_row_indices);
+                    const auto &lookup = vfx_catalog.Program().effect_lookup;
+                    const auto replace_mesh = [&](std::size_t index) {
+                        const auto &input = typed_vfx.events[index];
+                        replaced_legacy_mesh_sequences.push_back(input.sequence);
+                        if (input.effect_handle && input.effect_handle <= lookup.size() &&
+                            lookup[input.effect_handle - 1].effect_id == explosive_arrow_main)
+                            replaced_burst_shell_sequences.push_back(input.sequence);
+                    };
+                    for (const auto index : vfx_row_indices) replace_mesh(index);
+                    for (std::size_t first = 0; first < prepared_ballistic_bursts.size();)
+                    {
+                        const auto index = prepared_ballistic_bursts[first].event_index;
+                        bool eligible{}, admitted{};
+                        do {
+                            const auto &plan = prepared_ballistic_bursts[first++];
+                            eligible |= plan.count != 0; admitted |= plan.admitted_count != 0;
+                        } while (first < prepared_ballistic_bursts.size() &&
+                            prepared_ballistic_bursts[first].event_index == index);
+                        if (eligible && !admitted) replace_mesh(index);
+                    }
+                    std::ranges::sort(replaced_legacy_mesh_sequences);
+                    std::ranges::sort(replaced_burst_shell_sequences);
+                    ballistic_end = prepared_births.particle_spawns.size();
+                    runtime_detail::AppendVfxPreparedMoteBursts(prepared_status_mote_bursts, prepared_births.flashes);
+                    runtime_detail::AppendVfxPreparedMoteBursts(prepared_mote_bursts, prepared_births.flashes);
+                    for (const auto &burst : prepared_mote_bursts)
+                        if (burst.cosmetic) mote_birth_selection.admitted_decorative_rows =
+                            Add(mote_birth_selection.admitted_decorative_rows, burst.admitted_count);
+
+                    // Compatibility output uses the remaining budget after actual typed results.
+                    birth_requests.clear();
+                    required_rows = {Add(prepared_births.particle_spawns.size(), status_shard_commands.size()),
+                        prepared_births.effect_lines.size(), prepared_births.flashes.size()};
+                    for (auto &plan : prepared_legacy_events)
+                    {
+                        if (auto replaced = vfx_catalog.SetPreparedReplacements(plan, prepared_legacy_emitters,
+                            std::ranges::binary_search(replaced_particle_sequences, plan.event->sequence),
+                            std::ranges::binary_search(replaced_legacy_mesh_sequences, plan.event->sequence)); !replaced)
+                        {
+                            record_thread_failure(replaced);
+                            break;
+                        }
+                        const auto storage = plan.definition->kind == VfxDefinitionKind::Line ? 1 : 0;
+                        required_rows[storage] = Add(required_rows[storage], plan.required_count);
+                        if (plan.count) birth_requests.push_back({plan.count, &plan.admitted_count, plan.importance, 0});
+                    }
+                    if (channels.stop_requested.load(std::memory_order_acquire)) break;
+                    select_birth_rows(required_rows);
+                    for (const auto &plan : prepared_legacy_events)
+                    {
+                        const auto prefix = prepared_births.MarkBirths();
+                        if (auto expanded = vfx_catalog.AppendPreparedEvent(plan, prepared_legacy_emitters,
+                                prepared_births.particle_spawns, prepared_births.effect_lines); !expanded)
+                        {
+                            prepared_births.RollbackBirths(prefix);
+                            record_thread_failure(expanded);
+                            break;
+                        }
+                    }
+                    birth_requests.clear();
+                    prepared_flash_outputs.clear();
+                    prepared_ballistic_bursts.clear();
+                    prepared_status_mote_bursts.clear();
+                    prepared_mote_bursts.clear();
+                    prepared_legacy_events.clear();
+                    prepared_legacy_emitters.clear();
                 }
+                if (channels.stop_requested.load(std::memory_order_acquire)) break;
                 runtime_detail::DiagnosticScope birth_commit_scope(vfx_work[3], capture_clock);
                 // Keep legacy and showcase births before typed ballistic births
                 // while leaving the already-retained particle prefix untouched.
@@ -2439,20 +2671,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     std::rotate(prepared_births.particle_spawns.begin() + ballistic_first,
                         prepared_births.particle_spawns.begin() + ballistic_end,
                         prepared_births.particle_spawns.end());
-                if (!vfx_session.AppendPreparedBirths(prepared_births))
+                if (performance_lines)
                 {
-                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                        "Prepared VFX birth batch aliases retained output."));
-                    break;
+                    using namespace runtime_detail::vfx_retained_size;
+                    vfx_activation_raw_rows = vfx_session.raw_events.in_flight.entries.size();
+                    vfx_activation_typed_rows = typed_vfx.events.size();
+                    vfx_activation_birth_rows = Add(Add(prepared_births.particle_spawns.size(),
+                        prepared_births.effect_lines.size()), Add(prepared_births.flashes.size(),
+                        prepared_births.entity_surface_captures.size()));
+                    sample_vfx_workspace();
                 }
-                // Birth publication only changes decoded queues; the prepared store is untouched.
-                if (!profile_additions.empty() && !active_effects.CommitAppendBatch(prepared_profiles))
+                if (!vfx_session.CommitPreparedActivation(
+                        prepared_births, prepared_profiles, !profile_additions.empty()))
                 {
                     record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                        "Prepared VFX event profiles changed before publication."));
+                        "Prepared VFX activation changed before publication."));
                     break;
                 }
                 if (append_vfx_showcase) vfx_showcase_injected = true;
+                vfx_birth_budget_limited_frames += birth_budget_limited;
                 birth_commit_scope.Stop();
 
                 runtime_detail::DiagnosticScope surface_scope(vfx_work[5], capture_clock);
@@ -2549,42 +2786,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::DiagnosticScope movement_scope(vfx_work[6], capture_clock);
                 vfx_upgrade_movements.Append(vfx_catalog.Image(), frame_events,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    typed_vfx.persistent, sample_alpha);
+                    typed_vfx.persistent, sample_alpha, active_vfx_quality);
                 movement_scope.Stop();
                 runtime_detail::DiagnosticScope ballistic_scope(vfx_work[7], capture_clock);
                 typed_vfx_unsupported_inputs += typed_vfx.unsupported_effect_ids.size();
                 // Compatibility cancellation is a post-commit mutation: the staged
                 // replacement births are already in the retained queue at this point.
-                if (!replaced_particle_sequences.empty())
-                    for (auto &legacy : pending_particle_spawns)
-                        if (std::ranges::binary_search(replaced_particle_sequences, legacy.sequence) &&
-                            (!legacy.authored_ballistic ||
-                             std::ranges::binary_search(owned_status_sequences, legacy.sequence)))
-                            legacy.count = 0;
-                if (!replaced_legacy_mesh_sequences.empty())
-                    for (auto &legacy : pending_particle_spawns)
-                        if (!legacy.authored_ballistic && legacy.renderer == VfxRenderer::Mesh &&
-                            std::ranges::binary_search(replaced_legacy_mesh_sequences, legacy.sequence) &&
-                            (legacy.primitive != VfxPrimitive::ShockShell ||
-                             std::ranges::binary_search(replaced_burst_shell_sequences, legacy.sequence)))
-                            legacy.count = 0;
+                retained_particle_count = runtime_detail::vfx_birth_retirement::RetireCompatibilityBirthRows(
+                    pending_particle_spawns, retained_particle_count, replaced_particle_sequences,
+                    owned_status_sequences, replaced_legacy_mesh_sequences, replaced_burst_shell_sequences);
                 ballistic_scope.Stop();
                 runtime_detail::DiagnosticScope status_scope(vfx_work[8], capture_clock);
-                status_burst_keys.clear();
-                status_shard_commands.clear();
-                // Ballistic provenance is consumed above; this stage reuses its unborrowed row scratch.
-                vfx_session.SelectUnseenPersistentBurstOwners(typed_vfx.persistent, vfx_row_indices);
-                status_burst_keys.reserve(vfx_row_indices.size());
-                for (const auto index : vfx_row_indices)
+                if (!vfx_session.CommitPersistentBursts(status_burst_keys,
+                        status_shard_commands, pending_particle_spawns))
                 {
-                    const auto &owner = typed_vfx.persistent[index];
-                    status_burst_keys.push_back({owner.stable_id, owner.source_visual_kind});
+                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Prepared persistent VFX births changed before publication."));
+                    break;
                 }
-                runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, vfx_row_indices,
-                    snapshots.current.header.tick, status_shard_commands);
-                (void)vfx_session.CommitPersistentBursts(status_burst_keys,
-                    status_shard_commands, pending_particle_spawns);
                 status_scope.Stop();
                 runtime_detail::DiagnosticScope ground_scope(vfx_work[9], capture_clock);
                 ground_commands.clear();
@@ -2653,24 +2872,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 decal_scope.Stop();
                 local_scope.Stop();
                 runtime_detail::DiagnosticScope ground_event_scope(vfx_work[11], capture_clock);
-                // Retire only preexisting compatibility rows for accepted birth
-                // layers; the current frame's emitter already skipped these rows.
-                for (auto &legacy : pending_particle_spawns)
-                {
-                    const auto fact = std::ranges::lower_bound(ground_birth_suppressions,
-                        legacy.sequence, {},
-                        &runtime_detail::VfxGroundBirthSuppressionFacts::sequence);
-                    if (fact == ground_birth_suppressions.end() || fact->sequence != legacy.sequence)
-                        continue;
-                    if (fact->all_particles ||
-                        (fact->ground_ring && legacy.renderer == VfxRenderer::Ground &&
-                         legacy.primitive == VfxPrimitive::Ring) ||
-                        (fact->ground_disc && legacy.renderer == VfxRenderer::Ground &&
-                         legacy.primitive == VfxPrimitive::Disc) ||
-                        (fact->segment_solid_trail && legacy.renderer == VfxRenderer::Segment &&
-                         legacy.primitive == VfxPrimitive::SolidTrail))
-                        legacy.count = 0;
-                }
+                // Keep this after CommitPersistentBursts: accepted all-particle ground
+                // facts also retire newly committed status-shard rows for that sequence.
+                retained_particle_count = runtime_detail::vfx_birth_retirement::RetireGroundSuppressedBirthRows(
+                    pending_particle_spawns, retained_particle_count, ground_birth_suppressions);
                 const Tick ground_tick = snapshots.current.header.tick;
                 active_effects.RefreshProfile(VfxEventProfile::Ground, refresh_owner_event);
                 active_effects.EraseIf(VfxEventProfile::Ground, [&](const VfxEventInput &input) {
@@ -2692,37 +2897,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     break;
                 }
                 runtime_detail::DiagnosticScope mote_scope(vfx_work[13], capture_clock);
-                persistent_sparks.Append(
-                    vfx_catalog.Image(), typed_vfx.persistent, ground_tick, sample_alpha,
-                    active_vfx_flashes);
-                const double flash_tick = display_tick;
-                visible_flashes.clear();
-                visible_flashes.reserve(active_vfx_flashes.size());
-                std::erase_if(active_vfx_flashes, [&](const VfxFlashSpawnInput &flash) {
-                    if (flash_tick < flash.event_tick) return false;
-                    const auto elapsed = static_cast<float>((flash_tick - flash.event_tick) / 60.0);
-                    if (elapsed >= flash.delay + flash.lifetime) return true;
-                    if (elapsed < flash.delay) return false;
-                    auto visible = flash;
-                    visible.normalized_age =
-                        (elapsed - flash.delay) / flash.lifetime;
-                    visible_flashes.push_back(visible);
-                    return false;
-                });
-                active_effects.EraseIf(VfxEventProfile::PointRate, [&](const auto &input) {
-                    return display_tick >= input.event_tick && display_tick - input.event_tick >= 39;
-                });
-                runtime_detail::AppendVfxOwnedMoteCommands(
-                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::PointRate),
-                    display_tick, visible_flashes);
-                runtime_detail::AppendVfxOwnedMoteCommands(
-                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground),
-                    display_tick, visible_flashes);
-                runtime_detail::AppendVfxPersistentMoteCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, visible_flashes);
-                status_stamp_flashes.clear();
-                runtime_detail::AppendVfxPersistentStatusStampCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, status_stamp_flashes);
+                const auto required_flash_suffix = runtime_detail::vfx_retained_size::Add(
+                    status_stamp_flashes.size(), required_fire);
+                const auto mote_admission = runtime_detail::PrepareVisibleMoteOutputs(
+                    vfx_catalog.Image(), vfx_session, persistent_sparks, typed_vfx.persistent,
+                    display_tick, ground_tick, sample_alpha, retained_flash_count,
+                    required_flash_suffix, visible_flashes, mote_birth_selection,
+                    vfx_admission_held_bytes);
+                vfx_mote_requested_rows = runtime_detail::vfx_retained_size::Add(
+                    vfx_mote_requested_rows, mote_admission.requested_rows);
+                vfx_mote_allowed_rows = runtime_detail::vfx_retained_size::Add(
+                    vfx_mote_allowed_rows, mote_admission.admitted_rows);
+                vfx_mote_budget_limited_frames += mote_admission.budget_limited;
                 typed_ground_spawns.clear();
                 typed_ground_spawns.reserve(ground_commands.size());
                 for (auto &source : ground_commands)
@@ -2762,7 +2948,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     (snapshots.has_previous && sample_alpha < 1.0f && current_snapshot.header.tick != 0 ? 1u : 0u);
                 auto *native_batch = vfx_session.PrepareNativeBatch(stateful_target,
                     !vfx_session.has_committed_stateful_target ||
-                    stateful_target != vfx_session.last_committed_stateful_target);
+                    stateful_target != vfx_session.last_committed_stateful_target, &prepared_births);
                 const RenderVfxWorldBatch native_world = native_batch ? native_batch->identity :
                     RenderVfxWorldBatch{.session = current_snapshot.header.session_id,
                         .stateful_target = stateful_target};
@@ -2775,49 +2961,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto particle_spawn_count = native_particles.size();
                 const auto effect_line_count = native_lines.size();
                 sort_scope.Stop();
-                std::size_t fire_requested{}, fire_admitted{}, fire_admission_bytes{};
-                bool fire_budget_limited{};
                 {
                     runtime_detail::DiagnosticScope fire_scope(vfx_work[13], capture_clock);
-                    using namespace runtime_detail::vfx_retained_size;
-                    runtime_detail::PrepareVfxPersistentFireSources(vfx_catalog.Image(),
-                        typed_vfx.persistent, display_tick, prepared_fire_sources);
-                    if (!prepared_fire_sources.empty())
-                    {
-                        std::size_t required_fire{}, decorative_fire{};
-                        for (const auto &source : prepared_fire_sources)
-                        {
-                            fire_requested = Add(fire_requested, source.eligible_ordinals);
-                            auto &count = source.authoritative ? required_fire : decorative_fire;
-                            count = Add(count, source.eligible_ordinals);
-                        }
-                        // Reserve essential rows before admitting decorative fire; preserve the
-                        // old flash/mote/fire/stamp output order without moving the fire suffix.
-                        const auto required_suffix = Add(status_stamp_flashes.size(), required_fire);
-                        visible_flashes.reserve(Add(visible_flashes.size(), required_suffix));
-                        fire_admission_bytes = vfx_workspace_bytes();
-                        const auto available = runtime_detail::AvailableVfxFlashAppendRows(
-                            fire_admission_bytes, runtime_detail::kVfxWorkspaceSoftBudgetBytes, visible_flashes);
-                        const auto fire_limit = available > required_suffix ? available - required_suffix : 0;
-                        const auto admitted = std::min(decorative_fire, fire_limit);
-                        fire_budget_limited = admitted < decorative_fire;
-                        const auto previous_capacity = visible_flashes.capacity();
-                        visible_flashes.reserve(Add(Add(visible_flashes.size(), required_suffix), admitted));
-                        fire_admission_bytes = Add(fire_admission_bytes,
-                            Multiply(visible_flashes.capacity() - previous_capacity, sizeof(VfxFlashSpawnInput)));
-                        const auto before = visible_flashes.size();
-                        runtime_detail::AppendVfxPreparedFireFlameCommands(
-                            prepared_fire_sources, admitted, visible_flashes);
-                        fire_admitted = visible_flashes.size() - before;
-                        vfx_fire_admission_peak_bytes = std::max(vfx_fire_admission_peak_bytes, fire_admission_bytes);
-                    }
-                    visible_flashes.insert(visible_flashes.end(),
-                        status_stamp_flashes.begin(), status_stamp_flashes.end());
+                    const auto fire_admission = runtime_detail::AppendVisibleFireAndStamps(
+                        prepared_fire_sources, decorative_fire, required_flash_suffix,
+                        status_stamp_flashes, visible_flashes,
+                        runtime_detail::kVfxWorkspaceSoftBudgetBytes, vfx_admission_held_bytes);
+                    fire_admitted = fire_admission.emitted_rows;
+                    fire_admission_bytes = fire_admission.admission_bytes;
+                    fire_budget_limited = fire_admission.budget_limited;
+                    vfx_fire_admission_peak_bytes = std::max(
+                        vfx_fire_admission_peak_bytes, fire_admission_bytes);
                 }
                 vfx_fire_budget_limited_frames += fire_budget_limited;
                 active_effects.Compact(vfx_session.decoded.entity_surface_captures);
-                // Activation owns CPU fanout; native emission keeps its separate pending queue.
-                vfx_session.raw_events.AcknowledgeActivation();
+                if (performance_lines) sample_vfx_workspace();
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
                 const std::array views{renderer.MainViewInput(InterpolateRenderCamera(snapshots, sample_alpha))};
@@ -2873,22 +3031,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto frame_settings_generation = active_settings_generation;
                 const auto frame_pipeline_revision = renderer.PipelineRevision();
                 const auto rendered = renderer.Render(render_input, frame);
-                if (frame.presented_ui_packet_generation != 0)
-                {
-                    if (!channels.ui_packets.AcceptPresentedUiPacket(frame.presented_ui_packet_generation,
-                        snapshots.ui_frame, snapshots.current.header.session_id,
-                        frame.rendered_view.output_extent))
-                        OutputDebugStringA("Presented UI receipt did not match the retained packet; prior accepted frame retained.\n");
-                }
-                const bool vfx_world_step_accepted = vfx_session.AcknowledgeNativeBatch(
-                    {.session = frame.vfx_world_session_id, .stateful_target = frame.vfx_world_tick,
-                        .sequence = frame.vfx_world_batch_sequence}, frame.vfx_world_step_submitted);
+                const auto receipts = runtime_detail::AcceptRendererReceipts(frame,
+                    channels.ui_packets, snapshots.ui_frame,
+                    snapshots.current.header.session_id, vfx_session);
+                if (receipts.ui_receipt_rejected)
+                    OutputDebugStringA("Presented UI receipt did not match the retained packet; prior accepted frame retained.\n");
                 if (!rendered)
                 {
                     record_thread_failure(rendered);
                     break;
                 }
-                if (native_world.sequence != 0 && !vfx_world_step_accepted)
+                if (native_world.sequence != 0 && !receipts.native_batch_accepted)
                 {
                     record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                         "Renderer completed VFX inputs without acknowledging the matching world step."));
@@ -2907,62 +3060,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     runtime_detail::DiagnosticSample capture_log{};
                     runtime_detail::DiagnosticScope capture_log_scope(capture_log, capture_clock);
                     performance_row.clear();
-                    runtime_detail::AppendCsvValues(performance_row,
-                        frame.frame, frame.rendered_tick, render_start_qpc, performance_frequency,
-                        performance_state.FrameInterval(render_start_qpc) * qpc_microseconds,
-                        runtime_detail::PerformanceLogState::ElapsedTicks(loop_start_qpc, render_start_qpc) * qpc_microseconds,
-                        runtime_detail::PerformanceLogState::ElapsedTicks(render_start_qpc, render_end_qpc) * qpc_microseconds,
-                        cpu.wait_us, cpu.streaming_us, cpu.scene_prepare_us, cpu.ui_us, cpu.constants_upload_us,
-                        cpu.graph_build_us, cpu.graph_prepare_us, cpu.descriptors_us, cpu.graph_plan_us,
-                        static_cast<unsigned>(cpu.graph_frontend_reused), cpu.graph_record_us, cpu.graph_submit_us,
-                        cpu.post_submit_us, cpu.present_us, cpu.diagnostics_us, cpu.wrapper_us,
-                        gpu.completed_frame_id, static_cast<unsigned>(gpu.valid && gpu.fence_completed),
-                        gpu.critical_path_ms, static_cast<unsigned>(gpu.critical_path_valid),
-                        static_cast<unsigned>(GetForegroundWindow() == window.Handle()), snapshots.current.instances.size(),
-                        snapshots.current.static_scene ? snapshots.current.static_scene->instances.size() : 0,
-                        static_cast<unsigned>(channels.session_phase.load(std::memory_order_acquire)), active_frame_cap,
-                        frame_config_revision, frame_settings_generation, frame_pipeline_revision,
-                        frame.rendered_view.id.value, frame.rendered_view.output_extent.width, frame.rendered_view.output_extent.height,
-                        frame.rendered_view.render_active.width, frame.rendered_view.render_active.height,
-                        frame.rendered_view.render_capacity.width, frame.rendered_view.render_capacity.height,
-                        diagnostic.rendered_frame_id,
-                        static_cast<unsigned>(diagnostic.rendered_frame_id == frame.frame && diagnostic.view_id == frame.rendered_view.id.value),
-                        diagnostic.submit_qpc, diagnostic.present_begin_qpc, diagnostic.present_end_qpc,
-                        diagnostic.qpc_frequency, static_cast<unsigned>(memory.budget_available),
-                        memory.local_usage_bytes, memory.local_budget_bytes, memory.tracked_live_bytes,
-                        memory.tracked_retiring_bytes, memory.texture_physical_bytes, memory.host_staging_bytes,
-                        queues.direct_batches, queues.compute_batches, queues.copy_batches, queues.cross_queue_waits,
-                        queues.record_jobs, queues.transient_bytes_without_aliasing, queues.transient_backing_bytes,
-                        static_cast<unsigned>(diagnostic.validation_enabled), static_cast<unsigned>(diagnostic.gpu_validation_enabled),
-                        cpu.frame_slot_wait_begin_qpc, cpu.frame_slot_wait_end_qpc, cpu.graph_prepare_validation_us,
-                        cpu.graph_prepare_info_key_us, cpu.graph_prepare_compile_us, cpu.graph_prepare_transient_us,
-                        frame.streamline_present.frames, static_cast<unsigned>(frame.streamline_present.valid),
-                        frame.streamline_present.begin_qpc, frame.streamline_present.end_qpc,
-                        frame.streamline_present.qpc_frequency, static_cast<unsigned>(native_latency),
-                        latency_begin_ticks * qpc_microseconds, input_wait_ticks * qpc_microseconds,
-                        simulation_wait_ticks * qpc_microseconds, cpu.retained_vfx_us, cpu.ribbon_prepare_us,
-                        cpu.particle_spawn_prepare_us, cpu.typed_vfx_upload_prepare_us, cpu.particle_upload_prepare_us,
-                        cpu.local_vfx_prepare_us, cpu.palette_prepare_us, cpu.skin_prepare_us, cpu.scene_reconcile_us,
-                        cpu.scene_gpu_prepare_us);
                     const auto io = performance_lines->Io();
-                    runtime_detail::AppendCsvValues(performance_row,
-                        snapshots.current.header.session_id, frame_events.size(), typed_vfx.events.size(), typed_vfx.persistent.size(),
-                        particle_spawn_count, effect_line_count, typed_ground_spawns.size(), visible_flashes.size(),
-                        typed_mesh_spawns.size(), typed_fresnels.size(), typed_ribbons.sources.size(), typed_lights.size(),
-                        typed_distortions.size(), typed_decals.size(), typed_volumes.size(), typed_screen.size(), typed_surfaces.size(),
-                        previous_capture_log.ticks * qpc_microseconds, io.ticks * qpc_microseconds, io.calls, performance_lines->Bytes());
+                    const auto workspace_sample = vfx_workspace_frame_peak.Sample();
+#define HS_FRAME_PERFORMANCE_FIELD(name, expression) \
+                    runtime_detail::AppendCsvValue(performance_row, expression);
+#define HS_FRAME_PERFORMANCE_TASKS() \
                     AppendTaskValues(performance_row, vfx_work, qpc_microseconds);
-                    runtime_detail::AppendCsvValues(performance_row,
-                        cpu.ribbon_state_us, cpu.ribbon_wait_us, cpu.ribbon_allocation_us, cpu.ribbon_replacement_count,
-                        cpu.ribbon_allocation_bytes, cpu.ribbon_prepare_thread_cpu_us,
-                        static_cast<unsigned>(cpu.ribbon_prepare_thread_cpu_valid), cpu.graph_resources_us,
-                        cpu.graph_base_passes_us, cpu.graph_shadows_us, cpu.graph_light_probes_us,
-                        cpu.graph_scene_selection_us, cpu.graph_ao_us, cpu.graph_opaque_us, cpu.graph_hero_us,
-                        cpu.graph_post_us, cpu.scene_skin_prepare_us, cpu.scene_shadow_prepare_us,
-                        cpu.scene_cluster_prepare_us, cpu.scene_geometry_demand_us, cpu.scene_texture_prepare_us,
-                        cpu.scene_upload_plan_us, active_graphics.target_render_fps,
-                        fire_admission_bytes, fire_requested, fire_admitted,
-                        static_cast<unsigned>(fire_budget_limited));
+#include "frame_performance_fields.inc"
+#undef HS_FRAME_PERFORMANCE_TASKS
+#undef HS_FRAME_PERFORMANCE_FIELD
                     performance_row += '\n';
                     performance_lines->Append(performance_row);
                     // The sampler waits for nonempty performance.csv before opening GPU counters.
@@ -3271,6 +3377,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   "\"vfx_workspace_soft_budget_bytes\":{},"
                                   "\"vfx_fire_admission_peak_bytes\":{},"
                                   "\"vfx_fire_budget_limited_frames\":{},"
+                                  "\"vfx_mote_requested_rows\":{},"
+                                  "\"vfx_mote_allowed_rows\":{},"
+                                  "\"vfx_mote_budget_limited_frames\":{},"
+                                  "\"vfx_birth_requested_rows\":{},"
+                                  "\"vfx_birth_allowed_rows\":{},"
+                                  "\"vfx_birth_budget_limited_frames\":{},"
+                                  "\"vfx_profile_requested_memberships\":{},"
+                                  "\"vfx_profile_admitted_memberships\":{},"
+                                  "\"vfx_profile_budget_limited_frames\":{},"
+                                  "\"vfx_workspace_sampled_logical_peak_bytes\":{},"
                                   "\"typed_vfx_mesh_peak\":{},"
                                   "\"typed_vfx_fresnel_peak\":{},"
                                   "\"typed_vfx_ribbon_peak\":{},"
@@ -3297,6 +3413,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   typed_vfx_flash_peak, typed_vfx_flash_submitted_total,
                                   runtime_detail::kVfxWorkspaceSoftBudgetBytes,
                                   vfx_fire_admission_peak_bytes, vfx_fire_budget_limited_frames,
+                                  vfx_mote_requested_rows, vfx_mote_allowed_rows, vfx_mote_budget_limited_frames,
+                                  vfx_birth_requested_rows, vfx_birth_allowed_rows, vfx_birth_budget_limited_frames,
+                                  vfx_profile_requested_memberships, vfx_profile_admitted_memberships,
+                                  vfx_profile_budget_limited_frames,
+                                  vfx_workspace_sampled_peak.TotalBytes(),
                                   typed_vfx_mesh_peak, typed_vfx_fresnel_peak,
                                   typed_vfx_ribbon_peak, typed_vfx_ribbon_dropped,
                                   typed_vfx_light_peak, typed_vfx_distortion_peak, typed_vfx_decal_peak,

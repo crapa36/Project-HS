@@ -1,9 +1,25 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 #include "../Source/Apps/AssetPipeline/action.hpp"
+#ifdef _WIN32
+#include "../Source/Apps/AssetPipeline/dxc_process.hpp"
+#endif
 #include "../Source/Apps/AssetPipeline/shader_source_snapshot.hpp"
+#include "../Source/Apps/Content/game_data_numbers.hpp"
 
 #include <stdexcept>
 #include <sstream>
 #include <array>
+#include <cmath>
+#include <limits>
+#include <exception>
+#include <utility>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 void TestAssetActionSnapshot()
 {
@@ -12,6 +28,56 @@ void TestAssetActionSnapshot()
     const auto root = ap::CreateStage(fs::temp_directory_path() / "hs-action-snapshot-tests");
     try
     {
+        const auto cleanup_stage = ap::CreateStage(root / "cleanup-success");
+        constexpr std::string_view partial_bytes = "partial";
+        ap::WriteBytes(cleanup_stage / "partial.bin",
+            std::as_bytes(std::span(partial_bytes.data(), partial_bytes.size())));
+        ap::RemoveStageAfterFailure(cleanup_stage);
+        if (fs::exists(cleanup_stage))
+            throw std::runtime_error("best-effort failure cleanup did not remove an unlocked stage");
+
+#ifdef _WIN32
+        const auto locked_stage = ap::CreateStage(root / "cleanup-locked");
+        const auto locked_file = locked_stage / "locked.bin";
+        constexpr std::string_view locked_bytes = "locked";
+        ap::WriteBytes(locked_file,
+            std::as_bytes(std::span(locked_bytes.data(), locked_bytes.size())));
+        const HANDLE lock = CreateFileW(locked_file.c_str(), GENERIC_READ, 0, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (lock == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("could not open cleanup fixture without delete sharing");
+        struct HandleGuard
+        {
+            HANDLE value{};
+            ~HandleGuard() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+            void Close() noexcept
+            {
+                if (value != INVALID_HANDLE_VALUE) CloseHandle(std::exchange(value, INVALID_HANDLE_VALUE));
+            }
+        } lock_guard{lock};
+        std::string propagated_error;
+        try
+        {
+            try
+            {
+                throw std::runtime_error("primary producer failure");
+            }
+            catch (...)
+            {
+                ap::RemoveStageAfterFailure(locked_stage);
+                throw;
+            }
+        }
+        catch (const std::exception &error) { propagated_error = error.what(); }
+        if (propagated_error != "primary producer failure" || !fs::exists(locked_stage))
+            throw std::runtime_error("locked-stage cleanup replaced the primary error or removed the live stage");
+        const auto unreadable_diagnostics = hs::shader_content::ReadDxcDiagnostics(locked_stage);
+        if (!unreadable_diagnostics.starts_with("diagnostic output unavailable:"))
+            throw std::runtime_error("DXC diagnostic read failure was not converted to a secondary message");
+        lock_guard.Close();
+        ap::RemoveStage(locked_stage);
+#endif
+
         ap::ActionSpec spec;
         spec.action_id = "snapshot.fixture";
         spec.recipe_id = "snapshot.fixture";
@@ -97,4 +163,40 @@ void TestAssetActionSnapshot()
         throw;
     }
     ap::RemoveStage(root);
+}
+
+void TestGameDataFloatConversion()
+{
+    using hs::content::detail::CheckedFloat;
+    using hs::content::detail::CheckedPositiveFloat;
+    using hs::content::detail::CheckedSpawnRate;
+    const auto rejects = [](auto &&convert) {
+        try
+        {
+            static_cast<void>(convert());
+        }
+        catch (const std::exception &)
+        {
+            return;
+        }
+        throw std::runtime_error("game-data float conversion accepted an invalid value");
+    };
+
+    const auto maximum = static_cast<double>(std::numeric_limits<float>::max());
+    if (CheckedFloat(0.0) != 0.0f || CheckedFloat(1e-50) != 0.0f ||
+        CheckedFloat(1.25) != 1.25f || CheckedFloat(maximum) != std::numeric_limits<float>::max() ||
+        CheckedFloat(-maximum) != std::numeric_limits<float>::lowest() ||
+        CheckedPositiveFloat(1.25) != 1.25f)
+        throw std::runtime_error("game-data float conversion changed valid values or allowed zero");
+    rejects([] { return CheckedFloat(std::numeric_limits<double>::infinity()); });
+    rejects([] { return CheckedFloat(std::numeric_limits<double>::quiet_NaN()); });
+    rejects([&] { return CheckedFloat(std::nextafter(maximum, std::numeric_limits<double>::infinity())); });
+    rejects([&] { return CheckedFloat(std::nextafter(-maximum, -std::numeric_limits<double>::infinity())); });
+    rejects([] { return CheckedPositiveFloat(0.0); });
+    rejects([] { return CheckedPositiveFloat(1e-50); });
+    if (CheckedSpawnRate(4.8) != static_cast<float>(4.8) || CheckedSpawnRate(120) != 120.0f)
+        throw std::runtime_error("spawn rate conversion changed normal or multi-spawn ticks");
+    rejects([] { return CheckedSpawnRate(1e20); });
+    rejects([] { return CheckedSpawnRate(1e-50); });
+    rejects([] { return CheckedSpawnRate(0); });
 }

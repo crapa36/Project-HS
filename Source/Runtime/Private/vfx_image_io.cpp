@@ -1642,17 +1642,6 @@ void PrepareVfxDistortionRecipes(VfxProgramView p, std::vector<VfxRange> &ranges
             }
         }
         range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
-        if(range.count)
-        {
-            std::uint32_t profiles{};
-            for(const auto &recipe:std::span(recipes).subspan(range.first,range.count))
-            {
-                if(recipe.source_type!=VfxSourceType::Direct)continue;
-                if(recipe.profile==VfxOutputProfile::GroundSdfAdd)profiles|=kVfxGroundEventDirectAdd;
-                if(recipe.profile==VfxOutputProfile::GroundSdfSoft)profiles|=kVfxGroundEventDirectSoft;
-            }
-            recipes[range.first].event_admission_profiles=profiles;
-        }
     }
 }
 
@@ -2187,6 +2176,17 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
             }
         }
         range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
+        if(range.count)
+        {
+            std::uint32_t profiles{};
+            for(const auto &recipe:std::span(recipes).subspan(range.first,range.count))
+            {
+                if(recipe.source_type!=VfxSourceType::Direct)continue;
+                if(recipe.profile==VfxOutputProfile::GroundSdfAdd)profiles|=kVfxGroundEventDirectAdd;
+                if(recipe.profile==VfxOutputProfile::GroundSdfSoft)profiles|=kVfxGroundEventDirectSoft;
+            }
+            recipes[range.first].event_admission_profiles=profiles;
+        }
     }
 }
 

@@ -133,8 +133,8 @@ inline const PersistentVfxVisual *FindPreviousVfxVisual(
     PersistentVfxKind kind) noexcept
 {
     const auto found = std::ranges::lower_bound(index, std::pair{stable_id, kind},
-        [](const PreviousVfxVisualRow &candidate, const auto &key) {
-            return std::pair{candidate.visual->stable_id, candidate.visual->kind} < key;
+        std::ranges::less{}, [](const PreviousVfxVisualRow &candidate) {
+            return std::pair{candidate.visual->stable_id, candidate.visual->kind};
         });
     return found != index.end() && found->visual->stable_id == stable_id &&
            found->visual->kind == kind ? found->visual : nullptr;

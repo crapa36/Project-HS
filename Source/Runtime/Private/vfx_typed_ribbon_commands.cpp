@@ -664,7 +664,7 @@ void AppendVfxTypedRibbonInputs(
                     ? std::clamp(input.elapsed_seconds / fade_seconds, 0.0f, 1.0f)
                     : 1.0f;
                 ribbon.start_alpha = input.normalized_age > 0.0f
-                    ? KnotAlpha(source, input.normalized_age)
+                    ? KnotAlpha(source.knots, source.knot_count, input.normalized_age)
                     : source.knot_count == 4
                         ? std::clamp((live_alpha - source.knots[0]) /
                             std::max(source.knots[1] - source.knots[0], 0.0001f), 0.0f, 1.0f)
@@ -885,7 +885,7 @@ void AppendVfxEventRibbonInputs(
                 auto &ribbon = scratch.PrepareAppendRow();
                 ribbon.owner_id = event.sequence;
                 ribbon.effect_handle = event.effect_handle;
-                ribbon.source_id = source.stable_id;
+                ribbon.source_id = source.source_id;
                 ribbon.stable_seed = event.stable_seed;
                 ribbon.importance = event_recipe->importance;
                 ribbon.history_seconds = history;

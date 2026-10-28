@@ -121,9 +121,9 @@ Result D3D12Renderer::Impl::WriteVisibilityDescriptors(OwnedView &owner, std::ui
     structured_srv(frame.static_retest_refs.resource.Get());
     structured_srv(static_refs, static_ref_offset, static_ref_count);
     structured_srv(frame.upload.resource.Get(), dynamic_ref_offset, dynamic_ref_count);
-    texture_srv(visibility_ids.resource.Get());
-    texture_srv(visibility_front_face.resource.Get());
-    raw_srv(visibility_pixels.resource.Get()); raw_srv(visibility_counts.resource.Get());
+    texture_srv(owner.targets.visibility_ids.resource.Get());
+    texture_srv(owner.targets.visibility_front_face.resource.Get());
+    raw_srv(owner.targets.visibility_pixels.resource.Get()); raw_srv(owner.targets.visibility_counts.resource.Get());
     if (cluster_runtime && cluster_runtime->frames[frame_slot].refs.resource)
         structured_srv(cluster_runtime->frames[frame_slot].refs.resource.Get());
     else

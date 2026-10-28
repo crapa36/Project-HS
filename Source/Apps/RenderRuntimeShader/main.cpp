@@ -258,7 +258,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root, const fs::path &st
     const auto code = hs::shader_content::WaitForDxcExit(process, stage, diagnostics);
     if (code != 0)
         throw std::runtime_error("DXC compilation failed for " + output.filename().string() + ": " +
-            (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
+            hs::shader_content::ReadDxcDiagnostics(diagnostics));
 }
 
 void RemoveTransientDirectory(const fs::path &path)
@@ -297,7 +297,7 @@ void RunDependencyScan(const fs::path &dxc, const fs::path &source_root,
     const auto code = hs::shader_content::WaitForDxcExit(process, stage, diagnostics);
     if (code != 0)
         throw std::runtime_error("DXC dependency scan failed for " + std::string(source_relative) + ": " +
-            (fs::exists(diagnostics) ? ap::ReadBytes(diagnostics) : "no diagnostic output"));
+            hs::shader_content::ReadDxcDiagnostics(diagnostics));
 }
 
 std::size_t MakeTargetSeparator(std::string_view text)
@@ -630,7 +630,7 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
     catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...)
     {
-        ap::RemoveStage(stage);
+        ap::RemoveStageAfterFailure(stage);
         throw;
     }
 }

@@ -188,7 +188,7 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
         ap::Publish(build, spec, stage, std::move(products));
         phase("publish");
     }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage);
     std::cout << spec.action_id << " published\n";
 }

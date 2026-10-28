@@ -725,7 +725,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     ap::AtomicWriteIfDifferent(shipping / "content.receipt.json", receipt.dump(2) + "\n");
     std::cout << "shipping-image published " << build_id << '\n';
     }
-    catch (...) { ap::RemoveStage(stage); throw; }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage);
 }
 }

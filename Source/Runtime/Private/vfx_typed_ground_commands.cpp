@@ -241,12 +241,17 @@ void AppendSourceOutputs(const VfxImage &image, std::span<const VfxGroundRecipe>
             item.geometry.outer_radius = owner.ring_gaps->outer_radius;
             item.geometry.edge_width = width;
             item.geometry.gap_half_angle_radians = owner.ring_gaps->gap_half_width_degrees * (3.14159265358979323846f / 180.0f);
-            item.geometry.gap_angles_radians.reserve(owner.ring_gaps->gap_angles_degrees.size());
-            for (float degrees : owner.ring_gaps->gap_angles_degrees)
+            item.geometry.uniform_gaps = owner.ring_gaps->uniform_gaps;
+            if (!item.geometry.uniform_gaps.Active())
             {
-                float wrapped = std::fmod(degrees, 360.0f);
-                if (wrapped < 0) wrapped += 360.0f;
-                item.geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
+                item.geometry.gap_angles_radians.reserve(owner.ring_gaps->GapCount());
+                for (std::size_t i = 0; i < owner.ring_gaps->GapCount(); ++i)
+                {
+                    const float degrees = owner.ring_gaps->GapAngleDegrees(i);
+                    float wrapped = std::fmod(degrees, 360.0f);
+                    if (wrapped < 0) wrapped += 360.0f;
+                    item.geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
+                }
             }
         }
         if(owner.is_circle_preview && (preview || ticks))
@@ -525,12 +530,17 @@ void AppendBossSignatureOutputs(const VfxEventInput &input, float age, float env
             geometry.inner_radius = ring->inner_radius;
             geometry.gap_half_angle_radians = ring->gap_half_width_degrees *
                 (3.14159265358979323846f / 180.0f);
-            geometry.gap_angles_radians.reserve(ring->gap_angles_degrees.size());
-            for (float degrees : ring->gap_angles_degrees)
+            geometry.uniform_gaps = ring->uniform_gaps;
+            if (!geometry.uniform_gaps.Active())
             {
-                float wrapped = std::fmod(degrees, 360.0f);
-                if (wrapped < 0.0f) wrapped += 360.0f;
-                geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
+                geometry.gap_angles_radians.reserve(ring->GapCount());
+                for (std::size_t i = 0; i < ring->GapCount(); ++i)
+                {
+                    const float degrees = ring->GapAngleDegrees(i);
+                    float wrapped = std::fmod(degrees, 360.0f);
+                    if (wrapped < 0.0f) wrapped += 360.0f;
+                    geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
+                }
             }
         }
         if (cone)
@@ -1213,9 +1223,18 @@ void AppendPersistentGroundCommands(
             const auto range = image.ground_effect_ranges[input.effect_handle - 1];
             if (!ValidRange(range, image.ground_recipes)) continue;
             const auto recipes = image.ground_recipes.subspan(range.first, range.count);
+            const auto &effect = cooked.effects[input.effect_handle - 1];
+            const auto source_first = static_cast<std::size_t>(effect.sources.first);
+            const auto source_count = static_cast<std::size_t>(effect.sources.count);
+            if (source_count != 2 || source_first > cooked.sources.size() ||
+                source_count > cooked.sources.size() - source_first)
+                continue;
+            std::array<std::span<const VfxGroundRecipe>, 2> source_recipes{};
+            for (std::size_t offset = 0; offset < source_recipes.size(); ++offset)
+                source_recipes[offset] = SourceRecipes(recipes, source_first + offset);
             const auto first = result.size();
-            AppendWaveGroundOutputs(image, cooked.effects[input.effect_handle - 1],
-                                    timer, input.normalized_age, recipes, result);
+            AppendWaveGroundOutputs(image, effect, timer, input.normalized_age,
+                                    recipes, source_recipes, result);
             for (std::size_t index = first; index < result.size(); ++index)
             {
                 result[index].source_visual_kind = input.source_visual_kind;
@@ -1245,7 +1264,7 @@ void AppendPersistentGroundCommands(
         if ((circle && (!Finite(circle->center) || !std::isfinite(circle->radius) || circle->radius <= 0.0f)) ||
             (line && (!Finite(line->start) || !Finite(line->end) || !std::isfinite(line->width) || line->width <= 0.0f)))
             continue;
-        if (ring_gaps && (!Finite(ring_gaps->center) || !std::isfinite(ring_gaps->inner_radius) ||
+        if (ring_gaps && (!ring_gaps->GapStorageConsistent() || !Finite(ring_gaps->center) || !std::isfinite(ring_gaps->inner_radius) ||
             !std::isfinite(ring_gaps->outer_radius) || ring_gaps->inner_radius < 0 || ring_gaps->outer_radius <= ring_gaps->inner_radius ||
             !std::isfinite(ring_gaps->gap_half_width_degrees) || ring_gaps->gap_half_width_degrees < 0 || ring_gaps->gap_half_width_degrees > 180 ||
             !std::isfinite(ring_gaps->lifetime01) || ring_gaps->lifetime01 < 0 || ring_gaps->lifetime01 > 1 ||
@@ -1379,12 +1398,12 @@ void AppendEventGroundCommands(
         if ((circle && (!Finite(circle->center) || !std::isfinite(circle->radius) || circle->radius <= 0.0f || circle->inner_radius != 0)) ||
             (point && (!Finite(point->position) || !std::isfinite(point->authored_scale) || point->authored_scale <= 0.0f)) ||
             (line && (!Finite(line->start) || !Finite(line->end) || !std::isfinite(line->width) || line->width <= 0.0f))) continue;
-        if (ring_gaps && ((effect.timing_kind == 1 && input.geometry_owner_id == 0) ||
+        if (ring_gaps && (!ring_gaps->GapStorageConsistent() || (effect.timing_kind == 1 && input.geometry_owner_id == 0) ||
             static_cast<std::uint32_t>(input.quality) > 2 || !Finite(ring_gaps->center) ||
             !std::isfinite(ring_gaps->inner_radius) || !std::isfinite(ring_gaps->outer_radius) ||
             ring_gaps->inner_radius < 0 || ring_gaps->outer_radius <= ring_gaps->inner_radius ||
             !std::isfinite(ring_gaps->gap_half_width_degrees) || ring_gaps->gap_half_width_degrees < 0 || ring_gaps->gap_half_width_degrees > 180 ||
-            (!ring_gaps->gap_angles_degrees.empty() && ring_gaps->gap_half_width_degrees == 0) ||
+            (ring_gaps->GapCount() != 0 && ring_gaps->gap_half_width_degrees == 0) ||
             std::any_of(ring_gaps->gap_angles_degrees.begin(),ring_gaps->gap_angles_degrees.end(),[](float v){return !std::isfinite(v);}))) continue;
         const float dx = line ? line->end.x - line->start.x : 0.0f;
         const float dz = line ? line->end.z - line->start.z : 0.0f;

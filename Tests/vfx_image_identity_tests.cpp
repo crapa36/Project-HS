@@ -93,7 +93,9 @@ void TestVfxImageIdentity()
     data.ribbon_link_output_recipes={{9,1,false,.04f,
         {VfxOutputProfile::RibbonAdd,VfxMotionKind::CurvesTowardCollector,{.2f,.3f,.4f,.7f},
             .04f,.04f,0,0,2,0,19,0xffffffffu,false,false},
-        {{{0,2},.35f,true,true},{{2,2},.4f,true,true},{{4,2},.5f,true,true}}}};
+        std::array{VfxRibbonLinkDetailRecipe{{0,2},.35f,true,true},
+            VfxRibbonLinkDetailRecipe{{2,2},.4f,true,true},
+            VfxRibbonLinkDetailRecipe{{4,2},.5f,true,true}}}};
     data.ribbon_event_effect_recipes={{22,1,3,4,.6f,{0,1}}};
     data.ribbon_event_sources={{1,9,4,true,{.1f,.2f,.8f,.9f},.25f,{35,45,55},{50,65,75},{0,1}}};
     data.ribbon_event_outputs={{2,true,true,75,
@@ -148,18 +150,66 @@ void TestVfxImageIdentity()
     data.persistent_fire_recipes[0].authoritative = false;
     Check(CanonicalVfxImageBytes(data.View()) == baseline);
 
-    data.ground_recipes[0].source_output_count = 2;
-    Check(CanonicalVfxImageBytes(data.View()) != baseline);
-    data.ground_recipes[0].source_output_count = 0;
-    data.ground_recipes[0].effect_lookup_count = 1;
-    Check(CanonicalVfxImageBytes(data.View()) != baseline);
-    data.ground_recipes[0].effect_lookup_count = 0;
-    data.ground_recipes[0].source_parameters_empty = true;
-    Check(CanonicalVfxImageBytes(data.View()) != baseline);
-    data.ground_recipes[0].source_parameters_empty = false;
-    data.ground_recipes[0].event_admission_profiles = kVfxGroundEventDirectAdd;
-    Check(CanonicalVfxImageBytes(data.View()) != baseline);
-    data.ground_recipes[0].event_admission_profiles = 0;
+    const auto check_ground_field = [&](auto mutate) {
+        data.ground_recipes[0] = ground;
+        mutate(data.ground_recipes[0]);
+        Check(CanonicalVfxImageBytes(data.View()) != baseline);
+    };
+    check_ground_field([](auto &r) { ++r.effect_id; });
+    check_ground_field([](auto &r) { ++r.effect_handle; });
+    check_ground_field([](auto &r) { ++r.source_index; });
+    check_ground_field([](auto &r) { ++r.source_stable_id; });
+    check_ground_field([](auto &r) { ++r.output_index; });
+    check_ground_field([](auto &r) { ++r.gradient_row; });
+    check_ground_field([](auto &r) { ++r.payload_kind; });
+    check_ground_field([](auto &r) { ++r.timing_kind; });
+    check_ground_field([](auto &r) { ++r.min_quality; });
+    check_ground_field([](auto &r) { r.source_type = VfxSourceType::ProjectileFollow; });
+    check_ground_field([](auto &r) { r.profile = VfxOutputProfile::GroundSdfAdd; });
+    check_ground_field([](auto &r) { r.motion = VfxMotionKind::SlowCounterRotationStableFootprint; });
+    check_ground_field([](auto &r) { r.kind = VfxGroundRecipeKind::Ticks; });
+    check_ground_field([](auto &r) { ++r.knot_count; });
+    check_ground_field([](auto &r) { r.knots[0] = -0.0f; });
+    check_ground_field([](auto &r) { r.knots[1] = .25f; });
+    check_ground_field([](auto &r) { r.knots[2] = .5f; });
+    check_ground_field([](auto &r) { r.knots[3] = 1.0f; });
+    check_ground_field([](auto &r) { ++r.pulse_curve_keys.first; });
+    check_ground_field([](auto &r) { ++r.pulse_curve_keys.count; });
+    check_ground_field([](auto &r) { ++r.pulse_curve_interpolation; });
+    check_ground_field([](auto &r) { ++r.tick_count; });
+    check_ground_field([](auto &r) { r.seconds = 1.0f; });
+    check_ground_field([](auto &r) { r.primary = 1.0f; });
+    check_ground_field([](auto &r) { r.secondary = 1.0f; });
+    check_ground_field([](auto &r) { r.rgb.x = 1.0f; });
+    check_ground_field([](auto &r) { r.rgb.y = 1.0f; });
+    check_ground_field([](auto &r) { r.rgb.z = 1.0f; });
+    check_ground_field([](auto &r) { r.hdr = 1.0f; });
+    check_ground_field([](auto &r) { r.alpha = 1.0f; });
+    check_ground_field([](auto &r) { r.motion_rate_hz = 1.0f; });
+    check_ground_field([](auto &r) { r.motion_amplitude = 1.0f; });
+    check_ground_field([](auto &r) { r.motion_inset_fraction = 1.0f; });
+    check_ground_field([](auto &r) { r.tertiary = .25f; });
+    check_ground_field([](auto &r) { ++r.mask_variants[1].slices.first; });
+    check_ground_field([](auto &r) { ++r.mask_variants[1].slices.count; });
+    check_ground_field([](auto &r) { r.mask_variants[1].strength = .75f; });
+    check_ground_field([](auto &r) { r.mask_variants[1].valid = true; });
+    check_ground_field([](auto &r) { r.mask_variants[1].present = false; });
+    check_ground_field([](auto &r) { r.mask_variants[0].slices.first = 1; });
+    check_ground_field([](auto &r) { r.mask_variants[0].slices.count = 1; });
+    check_ground_field([](auto &r) { r.mask_variants[0].strength = .25f; });
+    check_ground_field([](auto &r) { r.mask_variants[0].valid = false; });
+    check_ground_field([](auto &r) { r.mask_variants[0].present = true; });
+    check_ground_field([](auto &r) { r.mask_variants[2].slices.first = 1; });
+    check_ground_field([](auto &r) { r.mask_variants[2].slices.count = 1; });
+    check_ground_field([](auto &r) { r.mask_variants[2].strength = .25f; });
+    check_ground_field([](auto &r) { r.mask_variants[2].valid = false; });
+    check_ground_field([](auto &r) { r.mask_variants[2].present = true; });
+    check_ground_field([](auto &r) { r.texture_contract_valid = true; });
+    check_ground_field([](auto &r) { ++r.source_output_count; });
+    check_ground_field([](auto &r) { ++r.effect_lookup_count; });
+    check_ground_field([](auto &r) { r.source_parameters_empty = true; });
+    check_ground_field([](auto &r) { r.event_admission_profiles = kVfxGroundEventDirectAdd; });
+    data.ground_recipes[0] = ground;
     Check(CanonicalVfxImageBytes(data.View()) == baseline);
 
     data.screen_recipes[0].center_clear += .01f;

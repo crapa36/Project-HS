@@ -386,8 +386,8 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
         ap::AtomicWriteIfDifferent(completion,"environment-texture-family-v1\n"+std::to_string(timestamp)+"\n");
         if(!input_stage.empty()) { ap::RemoveStage(input_stage); input_stage.clear(); }
     } catch(...) {
-        for(auto& action:actions) if(!action.stage.empty()) ap::RemoveStage(action.stage);
-        if(!input_stage.empty()) ap::RemoveStage(input_stage);
+        for(auto& action:actions) if(!action.stage.empty()) ap::RemoveStageAfterFailure(action.stage);
+        if(!input_stage.empty()) ap::RemoveStageAfterFailure(input_stage);
         throw;
     }
 }
@@ -509,14 +509,14 @@ void Produce(std::string_view mode, const fs::path& source_root,
                     "producer wrote unexpected staged files");
             ap::Publish(build_root, spec, stage, std::move(products));
         } catch (...) {
-            ap::RemoveStage(stage);
+            ap::RemoveStageAfterFailure(stage);
             throw;
         }
         ap::RemoveStage(stage);
         ap::RemoveStage(input_stage);
         std::cout << spec.action_id << " published\n";
     } catch (...) {
-        ap::RemoveStage(input_stage);
+        ap::RemoveStageAfterFailure(input_stage);
         throw;
     }
 }

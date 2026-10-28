@@ -23,6 +23,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdio>
 #include <fstream>
 #include <format>
 #include <iostream>
@@ -1026,6 +1027,22 @@ void RemoveStage(const fs::path &stage)
         std::error_code error;
         fs::remove_all(stage, error);
         Require(!error, "cannot remove staging directory: " + error.message());
+    }
+}
+
+void RemoveStageAfterFailure(const fs::path &stage) noexcept
+{
+    try
+    {
+        RemoveStage(stage);
+    }
+    catch (const std::exception &error)
+    {
+        std::fprintf(stderr, "secondary stage cleanup failure: %s\n", error.what());
+    }
+    catch (...)
+    {
+        std::fputs("secondary stage cleanup failure: unknown error\n", stderr);
     }
 }
 

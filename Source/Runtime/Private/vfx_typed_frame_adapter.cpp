@@ -1,5 +1,6 @@
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_generation_rebind.hpp"
+#include "vfx_workspace_size.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,17 +19,6 @@ namespace hs::runtime_detail
 {
 namespace
 {
-std::size_t CapacityBytes(std::size_t count, std::size_t item_size) noexcept
-{
-    return count && item_size > std::numeric_limits<std::size_t>::max() / count
-        ? std::numeric_limits<std::size_t>::max() : count * item_size;
-}
-std::size_t AddBytes(std::size_t a, std::size_t b) noexcept
-{
-    return b > std::numeric_limits<std::size_t>::max() - a
-        ? std::numeric_limits<std::size_t>::max() : a + b;
-}
-
 consteval std::uint32_t Hash32(std::string_view value) noexcept
 {
     std::uint32_t hash = 2166136261u;
@@ -339,14 +329,8 @@ bool MakeEventGeometry(const PresentationEvent &event,
             ring.outer_radius = geometry.outer_radius;
             ring.gap_half_width_degrees = geometry.gap_half_width_degrees;
             ring.lifetime01 = 0.0f;
-            ring.gap_angles_degrees.reserve(geometry.gap_count);
-            if (geometry.gap_count > 0)
-            {
-                const auto spacing = 360.0f / static_cast<float>(geometry.gap_count);
-                for (std::uint8_t i = 0; i < geometry.gap_count; ++i)
-                    ring.gap_angles_degrees.push_back(
-                        geometry.gap_offset_degrees + spacing * static_cast<float>(i));
-            }
+            ring.uniform_gaps = {geometry.gap_offset_degrees, geometry.gap_count,
+                VfxGapAngleFormula::EventSpacing};
             payload = std::move(ring);
         }
         return true;
@@ -489,9 +473,8 @@ bool ValidRingGaps(const PersistentVfxVisual &visual) noexcept
 
 float RingGapAngle(const PersistentVfxVisual &visual, std::uint32_t index) noexcept
 {
-    const auto degrees = visual.gap_offset_degrees +
-        360.0f * static_cast<float>(index) / static_cast<float>(visual.gap_count);
-    return std::fmod(std::fmod(degrees, 360.0f) + 360.0f, 360.0f);
+    return VfxUniformRingGaps{visual.gap_offset_degrees, visual.gap_count,
+        VfxGapAngleFormula::OwnerNormalized}.AngleDegrees(index);
 }
 
 void FillRingGaps(const PersistentVfxVisual &visual, float age, VfxRingGapsPayload &ring) noexcept
@@ -501,8 +484,9 @@ void FillRingGaps(const PersistentVfxVisual &visual, float age, VfxRingGapsPaylo
     ring.outer_radius = visual.ring_outer_radius;
     ring.gap_half_width_degrees = visual.gap_half_angle_degrees;
     ring.lifetime01 = age;
-    for (std::uint32_t index = 0; index < visual.gap_count; ++index)
-        ring.gap_angles_degrees[index] = RingGapAngle(visual, index);
+    ring.gap_angles_degrees.clear();
+    ring.uniform_gaps = {visual.gap_offset_degrees, visual.gap_count,
+        VfxGapAngleFormula::OwnerNormalized};
 }
 
 bool MakeRingGaps(const PersistentVfxVisual &visual, float age, VfxPayload &payload)
@@ -510,12 +494,10 @@ bool MakeRingGaps(const PersistentVfxVisual &visual, float age, VfxPayload &payl
     if (!ValidRingGaps(visual)) return false;
     if (auto *ring = std::get_if<VfxRingGapsPayload>(&payload))
     {
-        ring->gap_angles_degrees.resize(visual.gap_count);
         FillRingGaps(visual, age, *ring);
         return true;
     }
     VfxRingGapsPayload ring;
-    ring.gap_angles_degrees.resize(visual.gap_count);
     FillRingGaps(visual, age, ring);
     payload = std::move(ring);
     return true;
@@ -645,8 +627,8 @@ std::optional<float> DeliveryHeadRadius(const VfxProgramView &cooked,
 
 bool MakeSafeSector(const VfxRingGapsPayload &ring, std::uint32_t index, VfxPayload &payload)
 {
-    if (index >= ring.gap_angles_degrees.size()) return false;
-    const auto radians = ring.gap_angles_degrees[index] * 0.017453292519943295f;
+    if (index >= ring.GapCount()) return false;
+    const auto radians = ring.GapAngleDegrees(index) * 0.017453292519943295f;
     payload = VfxSafeSectorPayload{ring.center, {std::cos(radians), 0.0f, std::sin(radians)},
         ring.inner_radius, ring.outer_radius, ring.gap_half_width_degrees, ring.lifetime01};
     return true;
@@ -741,13 +723,9 @@ std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) co
 
 std::size_t PreparedPairFacts::RetainedCapacityBytes() const noexcept
 {
-    const auto table = [](const auto &values) noexcept {
-        return AddBytes(CapacityBytes(values.bucket_count(), sizeof(void *)),
-            CapacityBytes(values.size(), sizeof(typename std::decay_t<decltype(values)>::value_type) +
-                3 * sizeof(void *)));
-    };
-    return AddBytes(AddBytes(table(previous_), table(current_)),
-        AddBytes(table(instances_), table(captures_)));
+    using namespace vfx_retained_size;
+    return Add(Add(HashTable(previous_), HashTable(current_)),
+        Add(HashTable(instances_), HashTable(captures_)));
 }
 
 bool PreparedPairFacts::Prepare(Key key,
@@ -819,7 +797,7 @@ void BuildVfxTypedFrameInputs(
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
     VfxTypedFrameInputs &result,
-    const PreparedPairFacts *pair_facts, float interpolation)
+    const PreparedPairFacts *pair_facts, float interpolation, VfxQuality quality)
 {
     const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
@@ -872,6 +850,7 @@ void BuildVfxTypedFrameInputs(
             continue;
         }
         VfxEventInput input;
+        input.quality = quality;
         input.effect_handle = effect->handle;
         input.sequence = event.sequence;
         input.status_episode_generation = event.status_episode_generation;
@@ -988,7 +967,7 @@ void BuildVfxTypedFrameInputs(
         }
         if (effect_id == Hash64("particle.boss.shockwave.telegraph") && input.geometry_owner_id != 0)
         {
-            const auto gap_count = std::get<VfxRingGapsPayload>(input.payload).gap_angles_degrees.size();
+            const auto gap_count = std::get<VfxRingGapsPayload>(input.payload).GapCount();
             if (gap_count != 0)
             {
                 const auto *marker_lookup = FindLookup(image, kSafeMarkerEffect);
@@ -998,6 +977,7 @@ void BuildVfxTypedFrameInputs(
                     Diagnose(result, kSafeMarkerEffect);
                 else
                 {
+                    vfx_retained_size::ReserveAppend(result.events, gap_count + 1u);
                     // Sector rows share envelope facts, not a copy of the ring's entire gap vector.
                     auto ring = std::move(std::get<VfxRingGapsPayload>(input.payload));
                     input.payload = VfxSafeSectorPayload{};
@@ -1073,6 +1053,7 @@ void BuildVfxTypedFrameInputs(
             const auto start = visual.source_horizon_tick > window
                 ? visual.source_horizon_tick - window : Tick{};
             VfxPersistentInput input{};
+            input.quality = quality;
             input.stable_id = visual.stable_id;
             input.effect_handle = effect->handle;
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
@@ -1128,6 +1109,7 @@ void BuildVfxTypedFrameInputs(
             const auto previous_position = position_at(current_tick > started ? current_tick - 1 : started);
             const Float3 velocity{0, -height * 60.0f / static_cast<float>(duration_ticks), 0};
             VfxPersistentInput input;
+            input.quality = quality;
             input.stable_id = visual.stable_id;
             input.effect_handle = effect->handle;
             input.current_transform = Transform(position, 0);
@@ -1175,6 +1157,7 @@ void BuildVfxTypedFrameInputs(
                 continue;
             }
             VfxPersistentInput input;
+            input.quality = quality;
             input.stable_id = visual.stable_id;
             input.effect_handle = effect->handle;
             input.current_transform = Transform(visual.projectile_current_position,
@@ -1363,6 +1346,7 @@ void BuildVfxTypedFrameInputs(
         }
 
         VfxPersistentInput input;
+        input.quality = quality;
         input.stable_id = visual.stable_id;
         input.status_episode_generation = visual.status_episode_generation;
         if (visual.kind == PersistentVfxKind::BossPhase2Aura ||
@@ -1601,8 +1585,8 @@ void BuildVfxTypedFrameInputs(
 
 std::size_t VfxUpgradeMovementState::RetainedCapacityBytes() const noexcept
 {
-    return AddBytes(CapacityBytes(owners_.capacity(), sizeof(Owner)),
-                    CapacityBytes(staged_owners_.capacity(), sizeof(Owner)));
+    return vfx_retained_size::Add(vfx_retained_size::Vector(owners_),
+        vfx_retained_size::Vector(staged_owners_));
 }
 
 std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
@@ -1628,7 +1612,7 @@ std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
 void VfxUpgradeMovementState::Append(
     const VfxImage &image,
     std::span<const PresentationEvent> dispatched_events,
-    Tick current_tick, std::vector<VfxPersistentInput> &output, float interpolation)
+    Tick current_tick, std::vector<VfxPersistentInput> &output, float interpolation, VfxQuality quality)
 {
     const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
@@ -1702,23 +1686,14 @@ void VfxUpgradeMovementState::Append(
           return static_cast<std::size_t>(std::ranges::count_if(owners,
               [display_tick](const Owner &owner) { return display_tick >= owner.started; }));
       };
-      const auto reserve_appends = [](auto &buffer, std::size_t append_count) {
-          const auto maximum = buffer.max_size();
-          if (append_count > maximum - buffer.size())
-              throw std::length_error("retreat VFX append exceeds vector capacity");
-          const auto required = buffer.size() + append_count;
-          if (required <= buffer.capacity()) return;
-          const auto current = buffer.capacity();
-          const auto grown = current == 0 ? std::size_t{1} :
-              (current > maximum / 2 ? maximum : current * 2);
-          buffer.reserve(std::max(required, grown));
-      };
-      reserve_appends(owners_, staged_owners_.size());
-      reserve_appends(output, visible_count(owners_) + visible_count(staged_owners_));
+      vfx_retained_size::ReserveAppend(owners_, staged_owners_.size());
+      vfx_retained_size::ReserveAppend(output,
+          visible_count(owners_) + visible_count(staged_owners_));
 
       const auto append_visible = [&](const Owner &owner) {
           if (display_tick < owner.started) return;
           auto input = owner.input;
+          input.quality = quality;
           input.elapsed_ticks = display_tick - owner.started;
           input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
           input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);

@@ -1,4 +1,5 @@
 #include "vfx_typed_ballistic_commands.hpp"
+#include "vfx_workspace_size.hpp"
 #include <hs/render_data/render_snapshot.hpp>
 #include <algorithm>
 #include <cmath>
@@ -37,9 +38,11 @@ std::uint64_t StatusEffectId(std::uint8_t kind)
 std::uint32_t SourceSeed(const VfxBallisticRecipe &r,std::uint32_t seed)
 {return Mix(seed^Mix(static_cast<std::uint32_t>(r.effect_id))^Mix(static_cast<std::uint32_t>(r.effect_id>>32))^Mix(r.source_stable_id));}
 bool Emit(const VfxBallisticRecipe &r,std::uint32_t source_seed,std::uint32_t count,Tick tick,Tick birth_tick,float birth_fraction,
- Float3 center,Float3 axis,float scale,float radius,float lifetime,Sequence sequence,std::vector<ParticleSpawnCommand> &result)
+ Float3 center,Float3 axis,float scale,float radius,float lifetime,Sequence sequence,
+ std::vector<ParticleSpawnCommand> &result,bool reserve_output=true)
 {
  if(!count)return false;
+ if(reserve_output)vfx_retained_size::ReserveAppend(result,count);
  const Float3 right=Normalize(Cross(std::abs(axis.y)<.9f?Float3{0,1,0}:Float3{1,0,0},axis));const Float3 up=Cross(axis,right);
  const float cone_cosine=std::cos(r.cone*std::numbers::pi_v<float>/180);
  const auto before=result.size();
@@ -108,11 +111,10 @@ void AppendPersistentStatusShardCommands(const VfxImage &image,
 }
 std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs)
 {std::vector<ParticleSpawnCommand> result;AppendVfxTypedBallisticCommands(image,inputs,result);return result;}
-void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
- std::vector<ParticleSpawnCommand> &result,std::vector<std::size_t> *emitted_event_indices)
+void PrepareVfxTypedBallisticBursts(const VfxImage &image,VfxEventView inputs,
+ std::vector<VfxPreparedBallisticBurst> &plans)
 {
- const auto old_result_size=result.size();
- const auto old_index_size=emitted_event_indices?emitted_event_indices->size():0;
+ const auto old_plan_size=plans.size();
  try
  {
   for(std::size_t input_index=0;input_index<inputs.size();++input_index)
@@ -127,7 +129,6 @@ void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
    else if(const auto *circle=std::get_if<VfxCirclePayload>(&input.payload)){if(circle->inner_radius!=0||!std::isfinite(circle->radius)||circle->radius<=0)continue;center=circle->center;radius=circle->radius;payload_kind=Hash("CircleAreaPayload");}
    else continue;
    if(!Finite(center)||!Finite(normal)||!std::isfinite(std::hypot(normal.x,normal.y,normal.z))||!std::isfinite(scale)||scale<=0)continue;
-   bool event_emitted=false;
    for(const auto &r:image.ballistic_recipes.subspan(range.first,range.count))
    {
     if(r.persistent_status||r.effect_handle!=input.effect_handle||r.min_quality>static_cast<std::uint32_t>(input.quality)||
@@ -137,10 +138,67 @@ void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
     if(!std::isfinite(delay)||ceil_delay>=static_cast<double>(std::numeric_limits<Tick>::max()-input.event_tick))continue;
     const Tick floor_tick=input.event_tick+static_cast<Tick>(floor_delay),tick=input.event_tick+static_cast<Tick>(ceil_delay);
     const auto source_seed=SourceSeed(r,input.stable_seed);const Float3 axis=(r.motion==VfxMotionKind::ShortBallisticFan||forward)?Normalize(normal):Float3{0,1,0};
-    event_emitted|=Emit(r,source_seed,r.count,tick,floor_tick,static_cast<float>(delay-floor_delay),center,axis,scale,radius,
-      r.seconds*(r.knots[1]-r.knots[0]),input.sequence,result);
+    const bool cosmetic=r.source_index<image.program.sources.size()&&
+      image.program.sources[r.source_index].effect==r.effect_handle&&
+      image.program.sources[r.source_index].type==VfxSourceType::BallisticCollision&&
+      image.program.sources[r.source_index].authoritative==0&&r.source_type==VfxSourceType::BallisticCollision;
+    plans.push_back({&r,input_index,r.count,r.count,source_seed,r.importance,tick,floor_tick,center,axis,
+      static_cast<float>(delay-floor_delay),scale,radius,r.seconds*(r.knots[1]-r.knots[0]),input.sequence,cosmetic});
    }
-   if(event_emitted&&emitted_event_indices)emitted_event_indices->push_back(input_index);
+  }
+ }
+ catch(...)
+ {
+  plans.resize(old_plan_size);
+  throw;
+ }
+}
+void AppendVfxPreparedBallisticBursts(std::span<const VfxPreparedBallisticBurst> plans,
+ std::vector<ParticleSpawnCommand> &result,std::vector<std::size_t> *emitted_event_indices)
+{
+ const auto old_result_size=result.size();
+ const auto old_index_size=emitted_event_indices?emitted_event_indices->size():0;
+ try
+ {
+  std::size_t aggregate{};
+  for(const auto &plan:plans)
+  {
+   if(!plan.recipe||plan.count!=plan.recipe->count||
+      plan.count>std::numeric_limits<std::uint32_t>::max()||plan.admitted_count>plan.count)
+    throw std::invalid_argument("prepared ballistic burst has invalid recipe or admission count");
+   if(plan.admitted_count>std::numeric_limits<std::size_t>::max()-aggregate)
+    throw std::length_error("prepared ballistic burst count overflow");
+   aggregate+=plan.admitted_count;
+  }
+  vfx_retained_size::ReserveAppend(result,aggregate);
+
+  if(emitted_event_indices)
+  {
+   std::size_t event_groups{};
+   for(std::size_t i=0;i<plans.size();)
+   {
+    const auto event_index=plans[i].event_index;
+    bool admitted=false;
+    do{admitted|=plans[i].admitted_count!=0;++i;}
+    while(i<plans.size()&&plans[i].event_index==event_index);
+    if(admitted)++event_groups;
+   }
+   vfx_retained_size::ReserveAppend(*emitted_event_indices,event_groups);
+  }
+
+  for(std::size_t i=0;i<plans.size();)
+  {
+   const auto event_index=plans[i].event_index;
+   bool event_emitted=false;
+   do
+   {
+    const auto &plan=plans[i++];
+    if(plan.admitted_count==0)continue;
+    event_emitted|=Emit(*plan.recipe,plan.source_seed,static_cast<std::uint32_t>(plan.admitted_count),plan.tick,plan.birth_tick,
+      plan.birth_fraction,plan.center,plan.axis,plan.scale,plan.radius,plan.lifetime,plan.sequence,result,false);
+   }
+   while(i<plans.size()&&plans[i].event_index==event_index);
+   if(event_emitted&&emitted_event_indices)emitted_event_indices->push_back(event_index);
   }
  }
  catch(...)
@@ -149,6 +207,13 @@ void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
   if(emitted_event_indices)emitted_event_indices->resize(old_index_size);
   throw;
  }
+}
+void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
+ std::vector<ParticleSpawnCommand> &result,std::vector<std::size_t> *emitted_event_indices)
+{
+ std::vector<VfxPreparedBallisticBurst> plans;
+ PrepareVfxTypedBallisticBursts(image,inputs,plans);
+ AppendVfxPreparedBallisticBursts(plans,result,emitted_event_indices);
 }
 void BuildVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,std::vector<ParticleSpawnCommand> &result)
 {AppendVfxTypedBallisticCommands(image,inputs,result);}

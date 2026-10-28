@@ -25,6 +25,63 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
+void TestUniformGapFormulaMatchesExpandedAngles()
+{
+    const std::array offsets{-725.0f,-360.0f,-0.0f,0.0f,7.0f,359.0f,719.0f,
+        std::nextafter(360.0f,0.0f),4096.125f};
+    const std::array<std::uint8_t,7> counts{0,1,2,3,7,254,255};
+    for(float offset:offsets)
+        for(auto count:counts)
+        {
+            hs::VfxRingGapsPayload event,owner;
+            event.uniform_gaps={offset,count,hs::VfxGapAngleFormula::EventSpacing};
+            owner.uniform_gaps={offset,count,hs::VfxGapAngleFormula::OwnerNormalized};
+            Check(event.GapStorageConsistent()&&owner.GapStorageConsistent()&&
+                event.GapCount()==count&&owner.GapCount()==count,
+                "compact ring descriptor lost its source gap count");
+            if(!count)continue;
+            const float spacing=360.0f/static_cast<float>(count);
+            for(std::uint32_t index=0;index<count;++index)
+            {
+                const float event_angle=offset+spacing*static_cast<float>(index);
+                const float degrees=offset+360.0f*static_cast<float>(index)/static_cast<float>(count);
+                const float owner_angle=std::fmod(std::fmod(degrees,360.0f)+360.0f,360.0f);
+                Check(std::bit_cast<std::uint32_t>(event.GapAngleDegrees(index))==
+                        std::bit_cast<std::uint32_t>(event_angle)&&
+                    std::bit_cast<std::uint32_t>(owner.GapAngleDegrees(index))==
+                        std::bit_cast<std::uint32_t>(owner_angle),
+                    "compact gaps changed event/owner expression order or normalization");
+                for(const auto *payload:{&event,&owner})
+                {
+                    hs::VfxGroundGeometry ground;
+                    ground.uniform_gaps=payload->uniform_gaps;
+                    float wrapped=std::fmod(payload->uniform_gaps.formula==hs::VfxGapAngleFormula::EventSpacing
+                        ?event_angle:owner_angle,360.0f);
+                    if(wrapped<0.0f)wrapped+=360.0f;
+                    const float radians=wrapped*(3.14159265358979323846f/180.0f);
+                    Check(ground.gap_angles_radians.capacity()==0&&
+                        std::bit_cast<std::uint32_t>(ground.GapAngleRadians(index))==
+                            std::bit_cast<std::uint32_t>(radians),
+                        "compact ground gaps changed the former flattened upload values");
+                }
+            }
+        }
+    hs::VfxRingGapsPayload raw;
+    raw.gap_angles_degrees={-17,43,407,720};
+    Check(raw.GapStorageConsistent()&&raw.GapCount()==4&&raw.GapAngleDegrees(2)==407,
+        "raw irregular ring gap values were normalized or lost");
+    raw.uniform_gaps={0,3,hs::VfxGapAngleFormula::EventSpacing};
+    Check(!raw.GapStorageConsistent(),"mixed compact/explicit ring storage was accepted");
+    raw.gap_angles_degrees.clear();
+    raw.uniform_gaps.offset_degrees=std::numeric_limits<float>::quiet_NaN();
+    Check(!raw.GapStorageConsistent(),"nonfinite compact gap offset was accepted");
+    raw.uniform_gaps.offset_degrees=0;
+    raw.uniform_gaps.formula=static_cast<hs::VfxGapAngleFormula>(255);
+    Check(!raw.GapStorageConsistent(),"unknown active compact formula was accepted");
+    raw.uniform_gaps.count=0;
+    Check(raw.GapStorageConsistent(),"inactive gap descriptor fields affected raw storage");
+}
+
 std::uint32_t Hash32(std::string_view value)
 {
     std::uint32_t hash = 2166136261u;
@@ -141,10 +198,16 @@ void TestFrameInputStorageReused()
     event.kind = hs::PresentationKind::Vfx;
     event.asset = {effect_id};
     event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
-    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4, result);
+    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4,
+        result, nullptr, 1.0f, hs::VfxQuality::Low);
     Check(result.events.size() == 1 && result.persistent.empty() &&
-              result.unsupported_effect_ids.empty(),
+              result.unsupported_effect_ids.empty() && result.events.front().quality == hs::VfxQuality::Low,
           "reused frame inputs retained previous payloads or diagnostics");
+    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4,
+        result, nullptr, 1.0f, hs::VfxQuality::Medium);
+    Check(result.events.size() == 1 && result.events.front().quality == hs::VfxQuality::Medium &&
+          result.events.data() == events_storage,
+          "frame quality change retained default High or replaced reusable storage");
     hs::runtime_detail::BuildVfxTypedFrameInputs(image, {}, {}, {}, 5, result);
     Check(result.events.empty() && result.events.data() == events_storage &&
               result.persistent.data() == persistent_storage &&
@@ -242,10 +305,10 @@ void TestEventGeometryTagsAndGapExpansion()
     Check(cone_payload.range == 18.0f && cone_payload.half_angle_degrees == 22.0f,
           "cone geometry was changed");
     const auto &ring_payload = std::get<hs::VfxRingGapsPayload>(result.events[1].payload);
-    Check(ring_payload.gap_angles_degrees.size() == 3 &&
-              ring_payload.gap_angles_degrees[0] == 7.0f &&
-              ring_payload.gap_angles_degrees[1] == 127.0f &&
-              ring_payload.gap_angles_degrees[2] == 247.0f,
+    Check(ring_payload.gap_angles_degrees.capacity() == 0 && ring_payload.GapCount() == 3 &&
+              ring_payload.GapAngleDegrees(0) == 7.0f &&
+              ring_payload.GapAngleDegrees(1) == 127.0f &&
+              ring_payload.GapAngleDegrees(2) == 247.0f,
           "ring gaps were not expanded from authored spacing");
 
     hs::PresentationEvent wrong = cone;
@@ -534,19 +597,30 @@ void TestSafeSectorFanout()
         markers.push_back(input);
     }
     Check(markers.size() == 3 && markers[0].stable_seed != markers[1].stable_seed, "safe sector seed identity collapsed");
-    Check(inputs.events.back().effect_handle == 1 &&
-          std::get<hs::VfxRingGapsPayload>(inputs.events.back().payload).gap_angles_degrees ==
-              std::vector<float>{359,119,239},
+    const auto &original_ring = std::get<hs::VfxRingGapsPayload>(inputs.events.back().payload);
+    Check(inputs.events.back().effect_handle == 1 && original_ring.GapCount() == 3 &&
+          original_ring.GapAngleDegrees(0) == 359 && original_ring.GapAngleDegrees(1) == 479 &&
+          original_ring.GapAngleDegrees(2) == 599,
           "sector fanout consumed or replaced the original ring payload");
     auto many_gaps = event;
     many_gaps.geometry.gap_count = std::numeric_limits<std::uint8_t>::max();
-    const auto maximum = hs::test::BuildFrameInputs(
+    auto maximum = hs::test::BuildFrameInputs(
         hs::test::VfxLookupImage(program), std::array{many_gaps}, {}, {}, 40);
     Check(maximum.events.size() == 256 && maximum.events[254].geometry_sector_index == 254 &&
           maximum.events.front().geometry_effect_id == marker_id &&
           std::holds_alternative<hs::VfxSafeSectorPayload>(maximum.events[254].payload) &&
-          std::get<hs::VfxRingGapsPayload>(maximum.events.back().payload).gap_angles_degrees.size() == 255,
+          std::get<hs::VfxRingGapsPayload>(maximum.events.back().payload).GapCount() == 255 &&
+          std::get<hs::VfxRingGapsPayload>(maximum.events.back().payload).gap_angles_degrees.capacity() == 0,
           "maximum source gap fanout lost its sector order or original ring");
+    const auto fanout_capacity = maximum.events.capacity();
+    const auto *fanout_data = maximum.events.data();
+    hs::runtime_detail::BuildVfxTypedFrameInputs(hs::test::VfxLookupImage(program),
+        std::array{many_gaps}, {}, {}, 40, maximum, nullptr, 1.0f, hs::VfxQuality::Low);
+    Check(maximum.events.size() == 256 && maximum.events.capacity() == fanout_capacity &&
+          maximum.events.data() == fanout_data && maximum.events[254].geometry_sector_index == 254 &&
+          maximum.events.back().effect_handle == 1 &&
+          std::ranges::all_of(maximum.events, [](const auto &input) { return input.quality == hs::VfxQuality::Low; }),
+          "repeated maximum safe-sector fanout did not reuse its prepared output storage");
     hs::PersistentVfxVisual owner{};
     owner.kind = hs::PersistentVfxKind::BossShockwaveWarning; owner.stable_id = 831;
     owner.position = event.position; owner.radius = 5; owner.ring_inner_radius = 1.7f; owner.ring_outer_radius = 5;
@@ -574,7 +648,7 @@ void TestSafeSectorFanout()
           "zero-gap warning fabricated safe markers");
 }
 
-void TestSafeSectorRefreshUsesRingOracleAndRetainsStorage()
+void TestSafeSectorRefreshUsesRingOracleAndStaysCompact()
 {
     const auto warning_id = Hash64("particle.boss.shockwave.telegraph");
     const auto marker_id = Hash64("particle.boss.shockwave.safe_gap_marker");
@@ -607,14 +681,13 @@ void TestSafeSectorRefreshUsesRingOracleAndRetainsStorage()
     hs::runtime_detail::RefreshVfxGroundEventOwners(
         retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
     auto &ring = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
-    Check(ring.gap_angles_degrees.size() == 255, "refreshed ring lost maximum source gaps");
-    const auto *const ring_storage = ring.gap_angles_degrees.data();
-    const auto ring_capacity = ring.gap_angles_degrees.capacity();
+    Check(ring.GapCount() == 255 && ring.gap_angles_degrees.capacity() == 0,
+          "refreshed ring lost maximum source gaps or allocated angle items");
     hs::runtime_detail::RefreshVfxGroundEventOwners(
         retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
-    Check(std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.data() == ring_storage &&
-          std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.capacity() == ring_capacity,
-          "repeated ring refresh replaced retained angle storage");
+    Check(std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).GapCount() == 255 &&
+          std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.capacity() == 0,
+          "repeated ring refresh materialized angle storage");
 
     auto sector_event = built.events[254];
     Check(sector_event.geometry_sector_index == 254 &&
@@ -623,7 +696,7 @@ void TestSafeSectorRefreshUsesRingOracleAndRetainsStorage()
           "maximum indexed sector did not refresh");
     const auto &sector = std::get<hs::VfxSafeSectorPayload>(sector_event.payload);
     const auto &oracle = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
-    const auto radians = oracle.gap_angles_degrees[254] * .017453292519943295f;
+    const auto radians = oracle.GapAngleDegrees(254) * .017453292519943295f;
     Check(std::abs(sector.direction.x - std::cos(radians)) < .000001f &&
           std::abs(sector.direction.z - std::sin(radians)) < .000001f &&
           sector.center.x == oracle.center.x && sector.inner_radius == oracle.inner_radius &&
@@ -638,9 +711,9 @@ void TestSafeSectorRefreshUsesRingOracleAndRetainsStorage()
     Check(!hs::runtime_detail::RefreshVfxGroundEventOwner(removed, fewer_gaps, 40),
           "sector index outside decreased owner gap count remained valid");
     hs::runtime_detail::RefreshVfxGroundEventOwners(retained_ring, fewer_gaps, 40);
-    const auto &shrunk = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees;
-    Check(shrunk.size() == 128 && shrunk.data() == ring_storage && shrunk.capacity() == ring_capacity,
-          "decreased ring gap count discarded reusable angle storage");
+    const auto &shrunk = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
+    Check(shrunk.GapCount() == 128 && shrunk.gap_angles_degrees.capacity() == 0,
+          "decreased ring gap count materialized angle storage");
 }
 
 void TestShockwaveWarningOwner()
@@ -666,7 +739,8 @@ void TestShockwaveWarningOwner()
     Check(inputs.events.size() == 1, "shockwave warning owner missing");
     const auto &ring = std::get<hs::VfxRingGapsPayload>(inputs.events[0].payload);
     Check(ring.center.x == 3 && ring.center.z == 4 && ring.inner_radius == 1.7f && ring.outer_radius == 5 &&
-          ring.gap_angles_degrees == std::vector<float>{359,119,239} &&
+          ring.GapCount() == 3 && ring.GapAngleDegrees(0) == 359 &&
+          ring.GapAngleDegrees(1) == 119 && ring.GapAngleDegrees(2) == 239 &&
           std::abs(ring.lifetime01 - 30.0f / 73.0f) < 0.0001f,
           "shockwave owner refresh changed fixed geometry or clock");
     auto rebound = Program({{Hash64("unrelated.effect"), 1, 0, Hash32("PointEventPayload")},
@@ -701,7 +775,8 @@ void TestShockwaveWavefrontBinding()
           input.normalized_age == 0.5f && std::abs(input.elapsed_seconds - 1.0f / 3.0f) < 0.0001f &&
           ring.center.x == 3.0f && ring.inner_radius == 5.6f && ring.outer_radius == 7.0f &&
           ring.lifetime01 == 0.5f && ring.gap_half_width_degrees == 12.0f &&
-          ring.gap_angles_degrees == std::vector<float>{359.0f, 119.0f, 239.0f},
+          ring.GapCount() == 3 && ring.GapAngleDegrees(0) == 359 &&
+          ring.GapAngleDegrees(1) == 119 && ring.GapAngleDegrees(2) == 239,
           "wavefront payload changed actual annulus, gap rotation or owner age");
     const std::array retained{visual};
     const auto between = hs::test::BuildFrameInputs(
@@ -720,7 +795,7 @@ void TestShockwaveWavefrontBinding()
     visual.gap_count = 0; visual.gap_half_angle_degrees = 0;
     const auto continuous = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 100);
     Check(continuous.persistent.size() == 1 &&
-          std::get<hs::VfxRingGapsPayload>(continuous.persistent.front().payload).gap_angles_degrees.empty(),
+          std::get<hs::VfxRingGapsPayload>(continuous.persistent.front().payload).GapCount() == 0,
           "wavefront fabricated gaps in continuous annulus");
     Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 99).persistent.empty() &&
           hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 140).persistent.empty(),
@@ -829,6 +904,13 @@ void TestUpgradeSlowAreaAliases()
               trap_result.persistent[1].stable_id != trap_result.persistent[0].stable_id,
           "trap landing slow did not submit distinct alias and bound base owners");
     const auto &trap_input = trap_result.persistent.front();
+    hs::runtime_detail::VfxTypedFrameInputs medium_trap;
+    hs::runtime_detail::BuildVfxTypedFrameInputs(hs::test::VfxLookupImage(program),
+        {}, std::array{trap}, {}, 130, medium_trap, nullptr, 1.0f, hs::VfxQuality::Medium);
+    Check(medium_trap.persistent.size() == 2 &&
+          std::ranges::all_of(medium_trap.persistent, [](const auto &input) {
+              return input.quality == hs::VfxQuality::Medium;
+          }), "persistent area alias lost the active frame quality");
     const auto &trap_circle = std::get<hs::VfxCirclePayload>(trap_input.payload);
     Check(trap_input.stable_id == trap.stable_id &&
               trap_input.status_episode_generation == trap.status_episode_generation &&
@@ -1685,16 +1767,23 @@ void TestPreparedVolumeCommands()
     std::array recipes{hs::VfxVolumeRecipe{0, 0, Hash32("smoke_volume"), 2, 7,
         hs::VfxVolumeShape::NoisySphere, hs::VfxVolumeNoise::Fbm3D, 0, 1, 1, .6f, 0, 1,
         12, 1, {.4f, .5f, .6f}}};
-    hs::VfxImage image; image.volume_effect_recipes = effects; image.volume_recipes = recipes;
-    hs::VfxEventInput event; event.effect_handle = 1; event.sequence = 9; event.event_tick = 0;
-    event.world_transform = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    event.payload = hs::VfxContextPayload{0, {}, 1, 0, 0};
+    auto program = Program({{effects[0].effect_id, 1, 0, Hash32("PresentationContextPayload")}});
+    program.effects[0].seconds = effects[0].seconds;
+    hs::test::VfxLookupImage image(program);
+    image.volume_effect_recipes = effects; image.volume_recipes = recipes;
+    hs::PresentationEvent raw;
+    raw.kind = hs::PresentationKind::Vfx; raw.asset = {effects[0].effect_id}; raw.sequence = 9;
+    raw.parameters = hs::EncodeVfxParameters({{0, 0, 1}, 1, {}, {}});
+    const auto adapted = hs::test::BuildFrameInputs(image, std::array{raw}, {}, {}, 30);
+    Check(adapted.events.size() == 1 && adapted.unsupported_effect_ids.empty(),
+          "volume fixture did not pass through actual context-scale adaptation");
+    const auto &event = adapted.events.front();
     std::vector<hs::VfxVolumeInput> output;
     Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedVolumeCommands(
               image, std::span(&event, 1), {}, 30, hs::VfxQuality::High, output)) &&
               output.size() == 1 && output[0].identity.event_sequence == 9 &&
               output[0].identity.effect_handle == 1 && output[0].shape == hs::VfxVolumeShape::NoisySphere &&
-              output[0].steps == 12 &&
+              output[0].steps == 12 && output[0].authored_scale == 1 &&
               output[0].elapsed_seconds == .5f,
           "prepared LocalVolume recipe lost live event or authored output values");
     const auto *volume_storage = output.data();
@@ -1702,6 +1791,11 @@ void TestPreparedVolumeCommands()
               image, std::span(&event, 1), {}, 31, hs::VfxQuality::High, output).Succeeded() &&
               output.data() == volume_storage,
           "volume output capacity was discarded between normal frames");
+    auto invalid_scale = event;
+    std::get<hs::VfxContextPayload>(invalid_scale.payload).scalar0 = 0;
+    Check(!hs::runtime_detail::BuildVfxTypedVolumeCommands(
+              image, std::span(&invalid_scale, 1), {}, 30, hs::VfxQuality::High, output) && output.empty(),
+          "raw LocalVolume input silently accepted a missing authored scale");
     effects[0].route_valid = false;
     Check(!hs::runtime_detail::BuildVfxTypedVolumeCommands(
               image, std::span(&event, 1), {}, 30, hs::VfxQuality::High, output) && output.empty(),
@@ -2233,7 +2327,7 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
     const auto dash_id = Hash64("particle.upgrade.retreat.second_dash");
     const auto afterimage_id = Hash64("particle.upgrade.retreat.afterimage");
     const std::array effect_ids{dash_id, afterimage_id};
-    const std::array payload_kinds{Hash32("LinePayload"),
+    const std::array payload_kinds{Hash32("LineAreaPayload"),
                                    Hash32("PresentationContextPayload")};
     for (std::size_t index = 0; index < effect_ids.size(); ++index)
     {
@@ -2279,12 +2373,14 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
     VfxUpgradeMovementState state;
     std::vector<VfxPersistentInput> output(1);
     output.front().stable_id = 55;
-    state.Append(image, dispatched, 20, output);
+    state.Append(image, dispatched, 20, output, 1.0f, VfxQuality::Low);
     Check(state.RetainedCapacityBytes() > 0,
           "retreat state omitted retained owner/staging vector capacity");
     Check(output.size() == 3 && output[0].stable_id == 55 &&
               std::holds_alternative<VfxLinePayload>(output[1].payload) &&
-              std::holds_alternative<VfxContextPayload>(output[2].payload),
+              std::holds_alternative<VfxContextPayload>(output[2].payload) &&
+              output[0].quality == VfxQuality::High && output[1].quality == VfxQuality::Low &&
+              output[2].quality == VfxQuality::Low,
           "retreat append lost caller prefix, source order or duplicate identity suppression");
     Check(output[1].stable_id != 0 && output[1].elapsed_ticks == 0.0 &&
               output[2].stable_id != 0 && output[2].elapsed_ticks == 0.0,
@@ -2295,9 +2391,10 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
               state.RetainedCapacityBytes() == retained_before_rebind,
           "same-generation retreat owner was dropped during rebind");
     output.clear();
-    state.Append(image, {}, 21, output, 0.5f);
+    state.Append(image, {}, 21, output, 0.5f, VfxQuality::Medium);
     Check(output.size() == 2 && output[0].elapsed_ticks == 0.5 &&
               output[1].elapsed_ticks == 0.5 &&
+              output[0].quality == VfxQuality::Medium && output[1].quality == VfxQuality::Medium &&
               std::abs(output[0].normalized_age - 0.5f / 60.0f) < 0.00001f,
           "retained retreat state changed its interpolated absolute age");
 
@@ -2335,53 +2432,59 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
 
 int main()
 {
-    try
+    const std::array cases{
+        TestTerminalVfxClock,
+        TestEnemyStatusOwners,
+        TestBossStateOwners,
+        TestPlayerStateOwners,
+        TestLowHealthPulseClock,
+        TestPreparedVolumeCommands,
+        TestPickupIdleOwners,
+        TestPlayerStampedEntityBindings,
+        TestChargedOverchargeOwner,
+        TestProcStampedProjectileBindings,
+        TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity,
+        TestStatusTickIdentity,
+        TestRetreatMovementAppendPublishesStateWithOutputs,
+        TestUniformGapFormulaMatchesExpandedAngles,
+        TestOwnedVisualLinks,
+        TestPointEvent,
+        TestPreparedLookupPreservesAuthoredHandles,
+        TestFrameInputStorageReused,
+        TestProjectileImpactEventUsesAuthoritativeGeometry,
+        TestEventSchemaAndModeRejection,
+        TestEventGeometryTagsAndGapExpansion,
+        TestArrowRainPullLinkGeometry,
+        TestPickupCollectLinkPayload,
+        TestContextAllowsZeroRatio,
+        TestChargedPulseContextMetadata,
+        TestCircleLifetimeAndCompoundIdentity,
+        TestUpgradeSlowAreaAliases,
+        TestUpgradeSlowAreaAliasRequiresCookedMembership,
+        TestDamageTrailUpgradeSupplements,
+        TestShockwaveWavefrontBinding,
+        TestShockwaveWarningOwner,
+        TestSafeSectorFanout,
+        TestSafeSectorRefreshUsesRingOracleAndStaysCompact,
+        TestBossAreaUsesAuthoredCircleBinding,
+        TestProjectileIngressUsesAuthoritativeOwnerState,
+        TestProjectilePathUsesAuthoritativeMotion,
+        TestHostileProjectileBindings,
+        TestChargeGuideUsesPresenceInsteadOfExpiry,
+        TestWarningOwnerRefresh,
+        TestRangedWarningIdentity,
+    };
+    unsigned failures{};
+    for (const auto run : cases)
     {
-        TestTerminalVfxClock();
-        TestEnemyStatusOwners();
-        TestBossStateOwners();
-        TestPlayerStateOwners();
-        TestLowHealthPulseClock();
-        TestPreparedVolumeCommands();
-        TestPickupIdleOwners();
-        TestPlayerStampedEntityBindings();
-        TestChargedOverchargeOwner();
-        TestProcStampedProjectileBindings();
-        TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity();
-        TestStatusTickIdentity();
-        TestRetreatMovementAppendPublishesStateWithOutputs();
-        TestOwnedVisualLinks();
-        TestPointEvent();
-        TestPreparedLookupPreservesAuthoredHandles();
-        TestFrameInputStorageReused();
-        TestProjectileImpactEventUsesAuthoritativeGeometry();
-        TestEventSchemaAndModeRejection();
-        TestEventGeometryTagsAndGapExpansion();
-        TestArrowRainPullLinkGeometry();
-        TestPickupCollectLinkPayload();
-        TestContextAllowsZeroRatio();
-        TestChargedPulseContextMetadata();
-        TestCircleLifetimeAndCompoundIdentity();
-        TestUpgradeSlowAreaAliases();
-        TestUpgradeSlowAreaAliasRequiresCookedMembership();
-        TestDamageTrailUpgradeSupplements();
-        TestShockwaveWavefrontBinding();
-        TestShockwaveWarningOwner();
-        TestSafeSectorFanout();
-        TestSafeSectorRefreshUsesRingOracleAndRetainsStorage();
-        TestBossAreaUsesAuthoredCircleBinding();
-        TestProjectileIngressUsesAuthoritativeOwnerState();
-        TestProjectilePathUsesAuthoritativeMotion();
-        TestHostileProjectileBindings();
-        TestChargeGuideUsesPresenceInsteadOfExpiry();
-        TestWarningOwnerRefresh();
-        TestRangedWarningIdentity();
-        std::cout << "Typed VFX frame adapter tests passed\n";
-        return 0;
+        try { run(); }
+        catch (const std::exception &error)
+        {
+            std::cerr << error.what() << '\n';
+            ++failures;
+        }
     }
-    catch (const std::exception &error)
-    {
-        std::cerr << error.what() << '\n';
-        return 1;
-    }
+    if (failures) return 1;
+    std::cout << "Typed VFX frame adapter tests passed (" << cases.size() << " cases)\n";
+    return 0;
 }
