@@ -5,6 +5,7 @@
 #include <hs/core/settings.hpp>
 #include <hs/presentation/projector.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -149,16 +150,15 @@ static_assert(std::is_trivially_copyable_v<UiActionEnvelope>);
         a.settings_page == b.settings_page && a.character_details_page == b.character_details_page;
 }
 
-[[nodiscard]] inline bool SameUiFrameInputs(const UiFrame &frame,
-    std::uint64_t session_id, std::uint64_t dynamic_pair_revision,
-    const PresentationUiState &ui, const SettingsData &settings,
-    const std::shared_ptr<const GraphicsSettingsUiModel> &graphics_model,
-    std::uint8_t modal_phase, std::uint8_t pending_rebind_slot, bool input_rejected) noexcept
+[[nodiscard]] inline bool SameUiDrawInputs(const UiFrame &frame,
+    std::span<const std::uint64_t> facts,
+    const std::shared_ptr<const GraphicsSettingsUiModel> &graphics_model) noexcept
 {
-    return frame.session_id == session_id && frame.dynamic_pair_revision == dynamic_pair_revision &&
-        SameUiState(frame.ui, ui) && SameUiSettings(frame.settings, settings) &&
-        frame.graphics_model == graphics_model && frame.modal_phase == modal_phase &&
-        frame.pending_rebind_slot == pending_rebind_slot && frame.input_rejected == input_rejected;
+    const bool graphics_visible = frame.ui.page == UiPage::MainMenuSettings ||
+        frame.ui.page == UiPage::PauseSettings;
+    return frame.draw_content && frame.draw_facts &&
+        (!graphics_visible || frame.graphics_model == graphics_model) &&
+        std::ranges::equal(*frame.draw_facts, facts);
 }
 
 [[nodiscard]] inline bool PointHitsUiDrawButton(std::span<const UiModel> models,

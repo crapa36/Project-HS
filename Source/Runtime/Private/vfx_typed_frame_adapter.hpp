@@ -3,7 +3,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/render_data/render_snapshot.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program.hpp>
+#include <hs/runtime/vfx_image.hpp>
 
 #include <cstdint>
 #include <cstddef>
@@ -34,10 +34,12 @@ class PreparedPairFacts
         bool operator==(const Key &) const = default;
     };
 
-    void Prepare(Key key, std::span<const PersistentVfxVisual> previous,
+    // Returns whether the publication indexes were rebuilt; unknown identities always rebuild.
+    bool Prepare(Key key, std::span<const PersistentVfxVisual> previous,
                  std::span<const PersistentVfxVisual> current,
                  std::span<const RenderInstance> instances,
                  std::span<const CapturedRenderInstance> captures);
+    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
     [[nodiscard]] const PersistentVfxVisual *Previous(
         std::uint64_t stable_id, PersistentVfxKind kind, std::span<const PersistentVfxVisual> rows) const noexcept;
     [[nodiscard]] const PersistentVfxVisual *Current(
@@ -83,12 +85,13 @@ class PreparedPairFacts
 // Convert the presentation contracts into typed v4 renderer inputs. The
 // function owns no state and does not create a lifetime or geometry value when
 // the source contract does not provide one.
-[[nodiscard]] VfxTypedFrameInputs BuildVfxTypedFrameInputs(
-    const VfxProgramView &cooked,
+void BuildVfxTypedFrameInputs(
+    const VfxImage &image,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
+    VfxTypedFrameInputs &result,
     const PreparedPairFacts *pair_facts = nullptr,
     float interpolation = 1.0f);
 
@@ -98,14 +101,20 @@ class PreparedPairFacts
 class VfxUpgradeMovementState
 {
   public:
-    [[nodiscard]] std::vector<VfxPersistentInput> Emit(
-        const VfxProgramView &cooked,
+    void Append(
+        const VfxImage &image,
         std::span<const PresentationEvent> dispatched_events,
-        Tick current_tick, float interpolation = 1.0f);
-    void Clear() noexcept { owners_.clear(); }
+        Tick current_tick, std::vector<VfxPersistentInput> &output,
+        float interpolation = 1.0f);
+    void Clear() noexcept { owners_.clear(); staged_owners_.clear(); }
+    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
     [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
                                      const VfxProgramView &next) noexcept;
-    void Swap(VfxUpgradeMovementState &prepared) noexcept { owners_.swap(prepared.owners_); }
+    void Swap(VfxUpgradeMovementState &prepared) noexcept
+    {
+        owners_.swap(prepared.owners_);
+        staged_owners_.swap(prepared.staged_owners_);
+    }
 
   private:
     struct Owner
@@ -115,6 +124,7 @@ class VfxUpgradeMovementState
         float seconds{};
     };
     std::vector<Owner> owners_;
+    std::vector<Owner> staged_owners_;
 };
 
 // Refresh one retained warning event from its authoritative persistent owner.
@@ -135,7 +145,7 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
 
 // Validate prepared owner-backed events against exact warning/sector recipes.
 // Events without owner metadata retain their already remapped handles.
-void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
+void RebindVfxGroundEventOwners(const VfxImage &image,
                                 std::vector<VfxEventInput> &events);
 
 } // namespace hs::runtime_detail

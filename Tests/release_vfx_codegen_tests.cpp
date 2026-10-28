@@ -48,7 +48,10 @@ int main()
         Range(v.ground_recipes[1].mask_variants[0].slices,8,2) &&
         Same(v.ground_recipes[1].mask_variants[0].strength,.35f) &&
         v.ground_recipes[1].mask_variants[0].valid && v.ground_recipes[1].mask_variants[0].present &&
-        v.ground_recipes[1].source_output_count==1 && v.ground_recipes[1].source_parameters_empty);
+        v.ground_recipes[1].source_output_count==1 && v.ground_recipes[1].effect_lookup_count==1 &&
+        v.ground_recipes[1].source_parameters_empty &&
+        v.ground_recipes[0].event_admission_profiles==(kVfxGroundEventDirectAdd|kVfxGroundEventDirectSoft) &&
+        v.ground_recipes[1].event_admission_profiles==0);
     Check(v.flash_effect_ranges.size()==1 && v.HasFlashRecipes(1) && v.flash_recipes.size()==1 &&
         v.flash_recipes[0].effect_id==44 && v.flash_recipes[0].supported_quality_mask==4 &&
         v.flash_recipes[0].spawn.shape==VfxImpactShape::Flame && v.flash_recipes[0].mask_strengths[2]==.75f);
@@ -57,6 +60,7 @@ int main()
         v.persistent_stamp_recipes[0].spawn.shape==VfxImpactShape::StatusStamp &&
         v.persistent_stamp_recipes[0].mask_slices[2].first==5 &&
         v.persistent_fire_recipes.size()==1 && v.persistent_fire_recipes[0].rate==8 &&
+        v.persistent_fire_recipes[0].authoritative &&
         v.persistent_fire_recipes[0].spawn.shape==VfxImpactShape::Flame &&
         v.owned_status_tick_recipes.size()==1 && v.owned_status_tick_recipes[0].tick_effect_id==47 &&
         v.owned_status_tick_recipes[0].mask_slices[2]==5);
@@ -71,6 +75,108 @@ int main()
         Same(v.mote_output_recipes[0].color,Float4{1,2,3,4}) &&
         v.mote_output_recipes[0].mask_present_mask==4 && v.mote_output_recipes[0].output_color_valid &&
         v.mote_output_recipes[0].spark_textures_valid);
+    Check(v.screen_effect_recipes.size()==1 && v.screen_recipes.size()==1 &&
+        v.screen_effect_recipes[0].effect_id==51 && Same(v.screen_effect_recipes[0].seconds,3.25f) &&
+        Range(v.screen_effect_recipes[0].outputs,0,1) && v.screen_effect_recipes[0].route_valid);
+    const auto &screen=v.screen_recipes[0];
+    Check(screen.source_index==9 && screen.output_index==37 && screen.min_quality==1 && screen.gradient_row==41 &&
+        screen.shape==VfxScreenShape::DirectionalArc && Same(screen.knot_start,.125f) && Same(screen.knot_end,.875f) &&
+        Same(screen.rgb,Float3{.1f,.2f,.3f}) && Same(screen.alpha,.5f) && Same(screen.hdr,2) &&
+        Same(screen.center_clear,.625f) && Same(screen.edge_power,3));
+    Check(v.volume_effect_recipes.size()==1 && v.volume_recipes.size()==1 &&
+        v.volume_effect_recipes[0].effect_id==52 && Same(v.volume_effect_recipes[0].seconds,4.5f) &&
+        Range(v.volume_effect_recipes[0].outputs,0,1) && v.volume_effect_recipes[0].route_valid);
+    const auto &volume=v.volume_recipes[0];
+    Check(volume.source_index==8 && volume.output_index==27 && volume.source_id==39 && volume.min_quality==2 &&
+        volume.gradient_row==43 && volume.shape==VfxVolumeShape::NoisySphere && volume.noise==VfxVolumeNoise::Fbm3D &&
+        Same(volume.knot_start,.25f) && Same(volume.knot_end,.75f) && Same(volume.density,1.25f) &&
+        Same(volume.alpha,.5f) && Same(volume.anisotropy,.25f) && Same(volume.hdr,2) && volume.steps==12 &&
+        volume.half_resolution==1 && Same(volume.rgb,Float3{.4f,.5f,.6f}));
+    Check(v.entity_surface_effect_recipes.size()==1 && v.entity_surface_recipes.size()==1 &&
+        v.entity_surface_effect_recipes[0].effect_id==53 &&
+        v.entity_surface_routes.phase_effect==5 && v.entity_surface_routes.death_effect==6 &&
+        v.entity_surface_routes.trap_point_rate_effect==7);
+    Check(v.ribbon_effect_recipes.size()==1 && v.ribbon_effect_recipes[0].effect_id==61 &&
+        v.ribbon_effect_recipes[0].handle==3 && v.ribbon_effect_recipes[0].valid_handle &&
+        v.ribbon_slice_indices.size()==2 && v.ribbon_slice_indices[0]==2 && v.ribbon_slice_indices[1]==5);
+    Check(v.ribbon_wake_effect_ranges.size()==1 && Range(v.ribbon_wake_effect_ranges[0],0,1) &&
+        v.ribbon_wake_recipes.size()==1 && v.ribbon_wake_recipes[0].effect_handle==3 &&
+        v.ribbon_wake_recipes[0].importance==4 &&
+        v.ribbon_wake_recipes[0].min_quality==1 && v.ribbon_wake_recipes[0].detail_min_quality==2 &&
+        v.ribbon_wake_recipes[0].gradient_row==17 && Range(v.ribbon_wake_recipes[0].detail_slices,0,2) &&
+        Same(v.ribbon_wake_recipes[0].width_head,.06f) && Same(v.ribbon_wake_recipes[0].width_tail,.04f) &&
+        Same(v.ribbon_wake_recipes[0].hdr,2.5f) && Same(v.ribbon_wake_recipes[0].detail_strength,.35f));
+    Check(v.ribbon_fixed_effect_ranges.size()==1 && Range(v.ribbon_fixed_effect_ranges[0],0,1) &&
+        v.ribbon_fixed_recipes.size()==1 && v.ribbon_fixed_recipes[0].effect_handle==3 &&
+        v.ribbon_fixed_recipes[0].kind==VfxRibbonFixedKind::ExplosivePrePull &&
+        v.ribbon_fixed_recipes[0].segments==16 && Same(v.ribbon_fixed_recipes[0].seconds,.45f) &&
+        Same(v.ribbon_fixed_recipes[0].taper,.55f) &&
+        Same(v.ribbon_fixed_recipes[0].outer_width_multiplier,2.8f) &&
+        v.ribbon_fixed_recipes[0].core_output.profile==VfxOutputProfile::RibbonAdd &&
+        v.ribbon_fixed_recipes[0].core_output.travel_pulse &&
+        v.ribbon_fixed_recipes[0].outer_output.profile==VfxOutputProfile::RibbonOit &&
+        Same(v.ribbon_fixed_recipes[0].outer_output.noise_warp,.08f) &&
+        Same(v.ribbon_fixed_recipes[0].outer_output.color,Float4{.4f,.3f,.2f,.1f}));
+    Check(v.ribbon_projectile_effect_ranges.size()==1 && Range(v.ribbon_projectile_effect_ranges[0],0,1) &&
+        v.ribbon_projectile_sources.size()==1 && v.ribbon_projectile_sources[0].effect_handle==3 &&
+        v.ribbon_projectile_sources[0].source_id==9 && v.ribbon_projectile_sources[0].knot_count==4 &&
+        Same(v.ribbon_projectile_sources[0].history_seconds,.25f) &&
+        Same(v.ribbon_projectile_sources[0].knots[2],.8f) &&
+        Range(v.ribbon_projectile_sources[0].outputs,0,1) &&
+        v.ribbon_projectile_outputs.size()==1 && v.ribbon_projectile_outputs[0].min_quality==2 &&
+        v.ribbon_projectile_outputs[0].output.motion==VfxMotionKind::TwoPhaseNarrowWakes &&
+        Same(v.ribbon_projectile_outputs[0].output.width_head,.08f) &&
+        Same(v.ribbon_projectile_outputs[0].output.phase_offset,.12f) &&
+        Range(v.ribbon_projectile_outputs[0].detail_slices,1,2) &&
+        Same(v.ribbon_projectile_outputs[0].detail_strength,.35f) &&
+        v.ribbon_projectile_outputs[0].detail_present);
+    Check(v.ribbon_cancel_effect_ranges.size()==1 && Range(v.ribbon_cancel_effect_ranges[0],0,1) &&
+        v.ribbon_cancel_recipes.size()==1 && v.ribbon_cancel_recipes[0].effect_handle==3 &&
+        v.ribbon_cancel_recipes[0].source_id==9 && v.ribbon_cancel_recipes[0].min_quality==2 &&
+        Same(v.ribbon_cancel_recipes[0].seconds,.9f) &&
+        Same(v.ribbon_cancel_recipes[0].history_seconds,.24f) &&
+        Same(v.ribbon_cancel_recipes[0].width_head,.08f) &&
+        v.ribbon_cancel_recipes[0].motion==VfxMotionKind::ReverseFlowBow &&
+        Same(v.ribbon_cancel_recipes[0].color,Float4{.2f,.3f,.4f,.7f}) &&
+        v.ribbon_cancel_recipes[0].gradient_row==19);
+    Check(v.ribbon_link_effect_recipes.size()==1 &&
+        v.ribbon_link_effect_recipes[0].kind==VfxRibbonLinkKind::PickupCollect &&
+        Same(v.ribbon_link_effect_recipes[0].window_start,.1f) &&
+        Range(v.ribbon_link_effect_recipes[0].outputs,0,1) &&
+        v.ribbon_link_output_recipes.size()==1 &&
+        v.ribbon_link_output_recipes[0].source_id==9 &&
+        v.ribbon_link_output_recipes[0].min_quality==2 &&
+        v.ribbon_link_output_recipes[0].output.motion==VfxMotionKind::CurvesTowardCollector &&
+        Same(v.ribbon_link_output_recipes[0].details[2].strength,.5f) &&
+        v.ribbon_link_output_recipes[0].details[2].present);
+    Check(v.ribbon_event_effect_recipes.size()==1 &&
+        v.ribbon_event_effect_recipes[0].effect_id==62 &&
+        v.ribbon_event_effect_recipes[0].effect_handle==3 &&
+        v.ribbon_event_effect_recipes[0].importance==4 &&
+        v.ribbon_event_effect_recipes[0].payload_kind==5 &&
+        Same(v.ribbon_event_effect_recipes[0].seconds,.6f) &&
+        Range(v.ribbon_event_effect_recipes[0].sources,0,1) &&
+        v.ribbon_event_sources.size()==1 && v.ribbon_event_sources[0].effect_handle==3 &&
+        v.ribbon_event_sources[0].source_id==9 && v.ribbon_event_sources[0].axial_source &&
+        v.ribbon_event_sources[0].knot_count==4 && Same(v.ribbon_event_sources[0].knots[2],.8f) &&
+        Same(v.ribbon_event_sources[0].history_seconds,.25f) &&
+        Same(v.ribbon_event_sources[0].axial_arc_by_quality[2],75) &&
+        Range(v.ribbon_event_sources[0].outputs,0,1) && v.ribbon_event_outputs.size()==1 &&
+        v.ribbon_event_outputs[0].axial && v.ribbon_event_outputs[0].min_quality==2 &&
+        Same(v.ribbon_event_outputs[0].arc_degrees,75) &&
+        v.ribbon_event_outputs[0].output.motion==VfxMotionKind::ShortLineIncomingVelocity &&
+        Range(v.ribbon_event_outputs[0].detail_slices,1,2) &&
+        Same(v.ribbon_event_outputs[0].detail_strength,.35f) && v.ribbon_event_outputs[0].detail_present);
+    Check(v.fresnel_effect_recipes.size()==1 && v.fresnel_effect_recipes[0].effect_id==62 &&
+        v.fresnel_recipes.size()==1 && v.fresnel_recipes[0].effect_handle==3 &&
+        v.fresnel_recipes[0].source_stable_id==9 && v.fresnel_recipes[0].output_index==4 &&
+        v.fresnel_recipes[0].kind==VfxFresnelShellKind::BossCrown &&
+        v.fresnel_recipes[0].sector_count==8 && Same(v.fresnel_recipes[0].rotation_hz,.25f) &&
+        v.fresnel_recipes[0].gradient_row==17 && Same(v.fresnel_recipes[0].motion_inset_fraction,.3f));
+    Check(v.mesh_effect_recipes.size()==1 && v.mesh_effect_recipes[0].effect_handle==4 &&
+        v.mesh_recipes.size()==1 && v.mesh_recipes[0].effect_handle==4 && v.mesh_recipes[0].output_index==6 &&
+        v.mesh_recipes[0].source_stable_id==7 && v.mesh_recipes[0].mesh_index==6 &&
+        v.mesh_recipes[0].gradient_row==31 && Same(v.mesh_recipes[0].shell_thickness,.22f));
     const auto &lr=v.light_recipes[0];
     Check(lr.seed_xor==0xf123456789abcdefull && lr.payload_kind==11 && lr.importance==12 && lr.min_quality==13 && lr.knot_count==4 &&
         Same(lr.seconds,2.5f) && Same(lr.radius,6.5f) && Same(lr.knots[0],-0.0f) && Same(lr.knots[1],.25f) && Same(lr.knots[2],.75f) && Same(lr.knots[3],1) &&
@@ -192,6 +298,7 @@ void TestReleaseVfxCodegen()
     const std::array curves{VfxCurveRecord{3,4,{1,1}}};
     const std::array keys{VfxCurveKey{negative_zero,subnormal},VfxCurveKey{0.5f,1}};
     const std::array lookup{VfxEffectLookupRecord{0xfedcba9876543210ull,1},VfxEffectLookupRecord{1,1}};
+    const std::array lookup_by_id{VfxEffectLookupRecord{1,2},VfxEffectLookupRecord{0xfedcba9876543210ull,1}};
     const std::array resources{VfxTextureResourceRecord{12,{1,7}}};
     const std::array strings{std::byte{0},std::byte{34},std::byte{92},std::byte{237},std::byte{133},
         std::byte{141},std::byte{195},std::byte{169},std::byte{0}};
@@ -215,8 +322,11 @@ void TestReleaseVfxCodegen()
     ground_recipe.source_index=2; ground_recipe.source_stable_id=3; ground_recipe.output_index=4;
     ground_recipe.gradient_row=31; ground_recipe.kind=VfxGroundRecipeKind::Ticks;
     ground_recipe.source_output_count=1; ground_recipe.source_parameters_empty=true;
+    ground_recipe.effect_lookup_count=1;
+    ground_recipe.event_admission_profiles=kVfxGroundEventDirectAdd|kVfxGroundEventDirectSoft;
     ground_recipe.tick_count=9; ground_recipe.pulse_curve_keys={1,2}; ground_recipe.tertiary=.125f;
     VfxGroundRecipe expanding_recipe=ground_recipe; expanding_recipe.output_index=5;
+    expanding_recipe.event_admission_profiles=0;
     expanding_recipe.kind=VfxGroundRecipeKind::ExpandingRing; expanding_recipe.knots={0,.5f,0,0};
     expanding_recipe.primary=.15f; expanding_recipe.secondary=1.25f; expanding_recipe.tertiary=.07f;
     expanding_recipe.mask_variants[0]={{8,2},.35f,true,true};
@@ -243,6 +353,7 @@ void TestReleaseVfxCodegen()
     fire_recipe.source_stable_id=8; fire_recipe.rate=8; fire_recipe.radius_scale=.5f;
     fire_recipe.spawn.shape=VfxImpactShape::Flame; fire_recipe.spawn.size=.7f;
     fire_recipe.mask_slices={2,3}; fire_recipe.mask_strength=.4f;
+    fire_recipe.authoritative=true;
     const std::array fire_ranges{VfxRange{0,1}};
     const std::array fire_recipes{fire_recipe};
     VfxOwnedStatusTickRecipe tick_recipe{}; tick_recipe.tick_effect_id=47; tick_recipe.status_effect_id=48;
@@ -262,6 +373,63 @@ void TestReleaseVfxCodegen()
     mote_output_recipe.mask_quality_mask=7; mote_output_recipe.output_color_valid=true;
     mote_output_recipe.persistent_params_valid=true; mote_output_recipe.spark_textures_valid=true;
     const std::array mote_output_recipes{mote_output_recipe};
+    const std::array screen_effect_recipes{VfxScreenEffectRecipe{51,3.25f,{0,1},true}};
+    const std::array screen_recipes{VfxScreenRecipe{9,37,1,41,VfxScreenShape::DirectionalArc,
+        .125f,.875f,{.1f,.2f,.3f},.5f,2,.625f,3}};
+    const std::array volume_effect_recipes{VfxVolumeEffectRecipe{52,4.5f,{0,1},true}};
+    const std::array volume_recipes{VfxVolumeRecipe{8,27,39,2,43,VfxVolumeShape::NoisySphere,VfxVolumeNoise::Fbm3D,
+        .25f,.75f,1.25f,.5f,.25f,2,12,1,{.4f,.5f,.6f}}};
+    const std::array entity_surface_effect_recipes{VfxEntitySurfaceEffectRecipe{53,9,10,1,1,1.5f,{0,1},true}};
+    const std::array entity_surface_recipes{VfxEntitySurfaceRecipe{1,2,3,1,4,VfxEntitySurfaceShape::Transition,
+        VfxEntitySurfaceDirection::UpAndOut,.08f,.88f,2.4f,.07f,{.2f,.3f,.4f,.72f},4.8f,.72f,false,false}};
+    const VfxEntitySurfaceRouteHandles entity_surface_routes{5,6,7};
+    VfxRibbonEffectRecipe ribbon_effect{}; ribbon_effect.effect_id=61; ribbon_effect.handle=3;
+    ribbon_effect.importance=4; ribbon_effect.payload_kind=7; ribbon_effect.input_mode=1;
+    ribbon_effect.timing_kind=1; ribbon_effect.lookup_count=1; ribbon_effect.identity_count=1;
+    ribbon_effect.seconds=.75f; ribbon_effect.sources={0,1}; ribbon_effect.valid_handle=true;
+    const std::array ribbon_effects{ribbon_effect};
+    const std::array<std::uint32_t,2> ribbon_slices{2,5};
+    const std::array ribbon_wake_ranges{VfxRange{0,1}};
+    const std::array ribbon_wake_recipes{VfxRibbonWakeRecipe{3,4,1,2,17,{0,2},{.2f,.3f,.4f,.5f},.06f,.04f,2.5f,.35f}};
+    VfxRibbonFixedRecipe ribbon_fixed{}; ribbon_fixed.effect_handle=3; ribbon_fixed.importance=4;
+    ribbon_fixed.core_min_quality=1; ribbon_fixed.outer_min_quality=2; ribbon_fixed.segments=16;
+    ribbon_fixed.kind=VfxRibbonFixedKind::ExplosivePrePull; ribbon_fixed.seconds=.45f;
+    ribbon_fixed.taper=.55f; ribbon_fixed.outer_width_multiplier=2.8f;
+    ribbon_fixed.core_output={VfxOutputProfile::RibbonAdd,VfxMotionKind::CurvedLinkTravelingHead,
+        {.1f,.2f,.3f,.4f},.07f,.0385f,0,0,3,0,31,0xffffffffu,false,true};
+    ribbon_fixed.outer_output={VfxOutputProfile::RibbonOit,VfxMotionKind::SoftWiderSheath,
+        {.4f,.3f,.2f,.1f},.196f,.1078f,.08f,0,1.5f,0,32,0xffffffffu,false,false};
+    const std::array ribbon_fixed_ranges{VfxRange{0,1}};
+    const std::array ribbon_fixed_recipes{ribbon_fixed};
+    const std::array ribbon_projectile_ranges{VfxRange{0,1}};
+    const std::array ribbon_projectile_sources{VfxRibbonProjectileSourceRecipe{
+        3,9,4,.25f,{.1f,.2f,.8f,.9f},{0,1}}};
+    const std::array ribbon_projectile_outputs{VfxRibbonProjectileOutputRecipe{
+        2,{VfxOutputProfile::RibbonOit,VfxMotionKind::TwoPhaseNarrowWakes,{.3f,.4f,.5f,.6f},
+            .08f,.02f,.11f,.12f,2.2f,.13f,33,0xffffffffu,true,false},
+        {1,2},.35f,true}};
+    const std::array ribbon_cancel_ranges{VfxRange{0,1}};
+    const std::array ribbon_cancel_recipes{VfxRibbonCancelRecipe{3,4,9,2,.9f,.24f,
+        .08f,.04f,{.2f,.3f,.4f,.7f},VfxOutputProfile::RibbonAdd,
+        VfxMotionKind::ReverseFlowBow,2.5f,19}};
+    const std::array ribbon_link_effects{VfxRibbonLinkEffectRecipe{3,4,
+        VfxRibbonLinkKind::PickupCollect,.9f,.1f,1.0f,0,12,{0,1}}};
+    const std::array ribbon_link_outputs{VfxRibbonLinkOutputRecipe{9,2,false,.04f,
+        {VfxOutputProfile::RibbonAdd,VfxMotionKind::CurvesTowardCollector,{.2f,.3f,.4f,.7f},
+            .04f,.04f,0,0,2,0,19,0xffffffffu,false,false},
+        {{{0,2},.35f,true,true},{{2,2},.4f,true,true},{{4,2},.5f,true,true}}}};
+    const std::array ribbon_event_effects{VfxRibbonEventEffectRecipe{62,3,4,5,.6f,{0,1}}};
+    const std::array ribbon_event_sources{VfxRibbonEventSourceRecipe{
+        3,9,4,true,{.1f,.2f,.8f,.9f},.25f,{35,45,55},{50,65,75},{0,1}}};
+    const std::array ribbon_event_outputs{VfxRibbonEventOutputRecipe{2,true,true,75,
+        {VfxOutputProfile::RibbonAdd,VfxMotionKind::ShortLineIncomingVelocity,{.2f,.3f,.4f,.7f},
+            .08f,.02f,0,0,2,0,19,0xffffffffu,false,false},
+        {1,2},.35f,true}};
+    const std::array fresnel_effects{VfxFresnelEffectRecipe{62,3,VfxFresnelShellKind::BossCrown,{0,1},true}};
+    const std::array fresnel_recipes{VfxFresnelRecipe{3,2,9,4,1,VfxFresnelShellKind::BossCrown,
+        .1f,.9f,8,0,0,.25f,0,{.2f,.3f,.4f,.5f},2,17,.1f,.2f,.3f}};
+    const std::array mesh_effects{VfxMeshEffectRecipe{4,{0,1},true}};
+    const std::array mesh_recipes{VfxMeshRecipe{4,5,6,7,6,2,31,{.4f,.5f,.6f,.7f},3,.25f,0,.22f}};
     const VfxImage image{definitions,emitters,sprites,meshes,decorative,
         {effects,sources,outputs,parameters,textures,slices,curves,keys,lookup,resources,strings,upgrades,sequences},
         true,65535,0xfedcba0123456789ull,
@@ -269,7 +437,14 @@ void TestReleaseVfxCodegen()
         distortion_ranges,distortion_recipes,decal_ranges,decal_recipes,
         ground_ranges,ground_recipes,flash_ranges,flash_recipes,
         stamp_ranges,stamp_recipes,fire_ranges,fire_recipes,tick_ranges,tick_recipes,
-        mote_source_recipes,mote_output_recipes};
+        mote_source_recipes,mote_output_recipes,screen_effect_recipes,screen_recipes,
+        volume_effect_recipes,volume_recipes,entity_surface_effect_recipes,entity_surface_recipes,entity_surface_routes,
+        ribbon_effects,ribbon_slices,
+        ribbon_wake_ranges,ribbon_wake_recipes,ribbon_fixed_ranges,ribbon_fixed_recipes,
+        ribbon_projectile_ranges,ribbon_projectile_sources,ribbon_projectile_outputs,
+        ribbon_cancel_ranges,ribbon_cancel_recipes,ribbon_link_effects,ribbon_link_outputs,
+        ribbon_event_effects,ribbon_event_sources,ribbon_event_outputs,lookup_by_id,
+        fresnel_effects,fresnel_recipes,mesh_effects,mesh_recipes};
     const auto source = hs::content::EmitReleaseVfxCpp(image);
     Check(source == hs::content::EmitReleaseVfxCpp(image));
     for (const std::string_view token : {"constinit const VfxImage kVfx{", "VfxProgramView{", "const VfxImage &Vfx() noexcept",
@@ -280,14 +455,41 @@ void TestReleaseVfxCodegen()
         Check(source.find(token) != std::string::npos);
     std::size_t arrays = 0, offset = 0;
     while ((offset = source.find("constinit const std::array<", offset)) != std::string::npos) { ++arrays; ++offset; }
-    Check(arrays == 38);
+    Check(arrays == 62);
     Check(source.find("std::array<VfxGroundRecipe,2> kGroundRecipes") != std::string::npos &&
           source.find("std::array<VfxFlashRecipe,1> kFlashRecipes") != std::string::npos &&
           source.find("std::array<VfxPersistentStampRecipe,1> kPersistentStampRecipes") != std::string::npos &&
           source.find("std::array<VfxPersistentFireRecipe,1> kPersistentFireRecipes") != std::string::npos &&
           source.find("std::array<VfxOwnedStatusTickRecipe,1> kOwnedStatusTickRecipes") != std::string::npos &&
           source.find("std::array<VfxMoteSourceRecipe,1> kMoteSourceRecipes") != std::string::npos &&
-          source.find("std::array<VfxMoteOutputRecipe,1> kMoteOutputRecipes") != std::string::npos);
+          source.find("std::array<VfxMoteOutputRecipe,1> kMoteOutputRecipes") != std::string::npos &&
+          source.find("std::array<VfxScreenEffectRecipe,1> kScreenEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxScreenRecipe,1> kScreenRecipes") != std::string::npos &&
+          source.find("std::array<VfxVolumeEffectRecipe,1> kVolumeEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxVolumeRecipe,1> kVolumeRecipes") != std::string::npos &&
+          source.find("std::array<VfxEntitySurfaceEffectRecipe,1> kEntitySurfaceEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxEntitySurfaceRecipe,1> kEntitySurfaceRecipes") != std::string::npos &&
+          source.find("std::array<VfxRibbonEffectRecipe,1> kRibbonEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxRange,1> kRibbonWakeEffectRanges") != std::string::npos &&
+          source.find("std::array<VfxRibbonWakeRecipe,1> kRibbonWakeRecipes") != std::string::npos &&
+          source.find("std::array<VfxRange,1> kRibbonFixedEffectRanges") != std::string::npos &&
+          source.find("std::array<VfxRibbonFixedRecipe,1> kRibbonFixedRecipes") != std::string::npos &&
+          source.find("std::array<VfxRange,1> kRibbonProjectileEffectRanges") != std::string::npos &&
+          source.find("std::array<VfxRibbonProjectileSourceRecipe,1> kRibbonProjectileSources") != std::string::npos &&
+          source.find("std::array<VfxRibbonProjectileOutputRecipe,1> kRibbonProjectileOutputs") != std::string::npos &&
+          source.find("std::array<VfxRange,1> kRibbonCancelEffectRanges") != std::string::npos &&
+          source.find("std::array<VfxRibbonCancelRecipe,1> kRibbonCancelRecipes") != std::string::npos &&
+          source.find("std::array<VfxRibbonLinkEffectRecipe,1> kRibbonLinkEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxRibbonLinkOutputRecipe,1> kRibbonLinkOutputRecipes") != std::string::npos &&
+          source.find("std::array<VfxRibbonEventEffectRecipe,1> kRibbonEventEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxRibbonEventSourceRecipe,1> kRibbonEventSources") != std::string::npos &&
+          source.find("std::array<VfxRibbonEventOutputRecipe,1> kRibbonEventOutputs") != std::string::npos &&
+          source.find("std::array<VfxFresnelEffectRecipe,1> kFresnelEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxFresnelRecipe,1> kFresnelRecipes") != std::string::npos &&
+          source.find("std::array<VfxMeshEffectRecipe,1> kMeshEffectRecipes") != std::string::npos &&
+          source.find("std::array<VfxMeshRecipe,1> kMeshRecipes") != std::string::npos &&
+          source.find("std::array<VfxEffectLookupRecord,2> kEffectLookupById") != std::string::npos &&
+          source.find("{5u,6u,7u}") != std::string::npos);
     Check(source.find("123ull,1u,2u,3u,4u,5u,0u,6u,2u,8u,3u,5u,2u,VfxSourceType(2u)") != std::string::npos &&
           source.find("std::array<VfxBallisticRecipe,1> kBallisticRecipes") != std::string::npos);
     for (const std::string_view token : {"std::vector", "memcpy", "DecodeVfx", "LoadVfx", "new ", "[]"})

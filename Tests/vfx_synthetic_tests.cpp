@@ -5,6 +5,7 @@ int RunVfxDecalTests();
 int RunVfxDistortionTests();
 int RunVfxLightTests();
 int RunVfxMeshTests();
+int RunVfxEntitySurfaceTests();
 int RunVfxUpgradeDispatchTests();
 
 int main(int argc, char **argv)
@@ -16,8 +17,9 @@ int main(int argc, char **argv)
         if (name == "distortion") return RunVfxDistortionTests();
         if (name == "light") return RunVfxLightTests();
         if (name == "mesh") return RunVfxMeshTests();
+        if (name == "entity_surface") return RunVfxEntitySurfaceTests();
         if (name == "upgrade_dispatch") return RunVfxUpgradeDispatchTests();
     }
-    std::cerr << "Expected one VFX case: decal|distortion|light|mesh|upgrade_dispatch\n";
+    std::cerr << "Expected one VFX case: decal|distortion|light|mesh|entity_surface|upgrade_dispatch\n";
     return 2;
 }

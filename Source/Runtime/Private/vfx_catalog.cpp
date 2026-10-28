@@ -11,6 +11,9 @@ namespace hs
 {
 namespace
 {
+const auto kExplosiveArrowMain = MakeAssetId("particle.skill.explosive_arrow.main");
+const auto kShockwaveRelease = MakeAssetId("particle.boss.shockwave.release");
+
 std::uint32_t SpawnSeed(Sequence sequence, std::uint32_t emitter) noexcept
 {
     auto value = sequence ^ (0x9e3779b97f4a7c15ull + emitter);
@@ -66,7 +69,8 @@ const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
 Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_fraction,
                            std::vector<ParticleSpawnCommand> &particles,
                            std::vector<VfxLineSpawnCommand> &lines,
-                           std::span<const Sequence> replaced_particle_sequences) const
+                           bool particles_replaced, bool mesh_replaced,
+                           VfxLegacyGroundSuppression ground_suppression) const
 {
     if (event.kind != PresentationKind::Vfx)
         return Result::Success();
@@ -75,9 +79,9 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     {
         // The legacy emitter catalog is only the compatibility path. New v4
         // events are decoded by the typed program and need no legacy emitter.
-        if (std::ranges::any_of(image_.program.effect_lookup, [&](const VfxEffectLookupRecord &effect) {
-                return effect.effect_id == event.asset.value;
-            }))
+        const auto typed = std::lower_bound(image_.effect_lookup_by_id.begin(), image_.effect_lookup_by_id.end(),
+            event.asset.value, [](const auto &effect, std::uint64_t id) { return effect.effect_id < id; });
+        if (typed != image_.effect_lookup_by_id.end() && typed->effect_id == event.asset.value)
             return Result::Success();
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX effect ID is missing.");
     }
@@ -91,7 +95,7 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     const Float3 forward{parameters.direction.x / direction_length, 0.0f, parameters.direction.z / direction_length};
     const Float3 right{forward.z, 0.0f, -forward.x};
     if (definition->kind != VfxDefinitionKind::Line &&
-        std::ranges::find(replaced_particle_sequences, event.sequence) != replaced_particle_sequences.end())
+        (particles_replaced || ground_suppression.all_particles))
         return Result::Success();
     if (definition->kind == VfxDefinitionKind::Line)
     {
@@ -108,11 +112,21 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     // The legacy release ring expands across safe gaps and disagrees with the
     // authoritative wavefront. Keep its other accents while the typed snapshot
     // owns this boundary for the area's entire lifetime.
-    const bool typed_wavefront = event.asset.value == MakeAssetId("particle.boss.shockwave.release").value &&
+    const bool typed_wavefront = event.asset.value == kShockwaveRelease.value &&
         event.geometry.kind == PresentationGeometryKind::RingGaps && image_.has_typed_wavefront;
     for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
     {
         const auto &emitter = image_.emitters[definition->first_emitter + index];
+        if (mesh_replaced && emitter.renderer == VfxRenderer::Mesh &&
+            (emitter.primitive != VfxPrimitive::ShockShell || event.asset.value == kExplosiveArrowMain.value))
+            continue;
+        if ((ground_suppression.ground_ring && emitter.renderer == VfxRenderer::Ground &&
+             emitter.primitive == VfxPrimitive::Ring) ||
+            (ground_suppression.ground_disc && emitter.renderer == VfxRenderer::Ground &&
+             emitter.primitive == VfxPrimitive::Disc) ||
+            (ground_suppression.segment_solid_trail && emitter.renderer == VfxRenderer::Segment &&
+             emitter.primitive == VfxPrimitive::SolidTrail))
+            continue;
         if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
             continue;
         const auto scaled = parameters.scale;

@@ -1,8 +1,8 @@
 #pragma once
 #include "vfx_event_view.hpp"
 #include <hs/core/result.hpp>
+#include <hs/runtime/vfx_image.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program.hpp>
 #include <hs/render_data/vfx_screen_input.hpp>
 #include <vector>
 namespace hs::runtime_detail
@@ -20,8 +20,8 @@ struct VfxLowHealthPulseState
     [[nodiscard]] double PhaseAt(double display_tick) const noexcept;
     [[nodiscard]] float EntryFade(double display_tick) const noexcept;
 };
-[[nodiscard]] bool IsVfxTypedScreenEffect(const VfxProgramView &, VfxEffectHandle) noexcept;
-[[nodiscard]] Result BuildVfxTypedScreenCommands(const VfxProgramView &,
+[[nodiscard]] bool IsVfxTypedScreenEffect(const VfxImage &, VfxEffectHandle) noexcept;
+[[nodiscard]] Result BuildVfxTypedScreenCommands(const VfxImage &,
     VfxEventView, std::span<const VfxPersistentInput>, Tick observation_tick,
     double display_tick,
     VfxQuality, VfxLowHealthPulseState &, std::vector<VfxScreenInput> &);

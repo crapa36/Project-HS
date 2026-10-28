@@ -335,8 +335,8 @@ class EnemyStore
         mutation_.RequireUnborrowed();
         if (size() == MaxSize()) throw std::length_error("Actor count overflow.");
         EnsureCapacity(size() + 1);
-        mutation_.Advance();
         assert(value.id.value != 0 && (empty() || ids.back().value < value.id.value));
+        mutation_.Advance();
         static_assert(std::is_nothrow_move_constructible_v<EntityId>);
         ids.push_back(std::move(value.id));
         static_assert(std::is_nothrow_move_constructible_v<EnemyMotion>);
@@ -379,9 +379,10 @@ class EnemyStore
     }
     template <typename Predicate> std::size_t EraseIf(Predicate predicate)
     {
-        mutation_.Advance();
+        mutation_.RequireUnborrowed();
         const auto original = size();
         std::size_t write{};
+        bool generation_advanced{};
         for (std::size_t read = 0; read < original; ++read)
         {
             bool remove;
@@ -389,6 +390,11 @@ class EnemyStore
             if (remove) continue;
             if (write != read)
             {
+                if (!generation_advanced)
+                {
+                    mutation_.Advance();
+                    generation_advanced = true;
+                }
                 static_assert(std::is_nothrow_move_assignable_v<EntityId>);
                 ids[write] = std::move(ids[read]);
                 static_assert(std::is_nothrow_move_assignable_v<EnemyMotion>);
@@ -404,6 +410,7 @@ class EnemyStore
             }
             ++write;
         }
+        if (write != original && !generation_advanced) mutation_.Advance();
         ids.resize(write);
         motion.resize(write);
         life.resize(write);
@@ -415,6 +422,8 @@ class EnemyStore
     }
     void clear()
     {
+        mutation_.RequireUnborrowed();
+        if (empty()) return;
         mutation_.Advance();
         ids.clear();
         motion.clear();
@@ -482,6 +491,7 @@ class ProjectileStore
         mutation_.RequireUnborrowed();
         if (size() == MaxSize()) throw std::length_error("Actor count overflow.");
         EnsureCapacity(size() + 1);
+        assert(value.id.value != 0);
         mutation_.Advance();
         static_assert(std::is_nothrow_move_constructible_v<EntityId>);
         ids.push_back(std::move(value.id));
@@ -516,9 +526,10 @@ class ProjectileStore
     }
     template <typename Predicate> std::size_t EraseIf(Predicate predicate)
     {
-        mutation_.Advance();
+        mutation_.RequireUnborrowed();
         const auto original = size();
         std::size_t write{};
+        bool generation_advanced{};
         for (std::size_t read = 0; read < original; ++read)
         {
             bool remove;
@@ -526,6 +537,11 @@ class ProjectileStore
             if (remove) continue;
             if (write != read)
             {
+                if (!generation_advanced)
+                {
+                    mutation_.Advance();
+                    generation_advanced = true;
+                }
                 static_assert(std::is_nothrow_move_assignable_v<EntityId>);
                 ids[write] = std::move(ids[read]);
                 static_assert(std::is_nothrow_move_assignable_v<ProjectileMotion>);
@@ -537,6 +553,7 @@ class ProjectileStore
             }
             ++write;
         }
+        if (write != original && !generation_advanced) mutation_.Advance();
         ids.resize(write);
         motion.resize(write);
         combat.resize(write);
@@ -546,6 +563,8 @@ class ProjectileStore
     }
     void clear()
     {
+        mutation_.RequireUnborrowed();
+        if (empty()) return;
         mutation_.Advance();
         ids.clear();
         motion.clear();

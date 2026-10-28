@@ -60,6 +60,66 @@ std::vector<hs::VfxFlashSpawnInput> BuildPersistentStamps(
 std::vector<hs::VfxFlashSpawnInput> BuildPersistentFire(
     const hs::VfxProgramData &program, std::span<const hs::VfxPersistentInput> inputs, double tick)
 { const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxPersistentFireFlameCommands(image.View(),inputs,tick); }
+std::vector<hs::VfxFlashSpawnInput> LegacyPersistentFire(
+    const hs::VfxImage &image, std::span<const hs::VfxPersistentInput> inputs, double current_tick)
+{
+    const auto mix = [](std::uint32_t value) {
+        value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
+        value *= 0x846ca68bu; return value ^ (value >> 16);
+    };
+    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
+        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) / 16777216.0f;
+    };
+    std::vector<hs::VfxFlashSpawnInput> output;
+    for (const auto &owner : inputs)
+    {
+        const auto *circle = std::get_if<hs::VfxCirclePayload>(&owner.payload);
+        const auto range = image.persistent_fire_effect_ranges[owner.effect_handle - 1];
+        const auto elapsed = static_cast<double>(owner.elapsed_seconds) * 60;
+        const auto duration = static_cast<std::uint64_t>(std::llround(
+            static_cast<double>(owner.source_duration_seconds) * 60));
+        const auto started = static_cast<hs::Tick>(std::llround(std::max(0.0, current_tick - elapsed)));
+        for (const auto &recipe : image.persistent_fire_recipes.subspan(range.first, range.count))
+        {
+            if (recipe.effect_handle != owner.effect_handle) continue;
+            const auto source_seed = mix(owner.stable_seed ^ mix(recipe.source_stable_id) ^
+                mix(static_cast<std::uint32_t>(recipe.effect_id)) ^
+                mix(static_cast<std::uint32_t>(recipe.effect_id >> 32)));
+            auto base = recipe.spawn;
+            base.position = circle->center;
+            if (recipe.mask_slices.count && recipe.mask_slices.first <= image.program.slice_indices.size() &&
+                recipe.mask_slices.count <= image.program.slice_indices.size() - recipe.mask_slices.first)
+            {
+                const auto slices = image.program.slice_indices.subspan(
+                    recipe.mask_slices.first, recipe.mask_slices.count);
+                base.mask_slice = slices[owner.stable_seed % slices.size()];
+                base.mask_strength = recipe.mask_strength;
+            }
+            const auto last = elapsed * recipe.rate / 60;
+            for (std::uint64_t ordinal = 0; ordinal <= last; ++ordinal)
+            {
+                const auto birth = (ordinal * 60 + recipe.rate - 1) / recipe.rate;
+                if (birth > elapsed || birth >= duration) continue;
+                auto tongue = base;
+                tongue.stable_seed = mix(source_seed ^ mix(static_cast<std::uint32_t>(ordinal + 1)));
+                const float angle = 2 * std::numbers::pi_v<float> * random(tongue.stable_seed, 0);
+                const float radius = std::sqrt(random(tongue.stable_seed, 1)) *
+                                     circle->radius * recipe.radius_scale;
+                tongue.initial_offset = {std::cos(angle) * radius, 0, std::sin(angle) * radius};
+                tongue.lifetime = static_cast<float>(duration - birth) / 60;
+                tongue.normalized_age = static_cast<float>(elapsed - birth) /
+                                        static_cast<float>(duration - birth);
+                tongue.event_tick = started + birth;
+                tongue.initial_velocity = {-tongue.initial_offset.x / tongue.lifetime,
+                    tongue.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
+                if (std::isfinite(tongue.initial_velocity.x) &&
+                    std::isfinite(tongue.initial_velocity.y) &&
+                    std::isfinite(tongue.initial_velocity.z)) output.push_back(tongue);
+            }
+        }
+    }
+    return output;
+}
 std::vector<hs::runtime_detail::VfxOwnedStatusTickFlashCommand> BuildOwnedStatusTicks(
     const hs::VfxProgramData &program, hs::VfxEventView events,
     std::span<const hs::VfxPersistentInput> inputs)
@@ -869,6 +929,160 @@ void PersistentFireFlameUsesPreparedRecipeAndLiveAge()
         "persistent fire did not evaluate its final tongue from live source age");
 }
 
+void PreparedPersistentFireCapsNewestBirthsFairly()
+{
+    const auto program = PersistentFireProgram();
+    auto first = PersistentStampOwner(hs::PersistentVfxKind::FireArea);
+    first.effect_handle = 1; first.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::FireArea);
+    first.stable_id = 91; first.stable_seed = 314; first.quality = hs::VfxQuality::High;
+    first.elapsed_seconds = 20.0f; first.source_duration_seconds = 30.0f;
+    hs::VfxCirclePayload circle; circle.center = {3, 1, 4}; circle.radius = 2;
+    first.payload = circle;
+    auto second = first;
+    second.stable_id = 92; second.stable_seed = 777;
+    std::array owners{first, second};
+    auto image = PreparedImage(program);
+    const auto image_view = image.View();
+    const auto expected = LegacyPersistentFire(image_view, owners, 1300.0);
+    const auto compatibility_wrapper = BuildPersistentFire(program, owners, 1300.0);
+    Require(expected.size() == 322,
+            "long-lived fire fixture did not produce the expected source-order oracle");
+    Require(compatibility_wrapper.size() == expected.size() &&
+                compatibility_wrapper.front().stable_seed == expected.front().stable_seed &&
+                compatibility_wrapper.back().event_tick == expected.back().event_tick,
+            "unlimited compatibility wrapper changed legacy fire scheduling");
+
+    std::vector<hs::runtime_detail::VfxPreparedFireSource> prepared;
+    hs::runtime_detail::PrepareVfxPersistentFireSources(image_view, owners, 1300.0, prepared);
+    Require(prepared.size() == 2 && prepared[0].eligible_ordinals == 161 &&
+                prepared[1].eligible_ordinals == 161,
+            "prepared fire did not count eligible ordinals without expanding them");
+    auto authoritative_image = PreparedImage(program);
+    authoritative_image.persistent_fire_recipes[0].authoritative = true;
+    std::vector<hs::runtime_detail::VfxPreparedFireSource> authoritative_prepared;
+    hs::runtime_detail::PrepareVfxPersistentFireSources(
+        authoritative_image.View(), owners, 1300.0, authoritative_prepared);
+    Require(authoritative_prepared.size() == 2 && authoritative_prepared[0].authoritative &&
+                authoritative_prepared[1].authoritative,
+            "prepared fire dropped the recipe's authoritative ownership flag");
+
+    auto mixed = prepared;
+    mixed[0].authoritative = true;
+    std::vector<hs::VfxFlashSpawnInput> mixed_output;
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(mixed, 1, mixed_output);
+    Require(mixed_output.size() == 162 && mixed_output.front().stable_seed == expected[0].stable_seed &&
+                mixed_output[160].stable_seed == expected[160].stable_seed &&
+                mixed_output.back().stable_seed == expected[321].stable_seed,
+            "decorative quota suppressed authoritative fire or reordered a mixed source batch");
+
+    mixed = prepared;
+    mixed[1].authoritative = true;
+    mixed_output.clear();
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(mixed, 0, mixed_output);
+    Require(mixed_output.size() == 161 && mixed_output.front().stable_seed == expected[161].stable_seed &&
+                mixed_output.back().stable_seed == expected[321].stable_seed,
+            "zero decorative quota did not preserve only the later authoritative source");
+
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed = 1234;
+    std::vector<hs::VfxFlashSpawnInput> capped{prefix};
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 0, capped);
+    Require(capped.size() == 1 && capped.front().stable_seed == prefix.stable_seed,
+            "zero fire admission changed the caller prefix");
+
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 2, capped);
+    Require(capped.size() == 3 && capped[1].stable_seed == expected[160].stable_seed &&
+                capped[1].event_tick == expected[160].event_tick &&
+                capped[2].stable_seed == expected[321].stable_seed &&
+                capped[2].event_tick == expected[321].event_tick,
+            "tiny fire cap did not admit each owner's newest birth in source order");
+
+    capped.resize(1);
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 3, capped);
+    Require(capped.size() == 4 && capped[1].stable_seed == expected[159].stable_seed &&
+                capped[2].stable_seed == expected[160].stable_seed &&
+                capped[3].stable_seed == expected[321].stable_seed,
+            "fire quota remainder was not distributed fairly before preserving newest ordinals");
+
+    capped.resize(1);
+    hs::runtime_detail::AppendVfxPreparedFireFlameCommands(
+        prepared, std::numeric_limits<std::size_t>::max(), capped);
+    Require(capped.size() == expected.size() + 1 &&
+                capped[1].stable_seed == expected[0].stable_seed &&
+                capped.back().event_tick == expected.back().event_tick,
+            "unlimited prepared fire changed the legacy output extent or order");
+    for (std::size_t index = 0; index < expected.size(); ++index)
+        Require(capped[index + 1].stable_seed == expected[index].stable_seed &&
+                    capped[index + 1].event_tick == expected[index].event_tick &&
+                    std::bit_cast<std::uint32_t>(capped[index + 1].initial_offset.x) ==
+                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.x) &&
+                    std::bit_cast<std::uint32_t>(capped[index + 1].initial_offset.z) ==
+                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.z) &&
+                    std::bit_cast<std::uint32_t>(capped[index + 1].normalized_age) ==
+                        std::bit_cast<std::uint32_t>(expected[index].normalized_age) &&
+                    std::bit_cast<std::uint32_t>(capped[index + 1].lifetime) ==
+                        std::bit_cast<std::uint32_t>(expected[index].lifetime),
+                "unlimited prepared fire changed an ordinal's seed, age, or float formula");
+    for (std::size_t index = 0; index < expected.size(); ++index)
+        Require(compatibility_wrapper[index].stable_seed == expected[index].stable_seed &&
+                    compatibility_wrapper[index].event_tick == expected[index].event_tick &&
+                    std::bit_cast<std::uint32_t>(compatibility_wrapper[index].initial_offset.x) ==
+                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.x) &&
+                    std::bit_cast<std::uint32_t>(compatibility_wrapper[index].normalized_age) ==
+                        std::bit_cast<std::uint32_t>(expected[index].normalized_age),
+                "unlimited raw fire wrapper changed an ordinal's seed, tick or formula");
+
+    first.elapsed_seconds = std::numeric_limits<float>::quiet_NaN();
+    first.payload = circle;
+    hs::runtime_detail::PrepareVfxPersistentFireSources(
+        image_view, std::span(&first, 1), 1300.0, prepared);
+    Require(prepared.empty(), "malformed live fire owner produced prepared fanout");
+    auto malformed_image = PreparedImage(program);
+    malformed_image.persistent_fire_recipes[0].rate = 0;
+    hs::runtime_detail::PrepareVfxPersistentFireSources(
+        malformed_image.View(), owners, 1300.0, prepared);
+    Require(prepared.empty(), "zero-rate fire recipe entered prepared fanout");
+}
+
+void PersistentAppendPathsPreservePrefixAndRejectWithoutMutation()
+{
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed=999;
+    auto fire=PersistentFireProgram();
+    hs::VfxPersistentInput fire_owner;
+    fire_owner.effect_handle=1; fire_owner.source_visual_kind=static_cast<std::uint8_t>(hs::PersistentVfxKind::FireArea);
+    fire_owner.stable_id=91; fire_owner.stable_seed=314; fire_owner.quality=hs::VfxQuality::High;
+    fire_owner.elapsed_seconds=.5f; fire_owner.source_duration_seconds=1;
+    hs::VfxCirclePayload circle; circle.center={3,1,4}; circle.radius=2; fire_owner.payload=circle;
+    const std::array fire_owners{fire_owner};
+    const auto expected_fire=BuildPersistentFire(fire,fire_owners,100.0);
+    const auto fire_image=PreparedImage(fire);
+    std::vector<hs::VfxFlashSpawnInput> appended{prefix};
+    hs::runtime_detail::AppendVfxPersistentFireFlameCommands(
+        fire_image.View(),fire_owners,100.0,appended);
+    Require(appended.size()==expected_fire.size()+1&&appended.front().stable_seed==prefix.stable_seed&&
+        appended[1].stable_seed==expected_fire[0].stable_seed&&
+        appended.back().event_tick==expected_fire.back().event_tick,
+        "persistent fire append changed prefix or recipe order");
+    fire_owner.source_duration_seconds=0;
+    hs::runtime_detail::AppendVfxPersistentFireFlameCommands(
+        fire_image.View(),std::span(&fire_owner,1),100.0,appended);
+    Require(appended.size()==expected_fire.size()+1,"rejected fire owner partially appended output");
+
+    const auto stamp=PersistentStampProgram("particle.player.bow_draw",false);
+    const auto owner=PersistentStampOwner(hs::PersistentVfxKind::PlayerBowDraw);
+    const std::array owners{owner};
+    const auto expected_stamp=BuildPersistentStamps(stamp,owners);
+    Require(expected_stamp.size()==1,"persistent status append fixture did not prepare");
+    const auto stamp_image=PreparedImage(stamp);
+    hs::runtime_detail::AppendVfxPersistentStatusStampCommands(stamp_image.View(),owners,appended);
+    Require(appended.size()==expected_fire.size()+2&&appended.back().stable_seed==owner.stable_seed&&
+        appended.back().shape==expected_stamp[0].shape,
+        "persistent status append changed caller ordering");
+    auto invalid=owner; invalid.source_duration_seconds=0;
+    hs::runtime_detail::AppendVfxPersistentStatusStampCommands(
+        stamp_image.View(),std::span(&invalid,1),appended);
+    Require(appended.size()==expected_fire.size()+2,"rejected status owner partially appended output");
+}
+
 void OwnedStatusTickPulseUsesLiveOwnerAndEventClock()
 {
     const auto cooked = StatusTickProgram();
@@ -890,6 +1104,22 @@ void OwnedStatusTickPulseUsesLiveOwnerAndEventClock()
             bleed.mask_slice == 5 && Near(bleed.mask_strength, .38f) &&
             burn.mask_slice == 0xffffffffu && Near(bleed.color.x, 1.92f),
             "status pulse lost fixed timing or authored curve/mask/color");
+
+    const auto image = PreparedImage(cooked);
+    auto duplicate = events[0];
+    duplicate.event_tick = 74;
+    auto rejected = events[1];
+    rejected.geometry_owner_id = 0;
+    std::vector<hs::VfxFlashSpawnInput> appended(1);
+    appended.front().event_tick = 5;
+    std::vector<hs::Sequence> emitted{399};
+    const std::array append_events{events[0], duplicate, rejected};
+    hs::runtime_detail::AppendVfxOwnedStatusTickFlashes(
+        image.View(), append_events, owners, appended, emitted);
+    Require(appended.size() == 3 && appended[0].event_tick == 5 &&
+            appended[1].event_tick == 73 && appended[2].event_tick == 74 &&
+            emitted == std::vector<hs::Sequence>{399, 401, 401},
+            "owned status append lost prefix/order or reported rejected duplicate sequence");
 }
 
 void OwnedStatusTickRejectsMissingOrWrongOwner()
@@ -1353,6 +1583,93 @@ void PickupCollectorImpactUsesLinkSource()
     }
 }
 
+void TypedFlashAppendPreservesPrefixAndSequenceSuppression()
+{
+    auto cooked = Program();
+    auto first = HitInput();
+    first.sequence = 500;
+    first.event_tick = 11;
+    auto duplicate = first;
+    duplicate.event_tick = 12;
+    auto next = first;
+    next.sequence = 501;
+    next.event_tick = 13;
+    auto rejected = first;
+    rejected.sequence = 502;
+    rejected.effect_handle = 99;
+    const std::array inputs{first, duplicate, next, rejected};
+    const std::array excluded{hs::Sequence{500}};
+    const auto image = PreparedImage(cooked);
+    std::vector<hs::VfxFlashSpawnInput> output(1);
+    output.front().event_tick = 3;
+    std::vector<hs::Sequence> superseded{499};
+    hs::runtime_detail::AppendVfxTypedFlashCommands(
+        image.View(), inputs, excluded, output, &superseded);
+    Require(output.size() == 2 && output[0].event_tick == 3 && output[1].event_tick == 13 &&
+            superseded == std::vector<hs::Sequence>{499},
+            "typed flash append lost prefix/order, failed to suppress duplicate sequences, or accepted rejection");
+
+    hs::VfxProgramData pickup;
+    hs::VfxEffectRecord effect;
+    effect.handle = 1;
+    effect.payload_kind = Hash32("SourceTargetPayload");
+    effect.seconds = .32f;
+    effect.sources = {0, 1};
+    pickup.effects.push_back(effect);
+    pickup.effect_lookup.push_back({Hash64("particle.pickup.xp_collect"), 1});
+    hs::VfxSourceRecord source;
+    source.effect = 1;
+    source.type = hs::VfxSourceType::ImpactSprite;
+    source.knot_count = 2;
+    source.knots = {0, .25f, 0, 0};
+    source.outputs = {0, 1};
+    pickup.sources.push_back(source);
+    pickup.parameters.push_back({Hash32("sdf"), hs::VfxParameterType::Enum,
+                                 Hash32("star_ring")});
+    hs::VfxOutputRecord sprite;
+    sprite.source = 0;
+    sprite.profile = hs::VfxOutputProfile::SpriteSdfAdd;
+    sprite.shape = Hash32("small_star_ring");
+    sprite.motion = hs::VfxMotionKind::SnapsInwardUpward;
+    sprite.rgba = {1, .6f, .2f, .8f};
+    sprite.hdr = 2;
+    sprite.parameters = {0, 1};
+    pickup.outputs.push_back(sprite);
+    hs::VfxEventInput collect;
+    collect.effect_handle = 1;
+    collect.sequence = 77;
+    collect.event_tick = 8;
+    hs::VfxLinkPayload link;
+    link.source_position = {1, 0, 2};
+    link.target_position = {3, 0, 4};
+    collect.payload = link;
+    const std::array duplicate_collect{collect, collect};
+    const auto pickup_image = PreparedImage(pickup);
+    std::vector<hs::VfxFlashSpawnInput> pickup_output(1);
+    pickup_output.front().event_tick = 4;
+    std::vector<hs::Sequence> pickup_sequences{70};
+    const std::array exclude_collect{hs::Sequence{77}};
+    hs::runtime_detail::AppendVfxTypedFlashCommands(
+        pickup_image.View(), duplicate_collect, exclude_collect,
+        pickup_output, &pickup_sequences);
+    Require(pickup_output.size() == 1 && pickup_output.front().event_tick == 4 &&
+            pickup_sequences == std::vector<hs::Sequence>{70},
+            "paired duplicate pickup sequences were not excluded before flash emission");
+    collect.sequence = 78;
+    collect.event_tick = 9;
+    auto malformed_collect = collect;
+    malformed_collect.sequence = 79;
+    malformed_collect.event_tick = 10;
+    std::get<hs::VfxLinkPayload>(malformed_collect.payload).target_position.x =
+        std::numeric_limits<float>::quiet_NaN();
+    const std::array mixed_collect{collect, malformed_collect};
+    hs::runtime_detail::AppendVfxTypedFlashCommands(
+        pickup_image.View(), mixed_collect, {}, pickup_output, &pickup_sequences);
+    Require(pickup_output.size() == 2 && pickup_output.back().event_tick == 9 &&
+            pickup_sequences == std::vector<hs::Sequence>{70, 78},
+            "pickup append suppressed malformed event or lost successful source sequence");
+}
+
 void ProductionStatusAndPickupOutputsDecode()
 {
     std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
@@ -1416,6 +1733,8 @@ int RunVfxFlashTests()
         AuthoredSdfShapesAndContext();
         AuthoredOitRecipes();
         PersistentFireFlameUsesPreparedRecipeAndLiveAge();
+        PreparedPersistentFireCapsNewestBirthsFairly();
+        PersistentAppendPathsPreservePrefixAndRejectWithoutMutation();
         OwnedStatusTickPulseUsesLiveOwnerAndEventClock();
         OwnedStatusTickRejectsMissingOrWrongOwner();
         OwnedStatusTickRejectsMalformedRecipe();
@@ -1423,6 +1742,7 @@ int RunVfxFlashTests()
         UpgradeStatusStampsUseAuthoredGeometry();
         ProductionUpgradeStatusStampsDecode();
         PickupCollectorImpactUsesLinkSource();
+        TypedFlashAppendPreservesPrefixAndSequenceSuppression();
         ProductionStatusAndPickupOutputsDecode();
         CircleAdditiveImpactRecipes();
         MuzzleConeFlashRecipes();

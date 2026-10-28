@@ -1,9 +1,12 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "vfx_typed_frame_adapter.hpp"
+#include "vfx_image_fixture.hpp"
 #include "vfx_session_state.hpp"
 #include "vfx_typed_screen_commands.hpp"
+#include "vfx_typed_volume_commands.hpp"
 
 #include <hs/game_domain/domain_signal.hpp>
+#include <hs/runtime/vfx_image.hpp>
 
 #include <array>
 #include <bit>
@@ -76,8 +79,8 @@ void TestPointEvent()
     event.position = {1.0f, 2.0f, 3.0f};
     event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.75f, {}, {}});
     const std::array events{event};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, events, {}, {}, 4);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), events, {}, {}, 4);
     Check(result.events.size() == 1, "point event was not adapted");
     Check(result.unsupported_effect_ids.empty(), "valid point event was diagnosed");
     const auto &point = std::get<hs::VfxPointPayload>(result.events.front().payload);
@@ -87,10 +90,66 @@ void TestPointEvent()
 
     event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 0.0f, {}, {}});
     const std::array invalid_events{event};
-    const auto rejected = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, invalid_events, {}, {}, 4);
+    const auto rejected = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), invalid_events, {}, {}, 4);
     Check(rejected.events.empty() && rejected.unsupported_effect_ids.size() == 1,
           "point event accepted nonpositive authored scale");
+}
+
+void TestPreparedLookupPreservesAuthoredHandles()
+{
+    auto program = Program({{30, 1, 0, Hash32("PointEventPayload")},
+                            {40, 2, 0, Hash32("PointEventPayload")}});
+    const std::array lookup{hs::VfxEffectLookupRecord{10, 2}, hs::VfxEffectLookupRecord{20, 1}};
+    hs::VfxImage image;
+    image.program = program;
+    image.effect_lookup_by_id = lookup;
+    hs::PresentationEvent event;
+    event.kind = hs::PresentationKind::Vfx;
+    event.asset = {10};
+    event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
+    auto second = event;
+    second.asset = {20};
+    const auto result = hs::test::BuildFrameInputs(
+        image, std::array{event, second}, {}, {}, 4);
+    Check(result.events.size() == 2 && result.events[0].effect_handle == 2 &&
+              result.events[1].effect_handle == 1 && result.unsupported_effect_ids.empty(),
+          "prepared lookup lost authored handle order or searched the raw table");
+
+    event.asset = {15};
+    const auto missing = hs::test::BuildFrameInputs(
+        image, std::array{event}, {}, {}, 4);
+    Check(missing.events.empty() && missing.unsupported_effect_ids.size() == 1,
+          "prepared lookup accepted an absent ID between indexed rows");
+}
+
+void TestFrameInputStorageReused()
+{
+    const auto effect_id = Hash64("particle.common.hit");
+    const auto program = Program({{effect_id, 1, 0, Hash32("PointEventPayload")}});
+    const hs::test::VfxLookupImage image(program);
+    hs::runtime_detail::VfxTypedFrameInputs result;
+    result.events.reserve(4);
+    result.persistent.reserve(4);
+    result.unsupported_effect_ids.reserve(4);
+    const auto *events_storage = result.events.data();
+    const auto *persistent_storage = result.persistent.data();
+    const auto *unsupported_storage = result.unsupported_effect_ids.data();
+    result.persistent.emplace_back();
+    result.unsupported_effect_ids.push_back(99);
+    hs::PresentationEvent event;
+    event.kind = hs::PresentationKind::Vfx;
+    event.asset = {effect_id};
+    event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
+    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4, result);
+    Check(result.events.size() == 1 && result.persistent.empty() &&
+              result.unsupported_effect_ids.empty(),
+          "reused frame inputs retained previous payloads or diagnostics");
+    hs::runtime_detail::BuildVfxTypedFrameInputs(image, {}, {}, {}, 5, result);
+    Check(result.events.empty() && result.events.data() == events_storage &&
+              result.persistent.data() == persistent_storage &&
+              result.unsupported_effect_ids.data() == unsupported_storage,
+          "frame adapter replaced reusable storage on the following empty frame");
 }
 
 void TestProjectileImpactEventUsesAuthoritativeGeometry()
@@ -105,8 +164,8 @@ void TestProjectileImpactEventUsesAuthoritativeGeometry()
     event.geometry.velocity = {0.0f, 0.0f, 24.0f};
     event.geometry.radius = 0.18f;
     event.geometry.source_id = 712;
-    const auto valid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{event}, {}, {}, 30);
+    const auto valid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 30);
     Check(valid.events.size() == 1 && valid.unsupported_effect_ids.empty(),
           "projectile impact geometry was not adapted");
     const auto &payload = std::get<hs::VfxProjectilePayload>(valid.events.front().payload);
@@ -115,8 +174,8 @@ void TestProjectileImpactEventUsesAuthoritativeGeometry()
           "projectile impact changed authoritative velocity or radius");
 
     event.geometry.velocity = {};
-    const auto invalid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{event}, {}, {}, 30);
+    const auto invalid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 30);
     Check(invalid.events.empty() && invalid.unsupported_effect_ids.size() == 1,
           "zero-velocity projectile impact was accepted");
 }
@@ -138,8 +197,8 @@ void TestEventSchemaAndModeRejection()
     hs::PresentationEvent second = first;
     second.asset = {persistent_id};
     const std::array events{first, second};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, events, {}, {}, 4);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), events, {}, {}, 4);
     Check(result.events.size() == 1, "authored circle event was not adapted");
     Check(result.unsupported_effect_ids.size() == 1, "event rejection diagnostics missing");
     const auto &circle = std::get<hs::VfxCirclePayload>(result.events.front().payload);
@@ -174,8 +233,8 @@ void TestEventGeometryTagsAndGapExpansion()
     ring.geometry.gap_offset_degrees = 7.0f;
     ring.geometry.gap_half_width_degrees = 4.0f;
     const std::array events{cone, ring};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, events, {}, {}, 4);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), events, {}, {}, 4);
     Check(result.unsupported_effect_ids.empty() && result.events.size() == 2,
           "tagged event geometry was rejected");
     Check(result.events[0].sequence == 42, "event sequence was not retained");
@@ -195,8 +254,8 @@ void TestEventGeometryTagsAndGapExpansion()
     wrong.geometry.outer_radius = 2.0f;
     wrong.geometry.gap_count = 1;
     const std::array wrong_events{wrong};
-    const auto rejected = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, wrong_events, {}, {}, 4);
+    const auto rejected = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), wrong_events, {}, {}, 4);
     Check(rejected.events.empty() && rejected.unsupported_effect_ids.size() == 1,
           "mismatched geometry tag was accepted");
 
@@ -204,16 +263,16 @@ void TestEventGeometryTagsAndGapExpansion()
     multishot.asset = {multishot_id};
     multishot.geometry = {};
     const std::array untagged_multishot{multishot};
-    const auto untagged_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, untagged_multishot, {}, {}, 4);
+    const auto untagged_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), untagged_multishot, {}, {}, 4);
     Check(untagged_result.events.empty() && untagged_result.unsupported_effect_ids.size() == 1,
           "untagged multishot cone was accepted");
     multishot.geometry.kind = hs::PresentationGeometryKind::Cone;
     multishot.geometry.range = 23.0f;
     multishot.geometry.half_angle_degrees = 31.0f;
     const std::array tagged_multishot{multishot};
-    const auto tagged_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, tagged_multishot, {}, {}, 4);
+    const auto tagged_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), tagged_multishot, {}, {}, 4);
     Check(tagged_result.events.size() == 1 && tagged_result.unsupported_effect_ids.empty(),
           "tagged multishot cone was rejected");
     const auto &multishot_payload = std::get<hs::VfxConePayload>(
@@ -265,8 +324,8 @@ void TestArrowRainPullLinkGeometry()
     event.geometry.end_position = {3.25f, 1.05f, -2.0f};
     event.upgrade_cast_id = 19;
     event.upgrade_owner_id = 712;
-    const auto valid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{event}, {}, {}, 100);
+    const auto valid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 100);
     Check(valid.events.size() == 1 && valid.unsupported_effect_ids.empty(),
           "ArrowRain pull source-target geometry was not adapted");
     const auto &link = std::get<hs::VfxLinkPayload>(valid.events.front().payload);
@@ -278,33 +337,33 @@ void TestArrowRainPullLinkGeometry()
 
     auto malformed = event;
     malformed.geometry.source_id = 0;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, std::array{malformed}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 100).events.empty(),
           "source-target link accepted missing source identity");
     malformed = event;
     malformed.upgrade_owner_id = 713;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, std::array{malformed}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 100).events.empty(),
           "source-target link accepted mismatched owner identity");
     malformed = event;
     malformed.upgrade_cast_id = 0;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, std::array{malformed}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 100).events.empty(),
           "source-target link accepted missing cast identity");
     malformed = event;
     malformed.geometry.end_position = malformed.position;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, std::array{malformed}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 100).events.empty(),
           "source-target link accepted coincident endpoints");
     malformed = event;
     malformed.geometry.width = std::numeric_limits<float>::quiet_NaN();
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, std::array{malformed}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 100).events.empty(),
           "source-target link accepted nonfinite width");
 
     auto wrong_schema = Program({{effect_id, 1, 0, Hash32("PointEventPayload")} });
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              wrong_schema, std::array{event}, {}, {}, 100).events.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(wrong_schema), std::array{event}, {}, {}, 100).events.empty(),
           "line geometry was accepted for a non-link payload schema");
 }
 
@@ -340,8 +399,8 @@ void TestPickupCollectLinkPayload()
 
     const hs::Float3 source{2.0f, 0.4f, -3.0f};
     const hs::Float3 target{7.0f, 1.0f, 5.0f};
-    const auto valid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program,
+    const auto valid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program),
         std::array{
             make_event(xp_id, 101, source, target),
             make_event(heal_id, 102, source, target),
@@ -364,14 +423,14 @@ void TestPickupCollectLinkPayload()
     auto missing_target = make_event(xp_id, 105, source, target);
     missing_target.parameters = hs::EncodeVfxParameters({
         {0.0f, 0.0f, 1.0f}, 1.0f, target, 0});
-    const auto missing = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{missing_target}, {}, {}, 320);
+    const auto missing = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{missing_target}, {}, {}, 320);
     Check(missing.events.empty() && missing.unsupported_effect_ids.size() == 1,
           "pickup collect event without HasTarget was accepted");
 
     const auto coincident = make_event(heal_id, 106, source, source);
-    const auto coincident_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{coincident}, {}, {}, 320);
+    const auto coincident_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{coincident}, {}, {}, 320);
     Check(coincident_result.events.size() == 1 &&
               coincident_result.unsupported_effect_ids.empty(),
           "coincident pickup collect source and target were rejected");
@@ -383,8 +442,8 @@ void TestPickupCollectLinkPayload()
           "coincident pickup collect source and target changed");
 
     const auto wrong_effect = make_event(wrong_id, 107, source, target);
-    const auto wrong = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{wrong_effect}, {}, {}, 320);
+    const auto wrong = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{wrong_effect}, {}, {}, 320);
     Check(wrong.events.empty() && wrong.unsupported_effect_ids.size() == 1,
           "unlisted pickup effect accepted SourceTarget adaptation");
 }
@@ -398,8 +457,8 @@ void TestContextAllowsZeroRatio()
     event.asset = {effect_id};
     event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 0.0f, {}, {}});
     const std::array events{event};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, events, {}, {}, 4);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), events, {}, {}, 4);
     Check(result.unsupported_effect_ids.empty() && result.events.size() == 1,
           "context event rejected zero ratio");
     const auto &context = std::get<hs::VfxContextPayload>(result.events.front().payload);
@@ -422,8 +481,8 @@ void TestChargedPulseContextMetadata()
     event.upgrade_owner_id = 1ull << 60;
     event.vfx_ratio01 = 0.375f;
     const std::array events{event};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, events, {}, {}, 12);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), events, {}, {}, 12);
     Check(result.events.size() == 1 && result.unsupported_effect_ids.empty(),
           "upgraded charged pulse was not adapted");
     const auto &context = std::get<hs::VfxContextPayload>(result.events.front().payload);
@@ -437,8 +496,8 @@ void TestChargedPulseContextMetadata()
     {
         auto malformed = event;
         malformed.vfx_ratio01 = ratio;
-        const auto rejected = hs::runtime_detail::BuildVfxTypedFrameInputs(
-            program, std::array{malformed}, {}, {}, 12);
+        const auto rejected = hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(program), std::array{malformed}, {}, {}, 12);
         Check(rejected.events.empty() && rejected.unsupported_effect_ids.size() == 1,
               "malformed upgraded charged pulse ratio was accepted");
     }
@@ -458,7 +517,7 @@ void TestSafeSectorFanout()
     event.geometry.inner_radius = 1.7f; event.geometry.outer_radius = 5.0f;
     event.geometry.source_id = 831; event.geometry.start_tick = 10; event.geometry.end_tick = 83;
     event.geometry.gap_count = 3; event.geometry.gap_half_width_degrees = 20; event.geometry.gap_offset_degrees = 359;
-    auto inputs = hs::runtime_detail::BuildVfxTypedFrameInputs(program, std::array{event}, {}, {}, 40);
+    auto inputs = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 40);
     Check(inputs.events.size() == 4 && inputs.unsupported_effect_ids.empty(), "safe marker did not fan out by actual gap count");
     std::vector<hs::VfxEventInput> markers;
     for (const auto &input : inputs.events)
@@ -475,6 +534,19 @@ void TestSafeSectorFanout()
         markers.push_back(input);
     }
     Check(markers.size() == 3 && markers[0].stable_seed != markers[1].stable_seed, "safe sector seed identity collapsed");
+    Check(inputs.events.back().effect_handle == 1 &&
+          std::get<hs::VfxRingGapsPayload>(inputs.events.back().payload).gap_angles_degrees ==
+              std::vector<float>{359,119,239},
+          "sector fanout consumed or replaced the original ring payload");
+    auto many_gaps = event;
+    many_gaps.geometry.gap_count = std::numeric_limits<std::uint8_t>::max();
+    const auto maximum = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{many_gaps}, {}, {}, 40);
+    Check(maximum.events.size() == 256 && maximum.events[254].geometry_sector_index == 254 &&
+          maximum.events.front().geometry_effect_id == marker_id &&
+          std::holds_alternative<hs::VfxSafeSectorPayload>(maximum.events[254].payload) &&
+          std::get<hs::VfxRingGapsPayload>(maximum.events.back().payload).gap_angles_degrees.size() == 255,
+          "maximum source gap fanout lost its sector order or original ring");
     hs::PersistentVfxVisual owner{};
     owner.kind = hs::PersistentVfxKind::BossShockwaveWarning; owner.stable_id = 831;
     owner.position = event.position; owner.radius = 5; owner.ring_inner_radius = 1.7f; owner.ring_outer_radius = 5;
@@ -488,18 +560,87 @@ void TestSafeSectorFanout()
                              {warning_id, 2, 0, Hash32("RingWithGapsPayload")},
                              {marker_id, 3, 0, Hash32("SafeGapSectorPayload")}});
     reloaded.effects[2].timing_kind = 1;
-    hs::runtime_detail::RebindVfxGroundEventOwners(reloaded, markers);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reloaded), markers);
     Check(markers.size() == 2 && markers[1].effect_handle == 3 && markers[1].geometry_sector_index == 1,
           "safe sector reload lost index or exact recipe identity");
     auto cancelled = markers;
     hs::runtime_detail::RefreshVfxGroundEventOwners(cancelled, {}, 41);
     Check(cancelled.empty(), "safe sector survived cancelled owner");
     reloaded.effects[2].timing_kind = 0;
-    hs::runtime_detail::RebindVfxGroundEventOwners(reloaded, markers);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reloaded), markers);
     Check(markers.empty(), "safe sector reload accepted fixed timing instead of gameplay timing");
     event.geometry.gap_count = 0;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, std::array{event}, {}, {}, 40).events.size() == 1,
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 40).events.size() == 1,
           "zero-gap warning fabricated safe markers");
+}
+
+void TestSafeSectorRefreshUsesRingOracleAndRetainsStorage()
+{
+    const auto warning_id = Hash64("particle.boss.shockwave.telegraph");
+    const auto marker_id = Hash64("particle.boss.shockwave.safe_gap_marker");
+    auto program = Program({{warning_id, 1, 0, Hash32("RingWithGapsPayload")},
+                            {marker_id, 2, 0, Hash32("SafeGapSectorPayload")}});
+    program.effects[1].timing_kind = 1;
+    hs::PresentationEvent source{};
+    source.kind = hs::PresentationKind::Vfx; source.asset = {warning_id};
+    source.sequence = 831; source.tick = 10; source.position = {3.0f, .025f, 4.0f};
+    source.geometry.kind = hs::PresentationGeometryKind::RingGaps;
+    source.geometry.inner_radius = 1.7f; source.geometry.outer_radius = 5.0f;
+    source.geometry.source_id = 831; source.geometry.start_tick = 10; source.geometry.end_tick = 83;
+    source.geometry.gap_count = std::numeric_limits<std::uint8_t>::max();
+    source.geometry.gap_half_width_degrees = 20; source.geometry.gap_offset_degrees = -725;
+    const auto built = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{source}, {}, {}, 40);
+    Check(built.events.size() == 256, "maximum safe-sector marker count changed");
+
+    hs::PersistentVfxVisual previous{};
+    previous.kind = hs::PersistentVfxKind::BossShockwaveWarning; previous.stable_id = 831;
+    previous.position = source.position; previous.radius = 5;
+    previous.ring_inner_radius = 1.7f; previous.ring_outer_radius = 5;
+    previous.active_tick = 10; previous.expires = 83; previous.gap_count = 255;
+    previous.gap_half_angle_degrees = 20; previous.gap_offset_degrees = -725;
+    auto current = previous; current.gap_offset_degrees = 719;
+    const std::array current_owner{current}, previous_owner{previous};
+
+    auto ring_event = built.events.back();
+    std::vector<hs::VfxEventInput> retained_ring{ring_event};
+    hs::runtime_detail::RefreshVfxGroundEventOwners(
+        retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
+    auto &ring = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
+    Check(ring.gap_angles_degrees.size() == 255, "refreshed ring lost maximum source gaps");
+    const auto *const ring_storage = ring.gap_angles_degrees.data();
+    const auto ring_capacity = ring.gap_angles_degrees.capacity();
+    hs::runtime_detail::RefreshVfxGroundEventOwners(
+        retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
+    Check(std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.data() == ring_storage &&
+          std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.capacity() == ring_capacity,
+          "repeated ring refresh replaced retained angle storage");
+
+    auto sector_event = built.events[254];
+    Check(sector_event.geometry_sector_index == 254 &&
+          hs::runtime_detail::RefreshVfxGroundEventOwner(
+              sector_event, current_owner, 40, nullptr, previous_owner, .25f),
+          "maximum indexed sector did not refresh");
+    const auto &sector = std::get<hs::VfxSafeSectorPayload>(sector_event.payload);
+    const auto &oracle = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
+    const auto radians = oracle.gap_angles_degrees[254] * .017453292519943295f;
+    Check(std::abs(sector.direction.x - std::cos(radians)) < .000001f &&
+          std::abs(sector.direction.z - std::sin(radians)) < .000001f &&
+          sector.center.x == oracle.center.x && sector.inner_radius == oracle.inner_radius &&
+          sector.outer_radius == oracle.outer_radius &&
+          sector.half_angle_degrees == oracle.gap_half_width_degrees &&
+          sector.lifetime01 == oracle.lifetime01,
+          "refreshed safe sector diverged from interpolated base-ring angles");
+
+    current.gap_count = 128;
+    const std::array fewer_gaps{current};
+    auto removed = built.events[254];
+    Check(!hs::runtime_detail::RefreshVfxGroundEventOwner(removed, fewer_gaps, 40),
+          "sector index outside decreased owner gap count remained valid");
+    hs::runtime_detail::RefreshVfxGroundEventOwners(retained_ring, fewer_gaps, 40);
+    const auto &shrunk = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees;
+    Check(shrunk.size() == 128 && shrunk.data() == ring_storage && shrunk.capacity() == ring_capacity,
+          "decreased ring gap count discarded reusable angle storage");
 }
 
 void TestShockwaveWarningOwner()
@@ -513,7 +654,7 @@ void TestShockwaveWarningOwner()
     event.geometry.inner_radius = 1.7f; event.geometry.outer_radius = 5.0f;
     event.geometry.source_id = 831; event.geometry.start_tick = 10; event.geometry.end_tick = 83;
     event.geometry.gap_count = 3; event.geometry.gap_half_width_degrees = 20; event.geometry.gap_offset_degrees = 359;
-    auto inputs = hs::runtime_detail::BuildVfxTypedFrameInputs(program, std::array{event}, {}, {}, 40);
+    auto inputs = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 40);
     Check(inputs.events.size() == 1 && inputs.events[0].geometry_effect_id == id,
           "shockwave warning event lacks exact owned identity");
     hs::PersistentVfxVisual owner{};
@@ -530,13 +671,13 @@ void TestShockwaveWarningOwner()
           "shockwave owner refresh changed fixed geometry or clock");
     auto rebound = Program({{Hash64("unrelated.effect"), 1, 0, Hash32("PointEventPayload")},
                             {id, 2, 0, Hash32("RingWithGapsPayload")}});
-    hs::runtime_detail::RebindVfxGroundEventOwners(rebound, inputs.events);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(rebound), inputs.events);
     Check(inputs.events.size() == 1 && inputs.events[0].effect_handle == 2 &&
           inputs.events[0].geometry_owner_id == 831 && inputs.events[0].event_tick == 10,
           "shockwave reload lost exact identity or restarted lifetime");
     hs::runtime_detail::RefreshVfxGroundEventOwners(inputs.events, {}, 41);
     Check(inputs.events.empty(), "cancelled shockwave warning survived missing owner");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{owner}, {}, 40).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{owner}, {}, 40).persistent.empty(),
           "shockwave warning incorrectly used persistent recipe mode");
 }
 
@@ -552,7 +693,7 @@ void TestShockwaveWavefrontBinding()
     visual.radius = 7.0f; visual.gap_count = 3;
     visual.gap_offset_degrees = 359.0f; visual.gap_half_angle_degrees = 12.0f;
     SetLifetime(visual, 100, 140);
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 120);
+    const auto result = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 120);
     Check(result.persistent.size() == 1 && result.unsupported_effect_ids.empty(), "wavefront binding missing");
     const auto &input = result.persistent.front();
     const auto &ring = std::get<hs::VfxRingGapsPayload>(input.payload);
@@ -563,29 +704,29 @@ void TestShockwaveWavefrontBinding()
           ring.gap_angles_degrees == std::vector<float>{359.0f, 119.0f, 239.0f},
           "wavefront payload changed actual annulus, gap rotation or owner age");
     const std::array retained{visual};
-    const auto between = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, retained, retained, 120, nullptr, 0.5f);
+    const auto between = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, retained, retained, 120, nullptr, 0.5f);
     Check(between.persistent.size() == 1 &&
               std::abs(between.persistent.front().normalized_age - 19.5f / 40.0f) < 0.0001f,
           "persistent age was rounded to a simulation endpoint");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, {}, retained, {}, 120, nullptr, 0.5f).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), {}, retained, {}, 120, nullptr, 0.5f).persistent.empty(),
           "new owner appeared before its current endpoint");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, {}, {}, retained, 120, nullptr, 0.5f).persistent.size() == 1 &&
-          hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, {}, {}, retained, 120).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), {}, {}, retained, 120, nullptr, 0.5f).persistent.size() == 1 &&
+          hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), {}, {}, retained, 120).persistent.empty(),
           "removed owner did not end at its current endpoint");
     visual.gap_count = 0; visual.gap_half_angle_degrees = 0;
-    const auto continuous = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 100);
+    const auto continuous = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 100);
     Check(continuous.persistent.size() == 1 &&
           std::get<hs::VfxRingGapsPayload>(continuous.persistent.front().payload).gap_angles_degrees.empty(),
           "wavefront fabricated gaps in continuous annulus");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 99).persistent.empty() &&
-          hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 140).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 99).persistent.empty() &&
+          hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 140).persistent.empty(),
           "wavefront escaped scheduled active lifetime");
     program.effects.front().payload_kind = Hash32("CircleAreaPayload");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::array{visual}, {}, 120).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 120).persistent.empty(),
           "wavefront was downgraded to a circle payload");
 }
 
@@ -612,8 +753,8 @@ void TestCircleLifetimeAndCompoundIdentity()
     hs::PersistentVfxVisual upgrade_slow = slow;
     upgrade_slow.kind = hs::PersistentVfxKind::UpgradeSlowArea;
     const std::array current{slow, fire, upgrade_slow};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current, {}, 20);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current, {}, 20);
     Check(result.persistent.size() == 3, "same owner distinct effects were collapsed");
     Check(result.persistent[0].stable_id == 77 && result.persistent[1].stable_id == 77 &&
           result.persistent[2].stable_id == 77,
@@ -679,8 +820,8 @@ void TestUpgradeSlowAreaAliases()
     for (auto &effect : program.effects) effect.timing_kind = 1;
 
     const auto trap = UpgradeSlowAreaVisual(trap_skill, 1, 0xA1);
-    const auto trap_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{trap}, {}, 130);
+    const auto trap_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{trap}, {}, 130);
     Check(trap_result.unsupported_effect_ids.empty() &&
               trap_result.persistent.size() == 2 &&
               trap_result.persistent.front().effect_handle == 2 &&
@@ -703,8 +844,8 @@ void TestUpgradeSlowAreaAliases()
           "trap alias changed the area payload, age, owner, or legacy key");
 
     const auto arrow_rain = UpgradeSlowAreaVisual(arrow_rain_skill, 7, 0xA2);
-    const auto arrow_rain_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{arrow_rain}, {}, 130);
+    const auto arrow_rain_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{arrow_rain}, {}, 130);
     Check(arrow_rain_result.unsupported_effect_ids.empty() &&
               arrow_rain_result.persistent.size() == 2 &&
               arrow_rain_result.persistent.front().effect_handle == 3 &&
@@ -716,8 +857,8 @@ void TestUpgradeSlowAreaAliases()
     // the generic persistent area recipe because its source is not ordinal 7.
     const auto arrow_rain_upgrade_six =
         UpgradeSlowAreaVisual(arrow_rain_skill, 5, 0xA3);
-    const auto baseline_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{arrow_rain_upgrade_six}, {}, 130);
+    const auto baseline_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{arrow_rain_upgrade_six}, {}, 130);
     Check(baseline_result.unsupported_effect_ids.empty() &&
               baseline_result.persistent.size() == 1 &&
               baseline_result.persistent.front().effect_handle == 1,
@@ -725,8 +866,8 @@ void TestUpgradeSlowAreaAliases()
 
     const auto no_cast_alias_metadata =
         UpgradeSlowAreaVisual(arrow_rain_skill, 7, 0);
-    const auto no_cast_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{no_cast_alias_metadata}, {}, 130);
+    const auto no_cast_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{no_cast_alias_metadata}, {}, 130);
     Check(no_cast_result.unsupported_effect_ids.empty() &&
               no_cast_result.persistent.size() == 1 &&
               no_cast_result.persistent.front().effect_handle == 1,
@@ -747,8 +888,8 @@ void TestUpgradeSlowAreaAliasRequiresCookedMembership()
     // alias must diagnose instead of silently falling back to handle 1.
     program.upgrade_sequences = {1};
     const auto visual = UpgradeSlowAreaVisual(trap_skill, 1, 0xB1);
-    const auto missing_member = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{visual}, {}, 130);
+    const auto missing_member = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 130);
     Check(missing_member.persistent.empty() &&
               missing_member.unsupported_effect_ids.size() == 1 &&
               missing_member.unsupported_effect_ids.front() == trap_id,
@@ -756,8 +897,8 @@ void TestUpgradeSlowAreaAliasRequiresCookedMembership()
 
     program.upgrade_sequences = {2};
     program.effects[1].input_mode = 0;
-    const auto malformed_effect = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{visual}, {}, 130);
+    const auto malformed_effect = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 130);
     Check(malformed_effect.persistent.empty() &&
               malformed_effect.unsupported_effect_ids.size() == 1 &&
               malformed_effect.unsupported_effect_ids.front() == trap_id,
@@ -806,8 +947,8 @@ void TestDamageTrailUpgradeSupplements()
     const auto piercing = make_trail(piercing_skill, 3, 0xA2, 42);
     const auto other = make_trail(retreat_skill, 1, 0xA3, 43);
     const auto no_cast = make_trail(retreat_skill, 2, 0, 44);
-    const auto active = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{retreat, piercing, other, no_cast}, {}, 116);
+    const auto active = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{retreat, piercing, other, no_cast}, {}, 116);
     Check(active.unsupported_effect_ids.empty() && active.persistent.size() == 6,
           "qualified damage trails did not keep their generic and authored inputs");
 
@@ -858,8 +999,8 @@ void TestDamageTrailUpgradeSupplements()
               std::abs(other_generic->normalized_age - 0.16f) < 0.00001f,
           "damage trail elapsed or normalized age was not authored correctly");
 
-    const auto expired_pulse = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{piercing}, {}, 133);
+    const auto expired_pulse = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{piercing}, {}, 133);
     Check(expired_pulse.unsupported_effect_ids.empty() &&
               expired_pulse.persistent.size() == 1 &&
               expired_pulse.persistent.front().effect_handle == 1,
@@ -867,8 +1008,8 @@ void TestDamageTrailUpgradeSupplements()
 
     auto missing_member = program;
     missing_member.upgrade_bindings[1].sequence = {2, 1};
-    const auto missing = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        missing_member, {}, std::array{piercing}, {}, 116);
+    const auto missing = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(missing_member), {}, std::array{piercing}, {}, 116);
     Check(missing.persistent.size() == 1 &&
               missing.persistent.front().effect_handle == 1 &&
               missing.unsupported_effect_ids.size() == 1 &&
@@ -877,8 +1018,8 @@ void TestDamageTrailUpgradeSupplements()
 
     auto invalid_mode = program;
     invalid_mode.effects[1].input_mode = 0;
-    const auto malformed = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        invalid_mode, {}, std::array{retreat}, {}, 116);
+    const auto malformed = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(invalid_mode), {}, std::array{retreat}, {}, 116);
     Check(malformed.persistent.size() == 1 &&
               malformed.persistent.front().effect_handle == 1 &&
               malformed.unsupported_effect_ids.size() == 1 &&
@@ -897,8 +1038,8 @@ void TestBossAreaUsesAuthoredCircleBinding()
     visual.radius = 2.75f;
     SetLifetime(visual, 20, 40);
     const std::array current{visual};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current, {}, 25);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current, {}, 25);
     Check(result.unsupported_effect_ids.empty() && result.persistent.size() == 1,
           "boss area was not bound to its persistent authored effect");
     const auto &input = result.persistent.front();
@@ -928,8 +1069,8 @@ void TestProjectileIngressUsesAuthoritativeOwnerState()
     visual.projectile_owner_id = 42;
     visual.projectile_state_flags = 3;
     const std::array current{visual};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current, {}, 130);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current, {}, 130);
     Check(result.unsupported_effect_ids.empty() && result.persistent.size() == 1,
           "authoritative projectile head was not adapted");
     const auto &input = result.persistent.front();
@@ -940,8 +1081,8 @@ void TestProjectileIngressUsesAuthoritativeOwnerState()
           payload.velocity.x == 60.0f && payload.state_flags == 3,
           "projectile lifetime or owner state was forecast instead of copied");
 
-    const auto absent = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, {}, current, 131);
+    const auto absent = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, {}, current, 131);
     Check(absent.persistent.empty(), "despawned projectile remained active");
 }
 
@@ -960,8 +1101,8 @@ void TestProjectilePathUsesAuthoritativeMotion()
     visual.projectile_spawned_tick = 20;
     visual.projectile_owner_id = 71;
     const std::array current{visual};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current, {}, 21);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current, {}, 21);
     Check(result.unsupported_effect_ids.empty() && result.persistent.size() == 1,
           "authoritative projectile path was not adapted");
     const auto &path = std::get<hs::VfxProjectilePathPayload>(
@@ -983,8 +1124,8 @@ void TestProjectilePathUsesAuthoritativeMotion()
     visual.active_tick = 100;
     visual.expires = 130;
     visual.return_start_position = {8.0f, 1.0f, 6.0f};
-    const auto returned = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        returning_program, {}, std::array{visual}, {}, 110);
+    const auto returned = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(returning_program), {}, std::array{visual}, {}, 110);
     Check(returned.unsupported_effect_ids.empty() && returned.persistent.size() == 1,
           "basic return did not bind to its actual return episode");
     const auto &return_path = std::get<hs::VfxProjectilePathPayload>(returned.persistent[0].payload);
@@ -994,8 +1135,8 @@ void TestProjectilePathUsesAuthoritativeMotion()
               std::abs(returned.persistent[0].elapsed_seconds - 10.0f / 60.0f) < 0.00001f,
           "basic return borrowed projectile birth instead of its captured return clock and origin");
     returning_program.upgrade_sequences.clear();
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              returning_program, {}, std::array{visual}, {}, 110).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(returning_program), {}, std::array{visual}, {}, 110).persistent.empty(),
           "basic return accepted missing cooked upgrade membership");
 }
 
@@ -1021,8 +1162,8 @@ void TestHostileProjectileBindings()
     boss.effect_asset = {boss_id};
     boss.projectile_owner_id = 502;
     const std::array current{enemy, boss};
-    const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current, {}, 2);
+    const auto result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current, {}, 2);
     Check(result.unsupported_effect_ids.empty() && result.persistent.size() == 2,
           "hostile projectile bindings were not resolved");
     Check(result.persistent[0].effect_handle == 1 &&
@@ -1045,7 +1186,7 @@ void TestChargeGuideUsesPresenceInsteadOfExpiry()
     guide.length = 23.0f;
     guide.active_tick = 10;
     const std::array current{guide};
-    const auto decoded = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, current, {}, 6010);
+    const auto decoded = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, current, {}, 6010);
     Check(decoded.persistent.size() == 1 && decoded.unsupported_effect_ids.empty(),
           "held charge guide requires a fabricated expiry");
     const auto &item = decoded.persistent.front();
@@ -1054,9 +1195,9 @@ void TestChargeGuideUsesPresenceInsteadOfExpiry()
           std::abs(segment.width - 1.6f) < 0.0001f &&
           std::abs(std::hypot(segment.end.x-segment.start.x, segment.end.z-segment.start.z)-23.0f) < 0.0001f,
           "charge age or exact guide dimensions changed");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, {}, current, 6011).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, {}, current, 6011).persistent.empty(),
           "charge guide survived release");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, current, {}, 9).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, current, {}, 9).persistent.empty(),
           "charge guide rendered before authoritative start");
 }
 
@@ -1079,8 +1220,8 @@ void TestWarningOwnerRefresh()
     event.geometry.source_id = 77;
     event.geometry.start_tick = 100;
     event.geometry.end_tick = 160;
-    const auto decoded = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{event}, {}, {}, 110);
+    const auto decoded = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{event}, {}, {}, 110);
     Check(decoded.events.size() == 1 && decoded.events[0].geometry_owner_id == 77 &&
               decoded.events[0].geometry_effect_id == dash_id &&
               decoded.events[0].geometry_start_tick == 100 &&
@@ -1193,7 +1334,7 @@ void TestWarningOwnerRefresh()
     auto reloaded = Program({
         {volley_id, 1, 0, Hash32("ConePayload")},
         {dash_id, 2, 0, Hash32("LineAreaPayload")} });
-    hs::runtime_detail::RebindVfxGroundEventOwners(reloaded, retained);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reloaded), retained);
     Check(retained.size() == 3 && retained[0].effect_handle == 2 &&
               retained[1].effect_handle == 1 && retained[0].geometry_owner_id == 77 &&
               retained[1].geometry_owner_id == 88 && retained[2].geometry_owner_id == 0 &&
@@ -1201,7 +1342,7 @@ void TestWarningOwnerRefresh()
               std::holds_alternative<hs::VfxPointPayload>(retained[2].payload),
           "owner-backed warning handles were not rebound after reload");
     auto missing = Program({{dash_id, 4, 1, Hash32("LineAreaPayload")} });
-    hs::runtime_detail::RebindVfxGroundEventOwners(missing, retained);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(missing), retained);
     Check(retained.size() == 1 && retained[0].geometry_owner_id == 0 &&
               retained[0].event_tick == original_sibling.event_tick,
           "warnings with missing or mismatched recipes survived reload, or an unrelated event was removed");
@@ -1234,7 +1375,7 @@ void TestRangedWarningIdentity()
     auto dash = ranged;
     dash.kind = hs::PersistentVfxKind::BossDashWarning;
     dash.position = {99, .2f, 0}; dash.length = 30; dash.radius = 1;
-    auto decoded = hs::runtime_detail::BuildVfxTypedFrameInputs(program, std::array{event}, std::array{ranged, dash}, {}, 110);
+    auto decoded = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), std::array{event}, std::array{ranged, dash}, {}, 110);
     Check(decoded.events.size() == 1 && decoded.persistent.empty() && decoded.unsupported_effect_ids.empty(),
           "ranged warning ingress failed or owner entered normal persistent path");
     Check(decoded.events[0].geometry_effect_id == ranged_id && decoded.events[0].geometry_owner_id == 55,
@@ -1248,7 +1389,7 @@ void TestRangedWarningIdentity()
     auto reload = Program({
         {ranged_id, 1, 0, Hash32("LineAreaPayload")},
         {dash_id, 2, 0, Hash32("LineAreaPayload")} });
-    hs::runtime_detail::RebindVfxGroundEventOwners(reload, events);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reload), events);
     Check(events.size() == 2 && events[0].effect_handle == 1 && events[1].effect_handle == 2 &&
           events[0].geometry_effect_id == ranged_id && events[0].geometry_start_tick == 100 && events[0].geometry_end_tick == 140,
           "catalog reordering confused the two line recipes or reset owner clocks");
@@ -1257,7 +1398,7 @@ void TestRangedWarningIdentity()
           "cancelled ranged warning was preserved using boss owner");
     auto invalid = boss; invalid.geometry_effect_id = 0;
     std::vector unknown{invalid};
-    hs::runtime_detail::RebindVfxGroundEventOwners(reload, unknown);
+    hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reload), unknown);
     Check(unknown.empty(), "unknown recipe identity inferred from line shape");
     auto wrong_shape = decoded.events[0]; wrong_shape.payload = hs::VfxConePayload{};
     std::vector malformed{wrong_shape};
@@ -1273,7 +1414,7 @@ void TestOwnedVisualLinks()
     visual.stable_id=918;visual.kind=hs::PersistentVfxKind::RicochetLink;
     visual.position={1,.7f,2};visual.link_target_position={5,.7f,9};visual.link_width=.09f;
     visual.active_tick=100;visual.expires=108;
-    auto decode=[&](hs::Tick tick){return hs::runtime_detail::BuildVfxTypedFrameInputs(program,{},std::span(&visual,1),{},tick);};
+    auto decode=[&](hs::Tick tick){return hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program),{},std::span(&visual,1),{},tick);};
     const auto result=decode(104);
     Check(result.persistent.size()==1&&result.unsupported_effect_ids.empty(),"live owned link missing");
     const auto &input=result.persistent.front();const auto &link=std::get<hs::VfxLinkPayload>(input.payload);
@@ -1310,13 +1451,13 @@ void TestEnemyStatusOwners()
  auto program=Program({{Hash64("persistent.status.bleed"),1,1,Hash32("EntityAttachmentPayload")}});program.effects[0].timing_kind=1;
  hs::PersistentVfxVisual owner;owner.kind=hs::PersistentVfxKind::EnemyBleedStatus;owner.effect_asset={Hash64("persistent.status.bleed")};owner.stable_id=91;owner.position={3,0,4};owner.radius=.73f;owner.active_tick=10;owner.expires=110;owner.entity_health_fraction=.6f;owner.entity_state_flags=1;owner.entity_render_id=0x2000000000000003ull;
  auto previous=owner;previous.position.x=2;
- const auto run=[&](hs::Tick tick){return hs::runtime_detail::BuildVfxTypedFrameInputs(program,{},std::span(&owner,1),std::span(&previous,1),tick);};
+ const auto run=[&](hs::Tick tick){return hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program),{},std::span(&owner,1),std::span(&previous,1),tick);};
  auto a=run(35);Check(a.persistent.size()==1,"status entity owner not adapted");const auto &payload=std::get<hs::VfxEntityPayload>(a.persistent[0].payload);
  Check(payload.footprint_radius==.73f&&payload.health_fraction==.6f&&payload.lifetime01==.25f&&payload.render_instance_id==owner.entity_render_id&&a.persistent[0].previous_transform[12]==2&&a.persistent[0].current_transform[12]==3,"status geometry, target mesh, health, age or history lost");
  owner.expires=210;auto b=run(35);Check(b.persistent[0].stable_id==a.persistent[0].stable_id&&b.persistent[0].stable_seed==a.persistent[0].stable_seed&&b.persistent[0].normalized_age==.125f,"refresh restarted owner instead of extending actual episode");
  Check(run(210).persistent.empty()&&run(9).persistent.empty(),"status accepted outside actual interval");
  owner.effect_asset={Hash64("persistent.status.burn")};Check(run(35).persistent.empty(),"status exact identity not checked");owner.effect_asset={Hash64("persistent.status.bleed")};program.effects[0].payload_kind=Hash32("CircleAreaPayload");Check(run(35).persistent.empty(),"status coerced to circle");
- Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program,{},{},std::span(&previous,1),35).persistent.empty(),"absent status persisted");
+ Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program),{},{},std::span(&previous,1),35).persistent.empty(),"absent status persisted");
 }
 
 void TestStatusTickIdentity()
@@ -1340,8 +1481,8 @@ void TestStatusTickIdentity()
         event.position = {1.0f, 2.0f, 3.0f};
         event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.75f, {}, {}});
         event.geometry.source_id = owner_id;
-        const auto result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-            program, std::array{event}, {}, {}, event.tick);
+        const auto result = hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(program), std::array{event}, {}, {}, event.tick);
         Check(result.events.size() == 1 && result.unsupported_effect_ids.empty(),
               "status tick event was not adapted");
         Check(result.events.front().geometry_owner_id == owner_id,
@@ -1359,8 +1500,8 @@ void TestStatusTickIdentity()
     unrelated.position = {1.0f, 2.0f, 3.0f};
     unrelated.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
     unrelated.geometry.source_id = 0x3003ull;
-    const auto generic = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, std::array{unrelated}, {}, {}, unrelated.tick);
+    const auto generic = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), std::array{unrelated}, {}, {}, unrelated.tick);
     Check(generic.events.size() == 1 && generic.events.front().geometry_owner_id == 0,
           "non-status point event acquired status owner identity");
 }
@@ -1389,7 +1530,7 @@ void TestBossStateOwners()
     transition.effect_asset = {Hash64("persistent.boss.phase_transition_invulnerable")};
     transition.stable_id = 203; transition.expires = 170; transition.entity_state_flags = 3;
     const std::array owners{dash, aura, transition};
-    const auto active = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 120);
+    const auto active = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, owners, {}, 120);
     Check(active.unsupported_effect_ids.empty() && active.persistent.size() == 3,
           "live boss state owners were not adapted");
     const auto &line = std::get<hs::VfxLinePayload>(active.persistent[0].payload);
@@ -1404,11 +1545,11 @@ void TestBossStateOwners()
               std::abs(locked.lifetime01 - 1.0f / 6.0f) < .00001f &&
               active.persistent[2].state_flags == 3,
           "phase2 presence or transition lifetime was invented");
-    const auto later = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 170);
+    const auto later = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, owners, {}, 170);
     Check(later.persistent.size() == 1 && later.persistent[0].effect_handle == 2 &&
               later.persistent[0].stable_id == 202,
           "expired dash/transition remained or live aura disappeared");
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, {}, owners, 120).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, {}, owners, 120).persistent.empty(),
           "absent boss owners persisted");
 }
 
@@ -1436,7 +1577,7 @@ void TestPlayerStateOwners()
     low.active_tick = 130;
     low.expires = 131;
     const std::array owners{shell, low};
-    const auto active = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 130);
+    const auto active = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, owners, {}, 130);
     Check(active.persistent.size() == 2 && active.unsupported_effect_ids.empty(),
           "player state owners missing");
     const auto &entity = std::get<hs::VfxEntityPayload>(active.persistent[0].payload);
@@ -1448,45 +1589,26 @@ void TestPlayerStateOwners()
     low.active_tick = 131;
     low.expires = 132;
     const std::array renewed_owners{shell, low};
-    const auto renewed = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, renewed_owners, owners, 131);
+    const auto renewed = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, renewed_owners, owners, 131);
     Check(renewed.persistent.size() == 2 &&
               renewed.persistent[1].stable_id == active.persistent[1].stable_id &&
               renewed.persistent[1].elapsed_seconds > active.persistent[1].elapsed_seconds,
           "renewed low-health presence preserves an advancing pulse clock");
-    const auto expired = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 160);
+    const auto expired = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, owners, {}, 160);
     Check(expired.persistent.empty(), "expired player state remained active");
     shell.effect_asset = {};
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::span(&shell, 1), {}, 130)
+    Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::span(&shell, 1), {}, 130)
               .persistent.empty(), "unidentified player shell accepted");
 }
 
 void TestLowHealthPulseClock()
 {
-    auto program = Program({{Hash64("post.player.low_health_vignette"), 1, 1,
-                             Hash32("PresentationContextPayload")}});
-    program.effects[0].timing_kind = 1;
-    program.effects[0].sources = {0, 1};
-    hs::VfxSourceRecord source;
-    source.effect = 1; source.type = hs::VfxSourceType::Direct;
-    source.knot_count = 2; source.knots = {0, 1}; source.outputs = {0, 1};
-    program.sources.push_back(source);
-    hs::VfxOutputRecord overlay;
-    overlay.profile = hs::VfxOutputProfile::ScreenOverlay;
-    overlay.shape = Hash32("screen_vignette"); overlay.shape_component_kind = Hash32("screen");
-    overlay.coverage_type = Hash32("analytic_screen");
-    overlay.motion = hs::VfxMotionKind::SlowPulseStateLocked;
-    overlay.rgba = {1, .1f, .1f, .5f}; overlay.hdr = 1;
-    overlay.parameters = {0, 2}; overlay.textures = {0, 1};
-    program.outputs.push_back(overlay);
-    program.parameters = {
-        {Hash32("center_clear"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(.5f)},
-        {Hash32("edge_power"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(2.0f)}};
-    hs::VfxTextureBindingRecord texture; texture.role = Hash32("profile.global");
-    program.texture_bindings.push_back(texture);
-    constexpr std::string_view path = "Content/Textures/VFX/vfx_gradient_lut.dds";
-    for (const auto byte : path) program.strings.push_back(static_cast<std::byte>(byte));
-    program.texture_resources.push_back({0, {0, static_cast<std::uint32_t>(path.size())}});
+    std::array screen_effects{hs::VfxScreenEffectRecipe{Hash64("post.player.low_health_vignette"), 0, {0, 1}, true}};
+    std::array screen_outputs{hs::VfxScreenRecipe{0, 0, 0, 0, hs::VfxScreenShape::Vignette,
+        0, 1, {1, .1f, .1f}, .5f, 1, .5f, 2}};
+    hs::VfxImage image;
+    image.screen_effect_recipes = screen_effects; image.screen_recipes = screen_outputs;
     hs::VfxPersistentInput health;
     health.stable_id = 11; health.effect_handle = 1;
     health.payload = hs::VfxContextPayload{10, {}, .30f, 0, 0};
@@ -1494,13 +1616,15 @@ void TestLowHealthPulseClock()
     std::vector<hs::VfxScreenInput> output;
     const auto emit = [&](hs::Tick tick, bool present = true) {
         Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedScreenCommands(
-            program, {}, present ? std::span(&health, 1) : std::span<hs::VfxPersistentInput>{},
+            image, {}, present ? std::span(&health, 1) : std::span<hs::VfxPersistentInput>{},
             tick, static_cast<double>(tick), hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
     };
     emit(1000);
     Check(output.size() == 1 && output[0].envelope == 0 && pulse.phase == 0,
           "health entry did not start its own short transition");
+    const auto *screen_storage = output.data();
     emit(1050);
+    Check(output.data() == screen_storage, "screen output capacity was discarded between normal frames");
     const auto prior = output[0];
     const double prior_phase = pulse.phase;
     std::get<hs::VfxContextPayload>(health.payload).ratio01 = .29f;
@@ -1520,14 +1644,14 @@ void TestLowHealthPulseClock()
     Check(output[0].gradient_age == paused.gradient_age && output[0].envelope == paused.envelope,
           "render/view repetition advanced the paused simulation clock");
     const auto retained_pulse = pulse;
-    program.outputs[0].shape = Hash32("invalid_screen_shape");
-    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, std::span(&health, 1),
+    screen_effects[0].route_valid = false;
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(image, {}, std::span(&health, 1),
               1052, 1052.0, hs::VfxQuality::High, pulse, output) && output.empty() &&
               pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
           "rejected output published a partial pulse clock update");
-    program.outputs[0].shape = Hash32("screen_vignette");
+    screen_effects[0].route_valid = true;
     const std::array duplicate_health{health, health};
-    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, duplicate_health,
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(image, {}, duplicate_health,
               1052, 1052.0, hs::VfxQuality::High, pulse, output) && output.empty() &&
               pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
           "rejected later owner published a partial pulse clock update");
@@ -1553,6 +1677,35 @@ void TestLowHealthPulseClock()
     Check(session.low_health_pulse.stable_id == 1, "catalog retention clear reset simulation phase");
     Check(session.Synchronize(2) && session.low_health_pulse.stable_id == 0,
           "session reset retained the previous player's pulse");
+}
+
+void TestPreparedVolumeCommands()
+{
+    std::array effects{hs::VfxVolumeEffectRecipe{Hash64("particle.boss.phase_change"), 2.0f, {0, 1}, true}};
+    std::array recipes{hs::VfxVolumeRecipe{0, 0, Hash32("smoke_volume"), 2, 7,
+        hs::VfxVolumeShape::NoisySphere, hs::VfxVolumeNoise::Fbm3D, 0, 1, 1, .6f, 0, 1,
+        12, 1, {.4f, .5f, .6f}}};
+    hs::VfxImage image; image.volume_effect_recipes = effects; image.volume_recipes = recipes;
+    hs::VfxEventInput event; event.effect_handle = 1; event.sequence = 9; event.event_tick = 0;
+    event.world_transform = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    event.payload = hs::VfxContextPayload{0, {}, 1, 0, 0};
+    std::vector<hs::VfxVolumeInput> output;
+    Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedVolumeCommands(
+              image, std::span(&event, 1), {}, 30, hs::VfxQuality::High, output)) &&
+              output.size() == 1 && output[0].identity.event_sequence == 9 &&
+              output[0].identity.effect_handle == 1 && output[0].shape == hs::VfxVolumeShape::NoisySphere &&
+              output[0].steps == 12 &&
+              output[0].elapsed_seconds == .5f,
+          "prepared LocalVolume recipe lost live event or authored output values");
+    const auto *volume_storage = output.data();
+    Check(hs::runtime_detail::BuildVfxTypedVolumeCommands(
+              image, std::span(&event, 1), {}, 31, hs::VfxQuality::High, output).Succeeded() &&
+              output.data() == volume_storage,
+          "volume output capacity was discarded between normal frames");
+    effects[0].route_valid = false;
+    Check(!hs::runtime_detail::BuildVfxTypedVolumeCommands(
+              image, std::span(&event, 1), {}, 30, hs::VfxQuality::High, output) && output.empty(),
+          "malformed prepared LocalVolume route emitted a command");
 }
 
 void TestPickupIdleOwners()
@@ -1594,8 +1747,8 @@ void TestPickupIdleOwners()
     };
     const auto run = [&](std::span<const hs::PersistentVfxVisual> current,
                          const hs::VfxProgramData &cooked, hs::Tick tick) {
-        return hs::runtime_detail::BuildVfxTypedFrameInputs(
-            cooked, {}, current, {}, tick);
+        return hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(cooked), {}, current, {}, tick);
     };
     const auto valid = run(owners, program, 160);
     Check(valid.persistent.size() == 4 && valid.unsupported_effect_ids.empty(),
@@ -1698,8 +1851,8 @@ void TestPlayerStampedEntityBindings()
     const auto empowered = make_owner(hs::PersistentVfxKind::EmpoweredReady,
                                       empowered_id, 103, 160);
     const auto current_with_horizon = std::array{bow, charged, empowered};
-    const auto valid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, current_with_horizon, {}, 110);
+    const auto valid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, current_with_horizon, {}, 110);
     Check(valid.persistent.size() == 3 && valid.unsupported_effect_ids.empty(),
           "player stamped entity bindings were not adapted");
     for (const auto &input : valid.persistent)
@@ -1718,8 +1871,8 @@ void TestPlayerStampedEntityBindings()
               std::abs(valid.persistent[2].source_duration_seconds - 1.0f) < 0.00001f,
           "player stamped source durations were not copied from their horizons");
 
-    const auto held_bow = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{bow}, {}, 140);
+    const auto held_bow = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{bow}, {}, 140);
     Check(held_bow.persistent.size() == 1 && held_bow.unsupported_effect_ids.empty() &&
               held_bow.persistent.front().normalized_age < 1.0f &&
               held_bow.persistent.front().normalized_age > 0.9998f &&
@@ -1729,8 +1882,8 @@ void TestPlayerStampedEntityBindings()
     auto wrong_timing = program;
     wrong_timing.effects[0].timing_kind = 0;
     wrong_timing.effects[0].seconds = 0.5f;
-    const auto wrong_timing_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        wrong_timing, {}, std::array{bow}, {}, 110);
+    const auto wrong_timing_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(wrong_timing), {}, std::array{bow}, {}, 110);
     Check(wrong_timing_result.persistent.empty() &&
               wrong_timing_result.unsupported_effect_ids.size() == 1 &&
               wrong_timing_result.unsupported_effect_ids.front() == bow_id,
@@ -1738,8 +1891,8 @@ void TestPlayerStampedEntityBindings()
 
     auto charged_gameplay = program;
     charged_gameplay.effects[1].timing_kind = 1;
-    const auto charged_wrong_timing = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        charged_gameplay, {}, std::array{charged}, {}, 110);
+    const auto charged_wrong_timing = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(charged_gameplay), {}, std::array{charged}, {}, 110);
     Check(charged_wrong_timing.persistent.empty() &&
               charged_wrong_timing.unsupported_effect_ids.size() == 1 &&
               charged_wrong_timing.unsupported_effect_ids.front() == charged_id,
@@ -1747,8 +1900,8 @@ void TestPlayerStampedEntityBindings()
 
     auto wrong_payload = program;
     wrong_payload.effects[2].payload_kind = Hash32("CircleAreaPayload");
-    const auto wrong_payload_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        wrong_payload, {}, std::array{empowered}, {}, 110);
+    const auto wrong_payload_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(wrong_payload), {}, std::array{empowered}, {}, 110);
     Check(wrong_payload_result.persistent.empty() &&
               wrong_payload_result.unsupported_effect_ids.size() == 1 &&
               wrong_payload_result.unsupported_effect_ids.front() == empowered_id,
@@ -1756,8 +1909,8 @@ void TestPlayerStampedEntityBindings()
 
     auto wrong_asset_owner = empowered;
     wrong_asset_owner.effect_asset = {bow_id};
-    const auto wrong_asset = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{wrong_asset_owner}, {}, 110);
+    const auto wrong_asset = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{wrong_asset_owner}, {}, 110);
     Check(wrong_asset.persistent.empty() &&
               wrong_asset.unsupported_effect_ids.size() == 1 &&
               wrong_asset.unsupported_effect_ids.front() == empowered_id,
@@ -1765,8 +1918,8 @@ void TestPlayerStampedEntityBindings()
 
     auto missing_render_id = empowered;
     missing_render_id.entity_render_id = 0;
-    const auto missing_render = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{missing_render_id}, {}, 110);
+    const auto missing_render = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{missing_render_id}, {}, 110);
     Check(missing_render.persistent.empty() &&
               missing_render.unsupported_effect_ids.size() == 1 &&
               missing_render.unsupported_effect_ids.front() == empowered_id,
@@ -1774,16 +1927,16 @@ void TestPlayerStampedEntityBindings()
 
     auto open_empowered = empowered;
     open_empowered.expires = 0;
-    const auto open_empowered_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{open_empowered}, {}, 110);
+    const auto open_empowered_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{open_empowered}, {}, 110);
     Check(open_empowered_result.persistent.empty() &&
               open_empowered_result.unsupported_effect_ids.size() == 1,
           "open ended lifetime escaped the bow draw sentinel contract");
 
     auto invalid_bow_horizon = bow;
     invalid_bow_horizon.source_horizon_tick = invalid_bow_horizon.active_tick;
-    const auto invalid_bow_horizon_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{invalid_bow_horizon}, {}, 110);
+    const auto invalid_bow_horizon_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{invalid_bow_horizon}, {}, 110);
     Check(invalid_bow_horizon_result.persistent.empty() &&
               invalid_bow_horizon_result.unsupported_effect_ids.size() == 1 &&
               invalid_bow_horizon_result.unsupported_effect_ids.front() == bow_id,
@@ -1791,8 +1944,8 @@ void TestPlayerStampedEntityBindings()
 
     auto invalid_empowered_horizon = empowered;
     invalid_empowered_horizon.expires = invalid_empowered_horizon.active_tick;
-    const auto invalid_empowered_horizon_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{invalid_empowered_horizon}, {}, 110);
+    const auto invalid_empowered_horizon_result = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{invalid_empowered_horizon}, {}, 110);
     Check(invalid_empowered_horizon_result.persistent.empty() &&
               invalid_empowered_horizon_result.unsupported_effect_ids.size() == 1 &&
               invalid_empowered_horizon_result.unsupported_effect_ids.front() == empowered_id,
@@ -1800,26 +1953,26 @@ void TestPlayerStampedEntityBindings()
 
     auto early_bow = bow;
     early_bow.active_tick = 111;
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, {}, std::array{early_bow}, {}, 110).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), {}, std::array{early_bow}, {}, 110).persistent.empty(),
           "bow draw was emitted before its active tick");
 
-    const auto fixed_active = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{charged}, {}, 132);
+    const auto fixed_active = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{charged}, {}, 132);
     Check(fixed_active.persistent.size() == 1 && fixed_active.unsupported_effect_ids.empty() &&
               std::abs(fixed_active.persistent.front().normalized_age -
                        ((32.0f / 60.0f) / 0.55f)) < 0.00001f,
           "charged full ready did not use cooked fixed duration");
-    const auto fixed_expired = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{charged}, {}, 133);
+    const auto fixed_expired = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{charged}, {}, 133);
     Check(fixed_expired.persistent.empty() &&
               fixed_expired.unsupported_effect_ids.size() == 1,
           "charged full ready survived its cooked 0.55 second lifetime");
 
     auto invalid_fixed_duration = program;
     invalid_fixed_duration.effects[1].seconds = 0.0f;
-    const auto invalid_fixed = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        invalid_fixed_duration, {}, std::array{charged}, {}, 110);
+    const auto invalid_fixed = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(invalid_fixed_duration), {}, std::array{charged}, {}, 110);
     Check(invalid_fixed.persistent.empty() &&
               invalid_fixed.unsupported_effect_ids.size() == 1 &&
               invalid_fixed.unsupported_effect_ids.front() == charged_id,
@@ -1853,8 +2006,8 @@ void TestChargedOverchargeOwner()
     owner.charge_ratio = .75f;
     owner.entity_render_id = 0x1000000000000001ull;
 
-    const auto valid = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{owner}, {}, 140);
+    const auto valid = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{owner}, {}, 140);
     Check(valid.persistent.size() == 1 && valid.unsupported_effect_ids.empty(),
           "charged overcharge owner did not bind through its ordinal1 recipe");
     const auto &input = valid.persistent.front();
@@ -1869,8 +2022,8 @@ void TestChargedOverchargeOwner()
 
     auto missing_membership = program;
     missing_membership.upgrade_sequences.clear();
-    const auto rejected_membership = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        missing_membership, {}, std::array{owner}, {}, 140);
+    const auto rejected_membership = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(missing_membership), {}, std::array{owner}, {}, 140);
     Check(rejected_membership.persistent.empty() &&
               rejected_membership.unsupported_effect_ids.size() == 1 &&
               rejected_membership.unsupported_effect_ids.front() == effect_id,
@@ -1878,14 +2031,14 @@ void TestChargedOverchargeOwner()
 
     auto wrong_upgrade = owner;
     wrong_upgrade.source_upgrade = 1;
-    const auto rejected_upgrade = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, std::array{wrong_upgrade}, {}, 140);
+    const auto rejected_upgrade = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, std::array{wrong_upgrade}, {}, 140);
     Check(rejected_upgrade.persistent.empty() &&
               rejected_upgrade.unsupported_effect_ids.size() == 1,
           "charged overcharge owner accepted a different upgrade ordinal");
 
-    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
-              program, {}, std::array{owner}, {}, 184).persistent.empty(),
+    Check(hs::test::BuildFrameInputs(
+              hs::test::VfxLookupImage(program), {}, std::array{owner}, {}, 184).persistent.empty(),
           "charged overcharge owner survived its gameplay overcharge end");
 }
 
@@ -1931,8 +2084,8 @@ void TestProcStampedProjectileBindings()
     ricochet.radius = 0.12f;
     ricochet.entity_render_id = 0x5000000000000033ull;
     const auto owners = std::array{retarget, ricochet};
-    const auto decoded = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, owners, {}, 110);
+    const auto decoded = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, owners, {}, 110);
     Check(decoded.persistent.size() == 2 && decoded.unsupported_effect_ids.empty(),
           "successful retarget and bleed extension owners did not bind");
     const auto &path = std::get<hs::VfxProjectilePathPayload>(decoded.persistent[0].payload);
@@ -1954,8 +2107,8 @@ void TestProcStampedProjectileBindings()
         owner.projectile_current_position = {-99, 0, -99};
         owner.projectile_owner_id = 999;
     }
-    const auto skipped = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, owners, stale, 110);
+    const auto skipped = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, owners, stale, 110);
     Check(skipped.persistent.size() == 2 &&
               std::get<hs::VfxProjectilePathPayload>(skipped.persistent[0].payload).previous_position.x == 2.0f &&
               skipped.persistent[1].previous_transform[12] == 2.0f,
@@ -1963,16 +2116,16 @@ void TestProcStampedProjectileBindings()
     auto spawned = owners;
     for (auto &owner : spawned)
         owner.projectile_previous_position = owner.projectile_current_position;
-    const auto born = hs::runtime_detail::BuildVfxTypedFrameInputs(
-        program, {}, spawned, stale, 110);
+    const auto born = hs::test::BuildFrameInputs(
+        hs::test::VfxLookupImage(program), {}, spawned, stale, 110);
     Check(born.persistent.size() == 2 &&
               std::get<hs::VfxProjectilePathPayload>(born.persistent[0].payload).previous_position.x == 3.0f &&
               born.persistent[1].previous_transform[12] == 3.0f,
           "new/discontinuous owner lost its authoritative collapsed endpoints");
     const auto run = [&](const hs::PersistentVfxVisual &owner, hs::Tick tick,
                          const hs::VfxProgramData &content) {
-        return hs::runtime_detail::BuildVfxTypedFrameInputs(
-            content, {}, std::span(&owner, 1), {}, tick);
+        return hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(content), {}, std::span(&owner, 1), {}, tick);
     };
     Check(run(retarget, 99, program).persistent.empty() &&
               run(retarget, 118, program).persistent.empty() &&
@@ -2029,7 +2182,10 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     PreparedPairFacts facts;
     PreparedPairFacts::Key key{.session_id = 11, .previous_publication = 2,
         .current_publication = 3};
-    facts.Prepare(key, previous, current, instances, captures);
+    Check(facts.Prepare(key, previous, current, instances, captures),
+          "first publication pair did not report a rebuild");
+    const auto pair_capacity = facts.RetainedCapacityBytes();
+    Check(pair_capacity > 0, "pair indexes must participate in the VFX workspace accounting");
     Check(facts.Previous(current_owner.stable_id, current_owner.kind, previous)->position.x == 1.0f &&
           facts.Current(7, PersistentVfxKind::ProjectileHead, current)->position.x == 4.0f,
           "pair facts changed source-order first-match semantics");
@@ -2042,7 +2198,10 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     auto copied_instances = instances;
     auto copied_captures = captures;
     copied_current[0].position.x = 12.0f;
-    facts.Prepare(key, copied_previous, copied_current, copied_instances, copied_captures);
+    Check(!facts.Prepare(key, copied_previous, copied_current, copied_instances, copied_captures),
+          "relocated identical publication pair repeated preparation");
+    Check(facts.RetainedCapacityBytes() == pair_capacity,
+          "relocating a retained publication must neither allocate nor lose its accounted indexes");
     Check(facts.Current(7, PersistentVfxKind::ProjectileHead, copied_current) == &copied_current[0] &&
           facts.Instance(91, copied_instances) == &copied_instances[0] &&
           facts.Capture(11, 22, 33, 44, copied_captures) == &copied_captures[0],
@@ -2052,17 +2211,126 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     const std::array republished_previous{changed_prior};
     key.previous_publication = 3;
     key.current_publication = 4;
-    facts.Prepare(key, republished_previous, current, instances, captures);
+    Check(facts.Prepare(key, republished_previous, current, instances, captures),
+          "new publication identity did not report preparation");
     Check(facts.Previous(current_owner.stable_id, current_owner.kind, republished_previous)->position.x == 9.0f,
           "new publication pair reused stale adaptation indexes");
 
     std::array unidentified{current_owner};
-    facts.Prepare({}, {}, unidentified, {}, {});
+    Check(facts.Prepare({}, {}, unidentified, {}, {}), "unidentified pair must prepare");
     unidentified[0].stable_id = 99;
-    facts.Prepare({}, {}, unidentified, {}, {});
+    Check(facts.Prepare({}, {}, unidentified, {}, {}), "unidentified pair must prepare again");
     Check(!facts.Current(7, PersistentVfxKind::ProjectileHead, unidentified) &&
           facts.Current(99, PersistentVfxKind::ProjectileHead, unidentified) == &unidentified[0],
           "inputs without semantic publication identity must not reuse an unknown index");
+}
+
+void TestRetreatMovementAppendPublishesStateWithOutputs()
+{
+    using namespace hs;
+    using runtime_detail::VfxUpgradeMovementState;
+    VfxProgramData program;
+    const auto dash_id = Hash64("particle.upgrade.retreat.second_dash");
+    const auto afterimage_id = Hash64("particle.upgrade.retreat.afterimage");
+    const std::array effect_ids{dash_id, afterimage_id};
+    const std::array payload_kinds{Hash32("LinePayload"),
+                                   Hash32("PresentationContextPayload")};
+    for (std::size_t index = 0; index < effect_ids.size(); ++index)
+    {
+        VfxEffectRecord effect;
+        effect.handle = static_cast<std::uint32_t>(index + 1);
+        effect.input_mode = 1;
+        effect.payload_kind = payload_kinds[index];
+        effect.seconds = 1.0f;
+        program.effects.push_back(effect);
+        program.effect_lookup.push_back({effect_ids[index], effect.handle});
+    }
+    program.upgrade_sequences = {1, 2};
+    program.upgrade_bindings.push_back(
+        {Hash64("skill.retreat_shot"), 8, {0, 2}});
+    test::VfxLookupImage image(program.View());
+
+    const auto event = [](std::uint64_t asset, Sequence sequence, std::uint64_t cast,
+                          std::uint64_t owner) {
+        PresentationEvent value;
+        value.sequence = sequence;
+        value.tick = 20;
+        value.kind = PresentationKind::Vfx;
+        value.asset = {asset};
+        value.position = {1.0f, 0.0f, 2.0f};
+        value.geometry.kind = PresentationGeometryKind::Line;
+        value.geometry.width = 0.4f;
+        value.geometry.start_tick = value.tick;
+        value.geometry.end_tick = value.tick;
+        value.geometry.source_id = owner;
+        value.geometry.end_position = {4.0f, 0.0f, 6.0f};
+        value.upgrade_skill = 8;
+        value.upgrade_index = 7;
+        value.upgrade_stage = 1;
+        value.upgrade_cast_id = cast;
+        value.upgrade_owner_id = owner;
+        return value;
+    };
+    const auto dash = event(dash_id, 101, 9001, 7001);
+    const auto dash_duplicate = dash;
+    const auto afterimage = event(afterimage_id, 102, 9002, 7001);
+    const std::array dispatched{dash, dash_duplicate, afterimage};
+
+    VfxUpgradeMovementState state;
+    std::vector<VfxPersistentInput> output(1);
+    output.front().stable_id = 55;
+    state.Append(image, dispatched, 20, output);
+    Check(state.RetainedCapacityBytes() > 0,
+          "retreat state omitted retained owner/staging vector capacity");
+    Check(output.size() == 3 && output[0].stable_id == 55 &&
+              std::holds_alternative<VfxLinePayload>(output[1].payload) &&
+              std::holds_alternative<VfxContextPayload>(output[2].payload),
+          "retreat append lost caller prefix, source order or duplicate identity suppression");
+    Check(output[1].stable_id != 0 && output[1].elapsed_ticks == 0.0 &&
+              output[2].stable_id != 0 && output[2].elapsed_ticks == 0.0,
+          "retreat append lost captured source identity or start age");
+
+    const auto retained_before_rebind = state.RetainedCapacityBytes();
+    Check(state.Rebind(image.program, image.program) == 0 &&
+              state.RetainedCapacityBytes() == retained_before_rebind,
+          "same-generation retreat owner was dropped during rebind");
+    output.clear();
+    state.Append(image, {}, 21, output, 0.5f);
+    Check(output.size() == 2 && output[0].elapsed_ticks == 0.5 &&
+              output[1].elapsed_ticks == 0.5 &&
+              std::abs(output[0].normalized_age - 0.5f / 60.0f) < 0.00001f,
+          "retained retreat state changed its interpolated absolute age");
+
+    output.clear();
+    state.Append(image, {}, 80, output);
+    Check(output.empty(), "expired retreat movement owner remained visible");
+    const auto expired_capacity = state.RetainedCapacityBytes();
+    VfxUpgradeMovementState swapped_state;
+    swapped_state.Swap(state);
+    Check(state.RetainedCapacityBytes() == 0 &&
+              swapped_state.RetainedCapacityBytes() == expired_capacity,
+          "retreat swap did not transfer retained vector capacity");
+    state.Append(image, dispatched, 80, output);
+    Check(output.empty(), "expired dispatched retreat event restarted its captured episode");
+
+    VfxUpgradeMovementState rejected_state;
+    auto rejected = event(dash_id, 201, 9011, 7011);
+    rejected.geometry.width = 0.0f;
+    output.resize(1);
+    output.front().stable_id = 77;
+    rejected_state.Append(image, std::span(&rejected, 1), 20, output);
+    Check(output.size() == 1 && output.front().stable_id == 77,
+          "rejected retreat input mutated caller output");
+    rejected.geometry.width = 0.4f;
+    rejected_state.Append(image, std::span(&rejected, 1), 20, output);
+    Check(output.size() == 2 && output.back().stable_id != 0,
+          "rejected retreat input was committed before a valid retry");
+    rejected_state.Clear();
+    Check(rejected_state.RetainedCapacityBytes() > 0,
+          "retreat clear hid retained vector backing capacity");
+    output.clear();
+    rejected_state.Append(image, {}, 21, output);
+    Check(output.empty(), "retreat clear retained owner or staged state");
 }
 
 int main()
@@ -2074,14 +2342,18 @@ int main()
         TestBossStateOwners();
         TestPlayerStateOwners();
         TestLowHealthPulseClock();
+        TestPreparedVolumeCommands();
         TestPickupIdleOwners();
         TestPlayerStampedEntityBindings();
         TestChargedOverchargeOwner();
         TestProcStampedProjectileBindings();
         TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity();
         TestStatusTickIdentity();
+        TestRetreatMovementAppendPublishesStateWithOutputs();
         TestOwnedVisualLinks();
         TestPointEvent();
+        TestPreparedLookupPreservesAuthoredHandles();
+        TestFrameInputStorageReused();
         TestProjectileImpactEventUsesAuthoritativeGeometry();
         TestEventSchemaAndModeRejection();
         TestEventGeometryTagsAndGapExpansion();
@@ -2096,6 +2368,7 @@ int main()
         TestShockwaveWavefrontBinding();
         TestShockwaveWarningOwner();
         TestSafeSectorFanout();
+        TestSafeSectorRefreshUsesRingOracleAndRetainsStorage();
         TestBossAreaUsesAuthoredCircleBinding();
         TestProjectileIngressUsesAuthoritativeOwnerState();
         TestProjectilePathUsesAuthoritativeMotion();

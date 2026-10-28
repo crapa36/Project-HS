@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 namespace hs::content
 {
@@ -33,6 +34,42 @@ std::string Vector(const std::array<float, N> &value)
     std::string result="{";
     for(std::size_t i=0;i<N;++i){if(i)result+=",";result+=F(value[i]);}
     return result+"}";
+}
+std::string GroundCodegenValue(std::uint64_t value) { return U64(value); }
+std::string GroundCodegenValue(std::uint32_t value) { return U(value); }
+std::string GroundCodegenValue(float value) { return F(value); }
+std::string GroundCodegenValue(bool value) { return value ? "true" : "false"; }
+std::string GroundCodegenValue(VfxSourceType value) { return Enum("VfxSourceType", value); }
+std::string GroundCodegenValue(VfxOutputProfile value) { return Enum("VfxOutputProfile", value); }
+std::string GroundCodegenValue(VfxMotionKind value) { return Enum("VfxMotionKind", value); }
+std::string GroundCodegenValue(VfxGroundRecipeKind value) { return Enum("VfxGroundRecipeKind", value); }
+std::string GroundCodegenValue(VfxRange value) { return Range(value); }
+std::string GroundCodegenValue(Float3 value) { return Vector(value); }
+template <std::size_t N>
+std::string GroundCodegenValue(const std::array<float, N> &value) { return Vector(value); }
+std::string GroundMaskCodegenRow(const VfxGroundRecipe::MaskVariant &mask)
+{
+    std::string row = "{";
+    bool first = true;
+    VisitVfxGroundMaskVariantFields(mask, [&](const char *, const auto &value) {
+        if (!first) row += ",";
+        first = false;
+        row += GroundCodegenValue(value);
+    });
+    return row + "}";
+}
+std::string GroundCodegenValue(const std::array<VfxGroundRecipe::MaskVariant, 3> &masks)
+{
+    std::string rows = "{{";
+    for (std::size_t i = 0; i < masks.size(); ++i) {
+        if (i) rows += ",";
+        rows += GroundMaskCodegenRow(masks[i]);
+    }
+    return rows + "}}";
+}
+template <typename T> std::string GroundCodegenValue(const T &)
+{
+    static_assert(!std::is_same_v<T, T>, "unsupported VfxGroundRecipe codegen field type");
 }
 std::string Row(const CookedVfxDefinition &r)
 {
@@ -137,16 +174,14 @@ std::string Row(const VfxDecalRecipe &r)
 }
 std::string Row(const VfxGroundRecipe &r)
 {
-    return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.source_stable_id) + "," + U(r.output_index) + "," + U(r.gradient_row) + "," +
-        U(r.payload_kind) + "," + U(r.timing_kind) + "," + U(r.min_quality) + "," + Enum("VfxSourceType",r.source_type) + "," +
-        Enum("VfxOutputProfile",r.profile) + "," + Enum("VfxMotionKind",r.motion) + "," + Enum("VfxGroundRecipeKind",r.kind) + "," + U(r.knot_count) + "," +
-        Vector(r.knots) + "," + Range(r.pulse_curve_keys) + "," + U(r.pulse_curve_interpolation) + "," + U(r.tick_count) + "," +
-        F(r.seconds) + "," + F(r.primary) + "," + F(r.secondary) + "," + Vector(r.rgb) + "," + F(r.hdr) + "," + F(r.alpha) + "," +
-        F(r.motion_rate_hz) + "," + F(r.motion_amplitude) + "," + F(r.motion_inset_fraction) + "," + F(r.tertiary) + "," +
-        "{{" + Range(r.mask_variants[0].slices) + "," + F(r.mask_variants[0].strength) + "," + (r.mask_variants[0].valid?"true":"false") + "," + (r.mask_variants[0].present?"true":"false") + "},{" +
-        Range(r.mask_variants[1].slices) + "," + F(r.mask_variants[1].strength) + "," + (r.mask_variants[1].valid?"true":"false") + "," + (r.mask_variants[1].present?"true":"false") + "},{" +
-        Range(r.mask_variants[2].slices) + "," + F(r.mask_variants[2].strength) + "," + (r.mask_variants[2].valid?"true":"false") + "," + (r.mask_variants[2].present?"true":"false") + "}}," +
-        (r.texture_contract_valid?"true":"false") + "," + U(r.source_output_count) + "," + (r.source_parameters_empty?"true":"false") + "}";
+    std::string row = "{";
+    bool first = true;
+    VisitVfxGroundRecipeFields(r, [&](const char *, const auto &value) {
+        if (!first) row += ",";
+        first = false;
+        row += GroundCodegenValue(value);
+    });
+    return row + "}";
 }
 std::string Row(const VfxFlashSpawnInput &r)
 {
@@ -180,7 +215,7 @@ std::string Row(const VfxPersistentFireRecipe &r)
 {
     return "{" + U64(r.effect_id) + "," + U(r.effect_handle) + "," + U(r.source_stable_id) + "," +
         U(r.rate) + "," + F(r.radius_scale) + "," + Row(r.spawn) + "," + Range(r.mask_slices) + "," +
-        F(r.mask_strength) + "}";
+        F(r.mask_strength) + "," + (r.authoritative ? "true" : "false") + "}";
 }
 std::string Row(const VfxOwnedStatusTickRecipe &r)
 {
@@ -196,7 +231,11 @@ std::string Row(const VfxMoteSourceRecipe &r)
     return "{" + U(r.count) + "," + std::to_string(r.rate) + "," +
         F(r.curl) + "," + F(r.drag) + "," + F(r.speed) + "," + F(r.cone_degrees) + "," +
         (r.common_params_valid ? "true" : "false") + "," + (r.rate_valid ? "true" : "false") + "," +
-        (r.residual_valid ? "true" : "false") + "," + (r.spark_valid ? "true" : "false") + "}";
+        (r.residual_valid ? "true" : "false") + "," + (r.spark_valid ? "true" : "false") + "," + U64(r.effect_id) + "," +
+        U(r.effect_handle) + "," + U(r.effect_lookup_count) + "," + U(r.stable_id) + "," + Range(r.output_range) + "," +
+        Vector(r.knots) + "," + (r.output_range_valid ? "true" : "false") + "," + (r.common_route_valid ? "true" : "false") + "," +
+        (r.residual_route_valid ? "true" : "false") + "," + (r.rate_route_valid ? "true" : "false") + "," +
+        (r.tick_route_valid ? "true" : "false") + "," + (r.spark_route_valid ? "true" : "false") + "}";
 }
 std::string Row(const VfxMoteOutputRecipe &r)
 {
@@ -204,7 +243,158 @@ std::string Row(const VfxMoteOutputRecipe &r)
         Range(r.mask_slices[2]) + "},{" + Vector(r.mask_strengths) + "}," + U(r.persistent_curve_row) + "," +
         F(r.persistent_size) + "," + F(r.hdr) + "," + Vector(r.color) + "," + U(r.mask_present_mask) + "," + U(r.mask_quality_mask) + "," +
         (r.output_color_valid ? "true" : "false") + "," +
-        (r.persistent_params_valid ? "true" : "false") + "," + (r.spark_textures_valid ? "true" : "false") + "}";
+        (r.persistent_params_valid ? "true" : "false") + "," + (r.spark_textures_valid ? "true" : "false") + "," + U(r.common_recipe_index) + "," +
+        (r.empty_parameters_valid ? "true" : "false") + "," + (r.residual_route_valid ? "true" : "false") + "," +
+        (r.rate_route_valid ? "true" : "false") + "," + (r.tick_route_valid ? "true" : "false") + "," +
+        (r.persistent_route_valid ? "true" : "false") + "," + (r.spark_route_valid ? "true" : "false") + "}";
+}
+std::string Row(const VfxScreenEffectRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + F(r.seconds) + "," + Range(r.outputs) + "," +
+        (r.route_valid ? "true" : "false") + "}";
+}
+std::string Row(const VfxScreenRecipe &r)
+{
+    return "{" + U(r.source_index) + "," + U(r.output_index) + "," + U(r.min_quality) + "," +
+        U(r.gradient_row) + "," + Enum("VfxScreenShape", r.shape) + "," + F(r.knot_start) + "," +
+        F(r.knot_end) + "," + Vector(r.rgb) + "," + F(r.alpha) + "," + F(r.hdr) + "," +
+        F(r.center_clear) + "," + F(r.edge_power) + "}";
+}
+std::string Row(const VfxVolumeEffectRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + F(r.seconds) + "," + Range(r.outputs) + "," +
+        (r.route_valid ? "true" : "false") + "}";
+}
+std::string Row(const VfxVolumeRecipe &r)
+{
+    return "{" + U(r.source_index) + "," + U(r.output_index) + "," + U(r.source_id) + "," +
+        U(r.min_quality) + "," + U(r.gradient_row) + "," + Enum("VfxVolumeShape", r.shape) + "," +
+        Enum("VfxVolumeNoise", r.noise) + "," + F(r.knot_start) + "," + F(r.knot_end) + "," +
+        F(r.density) + "," + F(r.alpha) + "," + F(r.anisotropy) + "," + F(r.hdr) + "," +
+        U(r.steps) + "," + U(r.half_resolution) + "," + Vector(r.rgb) + "}";
+}
+std::string Row(const VfxEntitySurfaceEffectRecipe &r)
+{
+    return "{" + U64(r.effect_id) + "," + U(r.importance) + "," + U(r.payload_kind) + "," +
+        U(r.input_mode) + "," + U(r.timing_kind) + "," + F(r.seconds) + "," + Range(r.outputs) + "," +
+        (r.identity_unique ? "true" : "false") + "}";
+}
+std::string Row(const VfxEntitySurfaceRecipe &r)
+{
+    return "{" + U(r.effect_handle) + "," + U(r.source_index) + "," + U(r.output_index) + "," +
+        U(r.min_quality) + "," + U(r.gradient_row) + "," + Enum("VfxEntitySurfaceShape", r.shape) + "," +
+        Enum("VfxEntitySurfaceDirection", r.direction) + "," + F(r.knot_start) + "," + F(r.knot_end) + "," +
+        F(r.noise_scale) + "," + F(r.edge_width) + "," + Vector(r.color) + "," + F(r.hdr) + "," +
+        F(r.alpha) + "," + (r.persistent ? "true" : "false") + "," + (r.death ? "true" : "false") + "}";
+}
+std::string Row(const VfxEntitySurfaceRouteHandles &r)
+{ return "{"+U(r.phase_effect)+","+U(r.death_effect)+","+U(r.trap_point_rate_effect)+"}"; }
+std::string Row(const VfxRibbonEffectRecipe &r)
+{
+    return "{"+U64(r.effect_id)+","+U(r.handle)+","+U(r.importance)+","+U(r.payload_kind)+","+
+        U(r.input_mode)+","+U(r.timing_kind)+","+U(r.lookup_count)+","+U(r.identity_count)+","+
+        F(r.seconds)+","+Range(r.sources)+","+(r.valid_handle?"true":"false")+"}";
+}
+std::string Row(const VfxRibbonWakeRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.importance)+","+U(r.min_quality)+","+U(r.detail_min_quality)+","+
+        U(r.gradient_row)+","+Range(r.detail_slices)+","+Vector(r.color)+","+
+        F(r.width_head)+","+F(r.width_tail)+","+F(r.hdr)+","+F(r.detail_strength)+"}";
+}
+std::string RibbonOutput(const VfxRibbonOutputInput &r)
+{
+    return "{"+Enum("VfxOutputProfile",r.profile)+","+Enum("VfxMotionKind",r.motion)+","+
+        Vector(r.color)+","+F(r.width_head)+","+F(r.width_tail)+","+F(r.noise_warp)+","+
+        F(r.phase_offset)+","+F(r.hdr)+","+F(r.detail_strength)+","+U(r.gradient_row)+","+
+        U(r.detail_slice)+","+(r.dashed?"true":"false")+","+(r.travel_pulse?"true":"false")+"}";
+}
+std::string Row(const VfxRibbonFixedRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.importance)+","+U(r.core_min_quality)+","+
+        U(r.outer_min_quality)+","+U(r.segments)+","+Enum("VfxRibbonFixedKind",r.kind)+","+
+        F(r.seconds)+","+F(r.taper)+","+F(r.outer_width_multiplier)+","+
+        RibbonOutput(r.core_output)+","+RibbonOutput(r.outer_output)+"}";
+}
+std::string Row(const VfxRibbonProjectileSourceRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.source_id)+","+U(r.knot_count)+","+
+        F(r.history_seconds)+","+Vector(r.knots)+","+Range(r.outputs)+"}";
+}
+std::string Row(const VfxRibbonProjectileOutputRecipe &r)
+{
+    return "{"+U(r.min_quality)+","+RibbonOutput(r.output)+","+Range(r.detail_slices)+","+
+        F(r.detail_strength)+","+(r.detail_present?"true":"false")+"}";
+}
+std::string Row(const VfxRibbonCancelRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.importance)+","+U(r.source_id)+","+
+        U(r.min_quality)+","+F(r.seconds)+","+F(r.history_seconds)+","+F(r.width_head)+","+
+        F(r.width_tail)+","+Vector(r.color)+","+Enum("VfxOutputProfile",r.profile)+","+
+        Enum("VfxMotionKind",r.motion)+","+F(r.hdr)+","+U(r.gradient_row)+"}";
+}
+std::string Row(const VfxRibbonLinkDetailRecipe &r)
+{
+    return "{"+Range(r.slices)+","+F(r.strength)+","+(r.valid?"true":"false")+","+
+        (r.present?"true":"false")+"}";
+}
+std::string LinkDetails(const std::array<VfxRibbonLinkDetailRecipe,3> &rows)
+{
+    std::string value="{";
+    for(std::size_t i=0;i<rows.size();++i){if(i)value+=",";value+=Row(rows[i]);}
+    return value+"}";
+}
+std::string Row(const VfxRibbonLinkOutputRecipe &r)
+{
+    return "{"+U(r.source_id)+","+U(r.min_quality)+","+(r.core?"true":"false")+","+
+        F(r.width_multiplier)+","+RibbonOutput(r.output)+","+LinkDetails(r.details)+"}";
+}
+std::string Row(const VfxRibbonLinkEffectRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.importance)+","+Enum("VfxRibbonLinkKind",r.kind)+","+
+        F(r.seconds)+","+F(r.window_start)+","+F(r.window_end)+","+F(r.taper)+","+
+        U(r.segments)+","+Range(r.outputs)+"}";
+}
+std::string Row(const VfxRibbonEventSourceRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.source_id)+","+U(r.knot_count)+","+
+        (r.axial_source?"true":"false")+","+Vector(r.knots)+","+F(r.history_seconds)+","+
+        Vector(r.recoil_arc_by_quality)+","+Vector(r.axial_arc_by_quality)+","+Range(r.outputs)+"}";
+}
+std::string Row(const VfxRibbonEventEffectRecipe &r)
+{
+    return "{"+U64(r.effect_id)+","+U(r.effect_handle)+","+U(r.importance)+","+
+        U(r.payload_kind)+","+F(r.seconds)+","+Range(r.sources)+"}";
+}
+std::string Row(const VfxRibbonEventOutputRecipe &r)
+{
+    return "{"+U(r.min_quality)+","+(r.axial?"true":"false")+","+
+        (r.arc_present?"true":"false")+","+F(r.arc_degrees)+","+RibbonOutput(r.output)+","+
+        Range(r.detail_slices)+","+F(r.detail_strength)+","+(r.detail_present?"true":"false")+"}";
+}
+std::string Row(const VfxFresnelEffectRecipe &r)
+{
+    return "{"+U64(r.effect_id)+","+U(r.effect_handle)+","+Enum("VfxFresnelShellKind",r.kind)+","+
+        Range(r.outputs)+","+(r.route_valid?"true":"false")+"}";
+}
+std::string Row(const VfxFresnelRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.source_index)+","+U(r.source_stable_id)+","+
+        U(r.output_index)+","+U(r.min_quality)+","+Enum("VfxFresnelShellKind",r.kind)+","+
+        F(r.knot_start)+","+F(r.knot_end)+","+U(r.sector_count)+","+U(r.end_crack)+","+
+        F(r.fresnel_power)+","+F(r.rotation_hz)+","+F(r.noise_amount)+","+Vector(r.color)+","+
+        F(r.hdr)+","+U(r.gradient_row)+","+F(r.motion_rate_hz)+","+F(r.motion_amplitude)+","+
+        F(r.motion_inset_fraction)+"}";
+}
+std::string Row(const VfxMeshEffectRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+Range(r.outputs)+","+(r.route_valid?"true":"false")+"}";
+}
+std::string Row(const VfxMeshRecipe &r)
+{
+    return "{"+U(r.effect_handle)+","+U(r.source_index)+","+U(r.output_index)+","+
+        U(r.source_stable_id)+","+U(r.mesh_index)+","+U(r.min_quality)+","+U(r.gradient_row)+","+
+        Vector(r.color)+","+F(r.hdr)+","+F(r.fresnel)+","+F(r.head_to_tail_ratio)+","+
+        F(r.shell_thickness)+"}";
 }
 std::string Row(std::uint32_t value) { return U(value); }
 std::string Row(std::uint8_t value) { return U(value); }
@@ -264,6 +454,34 @@ std::string EmitReleaseVfxCpp(const VfxImage &image)
     Array(source, "VfxOwnedStatusTickRecipe", "kOwnedStatusTickRecipes", image.owned_status_tick_recipes);
     Array(source, "VfxMoteSourceRecipe", "kMoteSourceRecipes", image.mote_source_recipes);
     Array(source, "VfxMoteOutputRecipe", "kMoteOutputRecipes", image.mote_output_recipes);
+    Array(source, "VfxScreenEffectRecipe", "kScreenEffectRecipes", image.screen_effect_recipes);
+    Array(source, "VfxScreenRecipe", "kScreenRecipes", image.screen_recipes);
+    Array(source, "VfxVolumeEffectRecipe", "kVolumeEffectRecipes", image.volume_effect_recipes);
+    Array(source, "VfxVolumeRecipe", "kVolumeRecipes", image.volume_recipes);
+    Array(source, "VfxEntitySurfaceEffectRecipe", "kEntitySurfaceEffectRecipes", image.entity_surface_effect_recipes);
+    Array(source, "VfxEntitySurfaceRecipe", "kEntitySurfaceRecipes", image.entity_surface_recipes);
+    Array(source, "VfxRibbonEffectRecipe", "kRibbonEffectRecipes", image.ribbon_effect_recipes);
+    Array(source, "std::uint32_t", "kRibbonSliceIndices", image.ribbon_slice_indices);
+    Array(source, "VfxRange", "kRibbonWakeEffectRanges", image.ribbon_wake_effect_ranges);
+    Array(source, "VfxRibbonWakeRecipe", "kRibbonWakeRecipes", image.ribbon_wake_recipes);
+    Array(source, "VfxRange", "kRibbonFixedEffectRanges", image.ribbon_fixed_effect_ranges);
+    Array(source, "VfxRibbonFixedRecipe", "kRibbonFixedRecipes", image.ribbon_fixed_recipes);
+    Array(source, "VfxRange", "kRibbonProjectileEffectRanges", image.ribbon_projectile_effect_ranges);
+    Array(source, "VfxRibbonProjectileSourceRecipe", "kRibbonProjectileSources", image.ribbon_projectile_sources);
+    Array(source, "VfxRibbonProjectileOutputRecipe", "kRibbonProjectileOutputs", image.ribbon_projectile_outputs);
+    Array(source, "VfxRange", "kRibbonCancelEffectRanges", image.ribbon_cancel_effect_ranges);
+    Array(source, "VfxRibbonCancelRecipe", "kRibbonCancelRecipes", image.ribbon_cancel_recipes);
+    Array(source, "VfxRibbonLinkEffectRecipe", "kRibbonLinkEffectRecipes", image.ribbon_link_effect_recipes);
+    Array(source, "VfxRibbonLinkOutputRecipe", "kRibbonLinkOutputRecipes", image.ribbon_link_output_recipes);
+    Array(source, "VfxRibbonEventEffectRecipe", "kRibbonEventEffectRecipes", image.ribbon_event_effect_recipes);
+    Array(source, "VfxRibbonEventSourceRecipe", "kRibbonEventSources", image.ribbon_event_sources);
+    Array(source, "VfxRibbonEventOutputRecipe", "kRibbonEventOutputs", image.ribbon_event_outputs);
+    Array(source, "VfxEffectLookupRecord", "kEffectLookupById", image.effect_lookup_by_id);
+    Array(source, "VfxFresnelEffectRecipe", "kFresnelEffectRecipes", image.fresnel_effect_recipes);
+    Array(source, "VfxFresnelRecipe", "kFresnelRecipes", image.fresnel_recipes);
+    Array(source, "VfxMeshEffectRecipe", "kMeshEffectRecipes", image.mesh_effect_recipes);
+    Array(source, "VfxMeshRecipe", "kMeshRecipes", image.mesh_recipes);
+    const std::string entity_routes=Row(image.entity_surface_routes);
     source +=
         "constinit const VfxImage kVfx{\n"
         "    kVfxDefinitions,kVfxEmitters,kVfxSprites,kVfxAuthoredMeshes,kVfxDecorativeDefinitions,\n"
@@ -279,7 +497,16 @@ std::string EmitReleaseVfxCpp(const VfxImage &image)
     source += "kLightRanges,kLightRecipes,kBallisticRanges,kBallisticRecipes,kEffectOutputProfiles,kDistortionRanges,kDistortionRecipes,kDecalRanges,kDecalRecipes,"
         "kGroundRanges,kGroundRecipes,kFlashRanges,kFlashRecipes,kPersistentStampRanges,kPersistentStampRecipes,"
         "kPersistentFireRanges,kPersistentFireRecipes,kOwnedStatusTickRanges,kOwnedStatusTickRecipes,"
-        "kMoteSourceRecipes,kMoteOutputRecipes};\n}\n"
+        "kMoteSourceRecipes,kMoteOutputRecipes,kScreenEffectRecipes,kScreenRecipes,"
+        "kVolumeEffectRecipes,kVolumeRecipes,kEntitySurfaceEffectRecipes,kEntitySurfaceRecipes,"+entity_routes+","+
+        "kRibbonEffectRecipes,kRibbonSliceIndices,"
+        "kRibbonWakeEffectRanges,kRibbonWakeRecipes,"
+        "kRibbonFixedEffectRanges,kRibbonFixedRecipes,"
+        "kRibbonProjectileEffectRanges,kRibbonProjectileSources,kRibbonProjectileOutputs,"
+        "kRibbonCancelEffectRanges,kRibbonCancelRecipes,"
+        "kRibbonLinkEffectRecipes,kRibbonLinkOutputRecipes,"
+        "kRibbonEventEffectRecipes,kRibbonEventSources,kRibbonEventOutputs,"
+        "kEffectLookupById,kFresnelEffectRecipes,kFresnelRecipes,kMeshEffectRecipes,kMeshRecipes};\n}\n"
         "const VfxImage &Vfx() noexcept { return kVfx; }\n}\n";
     return source;
 }

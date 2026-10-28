@@ -77,6 +77,8 @@ class PresentationGuides
         std::uint32_t devtools_pass_id, PresentationGuidesLayout *layout=nullptr);
     [[nodiscard]] bool MatchesLayout(const PresentationGuidesInputs &,std::uint32_t color_pass_id,
         std::uint32_t guides_pass_id,std::uint32_t devtools_pass_id,const PresentationGuidesLayout &) const noexcept;
+    [[nodiscard]] bool MatchesShape(const PresentationGuidesLayout &, std::uint32_t color_pass_id,
+        std::uint32_t guides_pass_id, std::uint32_t devtools_pass_id, bool transparent_guides) const noexcept;
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const PresentationGuidesInputs &,
         PresentationGuidesOutputs &,const PresentationGuidesLayout &);
     // First copy composite (SL/XeFG) or hudless (FSR) to the native backbuffer.
@@ -87,6 +89,7 @@ class PresentationGuides
         std::uint32_t pass_id,PresentationTagLayout *layout=nullptr);
     [[nodiscard]] bool MatchesTagLayout(const PresentationGuidesOutputs &,PresentationGuideResource back_buffer,
         std::uint32_t pass_id,const PresentationTagLayout &) const noexcept;
+    [[nodiscard]] bool MatchesTagShape(const PresentationTagLayout &, std::uint32_t pass_id) const noexcept;
     [[nodiscard]] Result BindRetainedTagPass(RenderGraphBuilder &,const PresentationGuidesOutputs &,
         PresentationGuideResource back_buffer,SdkPresentationFrame,SdkPresentation &,
         const PresentationTagLayout &);

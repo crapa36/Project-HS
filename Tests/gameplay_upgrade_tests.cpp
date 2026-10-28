@@ -219,19 +219,26 @@ void TestDetailedBalanceSwitchPreservesSimulation()
     data.enemies[0].health = 1'000;
     data.enemies[0].move_speed = 0.0f;
     data.enemies[0].damage = 0;
+    data.enemies[1].health = 1'000;
+    data.enemies[1].move_speed = 0.0f;
+    data.enemies[1].damage = 1;
     hs::SimulationConfig enabled_config{};
     enabled_config.seed = 0xB41A'CEu;
     hs::SimulationConfig disabled_config = enabled_config;
     disabled_config.capture_detailed_balance = false;
-    hs::GameSimulation enabled, disabled;
+    hs::SimulationConfig uncaptured_config = disabled_config;
+    uncaptured_config.capture_hit_rates = false;
+    hs::GameSimulation enabled, disabled, uncaptured;
     Check(enabled.Initialize(enabled_config, data).Succeeded() &&
-              disabled.Initialize(disabled_config, data).Succeeded(),
+              disabled.Initialize(disabled_config, data).Succeeded() &&
+              uncaptured.Initialize(uncaptured_config, data).Succeeded(),
           "detailed balance mode initialize");
-    for (auto *simulation : {&enabled, &disabled})
+    for (auto *simulation : {&enabled, &disabled, &uncaptured})
     {
         Debug(*simulation, hs::DebugCommandKind::GrantUpgrade,
               static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
         Debug(*simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+        Debug(*simulation, hs::DebugCommandKind::SpawnEnemy, 1, 0, {4.0f, 3.0f});
     }
     hs::HeldInputState held;
     held.basic_attack_held = true;
@@ -240,11 +247,14 @@ void TestDetailedBalanceSwitchPreservesSimulation()
     {
         (void)Tick(enabled, held);
         (void)Tick(disabled, held);
+        (void)Tick(uncaptured, held);
     }
     const auto enabled_probe = enabled.GetObservation();
     const auto disabled_probe = disabled.GetObservation();
-    Check(enabled.ComputeChecksum() == disabled.ComputeChecksum(),
-          "detailed balance capture does not change gameplay checksum");
+    const auto uncaptured_probe = uncaptured.GetObservation();
+    Check(enabled.ComputeChecksum() == disabled.ComputeChecksum() &&
+              enabled.ComputeChecksum() == uncaptured.ComputeChecksum(),
+          "independent observability choices do not change gameplay checksum");
     Check(enabled_probe.balance.skill_uses == disabled_probe.balance.skill_uses &&
               enabled_probe.balance.skill_hit_events ==
                   disabled_probe.balance.skill_hit_events &&
@@ -252,16 +262,29 @@ void TestDetailedBalanceSwitchPreservesSimulation()
               enabled_probe.damage_by_skill == disabled_probe.damage_by_skill,
           "fixed UI balance aggregates are identical with detailed collection disabled");
     Check(enabled_probe.balance.skill_casts_with_hit[0] > 0 &&
-              disabled_probe.balance.skill_casts_with_hit[0] == 0 &&
-              std::ranges::all_of(disabled_probe.balance.enemy_hits,
+              enabled_probe.balance.hit_rates_captured && disabled_probe.balance.hit_rates_captured &&
+              enabled_probe.balance.skill_casts_with_hit == disabled_probe.balance.skill_casts_with_hit &&
+              std::ranges::any_of(enabled_probe.balance.enemy_hits, [](auto hits) { return hits != 0; }) &&
+              enabled_probe.balance.enemy_hits == disabled_probe.balance.enemy_hits,
+          "disabling synergy detail preserves the default unique hit-rate aggregates");
+    Check(!uncaptured_probe.balance.hit_rates_captured &&
+              std::ranges::all_of(uncaptured_probe.balance.skill_casts_with_hit,
+                                  [](auto hits) { return hits == 0; }) &&
+              std::ranges::all_of(uncaptured_probe.balance.enemy_hits,
                                   [](auto hits) { return hits == 0; }),
-          "disabled detail leaves unique hit membership metrics unavailable");
+          "explicit hit-rate opt-out marks its aggregates unavailable");
+    Check(uncaptured_probe.damage_by_skill == enabled_probe.damage_by_skill &&
+              uncaptured_probe.balance.skill_hit_events == enabled_probe.balance.skill_hit_events &&
+              uncaptured_probe.balance.enemy_damage == enabled_probe.balance.enemy_damage &&
+              uncaptured_probe.kills == enabled_probe.kills && uncaptured_probe.health == enabled_probe.health,
+          "hit-rate opt-out preserves damage, health, kills and hit events");
     Check(enabled_probe.balance.detailed_balance_captured &&
               !disabled_probe.balance.detailed_balance_captured &&
               enabled_probe.balance.upgrade_relic_synergy_count == 0 &&
               disabled_probe.balance.upgrade_relic_synergy_count == 0,
           "detailed collection state is explicit even when no synergy was observed");
-    Check(enabled.Shutdown().Succeeded() && disabled.Shutdown().Succeeded(),
+    Check(enabled.Shutdown().Succeeded() && disabled.Shutdown().Succeeded() &&
+              uncaptured.Shutdown().Succeeded(),
           "detailed balance mode shutdown");
 }
 

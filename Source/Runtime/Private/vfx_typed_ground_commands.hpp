@@ -27,6 +27,27 @@ struct VfxTypedGroundCommand
     VfxGroundGeometry geometry;
 };
 
+// Birth-time compatibility layers that the typed builder actually accepted.
+// These facts filter matching legacy emitters before DrawCommand construction.
+struct VfxGroundBirthSuppressionFacts
+{
+    Sequence sequence{};
+    bool all_particles{};
+    bool ground_ring{};
+    bool ground_disc{};
+    bool segment_solid_trail{};
+};
+
+struct VfxGroundEventAdmission
+{
+    bool accepted{};
+    bool replace_context_owner{};
+};
+
+// Applies the event/profile eligibility used before Ground profile retention.
+[[nodiscard]] VfxGroundEventAdmission ClassifyVfxTypedEventGroundAdmission(
+    const VfxImage &image, const VfxEventInput &input) noexcept;
+
 // Converts authored persistent CircleAreaPayload boundaries and interior fills.
 // Callers retain the owner identity and world-space edge width alongside the
 // legacy spawn command until the renderer's exact-ring path consumes them.
@@ -34,10 +55,19 @@ struct VfxTypedGroundCommand
     const VfxImage &image,
     std::span<const VfxPersistentInput> inputs,
     Tick current_tick);
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxTypedGroundCommand> &result);
 
 [[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
     const VfxImage &image,
     VfxEventView inputs,
     double current_tick);
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick,
+    std::vector<VfxTypedGroundCommand> &result);
+void AppendVfxTypedEventGroundBirthSuppression(
+    const VfxImage &image, VfxEventView inputs,
+    std::vector<VfxGroundBirthSuppressionFacts> &result);
 
 } // namespace hs::runtime_detail

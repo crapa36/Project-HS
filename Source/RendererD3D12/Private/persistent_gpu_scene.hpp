@@ -287,6 +287,9 @@ class PersistentGpuSceneSlots
     std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> pending_new_slots_;
     std::vector<std::uint32_t> pending_active_slots_;
     std::vector<std::uint8_t> pending_seen_;
+    // Prepared in slot order before submission so Commit applies the same
+    // retirement set without rescanning the high-water slot range.
+    std::vector<std::uint32_t> pending_removed_slots_;
     // Retained slots reuse their authoritative lookup and frame-local staging.
     std::vector<Entry> pending_entries_;
     struct PreviousPayload

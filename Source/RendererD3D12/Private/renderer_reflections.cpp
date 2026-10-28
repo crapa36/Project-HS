@@ -297,15 +297,22 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
 {
     return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
 }
-bool ScreenReflectionsSystem::MatchesLayout(const ScreenReflectionsInputs &inputs,const ScreenReflectionsLayout &layout)const noexcept
+bool ScreenReflectionsSystem::MatchesShape(const ScreenReflectionsLayout &layout,
+    bool reset_history, std::uint64_t frame_index, bool ambient_visibility,
+    std::uint32_t sidecar_planes) const noexcept
 {
     const auto &s=impl_->targets;
     if(!layout.valid||!s||layout.active!=(s->quality!=GraphicsOptionalQuality::Off))return false;
-    return !layout.active||(layout.history==(s->history_valid&&!inputs.reset_history&&inputs.frame_index==s->previous_frame+1)&&
-        layout.ambient==inputs.ambient_visibility_enabled&&layout.sidecars==inputs.sidecar_plane_count&&
+    return !layout.active||(layout.history==(s->history_valid&&!reset_history&&frame_index==s->previous_frame+1)&&
+        layout.ambient==ambient_visibility&&layout.sidecars==sidecar_planes&&
         layout.render_capacity.width==s->render_capacity.width&&layout.render_capacity.height==s->render_capacity.height&&
         layout.trace_capacity.width==s->trace_capacity.width&&layout.trace_capacity.height==s->trace_capacity.height&&
-        layout.hierarchy_elements==s->hierarchy_elements&&
+        layout.hierarchy_elements==s->hierarchy_elements);
+}
+bool ScreenReflectionsSystem::MatchesLayout(const ScreenReflectionsInputs &inputs,const ScreenReflectionsLayout &layout)const noexcept
+{
+    return MatchesShape(layout, inputs.reset_history, inputs.frame_index,
+        inputs.ambient_visibility_enabled, inputs.sidecar_plane_count) && (!layout.active ||
         layout.guides==std::array{inputs.depth.version,inputs.base.version,inputs.normal.version,inputs.metadata.version,
             inputs.material.version,inputs.motion.version,inputs.surface_history.version,inputs.opaque_hdr.version,
             inputs.environment_specular.version,inputs.material_parameters.version,inputs.sidecars[0].version,

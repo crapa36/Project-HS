@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -241,6 +242,7 @@ struct LightListTargets
 struct LightListSystem::Impl
 {
     std::shared_ptr<LightListTargets> targets;
+    std::vector<GpuLightRecord> records;
     struct Import { AllocationResource *allocation{}; ResourceHandle handle; };
     struct Pending
     {
@@ -436,14 +438,18 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
                 return LightFailure(ErrorCode::InvalidArgument, "Light-list perspective corners must have positive physical view depth.");
         }
 
-    std::vector<const LightView *> sorted;
-    sorted.reserve(inputs.lights.size());
-    for (const auto &light : inputs.lights) sorted.push_back(&light);
+    std::array<const LightView *, kMaxLights> sorted_storage{};
+    auto sorted = std::span(sorted_storage.data(), inputs.lights.size());
+    std::ranges::transform(inputs.lights, sorted.begin(), [](const LightView &light) { return &light; });
     std::ranges::sort(sorted, [](const auto *left, const auto *right) { return left->stable_id < right->stable_id; });
     for (std::size_t index = 1; index < sorted.size(); ++index)
         if (sorted[index - 1]->stable_id == sorted[index]->stable_id)
             return LightFailure(ErrorCode::InvalidArgument, "A light snapshot contains duplicate stable IDs.");
-    std::vector<std::uint64_t> transient(inputs.transient_light_ids.begin(), inputs.transient_light_ids.end());
+    if (inputs.transient_light_ids.size() > inputs.lights.size())
+        return LightFailure(ErrorCode::InvalidArgument, "Transient light IDs must be a unique subset of the light snapshot.");
+    std::array<std::uint64_t, kMaxLights> transient_storage{};
+    auto transient = std::span(transient_storage.data(), inputs.transient_light_ids.size());
+    std::ranges::copy(inputs.transient_light_ids, transient.begin());
     std::ranges::sort(transient);
     for (std::size_t index = 0; index < transient.size(); ++index)
     {
@@ -452,14 +458,19 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
             !std::ranges::binary_search(sorted, id, {}, [](const LightView *light) { return light->stable_id; }))
             return LightFailure(ErrorCode::InvalidArgument, "Transient light IDs must be unique exact identities in the light snapshot.");
     }
-    std::stable_partition(sorted.begin(), sorted.end(), [](const auto *light) { return light->type == LightType::Directional; });
-    std::vector<GpuLightRecord> records(std::max(std::size_t(1), sorted.size()));
+    auto &records = impl_->records;
+    records.resize(std::max(std::size_t(1), sorted.size()));
+    if (sorted.empty()) records.front() = {};
     std::uint32_t directionalCount{};
     bool primaryShadowAssigned{};
-    for (std::size_t index = 0; index < sorted.size(); ++index)
+    std::size_t recordIndex{};
+    for (const auto directional : {true, false})
+    for (const auto *light_pointer : sorted)
     {
-        if (auto result = EncodeLight(*sorted[index], records[index]); !result) return result;
-        const auto &light = *sorted[index];
+        if ((light_pointer->type == LightType::Directional) != directional) continue;
+        const auto &light = *light_pointer;
+        auto &record = records[recordIndex++];
+        if (auto result = EncodeLight(light, record); !result) return result;
         if (light.type != LightType::Directional && (light.shadow_flags & kLightShadowRequested) != 0u)
         {
             const auto reference = std::ranges::find_if(inputs.local_shadow_records, [&](const auto &shadow) {
@@ -467,19 +478,20 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
                     shadow.revision == light.revision && shadow.type == light.type;
             });
             if (reference != inputs.local_shadow_records.end())
-                records[index].metadata.z |= (reference->record_index + 1u) << 1u;
+                record.metadata.z |= (reference->record_index + 1u) << 1u;
         }
-        if (std::ranges::binary_search(transient, sorted[index]->stable_id)) records[index].metadata.w |= 8u;
-        if (sorted[index]->type == LightType::Directional)
+        if (std::ranges::binary_search(transient, light.stable_id)) record.metadata.w |= 8u;
+        if (directional)
         {
             ++directionalCount;
-            if (!primaryShadowAssigned && (sorted[index]->shadow_flags & kLightShadowRequested))
+            if (!primaryShadowAssigned && (light.shadow_flags & kLightShadowRequested))
             {
-                records[index].metadata.w |= 2u;
+                record.metadata.w |= 2u;
                 primaryShadowAssigned = true;
             }
         }
     }
+    assert(recordIndex == sorted.size());
     LightListConstants constants{};
     DirectX::XMStoreFloat4x4(&constants.world_to_view, DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&rotation)));
     DirectX::XMStoreFloat4x4(&constants.projection, DirectX::XMMatrixTranspose(projectionMatrix));

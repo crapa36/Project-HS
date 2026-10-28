@@ -15,6 +15,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <type_traits>
 namespace hs { namespace {
 constexpr Tick Seconds(float v) noexcept { return static_cast<Tick>(v*60.0f+0.5f); }
 constexpr Tick kRecoilClipTicks=41, kAnimationBlendOutTicks=6;
@@ -2320,6 +2321,468 @@ void ProjectTickUi(const TickReadView &model,
                "클릭: 메인 메뉴", 1.0f, 26);
     }
     return;
+}
+
+void CaptureUiProjectionFacts(const TickReadView &model,
+    const PresentationCatalog &presentation, const PresentationUiState &ui,
+    const SettingsData &settings, std::uint8_t modal_phase,
+    std::uint8_t pending_rebind_slot, bool input_rejected,
+    std::vector<std::uint64_t> &facts)
+{
+    facts.clear();
+    facts.reserve(std::max<std::size_t>(facts.capacity(), 256));
+    const auto word = [&](auto value) {
+        using T = decltype(value);
+        if constexpr (std::is_enum_v<T>) facts.push_back(static_cast<std::uint64_t>(value));
+        else if constexpr (std::is_floating_point_v<T>)
+            facts.push_back(std::bit_cast<std::uint32_t>(static_cast<float>(value)));
+        else facts.push_back(static_cast<std::uint64_t>(value));
+    };
+    const auto text = [&](std::string_view value) {
+        word(value.size());
+        for (std::size_t offset = 0; offset < value.size(); offset += sizeof(std::uint64_t))
+        {
+            std::uint64_t packed{};
+            const auto count = std::min(sizeof(packed), value.size() - offset);
+            std::memcpy(&packed, value.data() + offset, count);
+            facts.push_back(packed);
+        }
+    };
+    const auto &probe = model.session;
+    if (probe.phase == SessionPhase::MainMenu ||
+        (probe.phase == SessionPhase::Paused &&
+         ui.page == UiPage::PauseSettings))
+    {
+        word(probe.phase);
+        word(ui.page);
+        if (ui.page == UiPage::Collection)
+        {
+            word(std::min<std::size_t>(ui.selected_collection_skill,
+                                       kCombatSkillCount - 1));
+        }
+        else if (ui.page == UiPage::MainMenuSettings ||
+                 ui.page == UiPage::PauseSettings)
+        {
+            word(ui.settings_group); word(ui.settings_page);
+            if (ui.settings_group >= 7)
+            {
+                const auto volume = [&](float value) {
+                    word(std::lround(value * 100.0f));
+                    word(value > 0.0f); word(value < 1.0f);
+                };
+                volume(settings.master_volume); volume(settings.bgm_volume);
+                volume(settings.sfx_volume); volume(settings.ui_volume);
+                volume(settings.screen_overlay_intensity);
+                for (const auto key : settings.skill_virtual_keys) word(key);
+                word(pending_rebind_slot);
+            }
+            // Graphics rows, status text and telemetry are keyed by the
+            // immutable GraphicsSettingsUiModel owner in SameUiDrawInputs.
+        }
+        return;
+    }
+    // The HUD remains visible beneath gameplay selection/results overlays and
+    // the pause root. Keep its facts aligned with the labels and bars emitted
+    // by ProjectTickUi; page-specific facts follow after this shared block.
+    if (probe.phase == SessionPhase::Playing ||
+        probe.phase == SessionPhase::CardSelection ||
+        probe.phase == SessionPhase::RelicSelection ||
+        probe.phase == SessionPhase::StatAllocation ||
+        probe.phase == SessionPhase::Victory || probe.phase == SessionPhase::Defeat ||
+        probe.phase == SessionPhase::QuitRequested ||
+        (probe.phase == SessionPhase::Paused && ui.page != UiPage::PauseSettings &&
+         ui.page != UiPage::CharacterOverview && ui.page != UiPage::CharacterSkills &&
+         ui.page != UiPage::CharacterStats))
+    {
+        word(probe.phase);
+        const auto displayed_time = probe.final_boss_spawned
+            ? probe.boss_fight_ticks : probe.growth_ticks;
+        word(displayed_time / 60);
+        word(probe.level); word(probe.normal_enemy_count);
+        word(probe.health); word(probe.max_health);
+        word(probe.experience); word(probe.experience_to_next);
+        word(probe.skill_levels[0]);
+        for (const auto key : settings.skill_virtual_keys) word(key);
+        for (const auto skill : model.player.loadout)
+        {
+            word(skill);
+            if (skill == SkillKind::Count) continue;
+            const auto index = static_cast<std::size_t>(skill);
+            word(probe.skill_levels[index]);
+            // ProjectTickUi displays this value with {:.1f}s. Key the emitted
+            // label, not the underlying tick counter, so hidden sub-tenth
+            // changes do not invalidate an unchanged button.
+            std::array<char, 16> cooldown_text{};
+            const auto cooldown_end = std::format_to(
+                cooldown_text.begin(), "{:.1f}",
+                static_cast<float>(probe.cooldown_ticks[index - 1]) / 60.0f);
+            text({cooldown_text.data(), static_cast<std::size_t>(
+                cooldown_end - cooldown_text.begin())});
+        }
+        word(probe.relic_mask);
+        std::size_t shown_relics{};
+        for (std::size_t relic = 0; relic < kRelicCount && shown_relics < 3; ++relic)
+        {
+            if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
+            text(presentation.relic_names[relic].data());
+            ++shown_relics;
+        }
+
+        // Match the first visible wave branch and its displayed countdown.
+        bool wave_visible{};
+        for (const auto &wave : model.waves)
+        {
+            if (probe.growth_ticks < wave.start &&
+                wave.start - probe.growth_ticks <= Seconds(5.0f))
+            {
+                word(1);
+                word((wave.start - probe.growth_ticks + 59) / 60);
+                wave_visible = true;
+                break;
+            }
+            if (probe.growth_ticks >= wave.start &&
+                probe.growth_ticks < wave.start + wave.duration)
+            {
+                word(2);
+                wave_visible = true;
+                break;
+            }
+        }
+        if (!wave_visible) word(0);
+
+        // The HUD sorts boss bars before drawing. Store only those emitted rows
+        // and use the same ordering; SessionProbe::boss_count avoids querying
+        // enemy rows at all for the common no-boss case.
+        if (probe.boss_count)
+        {
+            const auto count_index = facts.size();
+            word(0);
+            const auto rows_begin = facts.size();
+            std::size_t boss_count{};
+            for (const auto &enemy : model.enemies)
+                if (enemy.boss && !enemy.dead)
+            {
+                word(*enemy.boss); word(enemy.spawned_tick);
+                word(enemy.health); word(enemy.max_health);
+                ++boss_count;
+            }
+            // Sort the packed rows in place to match ProjectTickUi's final-boss
+            // then spawn-time order without a second per-frame boss allocation.
+            for (std::size_t row = 1; row < boss_count; ++row)
+            {
+                const auto offset = rows_begin + row * 4;
+                const std::array<std::uint64_t, 4> current{
+                    facts[offset], facts[offset + 1], facts[offset + 2], facts[offset + 3]};
+                std::size_t insertion = row;
+                while (insertion)
+                {
+                    const auto previous = rows_begin + (insertion - 1) * 4;
+                    const bool current_final = current[0] ==
+                        static_cast<std::uint64_t>(BossKind::Final);
+                    const bool previous_final = facts[previous] ==
+                        static_cast<std::uint64_t>(BossKind::Final);
+                    const bool precedes = current_final != previous_final
+                        ? current_final : current[1] < facts[previous + 1];
+                    if (!precedes) break;
+                    for (std::size_t field = 0; field < 4; ++field)
+                        facts[previous + 4 + field] = facts[previous + field];
+                    --insertion;
+                }
+                const auto destination = rows_begin + insertion * 4;
+                for (std::size_t field = 0; field < 4; ++field)
+                    facts[destination + field] = current[field];
+            }
+            facts[count_index] = boss_count;
+        }
+        else word(0);
+        if (probe.phase == SessionPhase::Playing) return;
+    }
+    if (probe.phase == SessionPhase::CardSelection ||
+        probe.phase == SessionPhase::RelicSelection)
+    {
+        word(probe.card_count);
+        for (std::size_t index = 0; index < probe.card_count; ++index)
+        {
+            const auto &card = probe.cards[index];
+            word(card.kind); word(card.subject); word(card.upgrade);
+            if (card.kind == CardKind::Relic && card.subject < kRelicCount)
+            {
+                text(presentation.relic_names[card.subject].data());
+                text(presentation.relic_rules[card.subject].data());
+            }
+        }
+        const auto rerolls = probe.phase == SessionPhase::RelicSelection
+            ? probe.relic_rerolls_remaining : probe.level_rerolls_remaining;
+        word(rerolls);
+        word(rerolls != 0 && probe.card_count != 0);
+        return;
+    }
+    if (probe.phase == SessionPhase::StatAllocation)
+    {
+        word(probe.pending_stat_points);
+        for (const auto points : probe.stat_points) word(points);
+        return;
+    }
+    if (probe.phase == SessionPhase::Victory || probe.phase == SessionPhase::Defeat)
+    {
+        word(probe.level); word(probe.kills); word(probe.boss_fight_ticks / 60);
+        word(probe.damage_dealt); word(probe.damage_taken); word(probe.healing);
+        for (const auto damage : probe.damage_by_skill) word(damage);
+        word(probe.skill_levels[0]); word(std::popcount(probe.upgrade_masks[0]));
+        for (const auto skill : probe.skill_loadout)
+        {
+            word(skill);
+            if (skill != SkillKind::Count)
+            {
+                const auto index = static_cast<std::size_t>(skill);
+                word(probe.skill_levels[index]);
+                word(std::popcount(probe.upgrade_masks[index]));
+            }
+        }
+        word(probe.relic_mask);
+        std::size_t shown{};
+        for (std::size_t relic = 0; relic < kRelicCount && shown < 4; ++relic)
+        {
+            if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
+            text(presentation.relic_names[relic].data());
+            word(model.summary.relic_triggers[relic]);
+            word(model.summary.relic_damage[relic]);
+            word(model.summary.relic_kills[relic]);
+            ++shown;
+        }
+        word(std::popcount(probe.relic_mask) - shown);
+        for (const auto points : probe.stat_points) word(points);
+        word(model.seed);
+        return;
+    }
+    const bool paused_character_details = probe.phase == SessionPhase::Paused &&
+        (ui.page == UiPage::CharacterOverview || ui.page == UiPage::CharacterSkills ||
+         ui.page == UiPage::CharacterStats);
+    if (paused_character_details)
+    {
+        word(probe.phase); word(ui.page);
+        const auto details_pages = CharacterDetailsPageCount(probe, ui);
+        const auto details_page = std::min<std::size_t>(ui.character_details_page,
+                                                        details_pages - 1);
+        word(details_pages); word(details_page);
+        if (ui.page == UiPage::CharacterOverview)
+        {
+            word(probe.level); word(probe.health); word(probe.max_health);
+            text(std::format("{:.1f}", model.effective_attack));
+            word(model.skills[0].displayed_damage);
+            text(std::format("{:.3f}", model.effective_attack_speed));
+            text(std::format("{:.2f}", model.effective_move_speed));
+            text(std::format("{:.0f}", 0.03f * probe.stat_points[
+                static_cast<std::size_t>(StatKind::CooldownReduction)] * 100.0f));
+            text(std::format("{:.1f}", model.effective_magnet_radius));
+            for (const auto points : probe.stat_points) word(points);
+            word(probe.damage_dealt); word(model.summary.direct_damage);
+            word(model.summary.derived_damage); word(model.summary.damage_over_time);
+            word(probe.damage_taken); word(probe.healing); word(probe.kills);
+            std::size_t visible_damage_rows{};
+            for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+                if (probe.skill_levels[skill] != 0 || probe.damage_by_skill[skill] != 0)
+                    ++visible_damage_rows;
+            word(visible_damage_rows);
+            for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+                if (probe.skill_levels[skill] != 0 || probe.damage_by_skill[skill] != 0)
+                {
+                    word(skill); word(probe.damage_by_skill[skill]);
+                }
+            return;
+        }
+        if (ui.page == UiPage::CharacterSkills)
+        {
+            auto selected = std::min<std::size_t>(ui.selected_character_skill,
+                                                   kCombatSkillCount - 1);
+            if (probe.skill_levels[selected] == 0) selected = 0;
+            word(selected); word(ui.loadout_source_slot);
+            std::size_t visible_skills{};
+            for (const auto level : probe.skill_levels) if (level != 0) ++visible_skills;
+            word(visible_skills);
+            for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+                if (probe.skill_levels[skill] != 0)
+                {
+                    word(skill); word(probe.skill_levels[skill]);
+                }
+            for (std::size_t slot = 0; slot < probe.skill_loadout.size(); ++slot)
+            {
+                word(settings.skill_virtual_keys[slot]);
+                word(probe.skill_loadout[slot]);
+            }
+            const auto &definition = model.skills[selected];
+            word(definition.displayed_damage);
+            if (selected == 0)
+            {
+                text(std::format("{:.3f}", model.effective_attack_speed));
+                text(std::format("{:.1f}", definition.effective_range));
+            }
+            else
+            {
+                text(std::format("{:.2f}",
+                    static_cast<float>(definition.effective_cooldown) / 60.0f));
+                text(std::format("{:.1f}", definition.effective_range));
+            }
+            word(definition.area_radius > 0.0f);
+            if (definition.area_radius > 0.0f)
+                text(std::format("{:.1f}", definition.area_radius));
+            word(definition.duration > 0);
+            if (definition.duration > 0)
+                text(std::format("{:.1f}", definition.duration / 60.0f));
+            word(definition.projectile_count > 1);
+            if (definition.projectile_count > 1) word(definition.projectile_count);
+            word(definition.pierce_count > 0);
+            if (definition.pierce_count > 0) word(definition.pierce_count);
+            word(probe.skill_levels[selected]); word(probe.damage_by_skill[selected]);
+            const auto upgrade_mask = probe.upgrade_masks[selected];
+            std::size_t visible_upgrades{};
+            std::size_t upgrade_ordinal{};
+            for (std::uint8_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
+            {
+                if (!HasUpgrade(upgrade_mask, upgrade + 1)) continue;
+                if (upgrade_ordinal++ / kCharacterUpgradesPerPage == details_page)
+                    ++visible_upgrades;
+            }
+            word(visible_upgrades);
+            upgrade_ordinal = 0;
+            for (std::uint8_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
+            {
+                if (!HasUpgrade(upgrade_mask, upgrade + 1)) continue;
+                if (upgrade_ordinal++ / kCharacterUpgradesPerPage == details_page)
+                {
+                    word(upgrade); word(model.summary.upgrade_damage[selected][upgrade]);
+                }
+            }
+            return;
+        }
+        std::size_t relic_count{};
+        for (std::size_t relic = 0; relic < kRelicCount; ++relic)
+            if (HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) ++relic_count;
+        word(relic_count);
+        std::size_t ordinal{};
+        for (std::size_t relic = 0; relic < kRelicCount; ++relic)
+        {
+            if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
+            const auto current = ordinal++;
+            if (current / kCharacterRelicsPerPage != details_page) continue;
+            word(relic); text(presentation.relic_names[relic].data());
+            text(presentation.relic_rules[relic].data());
+            const auto cooldown = model.summary.relic_effects[relic][static_cast<std::size_t>(
+                UpgradeEffectMetric::CooldownTicksSaved)];
+            const auto prevented = model.summary.relic_effects[relic][static_cast<std::size_t>(
+                UpgradeEffectMetric::DamagePrevented)];
+            const auto healing = model.summary.relic_effects[relic][static_cast<std::size_t>(
+                UpgradeEffectMetric::Healing)];
+            word(cooldown > 0);
+            if (cooldown > 0)
+                text(std::format("{:.1f}", static_cast<double>(cooldown) / 60.0));
+            word(prevented > 0);
+            if (prevented > 0) word(prevented);
+            word(healing > 0);
+            if (healing > 0) word(healing);
+            word(model.summary.relic_triggers[relic]);
+            word(model.summary.relic_damage[relic]);
+            word(model.summary.relic_kills[relic]);
+        }
+        return;
+    }
+    if (probe.phase == SessionPhase::Paused)
+    {
+        // Root pause draws the same HUD above its panel; nonstandard paused
+        // pages also retain that HUD even when they add no known overlay.
+        word(ui.page);
+        return;
+    }
+    if (probe.phase == SessionPhase::QuitRequested) return;
+    // Preserve conservative dependencies for an out-of-range phase value.
+    word(ui.page); word(ui.selected_collection_skill); word(ui.selected_character_skill);
+    word(ui.loadout_source_slot); word(ui.settings_group); word(ui.settings_page);
+    word(ui.character_details_page); word(modal_phase); word(pending_rebind_slot); word(input_rejected);
+    word(settings.schema_version); word(settings.width); word(settings.height); word(settings.borderless);
+    word(settings.vsync); word(settings.frame_cap); word(settings.render_scale_percent);
+    word(settings.shadow_resolution); word(settings.particle_percentage); word(settings.bloom);
+    word(settings.outline); word(settings.master_volume); word(settings.bgm_volume);
+    word(settings.sfx_volume); word(settings.ui_volume);
+    for (const auto key : settings.skill_virtual_keys) word(key);
+    word(settings.screen_overlay_intensity);
+    word(probe.phase);
+    word(probe.growth_ticks); word(probe.boss_fight_ticks);
+    word(probe.normal_enemy_count);
+    word(probe.level); word(probe.experience); word(probe.experience_to_next);
+    word(probe.health); word(probe.max_health);
+    word(probe.kills); word(probe.damage_dealt); word(probe.damage_taken); word(probe.healing);
+    word(probe.level_rerolls_remaining); word(probe.relic_rerolls_remaining);
+    word(probe.pending_stat_points);
+    word(probe.final_boss_spawned);
+    word(probe.relic_mask); word(probe.card_count);
+    for (auto skill : probe.skill_loadout) word(skill);
+    for (auto value : probe.skill_levels) word(value);
+    for (auto value : probe.upgrade_masks) word(value);
+    for (auto value : probe.cooldown_ticks) word(value);
+    for (auto value : probe.stat_points) word(value);
+    for (std::size_t index = 0; index < probe.card_count; ++index)
+    {
+        const auto &card = probe.cards[index];
+        word(card.kind); word(card.subject); word(card.upgrade);
+        if (card.kind == CardKind::Relic && card.subject < kRelicCount)
+        {
+            text(presentation.relic_names[card.subject].data());
+            text(presentation.relic_rules[card.subject].data());
+        }
+    }
+    for (std::size_t relic = 0; relic < kRelicCount; ++relic)
+        if (HasRelic(probe.relic_mask, static_cast<RelicKind>(relic)))
+        {
+            text(presentation.relic_names[relic].data());
+            text(presentation.relic_rules[relic].data());
+        }
+    for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+        word(probe.damage_by_skill[skill]);
+    for (const auto &wave : model.waves) { word(wave.start); word(wave.duration); }
+    for (const auto &skill : model.skills)
+    {
+        word(skill.effective_cooldown); word(skill.displayed_damage); word(skill.effective_range);
+        word(skill.area_radius); word(skill.duration); word(skill.projectile_count); word(skill.pierce_count);
+    }
+    for (const auto skill : model.player.loadout) word(skill);
+    word(model.effective_attack); word(model.effective_attack_speed);
+    word(model.effective_move_speed); word(model.effective_magnet_radius);
+    word(model.summary.direct_damage); word(model.summary.derived_damage);
+    word(model.summary.damage_over_time);
+    for (const auto &row : model.summary.upgrade_damage) for (auto value : row) word(value);
+    for (auto value : model.summary.relic_damage) word(value);
+    for (auto value : model.summary.relic_triggers) word(value);
+    for (auto value : model.summary.relic_kills) word(value);
+    for (const auto &row : model.summary.relic_effects) for (auto value : row) word(value);
+    word(model.seed);
+    // Boss rows are the only enemy-domain data shown by the HUD. SessionProbe's
+    // authoritative count avoids invoking any row readers in the common no-boss case.
+    if (probe.boss_count)
+    {
+        std::uint64_t visible_bosses{};
+        std::array<std::uint64_t, 4> boss_facts{
+            0x243f6a8885a308d3ull, 0x13198a2e03707344ull,
+            0xa4093822299f31d0ull, 0x082efa98ec4e6c89ull};
+        for (const auto &enemy : model.enemies)
+            if (enemy.boss && !enemy.dead)
+            {
+                ++visible_bosses;
+                const std::array<std::uint64_t, 4> row{
+                    static_cast<std::uint64_t>(*enemy.boss), enemy.spawned_tick,
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(enemy.health)),
+                    static_cast<std::uint64_t>(static_cast<std::int64_t>(enemy.max_health))};
+                for (std::size_t value = 0; value < row.size(); ++value)
+                    for (std::size_t lane = 0; lane < boss_facts.size(); ++lane)
+                    {
+                        auto mixed = boss_facts[lane] ^ (row[value] +
+                            (visible_bosses << (lane + 1)) + value * 0x9e3779b97f4a7c15ull);
+                        mixed *= 0x100000001b3ull + lane * 2u;
+                        boss_facts[lane] = std::rotl(mixed, static_cast<int>(11u + lane * 7u));
+                    }
+            }
+        word(visible_bosses);
+        for (const auto value : boss_facts) word(value);
+    }
 }
 
 Result ProjectTick(const TickReadView &model,

@@ -107,12 +107,15 @@ class HdrPostSystem
     // Pre-exposed output-resolution HDR. These passes never write temporal history.
     [[nodiscard]] Result RegisterMotionAndDoF(RenderGraphBuilder &, const HdrPostInputs &,
         HdrPostConstants, HdrPostOutputs &, HdrPostMotionLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesMotionShape(const HdrPostMotionLayout &, bool transparent_guides) const noexcept;
     [[nodiscard]] bool MatchesMotionLayout(const HdrPostInputs &, const HdrPostMotionLayout &) const noexcept;
     [[nodiscard]] Result BindRetainedMotionAndDoF(RenderGraphBuilder &, const HdrPostInputs &,
         HdrPostConstants, const HdrPostMotionLayout &, HdrPostOutputs &);
     // Invoke after bloom, on the same graph. Grade-only can be the first registration.
     [[nodiscard]] Result RegisterGrade(RenderGraphBuilder &, const HdrPostInputs &, HdrPostOutputs &,
         HdrPostGradeLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesGradeShape(const HdrPostGradeLayout &,
+        bool geometry_registered_before_grade) const noexcept;
     [[nodiscard]] bool MatchesGradeLayout(const HdrPostInputs &, const HdrPostGradeLayout &,
         bool geometry_registered_before_grade) const noexcept;
     [[nodiscard]] Result BindRetainedGrade(RenderGraphBuilder &, const HdrPostInputs &,

@@ -1,4 +1,5 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_fresnel_commands.hpp"
 #include "test_generation_paths.hpp"
 
@@ -14,6 +15,18 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace hs::runtime_detail
+{
+std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+{
+    VfxImageData data;
+    data.program = program;
+    PrepareVfxFresnelRecipes(program.View(), data.fresnel_effect_recipes, data.fresnel_recipes);
+    return BuildVfxTypedFresnelCommands(data.View(), inputs);
+}
+}
 
 namespace
 {
@@ -192,6 +205,30 @@ void PreservesBossOwnerAndAuthoredShells()
     }
 }
 
+void AppendPreservesOwnerPrefixAndCapacity()
+{
+    const auto program=Program(true);
+    VfxImageData data;
+    data.program=program;
+    PrepareVfxFresnelRecipes(data.program.View(),data.fresnel_effect_recipes,data.fresnel_recipes);
+    auto image=data.View();
+    auto owner=Input();
+    std::vector<VfxFresnelInput> result;
+    result.reserve(4);
+    VfxFresnelInput prefix;prefix.stable_id=77;result.push_back(prefix);
+    const auto capacity=result.capacity();
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,{},result);
+    auto rejected=owner;rejected.stable_id=0;
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&rejected,1),result);
+    Require(result.size()==1&&result[0].stable_id==77&&result.capacity()==capacity,
+            "empty/rejected Fresnel append changed prefix or capacity");
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&owner,1),result);
+    Require(result.size()==2&&result[1].stable_id==owner.stable_id&&
+            result[1].render_instance_id==std::get<VfxEntityPayload>(owner.payload).render_instance_id&&
+            result.capacity()==capacity,
+            "Fresnel append lost owner binding or reused capacity");
+}
+
 void RejectsMissingOwnerAndWrongAuthoredContract()
 {
     auto program = Program(false);
@@ -232,6 +269,23 @@ void RejectsMissingOwnerAndWrongAuthoredContract()
     program = Program(true);
     program.parameters[1].bits = 2;
     Require(run().empty(), "end_crack accepted non-flag value");
+}
+
+void SkipsMalformedOutputAndKeepsSiblingOutputOrder()
+{
+    auto program = Program(false);
+    auto second = program.outputs.front();
+    second.rgba[3] = .74f;
+    second.hdr = 4.0f;
+    program.outputs.front().motion = hs::VfxMotionKind::FresnelShellContracts;
+    program.outputs.push_back(second);
+    program.sources.front().outputs.count = 2;
+    const auto input = Input();
+    const auto commands = hs::runtime_detail::BuildVfxTypedFresnelCommands(
+        program, std::span(&input, 1));
+    Require(commands.size() == 1 && Near(commands[0].color.w, .74f) &&
+        Near(commands[0].hdr, 4.0f),
+        "malformed Fresnel output suppressed or reordered a valid sibling");
 }
 
 void PreservesPlayerInvulnerableOwnerAndCookedShell()
@@ -365,7 +419,9 @@ int RunVfxFresnelTests()
     try
     {
         PreservesBossOwnerAndAuthoredShells();
+        AppendPreservesOwnerPrefixAndCapacity();
         RejectsMissingOwnerAndWrongAuthoredContract();
+        SkipsMalformedOutputAndKeepsSiblingOutputOrder();
         PreservesPlayerInvulnerableOwnerAndCookedShell();
         CookedBossShellsConvertWhenAvailable();
         CookedPlayerShellConvertsWhenAvailable();

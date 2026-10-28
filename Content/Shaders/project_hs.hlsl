@@ -2162,7 +2162,7 @@ ParticleOutput GroundRingVS(uint vertex_id : SV_VertexID, uint instance_id : SV_
 // authoritative on the CPU side.
 ParticleOutput OwnerMeshVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
 {
-    const ParticleSpawnCommandGpu command = ParticleSpawnCommands[PassValue];
+    const ParticleSpawnCommandGpu command = ParticleSpawnCommands[PassValue + instance_id];
     const uint mesh = min(max(command.Metadata.x, 1u), 7u) - 1u;
     const uint first = VfxMeshAtlas.Load(20 + mesh * 12);
     const uint count = VfxMeshAtlas.Load(24 + mesh * 12);

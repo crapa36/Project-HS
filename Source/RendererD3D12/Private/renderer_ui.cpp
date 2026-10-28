@@ -143,13 +143,15 @@ void D3D12Renderer::Impl::CommitUiResources(OwnedView &owner, UiResources &resou
     {
         owner.ui_initialized[index] = false;
         owner.ui_models[index].clear();
+        owner.ui_draw_content[index].reset();
         owner.ui_dirty[index] = false;
     }
     owner.ui.text_layouts.clear();
 }
 
 Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
-                                        std::span<const UiModel> models)
+                                        std::span<const UiModel> models,
+                                        std::shared_ptr<const UiDrawContent> content)
 {
     const auto equal = [](const UiModel &left, const UiModel &right) {
         return left.kind == right.kind && left.anchor_pixels.x == right.anchor_pixels.x &&
@@ -158,7 +160,9 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
             left.color_rgba == right.color_rgba && left.value == right.value &&
             left.font_pixels == right.font_pixels && left.utf8_text == right.utf8_text;
     };
-    const auto &cached = owner.ui_models[frame_index];
+    const auto &cached_content = owner.ui_draw_content[frame_index];
+    const auto &cached_models = cached_content ? cached_content->models : owner.ui_models[frame_index];
+    std::vector<UiModel> candidate_models;
     auto &surface = owner.ui.surfaces[frame_index];
     if (surface.copy_completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         surface.completed_version = surface.submitted_version;
@@ -195,23 +199,33 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                 pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(owner.ui.row_bytes));
         return Result::Success();
     };
-    if (surface.bitmap_valid && cached.size() == models.size() &&
-        std::equal(cached.begin(), cached.end(), models.begin(), equal))
+    if (surface.bitmap_valid && ((content && cached_content == content) ||
+        (cached_models.size() == models.size() &&
+         std::equal(cached_models.begin(), cached_models.end(), models.begin(), equal))))
     {
         if (surface.completed_version == surface.bitmap_version)
         {
+            if (content)
+            {
+                owner.ui_draw_content[frame_index] = std::move(content);
+                owner.ui_models[frame_index].clear();
+            }
             owner.ui_dirty[frame_index] = false;
             return Result::Success();
         }
         if (auto copied = copy_bitmap(); !copied) return copied;
+        if (content)
+        {
+            owner.ui_draw_content[frame_index] = std::move(content);
+            owner.ui_models[frame_index].clear();
+        }
         owner.ui_dirty[frame_index] = true;
         return Result::Success();
     }
-    // Candidate layouts and model identity publish only after the whole raster succeeds.
+    if (!content) candidate_models.assign(models.begin(), models.end());
+    // Layouts are independent CPU products: publish each valid creation immediately;
+    // bitmap validity and native copy state remain transactional below.
     owner.ui.text_layouts.resize(std::max(owner.ui.text_layouts.size(), models.size()));
-    std::vector<UiTextLayout> candidate_layouts(models.size());
-    std::vector<bool> replace_layout(models.size());
-    std::vector<UiModel> candidate_models(models.begin(), models.end());
     // A failed raster cannot make the old model a valid bitmap on the next retry.
     surface.bitmap_valid = false;
     owner.ui_dirty[frame_index] = false;
@@ -274,7 +288,7 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
         const auto byte_count = static_cast<int>(end - model.utf8_text.begin());
         if (byte_count == 0)
         {
-            replace_layout[model_index] = true;
+            owner.ui.text_layouts[model_index] = {};
             continue;
         }
         const auto font_size = static_cast<float>(
@@ -304,7 +318,6 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
             cached_layout.font_size != font_size || cached_layout.width != text_width ||
             cached_layout.height != text_height)
         {
-            replace_layout[model_index] = true;
             const auto wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                                                          model.utf8_text.data(), byte_count,
                                                          nullptr, 0);
@@ -363,17 +376,14 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                     layout->SetTrimming(&trimming, ellipsis.Get());
                 }
             }
-            auto &candidate = candidate_layouts[model_index];
-            candidate.utf8.assign(utf8);
-            candidate.kind = model.kind;
-            candidate.font_size = font_size;
-            candidate.width = text_width;
-            candidate.height = text_height;
-            candidate.layout = std::move(layout);
+            cached_layout.utf8.assign(utf8);
+            cached_layout.kind = model.kind;
+            cached_layout.font_size = font_size;
+            cached_layout.width = text_width;
+            cached_layout.height = text_height;
+            cached_layout.layout = std::move(layout);
         }
-        auto *draw_layout = replace_layout[model_index]
-                                ? candidate_layouts[model_index].layout.Get()
-                                : cached_layout.layout.Get();
+        auto *draw_layout = cached_layout.layout.Get();
         assert(draw_layout->GetMaxWidth() == text_width &&
                draw_layout->GetMaxHeight() == text_height);
         surface.target->DrawTextLayout(
@@ -385,10 +395,10 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
     if (FAILED(draw_result)) return HResultFailure("Rasterize UI", draw_result);
 
     if (auto copied = copy_bitmap(); !copied) return copied;
-    for (std::size_t index = 0; index < models.size(); ++index)
-        if (replace_layout[index]) owner.ui.text_layouts[index] = std::move(candidate_layouts[index]);
     owner.ui.text_layouts.resize(models.size());
-    owner.ui_models[frame_index].swap(candidate_models);
+    owner.ui_draw_content[frame_index] = std::move(content);
+    if (owner.ui_draw_content[frame_index]) owner.ui_models[frame_index].clear();
+    else owner.ui_models[frame_index].swap(candidate_models);
     owner.ui_dirty[frame_index] = true;
     ++surface.bitmap_version;
     surface.bitmap_valid = true;

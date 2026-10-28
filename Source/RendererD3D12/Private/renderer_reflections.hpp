@@ -103,6 +103,8 @@ class ScreenReflectionsSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const ScreenReflectionsInputs &,
         ScreenReflectionsConstants, const ScreenReflectionsLayout &, ScreenReflectionsOutputs &);
     [[nodiscard]] bool MatchesLayout(const ScreenReflectionsInputs &,const ScreenReflectionsLayout &)const noexcept;
+    [[nodiscard]] bool MatchesShape(const ScreenReflectionsLayout &, bool reset_history,
+        std::uint64_t frame_index, bool ambient_visibility, std::uint32_t sidecar_planes) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;

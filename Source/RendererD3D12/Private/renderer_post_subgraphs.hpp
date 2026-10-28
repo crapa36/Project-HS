@@ -18,6 +18,9 @@ using PostPassCallbacks = std::array<PostPassCallback, 9>;
     PostSubgraphLayout *layout = nullptr);
 [[nodiscard]] bool MatchesPostSubgraphLayout(const PostSubgraphInputs &inputs,
     const PostSubgraphTargets &targets, const PostSubgraphLayout &layout) noexcept;
+[[nodiscard]] bool MatchesPostSubgraphShape(bool bloom, bool outline, bool fxaa_identity,
+    bool initialize_post_targets, bool pre_bloom, bool pre_tone_map, bool devtools_ui,
+    const PostSubgraphLayout &layout) noexcept;
 [[nodiscard]] Result BindRetainedPostSubgraphs(RenderGraphBuilder &graph,
     const PostSubgraphInputs &inputs, const PostSubgraphTargets &targets,
     const PostSubgraphLayout &layout, PostPassCallbacks callbacks,

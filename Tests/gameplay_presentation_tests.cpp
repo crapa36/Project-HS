@@ -297,6 +297,201 @@ void TestCursorMovement()
     Check(simulation.Shutdown().Succeeded(), "movement shutdown");
 }
 
+void TestUiProjectionFactsTrackDisplayInputsOnly()
+{
+    hs::GameReadModelStorage storage;
+    auto model = storage.View();
+    model.session.phase = hs::SessionPhase::Playing;
+    model.session.relic_mask = 1;
+    model.session.boss_count = 0;
+    model.waves = {};
+    auto presentation = DefaultContent().presentation;
+    hs::PresentationUiState ui;
+    hs::SettingsData settings;
+    std::vector<std::uint64_t> first, same, boundary_before, boundary_after,
+        hidden_summary, changed, catalog_changed;
+    const auto capture = [&](std::vector<std::uint64_t> &facts) {
+        const auto view = hs::development::BorrowOwnedReadModel(model);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, facts);
+    };
+    model.session.growth_ticks = 1;
+    capture(first);
+    model.session.growth_ticks = 2;
+    capture(same);
+    Check(first == same,
+          "ordinary gameplay ticks with identical displayed clock and no active alerts reuse HUD facts");
+    model.session.growth_ticks = 59;
+    capture(boundary_before);
+    model.session.growth_ticks = 60;
+    capture(boundary_after);
+    Check(boundary_before != boundary_after,
+          "HUD facts change when the displayed mm:ss clock crosses a second boundary");
+    model.summary.direct_damage++;
+    capture(hidden_summary);
+    Check(boundary_after == hidden_summary,
+          "HUD facts ignore character-summary data hidden on the gameplay page");
+    model.player.position = {120.0f, -80.0f};
+    model.session.player_position = {120.0f, -80.0f};
+    capture(same);
+    Check(hidden_summary == same,
+          "UI projection facts ignore gameplay positions absent from the displayed model");
+    model.session.health--;
+    capture(changed);
+    Check(changed != same, "UI projection facts retain the exact displayed health value");
+    presentation.relic_names[0][0] = presentation.relic_names[0][0] == 'X' ? 'Y' : 'X';
+    capture(catalog_changed);
+    Check(catalog_changed != changed, "UI projection facts include current catalog text content");
+}
+
+void TestNonGameplayUiFactsIgnoreHiddenSimulation()
+{
+    hs::GameReadModelStorage storage;
+    auto model = storage.View();
+    model.session.phase = hs::SessionPhase::MainMenu;
+    auto presentation = DefaultContent().presentation;
+    hs::PresentationUiState ui;
+    hs::SettingsData settings;
+    std::vector<std::uint64_t> first, same, changed;
+    const auto capture = [&](std::vector<std::uint64_t> &facts) {
+        const auto view = hs::development::BorrowOwnedReadModel(model);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, facts);
+    };
+
+    capture(first);
+    ++model.session.growth_ticks;
+    --model.session.health;
+    ++model.summary.direct_damage;
+    ++model.skills[0].displayed_damage;
+    capture(same);
+    Check(first == same, "main menu draw facts ignore hidden gameplay and summary changes");
+
+    ui.page = hs::UiPage::Collection;
+    ui.selected_collection_skill = 0;
+    capture(first);
+    ++model.session.growth_ticks;
+    --model.session.health;
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "collection facts ignore changing hidden gameplay state");
+    ui.selected_collection_skill = 1;
+    capture(changed);
+    Check(changed != same, "collection facts change with the selected visible skill");
+
+    ui.page = hs::UiPage::MainMenuSettings;
+    ui.settings_group = 7;
+    settings.master_volume = 0.25f;
+    capture(first);
+    ++model.session.growth_ticks;
+    --model.session.health;
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "settings facts ignore changing hidden gameplay state");
+    settings.master_volume = 0.35f;
+    capture(changed);
+    Check(changed != same, "settings facts track the displayed audio percentage");
+
+    model.session.phase = hs::SessionPhase::Paused;
+    ui.page = hs::UiPage::Root;
+    model.session.growth_ticks = 100;
+    std::array paused_wave{hs::WaveView{400, 60}};
+    model.waves = std::span<const hs::WaveView>(paused_wave);
+    capture(first);
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "pause root reuses HUD facts when hidden summary data changes");
+    --model.session.health;
+    capture(changed);
+    Check(changed != same, "pause root retains the visible HUD health value");
+    ++model.session.health;
+    capture(same);
+    paused_wave[0].start = 401;
+    capture(changed);
+    Check(changed != same, "pause root tracks a wave alert entering the visible countdown window");
+}
+
+void TestRareUiProjectionFactsTrackVisiblePageData()
+{
+    hs::GameReadModelStorage storage;
+    auto model = storage.View();
+    model.waves = {};
+    model.session.boss_count = 0;
+    auto presentation = DefaultContent().presentation;
+    hs::PresentationUiState ui;
+    hs::SettingsData settings;
+    std::vector<std::uint64_t> first, same, changed;
+    const auto capture = [&](std::vector<std::uint64_t> &facts) {
+        const auto view = hs::development::BorrowOwnedReadModel(model);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, facts);
+    };
+
+    model.session.phase = hs::SessionPhase::CardSelection;
+    model.session.card_count = 1;
+    model.session.cards[0] = {hs::CardKind::Relic, 0, 0};
+    capture(first);
+    ++model.summary.direct_damage;
+    ++model.skills[0].displayed_damage;
+    capture(same);
+    Check(first == same, "card selection facts ignore hidden summary and skill details");
+    presentation.relic_rules[0][0] = presentation.relic_rules[0][0] == 'X' ? 'Y' : 'X';
+    capture(changed);
+    Check(changed != same, "card selection facts track the displayed relic rule");
+
+    model.session.phase = hs::SessionPhase::StatAllocation;
+    capture(first);
+    ++model.skills[0].displayed_damage;
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "stat allocation facts ignore hidden skill and combat details");
+    ++model.session.stat_points[0];
+    capture(changed);
+    Check(changed != same, "stat allocation facts track a displayed stat value");
+
+    model.session.phase = hs::SessionPhase::Victory;
+    capture(first);
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "victory facts ignore direct-damage detail not shown on the result page");
+    ++model.session.damage_by_skill[0];
+    capture(changed);
+    Check(changed != same, "victory facts track the visible skill-damage table");
+
+    model.session.phase = hs::SessionPhase::Paused;
+    ui.page = hs::UiPage::CharacterOverview;
+    capture(first);
+    ++model.summary.relic_damage[0];
+    ++model.session.growth_ticks;
+    ++model.session.boss_fight_ticks;
+    capture(same);
+    Check(first == same, "character overview facts ignore hidden relic details and HUD clocks");
+    model.effective_attack += 1.0f;
+    capture(changed);
+    Check(changed != same, "character overview facts track visible formatted attack");
+
+    ui.page = hs::UiPage::CharacterSkills;
+    ui.selected_character_skill = 1;
+    model.session.skill_levels[1] = 1;
+    model.session.upgrade_masks[1] = 0x03;
+    model.summary.upgrade_damage[1][0] = 40;
+    capture(first);
+    ++model.summary.direct_damage;
+    capture(same);
+    Check(first == same, "character skill facts ignore hidden summary fields");
+    ++model.summary.upgrade_damage[1][0];
+    capture(changed);
+    Check(changed != same, "character skill facts track visible upgrade damage");
+
+    ui.page = hs::UiPage::CharacterStats;
+    ui.character_details_page = 0;
+    model.session.relic_mask = 1;
+    capture(first);
+    ++model.summary.upgrade_damage[1][0];
+    capture(same);
+    Check(first == same, "character relic facts ignore hidden skill-upgrade damage");
+    ++model.summary.relic_triggers[0];
+    capture(changed);
+    Check(changed != same, "character relic facts track visible trigger counts");
+}
+
 void TestUiHitRegionsMatchAnchors()
 {
     hs::GameSimulation simulation;
@@ -2429,6 +2624,9 @@ void RunGameplayPresentationTests()
     TestUpgradeActivationProjection();
     TestVisualLinkSnapshotTransport();
     TestCursorMovement();
+    TestUiProjectionFactsTrackDisplayInputsOnly();
+    TestNonGameplayUiFactsIgnoreHiddenSimulation();
+    TestRareUiProjectionFactsTrackVisiblePageData();
     TestUiHitRegionsMatchAnchors();
     TestCharacterInformationPage();
     TestPauseMenuActions();

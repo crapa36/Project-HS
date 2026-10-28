@@ -4,7 +4,6 @@
 #include <bit>
 #include <cmath>
 #include <limits>
-#include <unordered_set>
 #include <tuple>
 
 namespace hs::renderer_detail
@@ -15,6 +14,59 @@ bool Finite(const Float3 &v) { return std::isfinite(v.x) && std::isfinite(v.y) &
 bool Finite(const Float4 &v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) && std::isfinite(v.w); }
 using Key = std::tuple<std::uint64_t, VfxEffectHandle, std::uint32_t>;
 Key SourceKey(const VfxRibbonSourceInput &source) { return {source.owner_id, source.effect_handle, source.source_id}; }
+std::uint32_t MotionCode(VfxMotionKind motion);
+bool ValidateRibbonSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
+                           std::vector<std::size_t> &source_order)
+{
+    source_order.clear();
+    const auto reject = [&](const char *message) {
+        error = message;
+        source_order.clear();
+        return false;
+    };
+    for (const auto &source : sources)
+    {
+        if (source.effect_handle == kInvalidVfxEffectHandle || !Finite(source.position) || !Finite(source.previous_position) ||
+            !std::isfinite(source.history_seconds) || source.history_seconds < 0.0f ||
+            (!source.analytic && (source.history_seconds <= 0.0f || source.history_seconds > 62.0f / 60.0f)) ||
+            (source.analytic && (!Finite(source.control) || source.segments < 1 || source.segments >= kRibbonHistorySamples ||
+                !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1)) ||
+            !std::isfinite(source.start_alpha) || source.start_alpha < 0.0f || source.start_alpha > 1.0f || source.outputs.empty())
+            return reject("Ribbon source has invalid identity, transform, history, alpha, or outputs");
+        for (const auto &output : source.outputs)
+        {
+            const auto motion = MotionCode(output.motion);
+            if ((output.profile != VfxOutputProfile::RibbonAdd && output.profile != VfxOutputProfile::RibbonOit) ||
+                motion == std::numeric_limits<std::uint32_t>::max() ||
+                (source.analytic != (motion == 4 || motion == 5)) ||
+                (!source.analytic && output.travel_pulse) || !Finite(output.color) ||
+                !std::isfinite(output.width_head) || output.width_head < 0.0f || !std::isfinite(output.width_tail) || output.width_tail < 0.0f || !std::isfinite(output.noise_warp) || output.noise_warp < 0.0f ||
+                !std::isfinite(output.phase_offset) || !std::isfinite(output.hdr) || output.hdr < 0.0f ||
+                !std::isfinite(output.detail_strength) || output.detail_strength < 0.0f || output.detail_strength > 1.0f ||
+                output.gradient_row >= 68u ||
+                (output.motion == VfxMotionKind::HistoryRibbonTearsBackward &&
+                 (!std::isfinite(source.control.x) || source.control.x <= 0.0f)) ||
+                (output.detail_slice != std::numeric_limits<std::uint32_t>::max() && output.detail_slice >= 8u))
+                return reject("Ribbon output has an unsupported profile, motion, gradient, or non-finite material");
+        }
+    }
+
+    if (sources.size() > 1)
+    {
+        source_order.resize(sources.size());
+        for (std::size_t index = 0; index < source_order.size(); ++index) source_order[index] = index;
+        std::sort(source_order.begin(), source_order.end(), [&](std::size_t left, std::size_t right) {
+            return SourceKey(sources[left]) < SourceKey(sources[right]);
+        });
+        for (std::size_t index = 1; index < source_order.size(); ++index)
+            if (SourceKey(sources[source_order[index - 1]]) == SourceKey(sources[source_order[index]]))
+                return reject("Ribbon frame contains a duplicate owner, effect, and source key");
+    }
+
+    source_order.clear();
+    error.clear();
+    return true;
+}
 std::uint32_t MotionCode(VfxMotionKind motion)
 {
     switch (motion)
@@ -42,23 +94,28 @@ std::size_t VfxRibbonState::KeyHash::operator()(const Key &key) const noexcept
 }
 
 bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
-                                     std::size_t output_capacity) const
+                                     std::size_t output_capacity)
 {
-    std::vector<bool> included(slots_.size(), false);
+    constexpr auto word_bits = std::numeric_limits<std::size_t>::digits;
+    source_scratch_.assign(slots_.size() / word_bits + (slots_.size() % word_bits != 0), 0);
+    const auto finish = [&](bool exceeds) {
+        source_scratch_.clear();
+        return exceeds;
+    };
     for (const auto &source : sources)
     {
-        if (source.outputs.size() > output_capacity) return true;
+        if (source.outputs.size() > output_capacity) return finish(true);
         output_capacity -= source.outputs.size();
         if (const auto found = slot_by_key_.find(SourceKey(source)); found != slot_by_key_.end())
-            included[found->second] = true;
+            source_scratch_[found->second / word_bits] |= std::size_t{1} << (found->second % word_bits);
     }
     for (std::size_t i = 0; i < slots_.size(); ++i)
-        if (slots_[i].occupied && !included[i])
+        if (slots_[i].occupied && !(source_scratch_[i / word_bits] & (std::size_t{1} << (i % word_bits))))
         {
-            if (slots_[i].outputs.size() > output_capacity) return true;
+            if (slots_[i].outputs.size() > output_capacity) return finish(true);
             output_capacity -= slots_[i].outputs.size();
         }
-    return false;
+    return finish(false);
 }
 bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
@@ -66,57 +123,20 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             std::uint32_t point_budget, float interpolation,
                             Float3 previous_eye, std::string &error)
 {
-    if (!ValidateSources(sources, error)) return false;
+    if (!ValidateFrameSources(sources, error)) return false;
     return UpdateValidated(sources, tick, session, catalog_generation, point_budget, interpolation, previous_eye, error);
 }
 
 bool VfxRibbonState::ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error)
 {
-    for (std::size_t i = 0; i < sources.size(); ++i)
-    {
-        const auto &source = sources[i];
-        if (source.effect_handle == kInvalidVfxEffectHandle || !Finite(source.position) || !Finite(source.previous_position) ||
-            !std::isfinite(source.history_seconds) || source.history_seconds < 0.0f ||
-            (!source.analytic && (source.history_seconds <= 0.0f || source.history_seconds > 62.0f / 60.0f)) ||
-            (source.analytic && (!Finite(source.control) || source.segments < 1 || source.segments >= kRibbonHistorySamples ||
-                !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1)) ||
-            !std::isfinite(source.start_alpha) || source.start_alpha < 0.0f || source.start_alpha > 1.0f || source.outputs.empty())
-        {
-            error = "Ribbon source has invalid identity, transform, history, alpha, or outputs";
-            return false;
-        }
-        for (const auto &output : source.outputs)
-        {
-            if ((output.profile != VfxOutputProfile::RibbonAdd && output.profile != VfxOutputProfile::RibbonOit) ||
-                MotionCode(output.motion) == std::numeric_limits<std::uint32_t>::max() ||
-                (source.analytic != (MotionCode(output.motion) == 4 || MotionCode(output.motion) == 5)) ||
-                (!source.analytic && output.travel_pulse) || !Finite(output.color) ||
-                !std::isfinite(output.width_head) || output.width_head < 0.0f || !std::isfinite(output.width_tail) || output.width_tail < 0.0f || !std::isfinite(output.noise_warp) || output.noise_warp < 0.0f ||
-                !std::isfinite(output.phase_offset) || !std::isfinite(output.hdr) || output.hdr < 0.0f ||
-                !std::isfinite(output.detail_strength) || output.detail_strength < 0.0f || output.detail_strength > 1.0f ||
-                output.gradient_row >= 68u ||
-                (output.motion == VfxMotionKind::HistoryRibbonTearsBackward &&
-                 (!std::isfinite(source.control.x) || source.control.x <= 0.0f)) ||
-                (output.detail_slice != std::numeric_limits<std::uint32_t>::max() && output.detail_slice >= 8u))
-            {
-                error = "Ribbon output has an unsupported profile, motion, gradient, or non-finite material";
-                return false;
-            }
-        }
-    }
-    if (sources.size() > 1)
-    {
-        std::unordered_set<Key, KeyHash> input_keys;
-        input_keys.reserve(sources.size());
-        for (const auto &source : sources)
-            if (!input_keys.insert(SourceKey(source)).second)
-            {
-                error = "Ribbon frame contains a duplicate owner, effect, and source key";
-                return false;
-            }
-    }
-    error.clear();
-    return true;
+    std::vector<std::size_t> source_order;
+    return ValidateRibbonSources(sources, error, source_order);
+}
+
+bool VfxRibbonState::ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources,
+                                         std::string &error)
+{
+    return ValidateRibbonSources(sources, error, source_scratch_);
 }
 
 bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
@@ -149,7 +169,8 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
         initialized_ = true;
     }
 
-    std::vector<std::size_t> order(sources.size());
+    source_scratch_.resize(sources.size());
+    auto &order = source_scratch_;
     for (std::size_t i = 0; i < sources.size(); ++i) order[i] = i;
     std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
         if (sources[a].importance != sources[b].importance) return sources[a].importance > sources[b].importance;
@@ -287,12 +308,16 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
             outputs_.push_back(output);
         }
     }
-    std::vector<GpuRibbonOutput> grouped;
+    auto &grouped = grouped_outputs_;
+    grouped.clear();
     grouped.reserve(outputs_.size());
     for (const auto profile : {0u, 1u})
         for (const auto &output : outputs_)
             if ((output.metadata[3] & 1u) == profile) grouped.push_back(output);
     outputs_.swap(grouped);
+    // Empty scratch stays out of the conditional state checkpoint's deep copy.
+    grouped.clear();
+    order.clear();
     last_tick_ = tick;
     error.clear();
     return true;

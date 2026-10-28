@@ -53,6 +53,10 @@ void TestShippingRendererIdentity()
     texture.subresources = texture_layouts_b;
     Check(texture_bytes == Bytes([&](CanonicalBytes &b) { content_identity::Texture(b, texture); }),
           "texture identity ignores TextureSubresourceLayout object padding");
+    ++texture_layouts_b[0].row_pitch;
+    Check(texture_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Texture(b, texture); }),
+          "texture identity includes subresource layout");
+    --texture_layouts_b[0].row_pitch;
     std::array<AssetId, 2> reordered_texture_dependencies{{{22}, {11}}};
     texture.dependencies = reordered_texture_dependencies;
     Check(texture_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Texture(b, texture); }),
@@ -73,6 +77,11 @@ void TestShippingRendererIdentity()
     programs[0].product_id = "program-a";
     Check(material_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Material(b, material); }),
           "material identity includes length-prefixed program product IDs");
+    programs[0].product_id = "program-ab";
+    ++defaults[0].words[0];
+    Check(material_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Material(b, material); }),
+          "material identity includes actual default parameter bits");
+    --defaults[0].words[0];
 
     const std::array<GeometrySubmesh, 2> submeshes{{{0, 3, 0, 1, 2}, {3, 6, 1, 2, 4}}};
     GeometryDescriptor geometry{};
@@ -86,6 +95,10 @@ void TestShippingRendererIdentity()
     geometry.submeshes = reordered_submeshes;
     Check(geometry_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Geometry(b, geometry); }),
           "geometry identity preserves indexed submesh order");
+    geometry.submeshes = submeshes;
+    geometry.payload_ready = !geometry.payload_ready;
+    Check(geometry_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Geometry(b, geometry); }),
+          "geometry identity includes compiled payload readiness");
 
     const std::array<std::uint16_t, 2> parents{{0, 1}};
     CharacterDescriptor character{};
@@ -98,6 +111,10 @@ void TestShippingRendererIdentity()
     character.parents = reordered_parents;
     Check(character_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Character(b, character); }),
           "character identity preserves skeleton parent order");
+    character.parents = parents;
+    character.final_matrices.offset = 4096;
+    Check(character_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Character(b, character); }),
+          "character identity includes final palette range");
 
     const std::array<std::string_view, 2> bone_names{{"root", "arm"}};
     std::array<AnimationClipDescriptor, 1> clips{};
@@ -118,6 +135,12 @@ void TestShippingRendererIdentity()
     clips[0].name = "walk";
     Check(animation_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Animation(b, animation); }),
           "animation identity preserves bone index order");
+    const std::array<std::string_view, 2> split_names_a{{"a", "bc"}}, split_names_b{{"ab", "c"}};
+    animation.bone_names = split_names_a;
+    const auto split_a = Bytes([&](CanonicalBytes &b) { content_identity::Animation(b, animation); });
+    animation.bone_names = split_names_b;
+    Check(split_a != Bytes([&](CanonicalBytes &b) { content_identity::Animation(b, animation); }),
+          "adjacent names retain their length boundaries");
 
     BulkRange bulk{};
     bulk.offset = 512;
@@ -128,6 +151,10 @@ void TestShippingRendererIdentity()
     bulk.expected_digest[0] = std::byte{0x92};
     Check(bulk_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Bulk(b, bulk); }),
           "bulk identity includes its expected digest");
+    bulk.expected_digest[0] = std::byte{0x91};
+    bulk.offset += 64;
+    Check(bulk_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Bulk(b, bulk); }),
+          "bulk identity includes actual packed offset");
 
     VfxMeshAtlasDescriptor atlas{};
     atlas.asset_id = {88};

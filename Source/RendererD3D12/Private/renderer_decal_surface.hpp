@@ -105,6 +105,7 @@ class DecalSurfaceSystem
     [[nodiscard]] Result Register(RenderGraphBuilder &, const DecalSurfaceInputs &,
         DecalSurfaceConstants, DecalSurfaceOutputs &, DecalSurfaceLayout *layout=nullptr);
     [[nodiscard]] bool MatchesLayout(const DecalSurfaceInputs &,const DecalSurfaceLayout &)const noexcept;
+    [[nodiscard]] bool MatchesShape(const DecalSurfaceLayout &, bool active) const noexcept;
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const DecalSurfaceInputs &,
         DecalSurfaceConstants,const DecalSurfaceLayout &,DecalSurfaceOutputs &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);

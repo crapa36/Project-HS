@@ -158,6 +158,16 @@ void Engine()
         hs::TaskSystem tasks(workers);
         hs::TaskGroup sealed;
         Check(tasks.Wait(sealed).Succeeded(), "empty group joins");
+        const std::string rejected_name(120, 'r');
+        std::move_only_function<void(std::stop_token)> sealed_callable =
+            [](std::stop_token) {};
+        allocation_count = 0;
+        allocation_budget = 0;
+        const auto sealed_accepted = tasks.Submit(
+            sealed, rejected_name, std::move(sealed_callable));
+        allocation_budget = -1;
+        Check(!sealed_accepted && allocation_count == 0,
+              "sealed rejection prepared a task name or shared callable owner");
         Check(!tasks.Submit(sealed, "sealed", [](std::stop_token) {}),
               "sealed group rejects submission");
         Check(tasks.Wait(sealed).Code() == hs::ErrorCode::InvalidState,
@@ -167,6 +177,15 @@ void Engine()
         hs::TaskGroup owned;
         Check(tasks.Submit(owned, "owner", [](std::stop_token) {}),
               "valid submission is accepted");
+        std::move_only_function<void(std::stop_token)> wrong_owner_callable =
+            [](std::stop_token) {};
+        allocation_count = 0;
+        allocation_budget = 0;
+        const auto wrong_owner_accepted = other.Submit(
+            owned, rejected_name, std::move(wrong_owner_callable));
+        allocation_budget = -1;
+        Check(!wrong_owner_accepted && allocation_count == 0,
+              "wrong-owner rejection prepared a task name or shared callable owner");
         Check(!other.Submit(owned, "wrong owner", [](std::stop_token) {}),
               "another executor cannot admit work");
         Check(tasks.Wait(owned).Code() == hs::ErrorCode::InvalidState,

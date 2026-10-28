@@ -35,8 +35,9 @@ struct SimulationConfig
     bool capture_timings{false};
     // Session-start switch for optional upgrade/relic synergy detail. Fixed balance
     // aggregates and gameplay state are collected identically in either mode.
-    // False leaves unique hit-cast and enemy-hit counts unavailable in BalanceTelemetry.
     bool capture_detailed_balance{true};
+    // Independent session-start capture; false marks unique hit-rate aggregates unavailable.
+    bool capture_hit_rates{true};
 };
 
 struct TickResult

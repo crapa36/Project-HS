@@ -53,6 +53,54 @@ void CheckAsyncAssetPreparation()
     const std::array<std::uint32_t, 1> invalid_subresource{3};
     Check(hs::TextureReadChunkEnd(invalid_subresource, replacement_layouts, 0, 12) == 0,
         "software replacement planner accepted an out-of-range subresource index");
+    hs::render_data::TextureDescription target_description{8, 4, 1, 3, 98};
+    std::array<hs::render_data::TextureSubresourceLayout, 3> target_layouts{};
+    target_layouts[0].byte_count = 11; target_layouts[1].byte_count = 5; target_layouts[2].byte_count = 2;
+    for (auto &layout : target_layouts) layout.has_digest = true;
+    std::uint32_t minimum_host_mip{};
+    Check(hs::TextureReadTargetMip(target_description, target_layouts, 0, 2, 8, 18, 2) == 1 &&
+        hs::TextureReadTargetMip(target_description, target_layouts, 0, 2, 8, 19, 2) == 0 &&
+        hs::TextureReadTargetMip(target_description, target_layouts, 0, 2, 8, 20, 2) == 0 &&
+        hs::TextureReadTargetMip(target_description, target_layouts, 0, 2, 8, 9, 2) == 2 &&
+        hs::TextureReadMinimumHostMip(target_description, target_layouts, 8, 18, minimum_host_mip) &&
+        minimum_host_mip == 1 &&
+        hs::TextureReadMinimumHostMip(target_description, target_layouts, 8, 9, minimum_host_mip) &&
+        minimum_host_mip == target_description.mip_count,
+        "optional mip admission did not clamp below, at, and above the intrinsic authenticated-range cap");
+    Check(hs::TextureEffectiveHostTargetMip(0, 2, 1, 2, 0, true) == 0 &&
+        hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 1, true) == 1 &&
+        hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 2, false) == 2,
+        "host transfer ceiling evicted better published quality or skipped the registered fallback");
+    target_layouts[1].has_digest = false;
+    Check(!hs::TextureReadMinimumHostMip(target_description, target_layouts, 8, 19, minimum_host_mip),
+        "optional mip admission hid a missing authenticated range as a quality fallback");
+    const std::array<std::uint32_t, 3> priorities{3, 1, 1}, desired_mips{0, 0, 0}, tail_mips{2, 1, 2};
+    std::vector<std::uint32_t> victim_order;
+    std::array<std::vector<std::uint64_t>, 3> mip_costs{{{100, 60, 20}, {80, 40}, {90, 50, 10}}};
+    std::uint64_t planned_cost = 270;
+    std::array<std::uint32_t, 3> final_mips = desired_mips;
+    std::vector<std::uint32_t> advanced_owners;
+    Check(hs::TextureBuildBudgetVictimOrder(priorities, final_mips, tail_mips, victim_order) &&
+        victim_order == std::vector<std::uint32_t>{1, 2, 0},
+        "budget victim ordering did not retain ascending priority and original-index ties");
+    for (const auto owner : victim_order)
+        while (planned_cost > 150 && final_mips[owner] < tail_mips[owner])
+        {
+            Check(hs::TextureCoarsenOneMip(final_mips[owner], tail_mips[owner], mip_costs[owner], planned_cost),
+                "budget victim step rejected a valid monotonic mip cost");
+            advanced_owners.push_back(owner);
+        }
+    Check(final_mips == std::array<std::uint32_t, 3>{0, 1, 2} && planned_cost == 150 &&
+        advanced_owners == std::vector<std::uint32_t>{1, 2, 2},
+        "budget planner did not coarsen one priority victim through its tail before the next");
+    std::uint32_t overflow_mip{};
+    std::uint64_t underfunded_plan{};
+    Check(!hs::TextureCoarsenOneMip(overflow_mip, 1, std::array<std::uint64_t, 2>{2, 1}, underfunded_plan) &&
+        overflow_mip == 0 && underfunded_plan == 0,
+        "budget planner accepted an inconsistent planned-cost underflow");
+    auto maximum_cost = UINT64_MAX;
+    Check(!hs::TextureAccumulateBudgetBytes(maximum_cost, 1) && maximum_cost == UINT64_MAX,
+        "budget planner accepted an overflowing accumulated mip cost");
     hs::ResidencyManager mip_budget;
     mip_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
     const auto mip_payload = mip_budget.ReserveHost(512);
@@ -60,6 +108,22 @@ void CheckAsyncAssetPreparation()
     Check(mip_payload && mip_metadata && !mip_budget.CanStage(257) &&
         mip_budget.ReleaseNow(mip_payload) && mip_budget.ReleaseNow(mip_metadata) &&
         mip_budget.CanStage(768), "completed mip step did not return its payload and metadata budget");
+    hs::ResidencyManager shrunken_host_budget;
+    shrunken_host_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
+    const auto first_metadata = shrunken_host_budget.ReserveHost(400);
+    const auto second_metadata = shrunken_host_budget.ReserveHost(400);
+    Check(first_metadata && second_metadata &&
+        shrunken_host_budget.CommitHost(first_metadata, 400) &&
+        shrunken_host_budget.CommitHost(second_metadata, 400),
+        "software chunk metadata reservations were not committed");
+    shrunken_host_budget.UpdateBudget({true, 0, 0, 0, 0, true, 500});
+    const bool shrink_blocked = !shrunken_host_budget.CanStage(1);
+    const bool chunk_metadata_released = shrunken_host_budget.ReleaseNow(second_metadata);
+    const auto next_chunk = shrunken_host_budget.ReserveHost(100);
+    Check(shrink_blocked && chunk_metadata_released && next_chunk &&
+        shrunken_host_budget.CanStage(0) && shrunken_host_budget.ReleaseNow(next_chunk) &&
+        shrunken_host_budget.ReleaseNow(first_metadata),
+        "completed chunk metadata was not releasable to let a retained transaction progress after budget shrink");
     const std::array<std::byte, 4> contents{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     const auto path = std::filesystem::temp_directory_path() /
         ("hs_stream_prepare_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
@@ -172,6 +236,91 @@ void CheckAsyncAssetPreparation()
     const auto *failed_request = streaming.Find(failed);
     Check(failed_request && failed_request->state == hs::StreamingPageState::Cancelled,
         "failed preparation did not cancel its streaming request");
+
+    // CPU work admission is independent of host bytes. A saturated read owner
+    // remains Requested and can be retried after accepted futures reach terminal.
+    constexpr std::uint32_t cpu_task_limit = 32;
+    auto task_release = std::make_shared<std::promise<void>>();
+    struct ReleaseTaskGate
+    {
+        std::shared_ptr<std::promise<void>> promise;
+        bool released{};
+        void Release() { if (!released) { promise->set_value(); released = true; } }
+        ~ReleaseTaskGate() { if (!released) { try { Release(); } catch (...) {} } }
+    } release_task_gate{task_release};
+    const auto task_gate = task_release->get_future().share();
+    auto tasks_started = std::make_shared<std::atomic_uint32_t>();
+    auto tasks_finished = std::make_shared<std::atomic_uint32_t>();
+    std::vector<hs::StreamingRequestId> task_requests;
+    task_requests.reserve(cpu_task_limit);
+    for (std::uint32_t i = 0; i < cpu_task_limit; ++i)
+    {
+        const auto id = "cpu-admission-" + std::to_string(i);
+        const auto request = streaming.Request(id, id, "generation", 1);
+        const auto storage = residency.ReserveHost(contents.size() * 2);
+        bool submitted{};
+        const auto queued = io.Enqueue({request, "generation", id, hs::RendererAssetSource{path}, contents.size(),
+            std::make_shared<int>(1), [task_gate, tasks_started, tasks_finished](std::span<const std::byte>) {
+                tasks_started->fetch_add(1, std::memory_order_release);
+                task_gate.wait();
+                tasks_finished->fetch_add(1, std::memory_order_release);
+            }}, streaming, residency, storage, submitted);
+        Check(request && storage && bool(queued) && submitted,
+            "asset CPU task admission rejected work below its owner-local ceiling");
+        task_requests.push_back(request);
+    }
+    const auto task_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (tasks_started->load(std::memory_order_acquire) != cpu_task_limit &&
+           std::chrono::steady_clock::now() < task_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (tasks_started->load(std::memory_order_acquire) != cpu_task_limit)
+    {
+        release_task_gate.Release();
+        throw std::runtime_error("accepted CPU admission tasks did not all enter their preparation callback");
+    }
+    const auto deferred_id = std::string("cpu-admission-deferred");
+    const auto deferred_request = streaming.Request(deferred_id, deferred_id, "generation", 1);
+    auto deferred_storage = residency.ReserveHost(contents.size() * 2);
+    bool deferred_submitted{};
+    const auto deferred_result = io.Enqueue({deferred_request, "generation", deferred_id,
+        hs::RendererAssetSource{path}, contents.size(), std::make_shared<int>(1), {}},
+        streaming, residency, deferred_storage, deferred_submitted);
+    const auto *deferred_page = streaming.Find(deferred_request);
+    const bool deferred_cleanly = bool(deferred_result) && !deferred_submitted && deferred_page &&
+        deferred_page->state == hs::StreamingPageState::Requested;
+    release_task_gate.Release();
+    Check(deferred_cleanly, "saturated CPU task admission consumed a request or lost its retry state");
+    Check(residency.ReleaseNow(deferred_storage), "deferred CPU task kept its caller reservation");
+    const auto finish_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (tasks_finished->load(std::memory_order_acquire) != cpu_task_limit &&
+           std::chrono::steady_clock::now() < finish_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Check(tasks_finished->load(std::memory_order_acquire) == cpu_task_limit,
+        "admitted CPU task callables did not reach terminal state");
+    auto completed_but_uncollected_storage = residency.ReserveHost(contents.size() * 2);
+    bool completed_but_uncollected_submitted{};
+    const auto completed_but_uncollected = io.Enqueue({deferred_request, "generation", deferred_id,
+        hs::RendererAssetSource{path}, contents.size(), std::make_shared<int>(1), {}},
+        streaming, residency, completed_but_uncollected_storage, completed_but_uncollected_submitted);
+    Check(bool(completed_but_uncollected) && !completed_but_uncollected_submitted &&
+        residency.ReleaseNow(completed_but_uncollected_storage),
+        "terminal but uncollected futures released CPU admission before owner collection");
+    for (std::uint32_t i = 0; i < cpu_task_limit; ++i)
+    {
+        hs::AssetReadCompletion task_output;
+        Check(bool(poll(task_requests[i], task_output)) && task_output.ready &&
+            residency.ReleaseNow(task_output.storage),
+            "accepted CPU task did not release its slot and host bytes at completion");
+    }
+    deferred_storage = residency.ReserveHost(contents.size() * 2);
+    Check(static_cast<bool>(deferred_storage), "deferred task could not reacquire host admission");
+    Check(bool(io.Enqueue({deferred_request, "generation", deferred_id, hs::RendererAssetSource{path},
+        contents.size(), std::make_shared<int>(1), {}}, streaming, residency, deferred_storage,
+        deferred_submitted)) && deferred_submitted,
+        "deferred CPU task did not submit after earlier futures reached terminal");
+    hs::AssetReadCompletion deferred_output;
+    Check(bool(poll(deferred_request, deferred_output)) && deferred_output.ready &&
+        residency.ReleaseNow(deferred_output.storage), "retried CPU task did not complete cleanly");
 }
 
 void CheckPackAssetReads(bool native)
@@ -421,6 +570,49 @@ int main()
 {
     try
     {
+        hs::EssentialBootstrapAdmission bootstrap;
+        Check(bootstrap.Configure(1'000, 400, false), "known bootstrap capacity setup failed");
+        Check(bootstrap.HasCapacity(hs::ResidencySegment::Local) &&
+            bootstrap.HasCapacity(hs::ResidencySegment::NonLocal) &&
+            bootstrap.CanAdmit(1'000, hs::ResidencySegment::Local) &&
+            bootstrap.Commit(600, hs::ResidencySegment::Local) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 600 &&
+            bootstrap.CanAdmit(400, hs::ResidencySegment::Local) &&
+            !bootstrap.CanAdmit(401, hs::ResidencySegment::Local),
+            "essential bootstrap did not enforce the exact local physical-capacity boundary");
+        Check(bootstrap.CanAdmit(400, hs::ResidencySegment::NonLocal) &&
+            bootstrap.Commit(300, hs::ResidencySegment::NonLocal) &&
+            bootstrap.CanAdmit(100, hs::ResidencySegment::NonLocal) &&
+            !bootstrap.CanAdmit(101, hs::ResidencySegment::NonLocal) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 600,
+            "essential bootstrap mixed local and non-local segment accounting");
+        Check(bootstrap.CanAdmit(100, hs::ResidencySegment::Local) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 600 &&
+            !bootstrap.Commit(401, hs::ResidencySegment::Local) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 600 &&
+            bootstrap.Commit(100, hs::ResidencySegment::Local) &&
+            bootstrap.CanAdmit(300, hs::ResidencySegment::Local) &&
+            !bootstrap.CanAdmit(301, hs::ResidencySegment::Local),
+            "failed or successful actual allocation charging changed bootstrap allowance incorrectly");
+        Check(!bootstrap.Configure(2'000, 400, false) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 700,
+            "bootstrap reconfiguration discarded allocations still owned by the device");
+        bootstrap.Reset();
+        Check(bootstrap.Configure(0, 0, false), "unknown bootstrap capacity setup failed");
+        Check(!bootstrap.HasCapacity(hs::ResidencySegment::Local) &&
+            !bootstrap.HasCapacity(hs::ResidencySegment::NonLocal) &&
+            !bootstrap.CanAdmit(1, hs::ResidencySegment::Local) &&
+            !bootstrap.Commit(1, hs::ResidencySegment::Local),
+            "unknown physical capacity became an unlimited essential bootstrap allowance");
+        bootstrap.Reset();
+        Check(bootstrap.Configure(512, 0, true), "UMA bootstrap capacity setup failed");
+        Check(bootstrap.CanAdmit(512, hs::ResidencySegment::NonLocal) &&
+            bootstrap.Commit(512, hs::ResidencySegment::NonLocal) &&
+            bootstrap.Used(hs::ResidencySegment::Local) == 512 &&
+            bootstrap.HasCapacity(hs::ResidencySegment::NonLocal) &&
+            !bootstrap.CanAdmit(1, hs::ResidencySegment::NonLocal),
+            "UMA essential bootstrap did not combine native memory into its single LOCAL segment");
+
         hs::ResidencyManager residency;
         residency.UpdateBudget({true, 1'000, 600, 2'000, 100});
         Check(residency.CanAdmit(250), "safe local-budget admission rejected");
@@ -449,14 +641,21 @@ int main()
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         const auto gpu_reservation = admission.ReserveGpu(300);
         const auto host_reservation = admission.ReserveHost(700);
+        auto host_facts = admission.HostAdmissionFacts();
         Check(gpu_reservation && host_reservation && admission.CanAdmit(600) && !admission.CanAdmit(601) &&
-            admission.CanStage(300) && !admission.CanStage(301), "reservation admission boundaries changed");
+            admission.CanStage(300) && !admission.CanStage(301) &&
+            host_facts.budget.host_staging_budget == 1000 && host_facts.held_bytes == 700 &&
+            !host_facts.held_overflow, "reservation admission boundaries or live host facts changed");
         Check(!admission.CommitHost(host_reservation, 701) && !admission.CommitHost(host_reservation, 0) &&
             !admission.CanStage(301), "failed host commit changed admission");
         Check(admission.CommitHost(host_reservation, 400) && admission.CanStage(600) && !admission.CanStage(601),
             "host commit did not shrink held admission");
-        Check(admission.Retire(gpu_reservation, {1, 0, 0}) && admission.Collect({}) == 0 &&
-            !admission.CanAdmit(601) && admission.Collect({1, 0, 0}) == 1 && admission.CanAdmit(900),
+        host_facts = admission.HostAdmissionFacts();
+        Check(host_facts.held_bytes == 400 && !host_facts.held_overflow &&
+            admission.Retire(gpu_reservation, {1, 0, 0}) &&
+            admission.Retire(gpu_reservation, {2, 0, 0}) && admission.Collect({}) == 0 &&
+            !admission.CanAdmit(601) && admission.Collect({1, 0, 0}) == 0 &&
+            admission.Collect({2, 0, 0}) == 1 && admission.CanAdmit(900),
             "retiring reservation admission changed before completion");
         Check(admission.ReleaseNow(host_reservation) && admission.CanStage(1000), "host abort leaked admission");
         for (const auto storage : {hs::ResidencyStorage::GpuReservation, hs::ResidencyStorage::HostReservation,

@@ -127,7 +127,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     }
 
     DXGI_ADAPTER_DESC3 adapter_description{};
-    adapter->GetDesc3(&adapter_description);
+    const bool adapter_memory_capacity_known = SUCCEEDED(adapter->GetDesc3(&adapter_description));
     LARGE_INTEGER driver_version{};
     const auto has_driver = SUCCEEDED(
         adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver_version));
@@ -153,6 +153,40 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     {
         return HResultFailure("D3D12CreateDevice FL12_0", result);
     }
+    adapter_unified_memory = false;
+    bool bootstrap_architecture_known = false;
+    D3D12_FEATURE_DATA_ARCHITECTURE1 bootstrap_architecture{};
+    bootstrap_architecture.NodeIndex = 0;
+    if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1,
+        &bootstrap_architecture, sizeof(bootstrap_architecture))))
+    {
+        adapter_unified_memory = bootstrap_architecture.UMA != FALSE;
+        bootstrap_architecture_known = true;
+    }
+    else
+    {
+        D3D12_FEATURE_DATA_ARCHITECTURE legacy_bootstrap_architecture{};
+        legacy_bootstrap_architecture.NodeIndex = 0;
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE,
+            &legacy_bootstrap_architecture, sizeof(legacy_bootstrap_architecture))))
+        {
+            adapter_unified_memory = legacy_bootstrap_architecture.UMA != FALSE;
+            bootstrap_architecture_known = true;
+        }
+    }
+    adapter_architecture_observed = bootstrap_architecture_known;
+    // These DXGI descriptor fields are maximum adapter capacities, not current
+    // free memory. They bound essential bootstrap only; optional admission uses
+    // the independent dynamic budget observations.
+    if (!essential_bootstrap_admission.Configure(
+        adapter_memory_capacity_known && bootstrap_architecture_known
+            ? (adapter_unified_memory ? adapter_description.SharedSystemMemory
+                                      : adapter_description.DedicatedVideoMemory) : 0,
+        adapter_memory_capacity_known && bootstrap_architecture_known && !adapter_unified_memory
+            ? adapter_description.SharedSystemMemory : 0,
+        adapter_unified_memory))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Essential bootstrap policy still owns allocations from a prior device; shut down before reinitializing.");
     if (auto bound = BindReconstructionSessionsToDevice(); !bound) return bound;
     if (streamline_session && streamline_session->Initialized() &&
         streamline_session->Availability(StreamlineFeature::FrameGeneration) == ReconstructionAvailability::Available)
@@ -414,6 +448,40 @@ ResidencySegment D3D12Renderer::Impl::ResidencySegmentForHeap(D3D12_HEAP_TYPE ty
 {
     return adapter_unified_memory || type == D3D12_HEAP_TYPE_DEFAULT || type == D3D12_HEAP_TYPE_GPU_UPLOAD
         ? ResidencySegment::Local : ResidencySegment::NonLocal;
+}
+
+bool D3D12Renderer::Impl::ResidencySegmentForAllocation(
+    const D3D12MA::ALLOCATION_DESC &allocation, ResidencySegment &segment) const noexcept
+{
+    if (adapter_unified_memory)
+    {
+        segment = ResidencySegment::Local;
+        return true;
+    }
+    if (!allocation.CustomPool)
+    {
+        if (allocation.HeapType == D3D12_HEAP_TYPE_CUSTOM) return false;
+        segment = ResidencySegmentForHeap(allocation.HeapType);
+        return true;
+    }
+
+    const auto properties = allocation.CustomPool->GetDesc().HeapProperties;
+    if (properties.Type != D3D12_HEAP_TYPE_CUSTOM)
+    {
+        segment = ResidencySegmentForHeap(properties.Type);
+        return true;
+    }
+    if (properties.MemoryPoolPreference == D3D12_MEMORY_POOL_L0)
+    {
+        segment = ResidencySegment::NonLocal;
+        return true;
+    }
+    if (properties.MemoryPoolPreference == D3D12_MEMORY_POOL_L1)
+    {
+        segment = ResidencySegment::Local;
+        return true;
+    }
+    return false;
 }
 
 void D3D12Renderer::Impl::SampleAllocatorBudgetStats(bool local_absorbed,

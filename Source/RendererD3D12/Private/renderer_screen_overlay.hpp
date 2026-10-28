@@ -61,6 +61,7 @@ class ScreenOverlaySystem
         ScreenOverlayLayout *layout=nullptr);
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const ScreenOverlayInputs &,
         const ScreenOverlayLayout &,ScreenOverlayOutputs &);
+    [[nodiscard]] bool MatchesShape(const ScreenOverlayLayout &, bool active) const noexcept;
     [[nodiscard]] bool MatchesLayout(const ScreenOverlayInputs &,const ScreenOverlayLayout &)const noexcept;
     void Draw(ID3D12GraphicsCommandList *,std::uint32_t,D3D12_CPU_DESCRIPTOR_HANDLE) const;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool);

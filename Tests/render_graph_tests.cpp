@@ -2,6 +2,12 @@
 #include "render_graph_membership.hpp"
 #include "renderer_hlod.hpp"
 #include "renderer_post_subgraphs.hpp"
+#include "renderer_adaptive_shading.hpp"
+#include "renderer_ambient_occlusion.hpp"
+#include "renderer_subsurface.hpp"
+#include "renderer_reflections.hpp"
+#include "renderer_decal_surface.hpp"
+#include "renderer_screen_overlay.hpp"
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
 #include <d3d12.h>
@@ -46,6 +52,51 @@ struct RenderGraphTestAccess
 namespace
 {
 void Check(bool condition, const char *message) { if (!condition) throw std::runtime_error(message); }
+
+void EmptyFeatureShapes()
+{
+    hs::AdaptiveShadingSystem adaptive;
+    hs::AdaptiveShadingLayout adaptive_layout;
+    Check(!adaptive.MatchesShape(adaptive_layout), "invalid adaptive shape accepted");
+    adaptive_layout.valid = true;
+    Check(adaptive.MatchesShape(adaptive_layout) && adaptive.MatchesLayout({}, adaptive_layout),
+        "inactive adaptive shape disagrees with full binding contract");
+    adaptive_layout.active = true;
+    Check(!adaptive.MatchesShape(adaptive_layout) && !adaptive.MatchesLayout({}, adaptive_layout),
+        "active adaptive shape accepted without native targets");
+    hs::AmbientOcclusionSystem ambient;
+    hs::AmbientOcclusionLayout ambient_layout;
+    ambient_layout.valid = true;
+    Check(!ambient.MatchesShape(ambient_layout, false, hs::QueueHint::Direct) &&
+        !ambient.MatchesLayout({}, ambient_layout), "AO accepted a shape without targets");
+    hs::SubsurfaceSystem subsurface;
+    hs::SubsurfaceLayout subsurface_layout;
+    subsurface_layout.valid = true;
+    Check(!subsurface.MatchesShape(subsurface_layout) && !subsurface.MatchesLayout({}, subsurface_layout),
+        "subsurface accepted a shape without targets");
+    hs::ScreenReflectionsSystem reflections;
+    hs::ScreenReflectionsLayout reflection_layout;
+    reflection_layout.valid = true;
+    Check(!reflections.MatchesShape(reflection_layout, false, 0, false, 0) &&
+        !reflections.MatchesLayout({}, reflection_layout), "reflections accepted a shape without targets");
+    hs::DecalSurfaceSystem decals;
+    hs::DecalSurfaceLayout decal_layout;
+    decal_layout.valid = true;
+    Check(decals.MatchesShape(decal_layout, false) && decals.MatchesLayout({}, decal_layout) &&
+        !decals.MatchesShape(decal_layout, true), "inactive decal shape disagrees with actual commands");
+    decal_layout.active = true;
+    Check(!decals.MatchesShape(decal_layout, true), "active decal shape accepted without native targets");
+    hs::PostSubgraphLayout post_layout;
+    post_layout.pass_count = 1;
+    Check(hs::MatchesPostSubgraphShape(false, false, false, false, false, false, false, post_layout) &&
+        !hs::MatchesPostSubgraphShape(false, false, false, false, true, false, false, post_layout),
+        "post subgraph shape omitted its hook topology");
+    hs::ScreenOverlaySystem overlay;
+    hs::ScreenOverlayLayout overlay_layout;
+    overlay_layout.valid = true;
+    Check(overlay.MatchesShape(overlay_layout, false) && !overlay.MatchesShape(overlay_layout, true),
+        "inactive screen overlay shape disagrees with the retained layout contract");
+}
 void Hr(HRESULT result, const char *message) { Check(SUCCEEDED(result), message); }
 
 struct MembershipWork
@@ -528,12 +579,70 @@ void ImportedInitialAccess(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsComma
     f.Submit();
 }
 
+void CachedLogicalLifetimes(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
+{
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(f.allocator, f.device.Get()).Succeeded(), "lifetime cache pool initializes");
+    hs::RenderGraphBuilder graph;
+    std::array<hs::BufferHandle, 3> resources{};
+    hs::RenderGraphBuilder::PlanHandle sequential_plan{};
+    std::uint64_t disjoint_bytes{};
+    const auto check_binding = [&](bool overlap) {
+        auto *first = static_cast<ID3D12Resource *>(graph.Resolve(resources[0]));
+        auto *last = static_cast<ID3D12Resource *>(graph.Resolve(resources[2]));
+        Check(first && last && !graph.Resolve(resources[1]),
+            "cached lifetimes must keep unused logical resources unallocated");
+        Check(first->GetDesc().Width == 4096 && last->GetDesc().Width == 4096,
+            "cached alias descriptors must recreate the declared buffer views");
+        const auto allocated = pool.AllocatedBytes();
+        if (!disjoint_bytes) disjoint_bytes = allocated;
+        Check(disjoint_bytes && allocated == disjoint_bytes * (overlap ? 2u : 1u),
+            "cached plans must preserve one backing for disjoint uses and two for overlapping uses");
+    };
+    for (unsigned cycle = 0; cycle < 2; ++cycle)
+        for (unsigned shape = 0; shape < 2; ++shape)
+        {
+            pool.ResetClaims(); pool.Clear(); graph.Reset();
+            for (auto &resource : resources)
+                resource = graph.CreateBuffer({4096, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "lifetime resource");
+            auto writer = graph.AddPass(0, "lifetime first", hs::QueueHint::Direct);
+            const auto first_version = writer.Write(graph.Version(resources[0]), hs::Access::UnorderedWrite);
+            writer.SetExecute([](auto &) {});
+            auto last = graph.AddPass(1, "lifetime last", hs::QueueHint::Direct);
+            if (shape) last.Read(first_version, hs::Access::UnorderedRead);
+            (void)last.Write(graph.Version(resources[2]), hs::Access::UnorderedWrite);
+            last.SetExecute([](auto &) {});
+            graph.AddOrderingDependency(0, 1);
+            Check(graph.Prepare(pool).Succeeded(), "cold/warm logical lifetime plan prepares");
+            check_binding(shape != 0);
+            if (!cycle && !shape) sequential_plan = graph.PreparedPlan();
+            Check(graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(), "lifetime graph executes");
+            f.Submit();
+        }
+    Check(hs::RenderGraphTestAccess::Compilations(graph) == 2 &&
+        hs::RenderGraphTestAccess::Reuses(graph) == 2,
+        "logical lifetime and descriptor facts must follow each cached topology");
+    pool.ResetClaims(); pool.Clear(); graph.Reset();
+    Check(graph.RestorePlan(sequential_plan), "restore logical lifetime plan from prior cache slot");
+    for (std::uint32_t i = 0; i < 2; ++i)
+    {
+        auto pass = graph.BindPass(i, i);
+        Check(pass.has_value(), "restored lifetime pass binds");
+        pass->SetExecute([](auto &) {});
+    }
+    Check(graph.Prepare(pool).Succeeded(), "restored cached lifetimes prepare");
+    check_binding(false);
+    Check(graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(), "restored lifetime graph executes");
+    f.Submit();
+}
+
 void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
 {
     IdentityFxaaPostSubgraph();
     ImportedInitialAccess(f, mode, enhanced);
     BufferRanges(f, mode, enhanced);
     TextureRanges(f, mode, enhanced);
+    CachedLogicalLifetimes(f, mode, enhanced);
     hs::TransientResourcePool first,second;
     Check(first.Initialize(f.allocator, f.device.Get()).Succeeded() && second.Initialize(f.allocator, f.device.Get()).Succeeded(),"pool initialize");
     hs::RenderGraphBuilder graph;
@@ -990,6 +1099,7 @@ int main(int argc, char **argv)
         BatchResourceMembership();
         ResourceAliasPatterns();
         HlodSlotSetTest();
+        EmptyFeatureShapes();
         const bool hardware = argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware); Run(fixture,hs::BarrierMode::Legacy,nullptr);
         std::puts("Legacy range/readback checks passed.");

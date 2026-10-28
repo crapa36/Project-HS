@@ -243,8 +243,8 @@ unsigned ExecutionKind(const Pass &pass) noexcept
     return pass.external ? 4u : pass.owner_execute ? (pass.execute_on_owner ? 3u : 2u) : pass.execute ? 1u : 0u;
 }
 
-// Only declaration values survive Reset. Current native owners, callbacks and
-// completion remain in LogicalResource/Pass and are validated on every binding.
+// Declaration values and compiled logical facts survive Reset. Current native
+// owners, callbacks and completion are validated on every binding.
 struct TopologyValues
 {
     struct Resource
@@ -258,6 +258,7 @@ struct TopologyValues
         D3D12_HEAP_TYPE fixed_heap{};
         Access final{};
         ResourceVersion final_version{};
+        std::uint32_t first_use{UINT32_MAX}, last_use{};
     };
     struct PassValues
     {
@@ -274,6 +275,12 @@ struct TopologyValues
     std::vector<Resource> resources;
     std::vector<PassValues> passes;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering;
+    struct AliasValues
+    {
+        std::vector<D3D12_RESOURCE_DESC> descriptors;
+        bool aliased{};
+    };
+    std::vector<AliasValues> alias_values;
 
     bool Matches(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
                  const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
@@ -356,7 +363,8 @@ struct TopologyValues
     }
 
     void Capture(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
-                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering)
+                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
+                 const render_graph::CompiledSchedule &schedule, const render_graph::AliasPlan &aliases)
     {
         resources.clear(); resources.reserve(current_resources.size());
         passes.clear(); passes.reserve(current_passes.size());
@@ -372,6 +380,25 @@ struct TopologyValues
             if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
         }
         ordering = current_ordering;
+        for (std::uint32_t position = 0; position < schedule.execution_order.size(); ++position)
+            for (const auto &use : current_passes[schedule.execution_order[position]].Uses())
+            {
+                auto &resource = resources[use.predecessor.resource.value - 1];
+                if (resource.first_use == UINT32_MAX) resource.first_use = position;
+                resource.last_use = position;
+            }
+        alias_values.clear();
+        alias_values.reserve(aliases.groups.size());
+        for (const auto &group : aliases.groups)
+        {
+            auto &values = alias_values.emplace_back();
+            values.descriptors.reserve(group.resources.size());
+            for (const auto resource : group.resources)
+            {
+                values.descriptors.push_back(resources[resource].descriptor);
+                values.aliased |= aliases.resource_groups[resource] != render_graph::AliasPlan::kExcluded;
+            }
+        }
         valid = true;
     }
 };
@@ -3039,7 +3066,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         // Publish only a fully validated compiler result. A failed candidate
         // leaves the previous successful plan available for a later frame.
         TopologyValues compiled_topology;
-        compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies);
+        compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies, schedule, aliases);
         compiled_topology.handle = impl_->next_plan_handle++;
         if (impl_->topology.valid)
         {
@@ -3056,14 +3083,11 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     }
     if (reused) capture_stage(captured_cpu.cpu_prepare_info_key_us);
     capture_stage(captured_cpu.cpu_prepare_compile_us);
-    const auto pass_count = static_cast<std::uint32_t>(impl_->passes.size());
-    for (std::uint32_t position = 0; position < pass_count; ++position)
-        for (const auto &use : impl_->passes[impl_->schedule.execution_order[position]].Uses())
-        {
-            auto &r = impl_->resources[use.predecessor.resource.value - 1];
-            if (r.first_use == UINT32_MAX) r.first_use = position;
-            r.last_use = position;
-        }
+    for (std::size_t i = 0; i < impl_->resources.size(); ++i)
+    {
+        impl_->resources[i].first_use = impl_->topology.resources[i].first_use;
+        impl_->resources[i].last_use = impl_->topology.resources[i].last_use;
+    }
     // Validation is complete before any allocation or command callback.
     auto &entries = pool.impl_->entries;
     std::vector<std::size_t> claims;
@@ -3086,8 +3110,10 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             }
         return fail(message);
     };
-    for (const auto &group : impl_->alias_plan.groups)
+    for (std::size_t group_index = 0; group_index < impl_->alias_plan.groups.size(); ++group_index)
     {
+        const auto &group = impl_->alias_plan.groups[group_index];
+        const auto &member_descs = impl_->topology.alias_values[group_index].descriptors;
         if (!pool.impl_->allocator) return allocation_failure("RenderGraph transient pool has no allocator.");
         const auto heap_flags = static_cast<D3D12_HEAP_FLAGS>(group.heap_class);
         auto found = entries.end();
@@ -3121,17 +3147,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         }
         found->claimed = true;
         found->active_members = static_cast<std::uint32_t>(group.resources.size());
-        std::vector<D3D12_RESOURCE_DESC> member_descs;
-        member_descs.reserve(group.resources.size());
-        for (const auto resource_index : group.resources)
-        {
-            const auto &r = impl_->resources[resource_index];
-            member_descs.push_back(NativeDesc(r.kind, r.texture, r.buffer));
-        }
-        const bool alias_group = std::any_of(group.resources.begin(), group.resources.end(),
-            [&](auto resource) {
-                return impl_->alias_plan.resource_groups[resource] != render_graph::AliasPlan::kExcluded;
-            });
+        const bool alias_group = impl_->topology.alias_values[group_index].aliased;
         // A previous export or partial submission can leave a view owned by a
         // different queue in a non-COMMON state. The block is completed here;
         // recreate those views so activation starts from a legal neutral state.
@@ -3143,10 +3159,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             found->active_view_descs.size() == member_descs.size() &&
             found->active_view_states.size() == member_descs.size() &&
             found->active_view_queues.size() == member_descs.size() &&
-            std::equal(member_descs.begin(), member_descs.end(), found->active_view_descs.begin(),
-                       [](const auto &left, const auto &right) {
-                           return std::memcmp(&left, &right, sizeof(D3D12_RESOURCE_DESC)) == 0;
-                       });
+            std::equal(member_descs.begin(), member_descs.end(), found->active_view_descs.begin(), SameDescriptor);
         if (!reuse_views)
         {
             found->active_views.clear();
@@ -3197,7 +3210,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             }
             r.final_queue = r.initial_queue;
         }
-        if (!reuse_views) found->active_view_descs = std::move(member_descs);
+        if (!reuse_views) found->active_view_descs = member_descs;
     }
     impl_->pool = pool.impl_.get(); impl_->state = Preparation::Ready;
     capture_stage(captured_cpu.cpu_prepare_transient_us);

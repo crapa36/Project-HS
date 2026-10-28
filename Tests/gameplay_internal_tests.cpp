@@ -19,7 +19,11 @@
 
 namespace hs
 {
-struct GameplayTestAccess { using World = GameSimulation::SimulationWorld; };
+struct GameplayTestAccess
+{
+    using World = GameSimulation::SimulationWorld;
+    static World &State(GameSimulation &simulation) { return *simulation.impl_; }
+};
 }
 
 namespace
@@ -69,6 +73,19 @@ void TestActorColumnStorage()
               "kernel writes update the sole authoritative payload");
     }
     const auto generation = enemies.StructuralGeneration();
+    Check(enemies.EraseIf([](ConstEnemyRow) { return false; }) == 0 &&
+              enemies.StructuralGeneration() == generation,
+          "no-op enemy erase advanced structural generation");
+    bool predicate_threw{};
+    try
+    {
+        static_cast<void>(enemies.EraseIf([](ConstEnemyRow) -> bool {
+            throw std::runtime_error("predicate failure");
+        }));
+    }
+    catch (const std::runtime_error &) { predicate_threw = true; }
+    Check(predicate_threw && enemies.StructuralGeneration() == generation,
+          "throwing no-op enemy predicate changed structural generation");
     bool rejected{};
     try { enemies.reserve(std::numeric_limits<std::size_t>::max()); }
     catch (const std::length_error &) { rejected = true; }
@@ -115,9 +132,18 @@ void TestActorColumnStorage()
               projectiles.episodes[1].bleed_extend_ticks.data() == episode_storage,
           "projectile stable compaction moves hit and episode owners with the same row");
     const auto capacity = projectiles.capacity();
+    const auto projectile_generation = projectiles.StructuralGeneration();
+    Check(projectiles.EraseIf([](ConstProjectileRow) { return false; }) == 0 &&
+              projectiles.StructuralGeneration() == projectile_generation,
+          "no-op projectile erase advanced structural generation");
     projectiles.clear();
-    Check(projectiles.Consistent() && projectiles.empty() && projectiles.capacity() == capacity,
+    Check(projectiles.Consistent() && projectiles.empty() && projectiles.capacity() == capacity &&
+              projectiles.StructuralGeneration() == projectile_generation + 1,
           "session clear retains all column capacities");
+    const auto empty_generation = projectiles.StructuralGeneration();
+    projectiles.clear();
+    Check(projectiles.StructuralGeneration() == empty_generation,
+          "empty projectile clear advanced structural generation");
     PreparedProjectile restarted;
     restarted.id = {105};
     projectiles.push_back(std::move(restarted));
@@ -125,6 +151,43 @@ void TestActorColumnStorage()
               projectiles.combat[0].skill == hs::SkillKind::BasicAttack &&
               projectiles.episodes[0].bleed_extend_ticks.empty(),
           "reused columns retain original spawn defaults without stale owning payload");
+}
+
+void TestSmallFactsIgnoreNoOpMutation()
+{
+    hs::GameSimulation simulation;
+    hs::SimulationConfig config;
+    config.start_in_main_menu = true;
+    config.capture_checksums = true;
+    Check(simulation.Initialize(config).Succeeded(), "small-facts fixture initialization");
+    auto &world = hs::GameplayTestAccess::State(simulation);
+    {
+        const auto read = simulation.BorrowTickReadView();
+        Check(!world.observation.small_facts_dirty, "borrow did not refresh initial small facts");
+    }
+    {
+        hs::GameplayTestAccess::World::MutationScope mutation(world);
+        Check(!world.observation.small_facts_dirty && world.observation.checksum_dirty,
+              "no-op ownership scope invalidated small facts or stopped invalidating checksum");
+    }
+    hs::InputFrame input;
+    input.held.aim_world = {world.actors->player.position.x, 0.0f, world.actors->player.position.y};
+    const auto no_op = simulation.TickFixed(input, std::chrono::nanoseconds{16'666'667});
+    Check(!no_op.world_changed && !world.observation.small_facts_dirty,
+          "frozen no-op tick invalidated collection-derived facts");
+    simulation.ApplyUiAction({hs::UiActionKind::Resume});
+    Check(!world.observation.small_facts_dirty,
+          "rejected UI action invalidated small facts");
+    simulation.ApplyUiAction({hs::UiActionKind::StartSession});
+    Check(world.observation.small_facts_dirty,
+          "accepted session action failed to invalidate small facts");
+    {
+        const auto read = simulation.BorrowTickReadView();
+        Check(read.View().session.phase == hs::SessionPhase::Playing &&
+                  !world.observation.small_facts_dirty,
+              "accepted action was not reflected by fresh small facts");
+    }
+    Check(simulation.Shutdown().Succeeded(), "small-facts fixture shutdown");
 }
 
 void TestSimulationIdentityExhaustion()
@@ -488,6 +551,7 @@ void TestBalanceHitDeduplication()
           "enemy cast zero remains a fixed per-archetype seen key after retirement");
     observer.Reset(false);
     Check(!observer.metrics.detailed_balance_captured &&
+              observer.metrics.hit_rates_captured &&
               observer.player_hit_casts.empty() && !observer.enemy_seen_zero[0],
           "session reset marks disabled detail and clears all retained causes");
 
@@ -509,6 +573,14 @@ void TestBalanceHitDeduplication()
     world.RetireBalanceHitCauses();
     Check(retained.player_hit_casts.empty(),
           "retreat membership retires after both future causes resolve");
+    InitializePickupFixture(world);
+    world.config.capture_detailed_balance = true;
+    world.config.capture_hit_rates = false;
+    world.StartSession();
+    Check(retained.metrics.detailed_balance_captured && !retained.metrics.hit_rates_captured &&
+              retained.player_hit_casts.empty() &&
+              std::ranges::all_of(retained.enemy_hit_casts, [](const auto &casts) { return casts.empty(); }),
+          "session restart preserves independent hit-rate policy and clears retained membership");
 }
 
 void TestBleedActivePrefix()
@@ -851,6 +923,7 @@ int main(int argc, char **argv)
             return 0;
         }
         TestActorColumnStorage();
+        TestSmallFactsIgnoreNoOpMutation();
         TestSimulationIdentityExhaustion();
         TestPickupWorkMembership();
         TestPickupWorkAgainstOriginalTraversal();

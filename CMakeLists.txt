@@ -285,6 +285,11 @@ endif()
 hs_configure_target(hs_asset_manifest)
 endif()
 
+# Public value/contract headers are usable without the native Runtime backend.
+add_library(hs_runtime_contracts INTERFACE)
+target_include_directories(hs_runtime_contracts INTERFACE Source/Runtime/Public Source/RendererD3D12/Public)
+target_link_libraries(hs_runtime_contracts INTERFACE hs_core hs_game_domain hs_render_data_values)
+
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
 add_library(hs_vfx_program_io STATIC EXCLUDE_FROM_ALL Source/RendererD3D12/Private/vfx_program_loader.cpp)
 target_include_directories(hs_vfx_program_io PUBLIC Source/RendererD3D12/Public)
@@ -292,8 +297,7 @@ target_link_libraries(hs_vfx_program_io PUBLIC hs_core hs_render_data_values)
 hs_configure_target(hs_vfx_program_io)
 add_library(hs_vfx_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/vfx_image_io.cpp
     Source/Runtime/Private/vfx_image_identity.cpp)
-target_include_directories(hs_vfx_image_io PUBLIC Source/Runtime/Public)
-target_link_libraries(hs_vfx_image_io PUBLIC hs_vfx_program_io)
+target_link_libraries(hs_vfx_image_io PUBLIC hs_runtime_contracts hs_vfx_program_io)
 hs_configure_target(hs_vfx_image_io)
 endif()
 
@@ -358,7 +362,8 @@ add_executable(hs_audio_content
     Source/Apps/AudioContent/main.cpp
     Source/Apps/Content/release_audio_codegen.cpp)
 
-target_include_directories(hs_audio_content PRIVATE Source/Apps/Content Source/Runtime/Public)
+target_include_directories(hs_audio_content PRIVATE Source/Apps/Content)
+target_link_libraries(hs_audio_content PRIVATE hs_runtime_contracts)
 target_link_libraries(hs_audio_content PRIVATE hs_asset_pipeline)
 target_link_libraries(hs_audio_content PRIVATE hs_core nlohmann_json::nlohmann_json)
 if(WIN32)
@@ -564,11 +569,9 @@ add_library(
 target_sources(
     hs_runtime PRIVATE
 )
-# ApplicationConfig exposes only the native-free Hero diagnostic enum/header.
-target_include_directories(hs_runtime PUBLIC Source/Runtime/Public Source/RendererD3D12/Public)
 target_link_libraries(
     hs_runtime
-    PUBLIC hs_core hs_gameplay hs_render_data
+    PUBLIC hs_runtime_contracts hs_gameplay hs_render_data
     PRIVATE hs_jobs hs_presentation hs_renderer_d3d12 $<$<NOT:$<CONFIG:Release>>:hs_asset_manifest> nlohmann_json::nlohmann_json
             user32 shell32 xaudio2 ole32
 )
@@ -579,8 +582,7 @@ target_compile_definitions(
 hs_configure_target(hs_runtime)
 add_library(hs_runtime_audio_io OBJECT EXCLUDE_FROM_ALL
     Source/Runtime/Private/audio_engine_io.cpp)
-target_include_directories(hs_runtime_audio_io PRIVATE Source/Runtime/Public)
-target_link_libraries(hs_runtime_audio_io PRIVATE hs_core hs_asset_manifest nlohmann_json::nlohmann_json)
+target_link_libraries(hs_runtime_audio_io PRIVATE hs_runtime_contracts hs_asset_manifest nlohmann_json::nlohmann_json)
 target_compile_definitions(hs_runtime_audio_io PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 hs_configure_target(hs_runtime_audio_io)
 target_sources(hs_runtime PRIVATE
@@ -2076,7 +2078,7 @@ endif()
 
 if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
     add_library(hs_shipping_content STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp")
-    target_include_directories(hs_shipping_content PRIVATE Source/Runtime/Public Source/RendererD3D12/Public)
+    target_link_libraries(hs_shipping_content PRIVATE hs_runtime_contracts)
     target_link_libraries(hs_shipping_content PUBLIC hs_presentation hs_game_rules hs_render_data)
     if(HS_BUILD_CONTENT_TOOLS)
         add_dependencies(hs_shipping_content hs_shipping_image)
@@ -2138,10 +2140,10 @@ if(HS_BUILD_TESTS)
         set_tests_properties(rendering.hzb-region-gpu rendering.hzb-region-warp
             PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
     endif()
-    add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp)
-    target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_core hs_game_domain hs_render_data_values)
+    add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp Tests/vfx_image_header.cpp)
+    target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_runtime_contracts)
     target_include_directories(hs_vfx_session_state_tests PRIVATE
-        Source/Runtime/Private Source/RendererD3D12/Public)
+        Source/Runtime/Private)
     hs_configure_target(hs_vfx_session_state_tests)
     add_test(NAME runtime.vfx-session-state COMMAND hs_vfx_session_state_tests)
     add_executable(hs_ui_command_admission_tests Tests/ui_command_admission_tests.cpp)
@@ -2154,8 +2156,7 @@ if(HS_BUILD_TESTS)
     add_executable(hs_project_hs_arguments_tests
         Tests/project_hs_arguments_tests.cpp
         Source/Apps/ProjectHS/command_line.cpp)
-    target_link_libraries(hs_project_hs_arguments_tests PRIVATE hs_core)
-    target_include_directories(hs_project_hs_arguments_tests PRIVATE Source/Runtime/Public Source/RendererD3D12/Public)
+    target_link_libraries(hs_project_hs_arguments_tests PRIVATE hs_runtime_contracts)
     hs_configure_target(hs_project_hs_arguments_tests)
     add_test(NAME runtime.arguments COMMAND hs_project_hs_arguments_tests)
 
@@ -2167,10 +2168,11 @@ if(HS_BUILD_TESTS)
         add_executable(hs_vfx_typed_frame_tests
             Tests/vfx_typed_frame_adapter_tests.cpp
             Source/Runtime/Private/vfx_typed_frame_adapter.cpp
-            Source/Runtime/Private/vfx_typed_screen_commands.cpp)
-        target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_core hs_game_domain hs_render_data_values)
+            Source/Runtime/Private/vfx_typed_screen_commands.cpp
+            Source/Runtime/Private/vfx_typed_volume_commands.cpp)
+        target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_runtime_contracts)
         target_include_directories(hs_vfx_typed_frame_tests PRIVATE
-            Source/Runtime/Private Source/RendererD3D12/Public Source/AssetManifest/Public)
+            Source/Runtime/Private Source/AssetManifest/Public)
         hs_configure_target(hs_vfx_typed_frame_tests)
         add_test(NAME runtime.vfx-typed-frame COMMAND hs_vfx_typed_frame_tests)
         # DirectXMath comes from the Windows SDK; these tests create no device.
@@ -2354,13 +2356,14 @@ if(HS_BUILD_TESTS)
     add_test(NAME content.character-interchange COMMAND hs_character_interchange_tests)
     add_executable(hs_render_package_tests
         Tests/render_package_tests.cpp
+        Tests/shipping_image_identity_tests.cpp
         Tests/virtual_shadow_guarantee_tests.cpp
         Tests/release_audio_codegen_tests.cpp
         Source/Apps/Content/release_audio_codegen.cpp
         Source/Apps/RenderMaterialShader/material_graph_parser.cpp)
-    target_include_directories(hs_render_package_tests PRIVATE Source/Apps/Content Source/Runtime/Public)
+    target_include_directories(hs_render_package_tests PRIVATE Source/Apps/Content)
     target_link_libraries(hs_render_package_tests PRIVATE
-        hs_material_compiler hs_render_data hs_core nlohmann_json::nlohmann_json)
+        hs_material_compiler hs_render_data hs_runtime_contracts nlohmann_json::nlohmann_json)
     hs_configure_target(hs_render_package_tests)
     add_test(NAME content.render-package-format COMMAND hs_render_package_tests)
     if(HS_BUILD_CONTENT_TOOLS)
@@ -2752,6 +2755,7 @@ if(HS_BUILD_TESTS)
         Tests/vfx_typed_distortion_commands_tests.cpp
         Tests/vfx_typed_light_commands_tests.cpp
         Tests/vfx_typed_mesh_commands_tests.cpp
+        Tests/vfx_typed_entity_surface_commands_tests.cpp
         Tests/vfx_upgrade_dispatch_tests.cpp)
     target_link_libraries(hs_vfx_synthetic_tests PRIVATE hs_runtime hs_vfx_image_io hs_gameplay_development)
     target_include_directories(hs_vfx_synthetic_tests PRIVATE
@@ -2761,6 +2765,7 @@ if(HS_BUILD_TESTS)
     add_test(NAME runtime.vfx-typed-distortion COMMAND hs_vfx_synthetic_tests distortion)
     add_test(NAME runtime.vfx-typed-light COMMAND hs_vfx_synthetic_tests light)
     add_test(NAME runtime.vfx-typed-mesh COMMAND hs_vfx_synthetic_tests mesh)
+    add_test(NAME runtime.vfx-typed-entity-surface COMMAND hs_vfx_synthetic_tests entity_surface)
     add_test(NAME runtime.vfx-upgrade-dispatch COMMAND hs_vfx_synthetic_tests upgrade_dispatch)
 
     add_executable(hs_vfx_cooked_tests

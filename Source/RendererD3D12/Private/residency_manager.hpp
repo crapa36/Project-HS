@@ -41,6 +41,27 @@ struct ResidencyBudgetSnapshot
 
 enum class ResidencySegment : std::uint8_t { Local, NonLocal };
 
+// A finite, essential-only startup ceiling derived from adapter-reported
+// maximum physical capacity. It is not DXGI current availability and must
+// never be used for optional admission.
+class EssentialBootstrapAdmission
+{
+  public:
+    [[nodiscard]] bool Configure(std::uint64_t local_capacity, std::uint64_t nonlocal_capacity,
+                                 bool unified_memory) noexcept;
+    void Reset() noexcept;
+    [[nodiscard]] bool HasCapacity(ResidencySegment segment) const noexcept;
+    [[nodiscard]] bool CanAdmit(std::uint64_t bytes, ResidencySegment segment) const noexcept;
+    [[nodiscard]] bool Commit(std::uint64_t actual_allocation_bytes,
+                              ResidencySegment segment) noexcept;
+    [[nodiscard]] std::uint64_t Used(ResidencySegment segment) const noexcept;
+
+  private:
+    std::array<std::uint64_t, 2> capacity_{};
+    std::array<std::uint64_t, 2> used_{};
+    bool unified_memory_{};
+};
+
 enum class ResidencyStorage : std::uint8_t
 {
     GpuAllocation,
@@ -80,6 +101,13 @@ struct ResidencyAccounting
     std::array<std::uint64_t, static_cast<std::size_t>(ResidencyCategory::Count)> local_live_bytes{}, local_retiring_bytes{}, nonlocal_live_bytes{}, nonlocal_retiring_bytes{};
 };
 
+struct ResidencyHostAdmissionFacts
+{
+    ResidencyBudgetSnapshot budget;
+    std::uint64_t held_bytes{};
+    bool held_overflow{};
+};
+
 class ResidencyManager
 {
   public:
@@ -110,6 +138,10 @@ class ResidencyManager
 
     [[nodiscard]] bool Contains(ResidencyTicket ticket) const noexcept;
     [[nodiscard]] bool IsPinned(ResidencyTicket ticket) const noexcept;
+    [[nodiscard]] ResidencyHostAdmissionFacts HostAdmissionFacts() const noexcept
+    {
+        return {budget_, host_held_, host_held_overflow_};
+    }
     [[nodiscard]] ResidencyAccounting Accounting() const noexcept;
 
   private:
@@ -135,6 +167,7 @@ class ResidencyManager
     bool unified_memory_{};
     std::unordered_map<std::uint64_t, Allocation> allocations_;
     std::uint64_t next_ticket_{1};
+    std::uint64_t retiring_count_{};
     std::uint64_t reclaimed_total_{};
     std::uint64_t gpu_growth_since_snapshot_{};
     std::array<std::uint64_t, 2> segment_growth_since_snapshot_{};

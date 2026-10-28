@@ -3,6 +3,7 @@
 #include "renderer_grass_benders.hpp"
 #include "renderer_geometry_demand.hpp"
 #include "renderer_geometry.hpp"
+#include "renderer_vfx_compatibility.hpp"
 
 #include <iostream>
 #include <bit>
@@ -135,6 +136,195 @@ void TestOwnedVfxReplacementEquivalence()
             Check(sources[index].position.x==expected[index].position.x,
                 "indexed VFX filtering changed owner matching or stable survivor order");
     }
+}
+
+void TestVfxCompatibilityPreparationEquivalence()
+{
+    using namespace hs;
+    using namespace hs::renderer_detail;
+    const auto ground = [](std::uint64_t stable_id, PersistentVfxKind kind,
+                           VfxGroundShape shape, VfxPrimitive primitive) {
+        VfxGroundSpawnInput input;
+        input.stable_id = stable_id;
+        input.source_visual_kind = static_cast<std::uint8_t>(kind);
+        input.geometry.shape = shape;
+        input.command.primitive = primitive;
+        return input;
+    };
+    const std::vector<VfxGroundSpawnInput> grounds{
+        ground(2, PersistentVfxKind::EnemySlowStatus, VfxGroundShape::PolarRune,
+               VfxPrimitive::Chevron),
+        ground(2, PersistentVfxKind::EnemyMarkStatus, VfxGroundShape::LineBorder,
+               VfxPrimitive::Arrow),
+        ground(3, PersistentVfxKind::DamageTrail, VfxGroundShape::LineBorder,
+               VfxPrimitive::Arrow),
+        ground(3, PersistentVfxKind::DamageTrail, VfxGroundShape::Circle,
+               VfxPrimitive::ExactRing),
+        ground(3, PersistentVfxKind::DamageTrail, VfxGroundShape::Circle,
+               VfxPrimitive::LowFrequencyFill),
+        ground(4, PersistentVfxKind::EnemySlowStatus, VfxGroundShape::Circle,
+               VfxPrimitive::ExactRing),
+        ground(5, PersistentVfxKind::EnemyMarkStatus, VfxGroundShape::ConeBorder,
+               VfxPrimitive::ExactRing),
+    };
+    std::vector<PersistentVfxVisual> visuals(5);
+    visuals[0].stable_id = 1; visuals[0].entity_render_id = 9;
+    visuals[0].kind = PersistentVfxKind::EnemySlowStatus; visuals[0].position.x = 10;
+    visuals[1].stable_id = 2; visuals[1].entity_render_id = 9;
+    visuals[1].kind = PersistentVfxKind::EnemySlowStatus; visuals[1].position.x = 20;
+    visuals[2].stable_id = 2; visuals[2].entity_render_id = 9;
+    visuals[2].kind = PersistentVfxKind::EnemyMarkStatus; visuals[2].position.x = 30;
+    visuals[3].stable_id = 3; visuals[3].kind = PersistentVfxKind::DamageTrail;
+    visuals[4].stable_id = 3; visuals[4].kind = PersistentVfxKind::ChargeGuide;
+
+    const auto legacy_ground_match = [&](std::uint64_t id, std::uint8_t kind,
+                                         VfxGroundShape shape, VfxPrimitive primitive,
+                                         bool preview_enabled) {
+        return std::ranges::any_of(grounds, [&](const auto &candidate) {
+            if (candidate.stable_id != id || candidate.source_visual_kind != kind ||
+                candidate.geometry.shape != shape) return false;
+            if (shape == VfxGroundShape::Circle)
+                return !preview_enabled && candidate.command.primitive == primitive &&
+                       primitive == VfxPrimitive::ExactRing;
+            return shape == VfxGroundShape::PolarRune || shape == VfxGroundShape::LineBorder;
+        });
+    };
+
+    for (const bool preview_enabled : {false, true})
+    {
+        std::vector<VfxGroundCoverage> actual_ground;
+        PrepareVfxGroundCoverage(grounds, preview_enabled, actual_ground);
+        for (const auto &[id, kind, shape, primitive] : {
+                 VfxGroundCoverage{2, static_cast<std::uint8_t>(PersistentVfxKind::EnemySlowStatus),
+                     static_cast<std::uint8_t>(VfxGroundShape::PolarRune), 0},
+                 VfxGroundCoverage{2, static_cast<std::uint8_t>(PersistentVfxKind::EnemyMarkStatus),
+                     static_cast<std::uint8_t>(VfxGroundShape::PolarRune), 0},
+                 VfxGroundCoverage{3, static_cast<std::uint8_t>(PersistentVfxKind::DamageTrail),
+                     static_cast<std::uint8_t>(VfxGroundShape::LineBorder), 0},
+                 VfxGroundCoverage{3, static_cast<std::uint8_t>(PersistentVfxKind::DamageTrail),
+                     static_cast<std::uint8_t>(VfxGroundShape::Circle),
+                     static_cast<std::uint32_t>(VfxPrimitive::ExactRing)},
+                 VfxGroundCoverage{3, static_cast<std::uint8_t>(PersistentVfxKind::DamageTrail),
+                     static_cast<std::uint8_t>(VfxGroundShape::Circle),
+                     static_cast<std::uint32_t>(VfxPrimitive::LowFrequencyFill)},
+                 VfxGroundCoverage{4, static_cast<std::uint8_t>(PersistentVfxKind::EnemySlowStatus),
+                     static_cast<std::uint8_t>(VfxGroundShape::Circle),
+                     static_cast<std::uint32_t>(VfxPrimitive::ExactRing)}})
+        {
+            const auto query_shape = static_cast<VfxGroundShape>(shape);
+            const auto query_primitive = static_cast<VfxPrimitive>(primitive);
+            Check(HasVfxGroundCoverage(actual_ground, id, kind, query_shape, query_primitive) ==
+                      legacy_ground_match(id, kind, query_shape, query_primitive, preview_enabled),
+                  "ground coverage helper changed duplicate, shape, primitive or preview semantics");
+        }
+
+        std::vector<VfxStatusCoverage> actual_status;
+        PrepareVfxStatusCoverage(visuals, actual_ground, actual_status);
+        for (const auto kind : {PersistentVfxKind::EnemySlowStatus,
+                                PersistentVfxKind::EnemyMarkStatus})
+        {
+            const auto expected = std::ranges::any_of(visuals, [&](const auto &visual) {
+                return visual.entity_render_id == 9 && visual.kind == kind &&
+                    legacy_ground_match(visual.stable_id, static_cast<std::uint8_t>(kind),
+                        VfxGroundShape::PolarRune, VfxPrimitive{}, preview_enabled);
+            });
+            Check(HasVfxStatusCoverage(actual_status, 9, static_cast<std::uint8_t>(kind)) == expected,
+                  "status coverage did not preserve any matching duplicate visual");
+        }
+    }
+
+    std::vector<PersistentVfxVisual> previous{
+        visuals[1], visuals[2], visuals[1], visuals[3]};
+    previous[0].position.x = 101; previous[1].position.x = 202;
+    previous[2].position.x = 303; previous[3].position.x = 404;
+    std::vector<PreviousVfxVisualRow> previous_index;
+    PreparePreviousVfxVisualIndex(previous, previous_index);
+    for (const auto kind : {PersistentVfxKind::EnemySlowStatus,
+                            PersistentVfxKind::EnemyMarkStatus,
+                            PersistentVfxKind::DamageTrail,
+                            PersistentVfxKind::ChargeGuide})
+    {
+        const auto expected = std::ranges::find_if(previous, [&](const auto &candidate) {
+            return candidate.stable_id == 2 && candidate.kind == kind;
+        });
+        const auto *actual = FindPreviousVfxVisual(previous_index, 2, kind);
+        Check((expected == previous.end()) == (actual == nullptr) &&
+                  (!actual || actual == &*expected),
+              "previous visual index changed source-order first-match semantics");
+    }
+    std::vector<VfxGroundCoverage> empty_ground;
+    std::vector<VfxStatusCoverage> empty_status;
+    std::vector<PreviousVfxVisualRow> empty_previous;
+    PrepareVfxGroundCoverage({}, false, empty_ground);
+    PrepareVfxStatusCoverage({}, empty_ground, empty_status);
+    PreparePreviousVfxVisualIndex({}, empty_previous);
+    Check(empty_ground.empty() && empty_status.empty() && empty_previous.empty() &&
+              !HasVfxGroundCoverage(empty_ground, 1, 1, VfxGroundShape::LineBorder) &&
+              !HasVfxStatusCoverage(empty_status, 1, 1) &&
+              FindPreviousVfxVisual(empty_previous, 1, PersistentVfxKind::DamageTrail) == nullptr,
+          "empty VFX compatibility inputs did not stay empty");
+}
+
+void TestVfxOwnedMeshDrawRunsPreserveCommandOrder()
+{
+    using namespace hs;
+    using namespace hs::renderer_detail;
+    constexpr std::array<std::uint32_t, 4> vertex_counts{12, 12, 24, 48};
+    const auto command = [](std::uint32_t mesh_index) {
+        VfxOwnedMeshInput input;
+        input.mesh_index = mesh_index;
+        return input;
+    };
+    const auto verify = [&](std::span<const VfxOwnedMeshInput> commands,
+                            std::span<const std::pair<std::size_t, std::uint32_t>> expected_runs) {
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> original_draws;
+        for (const auto &input : commands)
+            original_draws.emplace_back(input.mesh_index, vertex_counts[input.mesh_index - 1]);
+
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> batched_draws;
+        std::size_t first{};
+        std::size_t run_index{};
+        while (first < commands.size())
+        {
+            const auto run = NextVfxOwnedMeshDrawRun(commands, vertex_counts, first);
+            Check(run_index < expected_runs.size() && run.first == first && run.count != 0 &&
+                      run.vertex_count == expected_runs[run_index].second &&
+                      run.count == expected_runs[run_index].first,
+                  "owned mesh run boundaries or native vertex count changed");
+            for (std::size_t index = run.first; index < run.first + run.count; ++index)
+                batched_draws.emplace_back(commands[index].mesh_index, run.vertex_count);
+            first += run.count;
+            ++run_index;
+        }
+        Check(run_index == expected_runs.size() && batched_draws == original_draws,
+              "owned mesh batching reordered or changed per-row mesh draws");
+        const auto end = NextVfxOwnedMeshDrawRun(commands, vertex_counts, commands.size());
+        Check(end.first == commands.size() && end.count == 0 && end.vertex_count == 0,
+              "owned mesh draw run at end boundary was not empty");
+    };
+
+    const std::vector<VfxOwnedMeshInput> empty;
+    Check(NextVfxOwnedMeshDrawRun(empty, vertex_counts, 0).count == 0,
+          "empty owned mesh input produced a draw run");
+    const std::array<std::pair<std::size_t, std::uint32_t>, 0> no_runs{};
+    verify(empty, no_runs);
+
+    const std::array same_count{command(1), command(2), command(2), command(1)};
+    const std::array<std::pair<std::size_t, std::uint32_t>, 1> same_run{{{4, 12}}};
+    verify(same_count, same_run);
+
+    const std::vector<VfxOwnedMeshInput> crowded(200, command(1));
+    const std::array<std::pair<std::size_t, std::uint32_t>, 1> crowded_run{{{200, 12}}};
+    verify(crowded, crowded_run);
+
+    const std::array alternating{command(1), command(2), command(3), command(4), command(2)};
+    const std::array<std::pair<std::size_t, std::uint32_t>, 4> alternating_runs{{
+        {2, 12}, {1, 24}, {1, 48}, {1, 12}}};
+    verify(alternating, alternating_runs);
+
+    const auto last = NextVfxOwnedMeshDrawRun(alternating, vertex_counts, alternating.size() - 1);
+    Check(last.first == alternating.size() - 1 && last.count == 1 && last.vertex_count == 12,
+          "owned mesh final single-row run changed");
 }
 
 void TestExplicitOrderAndReuse()
@@ -426,6 +616,8 @@ int main()
         TestRandomizedEquivalence();
         TestInstanceLookup();
         TestOwnedVfxReplacementEquivalence();
+        TestVfxCompatibilityPreparationEquivalence();
+        TestVfxOwnedMeshDrawRunsPreserveCommandOrder();
         TestGrassBenders();
         TestGeometryDemandCells();
         TestRasterIndexSuffix();

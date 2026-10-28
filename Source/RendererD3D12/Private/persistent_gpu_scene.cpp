@@ -264,9 +264,17 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
 void PersistentGpuSceneSlots::EndFrame()
 {
     changes_.destroyed = 0;
+    pending_removed_slots_.clear();
     if (!reset_scene_)
+    {
+        pending_removed_slots_.reserve(entries_.size());
         for (std::size_t slot = 0; slot < entries_.size(); ++slot)
-            if (entries_[slot].active && !pending_seen_[slot]) ++changes_.destroyed;
+            if (entries_[slot].active && !pending_seen_[slot])
+            {
+                ++changes_.destroyed;
+                pending_removed_slots_.push_back(static_cast<std::uint32_t>(slot));
+            }
+    }
     pending_content_revision_ = content_revision_;
     if (content_changed_ || changes_.destroyed)
         if (++pending_content_revision_ == 0) ++pending_content_revision_;
@@ -296,10 +304,9 @@ void PersistentGpuSceneSlots::Commit()
     else
     {
         free_slots_.resize(free_slots_.size() - pending_reused_slots_);
-        for (std::uint32_t slot = 0; slot < entries_.size(); ++slot)
+        for (const auto slot : pending_removed_slots_)
         {
             auto &entry = entries_[slot];
-            if (!entry.active || pending_seen_[slot]) continue;
             slots_.erase(entry.key);
             entry.active = false;
             free_slots_.push_back(slot);
@@ -315,6 +322,7 @@ void PersistentGpuSceneSlots::Commit()
     for (const auto slot : pending_active_slots_) pending_seen_[slot] = 0;
     pending_active_slots_.clear();
     pending_new_slots_.clear();
+    pending_removed_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -335,6 +343,7 @@ void PersistentGpuSceneSlots::Abort() noexcept
         if (dirty.slot < pending_payload_channels_.size()) pending_payload_channels_[dirty.slot] = 0;
     pending_active_slots_.clear();
     pending_new_slots_.clear();
+    pending_removed_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -374,6 +383,7 @@ void PersistentGpuSceneSlots::Clear() noexcept
     entries_.clear();
     pending_entries_.clear();
     pending_seen_.clear();
+    pending_removed_slots_.clear();
     instances_.clear();
     metadata_.clear();
     payload_slot_revisions_.clear();

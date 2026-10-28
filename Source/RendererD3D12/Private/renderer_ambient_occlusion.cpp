@@ -328,15 +328,21 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
 {
     return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
 }
-bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,const AmbientOcclusionLayout &layout)const noexcept
+bool AmbientOcclusionSystem::MatchesShape(const AmbientOcclusionLayout &layout,
+    bool reset_history, QueueHint queue) const noexcept
 {
     const auto &s=impl_->targets;
     if(!layout.valid||!s||layout.ao!=s->ao_enabled||layout.contact!=s->contact_enabled||
         layout.adaptive!=s->adaptive_compute)return false;
     return (!s->ao_enabled&&!s->contact_enabled)||
-        (layout.history==(s->history_valid&&!inputs.reset_history)&&layout.queue==inputs.queue&&
+        (layout.history==(s->history_valid&&!reset_history)&&layout.queue==queue&&
          layout.render_capacity.width==s->render_capacity.width&&layout.render_capacity.height==s->render_capacity.height&&
-         layout.ao_capacity.width==s->ao_capacity.width&&layout.ao_capacity.height==s->ao_capacity.height&&
+         layout.ao_capacity.width==s->ao_capacity.width&&layout.ao_capacity.height==s->ao_capacity.height);
+}
+bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,const AmbientOcclusionLayout &layout)const noexcept
+{
+    return MatchesShape(layout, inputs.reset_history, inputs.queue) &&
+        ((!impl_->targets->ao_enabled && !impl_->targets->contact_enabled) ||
          layout.guides==std::array{inputs.depth.version,inputs.normal.version,inputs.metadata.version,
              inputs.motion.version,inputs.surface_history.version,inputs.adaptive_density.version});
 }

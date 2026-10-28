@@ -100,7 +100,26 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
                                             D3D12_RESOURCE_STATES initial_state,
                                             const D3D12_CLEAR_VALUE *clear)
 {
-    if (auto admitted = AdmitResidentAllocation(resource, allocation); !admitted)
+    const bool bootstrap_allocation = essential_bootstrap_active &&
+        !resident_preparation_accounting.enabled;
+    ResidencySegment bootstrap_segment = ResidencySegment::Local;
+    if (bootstrap_allocation)
+    {
+        const auto required = device->GetResourceAllocationInfo(0, 1, &resource).SizeInBytes;
+        if (required == UINT64_MAX)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Essential bootstrap resource has no finite native allocation size.");
+        if (!ResidencySegmentForAllocation(allocation, bootstrap_segment))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Essential bootstrap allocation has no resolvable native memory segment.");
+        if (!essential_bootstrap_admission.HasCapacity(bootstrap_segment))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Essential renderer bootstrap has no adapter-reported physical capacity for its native segment.");
+        if (!essential_bootstrap_admission.CanAdmit(required, bootstrap_segment))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Essential renderer bootstrap exceeds the adapter-reported physical memory allowance.");
+    }
+    else if (auto admitted = AdmitResidentAllocation(resource, allocation); !admitted)
         return admitted;
     const auto effective_state =
         enhanced && resource.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER
@@ -118,6 +137,13 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
     {
         output.Reset();
         return contract;
+    }
+    if (bootstrap_allocation &&
+        !essential_bootstrap_admission.Commit(output.allocation->GetSize(), bootstrap_segment))
+    {
+        output.Reset();
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Essential renderer bootstrap allocation exceeds the adapter-reported physical memory allowance.");
     }
     RecordResidentAllocation(output, allocation.HeapType);
     return Result::Success();

@@ -1,98 +1,18 @@
 #include "vfx_typed_screen_commands.hpp"
 #include <algorithm>
-#include <bit>
 #include <cmath>
 #include <numbers>
 #include <string_view>
-#include <utility>
 
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash32(std::string_view s)
-{ std::uint32_t h=2166136261u; for(unsigned char c:s){h^=c;h*=16777619u;} return h; }
 constexpr std::uint64_t Hash64(std::string_view s)
-{ std::uint64_t h=14695981039346656037ull; for(unsigned char c:s){h^=c;h*=1099511628211ull;} return h; }
-constexpr auto kHit=Hash64("particle.player.hit_direction"), kHealth=Hash64("post.player.low_health_vignette");
-template<class T> bool Range(VfxRange r,std::span<const T> v)
-{ return r.first<=v.size()&&r.count<=v.size()-r.first; }
-std::uint64_t EffectId(const VfxProgramView &p,VfxEffectHandle handle)
-{
-    const auto i=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[=](const auto &x){return x.handle==handle;});
-    return i==p.effect_lookup.end()?0:i->effect_id;
-}
+{ std::uint64_t h=14695981039346656037ull;for(unsigned char c:s){h^=c;h*=1099511628211ull;}return h; }
+constexpr auto kHit=Hash64("particle.player.hit_direction"),kHealth=Hash64("post.player.low_health_vignette");
 Result Invalid(const char *message)
 { return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_screen",message); }
-bool Parameters(const VfxProgramView &p,const VfxOutputRecord &o,VfxScreenInput &v)
-{
-    if(!Range(o.parameters,p.parameters))return false;
-    bool center=false,edge=false,direction=false;
-    for(const auto &x:std::span(p.parameters).subspan(o.parameters.first,o.parameters.count))
-    {
-        if(x.key==Hash32("center_clear")&&!center&&x.type==VfxParameterType::Float)
-        { center=true;v.center_clear=std::bit_cast<float>(x.bits); }
-        else if(x.key==Hash32("edge_power")&&!edge&&x.type==VfxParameterType::Float)
-        { edge=true;v.edge_power=std::bit_cast<float>(x.bits); }
-        else if(x.key==Hash32("angle_from_hit")&&!direction&&x.type==VfxParameterType::Bool&&x.bits==1)
-            direction=true;
-        else return false;
-    }
-    return (v.shape==VfxScreenShape::Vignette ? center&&edge&&!direction : direction&&!center&&!edge)&&
-        std::isfinite(v.center_clear)&&v.center_clear>=0&&v.center_clear<1&&
-        std::isfinite(v.edge_power)&&v.edge_power>0;
-}
-bool Textures(const VfxProgramView &p,const VfxOutputRecord &o)
-{
-    if(!Range(o.textures,p.texture_bindings)||o.textures.count!=1)return false;
-    const auto &b=p.texture_bindings[o.textures.first];
-    const auto i=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto &r){return r.slot==b.catalog_slot;});
-    if(i==p.texture_resources.end()||!Range(i->asset_path_bytes,p.strings)||b.role!=Hash32("profile.global")||
-       b.selection||b.slices.count||b.first_frame||b.frame_count||b.fps!=0||b.strength!=1)return false;
-    return std::string_view(reinterpret_cast<const char *>(p.strings.data())+i->asset_path_bytes.first,
-        i->asset_path_bytes.count)=="Content/Textures/VFX/vfx_gradient_lut.dds";
-}
-Result Append(const VfxProgramView &p,const VfxEffectRecord &effect,const VfxContextPayload &context,
-    float phase,float age,bool persistent,VfxQuality admission,std::uint64_t sequence,
-    std::uint64_t owner,std::vector<VfxScreenInput> &commands,float entry_fade=1.0f)
-{
-    if(!Range(effect.sources,p.sources))return Invalid("Screen overlay source range is invalid.");
-    for(auto si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
-    {
-        const auto &s=p.sources[si];
-        if(s.effect!=effect.handle||s.type!=VfxSourceType::Direct||!Range(s.outputs,p.outputs)||
-           !Range(s.parameters,p.parameters)||s.parameters.count||s.knot_count!=2||
-           !std::isfinite(s.knots[0])||!std::isfinite(s.knots[1])||s.knots[0]<0||
-           s.knots[1]<=s.knots[0]||s.knots[1]>1)return Invalid("Screen overlay requires a valid direct source interval.");
-        if(!persistent&&(age<s.knots[0]||age>=s.knots[1]))continue;
-        const float source_age=persistent?age:(age-s.knots[0])/(s.knots[1]-s.knots[0]);
-        for(auto oi=s.outputs.first;oi<s.outputs.first+s.outputs.count;++oi)
-        {
-            const auto &o=p.outputs[oi];if(o.profile!=VfxOutputProfile::ScreenOverlay)continue;
-            VfxScreenInput v;v.event_sequence=sequence;v.owner_id=owner;v.output_index=oi;
-            if(o.shape==Hash32("screen_vignette"))v.shape=VfxScreenShape::Vignette;
-            else if(o.shape==Hash32("directional_arc"))v.shape=VfxScreenShape::DirectionalArc;
-            else return Invalid("Screen overlay shape is unsupported.");
-            if(o.source!=si||o.shape_component_kind!=Hash32("screen")||o.coverage_type!=Hash32("analytic_screen")||
-               o.motion!=(v.shape==VfxScreenShape::Vignette?VfxMotionKind::SlowPulseStateLocked:VfxMotionKind::OptionalTransientArc)||
-               o.min_quality>2||!Parameters(p,o,v)||!Textures(p,o)||!std::isfinite(o.hdr)||o.hdr<0||
-               !std::all_of(o.rgba.begin(),o.rgba.end(),[](float x){return std::isfinite(x)&&x>=0;})||o.rgba[3]>1)
-                return Invalid("Screen overlay output violates its cooked analytic coverage or gradient contract.");
-            if(o.min_quality>std::uint32_t(admission))continue;
-            v.color={o.rgba[0],o.rgba[1],o.rgba[2],1};v.alpha=o.rgba[3];v.hdr=o.hdr;v.gradient_row=o.gradient_row;
-            // Damage carries travel direction toward the victim; the arc points back to its source.
-            v.source_direction={-context.direction.x,-context.direction.y,-context.direction.z};
-            v.gradient_age=std::clamp(source_age,0.0f,1.0f);
-            if(persistent)
-            {
-                v.gradient_age=phase;
-                v.envelope=entry_fade*(0.75f+0.25f*std::cos(2.0f*std::numbers::pi_v<float>*phase));
-            }
-            commands.push_back(v); // Authored alpha zero remains zero, including optional arcs.
-        }
-    }
-    return Result::Success();
-}
 }
 void VfxLowHealthPulseState::Advance(std::uint64_t stable,std::uint64_t owner,Tick tick,float ratio) noexcept
 {
@@ -104,10 +24,8 @@ void VfxLowHealthPulseState::Advance(std::uint64_t stable,std::uint64_t owner,Ti
     {
         previous_tick=last_tick;previous_phase=phase;previous_frequency=frequency;
     }
-    // A newly observed HP value changes future speed, never the accrued phase.
     phase=std::fmod(phase+double(tick-last_tick)*double(frequency)/60.0,1.0);
-    last_tick=tick;
-    frequency=2.0f-ratio/0.35f;
+    last_tick=tick;frequency=2.0f-ratio/0.35f;
 }
 double VfxLowHealthPulseState::PhaseAt(double display_tick) const noexcept
 {
@@ -117,44 +35,71 @@ double VfxLowHealthPulseState::PhaseAt(double display_tick) const noexcept
 }
 float VfxLowHealthPulseState::EntryFade(double display_tick) const noexcept
 {
-    // Nine simulation ticks soften re-entry without delaying the HP snapshot.
     return static_cast<float>(std::clamp((display_tick-static_cast<double>(entered_tick))/9.0,0.0,1.0));
 }
-bool IsVfxTypedScreenEffect(const VfxProgramView &p,VfxEffectHandle handle) noexcept
-{ const auto id=EffectId(p,handle);return id==kHit||id==kHealth; }
-Result BuildVfxTypedScreenCommands(const VfxProgramView &p,VfxEventView events,
+bool IsVfxTypedScreenEffect(const VfxImage &image,VfxEffectHandle handle) noexcept
+{
+    return handle&&handle<=image.screen_effect_recipes.size()&&
+        (image.screen_effect_recipes[handle-1].effect_id==kHit||image.screen_effect_recipes[handle-1].effect_id==kHealth);
+}
+Result BuildVfxTypedScreenCommands(const VfxImage &image,VfxEventView events,
     std::span<const VfxPersistentInput> persistent,Tick observation_tick,double display_tick,VfxQuality admission,
     VfxLowHealthPulseState &pulse,std::vector<VfxScreenInput> &output)
 {
-    output.clear();std::vector<VfxScreenInput> commands;
-    auto next_pulse=pulse;
+    output.clear();std::vector<VfxScreenInput> commands;commands.swap(output);auto next_pulse=pulse;
+    const auto append=[&](const VfxScreenEffectRecipe &effect,const VfxContextPayload &context,
+        float phase,float age,bool persistent_owner,std::uint64_t sequence,std::uint64_t owner,float entry_fade)->Result
+    {
+        if(!effect.route_valid||effect.outputs.first>image.screen_recipes.size()||
+           effect.outputs.count>image.screen_recipes.size()-effect.outputs.first)
+            return Invalid("Screen overlay output violates its prepared source or gradient contract.");
+        for(std::size_t i=effect.outputs.first;i<static_cast<std::size_t>(effect.outputs.first)+effect.outputs.count;++i)
+        {
+            const auto &recipe=image.screen_recipes[i];
+            if(recipe.min_quality>static_cast<std::uint32_t>(admission))continue;
+            if(!persistent_owner&&(age<recipe.knot_start||age>=recipe.knot_end))continue;
+            const float source_age=persistent_owner?age:(age-recipe.knot_start)/(recipe.knot_end-recipe.knot_start);
+            VfxScreenInput v;v.event_sequence=sequence;v.owner_id=owner;v.output_index=recipe.output_index;
+            v.gradient_row=recipe.gradient_row;v.shape=recipe.shape;v.color={recipe.rgb.x,recipe.rgb.y,recipe.rgb.z,1};
+            v.alpha=recipe.alpha;v.hdr=recipe.hdr;v.center_clear=recipe.center_clear;v.edge_power=recipe.edge_power;
+            v.source_direction={-context.direction.x,-context.direction.y,-context.direction.z};
+            v.gradient_age=std::clamp(source_age,0.0f,1.0f);
+            if(persistent_owner)
+            {
+                v.gradient_age=phase;
+                v.envelope=entry_fade*(0.75f+0.25f*std::cos(2.0f*std::numbers::pi_v<float>*phase));
+            }
+            commands.push_back(v);
+        }
+        return Result::Success();
+    };
     for(const auto &v:events)
     {
-        if(EffectId(p,v.effect_handle)!=kHit)continue;
-        if(!v.effect_handle||v.effect_handle>p.effects.size())return Invalid("Screen hit effect handle is invalid.");
-        const auto &e=p.effects[v.effect_handle-1];const auto *c=std::get_if<VfxContextPayload>(&v.payload);
-        if(!c||!v.sequence||e.input_mode!=0||e.timing_kind!=0||e.payload_kind!=Hash32("PresentationContextPayload")||
-           !std::isfinite(e.seconds)||e.seconds<=0||!std::isfinite(c->direction.x)||!std::isfinite(c->direction.y)||
-           !std::isfinite(c->direction.z))return Invalid("Screen hit requires an actual timed damage context.");
+        if(!v.effect_handle||v.effect_handle>image.screen_effect_recipes.size())continue;
+        const auto &effect=image.screen_effect_recipes[v.effect_handle-1];if(effect.effect_id!=kHit)continue;
+        const auto *context=std::get_if<VfxContextPayload>(&v.payload);
+        if(!v.sequence||!context||!effect.route_valid||!std::isfinite(context->direction.x)||
+           !std::isfinite(context->direction.y)||!std::isfinite(context->direction.z))
+            return Invalid("Screen hit requires an actual timed damage context.");
         if(display_tick<v.event_tick)continue;
-        const float elapsed=float(display_tick-v.event_tick)/60.0f;if(elapsed>=e.seconds)continue;
-        if(auto r=Append(p,e,*c,elapsed,elapsed/e.seconds,false,admission,v.sequence,0,commands);!r)return r;
+        const float elapsed=float(display_tick-v.event_tick)/60.0f;if(elapsed>=effect.seconds)continue;
+        if(auto r=append(effect,*context,elapsed,elapsed/effect.seconds,false,v.sequence,0,1.0f);!r)return r;
     }
     bool health_present=false;
     for(const auto &v:persistent)
     {
-        if(EffectId(p,v.effect_handle)!=kHealth)continue;
-        if(!v.effect_handle||v.effect_handle>p.effects.size())return Invalid("Screen health effect handle is invalid.");
-        const auto &e=p.effects[v.effect_handle-1];const auto *c=std::get_if<VfxContextPayload>(&v.payload);
-        if(!c||!v.stable_id||!c->owner_id||health_present||e.input_mode!=1||e.timing_kind!=1||e.payload_kind!=Hash32("PresentationContextPayload")||
-           !std::isfinite(c->ratio01)||c->ratio01<0||c->ratio01>0.35f||
-           !std::isfinite(v.elapsed_seconds)||v.elapsed_seconds<0)return Invalid("Screen health requires its live low-health owner and tick clock.");
-        health_present=true;
-        next_pulse.Advance(v.stable_id,c->owner_id,observation_tick,c->ratio01);
-        if(auto r=Append(p,e,*c,float(next_pulse.PhaseAt(display_tick)),v.normalized_age,true,admission,0,v.stable_id,commands,next_pulse.EntryFade(display_tick));!r)return r;
+        if(!v.effect_handle||v.effect_handle>image.screen_effect_recipes.size())continue;
+        const auto &effect=image.screen_effect_recipes[v.effect_handle-1];if(effect.effect_id!=kHealth)continue;
+        const auto *context=std::get_if<VfxContextPayload>(&v.payload);
+        if(!v.stable_id||!context||!context->owner_id||health_present||!effect.route_valid||
+           !std::isfinite(context->ratio01)||context->ratio01<0||context->ratio01>0.35f||
+           !std::isfinite(v.elapsed_seconds)||v.elapsed_seconds<0)
+            return Invalid("Screen health requires its live low-health owner and tick clock.");
+        health_present=true;next_pulse.Advance(v.stable_id,context->owner_id,observation_tick,context->ratio01);
+        if(auto r=append(effect,*context,float(next_pulse.PhaseAt(display_tick)),v.normalized_age,true,0,
+            v.stable_id,next_pulse.EntryFade(display_tick));!r)return r;
     }
     if(!health_present)next_pulse.Clear();
-    pulse=next_pulse;
-    output=std::move(commands);return Result::Success();
+    pulse=next_pulse;output.swap(commands);return Result::Success();
 }
 }

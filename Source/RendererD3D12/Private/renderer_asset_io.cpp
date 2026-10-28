@@ -14,6 +14,7 @@
 #include <chrono>
 #include <future>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -30,6 +31,45 @@ struct EventOwner
     HANDLE value{};
     ~EventOwner() { if (value) CloseHandle(value); }
 };
+constexpr std::uint32_t kMaxConcurrentAssetCpuTasks = 32;
+struct CpuTaskAdmission
+{
+    std::atomic<std::uint32_t> active{};
+};
+struct CpuTaskLease
+{
+    std::shared_ptr<CpuTaskAdmission> admission;
+    CpuTaskLease() = default;
+    explicit CpuTaskLease(std::shared_ptr<CpuTaskAdmission> owner) : admission(std::move(owner)) {}
+    CpuTaskLease(const CpuTaskLease &) = delete;
+    CpuTaskLease &operator=(const CpuTaskLease &) = delete;
+    CpuTaskLease(CpuTaskLease &&other) noexcept : admission(std::move(other.admission)) {}
+    CpuTaskLease &operator=(CpuTaskLease &&other) noexcept
+    {
+        if (this != &other)
+        {
+            if (admission) admission->active.fetch_sub(1, std::memory_order_acq_rel);
+            admission = std::move(other.admission);
+        }
+        return *this;
+    }
+    ~CpuTaskLease()
+    {
+        if (admission) admission->active.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    explicit operator bool() const noexcept { return static_cast<bool>(admission); }
+};
+std::optional<CpuTaskLease> TryAcquireCpuTask(const std::shared_ptr<CpuTaskAdmission> &admission) noexcept
+{
+    auto active = admission->active.load(std::memory_order_relaxed);
+    while (active < kMaxConcurrentAssetCpuTasks)
+    {
+        if (admission->active.compare_exchange_weak(active, active + 1,
+                std::memory_order_acq_rel, std::memory_order_relaxed))
+            return CpuTaskLease{admission};
+    }
+    return std::nullopt;
+}
 #if HS_WITH_DIRECTSTORAGE
 using Microsoft::WRL::ComPtr;
 struct NativeTransport
@@ -61,6 +101,8 @@ struct ReadOwner
     std::vector<std::byte> bytes;
     std::future<std::vector<std::byte>> future;
     std::future<void> prepare_future;
+    // Permit spans terminal execution through Poll/owner collection, bounding queued results too.
+    CpuTaskLease cpu_task;
     std::shared_ptr<std::atomic_bool> cancellation{std::make_shared<std::atomic_bool>()};
     EventOwner event;
     bool cancelled{}, submitted{};
@@ -96,6 +138,7 @@ struct ReadOwner
 struct RendererAssetIo::Impl
 {
     std::unordered_map<std::uint64_t, std::unique_ptr<ReadOwner>> reads;
+    std::shared_ptr<CpuTaskAdmission> cpu_tasks{std::make_shared<CpuTaskAdmission>()};
     bool initialized{};
     ResidencyTicket transport_ticket;
 #if HS_WITH_DIRECTSTORAGE
@@ -172,6 +215,7 @@ Result RendererAssetIo::ShareTransportFrom(const RendererAssetIo &other, Residen
 #else
     static_cast<void>(residency);
 #endif
+    impl_->cpu_tasks = other.impl_->cpu_tasks;
     impl_->initialized = other.impl_->initialized;
     return Result::Success();
 }
@@ -207,6 +251,18 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         }
         if (total != input.expected_bytes)
             return IoFailure("Immutable asset range total differs from its host reservation.");
+    }
+    std::optional<CpuTaskLease> cpu_task;
+    const bool native_file_read =
+#if HS_WITH_DIRECTSTORAGE
+        impl_->transport && !input.source.pack;
+#else
+        false;
+#endif
+    if (!native_file_read)
+    {
+        cpu_task = TryAcquireCpuTask(impl_->cpu_tasks);
+        if (!cpu_task) return Result::Success(); // Requested remains eligible for a later pump.
     }
     auto read = std::make_unique<ReadOwner>();
     read->input = std::move(input);
@@ -296,6 +352,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     const auto source = read->input.source;
     const auto expected = read->input.expected_bytes;
     const auto key = read->input.request.value;
+    read->cpu_task = std::move(*cpu_task);
     auto *retained = read.get();
     impl_->reads.emplace(key, std::move(read));
     if (!streaming.BeginRead({key}) || !streaming.SubmitRead({key}))
@@ -303,9 +360,10 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     try
     {
         const auto prepare = retained->input.prepare;
-        const auto ranges = retained->input.ranges;
+        auto ranges = std::move(retained->input.ranges);
         const auto cancellation = retained->cancellation;
-        retained->future = std::async(std::launch::async, [source, expected, prepare, ranges, cancellation] {
+        retained->future = std::async(std::launch::async, [source, expected, prepare,
+                                                               ranges = std::move(ranges), cancellation] {
             std::vector<std::byte> bytes;
             if (ranges.empty())
             {
@@ -396,29 +454,40 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         {
             if (!read.prepare_future.valid())
             {
+                auto cpu_task = TryAcquireCpuTask(impl_->cpu_tasks);
+                if (!cpu_task) return Result::Success(); // Keep bytes and marker owner until verification can be admitted.
+                read.cpu_task = std::move(*cpu_task);
                 const auto prepare = read.input.prepare;
-                const auto ranges = read.input.ranges;
                 const auto source_range = read.input.source.range;
                 const auto cancellation = read.cancellation;
                 auto *bytes = &read.bytes;
-                read.prepare_future = std::async(std::launch::async, [prepare, ranges, source_range, cancellation, bytes] {
-                    if (cancellation->load(std::memory_order_acquire)) return;
-                    if (ranges.empty() && source_range.byte_count && Sha256(*bytes) != source_range.expected_digest)
-                        throw std::runtime_error("Immutable file digest mismatch.");
-                    if (!ranges.empty())
-                    {
-                        std::size_t offset{};
-                        for (const auto &range : ranges)
+                try
+                {
+                    read.prepare_future = std::async(std::launch::async, [prepare,
+                        ranges = read.input.ranges, source_range, cancellation, bytes] {
+                        if (cancellation->load(std::memory_order_acquire)) return;
+                        if (ranges.empty() && source_range.byte_count && Sha256(*bytes) != source_range.expected_digest)
+                            throw std::runtime_error("Immutable file digest mismatch.");
+                        if (!ranges.empty())
                         {
-                            if (range.byte_count > bytes->size() - offset ||
-                                Sha256(std::span<const std::byte>(*bytes).subspan(offset, range.byte_count)) != range.digest)
-                                throw std::runtime_error("Immutable subresource range digest mismatch.");
-                            offset += range.byte_count;
+                            std::size_t offset{};
+                            for (const auto &range : ranges)
+                            {
+                                if (range.byte_count > bytes->size() - offset ||
+                                    Sha256(std::span<const std::byte>(*bytes).subspan(offset, range.byte_count)) != range.digest)
+                                    throw std::runtime_error("Immutable subresource range digest mismatch.");
+                                offset += range.byte_count;
+                            }
+                            if (offset != bytes->size()) throw std::runtime_error("Immutable subresource ranges are incomplete.");
                         }
-                        if (offset != bytes->size()) throw std::runtime_error("Immutable subresource ranges are incomplete.");
-                    }
-                    if (!cancellation->load(std::memory_order_acquire) && prepare) prepare(*bytes);
-                });
+                        if (!cancellation->load(std::memory_order_acquire) && prepare) prepare(*bytes);
+                    });
+                }
+                catch (...)
+                {
+                    read.cpu_task = {};
+                    throw;
+                }
             }
         }
         if (read.prepare_future.valid())

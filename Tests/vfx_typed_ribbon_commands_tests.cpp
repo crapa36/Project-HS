@@ -1,4 +1,5 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ribbon_commands.hpp"
 #include "test_generation_paths.hpp"
 
@@ -10,10 +11,74 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace hs::runtime_detail
+{
+std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+{
+    VfxImageData data;
+    data.program = program;
+    PrepareVfxRibbonRecipes(program.View(), data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes,
+        data.ribbon_texture_recipes, data.ribbon_slice_indices);
+    PrepareVfxRibbonWakeRecipes(data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_slice_indices, data.ribbon_wake_effect_ranges, data.ribbon_wake_recipes);
+    PrepareVfxRibbonFixedRecipes(data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_slice_indices, data.ribbon_fixed_effect_ranges, data.ribbon_fixed_recipes);
+    PrepareVfxRibbonProjectileRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_projectile_effect_ranges, data.ribbon_projectile_sources,
+        data.ribbon_projectile_outputs);
+    PrepareVfxRibbonCancelRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_cancel_effect_ranges, data.ribbon_cancel_recipes);
+    PrepareVfxRibbonLinkRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_link_effect_recipes, data.ribbon_link_output_recipes);
+    PrepareVfxRibbonEventRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_event_effect_recipes, data.ribbon_event_sources, data.ribbon_event_outputs);
+    return BuildVfxTypedRibbonInputs(data.View(), inputs);
+}
+
+std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
+    const VfxProgramData &program, VfxEventView events, double current_tick)
+{
+    VfxImageData data;
+    data.program = program;
+    PrepareVfxRibbonRecipes(program.View(), data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes,
+        data.ribbon_texture_recipes, data.ribbon_slice_indices);
+    PrepareVfxRibbonWakeRecipes(data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_slice_indices, data.ribbon_wake_effect_ranges, data.ribbon_wake_recipes);
+    PrepareVfxRibbonFixedRecipes(data.ribbon_effect_recipes,
+        data.ribbon_source_recipes, data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_slice_indices, data.ribbon_fixed_effect_ranges, data.ribbon_fixed_recipes);
+    PrepareVfxRibbonProjectileRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_projectile_effect_ranges, data.ribbon_projectile_sources,
+        data.ribbon_projectile_outputs);
+    PrepareVfxRibbonCancelRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes,
+        data.ribbon_cancel_effect_ranges, data.ribbon_cancel_recipes);
+    PrepareVfxRibbonLinkRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_link_effect_recipes, data.ribbon_link_output_recipes);
+    PrepareVfxRibbonEventRecipes(data.ribbon_effect_recipes, data.ribbon_source_recipes,
+        data.ribbon_output_recipes, data.ribbon_texture_recipes, data.ribbon_slice_indices,
+        data.ribbon_event_effect_recipes, data.ribbon_event_sources, data.ribbon_event_outputs);
+    return BuildVfxEventRibbonInputs(data.View(), events, current_tick);
+}
+}
 
 namespace
 {
@@ -40,6 +105,44 @@ std::uint64_t Hash64(std::string_view value)
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+bool SameRibbonSources(std::span<const hs::VfxRibbonSourceInput> lhs,
+                       std::span<const hs::VfxRibbonSourceInput> rhs)
+{
+    if (lhs.size() != rhs.size()) return false;
+    for (std::size_t index = 0; index < lhs.size(); ++index)
+    {
+        const auto &a = lhs[index];
+        const auto &b = rhs[index];
+        if (a.owner_id != b.owner_id || a.effect_handle != b.effect_handle ||
+            a.source_id != b.source_id || a.stable_seed != b.stable_seed ||
+            a.importance != b.importance || a.position.x != b.position.x ||
+            a.position.y != b.position.y || a.position.z != b.position.z ||
+            a.previous_position.x != b.previous_position.x ||
+            a.previous_position.y != b.previous_position.y ||
+            a.previous_position.z != b.previous_position.z ||
+            a.history_seconds != b.history_seconds || a.start_alpha != b.start_alpha ||
+            a.analytic != b.analytic || a.control.x != b.control.x ||
+            a.control.y != b.control.y || a.control.z != b.control.z ||
+            a.segments != b.segments || a.normalized_age != b.normalized_age ||
+            a.outputs.size() != b.outputs.size())
+            return false;
+        for (std::size_t output = 0; output < a.outputs.size(); ++output)
+        {
+            const auto &x = a.outputs[output];
+            const auto &y = b.outputs[output];
+            if (x.profile != y.profile || x.motion != y.motion ||
+                x.color.x != y.color.x || x.color.y != y.color.y ||
+                x.color.z != y.color.z || x.color.w != y.color.w ||
+                x.width_head != y.width_head || x.width_tail != y.width_tail ||
+                x.noise_warp != y.noise_warp || x.phase_offset != y.phase_offset ||
+                x.hdr != y.hdr || x.detail_strength != y.detail_strength ||
+                x.gradient_row != y.gradient_row || x.detail_slice != y.detail_slice ||
+                x.dashed != y.dashed || x.travel_pulse != y.travel_pulse)
+                return false;
+        }
+    }
+    return true;
 }
 hs::VfxParameterRecord FloatParam(std::string_view key, float value)
 {
@@ -154,6 +257,71 @@ void TestBossDashWakeRibbon()
     std::get<hs::VfxLinePayload>(malformed.payload).lifetime01 = 1.0f;
     Check(hs::runtime_detail::BuildVfxTypedRibbonInputs(cooked, std::array{malformed}).empty(),
           "expired dash wake retained a ribbon");
+
+    hs::VfxImageData prepared;
+    prepared.program = cooked;
+    hs::PrepareVfxRibbonRecipes(prepared.program.View(), prepared.ribbon_effect_recipes,
+        prepared.ribbon_source_recipes, prepared.ribbon_output_recipes,
+        prepared.ribbon_texture_recipes, prepared.ribbon_slice_indices);
+    hs::PrepareVfxRibbonWakeRecipes(prepared.ribbon_effect_recipes,
+        prepared.ribbon_source_recipes, prepared.ribbon_output_recipes,
+        prepared.ribbon_texture_recipes, prepared.ribbon_slice_indices,
+        prepared.ribbon_wake_effect_ranges, prepared.ribbon_wake_recipes);
+    hs::VfxRibbonSourceInput prefix;
+    prefix.owner_id = 901;
+    std::vector<hs::VfxRibbonSourceInput> appended{prefix};
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{input}, appended);
+    Check(appended.size() == 2 && appended[0].owner_id == 901 && appended[1].owner_id == 74,
+          "persistent ribbon append changed existing rows or source order");
+
+    hs::runtime_detail::VfxRibbonInputScratch scratch;
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{input}, scratch);
+    const auto first_sources = scratch.Sources();
+    Check(SameRibbonSources(first_sources, ribbons),
+          "retained persistent ribbon rows differed from the returning API");
+    hs::runtime_detail::VfxRibbonInputScratch appended_scratch;
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{input}, appended_scratch);
+    const auto appended_prefix = appended_scratch.Sources()[0];
+    auto second_input = input;
+    second_input.stable_id = 75;
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{second_input}, appended_scratch);
+    Check(appended_scratch.Sources().size() == 2 &&
+              SameRibbonSources(std::span(&appended_prefix, 1), appended_scratch.Sources().first(1)) &&
+              appended_scratch.Sources()[1].owner_id == second_input.stable_id,
+          "persistent scratch append changed its accepted prefix or source order");
+    const auto output_backing = scratch.Storage()[0].outputs.data();
+    const auto output_capacity = scratch.Storage()[0].outputs.capacity();
+    const auto row_capacity = scratch.StorageCapacity();
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{input}, scratch);
+    Check(scratch.Sources().size() == 1 && scratch.StorageCapacity() == row_capacity &&
+              scratch.Storage()[0].outputs.data() == output_backing &&
+              scratch.Storage()[0].outputs.capacity() == output_capacity,
+          "warm persistent ribbon append replaced retained source/output storage");
+    auto malformed = input;
+    std::get<hs::VfxLinePayload>(malformed.payload).lifetime01 = 1.0f;
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{malformed}, scratch);
+    Check(scratch.Sources().empty() && scratch.Storage().size() == 1 &&
+              scratch.Storage()[0].outputs.empty(),
+          "rejected persistent ribbon exposed an inactive scratch row");
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), std::array{input}, scratch);
+    Check(scratch.Sources().size() == 1 && scratch.Storage()[0].outputs.data() == output_backing,
+          "persistent ribbon scratch did not regrow into retained output backing");
+    const std::array two_inputs{input, second_input};
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(prepared.View(), two_inputs, scratch);
+    Check(scratch.Sources().size() == 2 && scratch.Sources()[0].owner_id == 74 &&
+              scratch.Sources()[1].owner_id == 75 && scratch.Storage().size() == 2,
+          "persistent ribbon scratch changed accepted source order while growing");
+    auto changed_catalog = prepared;
+    changed_catalog.ribbon_wake_recipes[0].width_head = .22f;
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxTypedRibbonInputs(changed_catalog.View(), std::array{input}, scratch);
+    Check(scratch.Sources().size() == 1 && scratch.Sources()[0].outputs[0].width_head == .22f &&
+              scratch.Storage()[0].outputs.data() == output_backing,
+          "persistent ribbon scratch retained stale output values across catalog changes");
 }
 
 void TestCookedBossDashWakeRibbon()
@@ -188,6 +356,72 @@ void TestCookedBossDashWakeRibbon()
                   hs::VfxMotionKind::HistoryRibbonTearsBackward &&
               ribbons[0].outputs[0].detail_slice < 8,
           "production dash wake did not decode its paired ground rails");
+}
+
+void TestChargedShotCancelRibbon()
+{
+    hs::VfxProgramData program;
+    hs::VfxEffectRecord effect{};
+    effect.handle = 1;
+    effect.input_mode = 0;
+    effect.timing_kind = 0;
+    effect.payload_kind = Hash("EntityAttachmentPayload");
+    effect.importance = 3;
+    effect.seconds = .9f;
+    effect.sources = {0, 1};
+    program.effects.push_back(effect);
+    program.effect_lookup.push_back({Hash64("particle.skill.charged_shot.cancel"), 1});
+    program.parameters = {FloatParam("history_seconds", .24f),
+                          FloatParam("reverse_flow", 1.0f),
+                          FloatParam("width_head", .08f),
+                          FloatParam("width_tail", .04f)};
+    hs::VfxSourceRecord source{};
+    source.effect = 1;
+    source.stable_id = Hash("retract_ribbon");
+    source.type = hs::VfxSourceType::HistoryRibbon;
+    source.knot_count = 2;
+    source.knots = {0, 1};
+    source.parameters = {0, 1};
+    source.outputs = {0, 1};
+    program.sources.push_back(source);
+    hs::VfxOutputRecord output{};
+    output.source = 0;
+    output.profile = hs::VfxOutputProfile::RibbonAdd;
+    output.shape = Hash("dual_retract_ribbon");
+    output.motion = hs::VfxMotionKind::ReverseFlowBow;
+    output.rgba = {.2f, .3f, .4f, .8f};
+    output.hdr = 2.0f;
+    output.gradient_row = 7;
+    output.parameters = {1, 3};
+    program.outputs.push_back(output);
+
+    hs::VfxEventInput event{};
+    event.effect_handle = 1;
+    event.event_tick = 100;
+    event.sequence = 41;
+    event.payload = hs::VfxEntityPayload{.5f, .1f, .8f, 0, 22};
+    const auto ribbons = hs::runtime_detail::BuildVfxEventRibbonInputs(
+        program, std::array{event}, 106);
+    Check(ribbons.size() == 1 && ribbons[0].owner_id == event.sequence &&
+          ribbons[0].effect_handle == event.effect_handle && ribbons[0].outputs.size() == 1 &&
+          ribbons[0].outputs[0].motion == hs::VfxMotionKind::ReverseFlowBow,
+          "accepted cancel range did not route the entity event");
+
+    auto malformed = program;
+    malformed.effect_lookup[0].effect_id = Hash64("particle.enemy.other");
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(
+              malformed, std::array{event}, 106).empty(),
+          "unrelated effect identity entered the prepared cancel range");
+    auto invalid = event;
+    invalid.quality = static_cast<hs::VfxQuality>(3);
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(
+              program, std::array{invalid}, 106).empty(),
+          "cancel route accepted an invalid live quality");
+    invalid = event;
+    std::get<hs::VfxEntityPayload>(invalid.payload).footprint_radius = 0.0f;
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(
+              program, std::array{invalid}, 106).empty(),
+          "cancel route accepted a nonpositive live footprint");
 }
 
 void TestAnalyticLinks()
@@ -305,6 +539,93 @@ void TestEventRecoilRibbon()
     invalid.outputs[0].motion = hs::VfxMotionKind::VelocityAligned;
     Check(hs::runtime_detail::BuildVfxEventRibbonInputs(invalid, events, 0).empty(),
           "unsupported recoil motion was accepted");
+    invalid = program;
+    invalid.sources[0].knot_count = 3;
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(invalid, events, 30).empty(),
+          "recoil recipe with unsupported knot count passed admission");
+    invalid = program;
+    invalid.effects[0].seconds = 0.0f;
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(invalid, events, 30).empty(),
+          "recoil recipe with invalid duration passed cold admission");
+    auto wrong_payload = event;
+    wrong_payload.payload = hs::VfxCirclePayload{{1, 2, 3}, {}, 1, 0, 0, 0};
+    Check(hs::runtime_detail::BuildVfxEventRibbonInputs(
+              program, std::array{wrong_payload}, 30).empty(),
+          "recoil recipe accepted a mismatched live event payload");
+    auto ordered = program;
+    auto second_output = ordered.outputs[0];
+    second_output.profile = hs::VfxOutputProfile::RibbonOit;
+    ordered.outputs.push_back(second_output);
+    ordered.sources[0].outputs.count = 2;
+    const auto ordered_ribbons = hs::runtime_detail::BuildVfxEventRibbonInputs(
+        ordered, events, 30);
+    Check(ordered_ribbons.size() == 1 && ordered_ribbons[0].outputs.size() == 2 &&
+          ordered_ribbons[0].outputs[0].profile == hs::VfxOutputProfile::RibbonAdd &&
+          ordered_ribbons[0].outputs[1].profile == hs::VfxOutputProfile::RibbonOit,
+          "prepared recoil outputs changed authored output order");
+
+    hs::VfxImageData prepared;
+    prepared.program = program;
+    hs::PrepareVfxRibbonRecipes(prepared.program.View(), prepared.ribbon_effect_recipes,
+        prepared.ribbon_source_recipes, prepared.ribbon_output_recipes,
+        prepared.ribbon_texture_recipes, prepared.ribbon_slice_indices);
+    hs::PrepareVfxRibbonEventRecipes(prepared.ribbon_effect_recipes,
+        prepared.ribbon_source_recipes, prepared.ribbon_output_recipes,
+        prepared.ribbon_texture_recipes, prepared.ribbon_slice_indices,
+        prepared.ribbon_event_effect_recipes, prepared.ribbon_event_sources,
+        prepared.ribbon_event_outputs);
+    hs::VfxRibbonSourceInput prefix;
+    prefix.owner_id = 900;
+    std::vector<hs::VfxRibbonSourceInput> appended{prefix};
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), events, 30, appended);
+    Check(appended.size() == 2 && appended[0].owner_id == 900 && appended[1].owner_id == 77,
+          "event ribbon append did not preserve existing rows and authored event order");
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), {}, 30, appended);
+    Check(appended.size() == 2 && appended[0].owner_id == 900,
+          "empty event ribbon append changed caller-owned rows");
+
+    const auto expected = hs::runtime_detail::BuildVfxEventRibbonInputs(program, events, 30);
+    hs::runtime_detail::VfxRibbonInputScratch scratch;
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), events, 30, scratch);
+    Check(SameRibbonSources(scratch.Sources(), expected),
+          "retained event ribbon rows differed from the returning API");
+    hs::runtime_detail::VfxRibbonInputScratch appended_scratch;
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), events, 30, appended_scratch);
+    const auto appended_prefix = appended_scratch.Sources()[0];
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), events, 30, appended_scratch);
+    Check(appended_scratch.Sources().size() == expected.size() * 2 &&
+              SameRibbonSources(std::span(&appended_prefix, 1), appended_scratch.Sources().first(1)) &&
+              SameRibbonSources(appended_scratch.Sources().first(expected.size()), expected),
+          "event scratch append changed its accepted prefix or source order");
+    const auto output_backing = scratch.Storage()[0].outputs.data();
+    const auto output_capacity = scratch.Storage()[0].outputs.capacity();
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), events, 30, scratch);
+    Check(scratch.Sources().size() == expected.size() &&
+              scratch.Storage()[0].outputs.data() == output_backing &&
+              scratch.Storage()[0].outputs.capacity() == output_capacity,
+          "warm event ribbon append replaced retained output storage");
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxEventRibbonInputs(prepared.View(), {}, 30, scratch);
+    Check(scratch.Sources().empty() && scratch.Storage().size() == 1,
+          "empty event ribbon selection exposed inactive rows");
+    hs::VfxImageData ordered_prepared;
+    ordered_prepared.program = ordered;
+    hs::PrepareVfxRibbonRecipes(ordered_prepared.program.View(), ordered_prepared.ribbon_effect_recipes,
+        ordered_prepared.ribbon_source_recipes, ordered_prepared.ribbon_output_recipes,
+        ordered_prepared.ribbon_texture_recipes, ordered_prepared.ribbon_slice_indices);
+    hs::PrepareVfxRibbonEventRecipes(ordered_prepared.ribbon_effect_recipes,
+        ordered_prepared.ribbon_source_recipes, ordered_prepared.ribbon_output_recipes,
+        ordered_prepared.ribbon_texture_recipes, ordered_prepared.ribbon_slice_indices,
+        ordered_prepared.ribbon_event_effect_recipes, ordered_prepared.ribbon_event_sources,
+        ordered_prepared.ribbon_event_outputs);
+    scratch.Reset();
+    hs::runtime_detail::AppendVfxEventRibbonInputs(ordered_prepared.View(), events, 30, scratch);
+    Check(scratch.Sources().size() == ordered_ribbons.size() &&
+              scratch.Sources()[0].outputs.size() == 2 &&
+              scratch.Sources()[0].outputs[0].profile == hs::VfxOutputProfile::RibbonAdd &&
+              scratch.Sources()[0].outputs[1].profile == hs::VfxOutputProfile::RibbonOit,
+          "event ribbon scratch changed catalog output order after reuse");
 }
 }
 
@@ -960,6 +1281,7 @@ int RunVfxRibbonTests()
     {
         TestBossDashWakeRibbon();
         TestCookedBossDashWakeRibbon();
+        TestChargedShotCancelRibbon();
         TestEventRecoilRibbon();
         TestAnalyticLinks();
         TestEventImpactAxialRibbon();

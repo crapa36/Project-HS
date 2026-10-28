@@ -1,6 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "vfx_upgrade_dispatch.hpp"
 #include "vfx_typed_frame_adapter.hpp"
+#include "vfx_image_fixture.hpp"
 #include <hs/core/cooked_format.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/gameplay/game_simulation.hpp>
@@ -686,16 +687,25 @@ void RealSecondRetreatRetainsCapturedGeometry()
               program,std::span(projected).first(count),dispatched).Succeeded()&&dispatched.size()==2,
           "real second retreat did not dispatch its two exact bound persistent recipes");
     hs::runtime_detail::VfxUpgradeMovementState state;
-    const auto start=state.Emit(program,dispatched,movement.tick);
-    const auto retained=state.Emit(program,dispatched,movement.tick+1);
+    const hs::test::VfxLookupImage image(program);
+    const auto emit = [&](std::span<const hs::PresentationEvent> events, hs::Tick tick) {
+        std::vector<hs::VfxPersistentInput> output(1);
+        output.front().stable_id = 77;
+        state.Append(image, events, tick, output);
+        Check(output.front().stable_id == 77, "movement append replaced prior frame inputs");
+        output.erase(output.begin());
+        return output;
+    };
+    const auto start=emit(dispatched,movement.tick);
+    const auto retained=emit(dispatched,movement.tick+1);
     Check(start.size()==2&&retained.size()==2&&start[0].stable_id==retained[0].stable_id&&
           start[0].stable_id!=start[1].stable_id,
           "retained second retreat duplicated its capture or collapsed recipe identities");
     const auto &line=std::get<hs::VfxLinePayload>(retained[0].payload);
     Check(line.start.x==movement.position.x&&line.end.x==movement.geometry.end_position.x&&
           line.width==movement.geometry.width&&retained[0].elapsed_seconds==1.0f/60.0f&&
-          state.Emit(program,{},movement.tick+30).size()==1&&
-          state.Emit(program,{},movement.tick+33).empty(),
+          emit({},movement.tick+30).size()==1&&
+          emit({},movement.tick+33).empty(),
           "captured retreat line moved after activation or survived its authored fade");
     Check(simulation.Shutdown().Succeeded(),"second retreat shutdown");
 }
@@ -982,8 +992,8 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
         Check(expected_lookup!=program.effect_lookup.end() &&
               expected_lookup->effect_id==expected_effect_id,
               "slow-area cooked alias fixture changed its authored effect");
-        const auto adapted=hs::runtime_detail::BuildVfxTypedFrameInputs(
-            program,{},std::array{owner},{},snapshot.View().header.tick);
+        const auto adapted=hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(program),{},std::array{owner},{},snapshot.View().header.tick);
         Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==2,
               "slow-area owner did not submit its alias and bound base recipe");
         Check(adapted.persistent.front().effect_handle==expected_effect &&
@@ -1059,8 +1069,8 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
               std::abs(owner->position.z-slow_area.position.y)<0.0001f &&
               std::abs(owner->radius-slow_area.radius)<0.0001f,
               "slow-area owner must preserve exact flat/meadow geometry and metadata");
-        const auto adapted=hs::runtime_detail::BuildVfxTypedFrameInputs(
-            slow_program,{},std::array{*owner},{},snapshot.View().header.tick);
+        const auto adapted=hs::test::BuildFrameInputs(
+            hs::test::VfxLookupImage(slow_program),{},std::array{*owner},{},snapshot.View().header.tick);
         Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==2 &&
               adapted.persistent[0].effect_handle==2 &&
               adapted.persistent[0].stable_id==owner->stable_id &&

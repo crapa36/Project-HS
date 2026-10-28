@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hs
 {
@@ -51,6 +52,89 @@ struct TextureStreamingCapabilities
         ++end;
     }
     return end;
+}
+// Find the first mip whose complete remaining authenticated payload fits beside
+// prepared metadata. Registration validates the immutable descriptor; keep the
+// checks here so malformed ranges cannot be mistaken for optional quality.
+[[nodiscard]] inline bool TextureReadMinimumHostMip(
+    const render_data::TextureDescription &description,
+    std::span<const render_data::TextureSubresourceLayout> layouts,
+    std::uint64_t metadata_bytes, std::uint64_t host_budget,
+    std::uint32_t &minimum_mip) noexcept
+{
+    const auto subresource_count = static_cast<std::uint64_t>(description.array_size) * description.mip_count;
+    if (!description.array_size || !description.mip_count || subresource_count != layouts.size()) return false;
+    const bool metadata_fits = metadata_bytes < host_budget;
+    const auto payload_budget = metadata_fits ? host_budget - metadata_bytes : 0u;
+    minimum_mip = 0;
+    for (std::uint32_t slice = 0; slice < description.array_size; ++slice)
+        for (std::uint32_t mip = 0; mip < description.mip_count; ++mip)
+        {
+            const auto &layout = layouts[static_cast<std::size_t>(slice) * description.mip_count + mip];
+            if (!layout.has_digest || !layout.byte_count) return false;
+            if (!metadata_fits || layout.byte_count > payload_budget)
+                minimum_mip = std::max(minimum_mip, mip + 1u);
+        }
+    return true;
+}
+// Clamp requested software detail using the intrinsic host ceiling. Other
+// owners' temporary holds are accounted separately when admitting each chunk.
+[[nodiscard]] inline std::uint32_t TextureReadTargetMip(
+    const render_data::TextureDescription &description,
+    std::span<const render_data::TextureSubresourceLayout> layouts,
+    std::uint32_t requested, std::uint32_t tail, std::uint64_t metadata_bytes,
+    std::uint64_t host_budget, std::uint32_t fallback) noexcept
+{
+    std::uint32_t minimum_mip{};
+    if (requested > tail || !TextureReadMinimumHostMip(description, layouts,
+            metadata_bytes, host_budget, minimum_mip))
+        return fallback;
+    const auto target = std::max(requested, minimum_mip);
+    return target <= tail ? target : fallback;
+}
+[[nodiscard]] constexpr std::uint32_t TextureEffectiveHostTargetMip(
+    std::uint32_t requested, std::uint32_t tail, std::uint32_t minimum_host_mip,
+    std::uint32_t fallback, std::uint32_t resident_mip, bool has_published_backing) noexcept
+{
+    if (minimum_host_mip > tail) return fallback;
+    const auto target = std::max(requested, minimum_host_mip);
+    // A host ceiling limits transfers. It does not justify evicting detail
+    // already published at a finer mip than the cap permits us to reload.
+    return has_published_backing && minimum_host_mip > requested
+        ? std::min(target, resident_mip) : target;
+}
+[[nodiscard]] inline bool TextureBuildBudgetVictimOrder(
+    std::span<const std::uint32_t> priorities,
+    std::span<const std::uint32_t> desired_mips,
+    std::span<const std::uint32_t> tail_mips,
+    std::vector<std::uint32_t> &indices)
+{
+    if (priorities.size() != desired_mips.size() || priorities.size() != tail_mips.size()) return false;
+    indices.clear();
+    for (std::uint32_t index = 0; index < priorities.size(); ++index)
+        if (desired_mips[index] < tail_mips[index]) indices.push_back(index);
+    std::ranges::sort(indices, [&](std::uint32_t left, std::uint32_t right) {
+        return priorities[left] != priorities[right] ? priorities[left] < priorities[right] : left < right;
+    });
+    return true;
+}
+[[nodiscard]] inline bool TextureCoarsenOneMip(
+    std::uint32_t &mip, std::uint32_t tail_mip, std::span<const std::uint64_t> mip_costs,
+    std::uint64_t &planned_bytes) noexcept
+{
+    if (mip >= tail_mip || mip_costs.size() <= tail_mip || mip_costs[mip] < mip_costs[mip + 1u]) return false;
+    const auto released = mip_costs[mip] - mip_costs[mip + 1u];
+    if (planned_bytes < released) return false;
+    planned_bytes -= released;
+    ++mip;
+    return true;
+}
+[[nodiscard]] inline bool TextureAccumulateBudgetBytes(std::uint64_t &total,
+                                                       std::uint64_t bytes) noexcept
+{
+    if (total > UINT64_MAX - bytes) return false;
+    total += bytes;
+    return true;
 }
 struct TextureStreamRegistration
 {

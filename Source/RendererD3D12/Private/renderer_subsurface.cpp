@@ -259,11 +259,15 @@ Result SubsurfaceSystem::Register(RenderGraphBuilder &graph, const SubsurfaceInp
     return RegisterFrame(graph, inputs, constants, outputs, layout, nullptr);
 }
 
-bool SubsurfaceSystem::MatchesLayout(const SubsurfaceInputs &inputs, const SubsurfaceLayout &layout) const noexcept
+bool SubsurfaceSystem::MatchesShape(const SubsurfaceLayout &layout) const noexcept
 {
     const auto &storage = impl_->targets;
     if (!layout.valid || !storage || layout.enabled != storage->enabled) return false;
-    return !storage->enabled || (layout.capacity.width==storage->capacity.width&&layout.capacity.height==storage->capacity.height&&
+    return !storage->enabled || (layout.capacity.width==storage->capacity.width&&layout.capacity.height==storage->capacity.height);
+}
+bool SubsurfaceSystem::MatchesLayout(const SubsurfaceInputs &inputs, const SubsurfaceLayout &layout) const noexcept
+{
+    return MatchesShape(layout) && (!impl_->targets->enabled ||
         layout.guides == std::array{inputs.depth.version, inputs.normal.version,
             inputs.metadata.version, inputs.material_parameters.version, inputs.diffuse.version, inputs.hdr.version});
 }

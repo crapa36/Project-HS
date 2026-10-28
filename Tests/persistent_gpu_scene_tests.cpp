@@ -316,6 +316,34 @@ void PayloadRevisionRangesTrackRotatingUploads()
     Check(ranges.size() == 1 && ranges[0].begin == 0,
           "post-clear rows cannot silently match an older uploaded revision");
 }
+
+void PreparedRemovalSetPreservesCommitAndAbortOrder()
+{
+    hs::PersistentGpuSceneSlots scene;
+    scene.BeginFrame();
+    for (std::uint64_t id = 1; id <= 5; ++id)
+        static_cast<void>(scene.Upsert({id, 0}, Instance(static_cast<float>(id))));
+    scene.EndFrame();
+    scene.Commit();
+
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({1, 0}, Instance(1.0f)));
+    scene.EndFrame();
+    Check(scene.Changes().destroyed == 4,
+          "prepared removal set lost the ordered retirement count");
+    scene.Abort();
+
+    scene.BeginFrame();
+    static_cast<void>(scene.Upsert({1, 0}, Instance(1.0f)));
+    scene.EndFrame();
+    scene.Commit();
+    scene.BeginFrame();
+    const auto first_reused = scene.Upsert({6, 0}, Instance(6.0f));
+    const auto second_reused = scene.Upsert({7, 0}, Instance(7.0f));
+    Check(first_reused.index == 4 && second_reused.index == 3,
+          "prepared retirement changed ascending slot application or LIFO reuse");
+    scene.Abort();
+}
 } // namespace
 
 int main()
@@ -326,6 +354,7 @@ int main()
         SkinChannelTransactionsPreserveScene();
         PacketSkinConsumerCoverageIsPreparedForEveryView();
         PayloadRevisionRangesTrackRotatingUploads();
+        PreparedRemovalSetPreservesCommitAndAbortOrder();
         hs::PersistentGpuSceneSlots scene;
 
         scene.BeginFrame();

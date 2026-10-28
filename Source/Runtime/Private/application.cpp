@@ -796,7 +796,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             const auto cursor = ReferenceUiCursor(client_pixels,
                 {receipt->presented_extent.width, receipt->presented_extent.height});
-            if (!runtime_detail::PointHitsUiDrawButton(displayed->draw_models, cursor)) return;
+            if (!displayed->draw_content ||
+                !runtime_detail::PointHitsUiDrawButton(displayed->draw_content->models, cursor)) return;
             const auto modal = static_cast<GraphicsUiPhase>(displayed->modal_phase);
             if (modal != GraphicsUiPhase::Applied)
             {
@@ -1321,11 +1322,73 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::PreparedPairFacts vfx_pair_facts;
+        runtime_detail::VfxTypedFrameInputs typed_vfx;
         std::vector<PresentationEvent> ready_events, frame_events, dispatched_event_scratch;
+        std::vector<VfxScreenInput> typed_screen;
+        std::vector<VfxVolumeInput> typed_volumes;
+        std::vector<VfxLightInput> typed_lights;
+        std::vector<VfxDistortionInput> typed_distortions;
+        std::vector<VfxDecalInput> typed_decals;
+        std::vector<VfxEntitySurfaceCommand> typed_surfaces;
+        std::vector<VfxOwnedMeshInput> typed_mesh_spawns;
+        std::vector<VfxFresnelInput> typed_fresnels;
+        std::vector<runtime_detail::VfxTypedGroundCommand> ground_commands;
+        std::vector<VfxGroundSpawnInput> typed_ground_spawns;
+        std::vector<VfxFlashSpawnInput> visible_flashes;
+        std::vector<VfxFlashSpawnInput> status_stamp_flashes;
+        std::vector<runtime_detail::VfxPreparedFireSource> prepared_fire_sources;
+        runtime_detail::VfxRibbonInputScratch ribbon_inputs;
+        runtime_detail::DecodedVfxState prepared_births;
+        std::vector<runtime_detail::VfxEntitySurfaceEventCapture> surface_capture_inputs;
+        std::vector<runtime_detail::VfxEntitySurfacePersistentCapture> surface_persistent;
+        std::vector<runtime_detail::VfxGroundBirthSuppressionFacts> ground_birth_suppressions;
+        std::vector<Sequence> replaced_particle_sequences, superseded_pickup_sequences, owned_status_sequences;
+        std::vector<Sequence> owned_status_mote_sequences;
+        std::vector<Sequence> replaced_legacy_mesh_sequences, replaced_burst_shell_sequences;
+        std::vector<std::size_t> vfx_row_indices;
+        std::vector<runtime_detail::VfxSessionState::PersistentBurstKey> status_burst_keys;
+        std::vector<ParticleSpawnCommand> status_shard_commands;
+        const auto explosive_arrow_main = MakeAssetId("particle.skill.explosive_arrow.main").value;
         auto &active_effects = vfx_session.active_effects;
-        using VfxEventProfile = runtime_detail::ActiveEffectStore::Profile;
+        using VfxEventStore = runtime_detail::ActiveEffectStore;
+        using VfxEventProfile = VfxEventStore::Profile;
+        std::vector<VfxEventStore::AppendRequest> profile_additions;
+        VfxEventStore::PreparedAppendBatch prepared_profiles;
+        const auto profile_bit = [](VfxEventProfile profile) -> std::uint16_t {
+            return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
+        };
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
+        const auto vfx_workspace_bytes = [&]() noexcept {
+            using namespace runtime_detail::vfx_retained_size;
+            auto bytes = vfx_session.TrackedLogicalCapacityBytes();
+            const auto charge = [&](std::size_t owned) { bytes = Add(bytes, owned); };
+            const auto vectors = [&](const auto &...items) { (charge(Vector(items)), ...); };
+            charge(vfx_pair_facts.RetainedCapacityBytes());
+            charge(prepared_births.LogicalCapacityBytes());
+            charge(prepared_profiles.LogicalCapacityBytes());
+            charge(persistent_sparks.RetainedCapacityBytes());
+            charge(vfx_upgrade_movements.RetainedCapacityBytes());
+            vectors(typed_vfx.events, typed_vfx.persistent, typed_vfx.unsupported_effect_ids,
+                ready_events, frame_events, dispatched_event_scratch, typed_screen, typed_volumes,
+                typed_lights, typed_distortions, typed_decals, typed_surfaces, typed_mesh_spawns,
+                typed_fresnels, ground_commands, typed_ground_spawns, visible_flashes,
+                status_stamp_flashes, prepared_fire_sources, surface_capture_inputs,
+                surface_persistent, ground_birth_suppressions, replaced_particle_sequences,
+                superseded_pickup_sequences, owned_status_sequences, owned_status_mote_sequences,
+                replaced_legacy_mesh_sequences, replaced_burst_shell_sequences, vfx_row_indices,
+                status_burst_keys, status_shard_commands, profile_additions);
+            for (const auto &input : typed_vfx.events) charge(RingGapPayload(input.payload));
+            for (const auto &input : typed_vfx.persistent) charge(RingGapPayload(input.payload));
+            for (const auto &capture : surface_capture_inputs) charge(RingGapPayload(capture.input.payload));
+            for (const auto &capture : surface_persistent) charge(RingGapPayload(capture.input.payload));
+            for (const auto &command : ground_commands) charge(Vector(command.geometry.gap_angles_radians));
+            for (const auto &command : typed_ground_spawns) charge(Vector(command.geometry.gap_angles_radians));
+            for (const auto &command : typed_distortions) charge(Vector(command.gap_angles_degrees));
+            charge(Multiply(ribbon_inputs.StorageCapacity(), sizeof(VfxRibbonSourceInput)));
+            for (const auto &source : ribbon_inputs.Storage()) charge(Vector(source.outputs));
+            return bytes;
+        };
         auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
         auto &pending_effect_lines = vfx_session.decoded.effect_lines;
         auto &active_vfx_flashes = vfx_session.decoded.flashes;
@@ -1371,7 +1434,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                     "Could not initialize performance capture files."));
             performance_lines.emplace(performance_file, true,
-                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_frontend_reused,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us,target_render_fps\n", capture_clock);
+                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_frontend_reused,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us,target_render_fps,vfx_fire_admission_bytes,vfx_fire_requested,vfx_fire_admitted,vfx_fire_budget_limited\n", capture_clock);
             gpu_live_lines.emplace(gpu_live_file, true,
                 "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated,source_frame_id,source_frame_sequence,quality_generation,provider_generation,is_generated_frame,clock_gpu_before,clock_cpu_before,clock_gpu_after,clock_cpu_after,clock_gpu_frequency,clock_cpu_frequency,clock_anchors_valid,source_ready_cadence_ms,output_dependency_span_ms,calibration_valid,calibration_drift,cadence_valid,span_valid,gpu_backlog_proven,cadence_gap,closure_span_gap,cadence_exclusions_valid,cpu_supply_gap,pacing_gap,closure_clock_valid,closure_gap_checked\n", capture_clock);
         }
@@ -1520,6 +1583,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t static_scene_upload_count{};
         std::uint64_t vfx_catalog_generation{1};
         std::uint64_t typed_vfx_flash_submitted_total{};
+        std::uint64_t vfx_fire_budget_limited_frames{};
+        std::size_t vfx_fire_admission_peak_bytes{};
         std::uint64_t typed_vfx_unsupported_inputs{};
         bool captured{};
         bool resized{};
@@ -1651,7 +1716,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         runtime_detail::ActiveEffectStore::Profile::Ground,
                                         rebound_ground_events);
                                     const auto ground_count = rebound_ground_events.size();
-                                    runtime_detail::RebindVfxGroundEventOwners(next, rebound_ground_events);
+                                    const auto &next_image = catalog_changed ? replacement.Image() : vfx_catalog.Image();
+                                    runtime_detail::RebindVfxGroundEventOwners(next_image, rebound_ground_events);
                                     const auto retired_ground = ground_count - rebound_ground_events.size();
                                     rebound.retained -= retired_ground;
                                     rebound.incompatible += retired_ground;
@@ -2037,6 +2103,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_upgrade_movements.Clear();
                     vfx_showcase_injected = false;
                 }
+                prepared_births.Clear();
                 const auto retained_particle_count = pending_particle_spawns.size();
                 const auto &ready_batch = vfx_session.raw_events.Prepare(
                     current_snapshot.header.tick, vfx_session.session_id);
@@ -2107,7 +2174,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     snapshots.previous.header.session_id == snapshots.current.header.session_id
                     ? snapshots.previous.persistent_vfx
                     : std::span<const PersistentVfxVisual>{};
-                vfx_pair_facts.Prepare({
+                const bool new_vfx_pair = vfx_pair_facts.Prepare({
                     .session_id = snapshots.current.header.session_id,
                     .previous_publication = snapshots.has_previous
                         ? (snapshots.previous.header.dynamic_pair_revision
@@ -2117,6 +2184,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         ? snapshots.current.header.dynamic_pair_revision : snapshots.current_publication_sequence},
                     previous_vfx, current_vfx, snapshots.current.instances,
                     snapshots.current.captured_instances);
+                if (snapshots.has_current && (new_vfx_pair ||
+                    (vfx_session.has_status_burst_tick &&
+                     snapshots.current.header.tick < vfx_session.last_status_burst_tick)))
+                {
+                    vfx_session.RetireUnownedPersistentBursts(true,
+                        snapshots.current.header.tick, [&](const auto &key) noexcept {
+                            const auto kind = static_cast<PersistentVfxKind>(key.visual_kind);
+                            return vfx_pair_facts.Current(key.stable_id, kind, current_vfx) ||
+                                vfx_pair_facts.Previous(key.stable_id, kind, previous_vfx);
+                        });
+                }
                 active_effects.BeginFrameBindings();
                 const auto refresh_owner_event = [&](VfxEventInput &input) {
                     return runtime_detail::RefreshVfxGroundEventOwner(input,
@@ -2124,57 +2202,108 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         &vfx_pair_facts, previous_vfx, sample_alpha);
                 };
                 runtime_detail::DiagnosticScope frame_adapter_scope(vfx_work[4], capture_clock);
-                auto typed_vfx = runtime_detail::BuildVfxTypedFrameInputs(
-                    vfx_catalog.Program(), frame_events,
+                runtime_detail::BuildVfxTypedFrameInputs(
+                    vfx_catalog.Image(), frame_events,
                     current_vfx, previous_vfx,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    &vfx_pair_facts, sample_alpha);
+                    typed_vfx, &vfx_pair_facts, sample_alpha);
                 frame_adapter_scope.Stop();
-                std::vector<Sequence> replaced_particle_sequences;
-                std::vector<Sequence> superseded_pickup_sequences;
+                runtime_detail::DiagnosticScope ground_birth_scope(vfx_work[11], capture_clock);
+                ground_birth_suppressions.clear();
+                runtime_detail::AppendVfxTypedEventGroundBirthSuppression(
+                    vfx_catalog.Image(), typed_vfx.events, ground_birth_suppressions);
+                std::ranges::sort(ground_birth_suppressions, {},
+                    &runtime_detail::VfxGroundBirthSuppressionFacts::sequence);
+                auto unique_ground = ground_birth_suppressions.begin();
+                for (auto it = ground_birth_suppressions.begin(); it != ground_birth_suppressions.end();)
+                {
+                    auto merged = *it++;
+                    while (it != ground_birth_suppressions.end() && it->sequence == merged.sequence)
+                    {
+                        merged.all_particles |= it->all_particles;
+                        merged.ground_ring |= it->ground_ring;
+                        merged.ground_disc |= it->ground_disc;
+                        merged.segment_solid_trail |= it->segment_solid_trail;
+                        ++it;
+                    }
+                    *unique_ground++ = merged;
+                }
+                ground_birth_suppressions.erase(unique_ground, ground_birth_suppressions.end());
+                ground_birth_scope.Stop();
+                replaced_particle_sequences.clear();
+                superseded_pickup_sequences.clear();
+                owned_status_sequences.clear();
                 {
                     runtime_detail::DiagnosticScope flash_scope(vfx_work[12], capture_clock);
-                    const auto owned_status_ticks = runtime_detail::BuildVfxOwnedStatusTickFlashCommands(
-                        vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent);
-                    std::vector<VfxEventInput> unpaired_flash_events;
-                    unpaired_flash_events.reserve(typed_vfx.events.size());
-                    for (const auto &event : typed_vfx.events)
-                        if (!std::ranges::any_of(owned_status_ticks,
-                            [&](const auto &tick) { return tick.event_sequence == event.sequence; }))
-                            unpaired_flash_events.push_back(event);
-                    const auto new_flashes = runtime_detail::BuildVfxTypedFlashCommands(
-                        vfx_catalog.Image(), unpaired_flash_events, &superseded_pickup_sequences);
-                    replaced_particle_sequences.reserve(owned_status_ticks.size() + superseded_pickup_sequences.size());
-                    for (const auto &tick : owned_status_ticks)
-                        replaced_particle_sequences.push_back(tick.event_sequence);
+                    owned_status_sequences.reserve(typed_vfx.events.size());
+                    runtime_detail::AppendVfxOwnedStatusTickFlashes(
+                        vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent,
+                        prepared_births.flashes, owned_status_sequences);
+                    std::ranges::sort(owned_status_sequences);
+                    runtime_detail::AppendVfxTypedFlashCommands(
+                        vfx_catalog.Image(), typed_vfx.events, owned_status_sequences,
+                        prepared_births.flashes, &superseded_pickup_sequences);
+                    replaced_particle_sequences.reserve(owned_status_sequences.size() + superseded_pickup_sequences.size());
+                    replaced_particle_sequences.insert(replaced_particle_sequences.end(),
+                        owned_status_sequences.begin(), owned_status_sequences.end());
                     replaced_particle_sequences.insert(replaced_particle_sequences.end(),
                         superseded_pickup_sequences.begin(), superseded_pickup_sequences.end());
-                    if (!replaced_particle_sequences.empty())
-                        for (auto &legacy : pending_particle_spawns)
-                            if (std::ranges::any_of(owned_status_ticks, [&](const auto &tick) {
-                                    return tick.event_sequence == legacy.sequence;
-                                }) ||
-                                (!legacy.authored_ballistic &&
-                                 std::ranges::find(superseded_pickup_sequences, legacy.sequence) !=
-                                    superseded_pickup_sequences.end()))
-                                legacy.count = 0;
-                    for (const auto &tick : owned_status_ticks)
-                        active_vfx_flashes.push_back(tick.flash);
-                    active_vfx_flashes.insert(active_vfx_flashes.end(), new_flashes.begin(), new_flashes.end());
+                    std::ranges::sort(replaced_particle_sequences);
                 }
+                const auto ballistic_first = prepared_births.particle_spawns.size();
+                replaced_legacy_mesh_sequences.clear();
+                replaced_burst_shell_sequences.clear();
+                {
+                    runtime_detail::DiagnosticScope ballistic_prepare_scope(vfx_work[7], capture_clock);
+                    const auto &lookup = vfx_catalog.Program().effect_lookup;
+                    vfx_row_indices.clear();
+                    runtime_detail::AppendVfxTypedBallisticCommands(
+                        vfx_catalog.Image(), typed_vfx.events, prepared_births.particle_spawns,
+                        &vfx_row_indices);
+                    replaced_legacy_mesh_sequences.reserve(vfx_row_indices.size());
+                    replaced_burst_shell_sequences.reserve(vfx_row_indices.size());
+                    for (const auto index : vfx_row_indices)
+                    {
+                        const auto &input = typed_vfx.events[index];
+                        replaced_legacy_mesh_sequences.push_back(input.sequence);
+                        if (input.effect_handle != 0 && input.effect_handle <= lookup.size() &&
+                            lookup[input.effect_handle - 1].effect_id == explosive_arrow_main)
+                            replaced_burst_shell_sequences.push_back(input.sequence);
+                    }
+                    std::ranges::sort(replaced_legacy_mesh_sequences);
+                    std::ranges::sort(replaced_burst_shell_sequences);
+                }
+                const auto ballistic_end = prepared_births.particle_spawns.size();
                 runtime_detail::DiagnosticScope legacy_scope(vfx_work[3], capture_clock);
                 for (const auto &ready_event : frame_events)
+                {
+                    const auto fact = std::ranges::lower_bound(ground_birth_suppressions,
+                        ready_event.sequence, {},
+                        &runtime_detail::VfxGroundBirthSuppressionFacts::sequence);
+                    const VfxLegacyGroundSuppression ground_suppression =
+                        fact != ground_birth_suppressions.end() && fact->sequence == ready_event.sequence
+                            ? VfxLegacyGroundSuppression{fact->all_particles, fact->ground_ring,
+                                  fact->ground_disc, fact->segment_solid_trail}
+                            : VfxLegacyGroundSuppression{};
+                    const auto prefix = prepared_births.MarkBirths();
                     if (auto expanded = vfx_catalog.ExpandEvent(
                             ready_event, active_decorative_particle_fraction,
-                            pending_particle_spawns, pending_effect_lines, replaced_particle_sequences); !expanded)
+                            prepared_births.particle_spawns, prepared_births.effect_lines,
+                            std::ranges::binary_search(replaced_particle_sequences, ready_event.sequence),
+                            std::ranges::binary_search(replaced_legacy_mesh_sequences, ready_event.sequence),
+                            ground_suppression); !expanded)
                     {
+                        prepared_births.RollbackBirths(prefix);
 #if defined(HS_DEVELOPMENT_TOOLS)
                         record_thread_failure(expanded);
                         break;
 #endif
                     }
+                }
                 legacy_scope.Stop();
-                if (config.vfx_showcase && !vfx_showcase_injected)
+                if (channels.stop_requested.load(std::memory_order_acquire)) break;
+                const bool append_vfx_showcase = config.vfx_showcase && !vfx_showcase_injected;
+                if (append_vfx_showcase)
                 {
                     constexpr std::array colors{
                         Float4{0.35f, 0.75f, 2.5f, 0.9f},
@@ -2228,26 +2357,106 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             command.start_size_min;
                         command.stretch = command.renderer == VfxRenderer::Segment ? 7.0f : 1.0f;
                         command.seed = static_cast<std::uint32_t>(index + 1);
-                        pending_particle_spawns.push_back(command);
+                        prepared_births.particle_spawns.push_back(command);
                     }
-                    vfx_showcase_injected = true;
                 }
 
-                runtime_detail::DiagnosticScope surface_scope(vfx_work[5], capture_clock);
-                const Tick surface_tick = snapshots.current.header.tick;
-                const auto &surface_program = vfx_catalog.Program();
-                const auto effect_handle = [&](std::string_view id) {
-                    const auto asset = MakeAssetId(id).value;
-                    const auto found = std::find_if(surface_program.effect_lookup.begin(), surface_program.effect_lookup.end(),
-                        [&](const auto &entry) { return entry.effect_id == asset; });
-                    return found == surface_program.effect_lookup.end() ? 0u : found->handle;
-                };
-                const auto phase_effect = effect_handle("particle.boss.phase_change");
-                const auto death_effect = effect_handle("particle.boss.death");
-                const auto trap_effect = effect_handle("particle.skill.trap");
+                {
+                    runtime_detail::DiagnosticScope mote_birth_scope(vfx_work[13], capture_clock);
+                    owned_status_mote_sequences.clear();
+                    runtime_detail::AppendVfxOwnedStatusTickMoteFlashes(
+                        vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent,
+                        prepared_births.flashes, owned_status_mote_sequences);
+                    std::ranges::sort(owned_status_mote_sequences);
+                    owned_status_mote_sequences.erase(std::unique(owned_status_mote_sequences.begin(),
+                        owned_status_mote_sequences.end()), owned_status_mote_sequences.end());
+                    runtime_detail::AppendVfxTypedMoteCommands(
+                        vfx_catalog.Image(), typed_vfx.events, owned_status_mote_sequences,
+                        prepared_births.flashes);
+                }
+                const auto phase_effect = vfx_catalog.Image().entity_surface_routes.phase_effect;
+                const auto death_effect = vfx_catalog.Image().entity_surface_routes.death_effect;
+                const auto trap_effect = vfx_catalog.Image().entity_surface_routes.trap_point_rate_effect;
                 const auto is_effect = [](const VfxEventInput &input, std::uint32_t handle) {
                     return handle != 0 && input.effect_handle == handle;
                 };
+                {
+                    runtime_detail::DiagnosticScope profile_prepare_scope(vfx_work[10], capture_clock);
+                    profile_additions.clear();
+                    const auto &image = vfx_catalog.Image();
+                    for (const auto &input : typed_vfx.events)
+                    {
+                        std::uint16_t mask{};
+                        const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
+                        if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
+                        if (is_effect(input, phase_effect) || is_effect(input, death_effect))
+                            mask |= profile_bit(VfxEventProfile::EntitySurface);
+                        if (is_effect(input, trap_effect)) mask |= profile_bit(VfxEventProfile::PointRate);
+                        if (input.effect_handle != 0 && input.effect_handle <= image.program.effects.size())
+                        {
+                            if (input.effect_handle <= image.light_effect_ranges.size() &&
+                                image.light_effect_ranges[input.effect_handle - 1].count != 0)
+                                mask |= profile_bit(VfxEventProfile::Light);
+                            if (image.HasDistortionRecipes(input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Distortion);
+                            if (image.HasDecalRecipes(input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Decal);
+                            if (runtime_detail::IsVfxTypedVolumeEffect(image, input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Volume);
+                            if (runtime_detail::IsVfxTypedScreenEffect(image, input.effect_handle))
+                                mask |= profile_bit(VfxEventProfile::Screen);
+                        }
+                        if (input.effect_handle != 0 && input.effect_handle <= image.ribbon_effect_recipes.size() &&
+                            (image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonAdd) ||
+                             image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonOit)))
+                        {
+                            const auto &effect = image.ribbon_effect_recipes[input.effect_handle - 1];
+                            if (effect.input_mode == 0 && effect.timing_kind == 0 &&
+                                std::isfinite(effect.seconds) && effect.seconds > 0.0f &&
+                                (std::holds_alternative<VfxPointPayload>(input.payload) ||
+                                 std::holds_alternative<VfxProjectilePayload>(input.payload) ||
+                                 std::holds_alternative<VfxConePayload>(input.payload) ||
+                                 std::holds_alternative<VfxCirclePayload>(input.payload) ||
+                                 std::holds_alternative<VfxEntityPayload>(input.payload) ||
+                                 std::holds_alternative<VfxContextPayload>(input.payload) ||
+                                 std::holds_alternative<VfxLinkPayload>(input.payload)))
+                                mask |= profile_bit(VfxEventProfile::Ribbon);
+                        }
+                        if (mask) profile_additions.push_back({&input, mask, ground_admission.replace_context_owner});
+                    }
+                    if (!profile_additions.empty() &&
+                        !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles))
+                    {
+                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                            "VFX event profiles could not be prepared."));
+                        break;
+                    }
+                }
+                runtime_detail::DiagnosticScope birth_commit_scope(vfx_work[3], capture_clock);
+                // Keep legacy and showcase births before typed ballistic births
+                // while leaving the already-retained particle prefix untouched.
+                if (ballistic_first != ballistic_end && ballistic_end != prepared_births.particle_spawns.size())
+                    std::rotate(prepared_births.particle_spawns.begin() + ballistic_first,
+                        prepared_births.particle_spawns.begin() + ballistic_end,
+                        prepared_births.particle_spawns.end());
+                if (!vfx_session.AppendPreparedBirths(prepared_births))
+                {
+                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Prepared VFX birth batch aliases retained output."));
+                    break;
+                }
+                // Birth publication only changes decoded queues; the prepared store is untouched.
+                if (!profile_additions.empty() && !active_effects.CommitAppendBatch(prepared_profiles))
+                {
+                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Prepared VFX event profiles changed before publication."));
+                    break;
+                }
+                if (append_vfx_showcase) vfx_showcase_injected = true;
+                birth_commit_scope.Stop();
+
+                runtime_detail::DiagnosticScope surface_scope(vfx_work[5], capture_clock);
+                const Tick surface_tick = snapshots.current.header.tick;
                 const auto surface_instance = [&](std::uint64_t id) -> const RenderInstance * {
                     if (const auto *instance = vfx_pair_facts.Instance(id, snapshots.current.instances))
                         return instance;
@@ -2259,13 +2468,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     return nullptr;
                 };
-                for (const auto &input : typed_vfx.events)
-                {
-                    if (is_effect(input, phase_effect) || is_effect(input, death_effect))
-                        active_effects.Append(VfxEventProfile::EntitySurface, input);
-                    if (is_effect(input, trap_effect))
-                        active_effects.Append(VfxEventProfile::PointRate, input);
-                }
                 const auto terminal_phase = static_cast<SessionPhase>(
                     channels.session_phase.load(std::memory_order_acquire));
                 const auto terminal_tick = vfx_session.UpdateTerminalClock(
@@ -2274,16 +2476,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     ? static_cast<double>(terminal_tick) : display_tick;
                 std::erase_if(vfx_session.decoded.entity_surface_captures, [&](const auto &capture) {
                     const auto *input = active_effects.Get(capture.row);
-                    if (!input || input->effect_handle == 0 || input->effect_handle > surface_program.effects.size())
+                    if (!input || input->effect_handle == 0 || input->effect_handle > vfx_catalog.Image().entity_surface_effect_recipes.size())
                         return true;
-                    const auto &effect = surface_program.effects[input->effect_handle - 1];
+                    const auto &effect = vfx_catalog.Image().entity_surface_effect_recipes[input->effect_handle - 1];
                     const double current_tick = is_effect(*input, death_effect)
                         ? death_current_tick : display_tick;
                     return current_tick >= input->event_tick &&
                         static_cast<double>(current_tick - input->event_tick) >= static_cast<double>(effect.seconds) * 60.0;
                 });
                 active_effects.EraseIf(VfxEventProfile::EntitySurface, [&](const auto &input) {
-                    const auto &effect = surface_program.effects[input.effect_handle - 1];
+                    const auto &effect = vfx_catalog.Image().entity_surface_effect_recipes[input.effect_handle - 1];
                     const double current_tick = is_effect(input, death_effect)
                         ? death_current_tick : display_tick;
                     if (current_tick >= input.event_tick &&
@@ -2315,14 +2517,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_session.decoded.entity_surface_captures.push_back(std::move(capture));
                     return true;
                 });
-                std::vector<runtime_detail::VfxEntitySurfaceEventCapture> surface_capture_inputs;
+                surface_capture_inputs.clear();
                 surface_capture_inputs.reserve(vfx_session.decoded.entity_surface_captures.size());
                 for (const auto &capture : vfx_session.decoded.entity_surface_captures)
                     if (const auto *input = active_effects.Get(capture.row))
                         surface_capture_inputs.push_back({*input, capture.instance,
                             capture.retained_instance, capture.has_animation_pose,
                             capture.animation_pose, capture.generation_lease});
-                std::vector<runtime_detail::VfxEntitySurfacePersistentCapture> surface_persistent;
+                surface_persistent.clear();
                 for (const auto &input : typed_vfx.persistent)
                 {
                     if (input.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::BossPhaseTransition)) continue;
@@ -2339,84 +2541,66 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (actual && visual)
                         surface_persistent.push_back({input, *actual, visual->active_tick, visual->expires});
                 }
-                const auto typed_surfaces = runtime_detail::BuildVfxTypedEntitySurfaceCommands(surface_program,
+                typed_surfaces.clear();
+                runtime_detail::AppendVfxTypedEntitySurfaceCommands(vfx_catalog.Image(),
                     surface_capture_inputs, surface_persistent, display_tick,
-                    death_current_tick);
+                    death_current_tick, typed_surfaces);
                 surface_scope.Stop();
                 runtime_detail::DiagnosticScope movement_scope(vfx_work[6], capture_clock);
-                const auto movement_owners = vfx_upgrade_movements.Emit(vfx_catalog.Program(), frame_events,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{}, sample_alpha);
-                typed_vfx.persistent.insert(typed_vfx.persistent.end(), movement_owners.begin(), movement_owners.end());
+                vfx_upgrade_movements.Append(vfx_catalog.Image(), frame_events,
+                    snapshots.has_current ? snapshots.current.header.tick : Tick{},
+                    typed_vfx.persistent, sample_alpha);
                 movement_scope.Stop();
                 runtime_detail::DiagnosticScope ballistic_scope(vfx_work[7], capture_clock);
                 typed_vfx_unsupported_inputs += typed_vfx.unsupported_effect_ids.size();
-                for (const auto &input : typed_vfx.events)
-                {
-                    const auto ballistic_first = pending_particle_spawns.size();
-                    runtime_detail::BuildVfxTypedBallisticCommands(
-                        vfx_catalog.Image(), std::span(&input,1), pending_particle_spawns);
-                    if (pending_particle_spawns.size() == ballistic_first) continue;
-                    const auto &lookup = vfx_catalog.Program().effect_lookup;
-                    const bool replaces_legacy_burst_shell = std::ranges::any_of(lookup, [&](const auto &entry) {
-                        return entry.handle == input.effect_handle &&
-                            entry.effect_id == MakeAssetId("particle.skill.explosive_arrow.main").value;
-                    });
-                    for (auto &legacy : std::span(pending_particle_spawns).first(ballistic_first))
-                        if (!legacy.authored_ballistic && legacy.sequence == input.sequence && legacy.renderer == VfxRenderer::Mesh &&
-                            (legacy.primitive != VfxPrimitive::ShockShell || replaces_legacy_burst_shell)) legacy.count = 0;
-                }
+                // Compatibility cancellation is a post-commit mutation: the staged
+                // replacement births are already in the retained queue at this point.
+                if (!replaced_particle_sequences.empty())
+                    for (auto &legacy : pending_particle_spawns)
+                        if (std::ranges::binary_search(replaced_particle_sequences, legacy.sequence) &&
+                            (!legacy.authored_ballistic ||
+                             std::ranges::binary_search(owned_status_sequences, legacy.sequence)))
+                            legacy.count = 0;
+                if (!replaced_legacy_mesh_sequences.empty())
+                    for (auto &legacy : pending_particle_spawns)
+                        if (!legacy.authored_ballistic && legacy.renderer == VfxRenderer::Mesh &&
+                            std::ranges::binary_search(replaced_legacy_mesh_sequences, legacy.sequence) &&
+                            (legacy.primitive != VfxPrimitive::ShockShell ||
+                             std::ranges::binary_search(replaced_burst_shell_sequences, legacy.sequence)))
+                            legacy.count = 0;
                 ballistic_scope.Stop();
                 runtime_detail::DiagnosticScope status_scope(vfx_work[8], capture_clock);
-                std::vector<VfxPersistentInput> new_status_owners;
-                for (const auto &owner : typed_vfx.persistent)
+                status_burst_keys.clear();
+                status_shard_commands.clear();
+                // Ballistic provenance is consumed above; this stage reuses its unborrowed row scratch.
+                vfx_session.SelectUnseenPersistentBurstOwners(typed_vfx.persistent, vfx_row_indices);
+                status_burst_keys.reserve(vfx_row_indices.size());
+                for (const auto index : vfx_row_indices)
                 {
-                    const auto kind = static_cast<PersistentVfxKind>(owner.source_visual_kind);
-                    if (kind != PersistentVfxKind::PlayerBowDraw &&
-                        kind != PersistentVfxKind::ChargedFullReady &&
-                        kind != PersistentVfxKind::EmpoweredReady &&
-                        kind != PersistentVfxKind::MultishotRetarget &&
-                        kind != PersistentVfxKind::RicochetBleedExtend)
-                        continue;
-                    if (vfx_session.MarkPersistentBurst(owner.stable_id,
-                                                        owner.source_visual_kind))
-                        new_status_owners.push_back(owner);
+                    const auto &owner = typed_vfx.persistent[index];
+                    status_burst_keys.push_back({owner.stable_id, owner.source_visual_kind});
                 }
-                runtime_detail::BuildVfxPersistentStatusShardCommands(
-                    vfx_catalog.Image(), new_status_owners,
-                    snapshots.current.header.tick, pending_particle_spawns);
+                runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
+                    vfx_catalog.Image(), typed_vfx.persistent, vfx_row_indices,
+                    snapshots.current.header.tick, status_shard_commands);
+                (void)vfx_session.CommitPersistentBursts(status_burst_keys,
+                    status_shard_commands, pending_particle_spawns);
                 status_scope.Stop();
                 runtime_detail::DiagnosticScope ground_scope(vfx_work[9], capture_clock);
-                auto ground_commands = runtime_detail::BuildVfxTypedGroundCommands(
+                ground_commands.clear();
+                runtime_detail::AppendVfxTypedGroundCommands(
                     vfx_catalog.Image(), typed_vfx.persistent,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{});
+                    snapshots.has_current ? snapshots.current.header.tick : Tick{}, ground_commands);
                 ground_scope.Stop();
                 runtime_detail::DiagnosticScope local_scope(vfx_work[10], capture_clock);
-                for (const auto &input : typed_vfx.events)
-                {
-                    const auto &program = vfx_catalog.Program();
-                    if (input.effect_handle == 0 || input.effect_handle > program.effects.size()) continue;
-                    const auto light_ranges = vfx_catalog.Image().light_effect_ranges;
-                    const bool has_light = input.effect_handle <= light_ranges.size() &&
-                        light_ranges[input.effect_handle-1].count != 0;
-                    if (has_light) active_effects.Append(VfxEventProfile::Light, input);
-                    if (vfx_catalog.Image().HasDistortionRecipes(input.effect_handle))
-                        active_effects.Append(VfxEventProfile::Distortion, input);
-                    if (vfx_catalog.Image().HasDecalRecipes(input.effect_handle))
-                        active_effects.Append(VfxEventProfile::Decal, input);
-                    if (runtime_detail::IsVfxTypedVolumeEffect(program, input.effect_handle))
-                        active_effects.Append(VfxEventProfile::Volume, input);
-                    if (runtime_detail::IsVfxTypedScreenEffect(program, input.effect_handle))
-                        active_effects.Append(VfxEventProfile::Screen, input);
-                }
                 const auto light_tick = display_tick;
                 active_effects.EraseIf(VfxEventProfile::Screen, [&](const VfxEventInput &input) {
-                    const auto &effect = vfx_catalog.Program().effects[input.effect_handle - 1];
+                    const auto &effect = vfx_catalog.Image().screen_effect_recipes[input.effect_handle - 1];
                     return light_tick >= input.event_tick &&
                         static_cast<double>(light_tick - input.event_tick) / 60.0 >= effect.seconds;
                 });
                 runtime_detail::DiagnosticScope screen_scope(vfx_work[17], capture_clock);
-                std::vector<VfxScreenInput> typed_screen;
-                if (auto converted = runtime_detail::BuildVfxTypedScreenCommands(vfx_catalog.Program(),
+                if (auto converted = runtime_detail::BuildVfxTypedScreenCommands(vfx_catalog.Image(),
                         active_effects.ProfileEvents(VfxEventProfile::Screen), typed_vfx.persistent, current_snapshot.header.tick, display_tick,
                         active_vfx_quality, vfx_session.low_health_pulse, typed_screen); !converted)
                 {
@@ -2425,13 +2609,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 screen_scope.Stop();
                 active_effects.EraseIf(VfxEventProfile::Volume, [&](const VfxEventInput &input) {
-                    const auto &effect = vfx_catalog.Program().effects[input.effect_handle - 1];
+                    const auto &effect = vfx_catalog.Image().volume_effect_recipes[input.effect_handle - 1];
                     return light_tick >= input.event_tick &&
                         static_cast<double>(light_tick - input.event_tick) / 60.0 >= effect.seconds;
                 });
                 runtime_detail::DiagnosticScope volume_scope(vfx_work[18], capture_clock);
-                std::vector<VfxVolumeInput> typed_volumes;
-                if (auto converted = runtime_detail::BuildVfxTypedVolumeCommands(vfx_catalog.Program(),
+                if (auto converted = runtime_detail::BuildVfxTypedVolumeCommands(vfx_catalog.Image(),
                         active_effects.ProfileEvents(VfxEventProfile::Volume), typed_vfx.persistent, light_tick,
                         active_vfx_quality, typed_volumes); !converted)
                 {
@@ -2448,112 +2631,45 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 active_effects.RefreshProfile(VfxEventProfile::Light, refresh_owner_event);
                 active_effects.EraseIf(VfxEventProfile::Light, owner_event_expired);
                 runtime_detail::DiagnosticScope light_scope(vfx_work[19], capture_clock);
-                const auto typed_lights=runtime_detail::BuildVfxTypedLightCommands(vfx_catalog.Image(),active_effects.ProfileEvents(VfxEventProfile::Light),light_tick);
+                typed_lights.clear();
+                runtime_detail::AppendVfxTypedLightCommands(vfx_catalog.Image(),
+                    active_effects.ProfileEvents(VfxEventProfile::Light), light_tick, typed_lights);
                 light_scope.Stop();
                 active_effects.RefreshProfile(VfxEventProfile::Distortion, refresh_owner_event);
                 active_effects.EraseIf(VfxEventProfile::Distortion, owner_event_expired);
                 runtime_detail::DiagnosticScope distortion_scope(vfx_work[20], capture_clock);
-                const auto typed_distortions=runtime_detail::BuildVfxTypedDistortionCommands(
-                    vfx_catalog.Image(),active_effects.ProfileEvents(VfxEventProfile::Distortion),typed_vfx.persistent,light_tick);
+                typed_distortions.clear();
+                runtime_detail::AppendVfxTypedDistortionCommands(vfx_catalog.Image(),
+                    active_effects.ProfileEvents(VfxEventProfile::Distortion),
+                    typed_vfx.persistent, light_tick, typed_distortions);
                 distortion_scope.Stop();
                 active_effects.RefreshProfile(VfxEventProfile::Decal, refresh_owner_event);
                 active_effects.EraseIf(VfxEventProfile::Decal, owner_event_expired);
                 runtime_detail::DiagnosticScope decal_scope(vfx_work[21], capture_clock);
-                const auto typed_decals=runtime_detail::BuildVfxTypedDecalCommands(
-                    vfx_catalog.Image(),active_effects.ProfileEvents(VfxEventProfile::Decal),typed_vfx.persistent,light_tick);
+                typed_decals.clear();
+                runtime_detail::AppendVfxTypedDecalCommands(vfx_catalog.Image(),
+                    active_effects.ProfileEvents(VfxEventProfile::Decal),
+                    typed_vfx.persistent, light_tick, typed_decals);
                 decal_scope.Stop();
                 local_scope.Stop();
                 runtime_detail::DiagnosticScope ground_event_scope(vfx_work[11], capture_clock);
-                for (const auto &input : typed_vfx.events)
+                // Retire only preexisting compatibility rows for accepted birth
+                // layers; the current frame's emitter already skipped these rows.
+                for (auto &legacy : pending_particle_spawns)
                 {
-                    const auto &program = vfx_catalog.Program();
-                    if ((!std::holds_alternative<VfxPointPayload>(input.payload) &&
-                         !std::holds_alternative<VfxContextPayload>(input.payload) &&
-                         !std::holds_alternative<VfxProjectilePayload>(input.payload) &&
-                         !std::holds_alternative<VfxCirclePayload>(input.payload) &&
-                         !std::holds_alternative<VfxLinePayload>(input.payload) &&
-                         !std::holds_alternative<VfxConePayload>(input.payload) &&
-                         !std::holds_alternative<VfxRingGapsPayload>(input.payload) &&
-                         !std::holds_alternative<VfxSafeSectorPayload>(input.payload)) ||
-                        input.effect_handle == 0 || input.effect_handle > program.effects.size())
+                    const auto fact = std::ranges::lower_bound(ground_birth_suppressions,
+                        legacy.sequence, {},
+                        &runtime_detail::VfxGroundBirthSuppressionFacts::sequence);
+                    if (fact == ground_birth_suppressions.end() || fact->sequence != legacy.sequence)
                         continue;
-                    const auto &effect = program.effects[input.effect_handle - 1];
-                    const bool charged_pulse =
-                        std::holds_alternative<VfxContextPayload>(input.payload) &&
-                        std::ranges::any_of(program.effect_lookup, [&](const auto &lookup) {
-                            return lookup.handle == input.effect_handle &&
-                                lookup.effect_id == MakeAssetId(
-                                    "particle.skill.charged_shot.pulse").value;
-                        });
-                    const bool wave_start =
-                        std::holds_alternative<VfxContextPayload>(input.payload) &&
-                        std::ranges::any_of(program.effect_lookup, [&](const auto &lookup) {
-                            return lookup.handle == input.effect_handle &&
-                                lookup.effect_id == MakeAssetId("particle.session.wave_start").value;
-                        });
-                    const bool owned = input.geometry_owner_id != 0 &&
-                        input.geometry_end_tick > input.geometry_start_tick;
-                    if (effect.input_mode != 0 ||
-                        (effect.timing_kind == 1 ? !owned :
-                            (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0.0f)))
-                        continue;
-                    if (std::holds_alternative<VfxPointPayload>(input.payload) ||
-                        std::holds_alternative<VfxContextPayload>(input.payload) ||
-                        std::holds_alternative<VfxProjectilePayload>(input.payload))
-                    {
-                        const auto source_first = static_cast<std::size_t>(effect.sources.first);
-                        const auto source_count = static_cast<std::size_t>(effect.sources.count);
-                        if (source_first > program.sources.size() ||
-                            source_count > program.sources.size() - source_first) continue;
-                        bool has_ground_ring = false;
-                        for (std::size_t source_index = source_first;
-                             source_index < source_first + source_count && !has_ground_ring; ++source_index)
-                        {
-                            const auto &source = program.sources[source_index];
-                            const auto first = static_cast<std::size_t>(source.outputs.first);
-                            const auto count = static_cast<std::size_t>(source.outputs.count);
-                            if (source.type != VfxSourceType::Direct || first > program.outputs.size() ||
-                                count > program.outputs.size() - first) continue;
-                            for (std::size_t output_index = first; output_index < first + count; ++output_index)
-                            {
-                                const auto &output = program.outputs[output_index];
-                                has_ground_ring |= output.profile == VfxOutputProfile::GroundSdfAdd ||
-                                    ((charged_pulse || wave_start) && output.profile == VfxOutputProfile::GroundSdfSoft);
-                            }
-                        }
-                        if (!has_ground_ring) continue;
-                    }
-                    if (charged_pulse)
-                        active_effects.EraseIf(VfxEventProfile::Ground, [&](const VfxEventInput &older) {
-                            return older.effect_handle == input.effect_handle &&
-                                std::holds_alternative<VfxContextPayload>(older.payload) &&
-                                std::get<VfxContextPayload>(older.payload).owner_id ==
-                                    std::get<VfxContextPayload>(input.payload).owner_id;
-                        });
-                    active_effects.Append(VfxEventProfile::Ground, input);
-                    const auto initial = runtime_detail::BuildVfxTypedEventGroundCommands(
-                        vfx_catalog.Image(), std::span(&input, 1), input.event_tick);
-                    if (charged_pulse && std::ranges::any_of(initial, [](const auto &command) {
-                            return command.geometry.shape == VfxGroundShape::StateRing &&
-                                command.geometry.rings == 1;
-                        }))
-                        for (auto &legacy : pending_particle_spawns)
-                            if (legacy.sequence == input.sequence) legacy.count = 0;
-                    // Replace only the corresponding legacy geometric layer.
-                    // Other sources in this event retain their compatibility path.
-                    for (const auto &authored : initial)
-                        for (auto &legacy : pending_particle_spawns)
-                            if (legacy.sequence == input.sequence &&
-                                (((authored.geometry.shape == VfxGroundShape::Circle || authored.geometry.shape == VfxGroundShape::CirclePreviewBorder) &&
-                                  legacy.renderer == VfxRenderer::Ground &&
-                                  ((authored.command.primitive == VfxPrimitive::ExactRing &&
-                                    legacy.primitive == VfxPrimitive::Ring) ||
-                                   (authored.command.primitive == VfxPrimitive::LowFrequencyFill &&
-                                    legacy.primitive == VfxPrimitive::Disc))) ||
-                                 (authored.geometry.shape == VfxGroundShape::LineBorder &&
-                                  legacy.renderer == VfxRenderer::Segment &&
-                                  legacy.primitive == VfxPrimitive::SolidTrail)))
-                                legacy.count = 0;
+                    if (fact->all_particles ||
+                        (fact->ground_ring && legacy.renderer == VfxRenderer::Ground &&
+                         legacy.primitive == VfxPrimitive::Ring) ||
+                        (fact->ground_disc && legacy.renderer == VfxRenderer::Ground &&
+                         legacy.primitive == VfxPrimitive::Disc) ||
+                        (fact->segment_solid_trail && legacy.renderer == VfxRenderer::Segment &&
+                         legacy.primitive == VfxPrimitive::SolidTrail))
+                        legacy.count = 0;
                 }
                 const Tick ground_tick = snapshots.current.header.tick;
                 active_effects.RefreshProfile(VfxEventProfile::Ground, refresh_owner_event);
@@ -2564,9 +2680,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return display_tick >= input.event_tick &&
                         (display_tick - input.event_tick) / 60.0 >= seconds;
                 });
-                auto event_ground = runtime_detail::BuildVfxTypedEventGroundCommands(
-                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground), display_tick);
-                ground_commands.insert(ground_commands.end(), event_ground.begin(), event_ground.end());
+                runtime_detail::AppendVfxTypedEventGroundCommands(
+                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground),
+                    display_tick, ground_commands);
                 ground_event_scope.Stop();
                 if (inject_pickup_showcase && std::ranges::count_if(superseded_pickup_sequences,
                         [](Sequence sequence) { return sequence >= 0xF100u && sequence < 0xF104u; }) != 4)
@@ -2576,24 +2692,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     break;
                 }
                 runtime_detail::DiagnosticScope mote_scope(vfx_work[13], capture_clock);
-                const auto owned_status_motes = runtime_detail::BuildVfxOwnedStatusTickMoteCommands(
-                    vfx_catalog.Image(), typed_vfx.events, typed_vfx.persistent);
-                std::vector<VfxEventInput> unpaired_mote_events;
-                unpaired_mote_events.reserve(typed_vfx.events.size());
-                for (const auto &event : typed_vfx.events)
-                    if (!std::ranges::any_of(owned_status_motes,
-                        [&](const auto &mote) { return mote.event_sequence == event.sequence; }))
-                        unpaired_mote_events.push_back(event);
-                for (const auto &mote : owned_status_motes) active_vfx_flashes.push_back(mote.flash);
-                const auto new_motes = runtime_detail::BuildVfxTypedMoteCommands(
-                    vfx_catalog.Image(), unpaired_mote_events);
-                active_vfx_flashes.insert(active_vfx_flashes.end(), new_motes.begin(), new_motes.end());
-                const auto born_sparks = persistent_sparks.Emit(
-                    vfx_catalog.Image(), typed_vfx.persistent, ground_tick, sample_alpha);
-                active_vfx_flashes.insert(active_vfx_flashes.end(),
-                                          born_sparks.begin(), born_sparks.end());
+                persistent_sparks.Append(
+                    vfx_catalog.Image(), typed_vfx.persistent, ground_tick, sample_alpha,
+                    active_vfx_flashes);
                 const double flash_tick = display_tick;
-                std::vector<VfxFlashSpawnInput> visible_flashes;
+                visible_flashes.clear();
                 visible_flashes.reserve(active_vfx_flashes.size());
                 std::erase_if(active_vfx_flashes, [&](const VfxFlashSpawnInput &flash) {
                     if (flash_tick < flash.event_tick) return false;
@@ -2609,70 +2712,48 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 active_effects.EraseIf(VfxEventProfile::PointRate, [&](const auto &input) {
                     return display_tick >= input.event_tick && display_tick - input.event_tick >= 39;
                 });
-                const auto point_motes = runtime_detail::BuildVfxOwnedMoteCommands(
-                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::PointRate), display_tick);
-                visible_flashes.insert(visible_flashes.end(), point_motes.begin(), point_motes.end());
-                const auto owned_motes = runtime_detail::BuildVfxOwnedMoteCommands(
-                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground), display_tick);
-                visible_flashes.insert(visible_flashes.end(), owned_motes.begin(), owned_motes.end());
-                const auto persistent_motes = runtime_detail::BuildVfxPersistentMoteCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent,
-                    vfx_session.persistent_mote_births, ground_tick, sample_alpha);
-                visible_flashes.insert(visible_flashes.end(), persistent_motes.begin(),
-                                       persistent_motes.end());
-                const auto fire_flames = runtime_detail::BuildVfxPersistentFireFlameCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, display_tick);
-                visible_flashes.insert(visible_flashes.end(), fire_flames.begin(), fire_flames.end());
-                const auto status_stamps = runtime_detail::BuildVfxPersistentStatusStampCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent);
-                visible_flashes.insert(visible_flashes.end(), status_stamps.begin(),
-                                       status_stamps.end());
-                std::vector<VfxGroundSpawnInput> typed_ground_spawns;
+                runtime_detail::AppendVfxOwnedMoteCommands(
+                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::PointRate),
+                    display_tick, visible_flashes);
+                runtime_detail::AppendVfxOwnedMoteCommands(
+                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground),
+                    display_tick, visible_flashes);
+                runtime_detail::AppendVfxPersistentMoteCommands(
+                    vfx_catalog.Image(), typed_vfx.persistent, visible_flashes);
+                status_stamp_flashes.clear();
+                runtime_detail::AppendVfxPersistentStatusStampCommands(
+                    vfx_catalog.Image(), typed_vfx.persistent, status_stamp_flashes);
+                typed_ground_spawns.clear();
                 typed_ground_spawns.reserve(ground_commands.size());
-                for (const auto &source : ground_commands)
+                for (auto &source : ground_commands)
                     typed_ground_spawns.push_back(
                         {source.command, source.additive, source.stable_id, source.effect_handle,
-                         source.source_visual_kind, source.motion, source.gradient_row, source.hdr, source.geometry});
+                         source.source_visual_kind, source.motion, source.gradient_row, source.hdr,
+                         std::move(source.geometry)});
                 mote_scope.Stop();
                 runtime_detail::DiagnosticScope mesh_scope(vfx_work[14], capture_clock);
-                const auto typed_mesh_spawns = runtime_detail::BuildVfxTypedMeshCommands(
-                    vfx_catalog.Program(), typed_vfx.persistent);
+                typed_mesh_spawns.clear();
+                runtime_detail::AppendVfxTypedMeshCommands(
+                    vfx_catalog.Image(), typed_vfx.persistent, typed_mesh_spawns);
                 mesh_scope.Stop();
                 runtime_detail::DiagnosticScope fresnel_scope(vfx_work[22], capture_clock);
-                const auto typed_fresnels = runtime_detail::BuildVfxTypedFresnelCommands(
-                    vfx_catalog.Program(), typed_vfx.persistent);
+                typed_fresnels.clear();
+                runtime_detail::AppendVfxTypedFresnelCommands(
+                    vfx_catalog.Image(), typed_vfx.persistent, typed_fresnels);
                 fresnel_scope.Stop();
                 runtime_detail::DiagnosticScope ribbon_scope(vfx_work[15], capture_clock);
-                for (const auto &input : typed_vfx.events)
-                {
-                    const auto &program = vfx_catalog.Program();
-                    if (input.effect_handle == 0 || input.effect_handle > program.effects.size()) continue;
-                    if (!vfx_catalog.Image().HasOutput(input.effect_handle, VfxOutputProfile::RibbonAdd) &&
-                        !vfx_catalog.Image().HasOutput(input.effect_handle, VfxOutputProfile::RibbonOit)) continue;
-                    const auto &effect = program.effects[input.effect_handle - 1];
-                    if (effect.input_mode == 0 && effect.timing_kind == 0 &&
-                        std::isfinite(effect.seconds) && effect.seconds > 0.0f &&
-                        (std::holds_alternative<VfxPointPayload>(input.payload) ||
-                         std::holds_alternative<VfxProjectilePayload>(input.payload) ||
-                         std::holds_alternative<VfxConePayload>(input.payload) ||
-                         std::holds_alternative<VfxCirclePayload>(input.payload) ||
-                         std::holds_alternative<VfxEntityPayload>(input.payload) ||
-                         std::holds_alternative<VfxContextPayload>(input.payload) ||
-                         std::holds_alternative<VfxLinkPayload>(input.payload)))
-                        active_effects.Append(VfxEventProfile::Ribbon, input);
-                }
                 active_effects.EraseIf(VfxEventProfile::Ribbon, [&](const VfxEventInput &input) {
-                    const auto seconds = vfx_catalog.Program().effects[input.effect_handle - 1].seconds;
+                    const auto seconds = vfx_catalog.Image().ribbon_effect_recipes[input.effect_handle - 1].seconds;
                     return display_tick >= input.event_tick &&
                         (display_tick - input.event_tick) / 60.0 >= seconds;
                 });
-                auto ribbon_sources = runtime_detail::BuildVfxTypedRibbonInputs(
-                    vfx_catalog.Program(), typed_vfx.persistent);
-                auto event_ribbons = runtime_detail::BuildVfxEventRibbonInputs(
-                    vfx_catalog.Program(), active_effects.ProfileEvents(VfxEventProfile::Ribbon), display_tick);
-                ribbon_sources.insert(ribbon_sources.end(), std::make_move_iterator(event_ribbons.begin()),
-                                      std::make_move_iterator(event_ribbons.end()));
-                const VfxRibbonFrameInput typed_ribbons{ribbon_sources, vfx_catalog_generation};
+                ribbon_inputs.Reset();
+                runtime_detail::AppendVfxTypedRibbonInputs(
+                    vfx_catalog.Image(), typed_vfx.persistent, ribbon_inputs);
+                runtime_detail::AppendVfxEventRibbonInputs(
+                    vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ribbon),
+                    display_tick, ribbon_inputs);
+                const VfxRibbonFrameInput typed_ribbons{ribbon_inputs.Sources(), vfx_catalog_generation};
                 ribbon_scope.Stop();
                 runtime_detail::DiagnosticScope sort_scope(vfx_work[16], capture_clock);
                 // Authored source delays can cross later event deliveries. Keep the ready prefix chronological.
@@ -2694,6 +2775,46 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto particle_spawn_count = native_particles.size();
                 const auto effect_line_count = native_lines.size();
                 sort_scope.Stop();
+                std::size_t fire_requested{}, fire_admitted{}, fire_admission_bytes{};
+                bool fire_budget_limited{};
+                {
+                    runtime_detail::DiagnosticScope fire_scope(vfx_work[13], capture_clock);
+                    using namespace runtime_detail::vfx_retained_size;
+                    runtime_detail::PrepareVfxPersistentFireSources(vfx_catalog.Image(),
+                        typed_vfx.persistent, display_tick, prepared_fire_sources);
+                    if (!prepared_fire_sources.empty())
+                    {
+                        std::size_t required_fire{}, decorative_fire{};
+                        for (const auto &source : prepared_fire_sources)
+                        {
+                            fire_requested = Add(fire_requested, source.eligible_ordinals);
+                            auto &count = source.authoritative ? required_fire : decorative_fire;
+                            count = Add(count, source.eligible_ordinals);
+                        }
+                        // Reserve essential rows before admitting decorative fire; preserve the
+                        // old flash/mote/fire/stamp output order without moving the fire suffix.
+                        const auto required_suffix = Add(status_stamp_flashes.size(), required_fire);
+                        visible_flashes.reserve(Add(visible_flashes.size(), required_suffix));
+                        fire_admission_bytes = vfx_workspace_bytes();
+                        const auto available = runtime_detail::AvailableVfxFlashAppendRows(
+                            fire_admission_bytes, runtime_detail::kVfxWorkspaceSoftBudgetBytes, visible_flashes);
+                        const auto fire_limit = available > required_suffix ? available - required_suffix : 0;
+                        const auto admitted = std::min(decorative_fire, fire_limit);
+                        fire_budget_limited = admitted < decorative_fire;
+                        const auto previous_capacity = visible_flashes.capacity();
+                        visible_flashes.reserve(Add(Add(visible_flashes.size(), required_suffix), admitted));
+                        fire_admission_bytes = Add(fire_admission_bytes,
+                            Multiply(visible_flashes.capacity() - previous_capacity, sizeof(VfxFlashSpawnInput)));
+                        const auto before = visible_flashes.size();
+                        runtime_detail::AppendVfxPreparedFireFlameCommands(
+                            prepared_fire_sources, admitted, visible_flashes);
+                        fire_admitted = visible_flashes.size() - before;
+                        vfx_fire_admission_peak_bytes = std::max(vfx_fire_admission_peak_bytes, fire_admission_bytes);
+                    }
+                    visible_flashes.insert(visible_flashes.end(),
+                        status_stamp_flashes.begin(), status_stamp_flashes.end());
+                }
+                vfx_fire_budget_limited_frames += fire_budget_limited;
                 active_effects.Compact(vfx_session.decoded.entity_surface_captures);
                 // Activation owns CPU fanout; native emission keeps its separate pending queue.
                 vfx_session.raw_events.AcknowledgeActivation();
@@ -2723,6 +2844,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         .world_batch = native_world,
                     },
                     .devtools = devtools,
+                    .ui_draw_content = snapshots.ui_frame
+                        ? snapshots.ui_frame->draw_content : nullptr,
                     // Lockstep captures advance presentation by the same fixed
                     // step as simulation, independent of GPU/driver wall time.
                     .delta_seconds = config.smoke_render_lockstep
@@ -2825,7 +2948,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     runtime_detail::AppendCsvValues(performance_row,
                         snapshots.current.header.session_id, frame_events.size(), typed_vfx.events.size(), typed_vfx.persistent.size(),
                         particle_spawn_count, effect_line_count, typed_ground_spawns.size(), visible_flashes.size(),
-                        typed_mesh_spawns.size(), typed_fresnels.size(), ribbon_sources.size(), typed_lights.size(),
+                        typed_mesh_spawns.size(), typed_fresnels.size(), typed_ribbons.sources.size(), typed_lights.size(),
                         typed_distortions.size(), typed_decals.size(), typed_volumes.size(), typed_screen.size(), typed_surfaces.size(),
                         previous_capture_log.ticks * qpc_microseconds, io.ticks * qpc_microseconds, io.calls, performance_lines->Bytes());
                     AppendTaskValues(performance_row, vfx_work, qpc_microseconds);
@@ -2837,7 +2960,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         cpu.graph_scene_selection_us, cpu.graph_ao_us, cpu.graph_opaque_us, cpu.graph_hero_us,
                         cpu.graph_post_us, cpu.scene_skin_prepare_us, cpu.scene_shadow_prepare_us,
                         cpu.scene_cluster_prepare_us, cpu.scene_geometry_demand_us, cpu.scene_texture_prepare_us,
-                        cpu.scene_upload_plan_us, active_graphics.target_render_fps);
+                        cpu.scene_upload_plan_us, active_graphics.target_render_fps,
+                        fire_admission_bytes, fire_requested, fire_admitted,
+                        static_cast<unsigned>(fire_budget_limited));
                     performance_row += '\n';
                     performance_lines->Append(performance_row);
                     // The sampler waits for nonempty performance.csv before opening GPU counters.
@@ -3143,6 +3268,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   "\"typed_vfx_ground_submitted_total\":{},"
                                   "\"typed_vfx_flash_peak\":{},"
                                   "\"typed_vfx_flash_submitted_total\":{},"
+                                  "\"vfx_workspace_soft_budget_bytes\":{},"
+                                  "\"vfx_fire_admission_peak_bytes\":{},"
+                                  "\"vfx_fire_budget_limited_frames\":{},"
                                   "\"typed_vfx_mesh_peak\":{},"
                                   "\"typed_vfx_fresnel_peak\":{},"
                                   "\"typed_vfx_ribbon_peak\":{},"
@@ -3167,6 +3295,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   typed_vfx_events_received, typed_vfx_persistent_peak,
                                   typed_vfx_ground_peak, typed_vfx_ground_submitted_total,
                                   typed_vfx_flash_peak, typed_vfx_flash_submitted_total,
+                                  runtime_detail::kVfxWorkspaceSoftBudgetBytes,
+                                  vfx_fire_admission_peak_bytes, vfx_fire_budget_limited_frames,
                                   typed_vfx_mesh_peak, typed_vfx_fresnel_peak,
                                   typed_vfx_ribbon_peak, typed_vfx_ribbon_dropped,
                                   typed_vfx_light_peak, typed_vfx_distortion_peak, typed_vfx_decal_peak,
@@ -3235,6 +3365,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
         SettingsData projection_settings = initial_projection_settings;
+        const bool capture_balance = config.record_playtest || config.capture_diagnostics || config.smoke || replaying;
         if (auto initialized = simulation.Initialize(
                 {.seed = effective_seed, .automatic_choices = config.smoke,
                  .start_in_main_menu = !config.smoke,
@@ -3244,9 +3375,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                  .capture_checksums = config.diagnostic_enemy_count == 0 &&
                                       (config.smoke || config.record_playtest || replaying),
                  .capture_timings = config.capture_diagnostics,
-                 .capture_detailed_balance = config.record_playtest ||
-                                             config.capture_diagnostics ||
-                                             config.smoke || replaying},
+                 .capture_detailed_balance = capture_balance,
+                 .capture_hit_rates = capture_balance},
                 simulation_rules);
             !initialized)
         {
@@ -3369,6 +3499,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RenderClockMode display_clock_mode{RenderClockMode::Scripted};
         std::uint64_t dynamic_pair_revision{};
         std::shared_ptr<const UiFrame> prepared_ui;
+        std::vector<std::uint64_t> ui_projection_facts;
         std::array<ActionEdge, 256> action_storage{};
         std::array<UiAction, 64> ui_action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
@@ -3832,11 +3963,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             try
                             {
                                 slot->storage->CopyDynamicFrom(dynamic_current.View());
-                                auto ui_frame = prepared_ui;
-                                if (!ui_frame || !runtime_detail::SameUiFrameInputs(*ui_frame,
-                                    model.session_id, dynamic_pair_revision, ui_draw_state,
-                                    projection_settings, graphics_ui, static_cast<std::uint8_t>(modal_phase),
-                                    pending_rebind, input_rejected))
+                                CaptureUiProjectionFacts(model, presentation_catalog, ui_draw_state,
+                                    projection_settings, static_cast<std::uint8_t>(modal_phase),
+                                    pending_rebind, input_rejected, ui_projection_facts);
+                                const bool reuse_draw = prepared_ui &&
+                                    runtime_detail::SameUiDrawInputs(*prepared_ui,
+                                        ui_projection_facts, graphics_ui);
+                                std::shared_ptr<const UiDrawContent> draw_content = reuse_draw
+                                    ? prepared_ui->draw_content : nullptr;
+                                std::shared_ptr<const std::vector<std::uint64_t>> draw_facts = reuse_draw
+                                    ? prepared_ui->draw_facts : nullptr;
+                                if (!reuse_draw)
                                 {
                                     ProjectTickUi(model, presentation_catalog, ui_draw_state,
                                         projection_settings, *slot->storage, pending_rebind, graphics_ui.get());
@@ -3867,21 +4004,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         slot->storage->AddUi(SettingsStatusText(
                                             "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
                                             {500, 1000}, 0xFF80C0FFu));
-                                    auto candidate = std::make_shared<UiFrame>();
-                                    candidate->generation = publish_sequence + 1;
-                                    candidate->session_id = model.session_id;
-                                    candidate->selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
-                                    candidate->dynamic_pair_revision = dynamic_pair_revision;
-                                    candidate->session = model.session;
-                                    candidate->ui = ui_draw_state;
-                                    candidate->settings = projection_settings;
-                                    candidate->graphics_model = graphics_ui;
-                                    candidate->modal_phase = static_cast<std::uint8_t>(modal_phase);
-                                    candidate->pending_rebind_slot = pending_rebind;
-                                    candidate->input_rejected = input_rejected;
-                                    candidate->draw_models = slot->storage->TakeUiModels();
-                                    ui_frame = std::move(candidate);
+                                    auto content = std::make_shared<UiDrawContent>();
+                                    content->models = slot->storage->TakeUiModels();
+                                    draw_content = std::move(content);
+                                    draw_facts = std::make_shared<const std::vector<std::uint64_t>>(
+                                        ui_projection_facts);
                                 }
+                                auto ui_frame = std::make_shared<UiFrame>();
+                                ui_frame->generation = publish_sequence + 1;
+                                ui_frame->session_id = model.session_id;
+                                ui_frame->selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
+                                ui_frame->session = model.session;
+                                ui_frame->ui = ui_draw_state;
+                                ui_frame->settings = projection_settings;
+                                ui_frame->graphics_model = graphics_ui;
+                                ui_frame->modal_phase = static_cast<std::uint8_t>(modal_phase);
+                                ui_frame->pending_rebind_slot = pending_rebind;
+                                ui_frame->input_rejected = input_rejected;
+                                ui_frame->draw_facts = std::move(draw_facts);
+                                ui_frame->draw_content = std::move(draw_content);
                                 project_scope.Stop();
                                 runtime_detail::DiagnosticScope publication_scope(simulation_work[10], capture_clock);
                                 const auto previous_sample = dynamic_previous.View();

@@ -186,15 +186,19 @@ Result AdaptiveShadingSystem::Register(RenderGraphBuilder &graph,const AdaptiveS
 {
     return RegisterFrame(graph,in,out,layout,nullptr);
 }
-bool AdaptiveShadingSystem::MatchesLayout(const AdaptiveShadingInputs &in,const AdaptiveShadingLayout &layout)const noexcept
+bool AdaptiveShadingSystem::MatchesShape(const AdaptiveShadingLayout &layout) const noexcept
 {
     const auto &s=impl_->storage;
     return layout.valid&&layout.active==bool(s)&&(!s||
         (layout.raster==s->profile.raster_enabled&&layout.compute==s->profile.compute_enabled&&
          layout.capacity.width==s->profile.render_capacity.width&&layout.capacity.height==s->profile.render_capacity.height&&
-         layout.native_tile_size==s->hardware.vrs_tile_size&&
-         layout.guides==std::array{in.depth.version,in.normal.version,in.base.version,
-             in.material.version,in.metadata.version,in.motion.version}));
+         layout.native_tile_size==s->hardware.vrs_tile_size));
+}
+bool AdaptiveShadingSystem::MatchesLayout(const AdaptiveShadingInputs &in,const AdaptiveShadingLayout &layout)const noexcept
+{
+    return MatchesShape(layout) && (!impl_->storage ||
+        layout.guides==std::array{in.depth.version,in.normal.version,in.base.version,
+            in.material.version,in.metadata.version,in.motion.version});
 }
 Result AdaptiveShadingSystem::BindRetained(RenderGraphBuilder &graph,const AdaptiveShadingInputs &in,
     const AdaptiveShadingLayout &layout,AdaptiveShadingOutputs &out)

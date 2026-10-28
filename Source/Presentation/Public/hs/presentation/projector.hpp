@@ -4,6 +4,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
 #include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/ui_draw_content.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/domain_signal.hpp>
 #include <hs/game_domain/tick_read_view.hpp>
@@ -77,14 +78,15 @@ struct GraphicsSettingsUiModel
 struct UiFrame
 {
     Sequence generation{};
-    std::uint64_t session_id{}, selection_epoch{}, dynamic_pair_revision{};
+    std::uint64_t session_id{}, selection_epoch{};
     SessionProbe session{};
     PresentationUiState ui{};
     SettingsData settings{};
     std::shared_ptr<const GraphicsSettingsUiModel> graphics_model;
     std::uint8_t modal_phase{}, pending_rebind_slot{0xFF};
     bool input_rejected{};
-    std::vector<UiModel> draw_models;
+    std::shared_ptr<const std::vector<std::uint64_t>> draw_facts;
+    std::shared_ptr<const UiDrawContent> draw_content;
 };
 inline constexpr std::size_t kGraphicsUiRowsPerPage = 10;
 // Main-menu title + panel + tabs + rows + telemetry + footer + display modal.
@@ -179,6 +181,13 @@ void ProjectTickUi(const TickReadView &model,
                    RenderSnapshotStorage &snapshot,
                    std::uint8_t pending_rebind_slot = 0xFF,
                    const GraphicsSettingsUiModel *graphics_ui = nullptr);
+void CaptureUiProjectionFacts(const TickReadView &model,
+                   const PresentationCatalog &presentation,
+                   const PresentationUiState &ui,
+                   const SettingsData &settings,
+                   std::uint8_t modal_phase, std::uint8_t pending_rebind_slot,
+                   bool input_rejected,
+                   std::vector<std::uint64_t> &facts);
 [[nodiscard]] Result ProjectTick(const TickReadView &model,
                                          const PresentationCatalog &presentation,
                                          const PresentationUiState &ui,

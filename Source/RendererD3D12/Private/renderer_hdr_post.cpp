@@ -360,15 +360,21 @@ Result HdrPostSystem::Commit(HdrPostCandidate &&candidate, const CompletionSet &
     candidate.targets_->generation = g_hdr_post_target_generation.fetch_add(1,std::memory_order_relaxed)+1;
     impl_->targets = std::move(candidate.targets_); return Result::Success();
 }
-bool HdrPostSystem::MatchesMotionLayout(const HdrPostInputs &in,
-    const HdrPostMotionLayout &layout) const noexcept
+bool HdrPostSystem::MatchesMotionShape(const HdrPostMotionLayout &layout,
+    bool transparent_guides) const noexcept
 {
     const auto storage=impl_->targets;
     if(!storage||!storage->usable||storage->generation!=layout.target_generation||
         layout.enabled!=GeometryEffects(storage->settings)||
         layout.motion!=(storage->settings.motion_blur!=GraphicsMotionBlur::Off)||
         layout.dof!=storage->settings.depth_of_field||
-        (layout.enabled&&layout.transparent_guides!=in.transparent_guides_enabled))return false;
+        (layout.enabled&&layout.transparent_guides!=transparent_guides))return false;
+    return true;
+}
+bool HdrPostSystem::MatchesMotionLayout(const HdrPostInputs &in,
+    const HdrPostMotionLayout &layout) const noexcept
+{
+    if(!MatchesMotionShape(layout,in.transparent_guides_enabled))return false;
     if(!layout.enabled)return true;
     const std::array<ResourceVersion,9> versions{in.hdr.version,in.depth.version,in.motion.version,
         in.surface_history.version,in.normal.version,in.transparent_depth.version,
@@ -500,15 +506,20 @@ Result HdrPostSystem::RegisterMotionImpl(RenderGraphBuilder &graph, const HdrPos
     if(layout){layout->versions=pending.versions;layout->output=outputs.hdr;layout->pass_count=pass_cursor;}
     return Result::Success();
 }
-bool HdrPostSystem::MatchesGradeLayout(const HdrPostInputs &in,
-    const HdrPostGradeLayout &layout,bool geometry_registered_before_grade) const noexcept
+bool HdrPostSystem::MatchesGradeShape(const HdrPostGradeLayout &layout,
+    bool geometry_registered_before_grade) const noexcept
 {
     const auto storage=impl_->targets;
     return storage&&storage->usable&&storage->generation==layout.target_generation&&
         layout.enabled==storage->settings.color_grading&&
-        (!layout.enabled||(layout.input==in.hdr.version&&
-            layout.initialize_lut==!storage->lut_initialized&&
+        (!layout.enabled||(layout.initialize_lut==!storage->lut_initialized&&
             layout.imports_in_grade==!geometry_registered_before_grade));
+}
+bool HdrPostSystem::MatchesGradeLayout(const HdrPostInputs &in,
+    const HdrPostGradeLayout &layout,bool geometry_registered_before_grade) const noexcept
+{
+    return MatchesGradeShape(layout,geometry_registered_before_grade)&&
+        (!layout.enabled||layout.input==in.hdr.version);
 }
 Result HdrPostSystem::RegisterGrade(RenderGraphBuilder &graph,const HdrPostInputs &inputs,
     HdrPostOutputs &outputs,HdrPostGradeLayout *layout)

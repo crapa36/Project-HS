@@ -622,7 +622,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         static_cast<float>(camera.camera.position.y-camera.scene_origin.y), static_cast<float>(camera.camera.position.z-camera.scene_origin.z)};
     if (!std::isfinite(camera_scene_position.x) || !std::isfinite(camera_scene_position.y) || !std::isfinite(camera_scene_position.z))
         return ViewFailure("Ribbon interpolation and previous eye must be finite");
-    if (!VfxRibbonState::ValidateSources(input.vfx.ribbons.sources, ribbon_error))
+    if (!ribbon_state.ValidateFrameSources(input.vfx.ribbons.sources, ribbon_error))
         return ViewFailure(ribbon_error);
     return Result::Success();
 }

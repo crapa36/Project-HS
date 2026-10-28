@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -47,6 +48,50 @@ hs::VfxEventInput Input()
 }
 auto Decode(const hs::VfxProgramData &p,const hs::VfxEventInput &input)
 {const auto image=Prepared(p);return hs::runtime_detail::BuildVfxTypedMoteCommands(image.View(),std::span(&input,1));}
+void PreparedRoutesCloseAuthoredWindows()
+{
+    auto p=Program();
+    auto image=Prepared(p);
+    const auto &source=image.mote_source_recipes[0];
+    const auto &output=image.mote_output_recipes[0];
+    Require(source.effect_id==0xabc987123ull&&source.effect_lookup_count==1&&
+        source.stable_id==Hash("ascending_motes")&&source.output_range.first==0&&
+        source.output_range.count==1&&source.knots[0]==.05f&&source.knots[1]==1&&
+        source.common_route_valid&&output.empty_parameters_valid&&output.common_recipe_index==0,
+        "prepared Mote route identity/window missing");
+    p=Program();p.sources[0].outputs={9,1};image=Prepared(p);
+    Require(!image.mote_source_recipes[0].output_range_valid&&
+        image.mote_output_recipes[0].common_recipe_index==0xffffffffu,
+        "invalid authored output window entered a prepared Mote route");
+    p=Program();p.outputs[0].parameters={9,1};image=Prepared(p);
+    Require(!image.mote_output_recipes[0].empty_parameters_valid&&
+        image.mote_output_recipes[0].common_recipe_index==0xffffffffu,
+        "invalid authored parameter window entered a prepared Mote route");
+}
+void PreparedResidualAndTickRoutesRequireTwoKnots()
+{
+    hs::VfxProgramData residual;
+    hs::VfxEffectRecord effect;effect.handle=1;residual.effects.push_back(effect);
+    hs::VfxSourceRecord source;source.effect=1;source.stable_id=Hash("residual_motes");
+    source.type=hs::VfxSourceType::CurlMotes;source.knot_count=2;source.knots={0,1,0,0};
+    source.parameters={0,2};source.outputs={0,0};residual.sources.push_back(source);
+    residual.parameters={{Hash("count"),hs::VfxParameterType::Int,4},
+        {Hash("inward_speed"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.5f)}};
+    auto image=Prepared(residual);
+    Require(image.mote_source_recipes[0].residual_route_valid,"valid residual source route was rejected");
+    residual.sources[0].knot_count=4;image=Prepared(residual);
+    Require(!image.mote_source_recipes[0].residual_route_valid,"residual route accepted a non-two-knot source");
+
+    hs::VfxProgramData tick;
+    effect={};effect.handle=1;tick.effects.push_back(effect);
+    source={};source.effect=1;source.stable_id=Hash("tick_motes");source.type=hs::VfxSourceType::CurlMotes;
+    source.knot_count=2;source.knots={0,1,0,0};source.parameters={0,1};source.outputs={0,0};tick.sources.push_back(source);
+    tick.parameters.push_back({Hash("count"),hs::VfxParameterType::Int,3});
+    image=Prepared(tick);
+    Require(image.mote_source_recipes[0].tick_route_valid,"valid status tick source route was rejected");
+    tick.sources[0].knot_count=0;image=Prepared(tick);
+    Require(!image.mote_source_recipes[0].tick_route_valid,"status tick route accepted a non-two-knot source");
+}
 void BurstAndScale()
 {
     auto p=Program();auto in=Input();const auto a=Decode(p,in);
@@ -60,6 +105,78 @@ void BurstAndScale()
     in=Input();p.effects[0].payload_kind=Hash("PresentationContextPayload");hs::VfxContextPayload ctx;ctx.ratio01=.01f;in.payload=ctx;in.world_transform[12]=12;
     const auto context=Decode(p,in);Require(context.size()==10&&Near(context[0].size,.045f)&&Near(context[0].orbit_radius,.25f)&&Near(context[0].position.x,12),"Context ratio used as scale");
     p.sources[0].parameters.count=1;Require(Near(Decode(p,in)[0].orbit_radius,.2f),"missing curl default changed");
+}
+hs::VfxProgramData StatusTickMoteProgram()
+{
+    hs::VfxProgramData p;
+    hs::VfxEffectRecord tick; tick.handle=1; tick.payload_kind=Hash("PointEventPayload");
+    tick.seconds=.16f; tick.sources={0,1}; p.effects.push_back(tick);
+    hs::VfxEffectRecord status; status.handle=2; status.input_mode=1; status.timing_kind=1;
+    status.payload_kind=Hash("EntityAttachmentPayload"); status.sources={1,1}; p.effects.push_back(status);
+    p.effect_lookup={{Hash64("particle.status.bleed_tick"),1},
+        {Hash64("persistent.status.bleed"),2}};
+    hs::VfxSourceRecord event_source; event_source.effect=1; event_source.stable_id=Hash("event_motes");
+    event_source.type=hs::VfxSourceType::CurlMotes; event_source.knot_count=2;
+    event_source.knots={0,1,0,0}; event_source.parameters={0,3}; event_source.outputs={0,1};
+    p.sources.push_back(event_source);
+    hs::VfxSourceRecord owner_source; owner_source.effect=2; owner_source.stable_id=Hash("tick_motes");
+    owner_source.type=hs::VfxSourceType::CurlMotes; owner_source.knot_count=2;
+    owner_source.knots={0,1,0,0}; owner_source.parameters={3,1}; owner_source.outputs={1,1};
+    p.sources.push_back(owner_source);
+    p.parameters={{Hash("count"),hs::VfxParameterType::Int,3},
+        {Hash("curl"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.2f)},
+        {Hash("drag"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(.8f)},
+        {Hash("count"),hs::VfxParameterType::Int,3}};
+    hs::VfxOutputRecord burst; burst.source=0; burst.profile=hs::VfxOutputProfile::SpriteAdd;
+    burst.shape=Hash("soft_leaf_mote"); burst.motion=hs::VfxMotionKind::SlowUpwardHelix;
+    burst.rgba={.2f,.5f,.8f,.7f}; burst.hdr=1; p.outputs.push_back(burst);
+    hs::VfxOutputRecord tick_output; tick_output.source=1; tick_output.profile=hs::VfxOutputProfile::SpriteAdd;
+    tick_output.shape=Hash("small_motes"); tick_output.motion=hs::VfxMotionKind::VeryShortLocalDrift;
+    tick_output.shape_domain=Hash("sprite"); tick_output.shape_scale_rule=Hash("component_size");
+    tick_output.shape_component_kind=Hash("particle"); tick_output.coverage_type=Hash("analytic");
+    tick_output.coverage_ref=Hash("diamond_spark"); tick_output.rgba={.8f,.4f,.2f,.9f};
+    tick_output.hdr=1.5f; tick_output.gradient_row=6; p.outputs.push_back(tick_output);
+    return p;
+}
+void AppendAndConsumedSequenceSemantics()
+{
+    auto p=Program(); auto in=Input(); in.sequence=811;
+    const auto expected=Decode(p,in);
+    auto image=Prepared(p);
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed=123;
+    std::vector<hs::VfxFlashSpawnInput> appended{prefix};
+    hs::runtime_detail::AppendVfxTypedMoteCommands(image.View(),std::span(&in,1),{},appended);
+    Require(appended.size()==expected.size()+1&&appended.front().stable_seed==prefix.stable_seed&&
+        appended[1].stable_seed==expected[0].stable_seed,"typed Mote append changed prefix or row order");
+    const std::array consumed{in.sequence};
+    hs::runtime_detail::AppendVfxTypedMoteCommands(image.View(),std::span(&in,1),consumed,appended);
+    Require(appended.size()==expected.size()+1,"consumed event sequence was emitted again");
+
+    auto tick_program=StatusTickMoteProgram(); auto tick_image=Prepared(tick_program);
+    hs::VfxEventInput event; event.effect_handle=1; event.sequence=902; event.event_tick=51;
+    event.stable_seed=55; event.geometry_owner_id=17; event.status_episode_generation=4;
+    hs::VfxPointPayload point; point.position={1,2,3}; event.payload=point;
+    auto duplicate=event; duplicate.geometry_owner_id=18;
+    hs::VfxPersistentInput owner; owner.effect_handle=2; owner.stable_id=301;
+    owner.status_episode_generation=4; owner.normalized_age=.5f; owner.current_transform[12]=4;
+    hs::VfxEntityPayload entity; entity.render_instance_id=(2ull<<60)|17;
+    entity.footprint_radius=.6f; entity.lifetime01=.5f; owner.payload=entity;
+    const std::array events{event,duplicate}; const std::array owners{owner};
+    std::vector<hs::VfxFlashSpawnInput> converted;
+    std::vector<hs::Sequence> sequences;
+    hs::runtime_detail::AppendVfxOwnedStatusTickMoteFlashes(
+        tick_image.View(),events,owners,converted,sequences);
+    Require(converted.size()==3&&sequences==std::vector<hs::Sequence>(3,event.sequence),
+        "owned status Mote conversion did not report each consumed output row");
+    std::ranges::sort(sequences); sequences.erase(std::unique(sequences.begin(),sequences.end()),sequences.end());
+    std::vector<hs::VfxFlashSpawnInput> unpaired;
+    hs::runtime_detail::AppendVfxTypedMoteCommands(tick_image.View(),events,sequences,unpaired);
+    Require(unpaired.empty(),"duplicate event sequence escaped owned status pairing");
+    const auto returning=hs::runtime_detail::BuildVfxOwnedStatusTickMoteCommands(
+        tick_image.View(),events,owners);
+    Require(returning.size()==converted.size()&&returning[0].event_sequence==event.sequence&&
+        returning.back().flash.stable_seed==converted.back().stable_seed,
+        "returning owned Mote helper diverged from append output");
 }
 void CatalogOrderAndMotions()
 {
@@ -106,9 +223,6 @@ auto Owned(const hs::VfxProgramData &p,std::span<const hs::VfxEventInput> inputs
 {const auto image=Prepared(p);return hs::runtime_detail::BuildVfxOwnedMoteCommands(image.View(),inputs,tick);}
 auto Persistent(const hs::VfxProgramData &p,std::span<const hs::VfxPersistentInput> owners)
 {const auto image=Prepared(p);return hs::runtime_detail::BuildVfxPersistentMoteCommands(image.View(),owners);}
-auto Persistent(const hs::VfxProgramData &p,std::span<const hs::VfxPersistentInput> owners,
-    hs::runtime_detail::VfxPersistentMoteBirthWindow &births,hs::Tick tick,float interpolation=1)
-{const auto image=Prepared(p);return hs::runtime_detail::BuildVfxPersistentMoteCommands(image.View(),owners,births,tick,interpolation);}
 auto EmitSparks(hs::runtime_detail::VfxPersistentSparkState &state,const hs::VfxProgramData &p,
     std::span<const hs::VfxPersistentInput> owners,hs::Tick tick,float interpolation=1)
 {const auto image=Prepared(p);return state.Emit(image.View(),owners,tick,interpolation);}
@@ -118,6 +232,11 @@ void OwnedRateAndClock()
     Require(Owned(p,in,99).empty()&&Owned(p,in,220).empty(),"owner boundaries ignored");
     const auto birth=Owned(p,in,100);Require(birth.size()==1&&Near(birth[0].normalized_age,0),"integer rate first birth missing");
     const auto at20=Owned(p,in,120);Require(at20.size()==2,"integer rate cadence wrong");
+    auto image=Prepared(p); hs::VfxFlashSpawnInput prefix; prefix.stable_seed=333;
+    std::vector<hs::VfxFlashSpawnInput> appended{prefix};
+    hs::runtime_detail::AppendVfxOwnedMoteCommands(image.View(),std::span(&in,1),120,appended);
+    Require(appended.size()==at20.size()+1&&appended.front().stable_seed==prefix.stable_seed&&
+        appended[1].stable_seed==at20[0].stable_seed,"owned Mote append changed caller order");
     const auto between=Owned(p,in,119.5);
     Require(between.size()==1&&between[0].stable_seed==birth[0].stable_seed&&
             between[0].normalized_age>birth[0].normalized_age,
@@ -144,6 +263,16 @@ void OwnedRateAndClock()
     Require(Owned(p,in,160).size()==2&&Owned(p,in,169).size()==1&&Owned(p,in,189).empty(),
         "source interval emitted after end or discarded valid tails");
     Require(Owned(p,std::span<const hs::VfxEventInput>{},150).empty(),"cancelled owner left rate particles");
+}
+void SafeGapSectorAcceptsNonAmbientSourceId()
+{
+    auto p=OwnedProgram();
+    p.sources[0].stable_id=Hash("safe_gap_rate_source");
+    const auto in=OwnedInput();
+    const auto first=Owned(p,in,120),repeat=Owned(p,in,120);
+    Require(first.size()==2,"SafeGapSector rejected a valid non-ambient rate source");
+    Require(first[0].stable_seed==repeat[0].stable_seed&&first[1].stable_seed==repeat[1].stable_seed&&
+        first[0].stable_seed!=first[1].stable_seed,"non-ambient source birth seeds changed or repeated");
 }
 void OwnedMalformedAndQuality()
 {
@@ -224,42 +353,79 @@ auto PersistentMotes(const hs::VfxProgramData &program,
     return Persistent(program, std::span(&owner, 1));
 }
 
-void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
+void PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry()
 {
     auto program = PersistentMoteProgram();
-    hs::runtime_detail::VfxPersistentMoteBirthWindow births;
     auto owner = PersistentMoteOwner(20);
-    const auto at20 = Persistent(program, std::span(&owner, 1), births, 120);
+    const auto at20 = Persistent(program, std::span(&owner, 1));
     Require(at20.size() == 2 && at20[0].stable_seed != at20[1].stable_seed,
             "persistent mote birth cadence or indexed identity missing");
-    const auto repeat = Persistent(program, std::span(&owner, 1), births, 120);
+    const auto mix = [](std::uint32_t value) {
+        value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
+        value *= 0x846ca68bu; return value ^ (value >> 16);
+    };
+    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
+        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) *
+            (1.0f / 16777216.0f);
+    };
+    const auto effect_id = Hash64("persistent.status.slow");
+    const auto source_id = Hash("ambient_motes");
+    const auto source_seed = mix(owner.stable_seed ^ mix(static_cast<std::uint32_t>(effect_id)) ^
+        mix(static_cast<std::uint32_t>(effect_id >> 32)) ^ mix(source_id));
+    for (const auto &mote : at20)
+    {
+        const auto ordinal = mote.normalized_age == 0.0f ? 1u : 0u;
+        const auto seed = mix(source_seed ^ mix(ordinal + 1u));
+        const float angle = 2.0f * std::numbers::pi_v<float> * random(seed, 0);
+        const float radius = .8f * (.45f + .4f * random(seed, 1));
+        Require(mote.stable_seed == seed &&
+                Near(mote.position.x + mote.initial_offset.x, 4.0f + std::cos(angle) * radius) &&
+                Near(mote.position.z + mote.initial_offset.z, -2.0f + std::sin(angle) * radius),
+                "persistent mote random position differs from direct seed calculation");
+    }
+    auto append_image=Prepared(program);
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed=777;
+    std::vector<hs::VfxFlashSpawnInput> appended{prefix};
+    hs::runtime_detail::AppendVfxPersistentMoteCommands(
+        append_image.View(),std::span(&owner,1),appended);
+    Require(appended.size()==at20.size()+1&&appended.front().stable_seed==prefix.stable_seed&&
+        appended[1].stable_seed==at20[0].stable_seed,
+        "persistent Mote append changed caller prefix or row order");
+    owner.normalized_age=1.0f;
+    std::get<hs::VfxEntityPayload>(owner.payload).lifetime01=1.0f;
+    hs::runtime_detail::AppendVfxPersistentMoteCommands(
+        append_image.View(),std::span(&owner,1),appended);
+    Require(appended.size()==at20.size()+1,"rejected persistent owner partially appended motes");
+    owner=PersistentMoteOwner(20);
+    const auto repeat = Persistent(program, std::span(&owner, 1));
     Require(repeat.size() == at20.size() && repeat[0].stable_seed == at20[0].stable_seed &&
             repeat[0].normalized_age == at20[0].normalized_age,
-            "retained birth window accumulated or changed births");
+            "stateless persistent evaluation accumulated or changed births");
     auto fractional_owner = owner;
     fractional_owner.elapsed_seconds = 20.5f / 60.0f;
     fractional_owner.elapsed_ticks = 20.5;
     fractional_owner.normalized_age = 20.5f / 120.0f;
     std::get<hs::VfxEntityPayload>(fractional_owner.payload).lifetime01 = fractional_owner.normalized_age;
-    const auto fractional = Persistent(program, std::span(&fractional_owner, 1), births, 121, 0.5f);
+    const auto fractional = Persistent(program, std::span(&fractional_owner, 1));
     Require(fractional.size() == at20.size() && fractional[0].stable_seed == at20[0].stable_seed &&
             fractional[0].normalized_age > at20[0].normalized_age,
             "fractional display time dropped or regenerated persistent motes");
     owner = PersistentMoteOwner(40);
-    const auto at40 = Persistent(program, std::span(&owner, 1), births, 140);
+    const auto at40 = Persistent(program, std::span(&owner, 1));
     Require(at40.size() == 2 && at40[0].stable_seed == at20[1].stable_seed,
             "skipped persistent frame changed the live ordinal");
     owner.current_transform[12] = 12.0f;
-    const auto moved = Persistent(program, std::span(&owner, 1), births, 140);
+    const auto moved = Persistent(program, std::span(&owner, 1));
     Require(moved.size() == at40.size() && moved[0].stable_seed == at40[0].stable_seed &&
             Near(moved[0].position.x, 12.0f),
             "persistent motes did not use the current owner transform");
-    Require(births.size() == 2, "birth window retained expired unit-space records");
-    births.Prune(159);
-    Require(births.size() == 1, "birth window did not retire the 39-tick-old record");
-    births.Prune(180);
-    Require(births.size() == 0, "birth window retained records beyond their live interval");
-
+    owner = PersistentMoteOwner(20);
+    const auto owner_clock_rewind = Persistent(program, std::span(&owner, 1));
+    Require(owner_clock_rewind.size() == at20.size() &&
+            owner_clock_rewind[0].stable_seed == at20[0].stable_seed &&
+            owner_clock_rewind[0].normalized_age == at20[0].normalized_age &&
+            owner_clock_rewind[0].initial_offset.x == at20[0].initial_offset.x,
+            "nonmonotonic owner age changed deterministic persistent output");
     auto reordered = program;
     auto extra_effect = reordered.effects.front();
     extra_effect.handle = 2;
@@ -716,6 +882,159 @@ hs::VfxPersistentInput SparkOwner(std::uint32_t elapsed_tick)
     return owner;
 }
 
+std::uint32_t SparkModelMix(std::uint32_t value)
+{
+    value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
+    value *= 0x846ca68bu; return value ^ (value >> 16);
+}
+
+hs::VfxProgramData MultiSourceSparkProgram()
+{
+    auto program = SparkProgram();
+    program.effects[0].sources = {0, 2};
+    auto second_source = program.sources[0];
+    second_source.outputs = {1, 1};
+    program.sources.push_back(second_source);
+    auto second_output = program.outputs[0];
+    second_output.source = 1;
+    program.outputs.push_back(second_output);
+    return program;
+}
+
+class LinearSparkReference
+{
+  public:
+    void Append(std::span<const hs::VfxPersistentInput> owners, hs::Tick current_tick,
+                std::vector<std::uint32_t> &seeds)
+    {
+        struct Change { std::size_t index; Cursor cursor; bool is_new; };
+        std::vector<Change> changes;
+        constexpr auto effect_id = Hash64("particle.basic_attack");
+        constexpr auto source_id = Hash("micro_sparks");
+        for (const auto &owner : owners)
+        {
+            const auto *projectile = std::get_if<hs::VfxProjectilePayload>(&owner.payload);
+            if (!projectile) continue;
+            const auto age = static_cast<std::int64_t>(owner.elapsed_ticks);
+            for (std::uint32_t source = 0; source < 2; ++source)
+            {
+                auto change = std::find_if(changes.begin(), changes.end(), [&](const Change &item) {
+                    return item.cursor.owner_id == owner.stable_id && item.cursor.effect_handle == owner.effect_handle &&
+                        item.cursor.source_index == source;
+                });
+                if (change == changes.end())
+                {
+                    const auto cursor = std::find_if(cursors_.begin(), cursors_.end(), [&](const Cursor &item) {
+                        return current_tick < item.expires_tick && item.owner_id == owner.stable_id &&
+                            item.effect_handle == owner.effect_handle && item.source_index == source;
+                    });
+                    if (cursor != cursors_.end())
+                        changes.push_back({static_cast<std::size_t>(cursor - cursors_.begin()), *cursor, false});
+                    else
+                        changes.push_back({std::numeric_limits<std::size_t>::max(),
+                            {owner.stable_id, owner.effect_handle, source, 0,
+                             current_tick - static_cast<hs::Tick>(age) + 27}, true});
+                    change = std::prev(changes.end());
+                }
+                auto &cursor = change->cursor;
+                for (std::uint32_t ordinal = cursor.next_ordinal; ordinal < 3;)
+                {
+                    const auto birth_tick = static_cast<std::int64_t>(
+                        std::ceil((.1 * .45 + ((.9 - .1) * .45 / 2.0) * ordinal) * 60.0 - .000001));
+                    if (age < birth_tick) break;
+                    ++cursor.next_ordinal;
+                    if (age == birth_tick)
+                    {
+                        const auto seed = SparkModelMix(owner.stable_seed ^
+                            SparkModelMix(static_cast<std::uint32_t>(effect_id)) ^
+                            SparkModelMix(static_cast<std::uint32_t>(effect_id >> 32)) ^
+                            SparkModelMix(source_id) ^ SparkModelMix(ordinal + 1));
+                        seeds.push_back(seed);
+                    }
+                    ++ordinal;
+                }
+            }
+        }
+        for (const auto &change : changes)
+            if (!change.is_new) cursors_[change.index] = change.cursor;
+        std::erase_if(cursors_, [current_tick](const Cursor &cursor) {
+            return current_tick >= cursor.expires_tick;
+        });
+        for (const auto &change : changes)
+            if (change.is_new) cursors_.push_back(change.cursor);
+    }
+
+  private:
+    struct Cursor
+    {
+        std::uint64_t owner_id{};
+        hs::VfxEffectHandle effect_handle{};
+        std::uint32_t source_index{}, next_ordinal{};
+        hs::Tick expires_tick{};
+    };
+    std::vector<Cursor> cursors_;
+};
+
+void PersistentSparkIndexMatchesOriginalLinearModel()
+{
+    const auto program = MultiSourceSparkProgram();
+    const auto image = Prepared(program);
+    hs::runtime_detail::VfxPersistentSparkState indexed;
+    LinearSparkReference linear;
+    auto a = SparkOwner(3); a.stable_id = 1001; a.stable_seed = 0x102030u;
+    auto b = SparkOwner(3); b.stable_id = 2002; b.stable_seed = 0x405060u;
+    auto c = SparkOwner(3); c.stable_id = 3003; c.stable_seed = 0x708090u;
+    const auto compare = [&](std::span<const hs::VfxPersistentInput> owners, hs::Tick tick) {
+        std::vector<hs::VfxFlashSpawnInput> output;
+        std::vector<std::uint32_t> expected;
+        indexed.Append(image.View(), owners, tick, 1.0f, output);
+        linear.Append(owners, tick, expected);
+        Require(output.size() == expected.size(), "indexed spark output count differed from linear cursor model");
+        for (std::size_t i = 0; i < output.size(); ++i)
+            Require(output[i].stable_seed == expected[i] && output[i].event_tick == tick,
+                "indexed spark order or ordinal seed differed from linear cursor model");
+        return output.size();
+    };
+    const std::array duplicate_inputs{a, b, a, c};
+    Require(compare(duplicate_inputs, 100) == 6,
+        "duplicate input or index growth changed multi-source spark births");
+    a = SparkOwner(4); a.stable_id = 1001; a.stable_seed = 0x102030u;
+    b = SparkOwner(4); b.stable_id = 2002; b.stable_seed = 0x405060u;
+    const std::array skipped_tick_inputs{b, a, b};
+    Require(compare(skipped_tick_inputs, 101) == 0,
+        "skipped birth tick was replayed by the multi-source cursor index");
+    a = SparkOwner(14); a.stable_id = 1001; a.stable_seed = 0x102030u;
+    b = SparkOwner(14); b.stable_id = 2002; b.stable_seed = 0x405060u;
+    const std::array second_birth_inputs{a, b};
+    Require(compare(second_birth_inputs, 111) == 4,
+        "multi-source cursor failed to catch the next authored birth");
+    a = SparkOwner(25); a.stable_id = 1001; a.stable_seed = 0x102030u;
+    b = SparkOwner(25); b.stable_id = 2002; b.stable_seed = 0x405060u;
+    const std::array reordered_inputs{b, a};
+    Require(compare(reordered_inputs, 122) == 4,
+        "changed owner input order changed multi-source birth count");
+    Require(compare({}, 124) == 0,
+        "expired cursors emitted during an empty owner frame");
+    a = SparkOwner(3); a.stable_id = 1001; a.stable_seed = 0x102030u;
+    Require(compare(std::span(&a, 1), 124) == 2,
+        "expired cursor identity was not reusable for a new owner episode");
+
+    hs::runtime_detail::VfxPersistentSparkState retry_state;
+    auto rejected = SparkOwner(3);
+    rejected.stable_id = 3003;
+    std::get<hs::VfxProjectilePayload>(rejected.payload).velocity = {};
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed = 0x778899u;
+    std::vector<hs::VfxFlashSpawnInput> retry_output{prefix};
+    retry_state.Append(image.View(), std::span(&rejected, 1), 140, 1.0f, retry_output);
+    Require(retry_output.size() == 1 && retry_output.front().stable_seed == prefix.stable_seed,
+        "rejected spark input changed caller output before a valid retry");
+    auto retry_owner = SparkOwner(3);
+    retry_owner.stable_id = 3003;
+    retry_state.Append(image.View(), std::span(&retry_owner, 1), 140, 1.0f, retry_output);
+    Require(retry_output.size() == 3 && retry_output[0].stable_seed == prefix.stable_seed,
+        "rejected spark input consumed its ordinal before valid retry");
+}
+
 void PersistentSparksUseOnlyLiveBirthPositions()
 {
     const auto program = SparkProgram();
@@ -725,11 +1044,32 @@ void PersistentSparksUseOnlyLiveBirthPositions()
         return EmitSparks(state, program, std::span(&owner, 1), tick);
     };
     const auto first = emit(103);
+    Require(state.RetainedCapacityBytes() > 0,
+            "spark state omitted retained cursor vector capacity");
     Require(first.size() == 1 && first[0].shape == hs::VfxImpactShape::Spark &&
             Near(first[0].position.x, 7) && Near(first[0].position.y, .35f) &&
             Near(first[0].position.z, -2) && Near(first[0].size, .12f) &&
             Near(first[0].drag, .8f) && first[0].event_tick == 103,
             "first spark did not use the live projectile birth record");
+    hs::runtime_detail::VfxPersistentSparkState append_state;
+    auto image=Prepared(program);
+    hs::VfxFlashSpawnInput prefix; prefix.stable_seed=888;
+    std::vector<hs::VfxFlashSpawnInput> appended{prefix};
+    append_state.Append(image.View(),std::span(&owner,1),103,1.0f,appended);
+    Require(appended.size()==2&&appended.front().stable_seed==prefix.stable_seed&&
+        appended.back().stable_seed==first[0].stable_seed,
+        "persistent spark append changed output order or consumed birth state");
+    const auto warm_capacity = append_state.RetainedCapacityBytes();
+    append_state.Append(image.View(),std::span(&owner,1),103,1.0f,appended);
+    Require(appended.size()==2&&appended.front().stable_seed==prefix.stable_seed&&
+        appended.back().stable_seed==first[0].stable_seed&&
+        append_state.RetainedCapacityBytes()==warm_capacity,
+        "warm spark append changed output or failed to reuse retained scratch capacity");
+    hs::runtime_detail::VfxPersistentSparkState swapped_state;
+    swapped_state.Swap(append_state);
+    Require(append_state.RetainedCapacityBytes()==0&&
+        swapped_state.RetainedCapacityBytes()==warm_capacity,
+        "spark swap did not transfer retained cursor and scratch capacity");
     Require(Near(first[0].lifetime, .18f) && first[0].gradient_row == 12 &&
             Near(first[0].hdr, 1.6f) && Near(first[0].color.x, .32f) &&
             Near(first[0].color.w, .35f) &&
@@ -779,6 +1119,8 @@ void PersistentSparksSkipMissedTicksAndReset()
     Require(EmitSparks(state, program, std::span(&owner, 1), 114).empty(),
             "transient missing owner replayed the same birth");
     state.Clear();
+    Require(state.RetainedCapacityBytes() > 0,
+            "spark clear hid retained cursor backing capacity");
     Require(EmitSparks(state, program, std::span(&owner, 1), 114).size() == 1,
             "session/catalog reset failed to clear ordinal state");
     owner = SparkOwner(25);
@@ -900,6 +1242,6 @@ void CookedPersistentSparksConvertWhenAvailable()
 }
 int RunVfxMoteTests()
 {
-    try {BurstAndScale();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();OwnedMalformedAndQuality();PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
+    try {PreparedRoutesCloseAuthoredWindows();PreparedResidualAndTickRoutesRequireTwoKnots();BurstAndScale();AppendAndConsumedSequenceSemantics();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();SafeGapSectorAcceptsNonAmbientSourceId();OwnedMalformedAndQuality();PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparkIndexMatchesOriginalLinearModel();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

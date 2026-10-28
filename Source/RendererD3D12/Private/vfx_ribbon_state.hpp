@@ -2,6 +2,7 @@
 
 #include "vfx_ribbon_gpu.hpp"
 #include <hs/render_data/vfx_ribbon_input.hpp>
+#include <cstddef>
 #include <span>
 #include <string>
 #include <tuple>
@@ -16,6 +17,7 @@ class VfxRibbonState
 {
 public:
     [[nodiscard]] static bool ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error);
+    [[nodiscard]] bool ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources, std::string &error);
     [[nodiscard]] bool Update(std::span<const VfxRibbonSourceInput> sources,
                                Tick tick, std::uint64_t session,
                                std::uint64_t catalog_generation,
@@ -27,7 +29,7 @@ public:
     [[nodiscard]] std::uint32_t DroppedSources() const noexcept { return dropped_sources_; }
     [[nodiscard]] std::uint32_t Capacity() const noexcept { return capacity_; }
     [[nodiscard]] bool OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
-                                        std::size_t output_capacity) const;
+                                        std::size_t output_capacity);
 
 private:
     friend class hs::D3D12Renderer;
@@ -61,6 +63,8 @@ private:
     std::unordered_map<Key, std::size_t, KeyHash> slot_by_key_;
     std::vector<GpuRibbonSourceUpdate> updates_;
     std::vector<GpuRibbonOutput> outputs_;
+    std::vector<std::size_t> source_scratch_;
+    std::vector<GpuRibbonOutput> grouped_outputs_;
     std::uint64_t session_{};
     std::uint64_t catalog_generation_{};
     Tick last_tick_{};

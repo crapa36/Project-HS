@@ -259,15 +259,22 @@ Result ReconstructionGuidesSystem::Commit(ReconstructionGuidesCandidate &&candid
     return Result::Success();
 }
 
-bool ReconstructionGuidesSystem::MatchesLayout(const ReconstructionGuidesInputs &in,bool external,
-    std::string_view provider,const ReconstructionGuidesLayout &layout) const noexcept
+bool ReconstructionGuidesSystem::MatchesShape(const ReconstructionGuidesLayout &layout,bool external,
+    std::string_view provider,bool transparent_guides,bool screen_overlay) const noexcept
 {
     const auto storage=impl_->targets;
     if(!storage||!storage->usable||layout.target_generation!=storage->generation||
         layout.external!=external||layout.provider_name!=provider||
-        layout.transparent_guides!=in.transparent_guides_enabled||
-        layout.screen_overlay!=bool(in.screen_overlay_alpha.version.resource)||
+        layout.transparent_guides!=transparent_guides||
+        layout.screen_overlay!=screen_overlay||
         layout.composition!=bool(storage->composition.resource))return false;
+    return true;
+}
+bool ReconstructionGuidesSystem::MatchesLayout(const ReconstructionGuidesInputs &in,bool external,
+    std::string_view provider,const ReconstructionGuidesLayout &layout) const noexcept
+{
+    if(!MatchesShape(layout,external,provider,in.transparent_guides_enabled,
+            bool(in.screen_overlay_alpha.version.resource)))return false;
     const std::array<ResourceVersion,16> current{in.depth.version,in.motion.version,in.metadata.version,
         in.surface_history.version,in.composite_hdr.version,in.opaque_hdr.version,
         in.exposure.version,in.transparency_revealage.version,in.transparent_depth.version,

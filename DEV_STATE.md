@@ -1,14 +1,15 @@
 # DEV_STATE
 
 AI implementation continuity only. Workspace is dirty; preserve staged and unstaged
-edits. No commit/push/worktree requested. Current observed HEAD: 9f91820
-`Refine rendering, streaming, and runtime pipelines` (2026-10-27 observation).
+edits. User-requested checkpoint011ef96 `Continue engine optimization and
+simplification` was pushed to origin/main on2026-10-27. Newer changes are local;
+no further commit/push or worktree requested.
 
 ## Objective and execution policy
 
 Goal remains ACTIVE: Debug /Od/assertions/checked iterators,1080pUltra100%,200enemies,
 60FPS and all accepted earlier directives, then queued51d5055 review. NOT achieved.
-No commit/push/worktree; preserve all dirty edits. No Sol subagents; current workers
+Preserve all dirty edits. No Sol subagents; current workers
 are explicit Luna/high. Deferred W12 per-queue timestamp/readback separation stays
 untouched; native resource/fence/state/alias and actual submission contracts remain.
 
@@ -20,6 +21,305 @@ Use session. Whole-scope engineering estimate55-60% complete /40-45% remaining,
 including unqualified source and queued51d5055 detailed review; not item counting.
 Queue: .planning/2026-10-23-complete-directives/remaining-work-20261027.md.
 Current worktree is NEWER than all executable receipts below. Never claim its FPS.
+
+Native ribbon update reuses source-row workspace and a grouped-output buffer rather
+than constructing them per frame. Output-capacity preflight uses packed inclusion
+bits in the same source workspace, preserving its conservative retained-tail bound.
+OutputsMayExceed is now a nonconst operational method because it owns that scratch;
+all current callers already hold mutable state. Both preflight and update clear
+logical scratch sizes before return so conditional state checkpoints copy no work
+rows. The live output vector and slot histories remain authoritative. Added fixture
+sources cover130 slots across bit-word boundaries, repeated early rejection then
+valid preflight, warm grouping/shrink and checkpoint restore. None was executed.
+Dynamic ribbon duplicate validation now sorts source indices in that same scratch
+instead of allocating hash nodes. Native frame validation and public Update call
+ValidateFrameSources; the static checked ValidateSources wrapper still accepts raw
+callers using local workspace. All source/output conditions and error precedence
+remain, and motion decoding is reused within each output check. Empty/single-source
+validation needs no duplicate index. Source-key ordering deliberately ignores
+importance so a separated duplicate with another priority is rejected. The new
+fixture covers rejection, valid recovery and unchanged prior outputs; it is unrun.
+Texture-payload ownership was rechecked: completion->read output->texture transfers
+move the same byte owner; prepared subresource spans borrow it through upload. The
+remaining payload copy populates GPU staging. Do not remove it or the fresh-read
+digest. Windows one-shot SHA already uses the CNG pseudo-handle; no hash backend
+replacement or IO coalescing was justified without throughput evidence.
+
+OwnerMesh native recording now batches adjacent commands with the same actual
+vertex count into DrawInstanced runs, preserving source order and per-row atlas
+mesh identity. NextVfxOwnedMeshDrawRun is a no-allocation RenderData-only helper;
+the VS reads command[PassValue+SV_InstanceID]. Both native draw starts remain0.
+Root layout, upload row ABI, SRV backing, validation and completion are unchanged.
+Frame ingress already admits mesh indices1..7 and the upload path bounds count to
+UINT; run first/count therefore stay in that command range. OwnerMeshPS consumes
+per-row varyings, not the draw selector. Flash already uses blend-group instancing
+and was preserved. Existing value test source flattens batches against per-row
+draws (empty, mixed IDs/equal counts, alternating sizes,200 rows, final/end case).
+Runtime shader producer still compiles OwnerMeshVS/PS under the existing entries.
+No shader cook/compile, native smoke, image parity or timing was run; current native
+qualification requires regenerated shaders plus matching renderer workload.
+
+Current VFX continuation batches typed ballistic generation across the full event
+view. The append helper returns exact logical input indexes for rows that emitted;
+Runtime derives Mesh/ShockShell suppression from those exact events, preserving
+duplicate-sequence semantics. Sequence and final lifetime bind during emission,
+removing later per-output repair scans. Cone cosine and each particle's azimuth
+sin/cos are evaluated once in the same scalar expression order. Both event and
+persistent append retain prefixes on allocation failure. The independent old-formula
+bitwise command/provenance fixture is source-only; no current executable evidence.
+New persistent status-burst owners now select through source-row scratch once:
+eligible/unseen rows sort by owner/kind/source ordinal, retain the first duplicate,
+then return in original source order. The same unborrowed scratch used for ballistic
+provenance is reused after that stage consumes it; no new registry or vector owner.
+The selected-owner shard helper reads original persistent rows directly, removing
+the copied owner/payload vector. All-owner and indexed calls share validation and
+emission, empty selection means no output, and an invalid row rolls back the output
+prefix. Indexed emitter fixture compares a reordered/duplicate copied-row oracle
+and valid-then-invalid rollback; it is unexecuted.
+The existing episode set and reserve-before-publication contract remain. Actual
+player/projectile VFX stable IDs already include activation/episode+session; no
+redundant generation field was added. A source-only old nested-scan oracle covers
+all five kinds, repeated/different metadata, rejected/seen rows, reordered input,
+scratch reuse and session reset.
+
+Latest ZIP review priority is reconciled in
+.planning/2026-10-23-complete-directives/ponytail-deep-review-011ef96-20261027.md.
+Both reports, deep D01-D24/K01-K06/A01-A12, repeated P01-P12 and attached
+model/source ledgers were reviewed; embedded scripts were not run. All decisions
+are against this dirty tree, not inherited011ef96 execution results.
+Selected source changes: streaming uses current O(1) host admission facts instead
+of per-request full Accounting; zero retiring count skips allocation collection.
+Asset IO shares32 CPU read/verification permits across overlapping owners. Permits
+survive completed-but-uncollected futures, release after terminal Poll/owner join,
+and do not release on Cancel. Busy reads defer before ledger transition and read
+owner allocation; native256 status slots/queue bounds remain separate. Uncommitted
+metadata reservations release on defer; committed transaction metadata stays owned.
+Fallback range metadata moves once; native verification keeps a retry-safe copy.
+Graph topology now owns logical first/last uses and ordered alias descriptors;
+warm native binding does not rescan uses or build member descriptor vectors.
+SameDescriptor field comparison replaces alias-view descriptor memcmp. Current
+import/fence/state/neutral-view/claim rollback stays live. Native cache fixture
+sources cover cold/warm/prior-plan restore, unused resources and different backing.
+GPU scene Commit consumes the exact removal list prepared before submission.
+Renderer VFX compatibility uses one typed-ground coverage pass and indexed probes;
+previous-row index preserves duplicate first match via source ordinal. The real
+value preparation lives in renderer_vfx_compatibility.hpp with caller-owned scratch,
+and existing native-free instance-order tests have an independent nested-scan oracle.
+Light preparation uses bounded pointer/ID scratch, directional/local ordered passes
+and reusable actual-sized records; zero-light dummy clears. No new camera cache.
+Task submission rejects under lock before packing, rechecks on reservation, and
+avoids shared callable owners in synchronous fallback. Actor no-op erase/clear does
+not advance structural generation; Debug ID scans cover newly appended rows only.
+Conditional items remain unadopted pending evidence: incremental CNG, range event
+reuse/coalescing, CPU graph chunking, external fence pooling, fused dirty channels,
+view-common light/camera encoding, sample leases, area-ID set and PSO lock splitting.
+Keep row consistency assertions while columns remain publicly mutable. This is a
+source batch with unexecuted fixtures, not final native/performance qualification.
+
+R-V01 continuation now bounds decorative persistent-fire expansion before building
+rows. Prepared sources own copied owner/recipe facts and count eligible ordinals
+arithmetically. One64MiB soft logical CPU-workspace growth budget includes retained
+session/raw/decoded/frozen-native batches, pair indexes, prepared profiles/births,
+spark/movement owners, app vector capacities and nested payload/output buffers.
+The current native batch is prepared before optional admission. Existing unused
+flash capacity is credited, including under pressure, so no shrink/regrow loop or
+permanent suppression is introduced. Authoritative fire and existing stamps reserve
+their rows first; the recipe carries authored authority through cold preparation,
+canonical identity and generated C++. Only decorative rows share a fair capped
+quota of newest original ordinals; uncapped output keeps old math/order/seed/ticks.
+Caller retains prepared storage, reserves the output once and keeps original
+flash/mote/fire/stamp order. Four trailing performance columns expose admission
+bytes/requested/admitted/limited; render.json records budget/peak/limited frames.
+Budget-bound rows are quality fallback and cannot substantiate equal-quality FPS.
+This is NOT a hard aggregate R-V01/process/native allocation bound: activation
+fanout, other cosmetics, transient library allocations and external immutable
+owners still need their admission boundary. Container capacity/hash estimates are
+not RSS and reserve may overallocate. Fire parity/fairness/long-age/authority,
+capacity-credit and generated/identity fixtures are source-only. Full source
+diff whitespace check passes; builds/tests/cooks/native remain deferred.
+Next activation boundary is after DispatchVfxUpgradeEvents and before typed adapter
+fanout. Legacy emitter rows, summed ballistic counts, flash rows and burst-mote
+count*output bounds are available from accepted data. Safe-sector adapter cloning,
+owner/status routes, retained profile occupancy and live rate durations require
+their own concrete terms; effect_output_profiles is a mask, not a count. A whole
+effect is cosmetic only if must_match_logic is false and all sources are neither
+authoritative nor ProjectileFollow. Unknown/mixed events remain essential. Do not
+introduce a guessed universal count/byte factor or sequence-only grouping.
+
+Latest focused P01-P12 review is queued ahead of older directives in
+.planning/2026-10-23-complete-directives/focused-review-011ef96-20261027.md.
+Streaming P05/P06 now cache native mip costs/minimum and sort over-budget victim
+indices once in exact old priority/tie order. Host intrinsic threshold scans cache
+by fresh cap, and cap clamp keeps better published detail. UI P07/P08 now share a
+RenderData UiDrawContent independently from each fresh receipt UiFrame; ordinary
+Playing facts follow actual displayed time/labels/waves, not raw advancing tick.
+All recognized UI phases/pages now collect their actual visible dependencies;
+paused Root still includes the HUD drawn behind its panel. Character pages omit
+hidden HUD state; result/selection pages include their visible overlays. Only
+unknown phase values retain the conservative fallback. Semantic equality still guards new-owner/
+raw cache hits. Parent removed unnecessary raw-model copy on unchanged hits. P09 caches static GI
+base draws/classification on StaticGpuScene; P10 uses bounded page marks. P11 reuses
+EffectiveAttack and only invalidates small facts at actual mutations/advancing tick;
+checksum dirtiness and owner-thread/active-borrow checks remain independent. The
+new internal fixture is source-only. None of this source has current FPS evidence.
+
+Latest supplied review against checkpoint011ef96 is reconciled in
+.planning/2026-10-23-complete-directives/review-011ef96-20261027.md. Source closure
+and owner/identity correctness precede further optional optimization. R-B01 now
+uses one native-free Runtime contract INTERFACE, including a standalone VfxImage
+header TU in the existing low-level test; no native Runtime link. R-B02 private
+EffectId helper is renamed HashEffectName. R-B03 typed overload dispatch and R-A01
+two Ground semantic fields/mutations were already corrected locally. Ground now
+uses a field inventory shared by codegen/canonical writers (typed encoders reject
+unknown types) and a versioned canonical VFX identity domain; pack wire format/ActionKey are
+unchanged. R-B04 public
+result and R-G01 actual other-view owner/zero-GI merge are source fixed. Current
+compilation/native qualification is still not run. R-G02 now stages its skin owner
+and pool capacity before Execute and publishes actual accepted readers/completion
+before fallible callbacks. Parent integration retained the local shared owner for
+view history and clears no-skin slot validity; failure injection is still unrun.
+R-S01/S02 host-progress source changes are integrated: optional effective mip is
+clamped/fallback with original observed demand retained; completed chunk metadata
+is released and unsafe in-flight work is never retargeted. No native qualification.
+R-V01 full aggregate activation admission remains beyond the optional-fire policy above. R-V02/P03 Ground source
+cutover now uses shared exact birth-time suppression facts (no draw object/vector)
+for matching circle/fill/preview/line/expanding/charged layers. Legacy construction
+skips only those accepted layers; one indexed retirement pass handles older pending
+rows. Display-time output remains independent. Existing fixture sources compare
+birth facts with actual Ground builder outputs and preserve fallback/accents.
+P01/P02 Ground cold knot validation and one source-span resolution are source
+integrated; synthetic adapters retain structural guard. P04 Mote/Flash append and
+emitted-sequence membership remove reverse scans/temporary result vectors; charged
+Ground stages two commands in std::array. Ground birth facts now exist and retain exact age0 eligibility. Full raw-event
+activation/capacity admission across all profiles remains next. P12 preflight uses concrete shape/state APIs rather than
+fake saved-token DTOs; full bind retains dynamic tokens/resources/lifetime checks.
+Scoped R-V01 allocation boundaries are source fixed: Intern stages payload and
+reserves row/mask/binding/profile storage, then real index insertion is its sole
+potentially throwing publication step (no per-event temporary hash map). Native
+freeze reserves both partial prefixes before sequence/identity. Persistent burst
+keys/commands stage and reserve before tombstones/append, including zero-output
+activation semantics. This is NOT whole-activation atomicity or a byte bound.
+Ended status burst tombstones now query the already prepared current and
+same-session previous source indexes, independent of typed quality/failure. Stable
+episode IDs do not revive; same-session rewind explicitly resets these tombstones.
+Reuse the existing semantic pair preparation result so identical publication pairs
+do not repeat retirement, and no separate owner-union scan/sort/scratch is built.
+Pair index validity publishes only after
+successful preparation. Native frozen commands/receipt ownership are independent.
+P04 Flash birth paths now append output and actual emitted-sequence facts directly;
+the unpaired full-event copy and status/new-flash return vectors are gone. Both
+outputs roll back to their original sizes on append exceptions. Ground persistent
+and event outputs append to one retained scratch (checked returning wrappers stay),
+and frame Ground/visible-Flash/surface-capture scratch keeps capacity across frames.
+Prefix/rejection/order/capacity and pair-rebuild fixture sources were extended.
+Safe-sector fanout now moves the original ring payload aside while cloning scalar
+event facts, avoiding a whole gap-vector copy per sector, then restores the base
+event. Source fixture covers all255 gaps/order/base payload preservation. Ground
+helpers borrow the input ring within the call, reserve its exact output angle
+count, move owning geometry into output and then into renderer frame staging.
+Returned geometry remains owned independently of the original input.
+Raw Flash/Mote, typed ballistic and legacy particle/line births now prepare in one
+reusable DecodedVfxState scratch before native/live queue publication. Destination
+growth completes for all channels before their nonthrowing append. Empty queues
+accept the scratch backing by swap; no redundant payload copy/reservation. Failed
+legacy per-event expansion rolls its stage prefix back; development failures stop
+before publication, while shipping preserves other accepted outputs. Existing
+pending compatibility cancellation remains after accepted birth publication.
+ActiveEffectStore now has reusable prepared batch admission: deduplicated row
+copies and transferable index nodes, geometric capacity growth and no-shrink bucket
+reuse precede visible membership changes. Commit checks original owner and fixed
+base shape, not each already-resolved key. EntitySurface/PointRate and
+Ground/Light/Distortion/Decal/Volume/Screen/Ribbon now share one source-order request pass and one
+prepared batch before birth publication. All profile storage prepares first; birth
+destination reserves then publish, followed by adjacent nonallocating profile commit.
+Their consumers retain their original order and new row indices remain opaque.
+Ground context-owner replacement also stages in that batch: sorted owner keys
+select each last replacement, filter old Ground membership in one pass and append
+surviving incoming rows in original order. Other profiles retain their memberships.
+Cancellation changes no membership. The temporary dedup index now uses retained
+half-full row-index slots and the existing EventKeyHash, with no per-row temporary
+hash nodes or key sort. Actual canonical index nodes still transfer into the live
+store. Sequential replacement/dedup/order/seed/compaction fixture sources are added.
+Persistent frame cursors/caches, aggregate capacity policy and full raw
+acknowledgement closure remain open.
+Ribbon production outputs now append persistent then event rows directly into one
+retained frame vector, with rollback wrappers and no second event result vector.
+Nested output descriptor ownership remains unchanged, so this is not a claim that all Ribbon
+per-owner allocations were removed.
+Light/Distortion/Decal/EntitySurface/Mesh/Fresnel also append into retained frame
+vectors now; returning wrappers still serve raw callers/fixtures. Each append
+restores its original output size on exceptions. One EntitySurface fixture was
+added to the existing synthetic executable, not a new test executable. Ribbon
+membership joins the same source-order prepared admission batch. The separate late
+Ribbon and Ground event admission scans/individual store appends are removed.
+Ground Direct Add/Soft eligibility is aggregated into the first prepared recipe
+row at image preparation and carried through shared canonical/codegen fields.
+Activation checks the live payload/owned interval without rescanning recipe ranges;
+exact birth-time legacy suppression and display-time evaluation remain separate.
+Raw ingress now uses a lazily allocated bounded ring with the unchanged4096-entry
+pending+inflight limit. Prepare reserves the ready backing before removing events,
+closing the old allocation-failure loss; both backings retain and report capacity.
+Wraparound/session/ACK/move/reuse fixture sources were added. Prepared profile
+payloads own their snapshots and may outlive or differ from the original request
+inputs; only the target store must stay unchanged through adjacent publication.
+Owner-binding row-ID capacity now reserves before binding/count publication.
+Logical-capacity queries cover captured retreat owners, spark cursors and their
+retained scratch. The mote birth hash cache is removed: its stored values were only
+two deterministic Random(seed,lane) results, while sqrt/trig remained outside the
+cache. Direct evaluation preserves those exact values without nodes, key hashing,
+full-window pruning, session state or a capacity limit. Output uses the owner's
+already interpolated elapsed tick/seconds; unused cache-only clock overloads are
+removed. No invented lifetime was introduced.
+This remains logical accounting, not an aggregate enforced budget or RSS.
+Persistent spark output/cursor changes stage only touched rows in retained scratch,
+reserve both live destinations geometrically and commit without allocation. A failed
+output allocation can no longer consume a live spark ordinal. Old/staged cursor
+lookups share one retained half-full slot index instead of repeated vector scans.
+Logical slot size resets per Append while capacity stays reusable, preventing a
+peak-size clear scan after population shrink. Expiry, first-match/source order,
+skipped births and atomic output/cursor publication remain. Linear-oracle and
+stateless mote/rewind fixtures are unexecuted. Full raw activation,
+critical-warning/decoration admission and an aggregate retained+reserved-byte policy
+are still open; neither the4096 ingress limit nor these queries closes that policy.
+Safe-sector owner refresh computes only its indexed normalized gap angle, avoiding
+G temporary ring vectors and G-squared angle work for G sectors. Base Ring payloads
+reuse their angle backing after validation/resize; scalar math and interpolation
+order remain. Source fixture compares255 gaps with the ring oracle and checks
+wrapped offsets, count shrink, rejected indices and warm backing reuse.
+R-V01 static content inventory found current authored maxima8 ballistic command
+rows/event,3 impact flash rows/event and10 curl burst flash rows/event. These are
+not total bounds: event/owner multiplicities are live, and persistent fire expands
+all births since start with lifetime to the gameplay-owned end. Its CPU work and
+208-byte GPU upload rows can grow with duration. Shader trace confirms the current
+one-row-per-flash direct raster ABI; a compact owner/ordinal shader would need an
+explicit variant/mapping and arithmetic parity work, so it is not adopted without
+CPU/upload/GPU cost and quality evidence. Do not invent a short flame lifetime or
+infer a whole-state byte budget from the authored burst maxima.
+P09 follow-up review found no additional immutable work to move: remaining
+per-frame SoftwareGI records bind current page residency/generation, LOD, skin,
+wind and graph resources. Retain those checks rather than cache stale bindings.
+Captured retreat movement now stages new episode owners and caller-visible output,
+reserves both geometric destinations, then commits owners only after output succeeds.
+Output exceptions restore the original prefix and leave new owners unpublished;
+expiry follows existing source/display age. Clear/rebind/swap cover scratch too.
+This is a local state transaction, not the full activation/budget closure.
+Parent also corrected Ribbon output codegen aggregate order to match the real
+header (profile follows shape fields) and added real-header compiled roundtrip
+value checks for new recipe families. They are source-only/unrun.
+Current source-only diff --check passes. NO new compile/test/cook/native/FPS run.
+Next order remains review R-V01 whole activation and aggregate capacity policy,
+remaining static admission cleanup (all named Ribbon families now source prepared,
+raw source/output/texture mirrors are prep-only and not shipped; persistent Ground
+entity contracts now filter at admission), then executable qualification/remaining
+justified review work before earlier directives. Ground P03 source is now connected;
+do not substitute display-time emission for its exact birth facts. One per-event
+prepared activation still must reserve before every profile/native state commit.
+Pending/frozen/episode bytes need one coherent critical-warning/decoration policy,
+not unrelated per-vector caps or simulation backpressure. Do not treat this batch
+as achieved. UI facts follow actual draw predicates, including the Paused Root
+HUD and the HUD behind selection/end overlays. Hidden graphics model updates
+no longer invalidate non-settings draw reuse, while receipt metadata stays fresh.
+Source-only checks pass; no current executable result exists.
 
 - T05 canonical environment material product: render/material/<name>/material.rpkg;
   terrain/ground_detail retain their existing special IDs. Geometry LOD products
@@ -134,6 +434,19 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   source path read. Packed source revision table reused; generation-only explicit
   product-map path remains compatible. Unknown edges fail; VFX atlas remains bytes.
   No claimed Release payload savings: linker already excluded non-render sources.
+- A5 source now separates shipping content image identity from producer/cache
+  provenance. Core CanonicalBytes writes explicit LE scalar bits and u64 lengths;
+  Simulation reuses the public typed field inventory, Presentation encodes bounded
+  strings/camera values, Audio emits canonical release metadata, and VFX encodes
+  its actual tables and prepared recipes. Renderer descriptors include defaults,
+  skeleton/clip/binding/ranges and revision tables. Sorted asset layout plus actual
+  payload digests/offsets/extent enter project-hs-shipping-image version1; generated
+  C++ and producer executable bytes do not. ActionKey is unchanged; separate
+  content.receipt.json records action/producer provenance. Wire header format2 and
+  exact64byte pair matching/atomic replacement remain. No header-only pack reuse.
+  Existing foundation/simulation/presentation/audio/VFX/package fixtures cover the
+  encoders in source; no extra executable. Actual linker provenance/format-only
+  invariance, mixed/truncated pair and Release repack qualification remain deferred.
 - T12 successful typed pickup/status flash receipts suppress new legacy emitter
   generation. Prior pending rows retire under original rules before expansion;
   Line outputs and later authored ballistic rows remain. New ballistic recipes
@@ -154,7 +467,10 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   timing/color/quality/mask facts; all Ground/Flash callers use the image-only API.
   Ground selects only its sorted source range rather than rescanning all effect
   recipes per source. Existing malformed/geometry/codegen fixtures migrated, and a
-  sparse source-order case added. Specialized Ground handlers, persistent/status
+  sparse source-order case added. Specialized event and persistent Ground outputs
+  now prepare expansion, Hex/quality masks, Boss signature, CrossRing/Trap/Axial,
+  status/Polar/Crown, Chevron, SafeSector and ChargedPulse contracts too; live
+  geometry/time/seed/quality and preview curve integration remain per frame.
   Persistent status stamps, fire tongues and owned status-tick Flash now use cold
   image recipes too, emitted as immutable shipping arrays. Runtime/release views
   and all three application callers are connected. Live owner/episode, geometry,
@@ -165,8 +481,44 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   Runtime callers connected. Spark Rebind stays on the cold Program view; live
   births/cursors/geometry/quality/owner behavior remains. Redundant copied index
   tags/lookup equality checks are removed; authoritative array bounds remain.
-  Specialized Mote route/window selection, Ground/ribbon and other output recipes
-  remain; T12 is not fully closed. Source fixtures/codegen are unbuilt/unrun.
+  Mote source/output route and window facts now prepare once too: hot common,
+  residual, owned rate/status tick, persistent rate and Spark Emit avoid authored
+  source/output/parameter reads and effect lookup scans. Copied identity/order,
+  original source knots, seed and live birth/quality/owner behavior stay. Cold
+  Spark Rebind retains parameter decode; immutable effect-record gates remain.
+  Mote schema/codegen/identity and focused malformed/non-ambient-sector fixture
+  sources are connected. Screen hit/low-health and Volume phase/spawn/death/aura
+  now prepare immutable effect/source/output/parameter/texture contracts too.
+  Actual decode rejects unsupported known Screen/Volume contracts before image
+  publication; unrelated families remain independent. Runtime routing/expiry and
+  builders consume prepared rows; phase/owner/quality/time/seed remain live.
+  Render-thread Screen/Volume buffers retain their capacity on successful frames;
+  failure still clears output and preserves the prior pulse. Codegen/identity and
+  existing frame/codegen fixture sources cover all new fields, unbuilt/unrun.
+  Frame adapter/movement/ground-owner rebinding now consume an immutable effect-ID
+  index prepared once and emitted with shipping metadata; authored handle order is
+  unchanged. Literal hashes are consteval in that adapter even under /Od. One
+  render-thread input owner reuses outer vector capacity, and retained retreat
+  movement appends directly without a temporary vector/copy. Existing fixture
+  sources cover index misses, handle order, cleared output/capacity and append
+  preservation; no executable qualification has run.
+  Ribbon projectile/link/pickup/fixed-event/cancel routes and EntitySurface now
+  consume prepared effect/source/output/texture facts. Fresnel and direct-owner
+  Mesh use concrete ordered accepted recipes; malformed rows skip independently.
+  Shipping codegen/canonical identity/caller/fixture sources are connected. Some
+  immutable Ribbon route gates, adapter delivery radius and legacy Ground route
+  selection remain; T12 is not fully closed.
+  Ballistic activation now builds into the existing pending owner before legacy
+  expansion, skips only successfully replaced Mesh emitters, preserves ShockShell
+  except explosive main, and restores legacy-before-typed order by rotating the
+  newly appended range. Pending legacy retirement is one indexed pass rather than
+  one full scan per input. No extra command buffer or sequence/seed renumbering.
+  Narrow legacy replacement fixture source covers retained accents/order/seeds;
+  current execution/performance qualification remains deferred.
+  Status/pickup replacement keeps retained sequence scratch and sorted membership;
+  event filtering/pending-command retirement use binary search instead of nested
+  linear scans. ExpandEvent receives the per-event replacement fact directly;
+  line generation and authored-ballistic retirement meaning stay unchanged.
 - T13 settings-suspended guard now precedes VFX activation/state mutation while
   retaining bounded ingress/recovery. Pending particle due order sorts only newly
   appended suffix and merges only on overlap, preserving original birth, ties and
@@ -175,7 +527,9 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   Profiles borrow canonical indexed rows; four owner-attached outputs share sparse
   frame bindings while original birth/capture payloads remain unchanged. Membership
   masks replace per-profile duplicate scans; Materialize/Commit and nine decoded
-  scratch vectors are removed. Unchanged membership skips compaction; expiry
+  scratch vectors are removed. One zero-profile row count replaces dirty/capture
+  flags: additions with live profiles skip full compaction, capture-only rows stay
+  eligible for retirement, and explicit key changes still rebuild the index. Expiry
   remaps existing index entries instead of clearing/rebuilding the whole map.
   Focused fixture sources cover binding sharing/drop/reset, captures, sectors,
   stable compaction, rebind and delayed A/B activation. Unbuilt/unexecuted.
@@ -191,8 +545,15 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   requests particle reset; raw CPU activation and UI receipts remain separate.
   Native and state fixture sources cover different snapshot/target, no-step and
   bad session, plus frozen retries/rewind/capacity reuse. All are unexecuted.
-  Full pending/fanout byte admission, first-preparation persistent birth-space
-  retry semantics and wider output coverage still require follow-through. Audit
+  Entirely due native channels now transfer vector ownership into the frozen
+  batch without copying rows. Mixed/future channels keep the due-prefix path;
+  both partial buffers reserve before transfer. Exact identity/ACK and unchanged
+  retry birth position/seed are covered by extended unrun source fixtures.
+  Birth-space source audit distinguishes owner-bound persistent Motes (existing
+  fixture explicitly follows current owner), first-world-position Sparks retained
+  in decoded.flashes, and frozen native particle/line commands. No extra world-birth
+  cache is adopted for those paths; their actual retry qualification remains.
+  Full pending/fanout byte admission and wider output coverage require follow-through. Audit
   confirms10k particle/32 distortion/64 decal/32 fresnel limits do not bound Ground/
   Flash/mesh upload or episode/pending bytes. Do not silently treat10k as a shared
   budget. Avoid a second eligibility scan; finish immutable recipes before a
@@ -250,6 +611,25 @@ Current worktree is NEWER than all executable receipts below. Never claim its FP
   transfers the prepared bank snapshot into the active heap; shutdown clears owners.
   Existing native bank-cycling/reload coverage remains unexecuted for this source.
   No brittle source-string fixture or extra descriptor validation framework added.
+- T21 essential startup now has a scoped per-segment allowance from adapter
+  physical capacity. Successful D3D12MA allocation sizes consume it; failed or
+  oversize attempts do not. Unknown capacity is explicit failure, not unlimited.
+  Static limits never substitute for dynamic OS budgets or optional admission.
+  UMA routing and standard-vs-CUSTOM pool routing share the actual allocation
+  resolver with resident candidate admission; native failures/completion remain.
+  The scope ends on Initialize return/abort, and teardown clears policy state.
+  Pure boundary/segment fixtures are source-only; native startup remains unrun.
+- S4/T01 conflict is reconciled in source with independent capture_hit_rates,
+  default true for public callers. Detailed=false alone preserves fixed hit-rate
+  aggregates; ordinary Runtime explicitly disables both as before. Recording,
+  diagnostics, smoke and replay explicitly retain both. Record/seen/cause/retire
+  and reserve/reset follow the hit-rate flag together; combat state is unchanged.
+  Observation exposes hit_rates_captured; CombatSim/playtest exporters emit null
+  for unavailable counts/ratios. Disabled synergy detail is not reported as zero
+  observed activations. Extended existing fixtures cover mode parity/checksums,
+  restart and exported null-vs-zero semantics in source only. Existing ordinary
+  opt-out policy is retained without a new UI/CLI setting or a claimed cost win;
+  current-input executable parity and measured telemetry cost remain unqualified.
 
 ## Latest completed executable checkpoint (before new T05/T14 source)
 

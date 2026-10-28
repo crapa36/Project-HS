@@ -15,6 +15,14 @@ namespace hs
 {
 struct VfxImageData;
 
+struct VfxLegacyGroundSuppression
+{
+    bool all_particles{};
+    bool ground_ring{};
+    bool ground_disc{};
+    bool segment_solid_trail{};
+};
+
 class VfxCatalog
 {
   public:
@@ -39,7 +47,9 @@ class VfxCatalog
                                 float decorative_fraction,
                                 std::vector<ParticleSpawnCommand> &particles,
                                 std::vector<VfxLineSpawnCommand> &lines,
-                                std::span<const Sequence> replaced_particle_sequences = {}) const;
+                                bool particles_replaced = false,
+                                bool mesh_replaced = false,
+                                VfxLegacyGroundSuppression ground_suppression = {}) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return image_.payload_hash; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return image_.sprite_count; }
     [[nodiscard]] const VfxProgramView &Program() const noexcept { return image_.program; }

@@ -9,4 +9,6 @@ namespace hs::runtime_detail
 // Reconstruct live lights from absolute owner/event time. Renderer applies the global cap.
 [[nodiscard]] std::vector<VfxLightInput> BuildVfxTypedLightCommands(
     const VfxImage &image, VfxEventView inputs, double current_tick);
+void AppendVfxTypedLightCommands(const VfxImage &image, VfxEventView inputs,
+    double current_tick, std::vector<VfxLightInput> &result);
 }

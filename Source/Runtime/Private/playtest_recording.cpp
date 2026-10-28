@@ -379,9 +379,9 @@ Result PlaytestRecorder::Finish(bool execution_valid)
              {"damage_to_normal", probe.damage_by_skill[skill] -
                                       std::min(probe.damage_by_skill[skill], boss_damage)},
              {"damage_to_boss", boss_damage},
-             {"casts_with_hit", probe.balance.skill_casts_with_hit[skill]},
+             {"casts_with_hit", probe.balance.hit_rates_captured ? Json(probe.balance.skill_casts_with_hit[skill]) : Json(nullptr)},
              {"hit_events", probe.balance.skill_hit_events[skill]},
-             {"cast_hit_rate", Ratio(probe.balance.skill_casts_with_hit[skill], uses)},
+             {"cast_hit_rate", probe.balance.hit_rates_captured ? Json(Ratio(probe.balance.skill_casts_with_hit[skill], uses)) : Json(nullptr)},
              {"kills", probe.balance.skill_kills[skill]},
              {"upgrades", std::move(selected_upgrades)}});
     }
@@ -441,9 +441,9 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                   static_cast<double>(probe.balance.enemy_lifetime_ticks[index]) /
                       (60.0 * static_cast<double>(killed))},
              {"attack_attempts", probe.balance.enemy_attack_attempts[index]},
-             {"hits", probe.balance.enemy_hits[index]},
-             {"hit_rate", Ratio(probe.balance.enemy_hits[index],
-                                 probe.balance.enemy_attack_attempts[index])},
+             {"hits", probe.balance.hit_rates_captured ? Json(probe.balance.enemy_hits[index]) : Json(nullptr)},
+             {"hit_rate", probe.balance.hit_rates_captured ? Json(Ratio(probe.balance.enemy_hits[index],
+                                 probe.balance.enemy_attack_attempts[index])) : Json(nullptr)},
              {"damage", probe.balance.enemy_damage[index]}});
     }
     Json pickup_metrics = Json::array();
@@ -529,6 +529,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                                          {"derived", probe.balance.derived_damage},
                                          {"damage_over_time", probe.balance.damage_over_time}}},
                 {"balance", {{"detailed_captured", probe.balance.detailed_balance_captured},
+                               {"hit_rates_captured", probe.balance.hit_rates_captured},
                                {"skills", std::move(skill_metrics)},
                                {"upgrades", std::move(upgrade_metrics)},
                                {"relics", std::move(relic_metrics)},
@@ -586,7 +587,9 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         }
     }
     report << "\n## 강화·유물 실제 연쇄 기여\n\n";
-    if (probe.balance.upgrade_relic_synergy_count == 0)
+    if (!probe.balance.detailed_balance_captured)
+        report << "- 강화·유물 연쇄 상세 통계를 수집하지 않음\n";
+    else if (probe.balance.upgrade_relic_synergy_count == 0)
         report << "- 발동한 강화·유물 연쇄 없음\n";
     for (std::size_t index = 0;
          index < probe.balance.upgrade_relic_synergy_count; ++index)

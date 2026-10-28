@@ -3,6 +3,7 @@
 #include <D3D12MemAlloc.h>
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 
 namespace hs
@@ -14,7 +15,62 @@ constexpr auto CategoryIndex(ResidencyCategory category) noexcept
 {
     return static_cast<std::size_t>(category);
 }
+
+constexpr auto SegmentIndex(ResidencySegment segment) noexcept
+{
+    return static_cast<std::size_t>(segment);
+}
 } // namespace
+
+bool EssentialBootstrapAdmission::Configure(std::uint64_t local_capacity,
+    std::uint64_t nonlocal_capacity, bool unified_memory) noexcept
+{
+    const std::array<std::uint64_t, 2> capacity{local_capacity,
+        unified_memory ? 0 : nonlocal_capacity};
+    if ((used_[0] || used_[1]) && (capacity_ != capacity || unified_memory_ != unified_memory))
+        return false;
+    capacity_ = capacity;
+    unified_memory_ = unified_memory;
+    return true;
+}
+
+void EssentialBootstrapAdmission::Reset() noexcept
+{
+    capacity_ = {};
+    used_ = {};
+    unified_memory_ = false;
+}
+
+bool EssentialBootstrapAdmission::HasCapacity(ResidencySegment segment) const noexcept
+{
+    if (unified_memory_) segment = ResidencySegment::Local;
+    return capacity_[SegmentIndex(segment)] != 0;
+}
+
+bool EssentialBootstrapAdmission::CanAdmit(std::uint64_t bytes,
+    ResidencySegment segment) const noexcept
+{
+    if (unified_memory_) segment = ResidencySegment::Local;
+    const auto index = SegmentIndex(segment);
+    return bytes && capacity_[index] && used_[index] <= capacity_[index] &&
+        bytes <= capacity_[index] - used_[index];
+}
+
+bool EssentialBootstrapAdmission::Commit(std::uint64_t actual_allocation_bytes,
+    ResidencySegment segment) noexcept
+{
+    if (!CanAdmit(actual_allocation_bytes, segment)) return false;
+    if (unified_memory_) segment = ResidencySegment::Local;
+    auto &used = used_[SegmentIndex(segment)];
+    used += actual_allocation_bytes;
+    return true;
+}
+
+std::uint64_t EssentialBootstrapAdmission::Used(ResidencySegment segment) const noexcept
+{
+    if (unified_memory_) segment = ResidencySegment::Local;
+    return used_[SegmentIndex(segment)];
+}
 
 void ResidencyManager::Reset() noexcept
 {
@@ -26,6 +82,7 @@ void ResidencyManager::Reset() noexcept
     host_held_overflow_ = false;
     allocations_.clear();
     next_ticket_ = 1;
+    retiring_count_ = 0;
     reclaimed_total_ = 0;
     gpu_growth_since_snapshot_ = 0;
     segment_growth_since_snapshot_ = {};
@@ -196,6 +253,7 @@ bool ResidencyManager::Retire(ResidencyTicket ticket,
 {
     const auto found = allocations_.find(ticket.value);
     if (found == allocations_.end() || found->second.pinned) return false;
+    if (!found->second.retiring) ++retiring_count_;
     found->second.retiring = true;
     found->second.completion.Merge(completion);
     return true;
@@ -209,6 +267,11 @@ bool ResidencyManager::ReleaseNow(ResidencyTicket ticket) noexcept
     const auto storage = found->second.storage;
     const auto segment = found->second.segment;
     const auto bytes = found->second.bytes;
+    if (found->second.retiring)
+    {
+        assert(retiring_count_ != 0);
+        --retiring_count_;
+    }
     allocations_.erase(found);
     UpdateAdmissionTotals(storage, segment, bytes, 0);
     return true;
@@ -216,6 +279,7 @@ bool ResidencyManager::ReleaseNow(ResidencyTicket ticket) noexcept
 
 std::uint32_t ResidencyManager::Collect(const CompletionSet &completed) noexcept
 {
+    if (!retiring_count_) return 0;
     std::uint32_t collected = 0;
     for (auto it = allocations_.begin(); it != allocations_.end();)
     {
@@ -228,6 +292,8 @@ std::uint32_t ResidencyManager::Collect(const CompletionSet &completed) noexcept
         const auto storage = it->second.storage;
         const auto segment = it->second.segment;
         const auto bytes = it->second.bytes;
+        assert(retiring_count_ != 0);
+        --retiring_count_;
         it = allocations_.erase(it);
         UpdateAdmissionTotals(storage, segment, bytes, 0);
         ++collected;

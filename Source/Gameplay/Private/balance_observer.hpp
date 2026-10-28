@@ -42,10 +42,11 @@ struct BalanceObserver
         for (auto &casts : active_enemy_casts) casts.clear();
     }
 
-    void Reset(bool capture_detailed)
+    void Reset(bool capture_detailed, bool capture_hit_rates = true)
     {
         Reset();
         metrics.detailed_balance_captured = capture_detailed;
+        metrics.hit_rates_captured = capture_hit_rates;
     }
 
     static void AddCause(std::vector<std::uint64_t> &causes, std::uint64_t cast)

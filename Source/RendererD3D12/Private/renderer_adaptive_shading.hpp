@@ -91,6 +91,7 @@ class AdaptiveShadingSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const AdaptiveShadingInputs &,
         const AdaptiveShadingLayout &,AdaptiveShadingOutputs &);
     [[nodiscard]] bool MatchesLayout(const AdaptiveShadingInputs &,const AdaptiveShadingLayout &)const noexcept;
+    [[nodiscard]] bool MatchesShape(const AdaptiveShadingLayout &) const noexcept;
     [[nodiscard]] Result BeginRaster(RenderPassContext &,const AdaptiveShadingOutputs &,AdaptiveShadingRasterScope &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);

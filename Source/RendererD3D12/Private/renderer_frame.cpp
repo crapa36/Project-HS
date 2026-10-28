@@ -13,6 +13,7 @@
 #include "renderer_brixelizer_scene.hpp"
 #include "renderer_entity_surface.hpp"
 #include "hero_coverage.hpp"
+#include "renderer_vfx_compatibility.hpp"
 #include <DirectXPackedVector.h>
 #include <array>
 #include <bit>
@@ -802,9 +803,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         // One canonical LOD must satisfy every view's actual native consumers.
         for (const auto &view : impl_->explicit_frame->views)
         {
-            if (owned_view.id == impl_->active_view_id) continue;
-            const auto &owner = *impl_->owned_views.at(owned_view.id.value);
-            finest_gi_voxel = std::min(finest_gi_voxel, double(owner.brixelizer_gi.FinestVoxelSizeMeters()));
+            if (view.id == impl_->active_view_id) continue;
+            const auto &owner = *impl_->owned_views.at(view.id.value);
+            finest_gi_voxel = MergeActiveGiVoxelSize(finest_gi_voxel, owner.brixelizer_gi.FinestVoxelSizeMeters());
             vsm_active |= owner.virtual_shadows.AllocatedBytes() != 0;
             local_shadows_active |= owner.local_shadows.AllocatedBytes() != 0;
         }
@@ -1590,6 +1591,16 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             auto &episode = status_episodes[visual.entity_render_id][index];
             if (!episode) episode = &visual;
         }
+        std::vector<renderer_detail::VfxStatusCoverage> authored_status_coverage;
+        std::vector<renderer_detail::VfxGroundCoverage> typed_ground_coverage;
+        renderer_detail::PrepareVfxGroundCoverage(typed_ground_spawns,
+            impl_->config.slime_family_preview_count != 0, typed_ground_coverage);
+        renderer_detail::PrepareVfxStatusCoverage(snapshot.persistent_vfx,
+            typed_ground_coverage, authored_status_coverage);
+        std::vector<renderer_detail::PreviousVfxVisualRow> previous_by_identity;
+        if (interpolation < 1.0f)
+            renderer_detail::PreparePreviousVfxVisualIndex(
+                snapshots.previous.persistent_vfx, previous_by_identity);
         for (const auto &source : snapshot.instances)
         {
             const auto episodes = status_episodes.find(source.stable_id);
@@ -1606,18 +1617,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                     const auto kind = status == StatusVisual::Slow
                         ? PersistentVfxKind::EnemySlowStatus
                         : PersistentVfxKind::EnemyMarkStatus;
-                    const auto authored = std::ranges::any_of(snapshot.persistent_vfx,
-                        [&](const PersistentVfxVisual &visual) {
-                            return visual.kind == kind &&
-                                   visual.entity_render_id == source.stable_id &&
-                                   std::ranges::any_of(typed_ground_spawns,
-                                       [&](const VfxGroundSpawnInput &ground) {
-                                           return ground.geometry.shape == VfxGroundShape::PolarRune &&
-                                                  ground.stable_id == visual.stable_id &&
-                                                  ground.source_visual_kind ==
-                                                      static_cast<std::uint8_t>(kind);
-                                       });
-                        });
+                    const auto authored = renderer_detail::HasVfxStatusCoverage(
+                        authored_status_coverage, source.stable_id,
+                        static_cast<std::uint8_t>(kind));
                     if (authored) return;
                 }
                 ParticleSpawnCommand command;
@@ -1732,39 +1734,28 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 ribbon_projectile_ids.contains(visual.projectile_owner_id)) continue;
             if ((visual.kind == PersistentVfxKind::DamageTrail ||
                  visual.kind == PersistentVfxKind::ChargeGuide) &&
-                std::ranges::any_of(typed_ground_spawns, [&](const VfxGroundSpawnInput &spawn) {
-                    return spawn.geometry.shape == VfxGroundShape::LineBorder &&
-                        spawn.stable_id == visual.stable_id &&
-                        spawn.source_visual_kind == static_cast<std::uint8_t>(visual.kind);
-                })) continue;
+                renderer_detail::HasVfxGroundCoverage(typed_ground_coverage,
+                    visual.stable_id, static_cast<std::uint8_t>(visual.kind),
+                    VfxGroundShape::LineBorder)) continue;
             const bool authored_exact_ring =
                 impl_->config.slime_family_preview_count == 0 &&
-                std::ranges::any_of(
-                    typed_ground_spawns, [&visual](const VfxGroundSpawnInput &spawn) {
-                        return spawn.geometry.shape == VfxGroundShape::Circle &&
-                            spawn.command.primitive == VfxPrimitive::ExactRing &&
-                            spawn.stable_id == visual.stable_id &&
-                            spawn.source_visual_kind ==
-                                static_cast<std::uint8_t>(visual.kind);
-                    });
+                renderer_detail::HasVfxGroundCoverage(typed_ground_coverage,
+                    visual.stable_id, static_cast<std::uint8_t>(visual.kind),
+                    VfxGroundShape::Circle, VfxPrimitive::ExactRing);
             auto position = visual.position;
             auto visual_yaw = visual.yaw;
             if (interpolation < 1.0f)
             {
-                const auto previous = std::ranges::find_if(
-                    snapshots.previous.persistent_vfx,
-                    [&visual](const PersistentVfxVisual &candidate) {
-                        return candidate.stable_id == visual.stable_id &&
-                               candidate.kind == visual.kind;
-                    });
-                if (previous != snapshots.previous.persistent_vfx.end())
+                if (const auto *previous = renderer_detail::FindPreviousVfxVisual(
+                        previous_by_identity, visual.stable_id, visual.kind))
                 {
-                    position.x = std::lerp(previous->position.x, position.x, interpolation);
-                    position.y = std::lerp(previous->position.y, position.y, interpolation);
-                    position.z = std::lerp(previous->position.z, position.z, interpolation);
-                    const auto yaw_delta = std::remainder(visual_yaw - previous->yaw,
+                    const auto &prior = *previous;
+                    position.x = std::lerp(prior.position.x, position.x, interpolation);
+                    position.y = std::lerp(prior.position.y, position.y, interpolation);
+                    position.z = std::lerp(prior.position.z, position.z, interpolation);
+                    const auto yaw_delta = std::remainder(visual_yaw - prior.yaw,
                                                           2.0f * std::numbers::pi_v<float>);
-                    visual_yaw = previous->yaw + yaw_delta * interpolation;
+                    visual_yaw = prior.yaw + yaw_delta * interpolation;
                 }
             }
             ParticleSpawnCommand command;
@@ -2448,7 +2439,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     auto *const imgui_draw_data = impl_->config.devtools_visible ? ImGui::GetDrawData() : nullptr;
 #endif
     cpu_timings.scene_prepare_us = measure_stage();
-    if (auto result = impl_->RasterizeUi(owned_view, frame_slot, snapshot.ui); !result)
+    const auto ui_content = impl_->explicit_frame->ui_draw_content;
+    const auto ui_models = ui_content ? std::span<const UiModel>(ui_content->models) : snapshot.ui;
+    if (auto result = impl_->RasterizeUi(owned_view, frame_slot, ui_models, ui_content); !result)
     {
         return result;
     }
@@ -4016,6 +4009,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             return (lease.use_count() > 1 || !lease->skin_cache_use_completion.IsSatisfiedBy(completed_skin)) &&
                 lease->skin_cache_vertices.resource.Get() == frame.skin_cache_vertices.resource.Get();
         });
+    if (have_skinned_instances && !reuse_canonical_skin)
+        impl_->canonical_skin_frames.reserve(impl_->canonical_skin_frames.size() + 1);
     if (have_skinned_instances)
     {
         const auto required_skin_vertices = current_skin_ranges->VertexCount();
@@ -4061,6 +4056,21 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             frame.skin_cache_bounds_read = false;
             frame.skin_cache_valid = false;
         }
+    }
+    std::shared_ptr<Impl::CanonicalSkinFrame> staged_current_skin_deformation;
+    if (have_skinned_instances && !reuse_canonical_skin)
+    {
+        // Hold the exact backing and immutable ranges before submission, but keep
+        // the candidate invalid and unpublished until Execute accepts the graph.
+        staged_current_skin_deformation = std::make_shared<Impl::CanonicalSkinFrame>();
+        auto &canonical = *staged_current_skin_deformation;
+        canonical.skin_cache_vertices = Impl::RetainViewAllocation(frame.skin_cache_vertices);
+        canonical.skin_cache_bounds = Impl::RetainViewAllocation(frame.skin_cache_bounds);
+        canonical.skin_cache_vertex_capacity = frame.skin_cache_vertex_capacity;
+        canonical.skin_cache_bound_capacity = frame.skin_cache_bound_capacity;
+        canonical.vertex_stride = SkinVertexRanges::kVertexBytes;
+        canonical.vertex_ranges = std::move(skin_vertex_ranges);
+        canonical.package_id = impl_->active_render_package_id;
     }
     std::size_t dynamic_scene_capacity =
         std::max<std::size_t>(current_instance_snapshot->capacity, 256);
@@ -5636,23 +5646,111 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                     ordered_monster_lods[index]); !appended) return appended;
         }
         if (static_scene && impl_->static_gpu_scene)
-            for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
+        {
+            auto &cache = impl_->static_gpu_scene->software_scene;
+            const bool rebuild = !cache.valid || cache.foliage_density != foliage_density ||
+                cache.material_layouts != impl_->material_surface_layouts ||
+                cache.material_variants != impl_->environment_material_variants;
+            if (rebuild)
             {
-                const auto &source = static_scene->instances[index];
-                if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
-                const bool environment = is_environment_mesh(source.mesh);
-                const GpuInstance draw{{source.position.x,
-                    source.position.y + (environment ? 0.0f : source.scale.y * 0.5f),
-                    source.position.z, 0}, {source.scale.x, source.scale.y, source.scale.z, 1},
-                    source.color_rgba, static_cast<std::uint32_t>(source.mesh) |
-                    (environment ? kEnvironmentMeshFlag : 0u) |
-                    (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
-                    source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
-                        ? 0.0f : std::bit_cast<float>(source.environment_seed)};
-                if (auto appended = append_scene(source, draw,
-                        0x80000000u | static_cast<std::uint32_t>(index),
-                        impl_->static_gpu_scene->instance_generation, UINT32_MAX, 0u); !appended) return appended;
+                cache.rows.clear();
+                cache.rows.reserve(static_scene->instances.size());
+                for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
+                {
+                    const auto &source = static_scene->instances[index];
+                    if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
+                    const bool environment = is_environment_mesh(source.mesh);
+                    const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
+                    const auto geometry_ordinal = environment
+                        ? static_cast<std::uint32_t>(environment_mesh_index(source)) : UINT32_MAX;
+                    const auto ordinal = environment
+                        ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)
+                        : source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch
+                            ? kTerrainMaterialOrdinal : UINT32_MAX;
+                    const auto page_slot = environment
+                        ? geometry_ordinal * render_data::kEnvironmentGeometryLodCount
+                        : source.mesh == RenderMesh::Archer ? kArcherGeometryPage
+                        : is_monster(source.mesh)
+                            ? kMonsterGeometryPage + static_cast<std::uint32_t>(source.mesh) -
+                                static_cast<std::uint32_t>(RenderMesh::MonsterMelee)
+                        : source.mesh == RenderMesh::EnemyProjectile ? kProjectileGeometryPage
+                            : kProceduralGeometryPage;
+                    const auto variant_ordinal = environment
+                        ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal) : UINT32_MAX;
+                    const bool masked = environment && variant_ordinal <
+                            impl_->environment_material_variants.size() &&
+                        impl_->environment_material_variants[variant_ordinal] ==
+                            render_data::EnvironmentMaterialVariant::MaskedTwoSided;
+                    std::uint32_t flags = hero ? SceneGeometryCachedSkin : 0u;
+                    if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
+                        flags |= SceneGeometryTwoSided;
+                    if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
+                    auto domain = BrixelizerGeometryDomain::Opaque;
+                    if (environment && !hero)
+                    {
+                        const auto capabilities = ordinal < kAuthoredMaterialNames.size()
+                            ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
+                        domain = ClassifyBrixelizerDomain(capabilities,
+                            (flags & SceneGeometryTwoSided) != 0,
+                            (flags & SceneGeometryTransmissive) != 0);
+                    }
+                    const GpuInstance draw{{source.position.x,
+                        source.position.y + (environment ? 0.0f : source.scale.y * 0.5f),
+                        source.position.z, 0}, {source.scale.x, source.scale.y, source.scale.z, 1},
+                        source.color_rgba, static_cast<std::uint32_t>(source.mesh) |
+                        (environment ? kEnvironmentMeshFlag : 0u) |
+                        (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
+                        source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
+                            ? 0.0f : std::bit_cast<float>(source.environment_seed)};
+                    cache.rows.push_back({index, draw, page_slot, ordinal, flags, domain});
+                }
+                cache.material_layouts = impl_->material_surface_layouts;
+                cache.material_variants = impl_->environment_material_variants;
+                cache.foliage_density = foliage_density;
+                cache.valid = true;
             }
+            for (const auto &base : cache.rows)
+            {
+                if (base.source_index >= static_scene->instances.size())
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Cached software scene source index exceeds its admitted static scene.");
+                const auto &source = static_scene->instances[base.source_index];
+                const auto *page = impl_->FindGeometryPage(base.page_slot);
+                if (!page)
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Software scene candidate has no complete resident geometry page.");
+                auto flags = base.flags;
+                const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
+                const bool builtin = page->page_slot == kProceduralGeometryPage;
+                if (builtin) flags |= SceneGeometryBuiltin;
+                if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant)))
+                    flags |= SceneGeometryDeformed;
+                const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
+                    2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
+                    0u, sizeof(Vertex), page->vertex_count, 0u,
+                    0x80000000u | static_cast<std::uint32_t>(base.source_index),
+                    impl_->static_gpu_scene->instance_generation, UINT32_MAX,
+                    static_cast<std::uint32_t>(source.mesh), base.material_ordinal, flags};
+                const SceneDrawInstance instance{base.draw.position, base.draw.scale,
+                    base.draw.color, base.draw.mesh, base.draw.yaw, base.draw.padding};
+                if (base.domain != BrixelizerGeometryDomain::Opaque &&
+                    base.domain != BrixelizerGeometryDomain::AuthoredCoverage)
+                {
+                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
+                    auto &count = base.domain == BrixelizerGeometryDomain::UnsupportedMasked
+                        ? excluded_masked_count
+                        : base.domain == BrixelizerGeometryDomain::UnsupportedThin
+                            ? excluded_thin_count : excluded_translucent_count;
+                    if (auto counted = AddBrixelizerExcludedCount(count, page->submeshes.size()); !counted)
+                        return counted;
+                    continue;
+                }
+                software_scene_jobs.push_back(job);
+                software_scene_draws.push_back(instance);
+                software_scene_pages.push_back(page);
+                software_scene_sources.push_back(&source);
+            }
+        }
     }
     SceneGeometryOutputs software_scene_preview;
     if (!software_scene_jobs.empty())
@@ -5661,7 +5759,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             frame_slot, impl_->graph_queue_executor.Completed()};
         if (auto previewed = impl_->scene_geometry.PreviewPreparedOutputs(
                 preview_inputs, software_scene_preview); !previewed) return previewed;
-        if (software_scene_preowned_view.geometries.size() != software_scene_jobs.size())
+        if (software_scene_preview.geometries.size() != software_scene_jobs.size())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Software GI scene geometry preview did not cover every current job.");
     }
@@ -5669,10 +5767,17 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         {}, {}, frame_slot, impl_->graph_queue_executor.Completed()};
     const auto scene_shape = impl_->scene_geometry.PrepareRecordData(scene_shape_inputs);
     std::vector<std::uint32_t> software_scene_page_slots;
+    std::array<bool, kGeometryPageCapacity> software_scene_page_seen{};
     software_scene_page_slots.reserve(software_scene_pages.size());
     for (const auto *page : software_scene_pages)
-        if (std::ranges::find(software_scene_page_slots, page->page_slot) ==
-            software_scene_page_slots.end()) software_scene_page_slots.push_back(page->page_slot);
+    {
+        if (page->page_slot >= software_scene_page_seen.size())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Software scene page slot exceeds the admitted geometry-page capacity.");
+        if (software_scene_page_seen[page->page_slot]) continue;
+        software_scene_page_seen[page->page_slot] = true;
+        software_scene_page_slots.push_back(page->page_slot);
+    }
     std::ranges::sort(software_scene_page_slots);
     bool direct_contract_failed{};
     const auto shape_of = [&](AllocationResource *resource) {
@@ -5769,168 +5874,57 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     // A value-only first gate precedes the stateful GI and probe record
     // preparation. Later guide and import checks must also qualify a restore.
     const auto matches_target_shapes = [&](const FrameGraphLayout &saved) {
-        AdaptiveShadingInputs adaptive;
-        adaptive.depth.version = saved.adaptive.guides[0];
-        adaptive.normal.version = saved.adaptive.guides[1];
-        adaptive.base.version = saved.adaptive.guides[2];
-        adaptive.material.version = saved.adaptive.guides[3];
-        adaptive.metadata.version = saved.adaptive.guides[4];
-        adaptive.motion.version = saved.adaptive.guides[5];
-        if (!owned_view.adaptive_shading.MatchesLayout(adaptive, saved.adaptive)) return false;
+        if (!owned_view.adaptive_shading.MatchesShape(saved.adaptive)) return false;
+        if (!owned_view.ambient_occlusion.MatchesShape(saved.ambient,
+                !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session,
+                overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct)) return false;
+        if (!owned_view.subsurface.MatchesShape(saved.subsurface)) return false;
 
-        AmbientOcclusionInputs ambient;
-        ambient.depth.version = saved.ambient.guides[0];
-        ambient.normal.version = saved.ambient.guides[1];
-        ambient.metadata.version = saved.ambient.guides[2];
-        ambient.motion.version = saved.ambient.guides[3];
-        ambient.surface_history.version = saved.ambient.guides[4];
-        ambient.adaptive_density.version = saved.ambient.guides[5];
-        ambient.reset_history = !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session;
-        ambient.queue = overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct;
-        if (!owned_view.ambient_occlusion.MatchesLayout(ambient, saved.ambient)) return false;
-
-        SubsurfaceInputs subsurface;
-        subsurface.depth.version = saved.subsurface.guides[0];
-        subsurface.normal.version = saved.subsurface.guides[1];
-        subsurface.metadata.version = saved.subsurface.guides[2];
-        subsurface.material_parameters.version = saved.subsurface.guides[3];
-        subsurface.diffuse.version = saved.subsurface.guides[4];
-        subsurface.hdr.version = saved.subsurface.guides[5];
-        if (!owned_view.subsurface.MatchesLayout(subsurface, saved.subsurface)) return false;
-
-        ScreenReflectionsInputs reflection;
-        reflection.depth.version = saved.reflections.guides[0];
-        reflection.base.version = saved.reflections.guides[1];
-        reflection.normal.version = saved.reflections.guides[2];
-        reflection.metadata.version = saved.reflections.guides[3];
-        reflection.material.version = saved.reflections.guides[4];
-        reflection.motion.version = saved.reflections.guides[5];
-        reflection.surface_history.version = saved.reflections.guides[6];
-        reflection.opaque_hdr.version = saved.reflections.guides[7];
-        reflection.environment_specular.version = saved.reflections.guides[8];
-        reflection.material_parameters.version = saved.reflections.guides[9];
-        reflection.sidecars[0].version = saved.reflections.guides[10];
-        reflection.sidecars[1].version = saved.reflections.guides[11];
-        reflection.ambient_visibility.version = saved.reflections.guides[12];
-        reflection.ambient_visibility_enabled = saved.ambient.ao;
-        reflection.sidecar_plane_count = impl_->material_sidecar_layout.plane_count;
-        reflection.frame_index = owned_view.frame_number;
-        reflection.reset_history = !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session;
-        if (!owned_view.screen_reflections.MatchesLayout(reflection, saved.reflections)) return false;
+        if (!owned_view.screen_reflections.MatchesShape(saved.reflections,
+                !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session,
+                owned_view.frame_number, saved.ambient.ao, impl_->material_sidecar_layout.plane_count)) return false;
 
         if (constants->vfx_decal_count.x)
         {
-            DecalSurfaceInputs decal;
-            decal.command_count = constants->vfx_decal_count.x;
-            decal.depth.version = saved.decal_surface.guides[0];
-            decal.metadata.version = saved.decal_surface.guides[1];
-            decal.base.version = saved.decal_surface.guides[2];
-            decal.normal.version = saved.decal_surface.guides[3];
-            decal.material.version = saved.decal_surface.guides[4];
-            decal.commands.version = saved.decal_surface.guides[5];
-            decal.parameters.version = saved.decal_surface.guides[6];
-            decal.gradient.version = saved.decal_surface.guides[7];
-            decal.textures[0].version = saved.decal_surface.guides[8];
-            decal.textures[1].version = saved.decal_surface.guides[9];
-            if (!owned_view.decal_surface.MatchesLayout(decal, saved.decal_surface)) return false;
+            if (!owned_view.decal_surface.MatchesShape(saved.decal_surface, true)) return false;
         }
         if (!typed_screen.empty() && screen_intensity > 0)
         {
-            ScreenOverlayInputs overlay;
-            overlay.commands = typed_screen;
-            overlay.intensity = screen_intensity;
-            overlay.gradient = saved.screen_overlay.gradient;
-            if (!owned_view.screen_overlay.MatchesLayout(overlay, saved.screen_overlay)) return false;
+            const bool active = std::ranges::any_of(typed_screen,
+                [](const auto &command) { return command.alpha != 0; });
+            if (!owned_view.screen_overlay.MatchesShape(saved.screen_overlay, active)) return false;
         }
-        PostSubgraphInputs post;
-        post.bloom = impl_->config.bloom;
-        post.outline = impl_->config.outline;
-        const auto &versions = saved.post.inputs;
-        post.scene_hdr = versions[0]; post.composite_hdr = versions[1];
-        post.depth = versions[2]; post.normal = versions[3]; post.metadata = versions[4];
-        post.motion = versions[5]; post.surface_history = versions[6];
-        post.temporal_history = versions[7]; post.ui = versions[8];
-        post.temporal_normal_history = versions[9]; post.temporal_material_history = versions[10];
-        post.exposure = versions[11]; post.external_temporal = versions[12];
-        std::copy_n(versions.begin() + 13, post.transparent_guides.size(),
-            post.transparent_guides.begin());
-        post.screen_overlay_alpha = versions[20]; post.screen_overlay_upload = versions[21];
-        post.screen_overlay_gradient = versions[22]; post.reactive_composite_hdr = versions[23];
-        post.fxaa_identity = fxaa_identity;
-        post.initialize_post_targets = !owned_view.view_targets_initialized;
-        const auto present_hook = [](RenderGraphBuilder &, ResourceVersion, ResourceVersion &) {
-            return Result::Success();
-        };
-        if (impl_->config.motion_blur != GraphicsMotionBlur::Off || impl_->config.depth_of_field)
-            post.pre_bloom = present_hook;
-        if (impl_->config.color_grading) post.pre_tone_map = present_hook;
-        if (devtools_ui_hook) post.devtools_ui = present_hook;
-        if (post.pre_bloom)
+        const bool pre_bloom = impl_->config.motion_blur != GraphicsMotionBlur::Off ||
+            impl_->config.depth_of_field;
+        const bool pre_tone_map = impl_->config.color_grading;
+        if (!MatchesPostSubgraphShape(impl_->config.bloom, impl_->config.outline, fxaa_identity,
+                !owned_view.view_targets_initialized, pre_bloom, pre_tone_map,
+                devtools_ui_hook, saved.post)) return false;
+        const bool transparent_guide_state = have_hero_contributors &&
+            owned_view.hero_transparency.AllocatedBytes() != 0;
+        if (pre_bloom)
         {
-            HdrPostInputs motion;
-            motion.hdr.version = saved.hdr_motion.inputs[0];
-            motion.depth.version = saved.hdr_motion.inputs[1];
-            motion.motion.version = saved.hdr_motion.inputs[2];
-            motion.surface_history.version = saved.hdr_motion.inputs[3];
-            motion.normal.version = saved.hdr_motion.inputs[4];
-            motion.transparent_depth.version = saved.hdr_motion.inputs[5];
-            motion.transparent_motion.version = saved.hdr_motion.inputs[6];
-            motion.transparent_history.version = saved.hdr_motion.inputs[7];
-            motion.transparent_classification.version = saved.hdr_motion.inputs[8];
-            motion.transparent_guides_enabled = have_hero_contributors &&
-                owned_view.hero_transparency.AllocatedBytes() != 0;
-            if (!owned_view.hdr_post.MatchesMotionLayout(motion, saved.hdr_motion)) return false;
+            if (!owned_view.hdr_post.MatchesMotionShape(saved.hdr_motion, transparent_guide_state)) return false;
         }
-        if (post.pre_tone_map)
+        if (pre_tone_map)
         {
-            HdrPostInputs grade;
-            grade.hdr.version = saved.hdr_grade.input;
-            if (!owned_view.hdr_post.MatchesGradeLayout(grade, saved.hdr_grade,
-                    static_cast<bool>(post.pre_bloom))) return false;
+            if (!owned_view.hdr_post.MatchesGradeShape(saved.hdr_grade, pre_bloom)) return false;
         }
-        const PostSubgraphTargets post_targets{versions[24], versions[25], versions[26],
-            versions[27], versions[28], versions[29], versions[30], versions[31],
-            versions[32], versions[33]};
-        if (!MatchesPostSubgraphLayout(post, post_targets, saved.post)) return false;
         if (use_native_reconstruction)
         {
-            ReconstructionGuidesInputs guide;
-            const auto &v = saved.reconstruction_guides.inputs;
-            guide.depth.version = v[0]; guide.motion.version = v[1];
-            guide.metadata.version = v[2]; guide.surface_history.version = v[3];
-            guide.composite_hdr.version = v[4]; guide.opaque_hdr.version = v[5];
-            guide.exposure.version = v[6]; guide.transparency_revealage.version = v[7];
-            guide.transparent_depth.version = v[8]; guide.transparent_motion.version = v[9];
-            guide.transparent_history.version = v[10]; guide.transparent_classification.version = v[11];
-            guide.transparent_metadata.version = v[12]; guide.transparent_overflow.version = v[13];
-            guide.transparent_transport.version = v[14]; guide.screen_overlay_alpha.version = v[15];
-            guide.transparent_guides_enabled = have_hero_contributors &&
-                owned_view.hero_transparency.AllocatedBytes() != 0;
-            if (!owned_view.reconstruction_guides.MatchesLayout(guide,
+            const bool screen_overlay_active = screen_intensity != 0 && std::ranges::any_of(typed_screen,
+                [](const auto &command) { return command.alpha != 0; });
+            if (!owned_view.reconstruction_guides.MatchesShape(saved.reconstruction_guides,
                     owned_view.reconstruction_provider->UsesExternalQueue(),
                     owned_view.reconstruction_plan.effective_provider.value,
-                    saved.reconstruction_guides)) return false;
+                    transparent_guide_state, screen_overlay_active)) return false;
         }
         if (presented_view && impl_->sdk_presentation.IsEnabled())
         {
-            PresentationGuidesInputs guide;
-            const auto &v = saved.presentation_guides.inputs;
-            guide.display_linear.version = v[0]; guide.encoded_ui.version = v[1];
-            guide.depth.version = v[2]; guide.motion.version = v[3];
-            guide.transparent_depth.version = v[4]; guide.transparent_motion.version = v[5];
-            guide.transparent_classification.version = v[6]; guide.transparent_metadata.version = v[7];
-            guide.transparent_guides_enabled = !use_native_reconstruction &&
-                have_hero_contributors && owned_view.hero_transparency.AllocatedBytes() != 0;
-            if (!impl_->presentation_guides.MatchesLayout(guide, 900, 901, 902,
-                    saved.presentation_guides)) return false;
-            PresentationGuidesOutputs outputs;
-            outputs.hudless.version = saved.presentation_tag.guides[0];
-            outputs.ui.version = saved.presentation_tag.guides[1];
-            outputs.depth.version = saved.presentation_tag.guides[2];
-            outputs.motion.version = saved.presentation_tag.guides[3];
-            if (!impl_->presentation_guides.MatchesTagLayout(outputs,
-                    {saved.presentation_tag.back_buffer, nullptr}, 904,
-                    saved.presentation_tag)) return false;
+            const bool presentation_transparent = !use_native_reconstruction && transparent_guide_state;
+            if (!impl_->presentation_guides.MatchesShape(saved.presentation_guides, 900, 901, 902,
+                    presentation_transparent) ||
+                !impl_->presentation_guides.MatchesTagShape(saved.presentation_tag, 904)) return false;
         }
         return true;
     };
@@ -6020,8 +6014,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     if (active_features.software_gi_enabled)
     {
         brixelizer_owners.push_back(impl_->resident_generation_lease);
-        if (software_scene_preowned_view.owner)
-            brixelizer_owners.push_back(software_scene_preowned_view.owner);
+        if (software_scene_preview.owner)
+            brixelizer_owners.push_back(software_scene_preview.owner);
     }
     if (active_features.software_gi_enabled && !software_scene_jobs.empty())
     {
@@ -6030,7 +6024,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             geometries.reserve(software_scene_jobs.size()); instances.reserve(software_scene_jobs.size());
             for (std::size_t index = 0; index < software_scene_jobs.size(); ++index)
             {
-                const auto &job = software_scene_preowned_view.geometries[index];
+                const auto &job = software_scene_preview.geometries[index];
                 const auto &draw = software_scene_draws[index];
                 const auto &page = *software_scene_pages[index];
                 const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
@@ -6043,7 +6037,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                     frame.skin_cache_vertices.resource->GetDesc().Width))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
                 geometries.push_back({std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
-                    deformed ? software_scene_preowned_view.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
+                    deformed ? software_scene_preview.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
                     page.storage.resource.Get(), {},
                     ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
                         skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
@@ -9549,11 +9543,13 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             list->SetPipelineState(impl_->owner_mesh_pipeline.Get());
             list->SetGraphicsRootShaderResourceView(
                 11, frame.upload.resource->GetGPUVirtualAddress() + owner_mesh_data_offset);
-            for (std::uint32_t index = 0; index < owner_mesh_count; ++index)
+            for (std::size_t first = 0; first < owner_mesh_count;)
             {
-                list->SetGraphicsRoot32BitConstant(6, index, 0);
-                list->DrawInstanced(
-                    impl_->vfx_mesh_vertex_counts[typed_mesh_spawns[index].mesh_index - 1], 1, 0, 0);
+                const auto run = renderer_detail::NextVfxOwnedMeshDrawRun(
+                    typed_mesh_spawns.first(owner_mesh_count), impl_->vfx_mesh_vertex_counts, first);
+                list->SetGraphicsRoot32BitConstant(6, static_cast<UINT>(run.first), 0);
+                list->DrawInstanced(run.vertex_count, static_cast<UINT>(run.count), 0, 0);
+                first += run.count;
             }
             list->SetGraphicsRoot32BitConstant(6, 0, 0);
         }
@@ -10753,6 +10749,61 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     current_instance_snapshot->surface_package_id = impl_->active_render_package_id;
     current_instance_snapshot->initialized = current_instance_snapshot->submitted = true;
     impl_->canonical_instance_current = current_instance_snapshot;
+    std::shared_ptr<Impl::CanonicalSkinFrame> current_skin_deformation;
+    if (new_session)
+        for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
+    frame.skin_cache_valid = have_skinned_instances;
+    if (have_skinned_instances)
+    {
+        const auto current_skin_vertex_completion =
+            impl_->graph.ResourceCompletion(skin_cache_buffer);
+        const auto current_skin_bounds_completion =
+            impl_->graph.ResourceCompletion(skin_bounds_buffer);
+        frame.skin_cache_use_completion = current_skin_vertex_completion;
+        frame.skin_cache_use_completion.Merge(current_skin_bounds_completion);
+        frame.skin_cache_vertices.graph_access = impl_->graph.FinalAccess(skin_cache_buffer);
+        frame.skin_cache_vertices.graph_queue = impl_->graph.FinalQueue(skin_cache_buffer);
+        frame.skin_cache_vertices.graph_completion.Merge(current_skin_vertex_completion);
+        frame.skin_cache_bounds.graph_access = impl_->graph.FinalAccess(skin_bounds_buffer);
+        frame.skin_cache_bounds.graph_queue = impl_->graph.FinalQueue(skin_bounds_buffer);
+        frame.skin_cache_bounds.graph_completion.Merge(current_skin_bounds_completion);
+        if (previous_skin_frame_valid)
+        {
+            const auto previous_completion =
+                impl_->graph.ResourceCompletion(previous_skin_cache_buffer);
+            previous_skin_frame->skin_cache_use_completion.Merge(previous_completion);
+            previous_skin_frame->skin_cache_vertices.graph_access =
+                impl_->graph.FinalAccess(previous_skin_cache_buffer);
+            previous_skin_frame->skin_cache_vertices.graph_queue =
+                impl_->graph.FinalQueue(previous_skin_cache_buffer);
+            previous_skin_frame->skin_cache_vertices.graph_completion.Merge(previous_completion);
+        }
+        frame.skin_cache_vertex_read = true;
+        frame.skin_cache_bounds_read = true;
+        frame.skin_cache_valid = true;
+        current_skin_deformation = reuse_canonical_skin
+            ? packet_skin_deformation : std::move(staged_current_skin_deformation);
+        current_skin_deformation->skin_cache_vertices.graph_access =
+            impl_->graph.FinalAccess(skin_cache_buffer);
+        current_skin_deformation->skin_cache_vertices.graph_queue =
+            impl_->graph.FinalQueue(skin_cache_buffer);
+        current_skin_deformation->skin_cache_vertices.graph_completion.Merge(
+            impl_->graph.ResourceCompletion(skin_cache_buffer));
+        current_skin_deformation->skin_cache_bounds.graph_access =
+            impl_->graph.FinalAccess(skin_bounds_buffer);
+        current_skin_deformation->skin_cache_bounds.graph_queue =
+            impl_->graph.FinalQueue(skin_bounds_buffer);
+        current_skin_deformation->skin_cache_bounds.graph_completion.Merge(
+            impl_->graph.ResourceCompletion(skin_bounds_buffer));
+        current_skin_deformation->skin_cache_valid = true;
+        current_skin_deformation->skin_cache_use_completion.Merge(frame.skin_cache_use_completion);
+        // Capacity was reserved before Execute; publication and lease linking are
+        // non-allocating once the GPU work has been accepted.
+        if (!reuse_canonical_skin)
+            impl_->canonical_skin_frames.push_back(current_skin_deformation);
+        impl_->canonical_skin_current = current_skin_deformation;
+        prepared_scene.skin_deformation = current_skin_deformation;
+    }
     if (separate_previous_instance_scene)
     {
         auto &scene = previous_instance_snapshot->scene;
@@ -11008,38 +11059,6 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     impl_->particles_initialized = true;
     impl_->particle_input_is_a = !impl_->particle_input_is_a;
     if (impl_->render_scene_inputs && world_step_requested) impl_->last_particle_tick = stateful_target;
-    if (new_session)
-        for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
-    if (have_skinned_instances)
-        frame.skin_cache_use_completion = impl_->graph.ResourceCompletion(skin_cache_buffer);
-    if (have_skinned_instances && previous_skin_frame_valid)
-        previous_skin_frame->skin_cache_use_completion.Merge(
-            impl_->graph.ResourceCompletion(previous_skin_cache_buffer));
-    if (have_skinned_instances) frame.skin_cache_vertex_read = true;
-    if (have_skinned_instances) frame.skin_cache_bounds_read = true;
-    frame.skin_cache_valid = have_skinned_instances;
-    std::shared_ptr<Impl::CanonicalSkinFrame> current_skin_deformation;
-    if (have_skinned_instances)
-    {
-        if (reuse_canonical_skin) current_skin_deformation = packet_skin_deformation;
-        else
-        {
-            current_skin_deformation = std::make_shared<Impl::CanonicalSkinFrame>();
-            auto &canonical = *current_skin_deformation;
-            canonical.skin_cache_vertices = Impl::RetainViewAllocation(frame.skin_cache_vertices);
-            canonical.skin_cache_bounds = Impl::RetainViewAllocation(frame.skin_cache_bounds);
-            canonical.skin_cache_vertex_capacity = frame.skin_cache_vertex_capacity;
-            canonical.skin_cache_bound_capacity = frame.skin_cache_bound_capacity;
-            canonical.vertex_stride = SkinVertexRanges::kVertexBytes;
-            canonical.vertex_ranges = std::move(skin_vertex_ranges);
-            canonical.skin_cache_valid = true;
-            canonical.package_id = impl_->active_render_package_id;
-            impl_->canonical_skin_frames.push_back(current_skin_deformation);
-        }
-        current_skin_deformation->skin_cache_use_completion.Merge(frame.skin_cache_use_completion);
-        impl_->canonical_skin_current = current_skin_deformation;
-        prepared_scene.skin_deformation = current_skin_deformation;
-    }
     impl_->render_session_id = snapshot.header.session_id;
     owned_view.last_presented_index = output_index;
     owned_view.transient_textures_common = false;
@@ -11211,7 +11230,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             frame_result.identity.provider_token_known = true;
         }
     frame_result.rendered_view = view_input;
-    frame_result.rendered_owned_view.render_active = owned_view.state.render_active;
+    frame_result.rendered_view.render_active = owned_view.state.render_active;
     frame_result.view_history_generation = impl_->owned_views.at(impl_->active_view_id.value)->history_generation;
     std::memcpy(frame_result.unjittered_view_projection.data(), &constants->current_unjittered_view_projection,
         sizeof(constants->current_unjittered_view_projection));

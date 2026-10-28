@@ -7,12 +7,21 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <span>
 #include <vector>
 
 namespace hs
 {
+[[nodiscard]] inline double MergeActiveGiVoxelSize(double first, double second) noexcept
+{
+    if (!std::isfinite(first) || !std::isfinite(second))
+        return std::numeric_limits<double>::quiet_NaN();
+    if (first == 0.0) return second;
+    return second == 0.0 ? first : std::min(first, second);
+}
+
 struct MonsterLodConsumer
 {
     // The caller supplies every camera, shadow and probe consumer of this

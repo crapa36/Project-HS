@@ -552,7 +552,8 @@ void TestProductionVfxDecoding()
     std::vector<hs::PresentationEvent> dispatched;
     Check(hs::runtime_detail::DispatchVfxUpgradeEvents(program,std::span(&mini,1),dispatched).Succeeded(),
           "actual cooked mini-bomb stage dispatch");
-    auto typed_mini=hs::runtime_detail::BuildVfxTypedFrameInputs(program,dispatched,{}, {},130);
+    hs::runtime_detail::VfxTypedFrameInputs typed_mini;
+    hs::runtime_detail::BuildVfxTypedFrameInputs(catalog.Image(),dispatched,{}, {},130,typed_mini);
     Check(typed_mini.events.size()==1 && typed_mini.unsupported_effect_ids.empty(),"mini-bomb Circle owner ingress");
     hs::PersistentVfxVisual mini_owner; mini_owner.kind=hs::PersistentVfxKind::MiniBombWarning;
     mini_owner.stable_id=901; mini_owner.active_tick=100; mini_owner.expires=160; mini_owner.radius=1.6f;
@@ -605,10 +606,106 @@ void TestProductionVfxDecoding()
     {
         hs::VfxPersistentInput owner;owner.stable_id=71;owner.effect_handle=handle(id);owner.normalized_age=.5f;
         hs::VfxLinkPayload link;link.source_position={0,.7f,0};link.target_position={3,.7f,4};link.width=.1f;link.lifetime01=.5f;owner.payload=link;
-        const auto ribbons=hs::runtime_detail::BuildVfxTypedRibbonInputs(program,std::span(&owner,1));
+        const auto ribbons=hs::runtime_detail::BuildVfxTypedRibbonInputs(vfx_image,std::span(&owner,1));
         Check(ribbons.size()==1&&ribbons[0].analytic&&ribbons[0].outputs.size()==2,
               "actual cooked link yields one analytic source with both outputs");
     }
+}
+
+void TestLegacyMeshReplacement()
+{
+    std::array<hs::CookedParticleEmitter, 4> emitters{};
+    for (auto &emitter : emitters) emitter.count = 3;
+    emitters[0].renderer = hs::VfxRenderer::Mesh;
+    emitters[0].primitive = hs::VfxPrimitive::Arrow;
+    emitters[1].renderer = hs::VfxRenderer::Mesh;
+    emitters[1].primitive = hs::VfxPrimitive::ShockShell;
+    emitters[2].renderer = hs::VfxRenderer::Sprite;
+    emitters[3].renderer = hs::VfxRenderer::Ground;
+    emitters[3].primitive = hs::VfxPrimitive::Ring;
+    const std::array<std::uint8_t, 4> meshes{1, 2, 0, 0};
+    const std::array<std::uint8_t, 1> decorative{0};
+    for (const auto name : {"particle.fixture.mesh", "particle.skill.explosive_arrow.main"})
+    {
+        const auto id = hs::MakeAssetId(name);
+        const std::array definitions{hs::CookedVfxDefinition{id.value, 0, 4}};
+        hs::VfxImage image;
+        image.definitions = definitions;
+        image.emitters = emitters;
+        image.authored_mesh_indices = meshes;
+        image.decorative_definitions = decorative;
+        hs::VfxCatalog catalog;
+        catalog.Bind(image);
+        hs::PresentationEvent event;
+        event.kind = hs::PresentationKind::Vfx;
+        event.asset = id;
+        event.sequence = 27;
+        event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
+        std::vector<hs::ParticleSpawnCommand> original, actual(1);
+        actual.front().sequence = 99;
+        std::vector<hs::VfxLineSpawnCommand> lines;
+        Check(catalog.ExpandEvent(event, 1.0f, original, lines).Succeeded() &&
+                  catalog.ExpandEvent(event, 1.0f, actual, lines, false, true).Succeeded(),
+              "legacy mesh replacement expansion failed");
+        const bool replaces_shell = id.value == hs::MakeAssetId("particle.skill.explosive_arrow.main").value;
+        std::size_t kept = 1;
+        for (const auto &command : original)
+        {
+            if (command.renderer == hs::VfxRenderer::Mesh &&
+                (command.primitive != hs::VfxPrimitive::ShockShell || replaces_shell)) continue;
+            Check(kept < actual.size() && actual[kept].seed == command.seed &&
+                      actual[kept].count == command.count && actual[kept].renderer == command.renderer &&
+                      actual[kept].primitive == command.primitive,
+                  "mesh replacement changed retained accents, emitter order or seeds");
+            ++kept;
+        }
+        Check(original.size() == 4 && actual.size() == kept && actual.front().sequence == 99 &&
+                  kept == (replaces_shell ? 3 : 4),
+              "mesh replacement removed unrelated outputs or retained replaced mesh");
+    }
+}
+
+void TestLegacyGroundSuppression()
+{
+    std::array<hs::CookedParticleEmitter, 5> emitters{};
+    for (auto &emitter : emitters) emitter.count = 2;
+    emitters[0].renderer = hs::VfxRenderer::Ground;
+    emitters[0].primitive = hs::VfxPrimitive::Ring;
+    emitters[1].renderer = hs::VfxRenderer::Ground;
+    emitters[1].primitive = hs::VfxPrimitive::Disc;
+    emitters[2].renderer = hs::VfxRenderer::Segment;
+    emitters[2].primitive = hs::VfxPrimitive::SolidTrail;
+    emitters[3].renderer = hs::VfxRenderer::Sprite;
+    emitters[4].renderer = hs::VfxRenderer::Ground;
+    emitters[4].primitive = hs::VfxPrimitive::ShockShell;
+    const std::array<std::uint8_t, 1> decorative{0};
+    const auto id = hs::MakeAssetId("particle.fixture.ground_suppression");
+    const std::array definitions{hs::CookedVfxDefinition{id.value, 0, 5}};
+    hs::VfxImage image;
+    image.definitions = definitions;
+    image.emitters = emitters;
+    image.decorative_definitions = decorative;
+    hs::VfxCatalog catalog;
+    catalog.Bind(image);
+
+    hs::PresentationEvent event;
+    event.kind = hs::PresentationKind::Vfx;
+    event.asset = id;
+    event.sequence = 27;
+    event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
+    std::vector<hs::ParticleSpawnCommand> actual;
+    std::vector<hs::VfxLineSpawnCommand> lines;
+    const hs::VfxLegacyGroundSuppression matching{false, true, true, true};
+    Check(catalog.ExpandEvent(event, 1.0f, actual, lines, false, false, matching).Succeeded() &&
+              actual.size() == 2 && actual[0].renderer == hs::VfxRenderer::Sprite &&
+              actual[1].renderer == hs::VfxRenderer::Ground &&
+              actual[1].primitive == hs::VfxPrimitive::ShockShell,
+          "ground suppression changed unrelated accents or ShockShell ordering");
+    actual.clear();
+    Check(catalog.ExpandEvent(event, 1.0f, actual, lines, false, false,
+              hs::VfxLegacyGroundSuppression{true, false, false, false}).Succeeded() &&
+              actual.empty(),
+          "full typed replacement retained legacy particle rows");
 }
 
 void TestVfxCatalog()
@@ -695,8 +792,9 @@ void TestVfxCatalog()
         pickup.parameters = hs::EncodeVfxParameters({
             {0.0f, 0.0f, 1.0f}, 1.0f, {7.0f, 1.0f, 5.0f},
             static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget)});
-        const auto typed = hs::runtime_detail::BuildVfxTypedFrameInputs(
-            catalog.Program(), std::span(&pickup, 1), {}, {}, pickup.tick);
+        hs::runtime_detail::VfxTypedFrameInputs typed;
+        hs::runtime_detail::BuildVfxTypedFrameInputs(
+            catalog.Image(), std::span(&pickup, 1), {}, {}, pickup.tick, typed);
         std::vector<hs::Sequence> superseded;
         const auto flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
             catalog.Image(), typed.events, &superseded);
@@ -704,7 +802,7 @@ void TestVfxCatalog()
               "typed pickup flash identifies its exact replaced legacy event");
         std::vector<hs::ParticleSpawnCommand> suppressed;
         std::vector<hs::VfxLineSpawnCommand> pickup_lines;
-        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, superseded).Succeeded() &&
+        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, superseded.front() == pickup.sequence).Succeeded() &&
                   suppressed.empty() && pickup_lines.empty(),
               "successful typed pickup flash suppresses legacy generation before command creation");
         Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines).Succeeded() &&
@@ -712,20 +810,21 @@ void TestVfxCatalog()
               "pickup without typed replacement retains both legacy emitters");
         const std::array unrelated_sequence{pickup.sequence + 1};
         suppressed.clear();
-        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, unrelated_sequence).Succeeded() &&
+        Check(catalog.ExpandEvent(pickup, 1.0f, suppressed, pickup_lines, unrelated_sequence.front() == pickup.sequence).Succeeded() &&
                   suppressed.size() == 2,
               "nonmatching typed replacement sequence retains legacy emitters");
         auto unadapted_pickup = pickup;
         unadapted_pickup.sequence++;
         unadapted_pickup.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, 0});
-        const auto rejected_typed = hs::runtime_detail::BuildVfxTypedFrameInputs(
-            catalog.Program(), std::span(&unadapted_pickup, 1), {}, {}, unadapted_pickup.tick);
+        hs::runtime_detail::VfxTypedFrameInputs rejected_typed;
+        hs::runtime_detail::BuildVfxTypedFrameInputs(
+            catalog.Image(), std::span(&unadapted_pickup, 1), {}, {}, unadapted_pickup.tick, rejected_typed);
         std::vector<hs::Sequence> no_replacements;
         const auto rejected_flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
             catalog.Image(), rejected_typed.events, &no_replacements);
         suppressed.clear();
         Check(rejected_flashes.empty() && no_replacements.empty() &&
-                  catalog.ExpandEvent(unadapted_pickup, 1.0f, suppressed, pickup_lines, no_replacements).Succeeded() &&
+                  catalog.ExpandEvent(unadapted_pickup, 1.0f, suppressed, pickup_lines, !no_replacements.empty()).Succeeded() &&
                   suppressed.size() == 2,
               "typed pickup rejection retains the compatibility emitters");
     }
@@ -820,9 +919,8 @@ void TestVfxCatalog()
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
-    const std::array replaced_line_sequence{event.sequence};
     lines.clear();
-    Check(catalog.ExpandEvent(event, 1.0f, full, lines, replaced_line_sequence).Succeeded() &&
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines, true).Succeeded() &&
               lines.size() == 1 && lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "particle replacement receipts do not suppress legacy line outputs");
 
@@ -1798,6 +1896,34 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
         reject_input("\"kind\":7", std::string("\"kind\":") + value);
 }
 
+void TestUncapturedHitRateReport(const std::filesystem::path &root)
+{
+    const auto directory = root / "playtest-uncaptured-hits";
+    hs::PlaytestRecorder recorder;
+    Check(recorder.Start({directory, 42, 99, 101}).Succeeded(), "start uncaptured hit-rate report");
+    hs::SimulationObservation probe;
+    probe.tick = 1;
+    probe.phase = hs::SessionPhase::Playing;
+    probe.damage_dealt = 42;
+    probe.balance.hit_rates_captured = false;
+    probe.balance.detailed_balance_captured = false;
+    probe.balance.skill_casts_with_hit[0] = 99;
+    probe.balance.enemy_hits[0] = 88;
+    Check(recorder.Record({1, {}, {}}, 1234, probe, {}).Succeeded() &&
+              recorder.Finish(true).Succeeded(), "finish uncaptured hit-rate report");
+    std::ifstream result_stream(directory / "result.json");
+    const std::string result((std::istreambuf_iterator<char>(result_stream)), {});
+    Check(result.contains("\"hit_rates_captured\": false") &&
+              result.contains("\"casts_with_hit\": null") && result.contains("\"cast_hit_rate\": null") &&
+              result.contains("\"hits\": null") && result.contains("\"hit_rate\": null") &&
+              result.contains("\"damage_dealt\": 42"),
+          "uncaptured rates are unavailable while ordinary summary values remain numeric");
+    std::ifstream analysis_stream(directory / "analysis.md");
+    const std::string analysis((std::istreambuf_iterator<char>(analysis_stream)), {});
+    Check(analysis.contains("상세 통계를 수집하지 않음"),
+          "disabled synergy detail is not reported as zero observed activations");
+}
+
 void TestRecordingFileFinalization(const std::filesystem::path &root)
 {
     const auto path = root / "recording-finalize.txt";
@@ -1965,6 +2091,30 @@ void TestVfxActiveEffectStoreOwnsPayloadOnce()
               store.Get(captures[0].row)->sequence == 10 &&
               store.Get(captures[0].row)->effect_handle == 7,
           "catalog rebind retires incompatible captures and remaps retained canonical rows");
+    store.Clear();
+    input.sequence = 20;
+    store.Append(Profile::Ground, input);
+    store.Append(Profile::Light, input);
+    auto extra = input;
+    ++extra.sequence;
+    store.Append(Profile::Ground, extra);
+    store.Compact();
+    Check(store.Size() == 2, "adding live profile rows requires no retirement");
+    const std::array rebound{input};
+    store.RebindProfile(Profile::Ground, rebound);
+    store.Compact();
+    Check(store.Size() == 1 && store.ProfileEvents(Profile::Light).size() == 1,
+          "profile rebind retires only rows losing their final membership");
+    captures.clear();
+    store.RebindRows([](hs::VfxEventInput &row) { row.effect_handle = 8; return true; }, captures);
+    input.effect_handle = 8;
+    Check(store.Find(input) == 0, "live-only rebind updates lookup keys without a retirement scan");
+    store.EraseIf(Profile::Ground, [](const auto &) { return true; });
+    store.Compact();
+    Check(store.Size() == 1, "removing one of several memberships preserves the row");
+    store.EraseIf(Profile::Light, [](const auto &) { return true; });
+    store.Compact();
+    Check(store.Size() == 0, "final membership removal retires the row after live-only fast paths");
 }
 
 void TestVfxProfileBindingsAndCaptureRetention()
@@ -2043,8 +2193,12 @@ void TestVfxProfileBindingsAndCaptureRetention()
     Store prepared;
     hs::VfxEventInput swapped = event; swapped.sequence = 104;
     prepared.Append(Profile::Ribbon, swapped);
+    auto orphan = swapped; ++orphan.sequence;
+    (void)prepared.Intern(orphan);
     store.Swap(prepared);
+    store.Compact();
     Check(store.Find(swapped) != std::numeric_limits<Store::Row>::max() &&
+              store.Size() == 1 &&
               store.ProfileEvents(Profile::Ribbon).size() == 1 &&
               store.ProfileEvents(Profile::Ribbon)[0].sequence == swapped.sequence,
           "store swap transfers canonical rows and profile indices together");
@@ -2061,7 +2215,11 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
     older->session.card_count = 1;
     older->session.cards[0] = {hs::CardKind::LearnSkill, 1, 0};
     older->selection_epoch = hs::runtime_detail::UiSelectionEpoch(older->session);
-    older->draw_models.push_back({hs::UiModel::Kind::Button, {360, 300}, {360, 420}});
+    auto draw_content = std::make_shared<hs::UiDrawContent>();
+    draw_content->models.push_back({hs::UiModel::Kind::Button, {360, 300}, {360, 420}});
+    older->draw_content = draw_content;
+    older->draw_facts = std::make_shared<const std::vector<std::uint64_t>>(
+        std::vector<std::uint64_t>{1, 2, 3});
     auto newer = std::make_shared<hs::UiFrame>(*older);
     newer->generation = 11; newer->session.cards[0].subject = 2;
     newer->selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer->session);
@@ -2072,7 +2230,7 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
     auto second = exchange.TryBeginWrite();
     Check(second.has_value(), "new UI can publish while old UI is rendered");
     exchange.Publish(*second, 11, nullptr, newer);
-    Check(rendered.ui_frame == older && rendered.current.ui.data() == older->draw_models.data(),
+    Check(rendered.ui_frame == older && rendered.current.ui.data() == draw_content->models.data(),
           "draw span and interaction facts retain the same immutable UI owner");
     Check(packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {1920, 1080}),
           "older submitted UI retains its exact facts despite a newer pending publication");
@@ -2096,15 +2254,18 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
           !packets.AcceptPresentedUiPacket(10, older, 7, {1280, 720}) &&
           packets.presented_ui_packet.load(std::memory_order_acquire)->frame == newer,
           "new frame supersedes old receipts without accepting stale UI");
-    Check(hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
-              newer->graphics_model, 0, 0xFF, false) &&
-          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 1, newer->ui, newer->settings,
-              newer->graphics_model, 0, 0xFF, false) &&
-          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
-              newer->graphics_model, 0, 0, false) &&
-          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
-              newer->graphics_model, 0, 0xFF, true),
-          "UI reuse depends on world projection, key rebind and input feedback before building draws");
+    const std::array<std::uint64_t, 3> unchanged_facts{1, 2, 3};
+    const std::array<std::uint64_t, 3> changed_facts{1, 2, 4};
+    Check(hs::runtime_detail::SameUiDrawInputs(*newer, unchanged_facts, newer->graphics_model) &&
+          !hs::runtime_detail::SameUiDrawInputs(*newer, changed_facts, newer->graphics_model),
+          "UI draw reuse follows concrete display facts while newer interaction receipts share the content owner");
+    const auto changed_graphics = std::make_shared<const hs::GraphicsSettingsUiModel>();
+    Check(hs::runtime_detail::SameUiDrawInputs(*newer, unchanged_facts, changed_graphics),
+          "hidden graphics telemetry invalidated unchanged root draw content");
+    auto settings_frame = *newer;
+    settings_frame.ui.page = hs::UiPage::PauseSettings;
+    Check(!hs::runtime_detail::SameUiDrawInputs(settings_frame, unchanged_facts, changed_graphics),
+          "visible graphics settings ignored a new model owner");
 }
 
 void TestVfxSessionReset()
@@ -2121,8 +2282,6 @@ void TestVfxSessionReset()
     Check(state.raw_events.Enqueue(old_event) && state.raw_events.Enqueue(next_event),
           "VFX events enqueue");
     Check(state.Synchronize(1), "first VFX session begins");
-    (void)state.persistent_mote_births.GetOrCreate(77, 3, 12, 4, 0, 0, 21);
-    Check(state.persistent_mote_births.size() == 1, "initial session should retain its mote birth window");
     Check(state.raw_events.Prepare(99, 1).entries.empty(), "future tick or session event played early");
     const auto &first = state.raw_events.Prepare(100, 1);
     Check(first.entries.size() == 1 && first.entries[0].event.sequence == 9,
@@ -2139,8 +2298,6 @@ void TestVfxSessionReset()
     Check(state.Synchronize(2) && state.decoded.flashes.empty() &&
               state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty(),
           "session restart retained an old visual");
-    Check(state.persistent_mote_births.size() == 0,
-          "session restart retained previous-session mote unit data");
     Check(state.MarkPersistentBurst(77, 3),
           "new simulation session retained an old burst episode");
     Check(state.raw_events.Prepare(1, 2).entries.empty(), "reset clock replayed an old/future event");
@@ -2812,6 +2969,8 @@ int main(int argc, char **argv)
             return 0;
         }
         TestVfxCatalog();
+        TestLegacyMeshReplacement();
+        TestLegacyGroundSuppression();
         TestShippingImage();
         TestCompiledShippingTables();
         TestProductionVfxDecoding();
@@ -2828,6 +2987,7 @@ int main(int argc, char **argv)
         TestPreparedSessionAmbience(root);
         TestExperimentSpecRoundTrip(root);
         TestPlaytestRecordAndReplay(root);
+        TestUncapturedHitRateReport(root);
         TestRecordingFileFinalization(root);
         TestCsvAppendPreservesNumericValues();
         TestPlaytestFinalizationFailures(root);

@@ -9,4 +9,7 @@ namespace hs::runtime_detail
 [[nodiscard]] std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(
     const VfxImage &image, VfxEventView events,
     std::span<const VfxPersistentInput> persistent, double current_tick);
+void AppendVfxTypedDistortionCommands(const VfxImage &image, VfxEventView events,
+    std::span<const VfxPersistentInput> persistent, double current_tick,
+    std::vector<VfxDistortionInput> &result);
 }

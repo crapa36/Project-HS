@@ -204,6 +204,8 @@ struct BalanceTelemetry
 {
     // False means optional detailed synergy fields were deliberately not captured.
     bool detailed_balance_captured{true};
+    // False means skill_casts_with_hit and enemy_hits were not collected, not zero hits.
+    bool hit_rates_captured{true};
     std::array<std::uint64_t, kCombatSkillCount> skill_uses{};
     std::array<std::uint64_t, kCombatSkillCount> skill_casts_with_hit{};
     std::array<std::uint64_t, kCombatSkillCount> skill_hit_events{};

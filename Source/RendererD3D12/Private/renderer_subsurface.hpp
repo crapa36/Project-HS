@@ -83,6 +83,7 @@ class SubsurfaceSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const SubsurfaceInputs &,
         SubsurfaceConstants, const SubsurfaceLayout &, SubsurfaceOutputs &);
     [[nodiscard]] bool MatchesLayout(const SubsurfaceInputs &, const SubsurfaceLayout &) const noexcept;
+    [[nodiscard]] bool MatchesShape(const SubsurfaceLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);

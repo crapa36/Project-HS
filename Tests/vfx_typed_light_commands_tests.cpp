@@ -3,6 +3,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_light_commands.hpp"
 #include <bit>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -78,5 +79,18 @@ void QualityAndInvalidInputs()
  p=Program();i.geometry_owner_id=8;i.geometry_start_tick=100;i.geometry_end_tick=100;Check(Run(p,i,145).empty(),"invalid owner clock accepted");
  Check(hs::runtime_detail::BuildVfxTypedLightCommands(hs::VfxImage{}, {},145).empty(),"cancelled event retained light");
 }
+void AppendContract()
+{
+ auto p=Program();auto first=Input();auto second=first;second.sequence++;
+ hs::VfxImageData data;hs::PrepareVfxLightRecipes(p.View(),data.light_effect_ranges,data.light_recipes);auto image=data.View();image.program=p.View();
+ std::vector<hs::VfxLightInput> result;result.reserve(8);hs::VfxLightInput prefix;prefix.stable_id=99;result.push_back(prefix);const auto capacity=result.capacity();
+ hs::runtime_detail::AppendVfxTypedLightCommands(image,{},145,result);
+ auto rejected=first;rejected.effect_handle=0;hs::runtime_detail::AppendVfxTypedLightCommands(image,std::span(&rejected,1),145,result);
+ Check(result.size()==1&&result[0].stable_id==99&&result.capacity()==capacity,"empty/rejected append changed light prefix or capacity");
+ const std::array inputs{first,second};hs::runtime_detail::AppendVfxTypedLightCommands(image,inputs,145,result);
+ const auto expected_first=Run(p,first,145),expected_second=Run(p,second,145);
+ Check(result.size()==3&&result[1].stable_id==expected_first[0].stable_id&&result[2].stable_id==expected_second[0].stable_id&&result.capacity()==capacity,
+       "light append changed order, prefix, or caller capacity");
 }
-int RunVfxLightTests(){try{PreparedSkipsAndOrder();ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int RunVfxLightTests(){try{PreparedSkipsAndOrder();ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();AppendContract();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

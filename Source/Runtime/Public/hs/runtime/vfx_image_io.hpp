@@ -41,6 +41,37 @@ struct VfxImageData
     std::vector<VfxOwnedStatusTickRecipe> owned_status_tick_recipes;
     std::vector<VfxMoteSourceRecipe> mote_source_recipes;
     std::vector<VfxMoteOutputRecipe> mote_output_recipes;
+    std::vector<VfxScreenEffectRecipe> screen_effect_recipes;
+    std::vector<VfxScreenRecipe> screen_recipes;
+    std::vector<VfxVolumeEffectRecipe> volume_effect_recipes;
+    std::vector<VfxVolumeRecipe> volume_recipes;
+    std::vector<VfxEntitySurfaceEffectRecipe> entity_surface_effect_recipes;
+    std::vector<VfxEntitySurfaceRecipe> entity_surface_recipes;
+    VfxEntitySurfaceRouteHandles entity_surface_routes{};
+    std::vector<VfxRibbonEffectRecipe> ribbon_effect_recipes;
+    std::vector<VfxRibbonSourceRecipe> ribbon_source_recipes;
+    std::vector<VfxRibbonOutputRecipe> ribbon_output_recipes;
+    std::vector<VfxRibbonTextureRecipe> ribbon_texture_recipes;
+    std::vector<std::uint32_t> ribbon_slice_indices;
+    std::vector<VfxRange> ribbon_wake_effect_ranges;
+    std::vector<VfxRibbonWakeRecipe> ribbon_wake_recipes;
+    std::vector<VfxRange> ribbon_fixed_effect_ranges;
+    std::vector<VfxRibbonFixedRecipe> ribbon_fixed_recipes;
+    std::vector<VfxRange> ribbon_projectile_effect_ranges;
+    std::vector<VfxRibbonProjectileSourceRecipe> ribbon_projectile_sources;
+    std::vector<VfxRibbonProjectileOutputRecipe> ribbon_projectile_outputs;
+    std::vector<VfxRange> ribbon_cancel_effect_ranges;
+    std::vector<VfxRibbonCancelRecipe> ribbon_cancel_recipes;
+    std::vector<VfxRibbonLinkEffectRecipe> ribbon_link_effect_recipes;
+    std::vector<VfxRibbonLinkOutputRecipe> ribbon_link_output_recipes;
+    std::vector<VfxRibbonEventEffectRecipe> ribbon_event_effect_recipes;
+    std::vector<VfxRibbonEventSourceRecipe> ribbon_event_sources;
+    std::vector<VfxRibbonEventOutputRecipe> ribbon_event_outputs;
+    std::vector<VfxEffectLookupRecord> effect_lookup_by_id;
+    std::vector<VfxFresnelEffectRecipe> fresnel_effect_recipes;
+    std::vector<VfxFresnelRecipe> fresnel_recipes;
+    std::vector<VfxMeshEffectRecipe> mesh_effect_recipes;
+    std::vector<VfxMeshRecipe> mesh_recipes;
     VfxImage View() const && = delete;
     [[nodiscard]] VfxImage View() const & noexcept
     {
@@ -53,7 +84,18 @@ struct VfxImageData
                 persistent_stamp_effect_ranges, persistent_stamp_recipes,
                 persistent_fire_effect_ranges, persistent_fire_recipes,
                 owned_status_tick_effect_ranges, owned_status_tick_recipes,
-                mote_source_recipes, mote_output_recipes};
+                mote_source_recipes, mote_output_recipes,
+                screen_effect_recipes, screen_recipes,
+                volume_effect_recipes, volume_recipes,
+                entity_surface_effect_recipes, entity_surface_recipes, entity_surface_routes,
+                ribbon_effect_recipes, ribbon_slice_indices, ribbon_wake_effect_ranges,
+                ribbon_wake_recipes, ribbon_fixed_effect_ranges, ribbon_fixed_recipes,
+                ribbon_projectile_effect_ranges, ribbon_projectile_sources, ribbon_projectile_outputs,
+                ribbon_cancel_effect_ranges, ribbon_cancel_recipes,
+                ribbon_link_effect_recipes, ribbon_link_output_recipes,
+                ribbon_event_effect_recipes, ribbon_event_sources, ribbon_event_outputs,
+                effect_lookup_by_id,
+                fresnel_effect_recipes, fresnel_recipes, mesh_effect_recipes, mesh_recipes};
     }
 };
 // Rebuild after developer fixture mutation; unsupported Light rows are skipped.
@@ -76,6 +118,63 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView program,
 void PrepareVfxMoteRecipes(VfxProgramView program,
     std::vector<VfxMoteSourceRecipe> &sources,
     std::vector<VfxMoteOutputRecipe> &outputs);
+[[nodiscard]] Result PrepareVfxScreenRecipes(VfxProgramView program,
+    std::vector<VfxScreenEffectRecipe> &effects, std::vector<VfxScreenRecipe> &outputs);
+[[nodiscard]] Result PrepareVfxVolumeRecipes(VfxProgramView program,
+    std::vector<VfxVolumeEffectRecipe> &effects, std::vector<VfxVolumeRecipe> &outputs);
+void PrepareVfxEntitySurfaceRecipes(VfxProgramView program,
+    std::vector<VfxEntitySurfaceEffectRecipe> &effects, std::vector<VfxEntitySurfaceRecipe> &outputs,
+    VfxEntitySurfaceRouteHandles &routes);
+void PrepareVfxRibbonRecipes(VfxProgramView program,
+    std::vector<VfxRibbonEffectRecipe> &effects, std::vector<VfxRibbonSourceRecipe> &sources,
+    std::vector<VfxRibbonOutputRecipe> &outputs, std::vector<VfxRibbonTextureRecipe> &textures,
+    std::vector<std::uint32_t> &slice_indices);
+void PrepareVfxRibbonWakeRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::span<const std::uint32_t> slice_indices,
+    std::vector<VfxRange> &ranges, std::vector<VfxRibbonWakeRecipe> &recipes);
+void PrepareVfxRibbonFixedRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::span<const std::uint32_t> slice_indices,
+    std::vector<VfxRange> &ranges, std::vector<VfxRibbonFixedRecipe> &recipes);
+void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::span<const std::uint32_t> slice_indices,
+    std::vector<VfxRange> &effect_ranges,
+    std::vector<VfxRibbonProjectileSourceRecipe> &source_recipes,
+    std::vector<VfxRibbonProjectileOutputRecipe> &output_recipes);
+void PrepareVfxRibbonCancelRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::vector<VfxRange> &ranges, std::vector<VfxRibbonCancelRecipe> &recipes);
+void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::span<const std::uint32_t> slice_indices,
+    std::vector<VfxRibbonLinkEffectRecipe> &effect_recipes,
+    std::vector<VfxRibbonLinkOutputRecipe> &output_recipes);
+void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+    std::span<const VfxRibbonSourceRecipe> sources,
+    std::span<const VfxRibbonOutputRecipe> outputs,
+    std::span<const VfxRibbonTextureRecipe> textures,
+    std::span<const std::uint32_t> slice_indices,
+    std::vector<VfxRibbonEventEffectRecipe> &effect_recipes,
+    std::vector<VfxRibbonEventSourceRecipe> &source_recipes,
+    std::vector<VfxRibbonEventOutputRecipe> &output_recipes);
+void PrepareVfxEffectLookupById(VfxProgramView program,
+    std::vector<VfxEffectLookupRecord> &lookup_by_id);
+void PrepareVfxFresnelRecipes(VfxProgramView program,
+    std::vector<VfxFresnelEffectRecipe> &effects, std::vector<VfxFresnelRecipe> &outputs);
+void PrepareVfxMeshRecipes(VfxProgramView program,
+    std::vector<VfxMeshEffectRecipe> &effects, std::vector<VfxMeshRecipe> &outputs);
 void PrepareVfxOutputProfiles(VfxProgramView program, std::vector<std::uint32_t> &profiles);
 [[nodiscard]] std::vector<std::byte> CanonicalVfxImageBytes(const VfxImage &image);
 // Failure leaves output unchanged; successful decoding owns all view storage.

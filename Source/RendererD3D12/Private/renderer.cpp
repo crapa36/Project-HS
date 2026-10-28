@@ -79,6 +79,15 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Renderer already initialized.");
     }
+    struct EssentialBootstrapScope
+    {
+        explicit EssentialBootstrapScope(bool &active) : active_(active) { active_ = true; }
+        EssentialBootstrapScope(const EssentialBootstrapScope &) = delete;
+        EssentialBootstrapScope &operator=(const EssentialBootstrapScope &) = delete;
+        ~EssentialBootstrapScope() { active_ = false; }
+        bool &active_;
+    };
+    [[maybe_unused]] EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
     StartupCapture startup(impl_->startup_timings, config.capture_timing_stream);
     auto &main_view = *impl_->owned_views.try_emplace(
         kMainRenderViewId.value, std::make_unique<Impl::OwnedView>()).first->second;
@@ -1573,6 +1582,8 @@ Result D3D12Renderer::Shutdown()
     impl_->device.Reset();
     impl_->adapter.Reset();
     impl_->factory.Reset();
+    impl_->essential_bootstrap_admission.Reset();
+    impl_->essential_bootstrap_active = false;
     if (impl_->com_initialized)
     {
         CoUninitialize();

@@ -2,6 +2,7 @@
 #include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_decal_commands.hpp"
 #include <bit>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -50,5 +51,18 @@ void Invalid()
  p=Program();p.parameters[0].type=hs::VfxParameterType::Float;Check(Run(p,i).empty(),"wrong cells type accepted");p=Program();p.parameters[1].bits=std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());Check(Run(p,i).empty(),"invalid glow accepted");p=Program();p.outputs[0].motion=hs::VfxMotionKind::StaticProjectedResidue;Check(Run(p,i).empty(),"shape/motion mismatch accepted");
  p=Program();p.sources[0].parameters={0,1};Check(Run(p,i).empty(),"unknown source params ignored");p=Program();i.payload=hs::VfxConePayload{};Check(Run(p,i).empty(),"unsupported cone coerced");
 }
+void AppendContract()
+{
+ auto p=Program();auto first=Input();auto second=first;second.sequence++;second.stable_seed++;
+ auto data=Image(p);std::vector<hs::VfxDecalInput> result;result.reserve(8);hs::VfxDecalInput prefix;prefix.stable_id=99;result.push_back(prefix);const auto capacity=result.capacity();
+ hs::runtime_detail::AppendVfxTypedDecalCommands(data.View(),{},{},166,result);
+ auto rejected=first;rejected.effect_handle=0;hs::runtime_detail::AppendVfxTypedDecalCommands(data.View(),std::span(&rejected,1),{},166,result);
+ Check(result.size()==1&&result[0].stable_id==99&&result.capacity()==capacity,"empty/rejected append changed decal prefix or capacity");
+ const std::array inputs{first,second};hs::runtime_detail::AppendVfxTypedDecalCommands(data.View(),inputs,{},166,result);
+ const auto expected_first=Run(p,first),expected_second=Run(p,second);
+ Check(result.size()==3&&result[1].stable_id==expected_first[0].stable_id&&result[2].stable_id==expected_second[0].stable_id&&
+       result[2].stable_seed==second.stable_seed&&result.capacity()==capacity,
+       "decal append changed order, seed, prefix, or caller capacity");
 }
-int RunVfxDecalTests(){try{GeometryAndIdentity();ResidueAndOwner();Invalid();std::cout<<"Typed decal commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int RunVfxDecalTests(){try{GeometryAndIdentity();ResidueAndOwner();Invalid();AppendContract();std::cout<<"Typed decal commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

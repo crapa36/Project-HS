@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_view_input.hpp>
+#include <hs/render_data/ui_draw_content.hpp>
 #include <hs/render_data/render_scene_ref.hpp>
 #include <hs/render_data/devtools_frame_data.hpp>
 #include <hs/render_data/vfx_decal_input.hpp>
@@ -16,6 +17,7 @@
 #include <hs/render_data/vfx_volume_input.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 namespace hs
@@ -60,6 +62,8 @@ struct RenderFrameInput
     RenderVfxFrameInput vfx;
     DevToolsFrameData devtools;
     std::span<const UiModel> ui;
+    // Optional immutable owner enables renderer cache hits without pointer/size identity.
+    std::shared_ptr<const UiDrawContent> ui_draw_content;
     bool override_ui{};
     std::optional<std::chrono::nanoseconds> simulation_time;
     std::optional<float> delta_seconds;

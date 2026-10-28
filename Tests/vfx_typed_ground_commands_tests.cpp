@@ -14,6 +14,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -48,9 +49,46 @@ std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildGround(
 std::vector<hs::runtime_detail::VfxTypedGroundCommand> BuildEventGround(
     const hs::VfxProgramData &program,hs::VfxEventView inputs,double tick)
 { const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxTypedEventGroundCommands(image.View(),inputs,tick); }
+std::vector<hs::runtime_detail::VfxGroundBirthSuppressionFacts> GroundBirthFacts(
+    const hs::VfxProgramData &program, hs::VfxEventView inputs)
+{
+    const auto image = PreparedImage(program);
+    std::vector<hs::runtime_detail::VfxGroundBirthSuppressionFacts> facts;
+    hs::runtime_detail::AppendVfxTypedEventGroundBirthSuppression(image.View(), inputs, facts);
+    return facts;
+}
 void Require(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+bool PreviousGroundAdmission(const hs::VfxImage &image,const hs::VfxEventInput &input)
+{
+    const bool point=std::holds_alternative<hs::VfxPointPayload>(input.payload);
+    const bool context=std::holds_alternative<hs::VfxContextPayload>(input.payload);
+    const bool projectile=std::holds_alternative<hs::VfxProjectilePayload>(input.payload);
+    if(!point&&!context&&!projectile&&
+       !std::holds_alternative<hs::VfxCirclePayload>(input.payload)&&
+       !std::holds_alternative<hs::VfxLinePayload>(input.payload)&&
+       !std::holds_alternative<hs::VfxConePayload>(input.payload)&&
+       !std::holds_alternative<hs::VfxRingGapsPayload>(input.payload)&&
+       !std::holds_alternative<hs::VfxSafeSectorPayload>(input.payload))return false;
+    if(!input.effect_handle||input.effect_handle>image.program.effects.size())return false;
+    const auto &effect=image.program.effects[input.effect_handle-1];
+    if(input.effect_handle>image.ground_effect_ranges.size())return false;
+    const auto range=image.ground_effect_ranges[input.effect_handle-1];
+    if(range.first>image.ground_recipes.size()||range.count>image.ground_recipes.size()-range.first||!range.count)return false;
+    const auto prepared=image.ground_recipes.subspan(range.first,range.count);
+    const bool charged=context&&prepared.front().effect_id==Hash64("particle.skill.charged_shot.pulse");
+    const bool wave=context&&prepared.front().effect_id==Hash64("particle.session.wave_start");
+    const bool owned=input.geometry_owner_id!=0&&input.geometry_end_tick>input.geometry_start_tick;
+    if(effect.input_mode!=0||(effect.timing_kind==1?!owned:
+       (effect.timing_kind!=0||!std::isfinite(effect.seconds)||effect.seconds<=0)))return false;
+    if(point||context||projectile)
+        if(!std::ranges::any_of(prepared,[&](const auto &recipe){return recipe.source_type==hs::VfxSourceType::Direct&&
+            (recipe.profile==hs::VfxOutputProfile::GroundSdfAdd||
+             ((charged||wave)&&recipe.profile==hs::VfxOutputProfile::GroundSdfSoft));}))return false;
+    return true;
 }
 
 bool Near(float actual, float expected)
@@ -217,6 +255,11 @@ void RejectsUnsupportedOrMissingGeometry()
     cooked.sources[0].type = hs::VfxSourceType::ProjectileFollow;
     Require(BuildGround(cooked, inputs, 712).empty(),
             "non-direct source was executed as direct geometry");
+    cooked = Program();
+    cooked.sources[0].knots = {.8f, .2f, 0, 0};
+    const auto invalid_interval = PreparedImage(cooked);
+    Require(invalid_interval.ground_recipes.empty(),
+            "malformed immutable source interval survived image preparation");
 }
 
 void PreservesSharedSourceRingAndFill()
@@ -295,6 +338,43 @@ void ConvertsFixedTimeCircleEvents()
             "event sequence high bits were discarded");
     Require(BuildEventGround(cooked, std::vector{event}, 220).empty(),
             "event after fixed lifetime was rendered");
+}
+
+void GroundAppendPreservesPrefixAndRejectedInputs()
+{
+    auto program = Program();
+    const auto image = PreparedImage(program);
+    const std::array persistent{CircleInput()};
+    std::vector<hs::runtime_detail::VfxTypedGroundCommand> appended(1);
+    appended.front().stable_id = 0x9988;
+    appended.front().command.sequence = 0x8877;
+    appended.reserve(16);
+    const auto capacity = appended.capacity();
+    hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), persistent, 712, appended);
+    Require(appended.size() == 3 && appended.front().stable_id == 0x9988 &&
+            appended.front().command.sequence == 0x8877 &&
+            Near(appended[1].edge_width_world, 0.055f) &&
+            Near(appended[2].edge_width_world, 0.075f),
+            "persistent append lost prefix or authored output order");
+    auto rejected = CircleInput();
+    std::get<hs::VfxCirclePayload>(rejected.payload).radius = -1.0f;
+    hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), std::span(&rejected, 1), 712, appended);
+    Require(appended.size() == 3, "rejected persistent append changed existing output");
+
+    program.effects.front().input_mode = 0;
+    program.effects.front().timing_kind = 0;
+    program.effects.front().seconds = 2.0f;
+    const auto event_image = PreparedImage(program);
+    auto event = CircleEvent();
+    hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 99, appended);
+    Require(appended.size() == 3, "inactive event append changed existing output");
+    hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 160, appended);
+    Require(appended.size() == 5 && appended.front().stable_id == 0x9988 &&
+            appended[3].stable_id == event.sequence && appended[4].stable_id == event.sequence &&
+            appended[3].command.tick == event.event_tick &&
+            appended[3].command.sequence != appended[4].command.sequence &&
+            appended.capacity() == capacity,
+            "event append lost identity, order or reusable capacity");
 }
 
 void HonorsEventSourceEnvelopeAndSchema()
@@ -559,6 +639,12 @@ void RingGapsPreservesGeometryAndOwnerAge()
             Near(border.geometry.gap_angles_radians[3],0)&&Near(border.geometry.gap_half_angle_radians,7*radians),
             "irregular gap angles or wrapping lost");
     Require(Near(border.normalized_age,.6f)&&Near(border.lifetime01,.6f)&&Near(fill.command.stretch,.31f),"authoritative age or flow lost");
+    std::get<hs::VfxRingGapsPayload>(input.payload).gap_angles_degrees.clear();
+    Require(border.geometry.gap_angles_radians.size() == 4 &&
+            fill.geometry.gap_angles_radians.size() == 4 &&
+            Near(fill.geometry.gap_angles_radians[0], 343*radians),
+            "ground output retained borrowed ring geometry after the builder returned");
+    std::get<hs::VfxRingGapsPayload>(input.payload).gap_angles_degrees = ring.gap_angles_degrees;
     cooked.sources[0].knot_count=4; cooked.sources[0].knots={0,.2f,.4f,1};
     commands=run();Require(commands.size()==2&&Near(commands[0].command.start_color.w,.8f*(2.0f/3.0f)),"four-knot owner fade ignored");
     std::get<hs::VfxRingGapsPayload>(input.payload).lifetime01=1;
@@ -603,6 +689,10 @@ void CircleWarningUsesOwnerClockAndExactRadius()
     const auto run=[&](hs::Tick tick){return BuildEventGround(cooked,std::span(&input,1),tick);};
     auto c=run(160);Require(c.size()==2&&c[0].geometry.shape==hs::VfxGroundShape::CirclePreviewBorder&&
         c[1].geometry.shape==hs::VfxGroundShape::CirclePreviewTicks,"owned circle warning shape pair missing");
+    const auto birth_facts = GroundBirthFacts(cooked, std::span(&input, 1));
+    Require(birth_facts.size() == 1 && birth_facts[0].ground_ring &&
+            !birth_facts[0].ground_disc,
+            "owned circle warning did not suppress only its accepted birth border");
     Require(c[0].stable_id==99&&c[1].stable_id==99&&Near(c[0].geometry.outer_radius,3.7f)&&c[0].geometry.inner_radius==0&&
         c[0].geometry.gap_angles_radians.empty()&&Near(c[0].geometry.edge_width,.065f)&&Near(c[0].command.start_size_max,3.765f),
         "circle owner identity or exact boundary changed");
@@ -1793,6 +1883,38 @@ void PlayerStateRingRejectsWrongTupleAndOwner()
     Require(run().empty(), "state ring accepted mismatched owner clock");
 }
 
+void PersistentGroundRecipesAreAdmittedBeforeRuntime()
+{
+    const auto prepared_count = [](const hs::VfxProgramData &program) {
+        const auto image = PreparedImage(program);
+        return image.ground_effect_ranges.empty() ? 0u : image.ground_effect_ranges[0].count;
+    };
+
+    auto cooked = StateRingProgram();
+    Require(prepared_count(cooked) == 1,
+            "valid persistent state ring was not admitted");
+
+    cooked = StateRingProgram();
+    cooked.sources[0].stable_id = Hash32("wrong_source");
+    Require(prepared_count(cooked) == 0,
+            "persistent state ring with the wrong source survived preparation");
+
+    cooked = StateRingProgram();
+    cooked.effect_lookup.push_back(cooked.effect_lookup.front());
+    Require(prepared_count(cooked) == 0,
+            "persistent state ring with ambiguous identity survived preparation");
+
+    cooked = StateRingProgram();
+    cooked.sources[0].knots = {.8f, .2f, 0.0f, 0.0f};
+    Require(prepared_count(cooked) == 0,
+            "persistent state ring with malformed knots survived preparation");
+
+    cooked = StateRingProgram();
+    cooked.parameters[0].bits = 2;
+    Require(prepared_count(cooked) == 0,
+            "persistent state ring with an invalid authored segment tuple survived preparation");
+}
+
 hs::VfxProgramData ChargedPulseProgram()
 {
     hs::VfxProgramData cooked;
@@ -2034,6 +2156,150 @@ void ChargedPulseRejectsMalformedContextAndCookedContract()
     input = ChargedPulseInput();
     input.payload = hs::VfxPointPayload{};
     reject("wrong payload accepted charged pulse ground outputs");
+}
+
+void GroundBirthSuppressionMatchesAcceptedEventOutputs()
+{
+    auto circle_program = Program();
+    circle_program.effects[0].input_mode = 0;
+    circle_program.effects[0].timing_kind = 0;
+    circle_program.effects[0].seconds = 2.0f;
+    auto circle = CircleEvent();
+    const auto circle_commands = BuildEventGround(circle_program, std::span(&circle, 1), 100);
+    const auto circle_facts = GroundBirthFacts(circle_program, std::span(&circle, 1));
+    Require(circle_commands.size() == 2 && circle_facts.size() == 1 &&
+            circle_facts[0].sequence == circle.sequence && circle_facts[0].ground_ring &&
+            !circle_facts[0].ground_disc && !circle_facts[0].all_particles,
+            "birth ring suppression diverged from accepted circle outputs");
+    std::get<hs::VfxCirclePayload>(circle.payload).radius = 0.0f;
+    const auto malformed_circle = GroundBirthFacts(circle_program, std::span(&circle, 1));
+    Require(malformed_circle.size() == 1 && !malformed_circle[0].ground_ring &&
+            !malformed_circle[0].ground_disc,
+            "malformed circle suppressed a legacy output");
+
+    auto line_program = LineProgram(false);
+    line_program.effects[0].input_mode = 0;
+    line_program.effects[0].timing_kind = 0;
+    line_program.effects[0].seconds = 2.0f;
+    line_program.sources[0].knot_count = 2;
+    line_program.sources[0].knots = {0.0f, 1.0f, 0.0f, 0.0f};
+    auto line = CircleEvent();
+    line.payload = std::get<hs::VfxLinePayload>(LineInput().payload);
+    const auto line_commands = BuildEventGround(line_program, std::span(&line, 1), 100);
+    const auto line_facts = GroundBirthFacts(line_program, std::span(&line, 1));
+    Require(line_commands.size() == 1 && line_commands[0].geometry.shape == hs::VfxGroundShape::LineBorder &&
+            line_facts.size() == 1 && line_facts[0].segment_solid_trail,
+            "birth line suppression diverged from accepted border output");
+    line_program.outputs[0].min_quality = 2;
+    line.quality = hs::VfxQuality::Low;
+    Require(BuildEventGround(line_program, std::span(&line, 1), 100).empty() &&
+            !GroundBirthFacts(line_program, std::span(&line, 1))[0].segment_solid_trail,
+            "quality-rejected line output suppressed a legacy trail");
+    line_program.outputs[0].min_quality = 0;
+    line.quality = hs::VfxQuality::High;
+    line_program.sources[0].knots = {.2f, .8f, 0.0f, 0.0f};
+    Require(BuildEventGround(line_program, std::span(&line, 1), 100).empty() &&
+            !GroundBirthFacts(line_program, std::span(&line, 1))[0].segment_solid_trail,
+            "inactive birth source suppressed a legacy line layer");
+
+    auto expanding_program = ExpandingRingProgram();
+    expanding_program.sources[0].knots = {0.0f, 0.55f, 0.0f, 0.0f};
+    auto expanding = ExpandingRingEvent();
+    const auto expanding_commands = BuildEventGround(
+        expanding_program, std::span(&expanding, 1), 100);
+    const auto expanding_facts = GroundBirthFacts(expanding_program, std::span(&expanding, 1));
+    Require(expanding_commands.size() == 1 &&
+            expanding_commands[0].geometry.shape == hs::VfxGroundShape::Circle &&
+            expanding_commands[0].command.primitive == hs::VfxPrimitive::ExactRing &&
+            expanding_facts.size() == 1 && expanding_facts[0].ground_ring,
+            "expanding exact ring was not included in legacy birth suppression");
+
+    auto charged_program = ChargedPulseProgram();
+    auto charged = ChargedPulseInput();
+    const auto charged_commands = BuildEventGround(charged_program, std::span(&charged, 1), 100);
+    const auto charged_facts = GroundBirthFacts(charged_program, std::span(&charged, 1));
+    Require(charged_commands.size() == 2 && charged_facts.size() == 1 &&
+            charged_facts[0].all_particles && charged_facts[0].ground_disc,
+            "charged pulse birth suppression diverged from its ring and fill outputs");
+    charged_program.sources[0].knots = {.1f, .9f, 0.0f, 0.0f};
+    const auto delayed_charged = GroundBirthFacts(charged_program, std::span(&charged, 1));
+    Require(delayed_charged.size() == 1 && !delayed_charged[0].all_particles &&
+            delayed_charged[0].ground_disc,
+            "inactive charged boundary suppressed a legacy ring before its source window");
+
+    auto wave_program = ChargedPulseProgram();
+    wave_program.effect_lookup[0].effect_id = Hash64("particle.session.wave_start");
+    auto wave = ChargedPulseInput();
+    wave.sequence = 0x321;
+    wave.payload = hs::VfxContextPayload{0, {}, 0.0f, 10.0f, 0.0f};
+    const auto wave_commands = BuildEventGround(wave_program, std::span(&wave, 1), 100);
+    const auto wave_facts = GroundBirthFacts(wave_program, std::span(&wave, 1));
+    Require(wave_commands.size() == 2 && wave_facts.size() == 1 &&
+            wave_facts[0].ground_ring && wave_facts[0].ground_disc,
+            "wave-start soft ring/fill suppression diverged from accepted birth outputs");
+}
+
+void GroundEventAdmissionMatchesPreviousRules()
+{
+    hs::VfxImageData data;
+    data.program.effects.resize(9);
+    for(std::size_t i=0;i<data.program.effects.size();++i)
+    {
+        data.program.effects[i].handle=static_cast<std::uint32_t>(i+1);
+        data.program.effects[i].seconds=1.0f;
+    }
+    data.program.effects[5].timing_kind=2;
+    data.program.effects[6].input_mode=1;
+    data.program.effects[7].timing_kind=1;
+    data.program.effects[8].timing_kind=1;
+    data.ground_effect_ranges={{0,1},{1,1},{2,1},{3,1},{4,2},{4,1},{4,1},{4,1},{4,1}};
+    data.ground_recipes.resize(5);
+    const auto row=[&](std::size_t index,std::uint64_t id,hs::VfxOutputProfile profile,
+                       std::uint32_t flags){
+        auto &recipe=data.ground_recipes[index];recipe.effect_id=id;recipe.source_type=hs::VfxSourceType::Direct;
+        recipe.profile=profile;recipe.event_admission_profiles=flags;
+    };
+    row(0,0,hs::VfxOutputProfile::GroundSdfAdd,hs::kVfxGroundEventDirectAdd);
+    row(1,Hash64("particle.skill.charged_shot.pulse"),hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
+    row(2,Hash64("particle.session.wave_start"),hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
+    row(3,0,hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
+    row(4,0,hs::VfxOutputProfile::GroundSdfAdd,hs::kVfxGroundEventDirectAdd);
+    const auto image=data.View();
+    const auto event=[](std::uint32_t handle,hs::VfxPayload payload){
+        hs::VfxEventInput input;input.effect_handle=handle;input.payload=std::move(payload);return input;
+    };
+    std::vector<hs::VfxEventInput> inputs{
+        event(1,hs::VfxPointPayload{}),event(1,hs::VfxContextPayload{42}),
+        event(1,hs::VfxProjectilePayload{}),event(2,hs::VfxContextPayload{42}),
+        event(3,hs::VfxContextPayload{42}),event(2,hs::VfxPointPayload{}),
+        event(4,hs::VfxPointPayload{}),event(4,hs::VfxCirclePayload{}),
+        event(4,hs::VfxLinePayload{}),event(4,hs::VfxConePayload{}),
+        event(4,hs::VfxRingGapsPayload{}),event(4,hs::VfxSafeSectorPayload{}),
+        event(4,hs::VfxPayload{hs::VfxLinkPayload{}}),event(5,hs::VfxCirclePayload{}),
+        event(6,hs::VfxCirclePayload{}),event(7,hs::VfxCirclePayload{}),
+        event(8,hs::VfxCirclePayload{}),event(9,hs::VfxCirclePayload{})};
+    inputs[16].geometry_owner_id=9;inputs[16].geometry_start_tick=10;inputs[16].geometry_end_tick=11;
+    inputs[17].geometry_owner_id=9;inputs[17].geometry_start_tick=10;inputs[17].geometry_end_tick=10;
+    for(const auto &input:inputs)
+    {
+        const bool expected=PreviousGroundAdmission(image,input);
+        const auto actual=hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(image,input);
+        Require(actual.accepted==expected,"prepared Ground event admission diverged from previous policy");
+        Require(actual.replace_context_owner==(expected&&input.effect_handle==2&&
+                    std::holds_alternative<hs::VfxContextPayload>(input.payload)),
+                "charged-context replacement classification changed");
+    }
+    auto prepared=PreparedImage(Program());
+    std::uint32_t expected_profiles{};
+    for(const auto &recipe:prepared.ground_recipes)
+    {
+        if(recipe.source_type!=hs::VfxSourceType::Direct)continue;
+        if(recipe.profile==hs::VfxOutputProfile::GroundSdfAdd)expected_profiles|=hs::kVfxGroundEventDirectAdd;
+        if(recipe.profile==hs::VfxOutputProfile::GroundSdfSoft)expected_profiles|=hs::kVfxGroundEventDirectSoft;
+    }
+    Require(!prepared.ground_recipes.empty()&&
+            prepared.ground_recipes.front().event_admission_profiles==expected_profiles,
+            "ground effect admission summary was not prepared from direct outputs");
 }
 
 void CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable()
@@ -2648,10 +2914,13 @@ int RunVfxGroundTests()
         PersistentCrownsUseActualOwnerFootprintAndPhase();
         PlayerStateRingKeepsOwnerAndCookedContract();
         PlayerStateRingRejectsWrongTupleAndOwner();
+        PersistentGroundRecipesAreAdmittedBeforeRuntime();
         PickupIdlePolarRunesUsePresenceClockAndRelicMask();
         PickupIdlePolarRunesRejectUnauthorizedContracts();
         ChargedPulseUsesContextRatioAndAuthoredGroundOutputs();
         ChargedPulseRejectsMalformedContextAndCookedContract();
+        GroundBirthSuppressionMatchesAcceptedEventOutputs();
+        GroundEventAdmissionMatchesPreviousRules();
         CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable();
         PersistentStatusPolarRuneUsesOwnerFootprintAndClock();
         PersistentStatusPolarRuneRejectsWrongContract();
@@ -2671,6 +2940,7 @@ int RunVfxGroundTests()
         RejectsUnsupportedOrMissingGeometry();
         PreservesSharedSourceRingAndFill();
         ConvertsFixedTimeCircleEvents();
+        GroundAppendPreservesPrefixAndRejectedInputs();
         HonorsEventSourceEnvelopeAndSchema();
         ConvertsLineGeometryAndAuthoredParams();
         RejectsMalformedLineGeometryAndCone();

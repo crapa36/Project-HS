@@ -68,6 +68,15 @@ void Append(const VfxDistortionRecipe&r,const Anchor&a,float age,std::uint64_t o
 std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,std::span<const VfxPersistentInput>persistent,double current_tick)
 {
  std::vector<VfxDistortionInput> result;
+ AppendVfxTypedDistortionCommands(image, events, persistent, current_tick, result);
+ return result;
+}
+void AppendVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,
+ std::span<const VfxPersistentInput>persistent,double current_tick,std::vector<VfxDistortionInput>&result)
+{
+ const auto original_size=result.size();
+ try
+ {
  const auto run=[&](std::uint32_t handle,const Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent_owner){
   if(!handle||handle>image.distortion_effect_ranges.size())return;const auto range=image.distortion_effect_ranges[handle-1];
   if(range.first>image.distortion_recipes.size()||range.count>image.distortion_recipes.size()-range.first)return;
@@ -108,6 +117,7 @@ std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxImage&i
   const float phase=in.normalized_age>0?in.normalized_age:(r.seconds>0?std::min(in.elapsed_seconds/r.seconds,.5f):.5f);
   run(in.effect_handle,a,phase,in.stable_id,in.stable_seed,in.quality,r.importance,true);
  }
- return result;
+ }
+ catch(...){result.resize(original_size);throw;}
 }
 }

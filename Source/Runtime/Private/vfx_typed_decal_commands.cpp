@@ -46,6 +46,15 @@ void Append(const VfxDecalRecipe&r,const Anchor&a,float age,std::uint64_t owner,
 std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxImage&image,VfxEventView events,std::span<const VfxPersistentInput>persistent,double tick)
 {
  std::vector<VfxDecalInput> result;
+ AppendVfxTypedDecalCommands(image, events, persistent, tick, result);
+ return result;
+}
+void AppendVfxTypedDecalCommands(const VfxImage&image,VfxEventView events,
+ std::span<const VfxPersistentInput>persistent,double tick,std::vector<VfxDecalInput>&result)
+{
+ const auto original_size=result.size();
+ try
+ {
  const auto run=[&](std::uint32_t handle,const Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool is_persistent){if(!handle||handle>image.decal_effect_ranges.size())return;const auto range=image.decal_effect_ranges[handle-1];if(range.first>image.decal_recipes.size()||range.count>image.decal_recipes.size()-range.first)return;for(const auto&r:image.decal_recipes.subspan(range.first,range.count))if(r.input_mode==(is_persistent?1u:0u)&&r.timing_kind==(is_persistent?1u:0u))Append(r,a,age,owner,seed,quality,importance,result);};
  for(const auto&i:events)
  {
@@ -62,6 +71,7 @@ std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxImage&image,VfxEv
   const auto a=GetAnchor(i.payload,i.current_transform,first.payload_kind);if(!a)continue;
   run(i.effect_handle,*a,i.normalized_age,i.stable_id,i.stable_seed,i.quality,first.importance,true);
  }
- return result;
+ }
+ catch(...){result.resize(original_size);throw;}
 }
 }

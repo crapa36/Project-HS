@@ -148,57 +148,73 @@ bool TaskSystem::Submit(TaskGroup &group, std::string_view name,
     }
 
     const auto state = group.state_;
+    const auto reject_if_unavailable = [&]() {
+        if (state->sealed)
+        {
+            state->RecordFailureLocked(ErrorCode::InvalidState,
+                                       "Cannot submit after TaskSystem::Wait.");
+            return true;
+        }
+        if (state->owner != nullptr && state->owner != impl_.get())
+        {
+            state->RecordFailureLocked(ErrorCode::InvalidState,
+                                       "TaskGroup cannot span TaskSystem instances.");
+            return true;
+        }
+        return false;
+    };
+    {
+        std::lock_guard lock(state->mutex);
+        if (reject_if_unavailable()) return false;
+    }
+
     // Construct directly: an MSVC Debug string move allocates an iterator
     // proxy inside noexcept and cannot propagate allocation failure.
     const std::string task_name(
         name.empty() ? std::string_view("unnamed") : name);
-    auto shared_task =
-        std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
 
-    auto run = [state, implementation = impl_.get(), shared_task, task_name]() mutable noexcept {
+    const auto reserve = [&]() {
+        std::lock_guard lock(state->mutex);
+        if (reject_if_unavailable()) return false;
+        state->owner = impl_.get();
+        state->pending.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+    const auto execute = [state, implementation = impl_.get()](auto &callable,
+                                                                 const char *task_name) noexcept {
         TaskGroup::State::Completion completion{state.get()};
         implementation->NameWorkerThread();
         try
         {
             const auto token = state->stop_source.get_token();
-            if (!token.stop_requested())
-            {
-                (*shared_task)(token);
-            }
+            if (!token.stop_requested()) callable(token);
         }
         catch (const std::exception &exception)
         {
-            state->SetFailure(ErrorCode::TaskFailed, exception.what(), task_name.c_str());
+            state->SetFailure(ErrorCode::TaskFailed, exception.what(), task_name);
         }
         catch (...)
         {
-            state->SetFailure(ErrorCode::TaskFailed, "unknown exception", task_name.c_str());
+            state->SetFailure(ErrorCode::TaskFailed, "unknown exception", task_name);
         }
     };
 
-    {
-        std::lock_guard lock(state->mutex);
-        if (state->sealed)
-        {
-            state->RecordFailureLocked(ErrorCode::InvalidState, "Cannot submit after TaskSystem::Wait.");
-            return false;
-        }
-        if (state->owner != nullptr && state->owner != impl_.get())
-        {
-            state->RecordFailureLocked(ErrorCode::InvalidState, "TaskGroup cannot span TaskSystem instances.");
-            return false;
-        }
-        state->owner = impl_.get();
-        state->pending.fetch_add(1, std::memory_order_relaxed);
-    }
-    TaskGroup::State::Completion reservation{state.get()};
-
     if (!impl_->executor)
     {
+        if (!reserve()) return false;
+        TaskGroup::State::Completion reservation{state.get()};
         reservation.state = nullptr;
-        run();
+        execute(task, task_name.c_str());
         return true;
     }
+
+    auto shared_task =
+        std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
+    auto run = [shared_task, task_name, execute]() mutable noexcept {
+        execute(*shared_task, task_name.c_str());
+    };
+    if (!reserve()) return false;
+    TaskGroup::State::Completion reservation{state.get()};
 
     try
     {
@@ -237,6 +253,21 @@ void TaskSystem::ParallelFor(TaskGroup &group, std::string_view name, std::size_
     }
     if (count == 0)
     {
+        return;
+    }
+
+    if (!impl_->executor)
+    {
+        for (std::size_t begin = 0; begin < count;)
+        {
+            const auto end = begin + std::min(grain, count - begin);
+            const auto submitted = Submit(group, name,
+                [&task, begin, end](std::stop_token stop) {
+                    if (!stop.stop_requested()) task(begin, end);
+                });
+            if (!submitted) break;
+            begin = end;
+        }
         return;
     }
 

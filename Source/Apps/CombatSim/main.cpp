@@ -671,10 +671,10 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                           {"damage", probe.damage_by_skill[skill]},
                           {"boss_damage", probe.balance.skill_boss_damage[skill]},
                           {"uses", uses},
-                          {"casts_with_hit", probe.balance.skill_casts_with_hit[skill]},
-                          {"hit_rate", uses == 0 ? 0.0 :
+                          {"casts_with_hit", probe.balance.hit_rates_captured ? Json(probe.balance.skill_casts_with_hit[skill]) : Json(nullptr)},
+                          {"hit_rate", !probe.balance.hit_rates_captured ? Json(nullptr) : Json(uses == 0 ? 0.0 :
                               static_cast<double>(probe.balance.skill_casts_with_hit[skill]) /
-                                  uses},
+                                  uses)},
                           {"hit_events", probe.balance.skill_hit_events[skill]},
                           {"kills", probe.balance.skill_kills[skill]}});
     }
@@ -750,7 +750,8 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                 {"enemy_spawned", probe.balance.enemy_spawned},
                 {"enemy_killed", probe.balance.enemy_killed},
                 {"enemy_attack_attempts", probe.balance.enemy_attack_attempts},
-                {"enemy_hits", probe.balance.enemy_hits},
+                {"hit_rates_captured", probe.balance.hit_rates_captured},
+                {"enemy_hits", probe.balance.hit_rates_captured ? Json(probe.balance.enemy_hits) : Json(nullptr)},
                 {"enemy_damage", probe.balance.enemy_damage},
                 {"stat_utility", probe.balance.stat_utility},
                 {"skills", std::move(skills)},
@@ -1112,6 +1113,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
                 {"damage", probe.damage_dealt}, {"dps", probe.damage_dealt / elapsed_seconds},
                 {"incoming_damage", probe.damage_taken},
                 {"detailed_balance_captured", probe.balance.detailed_balance_captured},
+                {"hit_rates_captured", probe.balance.hit_rates_captured},
                 {"skill_uses", probe.balance.skill_uses},
                 {"skill_damage", probe.damage_by_skill},
                 {"final_build", BuildDefinitionJson(final_build)},

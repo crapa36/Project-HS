@@ -6,7 +6,9 @@
 #include <bit>
 #include <cmath>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace hs::runtime_detail
 {
@@ -60,21 +62,31 @@ bool ValidRange(VfxRange range, std::span<const T> values) noexcept
     return range.first <= values.size() && range.count <= values.size() - range.first;
 }
 
-bool SourceEnvelope(const VfxSourceRecord &source, float age, float &envelope) noexcept
+std::span<const VfxGroundRecipe> SourceRecipes(
+    std::span<const VfxGroundRecipe> recipes, std::size_t source_index) noexcept
 {
-    if (source.knot_count != 2 && source.knot_count != 4) return false;
-    for (std::size_t index = 0; index < source.knot_count; ++index)
-        if (!std::isfinite(source.knots[index]) || source.knots[index] < 0.0f ||
-            source.knots[index] > 1.0f || (index > 0 && source.knots[index] < source.knots[index - 1]))
-            return false;
-    if (age < source.knots[0] || age >= source.knots[source.knot_count - 1]) return false;
+    const auto first = std::ranges::lower_bound(recipes, source_index, {}, &VfxGroundRecipe::source_index);
+    const auto last = std::ranges::upper_bound(first, recipes.end(), source_index, {}, &VfxGroundRecipe::source_index);
+    return recipes.subspan(static_cast<std::size_t>(first - recipes.begin()),
+                           static_cast<std::size_t>(last - first));
+}
+
+bool SourceEnvelope(std::uint32_t knot_count, const std::array<float, 4> &knots,
+                    float age, float &envelope) noexcept
+{
+    // Keep a narrow structural guard for synthetic VfxImage adapters. Authored
+    // knot ordering, finiteness, and range are still admission-time facts.
+    if (knot_count != 2 && knot_count != 4) return false;
+    // Immutable knot validity and ordering are checked while preparing the
+    // image. Only live age and the envelope value remain frame-dependent.
+    if (age < knots[0] || age >= knots[knot_count - 1]) return false;
     envelope = 1.0f;
-    if (source.knot_count == 4)
+    if (knot_count == 4)
     {
-        if (age < source.knots[1] && source.knots[1] > source.knots[0])
-            envelope = (age - source.knots[0]) / (source.knots[1] - source.knots[0]);
-        else if (age > source.knots[2] && source.knots[3] > source.knots[2])
-            envelope = (source.knots[3] - age) / (source.knots[3] - source.knots[2]);
+        if (age < knots[1] && knots[1] > knots[0])
+            envelope = (age - knots[0]) / (knots[1] - knots[0]);
+        else if (age > knots[2] && knots[3] > knots[2])
+            envelope = (knots[3] - age) / (knots[3] - knots[2]);
     }
     return std::isfinite(envelope) && envelope > 0.0f;
 }
@@ -90,6 +102,7 @@ std::optional<float> IntegratedPulse(const VfxProgramView &p, VfxRange curve_key
         const auto &key=keys[i];
         if (!i) continue;
         const auto &previous=keys[i-1];
+        if (age <= previous.time) break;
         const float end=std::min(age,key.time);
         if (end>previous.time)
         {
@@ -110,8 +123,7 @@ struct GroundOwner
     VfxCirclePayload circle{};
     VfxLinePayload line{};
     VfxConePayload cone{};
-    VfxRingGapsPayload ring_gaps{};
-    bool is_ring_gaps{false};
+    const VfxRingGapsPayload *ring_gaps{};
     bool is_ring_preview{false};
     bool is_circle_preview{false};
     bool gameplay_warning{false};
@@ -130,22 +142,15 @@ struct GroundOwner
     float command_lifetime{};
 };
 
-void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
+void AppendSourceOutputs(const VfxImage &image, std::span<const VfxGroundRecipe> recipes,
                          const GroundOwner &owner,
-                         std::vector<VfxTypedGroundCommand> &result)
+                         std::vector<VfxTypedGroundCommand> &result,
+                         VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto cooked = image.program;
-    if (source_index >= cooked.sources.size()) return;
-    const auto &source = cooked.sources[source_index];
-    if (source.type != VfxSourceType::Direct) return;
-    if (!owner.effect_handle || owner.effect_handle > image.ground_effect_ranges.size()) return;
-    const auto recipe_range = image.ground_effect_ranges[owner.effect_handle - 1];
-    if (!ValidRange(recipe_range, image.ground_recipes)) return;
-    const auto recipes = image.ground_recipes.subspan(recipe_range.first, recipe_range.count);
-    auto next = std::ranges::lower_bound(recipes, source_index, {}, &VfxGroundRecipe::source_index);
-    for (; next != recipes.end() && next->source_index == source_index; ++next)
+    if (recipes.empty() || recipes.front().source_type != VfxSourceType::Direct) return;
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe = *next;
         const bool ring = recipe.kind==VfxGroundRecipeKind::Ring && !owner.is_ring_preview && !owner.is_line && !owner.is_cone;
         const bool fill = recipe.kind==VfxGroundRecipeKind::Fill && !owner.is_ring_preview && !owner.is_line && !owner.is_cone;
         const bool border = (owner.is_line || owner.is_cone) &&
@@ -169,8 +174,24 @@ void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
         const float size = owner.is_line
             ? std::sqrt(owner.line_half_width * owner.line_half_width +
                         owner.line_half_length * owner.line_half_length)
-            : (owner.is_cone ? owner.cone_range + width : (owner.is_ring_gaps ? owner.ring_gaps.outer_radius : owner.circle.radius) + width);
+            : (owner.is_cone ? owner.cone_range + width : (owner.ring_gaps ? owner.ring_gaps->outer_radius : owner.circle.radius) + width);
         if (!std::isfinite(size)) continue;
+        const Float4 color{recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
+                           recipe.rgb.z * recipe.hdr, recipe.alpha * owner.alpha};
+        if ((owner.ring_gaps || owner.is_circle_preview) &&
+            (!Finite({color.x, color.y, color.z}) || !std::isfinite(color.w))) continue;
+        if (birth_facts)
+        {
+            if (owner.is_line && border)
+                birth_facts->segment_solid_trail = true;
+            else if (!owner.is_line && !owner.is_cone && !owner.ring_gaps)
+            {
+                if (preview) birth_facts->ground_ring = true;
+                else if (ring) birth_facts->ground_ring = true;
+                else if (fill) birth_facts->ground_disc = true;
+            }
+            continue;
+        }
         VfxTypedGroundCommand item;
         item.stable_id = owner.stable_id;
         item.effect_handle = owner.effect_handle;
@@ -187,7 +208,7 @@ void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
             (static_cast<std::uint64_t>(owner.effect_handle) << 32) ^
             static_cast<std::uint64_t>(output_index);
         command.tick = owner.command_tick;
-        command.position = owner.is_cone ? owner.cone.origin : (owner.is_ring_gaps ? owner.ring_gaps.center : owner.circle.center);
+        command.position = owner.is_cone ? owner.cone.origin : (owner.ring_gaps ? owner.ring_gaps->center : owner.circle.center);
         if (owner.is_line)
             command.position = {(owner.line.start.x + owner.line.end.x) * 0.5f,
                                 (owner.line.start.y + owner.line.end.y) * 0.5f,
@@ -202,13 +223,13 @@ void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
         command.lifetime_min = command.lifetime_max = owner.command_lifetime;
         command.start_size_min = command.start_size_max = size;
         command.end_size_min = command.end_size_max = size;
-        command.stretch = ring ? (owner.is_ring_gaps ? owner.ring_gaps.outer_radius : owner.circle.radius) / size :
+        command.stretch = ring ? (owner.ring_gaps ? owner.ring_gaps->outer_radius : owner.circle.radius) / size :
             (border ? 0.8f : primary);
         item.geometry.shape = owner.is_line
             ? (border ? VfxGroundShape::LineBorder : VfxGroundShape::LineHatch)
             : (owner.is_cone ? (border ? VfxGroundShape::ConeBorder : VfxGroundShape::ConeHatch)
                              : VfxGroundShape::Circle);
-        if (owner.is_ring_gaps)
+        if (owner.ring_gaps)
         {
             item.geometry.shape = owner.is_ring_preview
                 ? (preview ? VfxGroundShape::RingGapsPreviewBorder : VfxGroundShape::RingGapsTicks)
@@ -216,11 +237,12 @@ void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
             item.geometry.progress = owner.normalized_age;
             item.geometry.animation_phase = *phase;
             item.geometry.tick_count = recipe.tick_count;
-            item.geometry.inner_radius = owner.ring_gaps.inner_radius;
-            item.geometry.outer_radius = owner.ring_gaps.outer_radius;
+            item.geometry.inner_radius = owner.ring_gaps->inner_radius;
+            item.geometry.outer_radius = owner.ring_gaps->outer_radius;
             item.geometry.edge_width = width;
-            item.geometry.gap_half_angle_radians = owner.ring_gaps.gap_half_width_degrees * (3.14159265358979323846f / 180.0f);
-            for (float degrees : owner.ring_gaps.gap_angles_degrees)
+            item.geometry.gap_half_angle_radians = owner.ring_gaps->gap_half_width_degrees * (3.14159265358979323846f / 180.0f);
+            item.geometry.gap_angles_radians.reserve(owner.ring_gaps->gap_angles_degrees.size());
+            for (float degrees : owner.ring_gaps->gap_angles_degrees)
             {
                 float wrapped = std::fmod(degrees, 360.0f);
                 if (wrapped < 0) wrapped += 360.0f;
@@ -255,18 +277,17 @@ void AppendSourceOutputs(const VfxImage &image, std::size_t source_index,
             item.geometry.spacing = border ? secondary : primary;
             item.geometry.scroll = hatch ? secondary : 0.8f;
         }
-        command.start_color = command.end_color = {
-            recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
-            recipe.rgb.z * recipe.hdr, recipe.alpha * owner.alpha};
-        if ((owner.is_ring_gaps || owner.is_circle_preview) && (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
-            !std::isfinite(command.start_color.w))) continue;
+        command.start_color = command.end_color = color;
         command.seed = owner.stable_seed;
-        result.push_back(item);
+        result.push_back(std::move(item));
     }
 }
 void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effect,
                             const VfxEventInput &input, float age,
-                            std::vector<VfxTypedGroundCommand> &result)
+                            std::span<const VfxGroundRecipe> recipes,
+                            const std::array<std::span<const VfxGroundRecipe>, 2> &source_recipes,
+                            std::vector<VfxTypedGroundCommand> &result,
+                            VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto cooked=image.program;
     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
@@ -277,18 +298,9 @@ void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effec
         effect.sources.count != 2 || effect.sources.first > cooked.sources.size() ||
         effect.sources.count > cooked.sources.size() - effect.sources.first)
         return;
-    if(!input.effect_handle || input.effect_handle>image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes) || !range.count) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    std::uint64_t id{};
-    for(const auto &lookup:cooked.effect_lookup)
-        if(lookup.handle==effect.handle)
-        {
-            if(id) return;
-            id=lookup.effect_id;
-        }
-    if(id!=recipes.front().effect_id) return;
+    if (recipes.empty()) return;
+    const auto id = recipes.front().effect_id;
+    if (!id || recipes.front().effect_lookup_count != 1) return;
     const bool warning = id == Hash64("particle.session.wave_warning");
     if (!warning && id != Hash64("particle.session.wave_start")) return;
     const Float3 center{input.world_transform[12], input.world_transform[13],
@@ -297,17 +309,17 @@ void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effec
     for (std::size_t index = effect.sources.first;
          index < effect.sources.first + effect.sources.count; ++index)
     {
-        const auto &source = cooked.sources[index];
-        auto source_recipe=std::ranges::lower_bound(recipes,index,{},&VfxGroundRecipe::source_index);
-        if(source_recipe==recipes.end() || source_recipe->source_index!=index ||
-           source_recipe->source_output_count!=1 || !source_recipe->source_parameters_empty) continue;
-        if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
-            source.stable_id != Hash32(warning
+        const auto &source_rows = source_recipes[index - effect.sources.first];
+        if (source_rows.empty() || source_rows.front().source_output_count != 1 ||
+            !source_rows.front().source_parameters_empty) continue;
+        const auto &source_recipe = source_rows.front();
+        if (source_recipe.effect_handle != effect.handle || source_recipe.source_type != VfxSourceType::Direct ||
+            source_recipe.source_stable_id != Hash32(warning
                 ? (index == effect.sources.first ? "danger_boundary" : "radial_ticks")
                 : (index == effect.sources.first ? "gameplay_boundary" : "interior_secondary")))
             continue;
         float envelope{};
-        if (!SourceEnvelope(source, age, envelope)) continue;
+        if (!SourceEnvelope(source_recipe.knot_count, source_recipe.knots, age, envelope)) continue;
         GroundOwner owner{};
         owner.stable_id = context->owner_id ? context->owner_id : input.sequence;
         owner.effect_handle = input.effect_handle;
@@ -323,28 +335,23 @@ void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effec
         owner.stable_seed = input.stable_seed;
         owner.command_tick = input.event_tick;
         owner.command_lifetime = effect.seconds;
-        AppendSourceOutputs(image, index, owner, result);
+        AppendSourceOutputs(image, source_rows, owner, result, birth_facts);
     }
 }
 
-void AppendExpandingRingOutputs(const VfxImage &image, std::size_t source_index,
-                                const VfxEventInput &input, float age, float envelope,
-                                float duration, std::vector<VfxTypedGroundCommand> &result)
+void AppendExpandingRingOutputs(const VfxEventInput &input, float age, float envelope,
+                                float duration, std::span<const VfxGroundRecipe> recipes,
+                                std::vector<VfxTypedGroundCommand> &result,
+                                VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
-    if (!input.effect_handle || input.effect_handle > image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
     if (!point && !circle) return;
     const Float3 center = point ? point->position : circle->center;
     const float scale = point ? point->authored_scale : circle->radius;
     if (!Finite(center) || !std::isfinite(scale) || scale <= 0.0f) return;
-    for (;next!=recipes.end() && next->source_index==source_index;++next)
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe=*next;
         if(recipe.kind!=VfxGroundRecipeKind::ExpandingRing || recipe.min_quality>static_cast<std::uint32_t>(input.quality)) continue;
         const float progress = (age - recipe.knots[0]) / (recipe.knots[1] - recipe.knots[0]);
         if (!std::isfinite(progress) || progress < 0.0f || progress >= 1.0f) continue;
@@ -352,6 +359,14 @@ void AppendExpandingRingOutputs(const VfxImage &image, std::size_t source_index,
         const float edge_width=recipe.tertiary;
         const float size = radius + edge_width;
         if (!std::isfinite(radius) || !std::isfinite(size) || radius <= 0.0f) continue;
+        const Float4 color{recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
+                           recipe.rgb.z * recipe.hdr, recipe.alpha * envelope};
+        if (!Finite({color.x, color.y, color.z}) || !std::isfinite(color.w)) continue;
+        if (birth_facts)
+        {
+            birth_facts->ground_ring = true;
+            continue;
+        }
         VfxTypedGroundCommand item;
         item.additive = true;
         item.stable_id = input.geometry_owner_id != 0 ? input.geometry_owner_id : static_cast<std::uint64_t>(input.sequence);
@@ -379,11 +394,7 @@ void AppendExpandingRingOutputs(const VfxImage &image, std::size_t source_index,
         command.start_size_min = command.start_size_max = size;
         command.end_size_min = command.end_size_max = size;
         command.stretch = radius / size;
-        command.start_color = command.end_color = {
-            recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
-            recipe.rgb.z * recipe.hdr, recipe.alpha * envelope};
-        if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
-            !std::isfinite(command.start_color.w)) continue;
+        command.start_color = command.end_color = color;
         command.seed = input.stable_seed;
         result.push_back(item);
     }
@@ -406,15 +417,10 @@ bool HexMask(const VfxImage &image,const VfxGroundRecipe &recipe,
     return true;
 }
 
-void AppendHexConstellationOutputs(const VfxImage &image, std::size_t source_index,
-                                   const VfxEventInput &input, float age, float envelope,
-                                   float duration, std::vector<VfxTypedGroundCommand> &result)
+void AppendHexConstellationOutputs(const VfxImage &image, const VfxEventInput &input, float age, float envelope,
+                                   float duration, std::span<const VfxGroundRecipe> recipes,
+                                   std::vector<VfxTypedGroundCommand> &result)
 {
-    if (!input.effect_handle || input.effect_handle>image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
     if (!point && !context) return;
@@ -427,9 +433,8 @@ void AppendHexConstellationOutputs(const VfxImage &image, std::size_t source_ind
     const float radius = kBaseRadius * scale;
     const float size = radius + kWorldEdgeWidth;
     if (!std::isfinite(radius) || !std::isfinite(size) || radius <= 0.0f) return;
-    for (;next!=recipes.end() && next->source_index==source_index;++next)
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe=*next;
         if(recipe.kind!=VfxGroundRecipeKind::HexConstellation || recipe.min_quality>static_cast<std::uint32_t>(input.quality)) continue;
         const float progress=(age-recipe.knots[0])/(recipe.knots[1]-recipe.knots[0]);
         if(!std::isfinite(progress)||progress<0||progress>=1) continue;
@@ -476,15 +481,10 @@ void AppendHexConstellationOutputs(const VfxImage &image, std::size_t source_ind
         result.push_back(item);
     }
 }
-void AppendBossSignatureOutputs(const VfxImage &image, std::size_t source_index,
-                                const VfxEventInput &input, float age, float envelope,
-                                float duration, std::vector<VfxTypedGroundCommand> &result)
+void AppendBossSignatureOutputs(const VfxEventInput &input, float age, float envelope,
+                                float duration, std::span<const VfxGroundRecipe> recipes,
+                                std::vector<VfxTypedGroundCommand> &result)
 {
-    if (!input.effect_handle || input.effect_handle>image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
     const auto *ring = std::get_if<VfxRingGapsPayload>(&input.payload);
@@ -499,9 +499,8 @@ void AppendBossSignatureOutputs(const VfxImage &image, std::size_t source_index,
     if (!Finite(anchor) || !std::isfinite(radius) || radius <= 0.0f || !std::isfinite(size)) return;
     const float cone_length = cone ? std::hypot(cone->direction.x, cone->direction.z) : 1.0f;
     if (cone && (!std::isfinite(cone_length) || cone_length <= 0.0001f)) return;
-    for (;next!=recipes.end() && next->source_index==source_index;++next)
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe=*next;
         if(recipe.kind!=VfxGroundRecipeKind::BossSignature || recipe.min_quality>static_cast<std::uint32_t>(input.quality)) continue;
         const float progress=(age-recipe.knots[0])/(recipe.knots[1]-recipe.knots[0]);
         if(!std::isfinite(progress)||progress<0||progress>=1) continue;
@@ -526,6 +525,7 @@ void AppendBossSignatureOutputs(const VfxImage &image, std::size_t source_index,
             geometry.inner_radius = ring->inner_radius;
             geometry.gap_half_angle_radians = ring->gap_half_width_degrees *
                 (3.14159265358979323846f / 180.0f);
+            geometry.gap_angles_radians.reserve(ring->gap_angles_degrees.size());
             for (float degrees : ring->gap_angles_degrees)
             {
                 float wrapped = std::fmod(degrees, 360.0f);
@@ -562,18 +562,13 @@ void AppendBossSignatureOutputs(const VfxImage &image, std::size_t source_index,
         if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
             !std::isfinite(command.start_color.w)) continue;
         command.seed = input.stable_seed;
-        result.push_back(item);
+        result.push_back(std::move(item));
     }
 }
-void AppendRemainingEventGroundOutputs(const VfxImage &image, std::size_t source_index,
-                                       const VfxEventInput &input, float age, float envelope,
-                                       float duration, std::vector<VfxTypedGroundCommand> &result)
+void AppendRemainingEventGroundOutputs(const VfxEventInput &input, float age, float envelope,
+                                       float duration, std::span<const VfxGroundRecipe> recipes,
+                                       std::vector<VfxTypedGroundCommand> &result)
 {
-    if (!input.effect_handle || input.effect_handle>image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
     const auto *projectile = std::get_if<VfxProjectilePayload>(&input.payload);
@@ -581,9 +576,8 @@ void AppendRemainingEventGroundOutputs(const VfxImage &image, std::size_t source
     const Float3 anchor = point ? point->position : (circle ? circle->center :
         Float3{input.world_transform[12], input.world_transform[13], input.world_transform[14]});
     if (!Finite(anchor)) return;
-    for (;next!=recipes.end() && next->source_index==source_index;++next)
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe=*next;
         const bool heal=point && recipe.kind==VfxGroundRecipeKind::CrossRing;
         const bool trap=circle && recipe.kind==VfxGroundRecipeKind::BrokenHex;
         const bool axial=projectile && recipe.kind==VfxGroundRecipeKind::AxialFracture;
@@ -674,10 +668,18 @@ void AppendRemainingEventGroundOutputs(const VfxImage &image, std::size_t source
         result.push_back(item);
     }
 }
-void AppendChargedPulseGroundOutputs(const VfxImage &image,
-                                     const VfxEffectRecord &effect,
-                                     const VfxEventInput &input, float age,
-                                     std::vector<VfxTypedGroundCommand> &result)
+struct ChargedPulseOutput
+{
+    const VfxGroundRecipe *recipe{};
+    bool ring{};
+    float envelope{}, extent{};
+};
+
+std::size_t EvaluateChargedPulseOutputs(const VfxImage &image,
+    const VfxEffectRecord &effect, const VfxEventInput &input, float age,
+    std::span<const VfxGroundRecipe> recipes,
+    const std::array<std::span<const VfxGroundRecipe>, 2> &source_recipes,
+    std::array<ChargedPulseOutput, 2> &outputs)
 {
     const auto cooked=image.program;
     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
@@ -687,50 +689,70 @@ void AppendChargedPulseGroundOutputs(const VfxImage &image,
         !std::isfinite(context->scalar0) || !std::isfinite(context->scalar1) ||
         std::any_of(input.world_transform.begin(), input.world_transform.end(),
                     [](float value) { return !std::isfinite(value); }) ||
-        input.geometry_owner_id != 0 || effect.sources.count != 2 ||
-        input.effect_handle>image.ground_effect_ranges.size()) return;
-    const Float3 center{input.world_transform[12], input.world_transform[13],
-                        input.world_transform[14]};
-    // The authored event has no radius payload. This 0.65 m cosmetic ring
-    // surrounds the 0.4 m player footprint without claiming a gameplay hitbox.
+        input.geometry_owner_id != 0 || effect.sources.count != 2 || recipes.empty()) return 0;
     constexpr float kCosmeticRadius = 0.65f;
-    constexpr float kGroundHeight = 0.025f;
-    std::vector<VfxTypedGroundCommand> commands;
-    commands.reserve(2);
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
+    std::size_t output_count{};
     for (std::size_t offset = 0; offset < 2; ++offset)
     {
         const auto source_index = static_cast<std::size_t>(effect.sources.first) + offset;
-        if (source_index >= cooked.sources.size()) return;
-        const auto &source = cooked.sources[source_index];
+        if (source_index >= cooked.sources.size()) return 0;
         const bool ring = offset == 0;
-        if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
-            (source.knot_count != 2 && source.knot_count != 4) ||
-            source.knots[source.knot_count - 1] <= source.knots[0])
-            return;
-        auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
-        while(next!=recipes.end() && next->source_index==source_index &&
-              next->kind!=(ring?VfxGroundRecipeKind::ChargedBoundary:VfxGroundRecipeKind::ChargedInterior)) ++next;
-        if(next==recipes.end()||next->source_index!=source_index) return;
-        const auto &recipe=*next;
-        if(!recipe.source_parameters_empty || recipe.source_output_count!=1) return;
+        const auto &source_rows = source_recipes[offset];
+        const auto next = std::ranges::find_if(source_rows, [&](const auto &recipe) {
+            return recipe.kind == (ring ? VfxGroundRecipeKind::ChargedBoundary : VfxGroundRecipeKind::ChargedInterior);
+        });
+        if (next == source_rows.end()) return 0;
+        const auto &recipe = *next;
+        if (recipe.effect_handle != effect.handle || recipe.source_type != VfxSourceType::Direct) return 0;
         const float value=recipe.primary;
         if (!std::isfinite(value) || value <= 0.0f ||
-            (ring && value >= kCosmeticRadius)) return;
+            (ring && value >= kCosmeticRadius)) return 0;
         float envelope{};
-        if (!SourceEnvelope(source, age, envelope))
-        {
-            // An inactive source is valid; a malformed lifecycle is not.
-            if (source.knot_count != 2 && source.knot_count != 4) return;
-            for (std::size_t index = 0; index < source.knot_count; ++index)
-                if (!std::isfinite(source.knots[index]) || source.knots[index] < 0.0f ||
-                    source.knots[index] > 1.0f ||
-                    (index && source.knots[index] < source.knots[index - 1])) return;
-            continue;
-        }
+        if (!SourceEnvelope(recipe.knot_count, recipe.knots, age, envelope)) continue;
         const float extent = kCosmeticRadius + (ring ? value : 0.0f);
+        const Float4 color{recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
+                           recipe.rgb.z * recipe.hdr, recipe.alpha * envelope};
+        if (!Finite({color.x, color.y, color.z}) || !std::isfinite(color.w)) return 0;
+        outputs[output_count++] = {&recipe, ring, envelope, extent};
+    }
+    return output_count;
+}
+
+void AppendChargedPulseGroundOutputs(const VfxImage &image,
+                                     const VfxEffectRecord &effect,
+                                     const VfxEventInput &input, float age,
+                                     std::span<const VfxGroundRecipe> recipes,
+                                     const std::array<std::span<const VfxGroundRecipe>, 2> &source_recipes,
+                                     std::vector<VfxTypedGroundCommand> &result,
+                                     VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
+{
+    const auto *context = std::get_if<VfxContextPayload>(&input.payload);
+    if (!context) return;
+    std::array<ChargedPulseOutput, 2> outputs{};
+    const auto output_count = EvaluateChargedPulseOutputs(
+        image, effect, input, age, recipes, source_recipes, outputs);
+    if (birth_facts)
+    {
+        for (std::size_t i = 0; i < output_count; ++i)
+        {
+            if (outputs[i].ring) birth_facts->all_particles = true;
+            else birth_facts->ground_disc = true;
+        }
+        return;
+    }
+    if (!output_count) return;
+    const Float3 center{input.world_transform[12], input.world_transform[13],
+                        input.world_transform[14]};
+    constexpr float kCosmeticRadius = 0.65f;
+    constexpr float kGroundHeight = 0.025f;
+    std::array<VfxTypedGroundCommand, 2> commands{};
+    for (std::size_t index = 0; index < output_count; ++index)
+    {
+        const auto &accepted = outputs[index];
+        const auto &recipe = *accepted.recipe;
+        const bool ring = accepted.ring;
+        const float value = recipe.primary;
+        const float extent = accepted.extent;
         VfxTypedGroundCommand item;
         item.stable_id = context->owner_id;
         item.effect_handle = input.effect_handle;
@@ -768,13 +790,11 @@ void AppendChargedPulseGroundOutputs(const VfxImage &image,
         command.stretch = ring ? kCosmeticRadius / extent : value;
         command.start_color = command.end_color = {
             recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
-            recipe.rgb.z * recipe.hdr, recipe.alpha * envelope};
-        if (!Finite({command.start_color.x, command.start_color.y,
-                     command.start_color.z}) || !std::isfinite(command.start_color.w)) return;
+            recipe.rgb.z * recipe.hdr, recipe.alpha * accepted.envelope};
         command.seed = input.stable_seed;
-        commands.push_back(item);
+        commands[index] = item;
     }
-    result.insert(result.end(), commands.begin(), commands.end());
+    result.insert(result.end(), commands.begin(), commands.begin() + output_count);
 }
 
 void AppendPersistentEntityGroundOutputs(const VfxImage &image,
@@ -794,7 +814,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
     if(!ValidRange(recipe_range,image.ground_recipes) || !recipe_range.count) return;
     const auto recipes=image.ground_recipes.subspan(recipe_range.first,recipe_range.count);
     const std::uint64_t effect_id=recipes.front().effect_id;
-    if(!effect_id || std::any_of(recipes.begin(),recipes.end(),[&](const auto &recipe){return recipe.effect_id!=effect_id;})) return;
+    if(!effect_id) return;
     const bool pickup_idle = effect_id == kPickupXpIdle ||
         effect_id == kPickupHealIdle || effect_id == kPickupMagnetIdle ||
         effect_id == kPickupRelicIdle;
@@ -820,28 +840,29 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
     for (std::size_t source_index = source_first;
          source_index < source_first + source_count; ++source_index)
     {
-        const auto &source = cooked.sources[source_index];
+        const auto source_recipes = SourceRecipes(recipes, source_index);
+        if (source_recipes.empty()) continue;
+        const auto &source_recipe = source_recipes.front();
         const float source_age = charged_overcharge && input.normalized_age >= 1.0f &&
-                source.knots[1] >= 1.0f
+                source_recipe.knots[1] >= 1.0f
             ? std::nextafter(1.0f, 0.0f)
             : input.normalized_age;
         float envelope{};
-        if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
-            source.knot_count != 2 || source.knots[1] <= source.knots[0] ||
-            !SourceEnvelope(source, source_age, envelope)) continue;
-        const float progress = (source_age - source.knots[0]) /
-            (source.knots[1] - source.knots[0]);
+        if (source_recipe.effect_handle != effect.handle || source_recipe.source_type != VfxSourceType::Direct ||
+            !SourceEnvelope(source_recipe.knot_count, source_recipe.knots, source_age, envelope)) continue;
+        const float progress = (source_age - source_recipe.knots[0]) /
+            (source_recipe.knots[1] - source_recipe.knots[0]);
         if (!std::isfinite(progress) || progress < 0.0f || progress >= 1.0f) continue;
-        auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
-        for(;next!=recipes.end()&&next->source_index==source_index;++next)
+        for (const auto &recipe : source_recipes)
         {
-            const auto &recipe=*next;
             if (effect_id == kStatusSlow || effect_id == kStatusMark ||
                 pickup_idle || charged_overcharge || suicide_countdown)
             {
                 std::uint32_t mask_slice = 0xffffffffu;
                 float mask_strength = 0.0f;
-                bool textures_ok=recipe.texture_contract_valid;
+                // Non-relic texture contracts are admitted by PrepareVfxGroundRecipes.
+                // Relic mask availability remains quality and slice-range dependent.
+                bool textures_ok=true;
                 if(pickup_relic_idle)
                 {
                     const auto quality=static_cast<std::uint32_t>(input.quality);
@@ -858,7 +879,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                     }
                 }
                 if (recipe.kind!=VfxGroundRecipeKind::PolarRune || recipe.min_quality>static_cast<std::uint32_t>(input.quality) ||
-                    !textures_ok || recipe.alpha < 0.0f || recipe.alpha > 1.0f ||
+                    !textures_ok ||
                     (charged_overcharge && entity.render_instance_id == 0) ||
                     std::abs(entity.lifetime01 - input.normalized_age) > 0.00001f ||
                     (pickup_idle && (input.normalized_age != 0.0f ||
@@ -870,8 +891,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                 constexpr float edge = 0.035f;
                 const float radius = entity.footprint_radius;
                 const float size = radius + edge;
-                if (!std::isfinite(rotation_speed) || rotation_speed <= 0.0f ||
-                    !std::isfinite(phase) || !std::isfinite(size)) continue;
+                if (!std::isfinite(phase) || !std::isfinite(size)) continue;
                 VfxTypedGroundCommand item;
                 item.stable_id = input.stable_id;
                 item.effect_handle = input.effect_handle;
@@ -896,7 +916,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                 auto &command = item.command;
                 command.sequence = input.stable_id ^ current_tick ^
                     (static_cast<std::uint64_t>(input.effect_handle) << 32) ^
-                    output_index;
+                    recipe.output_index;
                 command.tick = current_tick;
                 command.position = {anchor.x, 0.025f, anchor.z};
                 command.shape = ParticleShape::Point;
@@ -922,7 +942,6 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
             {
                 if (entity.render_instance_id == 0 || recipe.kind!=VfxGroundRecipeKind::StateRing ||
                     recipe.min_quality>static_cast<std::uint32_t>(input.quality) ||
-                    !recipe.texture_contract_valid || recipe.alpha < 0.0f || recipe.alpha > 1.0f ||
                     std::abs(entity.lifetime01 - input.normalized_age) > 0.00001f)
                     continue;
                 constexpr float edge = 0.05f;
@@ -949,7 +968,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                 item.geometry.animation_phase = input.elapsed_seconds;
                 auto &command = item.command;
                 command.sequence = input.stable_id ^ current_tick ^
-                    (static_cast<std::uint64_t>(input.effect_handle) << 32) ^ output_index;
+                    (static_cast<std::uint64_t>(input.effect_handle) << 32) ^ recipe.output_index;
                 command.tick = current_tick;
                 command.position = {anchor.x, 0.025f, anchor.z};
                 command.shape = ParticleShape::Point;
@@ -976,10 +995,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
             const float inner_radius=teeth?recipe.secondary:0.0f;
             const float phase = input.elapsed_seconds * pulse_hz;
             const float size = entity.footprint_radius + edge;
-            if (!std::isfinite(pulse_hz) || pulse_hz <= 0.0f ||
-                !std::isfinite(edge) || edge <= 0.0f ||
-                (teeth && (!std::isfinite(inner_radius) || inner_radius <= 0.0f ||
-                           inner_radius >= entity.footprint_radius)) ||
+            if ((teeth && inner_radius >= entity.footprint_radius) ||
                 !std::isfinite(phase) || !std::isfinite(size)) continue;
             VfxTypedGroundCommand item;
             item.additive = true;
@@ -1000,7 +1016,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
             item.geometry.animation_phase = phase;
             auto &command = item.command;
             command.sequence = input.stable_id ^ current_tick ^
-                (static_cast<std::uint64_t>(input.effect_handle) << 32) ^ output_index;
+                (static_cast<std::uint64_t>(input.effect_handle) << 32) ^ recipe.output_index;
             command.tick = current_tick;
             command.position = {anchor.x, 0.025f, anchor.z};
             command.shape = ParticleShape::Point;
@@ -1022,24 +1038,22 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
         }
     }
 }
-void AppendPersistentChevronOutputs(const VfxImage &image,
-                                    std::size_t source_index,
+void AppendPersistentChevronOutputs(std::span<const VfxGroundRecipe> recipes,
                                     const VfxPersistentInput &input,
                                     const VfxLinePayload &line, Tick current_tick,
                                     std::vector<VfxTypedGroundCommand> &result)
 {
-    const auto cooked=image.program;
-    const auto &source = cooked.sources[source_index];
-    if (cooked.effects[input.effect_handle - 1].timing_kind != 1 ||
-        source.type != VfxSourceType::Direct || source.knot_count != 2 ||
-        source.knots[1] <= source.knots[0] || input.stable_id == 0 ||
+    if (recipes.empty()) return;
+    const auto &source = recipes.front();
+    if (source.timing_kind != 1 || source.source_type != VfxSourceType::Direct ||
+        input.stable_id == 0 ||
         !std::isfinite(input.normalized_age) ||
         !std::isfinite(line.lifetime01) ||
         std::abs(input.normalized_age - line.lifetime01) > 0.00001f ||
         !Finite(line.start) || !Finite(line.end) ||
         !std::isfinite(line.width) || line.width <= 0.0f) return;
     float envelope{};
-    if (!SourceEnvelope(source, input.normalized_age, envelope)) return;
+    if (!SourceEnvelope(source.knot_count, source.knots, input.normalized_age, envelope)) return;
     const float dx = line.end.x - line.start.x;
     const float dz = line.end.z - line.start.z;
     const float length = std::hypot(dx, dz);
@@ -1050,14 +1064,8 @@ void AppendPersistentChevronOutputs(const VfxImage &image,
     const float progress = (input.normalized_age - source.knots[0]) /
         (source.knots[1] - source.knots[0]);
     if (!std::isfinite(progress) || progress < 0.0f || progress >= 1.0f) return;
-    if(!input.effect_handle || input.effect_handle>image.ground_effect_ranges.size()) return;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(!ValidRange(range,image.ground_recipes)) return;
-    const auto recipes=image.ground_recipes.subspan(range.first,range.count);
-    auto next=std::ranges::lower_bound(recipes,source_index,{},&VfxGroundRecipe::source_index);
-    for(;next!=recipes.end()&&next->source_index==source_index;++next)
+    for (const auto &recipe : recipes)
     {
-        const auto &recipe=*next;
         if(recipe.kind!=VfxGroundRecipeKind::RepeatingChevron || recipe.min_quality>static_cast<std::uint32_t>(input.quality)) continue;
         const float progress=(input.normalized_age-recipe.knots[0])/(recipe.knots[1]-recipe.knots[0]);
         if(!std::isfinite(progress)||progress<0||progress>=1) continue;
@@ -1139,14 +1147,15 @@ void AppendSafeSector(const VfxImage &image, const VfxEventInput &input,
     const auto recipes=image.ground_recipes.subspan(recipe_range.first,recipe_range.count);
     for (std::size_t index = effect.sources.first; index < effect.sources.first + effect.sources.count; ++index)
     {
-        const auto &source = cooked.sources[index];
+        const auto source_recipes = SourceRecipes(recipes, index);
+        if (source_recipes.empty()) continue;
+        const auto &source_recipe = source_recipes.front();
         float envelope{};
-        if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
-            source.stable_id != Hash32("main_rune") || !SourceEnvelope(source, age, envelope)) continue;
-        auto next=std::ranges::lower_bound(recipes,index,{},&VfxGroundRecipe::source_index);
-        for(;next!=recipes.end()&&next->source_index==index;++next)
+        if (source_recipe.effect_handle != effect.handle || source_recipe.source_type != VfxSourceType::Direct ||
+            source_recipe.source_stable_id != Hash32("main_rune") ||
+            !SourceEnvelope(source_recipe.knot_count, source_recipe.knots, age, envelope)) continue;
+        for (const auto &recipe : source_recipes)
         {
-            const auto &recipe=*next;
             if(recipe.kind!=VfxGroundRecipeKind::SafeSector || recipe.min_quality>static_cast<std::uint32_t>(input.quality)) continue;
             const float phase = recipe.primary * elapsed;
             if (!std::isfinite(phase)) continue;
@@ -1176,15 +1185,13 @@ void AppendSafeSector(const VfxImage &image, const VfxEventInput &input,
         }
     }
 }
-} // namespace
-
-std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
+void AppendPersistentGroundCommands(
     const VfxImage &image,
     std::span<const VfxPersistentInput> inputs,
-    Tick current_tick)
+    Tick current_tick,
+    std::vector<VfxTypedGroundCommand> &result)
 {
     const auto cooked=image.program;
-    std::vector<VfxTypedGroundCommand> result;
     for (const auto &input : inputs)
     {
         if (input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::WaveTimer))
@@ -1202,9 +1209,13 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
             timer.stable_seed = input.stable_seed;
             timer.quality = input.quality;
             timer.payload = input.payload;
+            if (input.effect_handle > image.ground_effect_ranges.size()) continue;
+            const auto range = image.ground_effect_ranges[input.effect_handle - 1];
+            if (!ValidRange(range, image.ground_recipes)) continue;
+            const auto recipes = image.ground_recipes.subspan(range.first, range.count);
             const auto first = result.size();
             AppendWaveGroundOutputs(image, cooked.effects[input.effect_handle - 1],
-                                    timer, input.normalized_age, result);
+                                    timer, input.normalized_age, recipes, result);
             for (std::size_t index = first; index < result.size(); ++index)
             {
                 result[index].source_visual_kind = input.source_visual_kind;
@@ -1259,12 +1270,17 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
         const auto source_count = static_cast<std::size_t>(effect.sources.count);
         if (source_first > cooked.sources.size() || source_count > cooked.sources.size() - source_first)
             continue;
+        if (input.effect_handle > image.ground_effect_ranges.size()) continue;
+        const auto recipe_range = image.ground_effect_ranges[input.effect_handle - 1];
+        if (!ValidRange(recipe_range, image.ground_recipes)) continue;
+        const auto effect_recipes = image.ground_recipes.subspan(recipe_range.first, recipe_range.count);
         for (std::size_t source_index = source_first;
              source_index < source_first + source_count; ++source_index)
         {
-            const auto &source = cooked.sources[source_index];
-            if (source.effect != effect.handle)
-                continue;
+            const auto source_recipes = SourceRecipes(effect_recipes, source_index);
+            if (source_recipes.empty()) continue;
+            const auto &source_recipe = source_recipes.front();
+            if (source_recipe.effect_handle != effect.handle) continue;
             GroundOwner owner;
             owner.stable_id = input.stable_id;
             owner.effect_handle = effect.handle;
@@ -1279,15 +1295,16 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
                 owner.line_half_length = line_length * 0.5f;
                 owner.normalized_age = input.normalized_age;
                 float envelope = 1.0f;
-                if (!SourceEnvelope(source, input.normalized_age, envelope)) continue;
+                if (!SourceEnvelope(source_recipe.knot_count, source_recipe.knots,
+                                    input.normalized_age, envelope)) continue;
                 owner.alpha = envelope;
             }
             if (ring_gaps)
             {
-                owner.is_ring_gaps = true;
-                owner.ring_gaps = *ring_gaps;
+                owner.ring_gaps = ring_gaps;
                 float envelope = 1;
-                if (!SourceEnvelope(source, ring_gaps->lifetime01, envelope)) continue;
+                if (!SourceEnvelope(source_recipe.knot_count, source_recipe.knots,
+                                    ring_gaps->lifetime01, envelope)) continue;
                 owner.alpha = envelope;
             }
             owner.normalized_age = ring_gaps ? ring_gaps->lifetime01 : input.normalized_age;
@@ -1296,26 +1313,32 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
             owner.stable_seed = input.stable_seed;
             owner.command_tick = current_tick;
             owner.command_lifetime = 2.0f / 60.0f;
-            if (line) AppendPersistentChevronOutputs(image, source_index, input,
+            if (line) AppendPersistentChevronOutputs(source_recipes, input,
                                                       *line, current_tick, result);
-            AppendSourceOutputs(image, source_index, owner, result);
+            AppendSourceOutputs(image, source_recipes, owner, result);
         }
     }
-    return result;
 }
 
-std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
+void AppendEventGroundCommands(
     const VfxImage &image,
     VfxEventView inputs,
-    double current_tick)
+    double current_tick,
+    std::vector<VfxTypedGroundCommand> &result,
+    std::vector<VfxGroundBirthSuppressionFacts> *birth_facts)
 {
     const auto cooked=image.program;
-    std::vector<VfxTypedGroundCommand> result;
     for (const auto &input : inputs)
     {
+        VfxGroundBirthSuppressionFacts *event_birth_facts{};
+        if (birth_facts)
+        {
+            birth_facts->push_back({input.sequence});
+            event_birth_facts = &birth_facts->back();
+        }
         if (std::holds_alternative<VfxSafeSectorPayload>(input.payload))
         {
-            AppendSafeSector(image, input, current_tick, result);
+            if (!event_birth_facts) AppendSafeSector(image, input, current_tick, result);
             continue;
         }
         if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size() ||
@@ -1343,6 +1366,11 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
             (effect.timing_kind == 0 && (!std::isfinite(effect.seconds) || effect.seconds <= 0.0f)) ||
             static_cast<std::uint32_t>(input.quality)>2)
             continue;
+        if (input.effect_handle > image.ground_effect_ranges.size()) continue;
+        const auto effect_recipe_range = image.ground_effect_ranges[input.effect_handle - 1];
+        if (!ValidRange(effect_recipe_range, image.ground_recipes)) continue;
+        const auto effect_recipes = image.ground_recipes.subspan(
+            effect_recipe_range.first, effect_recipe_range.count);
         const auto *point = std::get_if<VfxPointPayload>(&input.payload);
         const auto *ring_gaps = std::get_if<VfxRingGapsPayload>(&input.payload);
         const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
@@ -1378,35 +1406,49 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
         const float age = static_cast<float>(current_tick - start_tick) / (60.0f * duration);
         if (!std::isfinite(age) || age < 0.0f || age >= 1.0f)
             continue;
-        if (context_payload)
-        {
-            AppendWaveGroundOutputs(image, effect, input, age, result);
-            AppendChargedPulseGroundOutputs(image, effect, input, age, result);
-        }
         const auto source_first = static_cast<std::size_t>(effect.sources.first);
         const auto source_count = static_cast<std::size_t>(effect.sources.count);
         if (source_first > cooked.sources.size() ||
             source_count > cooked.sources.size() - source_first)
             continue;
+        std::array<std::span<const VfxGroundRecipe>, 2> context_source_recipes{};
+        if (context_payload && source_count == context_source_recipes.size())
+            for (std::size_t offset = 0; offset < context_source_recipes.size(); ++offset)
+                context_source_recipes[offset] = SourceRecipes(effect_recipes, source_first + offset);
+        if (context_payload)
+        {
+            AppendWaveGroundOutputs(image, effect, input, age, effect_recipes,
+                                    context_source_recipes, result, event_birth_facts);
+            AppendChargedPulseGroundOutputs(image, effect, input, age, effect_recipes,
+                                            context_source_recipes, result, event_birth_facts);
+        }
         for (std::size_t source_index = source_first;
              source_index < source_first + source_count; ++source_index)
         {
-            const auto &source = cooked.sources[source_index];
-            if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
-                (source.knot_count != 2 && source.knot_count != 4))
+            const auto source_recipes = context_payload && source_count == context_source_recipes.size()
+                ? context_source_recipes[source_index - source_first]
+                : SourceRecipes(effect_recipes, source_index);
+            if (source_recipes.empty()) continue;
+            const auto &source_recipe = source_recipes.front();
+            if (source_recipe.effect_handle != effect.handle || source_recipe.source_type != VfxSourceType::Direct ||
+                (source_recipe.knot_count != 2 && source_recipe.knot_count != 4))
                 continue;
             float envelope = 1.0f;
-            if (!SourceEnvelope(source, age, envelope)) continue;
-            AppendExpandingRingOutputs(image, source_index, input, age, envelope, duration, result);
-            AppendHexConstellationOutputs(image, source_index, input, age, envelope, duration, result);
-            AppendBossSignatureOutputs(image, source_index, input, age, envelope, duration, result);
-            AppendRemainingEventGroundOutputs(image, source_index, input, age, envelope, duration, result);
+            if (!SourceEnvelope(source_recipe.knot_count, source_recipe.knots, age, envelope)) continue;
+            AppendExpandingRingOutputs(input, age, envelope, duration, source_recipes,
+                                       result, event_birth_facts);
+            if (!event_birth_facts)
+            {
+                AppendHexConstellationOutputs(image, input, age, envelope, duration, source_recipes, result);
+                AppendBossSignatureOutputs(input, age, envelope, duration, source_recipes, result);
+                AppendRemainingEventGroundOutputs(input, age, envelope, duration, source_recipes, result);
+            }
             if (point || context_payload || projectile_payload || (ring_gaps && input.geometry_owner_id == 0)) continue;
             GroundOwner owner;
             owner.stable_id = input.geometry_owner_id != 0 ? input.geometry_owner_id : static_cast<std::uint64_t>(input.sequence);
             owner.effect_handle = effect.handle;
             if (circle) { owner.circle = *circle; owner.is_circle_preview = true; owner.gameplay_warning = effect.timing_kind == 1; }
-            if (ring_gaps) { owner.is_ring_gaps = true; owner.is_ring_preview = true; owner.ring_gaps = *ring_gaps; }
+            if (ring_gaps) { owner.is_ring_preview = true; owner.ring_gaps = ring_gaps; }
             if (line)
             {
                 owner.is_line = true;
@@ -1433,10 +1475,94 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
             owner.stable_seed = input.stable_seed;
             owner.command_tick = start_tick;
             owner.command_lifetime = duration;
-            AppendSourceOutputs(image, source_index, owner, result);
+            AppendSourceOutputs(image, source_recipes, owner, result, event_birth_facts);
         }
     }
+}
+
+} // namespace
+
+VfxGroundEventAdmission ClassifyVfxTypedEventGroundAdmission(
+    const VfxImage &image, const VfxEventInput &input) noexcept
+{
+    const bool point=std::holds_alternative<VfxPointPayload>(input.payload);
+    const bool context=std::holds_alternative<VfxContextPayload>(input.payload);
+    const bool projectile=std::holds_alternative<VfxProjectilePayload>(input.payload);
+    if(!point&&!context&&!projectile&&
+       !std::holds_alternative<VfxCirclePayload>(input.payload)&&
+       !std::holds_alternative<VfxLinePayload>(input.payload)&&
+       !std::holds_alternative<VfxConePayload>(input.payload)&&
+       !std::holds_alternative<VfxRingGapsPayload>(input.payload)&&
+       !std::holds_alternative<VfxSafeSectorPayload>(input.payload))return {};
+    if(!input.effect_handle||input.effect_handle>image.program.effects.size()||
+       input.effect_handle>image.ground_effect_ranges.size())return {};
+    const auto range=image.ground_effect_ranges[input.effect_handle-1];
+    if(range.first>image.ground_recipes.size()||range.count>image.ground_recipes.size()-range.first||!range.count)
+        return {};
+    const auto &first=image.ground_recipes[range.first];
+    const bool charged_pulse=context&&first.effect_id==Hash64("particle.skill.charged_shot.pulse");
+    const bool wave_start=context&&first.effect_id==Hash64("particle.session.wave_start");
+    const auto &effect=image.program.effects[input.effect_handle-1];
+    const bool owned=input.geometry_owner_id!=0&&input.geometry_end_tick>input.geometry_start_tick;
+    if(effect.input_mode!=0||(effect.timing_kind==1?!owned:
+       (effect.timing_kind!=0||!std::isfinite(effect.seconds)||effect.seconds<=0.0f)))return {};
+    if((point||context||projectile)&&
+       !(first.event_admission_profiles&kVfxGroundEventDirectAdd)&&
+       !((charged_pulse||wave_start)&&(first.event_admission_profiles&kVfxGroundEventDirectSoft)))return {};
+    return {true,charged_pulse};
+}
+
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxTypedGroundCommand> &result)
+{
+    const auto first = result.size();
+    try { AppendPersistentGroundCommands(image, inputs, current_tick, result); }
+    catch (...) { result.resize(first); throw; }
+}
+
+std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
+    const VfxImage &image, std::span<const VfxPersistentInput> inputs, Tick current_tick)
+{
+    std::vector<VfxTypedGroundCommand> result;
+    AppendVfxTypedGroundCommands(image, inputs, current_tick, result);
     return result;
+}
+
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick, std::vector<VfxTypedGroundCommand> &result)
+{
+    const auto first = result.size();
+    try { AppendEventGroundCommands(image, inputs, current_tick, result, nullptr); }
+    catch (...) { result.resize(first); throw; }
+}
+
+std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
+    const VfxImage &image,
+    VfxEventView inputs,
+    double current_tick)
+{
+    std::vector<VfxTypedGroundCommand> result;
+    AppendVfxTypedEventGroundCommands(image, inputs, current_tick, result);
+    return result;
+}
+
+void AppendVfxTypedEventGroundBirthSuppression(
+    const VfxImage &image, VfxEventView inputs,
+    std::vector<VfxGroundBirthSuppressionFacts> &result)
+{
+    std::vector<VfxTypedGroundCommand> discard;
+    const auto first = result.size();
+    if (inputs.size() > result.max_size() - first)
+        throw std::length_error("too many VFX ground birth facts");
+    result.reserve(first + inputs.size());
+    try
+    {
+        for (const auto &input : inputs)
+            AppendEventGroundCommands(image, std::span(&input, 1),
+                                      static_cast<double>(input.event_tick), discard, &result);
+    }
+    catch (...) { result.resize(first); throw; }
 }
 
 } // namespace hs::runtime_detail

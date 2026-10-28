@@ -166,13 +166,17 @@ Result ScreenOverlaySystem::RegisterMask(RenderGraphBuilder &graph,const ScreenO
 {
     return RegisterFrame(graph,input,output,layout,nullptr);
 }
-bool ScreenOverlaySystem::MatchesLayout(const ScreenOverlayInputs &input,const ScreenOverlayLayout &layout)const noexcept
+bool ScreenOverlaySystem::MatchesShape(const ScreenOverlayLayout &layout,bool active)const noexcept
 {
-    const bool active=input.intensity!=0&&std::ranges::any_of(input.commands,[](const auto &command){return command.alpha!=0;});
     const auto &t=targets_;
     return layout.valid&&layout.active==active&&(!active||(t&&
         layout.capacity.width==t->capacity.width&&layout.capacity.height==t->capacity.height&&
-        layout.frame_slots==t->slot_completion.size()&&layout.gradient==input.gradient));
+        layout.frame_slots==t->slot_completion.size()));
+}
+bool ScreenOverlaySystem::MatchesLayout(const ScreenOverlayInputs &input,const ScreenOverlayLayout &layout)const noexcept
+{
+    const bool active=input.intensity!=0&&std::ranges::any_of(input.commands,[](const auto &command){return command.alpha!=0;});
+    return MatchesShape(layout,active)&&(!active||layout.gradient==input.gradient);
 }
 Result ScreenOverlaySystem::BindRetained(RenderGraphBuilder &graph,const ScreenOverlayInputs &input,
     const ScreenOverlayLayout &layout,ScreenOverlayOutputs &output)

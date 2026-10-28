@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <string_view>
 
@@ -43,14 +44,21 @@ template<class T> bool ValidRange(VfxRange r, std::span<const T> v)
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxImage &image,
-                                                         VfxEventView inputs,
-                                                         std::vector<Sequence> *superseded_pickup_sequences)
+void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
+    std::span<const Sequence> excluded_sorted_sequences,
+    std::vector<VfxFlashSpawnInput> &result,
+    std::vector<Sequence> *superseded_pickup_sequences)
 {
-    std::vector<VfxFlashSpawnInput> result;
     const auto cooked=image.program;
-    for (const auto &input : inputs)
+    const auto old_result_size = result.size();
+    const auto old_sequence_size = superseded_pickup_sequences
+        ? superseded_pickup_sequences->size() : 0;
+    try
     {
+      for (const auto &input : inputs)
+      {
+        if (!excluded_sorted_sequences.empty() &&
+            std::ranges::binary_search(excluded_sorted_sequences, input.sequence)) continue;
         if (input.effect_handle == 0 || input.effect_handle > image.flash_effect_ranges.size() ||
             static_cast<std::uint32_t>(input.quality) > 2) continue;
         const auto recipe_range=image.flash_effect_ranges[input.effect_handle-1];
@@ -174,19 +182,32 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxImage &image
         }
         if (pickup_collect && result.size() != first_flash && superseded_pickup_sequences)
             superseded_pickup_sequences->push_back(input.sequence);
+      }
     }
+    catch (...)
+    {
+        result.resize(old_result_size);
+        if (superseded_pickup_sequences)
+            superseded_pickup_sequences->resize(old_sequence_size);
+        throw;
+    }
+}
+
+std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxImage &image,
+    VfxEventView inputs, std::vector<Sequence> *superseded_pickup_sequences)
+{
+    std::vector<VfxFlashSpawnInput> result;
+    AppendVfxTypedFlashCommands(image, inputs, {}, result, superseded_pickup_sequences);
     return result;
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs, double current_tick)
+void PrepareVfxPersistentFireSources(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, double current_tick,
+    std::vector<VfxPreparedFireSource> &prepared)
 {
-    std::vector<VfxFlashSpawnInput> result;
+    prepared.clear();
     const auto mix = [](std::uint32_t v) {
         v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; return v ^ (v >> 16);
-    };
-    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
-        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) / 16777216.0f;
     };
     for (const auto &owner : inputs)
     {
@@ -202,14 +223,18 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
         if (!range.count || !ValidRange(range, image.persistent_fire_recipes)) continue;
         const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60;
         const double duration_ticks = static_cast<double>(owner.source_duration_seconds) * 60;
-        if (elapsed_ticks > current_tick + .01 || duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
+        if (!std::isfinite(current_tick) || elapsed_ticks > current_tick + .01 ||
+            duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
             std::abs(duration_ticks - std::round(duration_ticks)) > .01) continue;
         const double elapsed = elapsed_ticks;
         const auto duration = static_cast<std::uint64_t>(std::llround(duration_ticks));
-        const Tick started = static_cast<Tick>(std::llround(std::max(0.0, current_tick - elapsed)));
+        if (duration == 0) continue;
+        const auto started_value = std::max(0.0, current_tick - elapsed);
+        if (started_value >= static_cast<double>(std::numeric_limits<long long>::max())) continue;
+        const Tick started = static_cast<Tick>(std::llround(started_value));
         for (const auto &recipe : image.persistent_fire_recipes.subspan(range.first, range.count))
         {
-            if (recipe.effect_handle != owner.effect_handle) continue;
+            if (recipe.effect_handle != owner.effect_handle || recipe.rate == 0) continue;
             const auto source_seed = mix(owner.stable_seed ^ mix(recipe.source_stable_id) ^
                 mix(static_cast<std::uint32_t>(recipe.effect_id)) ^
                 mix(static_cast<std::uint32_t>(recipe.effect_id >> 32)));
@@ -222,32 +247,164 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
                 base.mask_slice = slices[owner.stable_seed % slices.size()];
                 base.mask_strength = recipe.mask_strength;
             }
-            const auto last = elapsed * recipe.rate / 60;
-            for (std::uint64_t ordinal = 0; ordinal <= last; ++ordinal)
+            // Births are integral ticks, so ceil(ordinal * 60 / rate) <= age
+            // is equivalent to ordinal <= floor(age) * rate / 60. Split the
+            // product to keep that bound checked without visiting old ordinals.
+            const auto whole_elapsed = std::min(
+                static_cast<std::uint64_t>(std::floor(elapsed)), duration - 1);
+            const auto whole_groups = whole_elapsed / 60;
+            const auto remainder_ticks = whole_elapsed % 60;
+            if (whole_groups > std::numeric_limits<std::uint64_t>::max() / recipe.rate)
+                continue;
+            const auto grouped_ordinals = whole_groups * recipe.rate;
+            const auto partial_product = remainder_ticks * static_cast<std::uint64_t>(recipe.rate);
+            if (grouped_ordinals >= std::numeric_limits<std::uint64_t>::max() - partial_product / 60)
+                continue;
+            const auto schedule_max = grouped_ordinals + partial_product / 60;
+            const auto legacy_max = elapsed * recipe.rate / 60;
+            if (!std::isfinite(legacy_max) || legacy_max < 0.0 ||
+                legacy_max >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) continue;
+            const auto eligible_ordinals = std::min(
+                schedule_max, static_cast<std::uint64_t>(std::floor(legacy_max))) + 1;
+            prepared.push_back({base, elapsed, duration, started, eligible_ordinals, 0,
+                                source_seed, recipe.rate, circle->radius, recipe.radius_scale,
+                                recipe.authoritative});
+        }
+    }
+}
+
+void AppendVfxPreparedFireFlameCommands(
+    std::vector<VfxPreparedFireSource> &prepared, std::size_t max_decorative_commands,
+    std::vector<VfxFlashSpawnInput> &result)
+{
+    const auto mix = [](std::uint32_t v) {
+        v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; return v ^ (v >> 16);
+    };
+    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
+        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) / 16777216.0f;
+    };
+
+    const auto cap = static_cast<std::uint64_t>(max_decorative_commands);
+    std::uint64_t high{};
+    for (auto &source : prepared)
+    {
+        source.admitted_ordinals = source.authoritative ? source.eligible_ordinals : 0;
+        if (!source.authoritative)
+            high = std::max(high, source.eligible_ordinals);
+    }
+    std::uint64_t total_eligible{};
+    bool all_fit = true;
+    for (const auto &source : prepared)
+    {
+        if (source.authoritative) continue;
+        if (source.eligible_ordinals > cap - total_eligible)
+        {
+            all_fit = false;
+            break;
+        }
+        total_eligible += source.eligible_ordinals;
+    }
+    if (all_fit)
+    {
+        for (auto &source : prepared)
+            if (!source.authoritative)
+                source.admitted_ordinals = source.eligible_ordinals;
+    }
+    else
+    {
+        const auto fits = [&](std::uint64_t level) {
+            std::uint64_t total{};
+            for (const auto &source : prepared)
             {
-                const auto birth = (ordinal * 60 + recipe.rate - 1) / recipe.rate;
-                if (birth > elapsed || birth >= duration) continue;
-                auto tongue = base;
-                tongue.stable_seed = mix(source_seed ^ mix(static_cast<std::uint32_t>(ordinal + 1)));
-                const float angle = 2 * std::numbers::pi_v<float> * random(tongue.stable_seed, 0);
-                const float radius = std::sqrt(random(tongue.stable_seed, 1)) * circle->radius * recipe.radius_scale;
-                tongue.initial_offset = {std::cos(angle) * radius, 0, std::sin(angle) * radius};
-                tongue.lifetime = static_cast<float>(duration - birth) / 60;
-                tongue.normalized_age = static_cast<float>(elapsed - birth) / static_cast<float>(duration - birth);
-                tongue.event_tick = started + birth;
-                tongue.initial_velocity = {-tongue.initial_offset.x / tongue.lifetime,
-                    tongue.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
-                if (Finite(tongue.initial_velocity)) result.push_back(tongue);
+                if (source.authoritative) continue;
+                const auto share = std::min(source.eligible_ordinals, level);
+                if (share > cap - total) return false;
+                total += share;
+            }
+            return true;
+        };
+        std::uint64_t low{};
+        while (low < high)
+        {
+            const auto middle = low + (high - low) / 2 + 1;
+            if (fits(middle)) low = middle;
+            else high = middle - 1;
+        }
+        std::uint64_t allocated{};
+        for (auto &source : prepared)
+        {
+            if (source.authoritative) continue;
+            source.admitted_ordinals = std::min(source.eligible_ordinals, low);
+            allocated += source.admitted_ordinals;
+        }
+        auto remainder = cap - allocated;
+        for (auto &source : prepared)
+        {
+            if (remainder == 0) break;
+            if (!source.authoritative && source.eligible_ordinals > low)
+            {
+                ++source.admitted_ordinals;
+                --remainder;
             }
         }
     }
+
+    const auto old_result_size = result.size();
+    try
+    {
+      for (const auto &source : prepared)
+      {
+        const auto first_ordinal = source.eligible_ordinals - source.admitted_ordinals;
+        for (std::uint64_t offset = 0; offset < source.admitted_ordinals; ++offset)
+        {
+            const auto ordinal = first_ordinal + offset;
+            const auto whole = ordinal / source.rate;
+            const auto remainder_rate = ordinal % source.rate;
+            const auto birth = whole * 60 +
+                (remainder_rate * 60 + source.rate - 1) / source.rate;
+            auto tongue = source.base;
+            tongue.stable_seed = mix(source.source_seed ^ mix(static_cast<std::uint32_t>(ordinal + 1)));
+            const float angle = 2 * std::numbers::pi_v<float> * random(tongue.stable_seed, 0);
+            const float radius = std::sqrt(random(tongue.stable_seed, 1)) *
+                                 source.circle_radius * source.radius_scale;
+            tongue.initial_offset = {std::cos(angle) * radius, 0, std::sin(angle) * radius};
+            tongue.lifetime = static_cast<float>(source.duration_ticks - birth) / 60;
+            tongue.normalized_age = static_cast<float>(source.elapsed_ticks - birth) /
+                                    static_cast<float>(source.duration_ticks - birth);
+            tongue.event_tick = source.started_tick + birth;
+            tongue.initial_velocity = {-tongue.initial_offset.x / tongue.lifetime,
+                tongue.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
+            if (Finite(tongue.initial_velocity)) result.push_back(tongue);
+        }
+      }
+    }
+    catch (...)
+    {
+        result.resize(old_result_size);
+        throw;
+    }
+}
+
+void AppendVfxPersistentFireFlameCommands(
+    const VfxImage &image, std::span<const VfxPersistentInput> inputs, double current_tick,
+    std::vector<VfxFlashSpawnInput> &result)
+{
+    std::vector<VfxPreparedFireSource> prepared;
+    PrepareVfxPersistentFireSources(image, inputs, current_tick, prepared);
+    AppendVfxPreparedFireFlameCommands(prepared, std::numeric_limits<std::size_t>::max(), result);
+}
+std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
+    const VfxImage &image, std::span<const VfxPersistentInput> inputs, double current_tick)
+{
+    std::vector<VfxFlashSpawnInput> result;
+    AppendVfxPersistentFireFlameCommands(image, inputs, current_tick, result);
     return result;
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs)
+void AppendVfxPersistentStatusStampCommands(
+    const VfxImage &image, std::span<const VfxPersistentInput> inputs,
+    std::vector<VfxFlashSpawnInput> &result)
 {
-    std::vector<VfxFlashSpawnInput> result;
     for (const auto &input : inputs)
     {
         if (input.stable_id == 0 || input.effect_handle == 0 ||
@@ -313,15 +470,26 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
             result.push_back(flash);
         }
     }
+}
+std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
+    const VfxImage &image, std::span<const VfxPersistentInput> inputs)
+{
+    std::vector<VfxFlashSpawnInput> result;
+    AppendVfxPersistentStatusStampCommands(image, inputs, result);
     return result;
 }
 
-std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands(
-    const VfxImage &image, VfxEventView events, std::span<const VfxPersistentInput> persistent)
+void AppendVfxOwnedStatusTickFlashes(const VfxImage &image, VfxEventView events,
+    std::span<const VfxPersistentInput> persistent,
+    std::vector<VfxFlashSpawnInput> &flashes,
+    std::vector<Sequence> &emitted_sequences)
 {
-    std::vector<VfxOwnedStatusTickFlashCommand> result;
-    for (const auto &event : events)
+    const auto old_flash_size = flashes.size();
+    const auto old_sequence_size = emitted_sequences.size();
+    try
     {
+      for (const auto &event : events)
+      {
         if (event.effect_handle == 0 || event.effect_handle > image.owned_status_tick_effect_ranges.size() ||
             event.geometry_owner_id == 0 || event.geometry_owner_id >= (1ull << 60) ||
             event.status_episode_generation == 0 || static_cast<std::uint32_t>(event.quality) > 2 ||
@@ -361,12 +529,33 @@ std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands
                     flash.mask_slice = recipe.mask_slices[event.stable_seed % recipe.mask_slices.size()];
                     flash.mask_strength = recipe.mask_strength;
                 }
-                result.push_back({event.sequence, flash});
+                flashes.push_back(flash);
+                emitted_sequences.push_back(event.sequence);
                 emitted = true;
                 break;
             }
             if (emitted) break;
         }
+      }
     }
+    catch (...)
+    {
+        flashes.resize(old_flash_size);
+        emitted_sequences.resize(old_sequence_size);
+        throw;
+    }
+}
+
+std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands(
+    const VfxImage &image, VfxEventView events, std::span<const VfxPersistentInput> persistent)
+{
+    std::vector<VfxFlashSpawnInput> flashes;
+    std::vector<Sequence> sequences;
+    AppendVfxOwnedStatusTickFlashes(image, events, persistent, flashes, sequences);
+    std::vector<VfxOwnedStatusTickFlashCommand> result;
+    result.reserve(flashes.size());
+    for (std::size_t index = 0; index < flashes.size(); ++index)
+        result.push_back({sequences[index], flashes[index]});
     return result;
-}} // namespace hs::runtime_detail
+}
+} // namespace hs::runtime_detail

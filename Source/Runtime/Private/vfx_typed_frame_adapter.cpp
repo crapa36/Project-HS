@@ -9,14 +9,27 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash32(std::string_view value) noexcept
+std::size_t CapacityBytes(std::size_t count, std::size_t item_size) noexcept
+{
+    return count && item_size > std::numeric_limits<std::size_t>::max() / count
+        ? std::numeric_limits<std::size_t>::max() : count * item_size;
+}
+std::size_t AddBytes(std::size_t a, std::size_t b) noexcept
+{
+    return b > std::numeric_limits<std::size_t>::max() - a
+        ? std::numeric_limits<std::size_t>::max() : a + b;
+}
+
+consteval std::uint32_t Hash32(std::string_view value) noexcept
 {
     std::uint32_t hash = 2166136261u;
     for (const unsigned char character : value)
@@ -27,7 +40,7 @@ constexpr std::uint32_t Hash32(std::string_view value) noexcept
     return hash;
 }
 
-constexpr std::uint64_t Hash64(std::string_view value) noexcept
+consteval std::uint64_t Hash64(std::string_view value) noexcept
 {
     std::uint64_t hash = 14695981039346656037ull;
     for (const unsigned char character : value)
@@ -164,12 +177,13 @@ constexpr std::array kPersistentBindings{
     PersistentBinding{PersistentVfxKind::PlayerLowHealthVignette, Hash64("post.player.low_health_vignette"), kContextPayload},
 };
 
-const VfxEffectLookupRecord *FindLookup(const VfxProgramView &cooked,
+const VfxEffectLookupRecord *FindLookup(const VfxImage &image,
                                         std::uint64_t effect_id) noexcept
 {
-    const auto found = std::find_if(cooked.effect_lookup.begin(), cooked.effect_lookup.end(),
-        [effect_id](const VfxEffectLookupRecord &entry) { return entry.effect_id == effect_id; });
-    return found == cooked.effect_lookup.end() ? nullptr : &*found;
+    const auto rows = image.effect_lookup_by_id;
+    const auto found = std::lower_bound(rows.begin(), rows.end(), effect_id,
+        [](const VfxEffectLookupRecord &entry, std::uint64_t id) { return entry.effect_id < id; });
+    return found != rows.end() && found->effect_id == effect_id ? &*found : nullptr;
 }
 
 const VfxEffectRecord *FindEffect(const VfxProgramView &cooked,
@@ -460,7 +474,7 @@ const PersistentVfxVisual *FindPrevious(
     return found == previous.end() ? nullptr : &*found;
 }
 
-bool MakeRingGaps(const PersistentVfxVisual &visual, float age, VfxPayload &payload)
+bool ValidRingGaps(const PersistentVfxVisual &visual) noexcept
 {
     if (!Finite(visual.position) || !std::isfinite(visual.ring_inner_radius) ||
         !std::isfinite(visual.ring_outer_radius) || visual.ring_inner_radius < 0.0f ||
@@ -470,19 +484,39 @@ bool MakeRingGaps(const PersistentVfxVisual &visual, float age, VfxPayload &payl
         (visual.gap_count > 0 && (visual.gap_half_angle_degrees <= 0.0f ||
                                    visual.gap_half_angle_degrees > 180.0f)))
         return false;
-    VfxRingGapsPayload ring;
+    return true;
+}
+
+float RingGapAngle(const PersistentVfxVisual &visual, std::uint32_t index) noexcept
+{
+    const auto degrees = visual.gap_offset_degrees +
+        360.0f * static_cast<float>(index) / static_cast<float>(visual.gap_count);
+    return std::fmod(std::fmod(degrees, 360.0f) + 360.0f, 360.0f);
+}
+
+void FillRingGaps(const PersistentVfxVisual &visual, float age, VfxRingGapsPayload &ring) noexcept
+{
     ring.center = visual.position;
     ring.inner_radius = visual.ring_inner_radius;
     ring.outer_radius = visual.ring_outer_radius;
     ring.gap_half_width_degrees = visual.gap_half_angle_degrees;
     ring.lifetime01 = age;
-    ring.gap_angles_degrees.reserve(visual.gap_count);
     for (std::uint32_t index = 0; index < visual.gap_count; ++index)
+        ring.gap_angles_degrees[index] = RingGapAngle(visual, index);
+}
+
+bool MakeRingGaps(const PersistentVfxVisual &visual, float age, VfxPayload &payload)
+{
+    if (!ValidRingGaps(visual)) return false;
+    if (auto *ring = std::get_if<VfxRingGapsPayload>(&payload))
     {
-        const auto degrees = visual.gap_offset_degrees +
-            360.0f * static_cast<float>(index) / static_cast<float>(visual.gap_count);
-        ring.gap_angles_degrees.push_back(std::fmod(std::fmod(degrees, 360.0f) + 360.0f, 360.0f));
+        ring->gap_angles_degrees.resize(visual.gap_count);
+        FillRingGaps(visual, age, *ring);
+        return true;
     }
+    VfxRingGapsPayload ring;
+    ring.gap_angles_degrees.resize(visual.gap_count);
+    FillRingGaps(visual, age, ring);
     payload = std::move(ring);
     return true;
 }
@@ -618,6 +652,16 @@ bool MakeSafeSector(const VfxRingGapsPayload &ring, std::uint32_t index, VfxPayl
     return true;
 }
 
+bool MakeSafeSector(const PersistentVfxVisual &visual, float age,
+                    std::uint32_t index, VfxPayload &payload) noexcept
+{
+    if (!ValidRingGaps(visual) || index >= visual.gap_count) return false;
+    const auto radians = RingGapAngle(visual, index) * 0.017453292519943295f;
+    payload = VfxSafeSectorPayload{visual.position, {std::cos(radians), 0.0f, std::sin(radians)},
+        visual.ring_inner_radius, visual.ring_outer_radius, visual.gap_half_angle_degrees, age};
+    return true;
+}
+
 std::optional<PersistentBinding> WarningBinding(std::uint64_t effect_id) noexcept
 {
     if (effect_id == Hash64("particle.enemy.spawn_warning"))
@@ -695,7 +739,18 @@ std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) co
     return hash;
 }
 
-void PreparedPairFacts::Prepare(Key key,
+std::size_t PreparedPairFacts::RetainedCapacityBytes() const noexcept
+{
+    const auto table = [](const auto &values) noexcept {
+        return AddBytes(CapacityBytes(values.bucket_count(), sizeof(void *)),
+            CapacityBytes(values.size(), sizeof(typename std::decay_t<decltype(values)>::value_type) +
+                3 * sizeof(void *)));
+    };
+    return AddBytes(AddBytes(table(previous_), table(current_)),
+        AddBytes(table(instances_), table(captures_)));
+}
+
+bool PreparedPairFacts::Prepare(Key key,
     std::span<const PersistentVfxVisual> previous,
     std::span<const PersistentVfxVisual> current,
     std::span<const RenderInstance> instances,
@@ -707,9 +762,8 @@ void PreparedPairFacts::Prepare(Key key,
     key.capture_count = captures.size();
     const bool identified = key.current_publication != 0 &&
         (previous.empty() || key.previous_publication != 0);
-    if (prepared_ && identified && key_ == key) return;
-    key_ = key;
-    prepared_ = true;
+    if (prepared_ && identified && key_ == key) return false;
+    prepared_ = false;
     previous_.clear(); current_.clear(); instances_.clear(); captures_.clear();
     previous_.reserve(previous.size()); current_.reserve(current.size());
     instances_.reserve(instances.size()); captures_.reserve(captures.size());
@@ -722,6 +776,9 @@ void PreparedPairFacts::Prepare(Key key,
     for (std::size_t i = 0; i < captures.size(); ++i)
         captures_.try_emplace({captures[i].session_id, captures[i].sequence,
                                captures[i].tick, captures[i].source_entity_id}, i);
+    key_ = key;
+    prepared_ = true;
+    return true;
 }
 
 const PersistentVfxVisual *PreparedPairFacts::Previous(
@@ -755,17 +812,21 @@ const CapturedRenderInstance *PreparedPairFacts::Capture(
     return found != captures_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
 }
 
-VfxTypedFrameInputs BuildVfxTypedFrameInputs(
-    const VfxProgramView &cooked,
+void BuildVfxTypedFrameInputs(
+    const VfxImage &image,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
+    VfxTypedFrameInputs &result,
     const PreparedPairFacts *pair_facts, float interpolation)
 {
+    const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
-    VfxTypedFrameInputs result;
+    result.events.clear();
+    result.persistent.clear();
+    result.unsupported_effect_ids.clear();
     result.events.reserve(events.size());
     result.persistent.reserve(current.size());
 
@@ -773,7 +834,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
     {
         if (event.kind != PresentationKind::Vfx) continue;
         const auto effect_id = event.asset.value;
-        const auto *lookup = FindLookup(cooked, effect_id);
+        const auto *lookup = FindLookup(image, effect_id);
         const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
         if (effect && effect->input_mode == 1 &&
             (effect_id == Hash64("particle.upgrade.retreat.second_dash") ||
@@ -927,17 +988,20 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         }
         if (effect_id == Hash64("particle.boss.shockwave.telegraph") && input.geometry_owner_id != 0)
         {
-            const auto &ring = std::get<VfxRingGapsPayload>(input.payload);
-            if (!ring.gap_angles_degrees.empty())
+            const auto gap_count = std::get<VfxRingGapsPayload>(input.payload).gap_angles_degrees.size();
+            if (gap_count != 0)
             {
-                const auto *marker_lookup = FindLookup(cooked, kSafeMarkerEffect);
+                const auto *marker_lookup = FindLookup(image, kSafeMarkerEffect);
                 const auto *marker = marker_lookup ? FindEffect(cooked, marker_lookup->handle) : nullptr;
                 if (!marker || marker->input_mode != 0 || marker->payload_kind != kSafeSectorPayload ||
                     marker->timing_kind != 1)
                     Diagnose(result, kSafeMarkerEffect);
                 else
                 {
-                    for (std::uint32_t index = 0; index < ring.gap_angles_degrees.size(); ++index)
+                    // Sector rows share envelope facts, not a copy of the ring's entire gap vector.
+                    auto ring = std::move(std::get<VfxRingGapsPayload>(input.payload));
+                    input.payload = VfxSafeSectorPayload{};
+                    for (std::uint32_t index = 0; index < gap_count; ++index)
                     {
                         auto sector = input;
                         sector.effect_handle = marker->handle;
@@ -947,6 +1011,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                         if (MakeSafeSector(ring, index, sector.payload))
                             result.events.push_back(std::move(sector));
                     }
+                    input.payload = std::move(ring);
                 }
             }
         }
@@ -994,7 +1059,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         if (visual.kind == PersistentVfxKind::WaveTimer)
         {
             constexpr auto id = Hash64("particle.session.wave_warning");
-            const auto *lookup = FindLookup(cooked, id);
+            const auto *lookup = FindLookup(image, id);
             const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
             if (!effect || effect->input_mode != 0 || effect->timing_kind != 0 ||
                 effect->payload_kind != kContextPayload ||
@@ -1025,7 +1090,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         }
         if (visual.kind == PersistentVfxKind::ScheduledAreaDelivery)
         {
-            const auto *lookup = FindLookup(cooked, kArrowRainIncomingEffect);
+            const auto *lookup = FindLookup(image, kArrowRainIncomingEffect);
             const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
             const auto head_radius = effect ? DeliveryHeadRadius(cooked, *effect) :
                 std::optional<float>{};
@@ -1092,7 +1157,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             continue; // Warning visuals are owner updates for EventStream effects.
         if (visual.kind == PersistentVfxKind::ProjectileHead)
         {
-            const auto *lookup = FindLookup(cooked, visual.effect_asset.value);
+            const auto *lookup = FindLookup(image, visual.effect_asset.value);
             const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
             if (!lookup || !effect || effect->input_mode != 1 ||
                 effect->payload_kind != kProjectilePayload ||
@@ -1145,7 +1210,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const auto *alias = FindUpgradeSlowAreaAlias(visual);
         if (alias)
             binding.effect_id = alias->effect_id;
-        const auto *lookup = FindLookup(cooked, binding.effect_id);
+        const auto *lookup = FindLookup(image, binding.effect_id);
         const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
         if (alias && (!lookup || !effect ||
                       !UpgradeBindingContains(cooked, alias->skill_id,
@@ -1440,7 +1505,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const auto append_area_recipe = [&](std::uint64_t effect_id,
                                             std::uint64_t skill_id,
                                             std::uint32_t ordinal) {
-            const auto *recipe_lookup = FindLookup(cooked, effect_id);
+            const auto *recipe_lookup = FindLookup(image, effect_id);
             const auto *recipe = recipe_lookup
                 ? FindEffect(cooked, recipe_lookup->handle) : nullptr;
             if (!recipe || recipe->input_mode != 1 || recipe->timing_kind != 1 ||
@@ -1482,7 +1547,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const auto *supplement = FindDamageTrailSupplement(visual);
         if (!supplement) continue;
 
-        const auto *supplement_lookup = FindLookup(cooked, supplement->effect_id);
+        const auto *supplement_lookup = FindLookup(image, supplement->effect_id);
         const auto *supplement_effect = supplement_lookup
             ? FindEffect(cooked, supplement_lookup->handle) : nullptr;
         const bool exact_binding =
@@ -1532,31 +1597,40 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         result.persistent.push_back(std::move(supplemental_input));
     }
 
-    return result;
+}
+
+std::size_t VfxUpgradeMovementState::RetainedCapacityBytes() const noexcept
+{
+    return AddBytes(CapacityBytes(owners_.capacity(), sizeof(Owner)),
+                    CapacityBytes(staged_owners_.capacity(), sizeof(Owner)));
 }
 
 std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
                                            const VfxProgramView &next) noexcept
 {
-    const auto count = owners_.size();
-    std::erase_if(owners_, [&](Owner &owner) {
-        if (RebindVfxGenerationHandle(previous, next, owner.input.effect_handle, 1u) !=
-            VfxGenerationRebindOutcome::Retained) return true;
-        const auto &effect = next.effects[owner.input.effect_handle - 1u];
-        if (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
-            !UpgradeBindingContains(next, Hash64("skill.retreat_shot"), 8, effect.handle)) return true;
-        owner.seconds = effect.seconds;
-        owner.input.source_duration_seconds = effect.seconds;
-        return false;
-    });
-    return count - owners_.size();
+    const auto rebind = [&](std::vector<Owner> &owners) {
+        const auto count = owners.size();
+        std::erase_if(owners, [&](Owner &owner) {
+            if (RebindVfxGenerationHandle(previous, next, owner.input.effect_handle, 1u) !=
+                VfxGenerationRebindOutcome::Retained) return true;
+            const auto &effect = next.effects[owner.input.effect_handle - 1u];
+            if (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
+                !UpgradeBindingContains(next, Hash64("skill.retreat_shot"), 8, effect.handle)) return true;
+            owner.seconds = effect.seconds;
+            owner.input.source_duration_seconds = effect.seconds;
+            return false;
+        });
+        return count - owners.size();
+    };
+    return rebind(owners_) + rebind(staged_owners_);
 }
 
-std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
-    const VfxProgramView &cooked,
+void VfxUpgradeMovementState::Append(
+    const VfxImage &image,
     std::span<const PresentationEvent> dispatched_events,
-    Tick current_tick, float interpolation)
+    Tick current_tick, std::vector<VfxPersistentInput> &output, float interpolation)
 {
+    const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
     std::erase_if(owners_, [current_tick, display_tick](const Owner &owner) {
@@ -1564,8 +1638,12 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
         return current_tick < owner.started || (display_tick >= owner.started &&
             display_tick - owner.started >= duration_ticks);
     });
-    for (const auto &event : dispatched_events)
+    staged_owners_.clear();
+    const auto old_output_size = output.size();
+    try
     {
+      for (const auto &event : dispatched_events)
+      {
         const bool dash = event.asset.value == Hash64("particle.upgrade.retreat.second_dash");
         const bool afterimage = event.asset.value == Hash64("particle.upgrade.retreat.afterimage");
         if ((!dash && !afterimage) || event.kind != PresentationKind::Vfx ||
@@ -1577,7 +1655,7 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
             event.geometry.source_id != event.upgrade_owner_id || event.geometry.width <= 0 ||
             event.geometry.start_tick != event.tick || event.geometry.end_tick != event.tick)
             continue;
-        const auto *lookup = FindLookup(cooked, event.asset.value);
+        const auto *lookup = FindLookup(image, event.asset.value);
         const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
         if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
             effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
@@ -1597,7 +1675,8 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
             event.asset.value);
         if (std::any_of(owners_.begin(), owners_.end(), [stable_id](const Owner &owner) {
                 return owner.input.stable_id == stable_id;
-            }))
+            }) || std::any_of(staged_owners_.begin(), staged_owners_.end(),
+                [stable_id](const Owner &owner) { return owner.input.stable_id == stable_id; }))
             continue;
         Owner owner{};
         owner.started = event.tick;
@@ -1616,24 +1695,52 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
         else
             owner.input.payload = VfxContextPayload{event.upgrade_owner_id, direction,
                                                     0.0f, length, event.geometry.width};
-        owners_.push_back(std::move(owner));
+        staged_owners_.push_back(std::move(owner));
+      }
+
+      const auto visible_count = [display_tick](const std::vector<Owner> &owners) {
+          return static_cast<std::size_t>(std::ranges::count_if(owners,
+              [display_tick](const Owner &owner) { return display_tick >= owner.started; }));
+      };
+      const auto reserve_appends = [](auto &buffer, std::size_t append_count) {
+          const auto maximum = buffer.max_size();
+          if (append_count > maximum - buffer.size())
+              throw std::length_error("retreat VFX append exceeds vector capacity");
+          const auto required = buffer.size() + append_count;
+          if (required <= buffer.capacity()) return;
+          const auto current = buffer.capacity();
+          const auto grown = current == 0 ? std::size_t{1} :
+              (current > maximum / 2 ? maximum : current * 2);
+          buffer.reserve(std::max(required, grown));
+      };
+      reserve_appends(owners_, staged_owners_.size());
+      reserve_appends(output, visible_count(owners_) + visible_count(staged_owners_));
+
+      const auto append_visible = [&](const Owner &owner) {
+          if (display_tick < owner.started) return;
+          auto input = owner.input;
+          input.elapsed_ticks = display_tick - owner.started;
+          input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
+          input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
+          if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
+              line->lifetime01 = input.normalized_age;
+          else
+              std::get<VfxContextPayload>(input.payload).ratio01 = input.normalized_age;
+          output.push_back(std::move(input));
+      };
+      for (const auto &owner : owners_) append_visible(owner);
+      for (const auto &owner : staged_owners_) append_visible(owner);
+
+      static_assert(std::is_nothrow_move_constructible_v<Owner>);
+      for (auto &owner : staged_owners_) owners_.push_back(std::move(owner));
+      staged_owners_.clear();
     }
-    std::vector<VfxPersistentInput> result;
-    result.reserve(owners_.size());
-    for (const auto &owner : owners_)
+    catch (...)
     {
-        if (display_tick < owner.started) continue;
-        auto input = owner.input;
-        input.elapsed_ticks = display_tick - owner.started;
-        input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
-        input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
-        if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
-            line->lifetime01 = input.normalized_age;
-        else
-            std::get<VfxContextPayload>(input.payload).ratio01 = input.normalized_age;
-        result.push_back(std::move(input));
+        output.resize(old_output_size);
+        staged_owners_.clear();
+        throw;
     }
-    return result;
 }
 
 bool RefreshVfxGroundEventOwner(VfxEventInput &event,
@@ -1731,10 +1838,7 @@ bool RefreshVfxGroundEventOwner(VfxEventInput &event,
         }
         else if (binding->payload_kind == kSafeSectorPayload)
         {
-            VfxPayload ring_payload;
-            if (!MakeRingGaps(owner, age, ring_payload) ||
-                !MakeSafeSector(std::get<VfxRingGapsPayload>(ring_payload), event.geometry_sector_index, event.payload))
-                return false;
+            if (!MakeSafeSector(owner, age, event.geometry_sector_index, event.payload)) return false;
         }
         else if (binding->payload_kind == kRingGapsPayload)
         {
@@ -1776,9 +1880,10 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
     }
     events.resize(retained);
 }
-void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
+void RebindVfxGroundEventOwners(const VfxImage &image,
                                 std::vector<VfxEventInput> &events)
 {
+    const auto &cooked = image.program;
     std::vector<VfxEventInput> rebound;
     rebound.reserve(events.size());
     for (auto &event : events)
@@ -1790,7 +1895,7 @@ void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
         }
         const auto binding = WarningBinding(event.geometry_effect_id);
         if (!binding || !WarningShapeMatches(*binding, event.payload)) continue;
-        const auto *lookup = FindLookup(cooked, binding->effect_id);
+        const auto *lookup = FindLookup(image, binding->effect_id);
         const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
         const auto expected_payload = binding->payload_kind;
         if (!lookup || !effect || effect->input_mode != 0 ||

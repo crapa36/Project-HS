@@ -654,13 +654,9 @@ Result D3D12Renderer::Impl::AdmitResidentAllocation(const D3D12_RESOURCE_DESC &d
     const auto size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
     if (size == UINT64_MAX || size > UINT64_MAX - resident_preparation_accounting.live_native_bytes)
         return ResidentFailure("Resident native allocation size overflow.");
-    auto segment = ResidencySegmentForHeap(allocation.HeapType);
-    if (allocation.CustomPool && !resident_preparation_accounting.unified_memory)
-    {
-        const auto properties = allocation.CustomPool->GetDesc().HeapProperties;
-        segment = properties.MemoryPoolPreference == D3D12_MEMORY_POOL_L1
-            ? ResidencySegment::Local : ResidencySegment::NonLocal;
-    }
+    ResidencySegment segment{};
+    if (!ResidencySegmentForAllocation(allocation, segment))
+        return ResidentFailure("Resident allocation has no resolvable native memory segment.");
     if (auto refreshed = RefreshBudgetObservations(); !refreshed) return refreshed;
     const auto &observation = segment == ResidencySegment::Local
         ? local_budget_observation : nonlocal_budget_observation;

@@ -244,14 +244,21 @@ Result PresentationGuides::Commit(PresentationGuidesCandidate &&candidate, const
     impl_->targets = std::move(candidate.targets_);
     return Result::Success();
 }
-bool PresentationGuides::MatchesLayout(const PresentationGuidesInputs &in,
+bool PresentationGuides::MatchesShape(const PresentationGuidesLayout &layout,
     std::uint32_t colorId,std::uint32_t guideId,std::uint32_t devtoolsId,
-    const PresentationGuidesLayout &layout) const noexcept
+    bool transparent_guides) const noexcept
 {
     if(!impl_||!impl_->targets||!impl_->targets->usable||
         layout.target_generation!=impl_->targets->generation||
         layout.pass_ids!=std::array<std::uint32_t,3>{devtoolsId,colorId,guideId}||
-        layout.transparent_guides!=in.transparent_guides_enabled)return false;
+        layout.transparent_guides!=transparent_guides)return false;
+    return true;
+}
+bool PresentationGuides::MatchesLayout(const PresentationGuidesInputs &in,
+    std::uint32_t colorId,std::uint32_t guideId,std::uint32_t devtoolsId,
+    const PresentationGuidesLayout &layout) const noexcept
+{
+    if(!MatchesShape(layout,colorId,guideId,devtoolsId,in.transparent_guides_enabled))return false;
     const std::array<ResourceVersion,8> current{in.display_linear.version,in.encoded_ui.version,
         in.depth.version,in.motion.version,in.transparent_depth.version,in.transparent_motion.version,
         in.transparent_classification.version,in.transparent_metadata.version};
@@ -425,11 +432,16 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
 bool PresentationGuides::MatchesTagLayout(const PresentationGuidesOutputs &output,
     PresentationGuideResource backBuffer,std::uint32_t passId,const PresentationTagLayout &layout) const noexcept
 {
-    return impl_&&impl_->targets&&impl_->targets->usable&&
-        layout.target_generation==impl_->targets->generation&&layout.pass_id==passId&&
-        layout.provider==impl_->targets->provider&&layout.back_buffer==backBuffer.version&&
+    return MatchesTagShape(layout,passId)&&layout.back_buffer==backBuffer.version&&
         layout.guides==std::array<ResourceVersion,4>{output.hudless.version,output.ui.version,
             output.depth.version,output.motion.version};
+}
+bool PresentationGuides::MatchesTagShape(const PresentationTagLayout &layout,
+    std::uint32_t passId) const noexcept
+{
+    return impl_&&impl_->targets&&impl_->targets->usable&&
+        layout.target_generation==impl_->targets->generation&&layout.pass_id==passId&&
+        layout.provider==impl_->targets->provider;
 }
 Result PresentationGuides::RegisterTagPass(RenderGraphBuilder &graph,const PresentationGuidesOutputs &output,
     PresentationGuideResource backBuffer,SdkPresentationFrame frame,SdkPresentation &presentation,

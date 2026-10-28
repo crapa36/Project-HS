@@ -4,12 +4,14 @@
 #include "test_generation_paths.hpp"
 #include <hs/render_data/render_snapshot.hpp>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <numbers>
 #include <string>
 #include <stdexcept>
 #include <span>
@@ -34,6 +36,88 @@ PreparedImage Prepare(const hs::VfxProgramData &p)
 {
  PreparedImage prepared;hs::PrepareVfxBallisticRecipes(p.View(),prepared.ranges,prepared.recipes);
  prepared.image.program=p.View();prepared.image.ballistic_effect_ranges=prepared.ranges;prepared.image.ballistic_recipes=prepared.recipes;return prepared;
+}
+std::uint32_t LegacyMix(std::uint32_t v){v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;return v^(v>>16);}
+float LegacyRandom(std::uint32_t seed,std::uint32_t lane){return static_cast<float>(LegacyMix(seed^LegacyMix(lane+0x9e3779b9u))>>8)/16777216.0f;}
+hs::Float3 LegacyNormalize(hs::Float3 value){const float length=std::hypot(value.x,value.y,value.z);return length>.0001f?hs::Float3{value.x/length,value.y/length,value.z/length}:hs::Float3{0,1,0};}
+hs::Float3 LegacyCross(hs::Float3 a,hs::Float3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
+std::vector<hs::ParticleSpawnCommand> LegacyPointBallistic(
+ const hs::VfxImage &image,const hs::VfxEventInput &input)
+{
+ const auto range=image.ballistic_effect_ranges[input.effect_handle-1];
+ const auto &point=std::get<hs::VfxPointPayload>(input.payload);
+ std::vector<hs::ParticleSpawnCommand> output;
+ for(const auto &r:image.ballistic_recipes.subspan(range.first,range.count))
+ {
+  if(r.persistent_status||r.effect_handle!=input.effect_handle||
+     r.min_quality>static_cast<std::uint32_t>(input.quality)||
+     r.payload_kind!=Hash("PointEventPayload"))continue;
+  const double delay=static_cast<double>(r.seconds)*r.knots[0]*60.;
+  const double floor_delay=std::floor(delay),ceil_delay=std::ceil(delay);
+  if(!std::isfinite(delay)||ceil_delay>=static_cast<double>(std::numeric_limits<hs::Tick>::max()-input.event_tick))continue;
+  const hs::Tick floor_tick=input.event_tick+static_cast<hs::Tick>(floor_delay);
+  const hs::Tick tick=input.event_tick+static_cast<hs::Tick>(ceil_delay);
+  const auto source_seed=LegacyMix(input.stable_seed^LegacyMix(static_cast<std::uint32_t>(r.effect_id))^
+      LegacyMix(static_cast<std::uint32_t>(r.effect_id>>32))^LegacyMix(r.source_stable_id));
+  const hs::Float3 axis=LegacyNormalize(point.normal);
+  const hs::Float3 right=LegacyNormalize(LegacyCross(std::abs(axis.y)<.9f?hs::Float3{0,1,0}:hs::Float3{1,0,0},axis));
+  const hs::Float3 up=LegacyCross(axis,right);
+  for(std::uint32_t i=0;i<r.count;++i)
+  {
+   hs::ParticleSpawnCommand cmd;cmd.seed=LegacyMix(source_seed^LegacyMix(i+1));cmd.sequence=0;cmd.count=1;
+   cmd.authored_ballistic=true;cmd.renderer=hs::VfxRenderer::Mesh;cmd.primitive=hs::VfxPrimitive::Shard;
+   cmd.mesh_index=r.mesh_index;cmd.facing=hs::ParticleFacing::Velocity;cmd.tick=tick;cmd.authored_birth_tick=floor_tick;
+   cmd.authored_birth_fraction=static_cast<float>(delay-floor_delay);
+   cmd.lifetime_min=cmd.lifetime_max=r.seconds*(r.knots[1]-r.knots[0]);cmd.position=point.position;
+   const float size=std::lerp(r.min_size,r.max_size,LegacyRandom(cmd.seed,2))*point.authored_scale;
+   const float azimuth=LegacyRandom(cmd.seed,3)*2*std::numbers::pi_v<float>;
+   const float cosine=std::lerp(1.0f,std::cos(r.cone*std::numbers::pi_v<float>/180),LegacyRandom(cmd.seed,4));
+   const float sine=std::sqrt(std::max(0.0f,1-cosine*cosine));
+   const float speed=r.speed>0?r.speed:std::lerp(r.min_speed,r.max_speed,LegacyRandom(cmd.seed,5));
+   cmd.authored_initial_velocity={
+       (axis.x*cosine+(right.x*std::cos(azimuth)+up.x*std::sin(azimuth))*sine)*speed,
+       (axis.y*cosine+(right.y*std::cos(azimuth)+up.y*std::sin(azimuth))*sine)*speed,
+       (axis.z*cosine+(right.z*std::cos(azimuth)+up.z*std::sin(azimuth))*sine)*speed};
+   cmd.direction=LegacyNormalize(cmd.authored_initial_velocity);cmd.gravity=r.gravity;cmd.authored_drag=r.drag;
+   cmd.authored_bounce=r.bounce;cmd.authored_ground_y=0;cmd.authored_collision_radius=size*.5f;
+   cmd.authored_hdr=r.hdr;cmd.authored_gradient_row=r.gradient_row;
+   cmd.start_size_min=cmd.start_size_max=cmd.end_size_min=cmd.end_size_max=size;
+   cmd.start_color=r.color;cmd.end_color=cmd.start_color;cmd.end_color.w=0;
+   cmd.rotation_min=cmd.rotation_max=LegacyRandom(cmd.seed,6)*2*std::numbers::pi_v<float>;
+   cmd.angular_velocity_min=cmd.angular_velocity_max=std::lerp(r.min_spin,r.max_spin,LegacyRandom(cmd.seed,7))*(LegacyRandom(cmd.seed,8)<.5f?-1.0f:1.0f);
+   if(std::isfinite(cmd.position.x)&&std::isfinite(cmd.position.y)&&std::isfinite(cmd.position.z)&&
+      std::isfinite(cmd.authored_initial_velocity.x)&&std::isfinite(cmd.authored_initial_velocity.y)&&
+      std::isfinite(cmd.authored_initial_velocity.z)&&std::isfinite(size)&&size>0)
+   {cmd.sequence=input.sequence;output.push_back(cmd);}
+  }
+ }
+ return output;
+}
+bool SameFloat(float a,float b){return std::bit_cast<std::uint32_t>(a)==std::bit_cast<std::uint32_t>(b);}
+bool Same3(hs::Float3 a,hs::Float3 b){return SameFloat(a.x,b.x)&&SameFloat(a.y,b.y)&&SameFloat(a.z,b.z);}
+bool Same4(hs::Float4 a,hs::Float4 b){return SameFloat(a.x,b.x)&&SameFloat(a.y,b.y)&&SameFloat(a.z,b.z)&&SameFloat(a.w,b.w);}
+bool SameBallisticCommand(const hs::ParticleSpawnCommand &a,const hs::ParticleSpawnCommand &b)
+{
+ return a.sequence==b.sequence&&a.tick==b.tick&&Same3(a.position,b.position)&&a.shape==b.shape&&
+     a.velocity_mode==b.velocity_mode&&a.facing==b.facing&&a.renderer==b.renderer&&a.primitive==b.primitive&&
+     a.mesh_index==b.mesh_index&&a.sprite==b.sprite&&a.frame_columns==b.frame_columns&&a.frame_rows==b.frame_rows&&
+     a.count==b.count&&a.seed==b.seed&&a.authored_ballistic==b.authored_ballistic&&
+     Same3(a.shape_extent,b.shape_extent)&&Same3(a.authored_initial_velocity,b.authored_initial_velocity)&&
+     Same3(a.direction,b.direction)&&
+     Same4(a.start_color,b.start_color)&&Same4(a.end_color,b.end_color)&&
+     SameFloat(a.lifetime_min,b.lifetime_min)&&SameFloat(a.lifetime_max,b.lifetime_max)&&
+     SameFloat(a.start_size_min,b.start_size_min)&&SameFloat(a.start_size_max,b.start_size_max)&&
+     SameFloat(a.end_size_min,b.end_size_min)&&SameFloat(a.end_size_max,b.end_size_max)&&
+     SameFloat(a.speed_min,b.speed_min)&&SameFloat(a.speed_max,b.speed_max)&&
+     SameFloat(a.cone_radians,b.cone_radians)&&SameFloat(a.stretch,b.stretch)&&
+     SameFloat(a.uv_repeat,b.uv_repeat)&&SameFloat(a.scroll_speed,b.scroll_speed)&&
+     SameFloat(a.gravity,b.gravity)&&SameFloat(a.rotation_min,b.rotation_min)&&
+     SameFloat(a.rotation_max,b.rotation_max)&&SameFloat(a.angular_velocity_min,b.angular_velocity_min)&&
+     SameFloat(a.angular_velocity_max,b.angular_velocity_max)&&SameFloat(a.authored_drag,b.authored_drag)&&
+     SameFloat(a.authored_bounce,b.authored_bounce)&&SameFloat(a.authored_ground_y,b.authored_ground_y)&&
+     SameFloat(a.authored_collision_radius,b.authored_collision_radius)&&SameFloat(a.authored_hdr,b.authored_hdr)&&
+     SameFloat(a.authored_birth_fraction,b.authored_birth_fraction)&&a.authored_birth_tick==b.authored_birth_tick&&
+     a.authored_gradient_row==b.authored_gradient_row;
 }
 auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i){const auto image=Prepare(p);return hs::runtime_detail::BuildVfxTypedBallisticCommands(image.image,std::span(&i,1));}
 void TimingIdentityAndScale()
@@ -67,6 +151,29 @@ void TimingIdentityAndScale()
  std::get<hs::VfxPointPayload>(i.payload).authored_scale=2;auto scaled=Run(p,i);Check(Near(scaled[0].start_size_min,2*a[0].start_size_min)&&scaled[0].authored_initial_velocity.x==a[0].authored_initial_velocity.x,"point scale altered world velocity");
  i=Input();p.effects.push_back(p.effects[0]);p.effects[1].handle=2;p.sources[0].effect=2;p.effect_lookup[0].handle=2;i.effect_handle=2;
  Check(Run(p,i)[0].seed==a[0].seed,"catalog handle changed semantic seed");
+}
+void BatchBallisticAppendPreservesOracleAndProvenance()
+{
+ auto p=Program();auto accepted=Input();accepted.sequence=700;
+ auto rejected=accepted;rejected.effect_handle=2;rejected.event_tick=111;
+ auto duplicate=accepted;duplicate.stable_seed=456;duplicate.event_tick=130;
+ const std::array inputs{accepted,rejected,duplicate};
+ const auto prepared=Prepare(p);
+ auto expected=LegacyPointBallistic(prepared.image,accepted);
+ const auto later=LegacyPointBallistic(prepared.image,duplicate);
+ expected.insert(expected.end(),later.begin(),later.end());
+ hs::ParticleSpawnCommand prefix;prefix.seed=9876;
+ std::vector<hs::ParticleSpawnCommand> output{prefix};
+ std::vector<std::size_t> emitted_indices{42};
+ hs::runtime_detail::AppendVfxTypedBallisticCommands(
+     prepared.image,inputs,output,&emitted_indices);
+ Check(emitted_indices==std::vector<std::size_t>{42,0,2},
+       "ballistic provenance did not distinguish accepted and rejected duplicate sequences");
+ Check(output.size()==expected.size()+1&&output.front().seed==prefix.seed,
+       "ballistic batch append replaced the caller prefix or changed accepted extent");
+ for(std::size_t index=0;index<expected.size();++index)
+     Check(SameBallisticCommand(output[index+1],expected[index]),
+           "ballistic batch append changed the independent original command formula or order");
 }
 void GeometryAndRecipes()
 {
@@ -231,6 +338,51 @@ void PersistentStatusShards()
   Check(run().empty(),"wrong persistent payload emitted shards");
  }
 }
+void SelectedPersistentStatusShardOwners()
+{
+ auto program=PersistentShardProgram("particle.player.bow_draw",false,0);
+ const auto prepared=Prepare(program);
+ std::array owners{
+  PersistentShardOwner(hs::PersistentVfxKind::PlayerBowDraw),
+  PersistentShardOwner(hs::PersistentVfxKind::PlayerBowDraw),
+  PersistentShardOwner(hs::PersistentVfxKind::PlayerBowDraw)};
+ owners[0].stable_seed=101;owners[0].stable_id=201;owners[0].current_transform[12]=1;
+ owners[1].stable_seed=202;owners[1].stable_id=302;owners[1].current_transform[12]=2;
+ owners[2].stable_seed=303;owners[2].stable_id=403;owners[2].current_transform[12]=3;
+ const std::array<std::size_t,3> selected{2,0,2};
+ const std::array expected_owners{owners[2],owners[0],owners[2]};
+ const auto expected=hs::runtime_detail::BuildVfxPersistentStatusShardCommands(
+     prepared.image,expected_owners,77);
+ std::vector<hs::ParticleSpawnCommand> actual(1);actual.front().seed=999;
+ hs::runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
+     prepared.image,owners,selected,77,actual);
+ Check(expected.size()==15&&actual.size()==16&&actual.front().seed==999,
+       "selected status shard append lost its prefix or rows");
+ for(std::size_t i=0;i<expected.size();++i)
+ {
+  const auto &a=actual[i+1];const auto &e=expected[i];
+  Check(a.seed==e.seed&&a.sequence==e.sequence&&a.tick==e.tick&&
+        a.authored_birth_tick==e.authored_birth_tick&&
+        a.authored_birth_fraction==e.authored_birth_fraction&&
+        a.lifetime_min==e.lifetime_min&&a.lifetime_max==e.lifetime_max&&
+        a.position.x==e.position.x&&a.position.y==e.position.y&&a.position.z==e.position.z&&
+        a.authored_initial_velocity.x==e.authored_initial_velocity.x&&
+        a.authored_initial_velocity.y==e.authored_initial_velocity.y&&
+        a.authored_initial_velocity.z==e.authored_initial_velocity.z,
+        "selected status shard order, seed or lifetime changed");
+ }
+ const std::span<const std::size_t> empty_indices;
+ const auto before_empty=actual.size();
+ hs::runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
+     prepared.image,owners,empty_indices,77,actual);
+ Check(actual.size()==before_empty,"empty selected status shard indices meant all owners");
+ const std::array<std::size_t,2> invalid{0,owners.size()};
+ bool rejected=false;
+ try{hs::runtime_detail::AppendVfxSelectedPersistentStatusShardCommands(
+     prepared.image,owners,invalid,77,actual);}catch(const std::out_of_range&){rejected=true;}
+ Check(rejected&&actual.size()==before_empty&&actual.front().seed==999,
+       "invalid selected owner index changed the output prefix");
+}
 void ProductionBowDrawStatusShards()
 {
  std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"),std::ios::binary);
@@ -283,4 +435,4 @@ void ProductionUpgradeStatusShards()
  }
 }
 }
-int RunVfxBallisticTests(){try{TimingIdentityAndScale();GeometryAndRecipes();CookedGlobalBindings();ProjectileForwardFans();RejectMalformed();PersistentStatusShards();ProductionBowDrawStatusShards();ProductionUpgradeStatusShards();std::cout<<"Typed ballistic commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxBallisticTests(){try{TimingIdentityAndScale();BatchBallisticAppendPreservesOracleAndProvenance();GeometryAndRecipes();CookedGlobalBindings();ProjectileForwardFans();RejectMalformed();PersistentStatusShards();SelectedPersistentStatusShardOwners();ProductionBowDrawStatusShards();ProductionUpgradeStatusShards();std::cout<<"Typed ballistic commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

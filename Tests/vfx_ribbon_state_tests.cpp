@@ -2,6 +2,7 @@
 #include "vfx_ribbon_resources.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <iostream>
@@ -196,6 +197,34 @@ void TestRejectedResetKeepsState()
     }
 }
 
+void TestRibbonDuplicateValidationScratchRecovery()
+{
+    VfxRibbonState state;
+    std::string error;
+    const std::vector original{Source(10)};
+    Check(state.Update(original, 10, 1, 1, 64, .5f, {}, error), error.c_str());
+    const auto identity = state.Updates()[0].identity;
+    const auto output_metadata = state.Outputs()[0].metadata;
+
+    auto duplicate = Source(20, 99);
+    const std::vector rejected{Source(20, 1), Source(30, 1), duplicate};
+    Check(!VfxRibbonState::ValidateSources(rejected, error),
+          "raw ribbon validation accepted a nonadjacent duplicate key with different importance");
+    Check(!state.ValidateFrameSources(rejected, error),
+          "frame ribbon validation accepted a nonadjacent duplicate key with different importance");
+    Check(state.ValidateFrameSources(original, error),
+          "valid frame validation failed after duplicate rejection");
+    Check(!state.Update(rejected, 11, 1, 1, 64, .5f, {}, error),
+          "ribbon update accepted a duplicate key after frame validation");
+    Check(state.Updates().size() == 1 && state.Outputs().size() == 1 &&
+              state.Updates()[0].identity == identity && state.Outputs()[0].metadata == output_metadata,
+          "duplicate rejection changed existing ribbon outputs");
+    Check(state.Update(original, 11, 1, 1, 64, .5f, {}, error), error.c_str());
+    Check(state.Updates().size() == 1 && state.Outputs().size() == 1 &&
+              state.Updates()[0].identity == identity && state.Outputs()[0].metadata == output_metadata,
+          "valid ribbon frame did not recover after duplicate rejection");
+}
+
 void TestRibbonBufferFailureRecovery()
 {
     using namespace hs::renderer_detail;
@@ -297,6 +326,27 @@ void TestRibbonBufferFailureRecovery()
           (state.Updates()[0].identity[3] & 2u) != 0,
         "argument-only failure consumed a generation reset before retry");
 }
+
+void TestRibbonOutputCapacityAcrossPackedWords()
+{
+    VfxRibbonState state;
+    Check(!state.OutputsMayExceed({}, 0), "empty ribbon output capacity changed");
+    std::vector<VfxRibbonSourceInput> sources;
+    for (std::uint64_t owner = 1; owner <= 130; ++owner) sources.push_back(Source(owner));
+    std::string error;
+    constexpr auto points = 130u * hs::renderer_detail::kRibbonHistorySamples;
+    Check(state.Update(sources, 1, 1, 1, points, 1.0f, {}, error), error.c_str());
+    Check(!state.OutputsMayExceed(sources, 130) && state.OutputsMayExceed(sources, 129),
+          "packed ribbon inclusion lost a source across word boundaries");
+    std::vector<VfxRibbonSourceInput> alternating;
+    for (std::size_t index = 0; index < sources.size(); index += 2)
+        alternating.push_back(sources[index]);
+    Check(!state.OutputsMayExceed(alternating, 130) && state.OutputsMayExceed(alternating, 129),
+          "packed ribbon inclusion lost a retained tail or kept a prior query mark");
+    Check(!state.OutputsMayExceed(sources, 130), "early capacity rejection left stale inclusion bits");
+    Check(state.Update(alternating, 2, 1, 1, points, 1.0f, {}, error) && state.Outputs().size() == 130,
+          "source-order preparation reused packed inclusion data as row indices");
+}
 }
 
 int main()
@@ -305,7 +355,9 @@ int main()
     {
         TestRibbonLookupLifecycle();
         TestRejectedResetKeepsState();
+        TestRibbonDuplicateValidationScratchRecovery();
         TestRibbonBufferFailureRecovery();
+        TestRibbonOutputCapacityAcrossPackedWords();
         std::string error;
         auto source = Source(10);
         VfxRibbonState state;
@@ -331,6 +383,26 @@ int main()
               (state.Outputs()[0].metadata[3] & 1u) == 0u && (state.Outputs()[1].metadata[3] & 1u) == 1u &&
               state.Outputs()[1].metadata[2] == 2 && state.Outputs()[1].metadata[3] == 3 && state.Outputs()[1].material.w == 4.0f,
               "shared ribbon history outputs were duplicated or profile-sorted incorrectly");
+
+        auto grouping_checkpoint = state;
+        const auto first_group = state.Outputs()[0].metadata;
+        const auto second_group = state.Outputs()[1].metadata;
+        const std::array repeated_groups{two_outputs};
+        for (unsigned repeat = 0; repeat < 3; ++repeat)
+        {
+            Check(state.Update(repeated_groups, 12, 1, 1, 128, 1.0f, {}, error), error.c_str());
+            Check(state.Outputs().size() == 2 && state.Outputs()[0].metadata == first_group &&
+                      state.Outputs()[1].metadata == second_group,
+                  "warm ribbon grouping retained stale rows or changed profile order");
+        }
+        const std::array single_group{Source(10)};
+        Check(state.Update(single_group, 12, 1, 1, 128, 1.0f, {}, error) && state.Outputs().size() == 1,
+              "ribbon grouping scratch kept outputs after the source shrank");
+        state = std::move(grouping_checkpoint);
+        Check(state.Update(repeated_groups, 12, 1, 1, 128, 1.0f, {}, error) &&
+                  state.Outputs().size() == 2 && state.Outputs()[0].metadata == first_group &&
+                  state.Outputs()[1].metadata == second_group,
+              "restored ribbon checkpoint lost output grouping");
 
         Check(state.Update(inputs, 13, 2, 1, 128, 0.0f, {}, error), error.c_str());
         Check(state.Updates()[0].identity[3] == 3, "session reset did not reset the reused ribbon slot");

@@ -8,4 +8,7 @@ namespace hs::runtime_detail
 {
 std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxImage &image,
  VfxEventView events, std::span<const VfxPersistentInput> persistent, double current_tick);
+void AppendVfxTypedDecalCommands(const VfxImage &image, VfxEventView events,
+ std::span<const VfxPersistentInput> persistent, double current_tick,
+ std::vector<VfxDecalInput> &result);
 }

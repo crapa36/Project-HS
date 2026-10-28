@@ -13,6 +13,7 @@
 #include <hs/render_data/quality_profiles.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/ui_draw_content.hpp>
 
 #include "renderer_options.hpp"
 #include "renderer_caster_storage.hpp"
@@ -1070,6 +1071,7 @@ struct D3D12Renderer::Impl
         std::array<AllocationResource, 2> exposure_values;
         AllocationResource exposure_histogram, initial_exposure;
         std::array<std::vector<UiModel>, kFrameCount> ui_models;
+        std::array<std::shared_ptr<const UiDrawContent>, kFrameCount> ui_draw_content;
         std::array<bool, kFrameCount> ui_dirty{}, ui_initialized{};
         AmbientOcclusionSystem ambient_occlusion;
         AdaptiveShadingSystem adaptive_shading;
@@ -1155,6 +1157,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
     [[nodiscard]] Result RefreshBudgetObservations();
     [[nodiscard]] ResidencySegment ResidencySegmentForHeap(D3D12_HEAP_TYPE type) const noexcept;
+    [[nodiscard]] bool ResidencySegmentForAllocation(
+        const D3D12MA::ALLOCATION_DESC &, ResidencySegment &) const noexcept;
     void SampleAllocatorBudgetStats(bool local_absorbed, bool nonlocal_absorbed) noexcept;
     [[nodiscard]] ResidencyTicket RegisterNativeAllocation(ResidencyCategory category,
         std::uint64_t bytes, bool pinned, ResidencySegment segment = ResidencySegment::Local);
@@ -1174,6 +1178,23 @@ struct D3D12Renderer::Impl
     };
     struct StaticGpuScene
     {
+        struct SoftwareSceneBase
+        {
+            std::size_t source_index{};
+            GpuInstance draw{};
+            std::uint32_t page_slot{};
+            std::uint32_t material_ordinal{UINT32_MAX};
+            std::uint32_t flags{};
+            BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
+        };
+        struct SoftwareSceneCache
+        {
+            std::vector<SoftwareSceneBase> rows;
+            std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_layouts{};
+            std::array<render_data::EnvironmentMaterialVariant, kAuthoredMaterialNames.size()> material_variants{};
+            float foliage_density{};
+            bool valid{};
+        };
         struct RefTable
         {
             std::shared_ptr<const std::vector<GpuStaticDrawRef>> cpu;
@@ -1183,6 +1204,7 @@ struct D3D12Renderer::Impl
         };
         std::shared_ptr<const StaticRenderScene> source;
         StaticDrawData draws;
+        SoftwareSceneCache software_scene;
         std::shared_ptr<RefTable> refs;
         std::vector<std::shared_ptr<RefTable>> retired_refs;
         bool refs_dirty{};
@@ -1579,7 +1601,8 @@ struct D3D12Renderer::Impl
                                             std::uint32_t output_height);
     void CommitUiResources(OwnedView &owner, UiResources &) noexcept;
     [[nodiscard]] Result RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
-                                     std::span<const UiModel> models);
+                                       std::span<const UiModel> models,
+                                       std::shared_ptr<const UiDrawContent> content = {});
     [[nodiscard]] Result CreateAllocation(AllocationResource &output,
                                           const D3D12MA::ALLOCATION_DESC &allocation,
                                           const D3D12_RESOURCE_DESC &resource,
@@ -1671,6 +1694,8 @@ struct D3D12Renderer::Impl
     std::array<FrameContext, kFrameCount> frames;
     std::array<VisibilityFrameBuffers, kFrameCount> visibility_frames;
     ResidencyManager residency;
+    EssentialBootstrapAdmission essential_bootstrap_admission;
+    bool essential_bootstrap_active{};
     NativeBudgetObservation local_budget_observation, nonlocal_budget_observation;
     HostBudgetObservation host_budget_observation;
     bool adapter_unified_memory{};

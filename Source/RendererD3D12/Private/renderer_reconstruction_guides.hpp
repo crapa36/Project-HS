@@ -109,6 +109,8 @@ class ReconstructionGuidesSystem
         ReconstructionGuidesLayout *layout=nullptr);
     [[nodiscard]] bool MatchesLayout(const ReconstructionGuidesInputs &,bool external,
         std::string_view provider_name,const ReconstructionGuidesLayout &) const noexcept;
+    [[nodiscard]] bool MatchesShape(const ReconstructionGuidesLayout &, bool external,
+        std::string_view provider_name, bool transparent_guides, bool screen_overlay) const noexcept;
     // external_bind must call the provider's BindExternal, which supplies the
     // current queue lease and callback without declaring graph boundaries.
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const ReconstructionGuidesInputs &,

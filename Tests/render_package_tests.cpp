@@ -47,6 +47,7 @@
 #include <utility>
 
 void TestReleaseAudioCodegen();
+void TestShippingRendererIdentity();
 void TestVirtualShadowGuarantees();
 
 namespace
@@ -62,6 +63,13 @@ void Require(bool condition, const char *reason)
 
 void TestMonsterLodDrawOrder()
 {
+    Require(hs::MergeActiveGiVoxelSize(0.0, 0.25) == 0.25 &&
+        hs::MergeActiveGiVoxelSize(0.25, 0.0) == 0.25 &&
+        hs::MergeActiveGiVoxelSize(0.5, 0.25) == 0.25 &&
+        hs::MergeActiveGiVoxelSize(0.25, 0.5) == 0.25 &&
+        hs::MergeActiveGiVoxelSize(0.0, 0.0) == 0.0 &&
+        !std::isfinite(hs::MergeActiveGiVoxelSize(0.25, std::numeric_limits<double>::quiet_NaN())),
+        "native GI union lost an active view or treated disabled zero as a voxel size");
     std::array<hs::RenderInstance, 4> sources{};
     sources[0].mesh = hs::RenderMesh::Archer;
     sources[1].mesh = hs::RenderMesh::MonsterMelee;
@@ -3440,6 +3448,7 @@ int main(int argc, char **argv)
             dump_numeric_fixtures = true;
         }
         RunNamed("TestExpandedVertexFields", TestExpandedVertexFields);
+        RunNamed("TestShippingRendererIdentity", TestShippingRendererIdentity);
         RunNamed("TestVfxMeshDescriptor", TestVfxMeshDescriptor);
         RunNamed("TestPackage", TestPackage);
         RunNamed("TestQualityProfiles", TestQualityProfiles);

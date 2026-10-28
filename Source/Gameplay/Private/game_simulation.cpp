@@ -98,7 +98,7 @@ GameSimulation::SimulationWorld::MutationScope::MutationScope(SimulationWorld &o
     world.RequireOwnerThread();
     if (world.observation.active_borrows != 0)
         throw std::logic_error("Gameplay mutation attempted while TickReadView is borrowed.");
-    world.observation.small_facts_dirty = true;
+    // Input bookkeeping can change the checksum without changing displayed facts.
     world.observation.checksum_dirty = true;
     ++world.observation.mutation_depth;
 }
@@ -162,9 +162,10 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
         impl_->actors->player_position_history.max_size())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Movement echo history age exceeds storage capacity.");
+    impl_->observation.small_facts_dirty = true;
     impl_->config = config;
-    impl_->telemetry->balance_observer.Reset(config.capture_detailed_balance);
-    if (config.capture_detailed_balance)
+    impl_->telemetry->balance_observer.Reset(config.capture_detailed_balance, config.capture_hit_rates);
+    if (config.capture_hit_rates)
         impl_->telemetry->balance_observer.player_hit_casts.reserve(256);
     impl_->timings = {};
     if (config.capture_timings)
@@ -207,12 +208,14 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
         impl_->actors->player.buffered_skill = SkillKind::Count;
         impl_->actors->player.buffered_skill_expires = 0;
         impl_->actors->player.buffered_skill_slot = 0xFF;
+        impl_->observation.small_facts_dirty |= world_changed;
         impl_->UpdateChecksum();
         impl_->timings.tick = impl_->tick;
         impl_->timings.completed = impl_->config.capture_timings;
         return {impl_->tick, impl_->checksum, impl_->session_phase, world_changed};
     }
     (void)fixed_delta;
+    impl_->observation.small_facts_dirty = true;
     NextSimulationSequence(impl_->tick);
     impl_->timings.tick = impl_->tick;
     impl_->PruneVisualLinks();
@@ -296,6 +299,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "Simulation is not initialized.");
     }
+    impl_->observation.small_facts_dirty = true;
     switch (command.kind)
     {
     case DebugCommandKind::StartSession:
@@ -439,6 +443,7 @@ Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
         impl_->actors->player_position_history.max_size())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Movement echo history age exceeds storage capacity.");
+    impl_->observation.small_facts_dirty = true;
     impl_->rules = rules;
     impl_->RebuildNavigation();
     impl_->InitializeContentReadFacts();
@@ -469,7 +474,7 @@ SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
 void GameSimulation::ApplyUiAction(const UiAction &action)
 {
     SimulationWorld::MutationScope mutation(*impl_);
-    (void)impl_->ApplyUiAction(action);
+    impl_->observation.small_facts_dirty |= impl_->ApplyUiAction(action);
     impl_->UpdateChecksum();
 }
 
@@ -583,7 +588,8 @@ void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
                      actors->player.forced_move_skill,
                      actors->player.movement_stopped_tick,
                      actors->player.locomotion_moving};
-    facts.effective_attack = EffectiveAttack();
+    const auto attack = EffectiveAttack();
+    facts.effective_attack = attack;
     facts.effective_attack_speed = EffectiveAttackSpeed();
     facts.effective_move_speed = EffectiveMoveSpeed();
     facts.effective_magnet_radius = EffectiveMagnetRadius();
@@ -593,7 +599,7 @@ void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
     {
         const auto skill = static_cast<SkillKind>(index);
         facts.skills[index].effective_cooldown = index == 0 ? Tick{} : EffectiveCooldownTicks(skill);
-        facts.skills[index].displayed_damage = RoundDamage(EffectiveAttack() * rules.skills[index].damage_coefficient);
+        facts.skills[index].displayed_damage = RoundDamage(attack * rules.skills[index].damage_coefficient);
     }
     if (actors->player.charging &&
         actors->player.charging_skill == SkillKind::ChargedShot)
@@ -786,6 +792,7 @@ Result GameSimulation::Shutdown()
         return Result::Success();
     }
     impl_->initialized = false;
+    impl_->observation.small_facts_dirty = true;
     return Result::Success();
 }
 

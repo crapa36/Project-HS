@@ -1,9 +1,24 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "vfx_typed_mesh_commands.hpp"
 #include <bit>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
+
+namespace hs::runtime_detail
+{
+std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+{
+    VfxImageData data;
+    data.program = program;
+    PrepareVfxMeshRecipes(program.View(), data.mesh_effect_recipes, data.mesh_recipes);
+    return BuildVfxTypedMeshCommands(data.View(), inputs);
+}
+}
 
 namespace
 {
@@ -58,6 +73,34 @@ int RunVfxMeshTests()
               "boss head must follow gameplay trajectory");
         p.outputs[0].source=4;
         Check(hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1)).empty(),"cross-source output accepted");
+        p.outputs[0].source=0;
+        auto valid_sibling=p.outputs[0];
+        valid_sibling.rgba[0]=0.4f;
+        valid_sibling.parameters={0,2};
+        p.parameters.push_back({Hash("unexpected"),hs::VfxParameterType::Float,0});
+        p.outputs[0].parameters={2,1};
+        p.outputs.push_back(valid_sibling);
+        p.sources[0].outputs.count=2;
+        commands=hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1));
+        Check(commands.size()==1 && commands[0].color.x==0.4f,
+              "malformed mesh row suppressed or reordered a valid sibling");
+        hs::VfxImageData data;
+        data.program=p;
+        hs::PrepareVfxMeshRecipes(data.program.View(),data.mesh_effect_recipes,data.mesh_recipes);
+        auto image=data.View();
+        std::vector<VfxOwnedMeshInput> appended;
+        appended.reserve(4);
+        VfxOwnedMeshInput prefix;prefix.owner_id=77;appended.push_back(prefix);
+        const auto capacity=appended.capacity();
+        hs::runtime_detail::AppendVfxTypedMeshCommands(image,{},appended);
+        auto rejected=owner;rejected.effect_handle=0;
+        hs::runtime_detail::AppendVfxTypedMeshCommands(image,std::span(&rejected,1),appended);
+        Check(appended.size()==1&&appended[0].owner_id==77&&appended.capacity()==capacity,
+              "empty/rejected mesh append changed prefix or capacity");
+        hs::runtime_detail::AppendVfxTypedMeshCommands(image,std::span(&owner,1),appended);
+        Check(appended.size()==2&&appended[1].owner_id==owner.stable_id&&
+              appended[1].position.x==owner.current_transform[12]&&appended.capacity()==capacity,
+              "mesh append lost actual owner geometry or reused capacity");
         std::cout<<"typed owned mesh tests passed\n";
         return 0;
     }

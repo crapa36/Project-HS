@@ -165,7 +165,8 @@ RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest
         const auto &packet = exchange_->slots_[*current_];
         pair.current = packet.storage.View();
         pair.ui_frame = packet.ui_frame;
-        if (pair.ui_frame) pair.current.ui = pair.ui_frame->draw_models;
+        if (pair.ui_frame && pair.ui_frame->draw_content)
+            pair.current.ui = pair.ui_frame->draw_content->models;
         pair.has_previous = packet.has_previous;
         if (pair.has_previous) pair.previous = packet.previous.View();
         pair.current_publication_sequence =

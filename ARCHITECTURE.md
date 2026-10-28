@@ -54,6 +54,11 @@ progression loops do not depend on Presentation or construct render snapshots.
 - The unconditional `hs_render_data_values` target depends only on Core. It does
   not pull package codecs, content tools, DXC or native renderer prerequisites into
   low-level builds. Presentation links this value target, not `hs_render_data`.
+- `hs_runtime_contracts` is a header usage-requirements target for native-free
+  Runtime public values/contracts. It exports Runtime/Public and renderer public
+  value headers and depends on Core/GameDomain/RenderData values; it neither builds
+  nor links the native Runtime/renderer backend, IO, DXC or content products.
+  Runtime, content consumers and low-level VFX fixtures inherit it directly.
 - RendererD3D12 must not depend on Jobs, game, presentation, or runtime modules.
 - Production modules must not include another module's `Private` headers.
 
@@ -81,6 +86,13 @@ simulation callers default to capture enabled; ordinary Runtime play disables
 it while smoke, recording and replay retain capture. Disabled TickResult and
 read-model checksums are zero. Explicit `ComputeChecksum()` still computes the
 same canonical state hash on demand without enabling automatic capture.
+
+Detailed balance capture controls optional upgrade/relic synergy detail.
+Independent session-start hit-rate capture controls only unique skill/enemy hit
+membership and its retirement. Public callers retain capture by default; ordinary
+Runtime explicitly disables both while recording/diagnostic sessions retain them.
+Off observations mark hit rates unavailable, and JSON exports use null for those
+counts/ratios while damage, uses, hit events and required summary values remain.
 
 ## Presentation and rendering
 
@@ -129,6 +141,15 @@ that same read; it has no catalog, format, generation or renderer knowledge. Thi
 currently covers PresentationCatalog, SimulationRules, AudioImage and VfxImage. AudioContent
 validates WAV inputs once and emits typed cue/sample rows plus headerless PCM;
 the linker incorporates these products without decoding the audio domain again.
+The linker's content image ID hashes a versioned value manifest, ordered typed
+tables and actual pack ranges/payload digests. Canonical scalars are little endian
+u32 (including narrow integers/bools) or u64, floats retain their IEEE bits, and
+strings/sequences have u64 lengths. Object padding, generated C++ formatting and
+producer executables are excluded. ActionKey still includes producer identity;
+Shipping/content.receipt.json records that provenance separately. HSCONT01 format2,
+13-table header layout and exact executable/pack matching remain unchanged.
+Regenerate the pair together when adopting the new content ID algorithm; existing
+runtime-only prebuilt configurations still require their exact matched pair.
 Release audio borrows generated cue rows and owns one preload PCM arena. Generated
 chunk digests cover contiguous preload runs and independent transition tracks;
 only successful verified reads publish ready PCM. Only
@@ -144,13 +165,18 @@ Runtime retains each adapted VFX event payload once in a stable-order
 ActiveEffectStore; profile lists and entity-surface captures hold private row
 references. Profile consumers borrow indexed views; attached ground/light/decal/
 distortion outputs share one sparse current-owner binding without overwriting
-birth/capture inputs. Membership masks avoid duplicate scans; unchanged stores
-skip compaction and expiry remaps the existing episode index incrementally.
+birth/capture inputs. Membership masks avoid duplicate scans; a count of rows
+without profile references skips compaction when only live rows were added.
+Capture-only rows remain eligible for retirement, and expiry remaps the existing
+episode index incrementally.
 Raw events retain the simulation producer's session/tick FIFO order; CPU activation
 retires that ingress independently from pending native emission submission.
 PreparedPairFacts indexes only the retained snapshot pair by its
 semantic publication revisions and row counts. It stores row ordinals, never
 borrowed data addresses; frame adapters still recompute live age and geometry.
+The admitted VfxImage also exposes a separately sorted effect-ID lookup without
+changing authored program handles. Frame adaptation borrows that index and reuses
+render-thread output storage; retained movement appends directly to the same owner.
 Light output recipes and their effect ranges are prepared by that same CPU IO
 phase and emitted as immutable tables. Ballistic mesh recipes likewise prepare
 immutable source/output shape, parameter and LUT contracts at admission; Runtime
@@ -160,6 +186,11 @@ texture/slice and quality contracts; per-frame evaluation only binds live values
 Output-profile presence is prepared with the image and generated for shipping;
 activation does not rescan source/output tables or retain non-ribbon events in
 the ribbon profile.
+Ribbon and EntitySurface share prepared image tables; Fresnel and direct-owner
+Mesh iterate accepted ordered recipes without authored parameter/path decoding.
+Successful Ballistic activation suppresses only the corresponding legacy Mesh
+before emitter construction; ShockShell and unrelated layers retain their original
+meaning. Native pending uses the same owner and stable legacy-before-typed order.
 Renderer accepts font bytes and DirectWrite owns its copy after initialization.
 Release reads the generated, verified font range from the pack; developer hosts
 load their explicit font input. Renderer texture/shader/bulk deployment still uses
@@ -171,6 +202,12 @@ the bounded latest UI packet. Main hit testing uses its rects and displayed
 facts; queued gameplay actions retain the packet/session/selection identity and
 are revalidated against the current simulation facts before application. This is
 a Present-accepted input contract, not a physical scan-out receipt.
+UiFrame receipt metadata publishes independently from a shared immutable RenderData
+UiDrawContent. Ordinary HUD draw facts follow actual displayed clock/label/wave
+values and exact bar inputs. Renderer banks retain that owner and their own raster
+and font environment; same-owner hits bypass deep comparison, different owners and
+legacy raw spans still compare content. CPU text-layout validity is independent of
+bitmap success and GPU copy completion. Reused draw data does not freeze click facts.
 
 RendererD3D12 is the single concrete platform backend. D3D12 types stay inside that boundary and Runtime/Apps that compose it. A generic renderer interface, factory, or registry is unwarranted without a real second backend.
 
@@ -264,6 +301,12 @@ Candidate scans share one current resource-shape snapshot. Flat reusable alias
 scratch labels the first occurrence rather than retaining native addresses or
 allocating a hash node per resource. Cold registration refreshes that snapshot
 after provider preparation; native certification and binding remain authoritative.
+
+Essential renderer initialization has a per-segment ceiling from reported adapter
+capacity, charging successful native allocation sizes only during that startup
+scope. Static capacity is never reported as currently available memory or used for
+optional streaming/candidate admission. Those paths retain observed OS budgets.
+Standard pools resolve by heap type; only CUSTOM heaps resolve by L0/L1 preference.
 
 Sequential views retain their own temporal and native reconstruction state.
 There is no parallel semantic history-resource registry: resources and history

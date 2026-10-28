@@ -339,7 +339,7 @@ void GameSimulation::SimulationWorld::StartSession()
     next_enemy_random_key = 1;
     telemetry->damage_dealt = telemetry->damage_taken = telemetry->healing = 0;
     telemetry->damage_by_skill = {};
-    telemetry->balance_observer.Reset(config.capture_detailed_balance);
+    telemetry->balance_observer.Reset(config.capture_detailed_balance, config.capture_hit_rates);
     actors->enemies.clear();
     actors->projectiles.clear();
     actors->pending_enemy_spawns.clear();
@@ -607,28 +607,43 @@ void GameSimulation::SimulationWorld::RunPipeline()
 
 void GameSimulation::SimulationWorld::CommitSpawnBarrier()
 {
+#ifndef NDEBUG
+    const auto first_new = actors->enemies.size();
+#endif
     actors->enemies.AppendFrom(actors->pending_enemy_spawns);
-    assert(std::ranges::none_of(actors->enemies, [](ConstEnemyRow enemy) {
-        return enemy.id.value == 0;
-    }));
+#ifndef NDEBUG
+    for (auto row = first_new; row < actors->enemies.size(); ++row)
+        assert(std::as_const(actors->enemies)[row].id.value != 0);
+#endif
 }
 
 void GameSimulation::SimulationWorld::CommitAbilitySpawnBarrier()
 {
+#ifndef NDEBUG
+    const auto first_new = actors->projectiles.size();
+#endif
     actors->projectiles.AppendFrom(actors->pending_projectile_spawns);
     actors->areas.insert(actors->areas.end(), std::make_move_iterator(actors->pending_area_spawns.begin()),
                  std::make_move_iterator(actors->pending_area_spawns.end()));
     actors->pending_area_spawns.clear();
-    assert(std::ranges::none_of(actors->projectiles, [](ConstProjectileRow projectile) {
-        return projectile.id.value == 0;
-    }));
+#ifndef NDEBUG
+    for (auto row = first_new; row < actors->projectiles.size(); ++row)
+        assert(std::as_const(actors->projectiles)[row].id.value != 0);
+#endif
 }
 
 void GameSimulation::SimulationWorld::CommitCleanupBarrier()
 {
     actors->enemies.EraseIf([](ConstEnemyRow enemy) { return enemy.life.dead; });
     actors->projectiles.EraseIf([](ConstProjectileRow projectile) { return projectile.combat.dead; });
+#ifndef NDEBUG
+    const auto first_new_projectile = actors->projectiles.size();
+#endif
     actors->projectiles.AppendFrom(actors->pending_projectile_spawns);
+#ifndef NDEBUG
+    for (auto row = first_new_projectile; row < actors->projectiles.size(); ++row)
+        assert(std::as_const(actors->projectiles)[row].id.value != 0);
+#endif
     std::erase_if(actors->areas, [](const AreaActor &area) { return area.dead; });
     if (progression->pickup_work.NeedsCompaction())
     {
@@ -687,7 +702,7 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
 void GameSimulation::SimulationWorld::RetireBalanceHitCauses()
 {
     auto &observer = telemetry->balance_observer;
-    if (!observer.metrics.detailed_balance_captured ||
+    if (!observer.metrics.hit_rates_captured ||
         (observer.player_hit_casts.empty() &&
          std::ranges::all_of(observer.enemy_hit_casts,
                              [](const auto &casts) { return casts.empty(); })))

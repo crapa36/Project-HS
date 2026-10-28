@@ -127,15 +127,19 @@ Result DecalSurfaceSystem::Register(RenderGraphBuilder &graph, const DecalSurfac
 {
     return RegisterFrame(graph,input,constants,output,layout,nullptr);
 }
-bool DecalSurfaceSystem::MatchesLayout(const DecalSurfaceInputs &input,const DecalSurfaceLayout &layout)const noexcept
+bool DecalSurfaceSystem::MatchesShape(const DecalSurfaceLayout &layout, bool active) const noexcept
 {
-    if(!layout.valid||layout.active!=(input.command_count!=0))return false;
+    if(!layout.valid||layout.active!=active)return false;
     if(!layout.active)return true;
     const auto &t=targets_;
     return t&&layout.capacity.width==t->capacity.width&&layout.capacity.height==t->capacity.height&&
-        layout.frame_slots==t->slot_completion.size()&&layout.guides==std::array{
+        layout.frame_slots==t->slot_completion.size();
+}
+bool DecalSurfaceSystem::MatchesLayout(const DecalSurfaceInputs &input,const DecalSurfaceLayout &layout)const noexcept
+{
+    return MatchesShape(layout, input.command_count != 0) && (!layout.active || layout.guides==std::array{
             input.depth.version,input.metadata.version,input.base.version,input.normal.version,input.material.version,
-            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version};
+            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version});
 }
 Result DecalSurfaceSystem::BindRetained(RenderGraphBuilder &graph,const DecalSurfaceInputs &input,
     DecalSurfaceConstants constants,const DecalSurfaceLayout &layout,DecalSurfaceOutputs &output)

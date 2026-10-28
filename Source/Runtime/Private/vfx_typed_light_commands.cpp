@@ -30,6 +30,15 @@ std::optional<Float3> Center(const VfxEventInput &input,std::uint32_t schema)
 std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,double current_tick)
 {
  std::vector<VfxLightInput> result;
+ AppendVfxTypedLightCommands(image, inputs, current_tick, result);
+ return result;
+}
+void AppendVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,double current_tick,
+ std::vector<VfxLightInput> &result)
+{
+ const auto original_size=result.size();
+ try
+ {
  for(const auto &input:inputs)
  {
   if(static_cast<std::uint32_t>(input.quality)>2 || !input.effect_handle || input.effect_handle>image.light_effect_ranges.size() || current_tick<input.event_tick)continue;
@@ -70,6 +79,7 @@ std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,VfxE
    result.push_back({stable,*center,r.radius,r.rgb,intensity,input.importance_override?input.importance_override:r.importance,input.quality});
   }
  }
- return result;
+ }
+ catch(...){result.resize(original_size);throw;}
 }
 }

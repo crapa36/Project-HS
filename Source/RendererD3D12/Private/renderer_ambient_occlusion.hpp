@@ -115,6 +115,7 @@ class AmbientOcclusionSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const AmbientOcclusionInputs &,
         AmbientOcclusionConstants, const AmbientOcclusionLayout &, AmbientOcclusionOutputs &);
     [[nodiscard]] bool MatchesLayout(const AmbientOcclusionInputs &,const AmbientOcclusionLayout &)const noexcept;
+    [[nodiscard]] bool MatchesShape(const AmbientOcclusionLayout &, bool reset_history, QueueHint) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;

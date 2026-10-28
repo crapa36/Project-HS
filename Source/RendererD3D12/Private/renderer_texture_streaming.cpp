@@ -92,6 +92,7 @@ struct TextureOwner
     NativeResourceContract reserved_contract{};
     D3D12_PACKED_MIP_INFO packed{};
     std::vector<D3D12_SUBRESOURCE_TILING> tilings;
+    std::vector<std::uint64_t> mip_costs;
     std::vector<MipBacking> backing;
     AllocationResource software;
     ResidencyTicket software_ticket;
@@ -107,7 +108,10 @@ struct TextureOwner
     render_data::TexturePackageView prepared_package;
     ResidencyTicket read_ticket, decode_ticket;
     std::uint64_t metadata_reservation_bytes{};
+    std::uint64_t host_target_budget{};
+    std::uint32_t minimum_host_target_mip{};
     bool metadata_ticket_committed{};
+    bool host_target_cache_valid{};
     std::uint64_t revision{1}, requests{}, uploads{}, publications{}, reclaims{};
     std::uint64_t demand_frame{}, publication_frame{};
     std::uint32_t first_mip{}, resident_mip{}, tail_mip{}, desired_mip{}, observed_mip{}, priority{};
@@ -127,6 +131,44 @@ struct TextureOwner
         return reserved_published || software.resource.Get() != nullptr;
     }
 };
+bool MetadataReservationBytes(const TextureOwner &texture, std::uint64_t &bytes) noexcept
+{
+    const auto count = texture.ranged_descriptor.subresources.empty()
+        ? static_cast<std::uint64_t>(texture.registration.description.array_size) * texture.registration.description.mip_count
+        : static_cast<std::uint64_t>(texture.ranged_descriptor.subresources.size());
+    if (count > (UINT64_MAX - sizeof(render_data::TexturePackageView)) /
+            sizeof(render_data::TextureSubresourceView))
+        return false;
+    bytes = sizeof(render_data::TexturePackageView) + count * sizeof(render_data::TextureSubresourceView);
+    return true;
+}
+bool RefreshTextureHostTarget(TextureOwner &texture, const ResidencyBudgetSnapshot &budget) noexcept
+{
+    if (!budget.host_budget_valid || !budget.host_fresh || texture.ranged_descriptor.subresources.empty())
+        return true;
+    if (texture.host_target_cache_valid && texture.host_target_budget == budget.host_staging_budget)
+        return true;
+    std::uint64_t metadata_bytes{};
+    if (!MetadataReservationBytes(texture, metadata_bytes)) return false;
+    std::uint32_t minimum_mip{};
+    if (!TextureReadMinimumHostMip(texture.registration.description,
+            texture.ranged_descriptor.subresources, metadata_bytes,
+            budget.host_staging_budget, minimum_mip)) return false;
+    texture.host_target_budget = budget.host_staging_budget;
+    texture.minimum_host_target_mip = minimum_mip;
+    texture.host_target_cache_valid = true;
+    return true;
+}
+enum class HostTargetFit : std::uint8_t { Unbounded, Fits, NoFit, Invalid };
+HostTargetFit TextureTargetFitsHost(TextureOwner &texture, std::uint32_t target,
+                                    const ResidencyBudgetSnapshot &budget) noexcept
+{
+    if (!RefreshTextureHostTarget(texture, budget)) return HostTargetFit::Invalid;
+    if (!budget.host_budget_valid || !budget.host_fresh || texture.ranged_descriptor.subresources.empty())
+        return HostTargetFit::Unbounded;
+    return target >= texture.minimum_host_target_mip && target <= texture.tail_mip
+        ? HostTargetFit::Fits : HostTargetFit::NoFit;
+}
 } // namespace
 struct RendererTextureStreaming::Impl
 {
@@ -138,6 +180,10 @@ struct RendererTextureStreaming::Impl
     std::uint32_t frame_count{};
     std::uint64_t budget{};
     std::vector<TextureOwner> textures;
+    std::uint64_t minimum_budget_bytes{};
+    std::vector<std::uint32_t> budget_candidate_indices;
+    std::vector<std::uint32_t> budget_priority_scratch;
+    std::vector<std::uint32_t> budget_desired_scratch, budget_tail_scratch;
     std::span<const render_data::TextureDescriptor> texture_catalog;
     std::unordered_map<std::string, render_data::TextureDescriptorStorage> supplied_descriptors;
     std::vector<RetiredTexture> retired;
@@ -187,39 +233,68 @@ struct RendererTextureStreaming::Impl
         }
         return result;
     }
-    std::uint64_t Cost(const TextureOwner &texture, std::uint32_t mip) const
+    bool BuildMipCosts(TextureOwner &texture) const
     {
+        const auto mip_count = texture.registration.description.mip_count;
+        texture.mip_costs.assign(mip_count, 0);
+        if (texture.registration.pinned) return true;
         if (!texture.reserved)
         {
-            if (mip == texture.registration.fallback_first_mip) return 0;
-            const auto description = Description(texture.registration.description, mip);
-            return device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
+            for (std::uint32_t mip = 0; mip < mip_count; ++mip)
+            {
+                if (mip == texture.registration.fallback_first_mip) continue;
+                const auto description = Description(texture.registration.description, mip);
+                const auto bytes = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
+                if (!bytes || bytes == UINT64_MAX) return false;
+                texture.mip_costs[mip] = bytes;
+            }
+            return true;
         }
-        std::uint64_t tiles{};
         const auto &description = texture.registration.description;
         const auto end = texture.packed.NumPackedMips ? texture.packed.NumStandardMips : description.mip_count;
-        for (auto level = mip; level < end; ++level)
+        if (end > mip_count) return false;
+        std::uint64_t packed_tiles{};
+        if (texture.packed.NumPackedMips)
+        {
+            const auto tiles_per_slice = static_cast<std::uint64_t>(texture.packed.NumTilesForPackedMips);
+            if (!tiles_per_slice || tiles_per_slice > UINT64_MAX / description.array_size) return false;
+            packed_tiles = tiles_per_slice * description.array_size;
+        }
+        std::uint64_t packed_bytes{};
+        if (packed_tiles > UINT64_MAX / D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES) return false;
+        packed_bytes = packed_tiles * D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
+        for (auto mip = end; mip < mip_count; ++mip) texture.mip_costs[mip] = packed_bytes;
+        std::uint64_t suffix_tiles{};
+        for (auto mip = end; mip > 0;)
+        {
+            --mip;
+            std::uint64_t mip_tiles{};
             for (UINT slice = 0; slice < description.array_size; ++slice)
             {
-                const auto &tiling = texture.tilings[slice * description.mip_count + level];
-                tiles += static_cast<UINT64>(tiling.WidthInTiles) * tiling.HeightInTiles * tiling.DepthInTiles;
+                const auto &tiling = texture.tilings[slice * description.mip_count + mip];
+                const auto width_height = static_cast<std::uint64_t>(tiling.WidthInTiles) * tiling.HeightInTiles;
+                if ((tiling.HeightInTiles && width_height / tiling.HeightInTiles != tiling.WidthInTiles) ||
+                    (tiling.DepthInTiles && width_height > UINT64_MAX / tiling.DepthInTiles)) return false;
+                const auto tiles = width_height * tiling.DepthInTiles;
+                if (!tiles) return false;
+                if (mip_tiles > UINT64_MAX - tiles) return false;
+                mip_tiles += tiles;
             }
-        if (texture.packed.NumPackedMips)
-            tiles += static_cast<UINT64>(texture.packed.NumTilesForPackedMips) * description.array_size;
-        return tiles * D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
+            if (suffix_tiles > UINT64_MAX - mip_tiles) return false;
+            suffix_tiles += mip_tiles;
+            if (suffix_tiles > (UINT64_MAX - packed_bytes) / D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES)
+                return false;
+            texture.mip_costs[mip] = suffix_tiles * D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES + packed_bytes;
+        }
+        return true;
+    }
+    std::uint64_t Cost(const TextureOwner &texture, std::uint32_t mip) const noexcept
+    {
+        return mip < texture.mip_costs.size() ? texture.mip_costs[mip] : UINT64_MAX;
     }
     std::uint64_t MinimumBudget() const
     {
-        std::uint64_t bytes{};
-        for (const auto &texture : textures)
-        {
-            const auto tail = texture.registration.pinned ? 0u : Cost(texture, texture.tail_mip);
-            const auto fallback = texture.registration.fallback_allocation_bytes;
-            if (tail == UINT64_MAX || tail > UINT64_MAX - fallback || bytes > UINT64_MAX - tail - fallback)
-                return UINT64_MAX;
-            bytes += tail + fallback;
-        }
-        return bytes;
+        return minimum_budget_bytes;
     }
     Result Prepare(TextureOwner &, std::uint32_t, ResidencyManager &, StreamingManager &);
 };
@@ -394,6 +469,14 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
         if (texture.packed.NumPackedMips) texture.tail_mip = std::min(texture.tail_mip,
             static_cast<std::uint32_t>(texture.packed.NumStandardMips));
     }
+    if (!impl_->BuildMipCosts(texture))
+        return Failure("Could not precompute the selected texture's native mip allocation costs.");
+    const auto tail_cost = texture.registration.pinned ? 0u : impl_->Cost(texture, texture.tail_mip);
+    const auto fallback_cost = texture.registration.fallback_allocation_bytes;
+    auto next_minimum_budget = impl_->minimum_budget_bytes;
+    if (tail_cost == UINT64_MAX || !TextureAccumulateBudgetBytes(next_minimum_budget, tail_cost) ||
+        !TextureAccumulateBudgetBytes(next_minimum_budget, fallback_cost))
+        return Failure("Selected texture minimum allocation total overflowed.");
     texture.fallback_ticket = texture.registration.fallback_residency;
     if (texture.fallback_ticket && (!residency.Contains(texture.fallback_ticket) || !residency.IsPinned(texture.fallback_ticket)))
         return Failure("Selected texture's existing fallback accounting is invalid.");
@@ -403,6 +486,7 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
     texture.observed_mip = texture.desired_mip = texture.tail_mip;
     try { impl_->textures.push_back(std::move(texture)); }
     catch (...) { if (!texture.registration.fallback_residency) static_cast<void>(residency.ReleaseNow(texture.fallback_ticket)); throw; }
+    impl_->minimum_budget_bytes = next_minimum_budget;
     id.value = static_cast<std::uint32_t>(impl_->textures.size());
     return Result::Success();
 }
@@ -506,7 +590,11 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
         !batch->maps.empty() || batch->unmaps.empty()))
         return Failure("Reserved texture coarsening has no authenticated mapping-only transition.");
     if (!batch->reserved && !texture.software_candidate.resource)
-        backing_bytes = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
+    {
+        backing_bytes = Cost(texture, target);
+        if (!backing_bytes)
+            return Failure("Selected software texture candidate has no precomputed native mip cost.");
+    }
     // A reserved batch with no new mappings only changes tile mappings. Its
     // requested mips already contain the package data, so keep the mapping
     // batch independent of GPU upload admission.
@@ -744,8 +832,11 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             texture.software_candidate = std::move(batch->candidate_owner);
             texture.transaction_next = batch->transaction_chunk_end;
             if (residency.ReleaseNow(batch->upload_ticket)) ++texture.reclaims;
+            if (texture.decode_ticket) static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
+            texture.decode_ticket = {}; texture.metadata_ticket_committed = false;
             texture.pending.reset(); texture.request = {};
             texture.request_ranges.clear(); texture.request_subresources.clear();
+            texture.prepared_package = {};
             std::vector<std::byte>{}.swap(texture.bytes);
             continue;
         }
@@ -777,14 +868,15 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
     }
     // Apply quality before the budget planner. With no feedback/view demand the
     // real coarse tail remains resident, including on software adapters.
+    const auto host_budget_snapshot = residency.HostAdmissionFacts().budget;
     std::uint64_t planned{};
     for (auto &texture : impl_->textures)
     {
         if (texture.registration.pinned)
         {
-            if (planned > UINT64_MAX - texture.registration.fallback_allocation_bytes)
+            if (!TextureAccumulateBudgetBytes(planned, texture.registration.fallback_allocation_bytes))
                 return Failure("Pinned texture budget cost overflow.");
-            planned += texture.registration.fallback_allocation_bytes; continue;
+            continue;
         }
         const auto recent = [&](std::uint64_t observed_frame) {
             return observed_frame <= frame && frame - observed_frame <= impl_->frame_count;
@@ -800,14 +892,23 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 ? texture.resident_mip : texture.tail_mip;
         }
         texture.desired_mip = std::min(texture.tail_mip, std::max(texture.desired_mip, impl_->finest_mip));
+        if (!texture.reserved && !texture.ranged_descriptor.subresources.empty() &&
+            host_budget_snapshot.host_budget_valid && host_budget_snapshot.host_fresh)
+        {
+            if (!RefreshTextureHostTarget(texture, host_budget_snapshot))
+                return Failure("Selected texture authenticated host range metadata is invalid.");
+            const auto fallback_mip = texture.software.resource
+                ? texture.resident_mip : texture.registration.fallback_first_mip;
+            texture.desired_mip = TextureEffectiveHostTargetMip(texture.desired_mip,
+                texture.tail_mip, texture.minimum_host_target_mip, fallback_mip,
+                texture.resident_mip, texture.software.resource.Get() != nullptr);
+        }
         const auto cost = impl_->Cost(texture, texture.desired_mip);
-        if (cost == UINT64_MAX || cost > UINT64_MAX - texture.registration.fallback_allocation_bytes ||
-            planned > UINT64_MAX - cost - texture.registration.fallback_allocation_bytes)
+        if (cost == UINT64_MAX || !TextureAccumulateBudgetBytes(planned, texture.registration.fallback_allocation_bytes) ||
+            !TextureAccumulateBudgetBytes(planned, cost))
             return Failure("Selected texture budget cost overflow.");
-        planned += texture.registration.fallback_allocation_bytes + cost;
     }
     auto budget = impl_->budget;
-    const auto accounting = residency.Accounting();
     const auto &observed = accounting.budget;
     bool global_pressure{};
     if (observed.valid && observed.local_budget)
@@ -827,18 +928,51 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         budget = std::max(budget, impl_->MinimumBudget());
     }
     else if (!budget) budget = UINT64_MAX; // The same unreported-budget contract as ResidencyManager.
-    while (planned > budget)
+    if (planned > budget)
     {
-        TextureOwner *victim{};
-        for (auto &texture : impl_->textures)
-            if (!texture.registration.pinned && texture.desired_mip < texture.tail_mip &&
-                (!victim || texture.priority < victim->priority)) victim = &texture;
-        if (!victim) return Failure("Texture budget cannot contain the actual pinned selected texture tails.");
-        const auto old_cost = impl_->Cost(*victim, victim->desired_mip);
-        ++victim->desired_mip; const auto new_cost = impl_->Cost(*victim, victim->desired_mip);
-        if (old_cost < new_cost) return Failure("Native texture mip costs are not monotonic.");
-        planned -= old_cost - new_cost;
+        const auto count = impl_->textures.size();
+        impl_->budget_priority_scratch.resize(count);
+        impl_->budget_desired_scratch.resize(count);
+        impl_->budget_tail_scratch.resize(count);
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const auto &texture = impl_->textures[index];
+            impl_->budget_priority_scratch[index] = texture.priority;
+            impl_->budget_desired_scratch[index] = texture.desired_mip;
+            impl_->budget_tail_scratch[index] = texture.registration.pinned ? texture.desired_mip : texture.tail_mip;
+        }
+        if (!TextureBuildBudgetVictimOrder(impl_->budget_priority_scratch,
+                impl_->budget_desired_scratch, impl_->budget_tail_scratch,
+                impl_->budget_candidate_indices))
+            return Failure("Texture budget victim candidate state is invalid.");
+        for (const auto index : impl_->budget_candidate_indices)
+        {
+            auto &victim = impl_->textures[index];
+            while (planned > budget && victim.desired_mip < victim.tail_mip)
+                if (!TextureCoarsenOneMip(victim.desired_mip, victim.tail_mip,
+                        victim.mip_costs, planned))
+                    return Failure("Native texture mip costs are not monotonic or overflowed.");
+            if (planned <= budget) break;
+        }
+        if (planned > budget)
+            return Failure("Texture budget cannot contain the actual pinned selected texture tails.");
     }
+    const auto abandon_software_transaction = [&](TextureOwner &texture) {
+        if (texture.request) static_cast<void>(streaming.Cancel(texture.request));
+        if (texture.read_ticket) static_cast<void>(residency.ReleaseNow(texture.read_ticket));
+        if (texture.decode_ticket) static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
+        texture.read_ticket = {}; texture.decode_ticket = {}; texture.metadata_ticket_committed = false;
+        texture.request = {}; texture.request_ranges.clear(); texture.request_subresources.clear();
+        if (texture.software_candidate_ticket)
+        {
+            static_cast<void>(residency.ReleaseNow(texture.software_candidate_ticket));
+            texture.software_candidate_ticket = {}; texture.software_candidate.Reset();
+        }
+        texture.software_transaction = false;
+        texture.transaction_subresources.clear(); texture.transaction_next = 0;
+        texture.transaction_target_mip = 0;
+        texture.prepared_package = {}; std::vector<std::byte>{}.swap(texture.bytes);
+    };
     // Resolve no-payload shrink/fallback transitions globally before admitting
     // any new texture payload reads in this pump.
     for (std::size_t owner_index = 0; owner_index < impl_->textures.size(); ++owner_index)
@@ -952,6 +1086,16 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             continue;
         }
         else if (page->state != StreamingPageState::Decoded) continue;
+        const auto target_fit = texture.software_transaction
+            ? TextureTargetFitsHost(texture, texture.transaction_target_mip, host_budget_snapshot)
+            : HostTargetFit::Fits;
+        if (target_fit == HostTargetFit::Invalid)
+            return Failure("Selected texture authenticated host range metadata is invalid.");
+        if (texture.software_transaction && target_fit == HostTargetFit::NoFit)
+        {
+            abandon_software_transaction(texture);
+            continue;
+        }
         const bool active = texture.reserved_published || texture.software.resource;
         if ((active && texture.resident_mip == texture.request_target_mip) ||
             (!active && !texture.reserved && texture.first_mip == texture.request_target_mip))
@@ -977,6 +1121,18 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
     {
         auto &texture = impl_->textures[owner_index];
         if (texture.registration.pinned || texture.pending) continue;
+        const auto target_fit = texture.software_transaction
+            ? TextureTargetFitsHost(texture, texture.transaction_target_mip, host_budget_snapshot)
+            : HostTargetFit::Fits;
+        if (target_fit == HostTargetFit::Invalid)
+            return Failure("Selected texture authenticated host range metadata is invalid.");
+        if (texture.software_transaction && target_fit == HostTargetFit::NoFit)
+        {
+            const auto *page = texture.request ? streaming.Find(texture.request) : nullptr;
+            if (!texture.request || (page && page->state != StreamingPageState::Reading &&
+                    page->state != StreamingPageState::Uploading && page->state != StreamingPageState::Retiring))
+                abandon_software_transaction(texture);
+        }
         const bool active = texture.reserved_published || texture.software.resource;
         if (!texture.software_transaction && !texture.request && active && texture.resident_mip == texture.desired_mip) continue;
         if (!texture.software_transaction && !texture.request && !active && !texture.reserved &&
@@ -1045,14 +1201,8 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 if (!texture.request_reserved && texture.transaction_subresources.empty())
                     return Failure("Software texture replacement has no required mip ranges.");
             }
-            const auto subresource_count = texture.ranged_descriptor.subresources.empty()
-                ? static_cast<std::uint64_t>(texture.registration.description.array_size) * texture.registration.description.mip_count
-                : static_cast<std::uint64_t>(texture.ranged_descriptor.subresources.size());
-            if (subresource_count > (UINT64_MAX - sizeof(render_data::TexturePackageView)) /
-                    sizeof(render_data::TextureSubresourceView))
+            if (!MetadataReservationBytes(texture, texture.metadata_reservation_bytes))
                 return Failure("Selected texture prepared metadata size overflow.");
-            texture.metadata_reservation_bytes = sizeof(render_data::TexturePackageView) +
-                subresource_count * sizeof(render_data::TextureSubresourceView);
             if (!texture.decode_ticket) texture.metadata_ticket_committed = false;
             // Each transaction owns a fixed target and only its authenticated subresource ranges.
         }
@@ -1065,12 +1215,17 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             if (!texture.request_reserved && texture.software_transaction &&
                 !texture.ranged_descriptor.subresources.empty() && texture.request_subresources.empty())
             {
-                const auto accounting_now = residency.Accounting();
-                const auto &host = accounting_now.budget;
+                const auto admission_now = residency.HostAdmissionFacts();
+                const auto &host = admission_now.budget;
                 if (!host.host_budget_valid || !host.host_fresh) continue;
-                if (accounting_now.host_staging_total > UINT64_MAX - accounting_now.host_reserved_total)
+                if (admission_now.held_overflow)
                     return Failure("Software texture host accounting overflow.");
-                const auto held = accounting_now.host_staging_total + accounting_now.host_reserved_total;
+                const auto held = admission_now.held_bytes;
+                if (metadata_needed > host.host_staging_budget && texture.software_transaction)
+                {
+                    abandon_software_transaction(texture);
+                    continue;
+                }
                 if (metadata_needed > host.host_staging_budget)
                     return Failure("Software texture metadata table exceeds the configured host staging budget.");
                 if (held > host.host_staging_budget - metadata_needed) continue;
@@ -1085,11 +1240,11 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                             texture.ranged_descriptor.subresources, texture.transaction_next,
                             intrinsic_payload_budget) != texture.transaction_next)
                         continue; // Other admitted owners currently hold the remaining host capacity.
-                    const auto index = texture.transaction_subresources[texture.transaction_next];
-                    const auto bytes = texture.ranged_descriptor.subresources[index].byte_count;
-                    return Failure("Software texture replacement subresource " + std::to_string(index) +
-                        " requires " + std::to_string(bytes) + " host bytes, but only " +
-                        std::to_string(payload_budget) + " are available after transaction metadata.");
+                    // The intrinsic ceiling changed after the per-pump target
+                    // selection. Drop this unpublished candidate; next Pump
+                    // will clamp the demand using the new cached threshold.
+                    abandon_software_transaction(texture);
+                    continue;
                 }
                 for (auto cursor = texture.transaction_next; cursor < chunk_end; ++cursor)
                 {
@@ -1111,7 +1266,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 return Failure("Selected texture range or metadata extent is invalid.");
             if (size > UINT64_MAX - metadata_needed) return Failure("Selected texture host peak overflow.");
             const auto host_peak = size + metadata_needed;
-            const auto host_budget = residency.Accounting().budget;
+            const auto host_budget = residency.HostAdmissionFacts().budget;
             if (host_budget.host_budget_valid && host_budget.host_fresh &&
                 host_peak > host_budget.host_staging_budget)
                 return Failure("Selected texture's smallest complete transaction exceeds the host staging budget.");
@@ -1133,6 +1288,11 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             if (!submitted)
             {
                 static_cast<void>(residency.ReleaseNow(texture.read_ticket));
+                if (texture.decode_ticket && !texture.metadata_ticket_committed)
+                {
+                    static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
+                    texture.decode_ticket = {};
+                }
             }
             texture.read_ticket = {};
             if (!result)
