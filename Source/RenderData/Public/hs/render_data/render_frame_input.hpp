@@ -16,7 +16,6 @@
 #include <hs/render_data/vfx_screen_input.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
 #include <hs/render_data/vfx_volume_input.hpp>
-#include <hs/core/presentation_event.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -62,7 +61,6 @@ struct RenderFrameInput
 {
     std::span<const RenderViewInput> views;
     RenderSnapshotPair snapshots;
-    std::span<const PresentationEvent> events;
     RenderVfxFrameInput vfx;
     DevToolsFrameData devtools;
     std::span<const UiModel> ui;

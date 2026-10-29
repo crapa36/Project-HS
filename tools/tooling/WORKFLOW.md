@@ -12,9 +12,9 @@ Local Python 3.13 environment: `Build/tooling/desloppify/.venv`. Installed
 runner, or game dependency was added.
 
 ```powershell
-& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx scan --path . --profile ci --no-badge
-& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx status
-& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx next
+& ./Build/tooling/desloppify/.venv/Scripts/python.exe -X utf8 -m desloppify --lang cxx scan --path . --profile ci --no-badge
+& ./Build/tooling/desloppify/.venv/Scripts/python.exe -X utf8 -m desloppify --lang cxx status
+& ./Build/tooling/desloppify/.venv/Scripts/python.exe -X utf8 -m desloppify --lang cxx next
 ```
 
 Run from the repository root. The initial scan used the existing validation
@@ -41,9 +41,15 @@ translation units independently, so zero include importers does not mean dead
 code. The numeric `/proc/self/statm` fscanf warning is a confirmed regex false
 positive. The test log's "7546 production files" is a weighted potential, not a
 file count or measured coverage. clang-tidy/cppcheck are unavailable; security
-uses reduced regex coverage. No subjective score was supplied, no score-driven
-tests/deletions were made, and no issue was marked fixed without a change.
-Results and complete raw score table: `Build/tooling/desloppify/RESULTS.md`.
+uses reduced regex coverage. No subjective score was supplied in that initial
+scan. The later full scan and twenty independent blind dimension reviews are in
+`Build/health-review-20261029/RESULTS.ko.md`; scores are analysis snapshots, not
+performance/stability evidence. No score-driven tests/deletions were made.
+The review module needed the same colon-regex correction as the extractor; its
+original is preserved in the local tool folder and declaration/case-label checks
+pass. Use `python -X utf8` to avoid Windows cp949 schema-read failures. Reinstalling
+the tool removes the local fixes. Initial raw score table:
+`Build/tooling/desloppify/RESULTS.md`.
 Upstream: https://github.com/peteromallet/desloppify
 
 ## C++ navigation: adopted

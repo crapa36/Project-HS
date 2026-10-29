@@ -13,7 +13,6 @@
 #include <hs/render_data/vfx_ribbon_input.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
 
-#include <hs/core/presentation_event.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <hs/core/result.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
@@ -848,8 +847,7 @@ class D3D12Renderer
     [[nodiscard]] Result CaptureVisibilityDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result ApplyOptions(const RendererOptions &options);
     [[nodiscard]] Result InitializeGraphicsSettings(const GraphicsSettings &);
-    [[nodiscard]] Result Render(const RenderSnapshotPair &snapshots,
-                                std::span<const PresentationEvent> events,
+    [[nodiscard]] Result RenderView(const RenderSnapshotPair &snapshots,
                                 std::span<const ParticleSpawnCommand> particle_spawns,
                                 std::span<const VfxLineSpawnCommand> effect_lines,
                                 std::uint32_t typed_vfx_event_count,

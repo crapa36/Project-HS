@@ -8,7 +8,9 @@
 #include <Windows.h>
 #include <d3d12.h>
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include <WinPixEventRuntime/pix3.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -240,7 +242,7 @@ bool SameDescriptor(const D3D12_RESOURCE_DESC &a, const D3D12_RESOURCE_DESC &b) 
 
 unsigned ExecutionKind(const Pass &pass) noexcept
 {
-    return pass.external ? 4u : pass.owner_execute ? (pass.execute_on_owner ? 3u : 2u) : pass.execute ? 1u : 0u;
+    return pass.external ? 4u : pass.execute_on_owner ? 3u : pass.owner_execute ? 2u : pass.execute ? 1u : 0u;
 }
 
 // Declaration values and compiled logical facts survive Reset. Current native
@@ -259,6 +261,7 @@ struct TopologyValues
         Access final{};
         ResourceVersion final_version{};
         std::uint32_t first_use{UINT32_MAX}, last_use{};
+        bool excludes_shared_reads{};
     };
     struct PassValues
     {
@@ -378,6 +381,10 @@ struct TopologyValues
             stored.id = p.id; stored.name = p.Name(); stored.queue = p.queue;
             stored.execution_kind = ExecutionKind(p); stored.uses = p.Uses();
             if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
+            // Owner/provider callbacks can bridge read-only resources through COMMON.
+            if (p.external || p.execute_on_owner)
+                for (const auto &use : stored.uses)
+                    resources[use.predecessor.resource.value - 1].excludes_shared_reads = true;
         }
         ordering = current_ordering;
         for (std::uint32_t position = 0; position < schedule.execution_order.size(); ++position)
@@ -1490,13 +1497,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             const auto &resource = g.resources[index];
             shareable[index] = resource.imported && resource.kind == ResourceKind::Texture &&
                 !resource.alias_activation && !resource.imported_external_completion.native_fence_owner &&
-                !resource.imported_external_completion.resource_lease;
+                !resource.imported_external_completion.resource_lease &&
+                !g.topology.resources[index].excludes_shared_reads;
         }
-        // Owner-thread SDK callbacks may temporarily bridge through COMMON via
-        // RecordLegacyResourceCommands even when their declared use is read-only.
-        for (const auto &pass : g.passes)
-            if (pass.external || pass.execute_on_owner)
-                for (const auto &use : pass.Uses()) shareable[use.predecessor.resource.value - 1] = false;
     }
     auto &batches = impl_->batches;
     batches.resize(g.passes.size());
@@ -1867,12 +1870,11 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 auto &pass = g.passes[batch.pass];
                 if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
-                // WinPixEventRuntime's command-list marker path issues
-                // compute-only calls on COPY lists under the D3D12 debug layer.
-                // Copy queues have no timestamp support here either, so leave
-                // them unmarked rather than introducing invalid API traffic.
+#if defined(HS_DEVELOPMENT_TOOLS)
+                // Copy lists are left unmarked because PIX may issue compute-only calls.
                 if (batch.queue != QueueHint::Copy)
                     PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.Name().c_str());
+#endif
                 RenderPassContext context(commands, enhanced, barriers, &g, batch.queue);
                 if (cpu_timing) cpu_timing->cpu_callback_begin_qpc = cpu_counter();
                 if (pass.owner_execute)
@@ -1885,7 +1887,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                     cpu_timing->cpu_callback_valid = cpu_timing->cpu_callback_begin_qpc != 0 &&
                         cpu_timing->cpu_callback_end_qpc >= cpu_timing->cpu_callback_begin_qpc;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
                 if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
+#endif
                 if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             }
@@ -3366,14 +3370,18 @@ Result RenderGraphBuilder::Execute(void *native_command_list, void *enhanced_com
             commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP,
                                timestamp_base + pass_index * 2);
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.Name().c_str());
+#endif
         if (pass.owner_execute)
         {
             if (auto result = pass.owner_execute(context); !result) return result;
         }
         else
             pass.execute(context);
+#if defined(HS_DEVELOPMENT_TOOLS)
         PIXEndEvent(commands);
+#endif
         if (queries)
         {
             commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP,

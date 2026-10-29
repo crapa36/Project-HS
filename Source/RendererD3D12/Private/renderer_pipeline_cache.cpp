@@ -383,6 +383,56 @@ struct RendererPipelineCache::Impl
         if(SUCCEEDED(native)) native=target->StorePipeline(name.c_str(),pipeline.Get());
         return native;
     }
+    template<class Load,class Create>
+    HRESULT CreateCached(const std::wstring &name,std::unique_lock<std::mutex> &state,
+        void **output,Load &&load,Create &&create)
+    {
+        auto gate=KeyMutex(name);
+        auto native_device=device;
+        auto native_library=library;
+        state.unlock();
+        std::unique_lock key_lock(*gate);
+        auto release_gate=Finally([&] {
+            if(key_lock.owns_lock()) key_lock.unlock();
+            std::lock_guard lock(mutex);
+            ReleaseKeyMutex(name,gate);
+        });
+        const auto load_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+        auto native=load(native_library.Get(),name.c_str(),output);
+        const auto load_ns=CacheElapsed(load_start);
+        {
+            std::lock_guard lock(mutex);
+            stats.library_load_ns+=load_ns;
+            stats.library_load_max_ns=std::max(stats.library_load_max_ns,load_ns);
+            if(SUCCEEDED(native)) { ++stats.hits; return native; }
+            if(native!=E_INVALIDARG)
+            {
+                ++stats.load_failures; stats.last_cache_hresult=std::int32_t(native); return native;
+            }
+            ++stats.misses;
+            ++stats.native_creates;
+        }
+        const auto create_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+        native=create(native_device.Get(),output);
+        const auto create_ns=CacheElapsed(create_start);
+        {
+            std::lock_guard lock(mutex);
+            stats.native_create_ns+=create_ns;
+            stats.native_create_max_ns=std::max(stats.native_create_max_ns,create_ns);
+        }
+        if(SUCCEEDED(native) && output && *output)
+        {
+            const auto store_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+            const auto stored=Store(name,static_cast<IUnknown *>(*output),native_library.Get());
+            const auto store_ns=CacheElapsed(store_start);
+            std::lock_guard lock(mutex);
+            stats.library_store_ns+=store_ns;
+            stats.library_store_max_ns=std::max(stats.library_store_max_ns,store_ns);
+            if(FAILED(stored)) { ++stats.store_failures; stats.last_cache_hresult=std::int32_t(stored); }
+            else { ++stats.stores; dirty=true; }
+        }
+        return native;
+    }
 };
 RendererPipelineCache::RendererPipelineCache():impl_(std::make_unique<Impl>()) {}
 RendererPipelineCache::~RendererPipelineCache()=default;
@@ -550,48 +600,13 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
             CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
             return impl_->device->CreateGraphicsPipelineState(description,iid,output);
         }
-        auto gate=impl_->KeyMutex(name);
-        auto device=impl_->device;
-        auto library=impl_->library;
-        state.unlock();
-        std::unique_lock key_lock(*gate);
-        auto release_gate=Finally([&] {
-            if(key_lock.owns_lock()) key_lock.unlock();
-            std::lock_guard lock(impl_->mutex);
-            impl_->ReleaseKeyMutex(name,gate);
-        });
-        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-        native=library->LoadGraphicsPipeline(name.c_str(),description,iid,output);
-        const auto load_ns=CacheElapsed(load_start);
-        {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_load_ns+=load_ns;
-            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
-            if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
-            if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
-            ++impl_->stats.misses;
-            ++impl_->stats.native_creates;
-        }
-        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-        native=device->CreateGraphicsPipelineState(description,iid,output);
-        const auto create_ns=CacheElapsed(create_start);
-        {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.native_create_ns+=create_ns;
-            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
-        }
-        if(SUCCEEDED(native) && output && *output)
-        {
-            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-            const auto stored=impl_->Store(name,static_cast<IUnknown *>(*output),library.Get());
-            const auto store_ns=CacheElapsed(store_start);
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_store_ns+=store_ns;
-            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
-            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
-            else { ++impl_->stats.stores; impl_->dirty=true; }
-        }
-        return native;
+        return impl_->CreateCached(name,state,output,
+            [&](ID3D12PipelineLibrary *library,const wchar_t *pipeline_name,void **result) {
+                return library->LoadGraphicsPipeline(pipeline_name,description,iid,result);
+            },
+            [&](ID3D12Device *device,void **result) {
+                return device->CreateGraphicsPipelineState(description,iid,result);
+            });
     }
     catch(const KeyError &)
     {
@@ -625,48 +640,13 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
             CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
             return impl_->device->CreateComputePipelineState(description,iid,output);
         }
-        auto gate=impl_->KeyMutex(name);
-        auto device=impl_->device;
-        auto library=impl_->library;
-        state.unlock();
-        std::unique_lock key_lock(*gate);
-        auto release_gate=Finally([&] {
-            if(key_lock.owns_lock()) key_lock.unlock();
-            std::lock_guard lock(impl_->mutex);
-            impl_->ReleaseKeyMutex(name,gate);
-        });
-        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-        native=library->LoadComputePipeline(name.c_str(),description,iid,output);
-        const auto load_ns=CacheElapsed(load_start);
-        {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_load_ns+=load_ns;
-            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
-            if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
-            if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
-            ++impl_->stats.misses;
-            ++impl_->stats.native_creates;
-        }
-        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-        native=device->CreateComputePipelineState(description,iid,output);
-        const auto create_ns=CacheElapsed(create_start);
-        {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.native_create_ns+=create_ns;
-            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
-        }
-        if(SUCCEEDED(native) && output && *output)
-        {
-            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-            const auto stored=impl_->Store(name,static_cast<IUnknown *>(*output),library.Get());
-            const auto store_ns=CacheElapsed(store_start);
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_store_ns+=store_ns;
-            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
-            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
-            else { ++impl_->stats.stores; impl_->dirty=true; }
-        }
-        return native;
+        return impl_->CreateCached(name,state,output,
+            [&](ID3D12PipelineLibrary *library,const wchar_t *pipeline_name,void **result) {
+                return library->LoadComputePipeline(pipeline_name,description,iid,result);
+            },
+            [&](ID3D12Device *device,void **result) {
+                return device->CreateComputePipelineState(description,iid,result);
+            });
     }
     catch(const KeyError &)
     {

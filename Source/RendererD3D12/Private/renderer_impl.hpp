@@ -1879,7 +1879,7 @@ struct D3D12Renderer::Impl
     RenderViewRole active_view_role{RenderViewRole::Main};
     const RenderViewInput *explicit_view{};
     const RenderFrameInput *explicit_frame{};
-    bool legacy_frame_bridge{}, render_scene_inputs{true};
+    bool render_scene_inputs{true};
     std::uint32_t active_native_viewport_id{}, next_native_viewport_id{1};
     std::uint64_t view_configuration_revision{1}, rendered_submission_count{}, render_package_id{}, active_render_package_id{};
     std::chrono::steady_clock::time_point render_package_time;

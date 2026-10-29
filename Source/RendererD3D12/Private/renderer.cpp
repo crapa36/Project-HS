@@ -852,7 +852,9 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (recreate_virtual_shadows)
         if (auto prepared = impl_->PrepareVirtualShadows(owned_view, feature_config, capacity,
                 virtual_shadows); !prepared) return prepared;
+#if defined(HS_DEVELOPMENT_TOOLS)
     impl_->diagnostics.ObserveTransition(impl_->DiagnosticsMemory());
+#endif
     const auto previous_hdr = owned_view.display_state.hdr_active;
     bool presentation_recreated{};
     if (options.presentation_request != impl_->config.presentation_request ||

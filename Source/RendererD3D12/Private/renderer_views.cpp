@@ -1116,7 +1116,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         const bool first = ordinal == 0;
         impl_->render_scene_inputs = first;
         const auto view_render_start = std::chrono::steady_clock::now();
-        result = Render(snapshots, input.events, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
+        result = RenderView(snapshots, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
             first ? v.effect_lines : std::span<const VfxLineSpawnCommand>{},
             v.event_count, v.persistent_count, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
             v.lights, v.distortions, v.decals, input.devtools, rendered, v.volumes, v.screen, v.entity_surfaces);

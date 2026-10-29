@@ -114,6 +114,21 @@ struct FrameContext
     std::shared_ptr<const std::vector<GpuStaticDrawRef>> static_input_refs;
     std::vector<GpuSceneSerializedSlot> scene_serialization_scratch;
     std::vector<PersistentGpuSceneRange> scene_dirty_scratch, scene_channel_dirty_scratch;
+    // CPU-only per-view instance preparation. Reused only after this frame slot
+    // has been waited; these vectors do not escape the synchronous frame build.
+    std::vector<GpuInstance> next_draw_instances_scratch;
+    std::vector<GpuSceneCanonicalInputs> dynamic_canonical_inputs_scratch;
+    std::vector<GpuStaticDrawRef> dynamic_draw_refs_scratch;
+    std::vector<std::uint32_t> dynamic_skin_offsets_scratch;
+    std::vector<std::uint32_t> dynamic_previous_skin_offsets_scratch;
+    std::vector<std::uint32_t> dynamic_skin_vertex_counts_scratch;
+    std::vector<std::uint64_t> dynamic_skin_geometry_ids_scratch;
+    std::vector<std::uint32_t> dynamic_pose_flags_scratch;
+    std::vector<float> dynamic_pose_times_scratch;
+    std::vector<std::uint8_t> dynamic_skin_history_scratch;
+    std::vector<std::uint8_t> dynamic_cooked_skin_bounds_scratch;
+    std::vector<std::uint8_t> dynamic_skin_needed_scratch;
+    std::vector<std::uint32_t> dynamic_skin_slots_scratch;
     AllocationResource skin_cache_vertices;
     AllocationResource skin_cache_bounds;
     std::size_t static_visible_capacity{};

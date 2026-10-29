@@ -159,8 +159,7 @@ Result BuildFinalGraph(RenderGraphBuilder &graph, ResourceVersion back_buffer,
 }
 
 
-Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
-                             std::span<const PresentationEvent> events,
+Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                              std::span<const ParticleSpawnCommand> particle_spawns,
                              std::span<const VfxLineSpawnCommand> effect_lines,
                              std::uint32_t typed_vfx_event_count,
@@ -178,20 +177,6 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                              VfxVolumeInputs typed_volumes, VfxScreenInputs typed_screen,
                              VfxEntitySurfaceInputs typed_entity_surfaces)
 {
-    if (!impl_->explicit_frame)
-    {
-        const auto view = MainViewInput(snapshots.current.camera);
-        RenderFrameInput input;
-        input.views = std::span(&view, 1); input.snapshots = snapshots; input.events = events;
-        input.vfx = {particle_spawns, effect_lines, typed_vfx_event_count, typed_vfx_persistent_count,
-            typed_ground_spawns, typed_flash_spawns, typed_mesh_spawns, typed_fresnels, typed_ribbons,
-            typed_lights, typed_distortions, typed_decals, typed_volumes, typed_screen, typed_entity_surfaces};
-        input.devtools = devtools;
-        impl_->legacy_frame_bridge = true;
-        const auto result = Render(input, frame_result);
-        impl_->legacy_frame_bridge = false;
-        return result;
-    }
     RendererCpuTimings cpu_timings;
     auto cpu_stage_start = std::chrono::steady_clock::now();
     const auto measure_stage = [&] {
@@ -452,7 +437,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         }
     } world_step_receipt{frame_result, stateful_target, snapshot.header.session_id,
         world_batch ? world_batch->sequence : 0};
-    if (!impl_->legacy_frame_bridge) snapshot.camera.vertical_fov_degrees = view_input.camera.vertical_fov_degrees;
+    snapshot.camera.vertical_fov_degrees = view_input.camera.vertical_fov_degrees;
     const bool scene_new_session = snapshot.header.session_id != impl_->render_session_id;
     const bool new_session = scene_new_session || snapshot.header.session_id != owned_view.view_session_id;
     const auto *last_sample = owned_view.previous_instances.get();
@@ -626,14 +611,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     }
     const auto &render_instances = prepared_scene.ordered_instances;
     const auto family_preview = impl_->config.slime_family_preview_count != 0;
-    const auto monster_preview = impl_->config.monster_preview_asset < 6 || family_preview;
-    const auto target_height = monster_preview
-                                   ? (!family_preview && impl_->config.monster_preview_asset >= 3 ? 3.0f : 1.0f)
-                               : impl_->config.character_preview ? 1.0f
-                                                                : snapshot.camera.target.y;
-    auto target = DirectX::XMVectorSet(family_preview ? 0.0f : snapshot.camera.target.x, target_height,
-                                             family_preview ? 0.0f : snapshot.camera.target.z, 1.0f);
 #if defined(HS_DEVELOPMENT_TOOLS)
+    const auto monster_preview = impl_->config.monster_preview_asset < 6 || family_preview;
     const auto camera_yaw = impl_->config.preview_camera_override
                                 ? impl_->config.preview_camera_yaw
                             : impl_->config.character_preview ? impl_->preview_yaw
@@ -662,26 +641,15 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                                      : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
                                      : snapshot.camera.distance;
 #endif
-    const auto yaw = DirectX::XMConvertToRadians(camera_yaw);
-    const auto pitch = DirectX::XMConvertToRadians(camera_pitch);
-    auto direction = DirectX::XMVector3Normalize(
-        DirectX::XMVectorSet(std::cos(pitch) * std::sin(yaw), -std::sin(pitch),
-                             std::cos(pitch) * std::cos(yaw), 0.0f));
-    auto eye = DirectX::XMVectorSubtract(
-        target, DirectX::XMVectorScale(direction, camera_distance));
-    auto camera_up = DirectX::XMVectorSet(0, 1, 0, 0);
-    if (!impl_->legacy_frame_bridge)
-    {
-        const auto scene_local = [&](RenderWorldPosition p) {
-            return DirectX::XMVectorSet(static_cast<float>(p.x - view_input.scene_origin.x),
-                static_cast<float>(p.y - view_input.scene_origin.y),
-                static_cast<float>(p.z - view_input.scene_origin.z), 1);
-        };
-        eye = scene_local(view_input.camera.position);
-        target = scene_local(view_input.camera.target);
-        direction = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(target, eye));
-        camera_up = DirectX::XMVectorSet(view_input.camera.up.x, view_input.camera.up.y, view_input.camera.up.z, 0);
-    }
+    const auto scene_local = [&](RenderWorldPosition p) {
+        return DirectX::XMVectorSet(static_cast<float>(p.x - view_input.scene_origin.x),
+            static_cast<float>(p.y - view_input.scene_origin.y),
+            static_cast<float>(p.z - view_input.scene_origin.z), 1);
+    };
+    const auto eye = scene_local(view_input.camera.position);
+    const auto target = scene_local(view_input.camera.target);
+    const auto direction = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(target, eye));
+    const auto camera_up = DirectX::XMVectorSet(view_input.camera.up.x, view_input.camera.up.y, view_input.camera.up.z, 0);
     DirectX::XMFLOAT3 lod_eye{};
     DirectX::XMStoreFloat3(&lod_eye, eye);
     const auto ribbon_prepare_start = capture_clock();
@@ -817,8 +785,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             local_shadows_active |= owner.local_shadows.AllocatedBytes() != 0;
         }
         const MonsterLodProjectionInputs monster_projection_inputs{
-            impl_->legacy_frame_bridge ? std::span<const RenderViewInput>{}
-                : std::span<const RenderViewInput>{impl_->explicit_frame->views},
+            std::span<const RenderViewInput>{impl_->explicit_frame->views},
             snapshot.lights, view_input.scene_origin,
             {lod_cascade_extents[0] / lod_shadow_resolution,
              lod_cascade_extents[1] / lod_shadow_resolution,
@@ -830,7 +797,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             impl_->QualityProfileFor(impl_->config.geometry_quality).geometry_screen_error_px,
             impl_->QualityProfileFor(impl_->config.shadow_quality).local_shadow_resolution,
             true, vsm_active, local_shadows_active,
-            active_features.software_gi_enabled, !impl_->legacy_frame_bridge, true};
+            active_features.software_gi_enabled, true, true};
         const auto monster_consumers = PrepareMonsterLodConsumers(monster_projection_inputs);
         prepared_scene.monster_lod_consumers_valid = monster_consumers.baseline.valid;
         prepared_scene.vsm_skin_consumer = vsm_active;
@@ -2457,8 +2424,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     const auto instance_count = render_instances.size();
 
     auto *constants = reinterpret_cast<FrameConstants *>(frame.mapped);
-    std::vector<GpuInstance> next_draw_instances;
+    auto &next_draw_instances = frame.next_draw_instances_scratch;
     if (reconcile_packet_scene) next_draw_instances.resize(instance_count);
+    else next_draw_instances.clear();
     auto *instances = next_draw_instances.data();
     auto *gpu_particle_spawns =
         reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + particle_spawn_data_offset);
@@ -2886,9 +2854,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     constants->temporal_options = {temporal_enabled ? 1.0f : 0.0f,
                                    owned_view.temporal_history_valid ? 1.0f : 0.0f,
                                    far_plane, near_plane};
-    const auto current_view_origin = impl_->legacy_frame_bridge
-        ? RenderWorldPosition{current_temporal_eye.x, current_temporal_eye.y, current_temporal_eye.z}
-        : view_input.view_origin;
+    const auto current_view_origin = view_input.view_origin;
     const DirectX::XMFLOAT3 view_origin_scene{
         static_cast<float>(current_view_origin.x - view_input.scene_origin.x),
         static_cast<float>(current_view_origin.y - view_input.scene_origin.y),
@@ -3559,29 +3525,38 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             "Prepared packet skin deformation lost its submitted current owner.");
     const SkinVertexRanges *current_skin_ranges = packet_skin_ready
         ? &packet_skin_deformation->vertex_ranges : &skin_vertex_ranges;
-    std::vector<std::uint32_t> dynamic_skin_offsets(instance_count);
-    std::vector<std::uint32_t> dynamic_previous_skin_offsets(instance_count);
-    std::vector<std::uint32_t> dynamic_skin_vertex_counts(instance_count);
-    std::vector<std::uint64_t> dynamic_skin_geometry_ids(instance_count);
+    auto &dynamic_skin_offsets = frame.dynamic_skin_offsets_scratch;
+    auto &dynamic_previous_skin_offsets = frame.dynamic_previous_skin_offsets_scratch;
+    auto &dynamic_skin_vertex_counts = frame.dynamic_skin_vertex_counts_scratch;
+    auto &dynamic_skin_geometry_ids = frame.dynamic_skin_geometry_ids_scratch;
+    dynamic_skin_offsets.assign(instance_count, 0);
+    dynamic_previous_skin_offsets.assign(instance_count, 0);
+    dynamic_skin_vertex_counts.assign(instance_count, 0);
+    dynamic_skin_geometry_ids.assign(instance_count, 0);
     auto *previous_skin_frame = !motion_history_reset && !view_input.camera_cut
         ? owned_view.previous_skin_deformation.get() : nullptr;
     const bool previous_skin_frame_valid = previous_skin_frame && previous_skin_frame->skin_cache_valid &&
         previous_skin_frame->skin_cache_vertices.resource;
-    std::vector<std::uint32_t> dynamic_pose_flags(instance_count);
-    std::vector<float> dynamic_pose_times(instance_count, 1.0f);
-    std::vector<std::uint8_t> dynamic_skin_history(instance_count);
-    std::vector<std::uint8_t> dynamic_cooked_skin_bounds(instance_count);
-    std::vector<std::uint8_t> dynamic_skin_needed(instance_count);
-    std::vector<GpuSceneCanonicalInputs> dynamic_canonical_inputs;
+    auto &dynamic_pose_flags = frame.dynamic_pose_flags_scratch;
+    auto &dynamic_pose_times = frame.dynamic_pose_times_scratch;
+    auto &dynamic_skin_history = frame.dynamic_skin_history_scratch;
+    auto &dynamic_cooked_skin_bounds = frame.dynamic_cooked_skin_bounds_scratch;
+    auto &dynamic_skin_needed = frame.dynamic_skin_needed_scratch;
+    auto &dynamic_canonical_inputs = frame.dynamic_canonical_inputs_scratch;
+    auto &dynamic_skin_slots = frame.dynamic_skin_slots_scratch;
+    dynamic_pose_flags.assign(instance_count, 0);
+    dynamic_pose_times.assign(instance_count, 1.0f);
+    dynamic_skin_history.assign(instance_count, 0);
+    dynamic_cooked_skin_bounds.assign(instance_count, 0);
+    dynamic_skin_needed.assign(instance_count, 0);
     if (reconcile_packet_scene) dynamic_canonical_inputs.resize(instance_count);
-    std::vector<std::uint32_t> dynamic_skin_slots(
-        instance_count, std::numeric_limits<std::uint32_t>::max());
+    else dynamic_canonical_inputs.clear();
+    dynamic_skin_slots.assign(instance_count, std::numeric_limits<std::uint32_t>::max());
     const bool non_view_skin_consumer =
         active_features.software_gi_enabled || !typed_volumes.empty() ||
         !prepared_scene.monster_lod_consumers_valid || prepared_scene.vsm_skin_consumer;
     const auto intersects_package_view = [&](Float3 center, float vertical_offset, float radius) {
-        if (impl_->legacy_frame_bridge ||
-            !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+        if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
             !std::isfinite(radius) || impl_->explicit_frame->views.empty() ||
             !std::isfinite(shadow_distance) || shadow_distance <= 0) return true;
         for (const auto &consumer : impl_->explicit_frame->views)
@@ -3862,7 +3837,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             ? next_draw_instances[index]
             : impl_->dynamic_scene_slots.Instances()[prepared_scene.gpu_slots[index].index];
     };
-    std::vector<GpuStaticDrawRef> dynamic_draw_refs(instance_count);
+    auto &dynamic_draw_refs = frame.dynamic_draw_refs_scratch;
+    dynamic_draw_refs.resize(instance_count);
+    bool reads_previous_instance_scene = false;
+    bool have_skinned_instances = false;
     frame.static_input_refs = static_scene && impl_->static_gpu_scene && impl_->static_gpu_scene->refs
         ? impl_->static_gpu_scene->refs->cpu : nullptr;
     frame.dynamic_input_ref_offset = dynamic_ref_data_offset;
@@ -3915,7 +3893,11 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         view_skin.skin_index = skinned ? slot.index : std::numeric_limits<std::uint32_t>::max();
         std::memcpy(frame.mapped + view_skin_data_offset + slot.index * sizeof(GpuSceneSkinEntry),
                     &view_skin, sizeof(view_skin));
-        if (skinned) dynamic_skin_slots[index] = slot.index;
+        if (skinned)
+        {
+            dynamic_skin_slots[index] = slot.index;
+            have_skinned_instances = true;
+        }
         const bool previous_slot_valid = previous_instance_snapshot &&
             slot.index < previous_instance_snapshot->identities.size() &&
             previous_instance_snapshot->identities[slot.index].generation == slot.generation;
@@ -3935,11 +3917,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             draw_flags,
             environment ? 1.0f : (monster ? dynamic_pose_times[index] : 1.0f),
             slot.generation};
+        reads_previous_instance_scene |= previous_instance_snapshot &&
+            (draw_flags & (kCachedSkinHistoryFlag | 0x200000u)) != 0;
     }
-    const bool reads_previous_instance_scene = previous_instance_snapshot &&
-        std::ranges::any_of(dynamic_draw_refs, [](const GpuStaticDrawRef &draw) {
-            return (draw.mesh_flags & (kCachedSkinHistoryFlag | 0x200000u)) != 0;
-        });
     if (reconcile_packet_scene) impl_->dynamic_scene_slots.EndFrame();
     if (reconcile_packet_scene) prepared_scene.gpu_slots_ready = true;
     const auto current_scene_payload_revision = impl_->dynamic_scene_slots.PayloadRevision();
@@ -4012,10 +3992,6 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     };
     const auto required_slots = impl_->dynamic_scene_slots.SlotCount();
     constexpr std::size_t kSkinBoundStride = sizeof(float) * 4;
-    const bool have_skinned_instances = std::ranges::any_of(
-        dynamic_skin_slots, [](std::uint32_t slot) {
-            return slot != std::numeric_limits<std::uint32_t>::max();
-        });
     // The packet owns immutable current poses, palette bytes, union LODs and
     // canonical GPU slots. A submitted packet owner therefore proves current
     // deformation identity; only previous offsets/history remain per view.
@@ -5375,7 +5351,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     const D3D12_RECT full_hero_rect{0, 0, static_cast<LONG>(hero_active.width),
         static_cast<LONG>(hero_active.height)};
     D3D12_RECT hero_rect{full_hero_rect.right, full_hero_rect.bottom, 0, 0};
-    bool hero_bounds_complete = hero_candidate_count != 0 && !impl_->legacy_frame_bridge &&
+    bool hero_bounds_complete = hero_candidate_count != 0 &&
         hero_active.width == owned_view.render_width && hero_active.height == owned_view.render_height;
     bool hero_all_outside = hero_bounds_complete;
     const renderer_detail::HeroCoverageProjection hero_projection{hero_active.width, hero_active.height,
@@ -5494,9 +5470,11 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         DecalSurfaceCandidate candidate;
         if (auto prepared = impl_->PrepareDecalSurface(impl_->config,
                 owned_view.state.render_capacity, true, candidate); !prepared) return prepared;
+#if defined(HS_DEVELOPMENT_TOOLS)
         auto transition = impl_->DiagnosticsMemory();
         transition.renderer_view_bytes += candidate.AllocatedBytes();
         impl_->diagnostics.ObserveTransition(transition);
+#endif
         if (auto committed = owned_view.decal_surface.Commit(std::move(candidate),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
     }
@@ -10264,7 +10242,6 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         if (presented_view && impl_->sdk_presentation.IsEnabled()) return;
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
-        (void)events;
         list->RSSetViewports(1, &output_viewport);
         list->RSSetScissorRects(1, &output_scissor);
         if (initialize_offscreen_output)

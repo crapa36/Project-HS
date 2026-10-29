@@ -98,7 +98,7 @@ if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RUNTIME)
     FetchContent_Declare(
         directxtex
         GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
-        GIT_TAG 4feb3e1
+        GIT_TAG 4feb3e11a020f35b796fc769a74216a555d4f5ef
     )
     FetchContent_MakeAvailable(directxtex)
 endif()
@@ -144,6 +144,7 @@ if(HS_BUILD_RUNTIME)
     )
     FetchContent_MakeAvailable(agility)
 
+    if(NOT HS_SINGLE_CONFIG_RELEASE)
     FetchContent_Declare(
         winpix
         URL https://www.nuget.org/api/v2/package/WinPixEventRuntime/1.0.240308001
@@ -158,6 +159,7 @@ if(HS_BUILD_RUNTIME)
         IMPORTED_LOCATION "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
         INTERFACE_INCLUDE_DIRECTORIES "${winpix_SOURCE_DIR}/Include"
     )
+    endif()
 
     set(D3D12MA_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
     set(D3D12MA_AGILITY_SDK_DIRECTORY "${agility_SOURCE_DIR}" CACHE STRING "" FORCE)
@@ -508,7 +510,7 @@ target_include_directories(
 target_link_libraries(
     hs_renderer_d3d12
     PUBLIC hs_core hs_render_data hs_render_data_values
-    PRIVATE D3D12MemoryAllocator WinPixEventRuntime DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
+    PRIVATE D3D12MemoryAllocator $<$<NOT:$<CONFIG:Release>>:WinPixEventRuntime> DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
 )
 target_compile_definitions(hs_renderer_d3d12 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 include(cmake/RenderSDKs.cmake)
@@ -525,9 +527,9 @@ target_compile_definitions(
     hs_renderer_d3d12 PRIVATE $<$<CONFIG:Debug>:HS_DEVELOPMENT_TOOLS=1>
 )
 if(HS_ENABLE_VALIDATION)
-    target_compile_definitions(hs_renderer_d3d12 PRIVATE USE_PIX=1)
+    target_compile_definitions(hs_renderer_d3d12 PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX=1>)
 else()
-    target_compile_definitions(hs_renderer_d3d12 PRIVATE USE_PIX_RETAIL=1)
+    target_compile_definitions(hs_renderer_d3d12 PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX_RETAIL=1>)
 endif()
 hs_configure_target(hs_renderer_d3d12)
 if(MSVC)
@@ -654,13 +656,18 @@ endfunction()
 hs_copy_runtime_asset(
     "${agility_SOURCE_DIR}/build/native/bin/x64/D3D12Core.dll"
     "${CMAKE_CURRENT_BINARY_DIR}/D3D12/D3D12Core.dll")
-hs_copy_runtime_asset(
-    "${agility_SOURCE_DIR}/build/native/bin/x64/d3d12SDKLayers.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/D3D12/d3d12SDKLayers.dll")
-hs_copy_runtime_asset(
-    "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/WinPixEventRuntime.dll")
 if(NOT HS_SINGLE_CONFIG_RELEASE)
+    hs_copy_runtime_asset(
+        "${agility_SOURCE_DIR}/build/native/bin/x64/d3d12SDKLayers.dll"
+        "${CMAKE_CURRENT_BINARY_DIR}/D3D12/d3d12SDKLayers.dll")
+    hs_copy_runtime_asset(
+        "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
+        "${CMAKE_CURRENT_BINARY_DIR}/WinPixEventRuntime.dll")
+    set(HS_DEVELOPMENT_NATIVE_OUTPUTS
+        "${CMAKE_CURRENT_BINARY_DIR}/D3D12/d3d12SDKLayers.dll"
+        "${CMAKE_CURRENT_BINARY_DIR}/WinPixEventRuntime.dll")
+endif()
+if(HS_BUILD_CONTENT_TOOLS OR NOT HS_SINGLE_CONFIG_RELEASE)
     hs_copy_runtime_asset(
         "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
         "${CMAKE_CURRENT_BINARY_DIR}/Fonts/NotoSansKR.ttf")
@@ -668,8 +675,7 @@ endif()
 hs_deploy_render_sdks()
 add_custom_target(hs_runtime_native_assets DEPENDS
     "${CMAKE_CURRENT_BINARY_DIR}/D3D12/D3D12Core.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/D3D12/d3d12SDKLayers.dll"
-    "${CMAKE_CURRENT_BINARY_DIR}/WinPixEventRuntime.dll"
+    ${HS_DEVELOPMENT_NATIVE_OUTPUTS}
     ${HS_RENDER_SDK_NATIVE_OUTPUTS})
 add_custom_target(hs_runtime_assets ALL DEPENDS ${HS_RUNTIME_ASSET_OUTPUTS})
 
@@ -680,10 +686,10 @@ target_include_directories(ProjectHS BEFORE PRIVATE "${agility_SOURCE_DIR}/build
 target_compile_definitions(ProjectHS PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
 if(HS_ENABLE_VALIDATION)
-    target_compile_definitions(ProjectHS PRIVATE HS_ENABLE_VALIDATION=1)
+    target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_ENABLE_VALIDATION=1>)
 endif()
 if(HS_ENABLE_GPU_VALIDATION)
-    target_compile_definitions(ProjectHS PRIVATE HS_ENABLE_GPU_VALIDATION=1)
+    target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_ENABLE_GPU_VALIDATION=1>)
 endif()
 hs_configure_target(ProjectHS)
 if(MSVC)
@@ -3070,11 +3076,14 @@ install(
     DESTINATION D3D12
     COMPONENT Runtime
 )
-install(
-    FILES "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
-    DESTINATION .
-    COMPONENT Runtime
-)
+if(NOT HS_SINGLE_CONFIG_RELEASE)
+    install(
+        FILES "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
+        DESTINATION .
+        CONFIGURATIONS Debug RelWithDebInfo MinSizeRel
+        COMPONENT Runtime
+    )
+endif()
 install(
     FILES "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
     DESTINATION Fonts

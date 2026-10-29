@@ -102,6 +102,9 @@ RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotP
 VFX frame inputs and RenderFrameInput. Presentation owns RenderSnapshotExchange;
 Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
 so it has no dependency on Presentation's exchange or producer lifecycle.
+Raw presentation events end at Runtime's VFX/audio translation. The renderer
+frame contains prepared VFX inputs; each view is rendered inside that explicit
+package, with no snapshot-to-package compatibility recursion.
 Snapshot values/helpers live in render_snapshot_values.hpp; mutable scene/snapshot
 builders live in render_snapshot_storage.hpp. The legacy render_snapshot.hpp
 includes both. Value consumers include values directly so builder changes do not

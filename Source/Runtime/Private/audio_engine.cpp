@@ -12,10 +12,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <optional>
+#include <string_view>
 #include <vector>
 #include <condition_variable>
 #include <deque>
@@ -163,6 +167,7 @@ struct AudioEngine::Impl
     std::array<runtime_detail::DiagnosticSample, kAudioWorkNames.size()> work{};
     std::atomic<std::uint64_t> reader_jobs{}, reader_failures{}, reader_bytes{};
     std::atomic<std::uint64_t> reader_read_ticks{}, reader_queue_ticks{}, reader_request_ready_ticks{};
+    bool reader_failure_reported{}; // Reader thread only; one diagnostic per engine.
     AudioWorkTimings native_timings{};
     runtime_detail::DiagnosticClock Clock() const noexcept { return capture_timings ? AudioQpc : nullptr; }
     auto &Work(AudioWorkId id) noexcept { return work[static_cast<std::size_t>(id)]; }
@@ -257,6 +262,33 @@ struct AudioEngine::Impl
         if (result) sample.pcm = sample.bytes;
         return result;
     }
+    void ReportReaderFailure(std::size_t sample_index, ErrorCode code,
+                             std::string_view subsystem, std::string_view message) noexcept
+    {
+        if (reader_failure_reported) return;
+        reader_failure_reported = true;
+        char diagnostic[768]{};
+        const auto subsystem_size = static_cast<int>(std::min(subsystem.size(), std::size_t{64}));
+        const auto message_size = static_cast<int>(std::min(message.size(), std::size_t{512}));
+        const auto *subsystem_text = subsystem.empty() ? "" : subsystem.data();
+        const auto *message_text = message.empty() ? "" : message.data();
+        const int length = std::snprintf(diagnostic, sizeof(diagnostic),
+            "Audio sample read failed (index %zu, error %u, subsystem '%.*s'): %.*s\n",
+            sample_index, static_cast<unsigned>(code), subsystem_size, subsystem_text,
+            message_size, message_text);
+        if (length <= 0)
+        {
+            constexpr char fallback[] = "Audio sample read failed; diagnostic formatting failed.\n";
+            std::fputs(fallback, stderr);
+            std::fflush(stderr);
+            OutputDebugStringA(fallback);
+            return;
+        }
+        const auto bytes = std::min(static_cast<std::size_t>(length), sizeof(diagnostic) - 1);
+        std::fwrite(diagnostic, 1, bytes, stderr);
+        std::fflush(stderr);
+        OutputDebugStringA(diagnostic);
+    }
     void RunReader() noexcept
     {
         for (;;)
@@ -269,8 +301,22 @@ struct AudioEngine::Impl
                 sample = reads.front(); reads.pop_front();
             }
             const auto begin = capture_timings ? AudioQpc() : 0;
+            const auto sample_index = static_cast<std::size_t>(sample - samples.get());
+            std::optional<Result> read_result;
             bool success = false;
-            try { success = Read(*sample).Succeeded(); } catch (...) {}
+            try
+            {
+                read_result.emplace(Read(*sample));
+                success = read_result->Succeeded();
+            }
+            catch (const std::exception &error)
+            {
+                ReportReaderFailure(sample_index, ErrorCode::TaskFailed, "exception", error.what());
+            }
+            catch (...)
+            {
+                ReportReaderFailure(sample_index, ErrorCode::TaskFailed, "exception", "unknown exception");
+            }
             if (!success) sample->bytes.clear();
             if (capture_timings)
             {
@@ -284,6 +330,9 @@ struct AudioEngine::Impl
             }
             sample->state.store(success ? SampleState::Ready : SampleState::Failed, std::memory_order_release);
             if (wake_main) wake_main(wake_context);
+            if (!success && read_result)
+                ReportReaderFailure(sample_index, read_result->Code(),
+                                    read_result->Subsystem(), read_result->Message());
         }
     }
     void EvictStopped() noexcept

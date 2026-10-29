@@ -1,7 +1,10 @@
 # DEV_STATE
 
 AI implementation continuity only. Current base:
-0dbde985889e58d0b09565c7130fc38b9be49de8 (Bound VFX growth and streamline render paths).
+a7739b0 (Harden runtime, renderer, and content workflows), committed externally
+while the analysis was in progress. The saved61-file native source receipt still
+matches byte-for-byte. Current branch: codex/engine-health-20261029; source edits
+are uncommitted, no push. Preserve the user's main/commit.
 The dirty worktree is authoritative. Preserve unrelated changes and
 .codex-remote-attachments/. No new commit/push/worktree is requested.
 
@@ -9,8 +12,11 @@ The dirty worktree is authoritative. Preserve unrelated changes and
 
 Goal ACTIVE: finish accepted reviews/directives and Debug /Od/assertions/checked
 iterators,1080pUltra100%,200enemies,60FPS. Not achieved.
-Latest steering requests foreground/FPS measurement; the current Debug200 run is
-Build/foreground-200-20261029/ (in progress). Its actual GI mode must be reported.
+Latest priority: analyze tests, Desloppify findings/scores and GPU pass timings,
+fix justified issues, then continue directives. The foreground Debug200 run in
+Build/foreground-200-20261029/ completes1800ticks/799frames, exit0. Selected
+foreground587frames/19.791s average29.609FPS,1%low27.108FPS (slowest6 intervals).
+Actual GI is Probe fallback, not fullUltra GI; target60FPS remains unmet.
 Batch affected checks;
 retain distinct behavior/lifetime/ABI contracts, remove source-shape assertions and
 disconnected models. No new permanent runner without an isolation/dependency need.
@@ -30,6 +36,65 @@ Keep Windows low-level/portable checks; no Linux qualification remains required.
 
 ## Current implementation
 
+- Current analysis: Build/health-review-20261029/RESULTS.ko.md. Exact foreground
+  GPU pass means: GBuffer7.160ms, GTAOHorizon3.465ms, HeroComposite#1082.825ms;
+  all passes/p95/queues in gpu-passes.md/.json. PID GPU average73.324%,peak80.226%,
+  CPU1.418cores/7.091% of20logical cores, with94.05% foreground GPU coverage.
+  Render wall32.042ms includes wait12.922ms; residual is not measured CPU busy.
+  Critical path and output span are unavailable; source-ready cadence is separate.
+  Fresh full Desloppify scan2 + all20 blind dimension reviews are imported:
+  objective/verified78.3,strict/overall87.4. The initial unassessed score19.6 and
+  previous CI profile73.9 are not code/performance improvements. Immutable review
+  packet/results are in .desloppify/subagents/runs/20261029_110247/.
+  Nine review findings:3 implemented and checked,4 naming/folder/config-wrapper
+  proposals explicitly declined,2 broad Impl/Render coupling findings remain
+  conditional. Do not mark the large-function/header debt fixed by a small cleanup.
+  No health-score commits. Mechanical candidates are heuristic, not900confirmed bugs.
+  Local C++ review regex repeated the extractor colon bug; one-character tool
+  fix plus declaration/case-label self-check passes and review preparation now
+  completes. Windows schema read requires python -X utf8 -m desloppify.
+- Slime body color investigation: isolated4frame baseline and private
+  transmission0/0.5 candidates all complete,validation0. Body hue stays blue/
+  green/red-brown but baseline is dark; full transmission removes diffuse by
+  construction. Candidate changes only617-byte slime_body parameters, using real
+  producer + immutable hardlinked Generation. Source/pointer unchanged. Do not
+  claim RGB inversion fixed or silently replace glass with opaque lighting.
+  Artifacts: Build/transparent-color-20261029/{slime-reference,transmission-0,
+  transmission-05,private-materials}/. Authored slime_body transmission default is
+  now0.5, preserving partial dielectric transport and coat. The explicit content
+  update completes with selected Generation6d65e4bfe47dab24502d8227af6840e07e1f5542ef68dd12ad639e7553aba896.
+  Its617-byte parameter digest ef63eefd031ecfbf742d50b6655e08a414f554d7ae788f3ac8c89d8c928413ca
+  matches the private0.5 candidate. Current native4frame capture completes with
+  validation0. No shader RGB/sign workaround was applied or literal inversion proved.
+- Health source fixes: removed unused raw RenderFrameInput.events and the private
+  legacy reentrant bridge; typed VFX/audio event translation stays in Runtime.
+  Private RenderView always uses the explicit view camera and package ownership.
+  Removed overwritten camera calculations. Graphics/compute PSO cache admission
+  shares one helper with unchanged key/lifecycle/error/counter contracts; mesh stays
+  separate. Audio reader reports the first retained Result/exception reason once,
+  using bounded diagnostics only on failure. DirectXTex pins the same full40char SHA.
+  Build health-fixes-20261029 succeeds;6existing contracts pass in58.51s, including
+  the native WARP/GBV graph. Owned-view3packages/9submissions and slime4frames pass
+  on the current binary (debug layer ON/GBV OFF), validation0. Evidence is under
+  Build/health-native-20261029/. Subsequent graph static-facts Debug build and
+  existing WARP/GBV graph also pass (46.98s), including owner callback/shared reader
+  paths. Existing TopologyValues::Resource holds the shared-reader exclusion fact;
+  Capture computes it once and Execute no longer traverses every pass/use to
+  rediscover it. ExecutionKind now also distinguishes an empty owner callback's
+  owner-thread flag so reuse cannot keep a mismatched exclusion. Dynamic imported
+  identity/completion/alias/lease checks stay. Evidence: health-graph-facts-20261029.
+  The scene-HLOD/snapshot existing leaf passes1.02s: frozen source/include bytes
+  survive source edits and stale input digests are rejected. It does not execute
+  the DXC timeout/uncertain-exit branch or prove the whole producer include closure.
+- The follow-up200 playback after the above fixes completes1800ticks/385frames,
+  exit0, but has no foreground frames. Build/health-foreground-200-20261029/ is
+  background functional evidence only, not an A/B FPS comparison. The user again
+  defers foreground measurement; continue implementation without another window.
+  Keep the earlier587foreground-frame pass table as the foreground baseline.
+- Exact baseline retained frontend hit rate is368/587(62.69%). graph_plan p50 is
+  hit2.830ms/miss2.821ms and includes executor slot Wait. constants_upload is a
+  composite scope containing GPU scene/VFX preparation, not pure constant memcpy.
+  Do not add caches for a768-byte zero fill or attribute these whole scopes to it.
 - ProjectileMotion retains its assigned scalar speed, used by homing rather than
   repeated Length(velocity). Ricochet/Basic retargets keep that effective speed,
   including BasicAttack fallback when Ricochet authored speed is nonpositive;
@@ -111,7 +176,9 @@ Keep Windows low-level/portable checks; no Linux qualification remains required.
   initial run hits the running watchdog, then old warm prep3.425s becomes91.749ms
   after the candidate. Do not attribute the cold13.65s-to-warm change to this
   patch. Receipts/dump remain in Build/directive-intake-20261029/pso-component/.
-  Foreground FPS remains deferred; full-renderer GBV timeout is still unresolved.
+  A later matching-source foreground measurement is recorded above; the older
+  background/component observations remain separate. Full-renderer GBV timeout
+  is still unresolved.
 - Named Debug ProjectHS/hs_experiment builds reuse the selected Generation instead
   of depending on whole-content cooking. Default ALL/runtime and Release shipping
   preparation retain their existing generation dependencies. Actual requested

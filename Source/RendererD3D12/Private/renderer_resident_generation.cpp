@@ -283,7 +283,9 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
                 main_owner.state.render_capacity.width, main_owner.state.render_capacity.height); !prepared) return reject(prepared);
     if (auto prepared = PrepareResidentServices(*next); !prepared) return reject(prepared);
     if (auto prepared = PrepareResidentPublication(*next); !prepared) return reject(prepared);
+#if defined(HS_DEVELOPMENT_TOOLS)
     diagnostics.ObserveTransition(DiagnosticsMemory());
+#endif
     DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
     if (FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory)) ||
         memory.CurrentUsage > memory.Budget)

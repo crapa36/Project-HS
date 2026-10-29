@@ -3126,7 +3126,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const RenderFrameInput render_input{
                     .views = views,
                     .snapshots = snapshots,
-                    .events = frame_events,
                     .vfx = {
                         .particle_spawns = native_particles,
                         .effect_lines = native_lines,
