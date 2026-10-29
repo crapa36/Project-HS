@@ -2,7 +2,7 @@
 #include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ballistic_commands.hpp"
 #include "test_generation_paths.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>

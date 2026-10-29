@@ -980,6 +980,9 @@ struct RenderGraphBuilder::Impl
     std::vector<Pass> passes;
     std::vector<std::vector<ResourceUse>> reusable_pass_uses;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering_dependencies;
+    std::vector<std::uintptr_t> imported_identities;
+    struct PlacedImport { void *heap; std::uint64_t begin, end; };
+    std::vector<PlacedImport> placed_imports;
     render_graph::CompiledSchedule schedule;
     render_graph::AliasPlan alias_plan;
     TopologyValues topology;
@@ -2835,10 +2838,12 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         default: return true;
         }
     };
-    std::unordered_set<std::uintptr_t> imported_identities;
+    auto &imported_identities = impl_->imported_identities;
+    imported_identities.clear();
     imported_identities.reserve(impl_->resources.size());
-    struct PlacedImport { void *heap; std::uint64_t begin, end; };
-    std::vector<PlacedImport> placed_imports;
+    auto &placed_imports = impl_->placed_imports;
+    placed_imports.clear();
+    placed_imports.reserve(impl_->resources.size());
     for (auto &resource : impl_->resources)
     {
         if (!resource.imported) continue;
@@ -2850,20 +2855,25 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             return fail("RenderGraph cannot identify an imported resource.");
         resource.imported_identity = reinterpret_cast<std::uintptr_t>(resource.certified
             ? resource.native_contract.resource_identity : identity.Get());
-        if (!imported_identities.insert(resource.imported_identity).second)
-            return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
+        imported_identities.push_back(resource.imported_identity);
         if (resource.certified && resource.native_contract.heap_identity)
         {
             const auto &contract = resource.native_contract;
             const auto end = contract.heap_offset + contract.heap_size;
-            if (std::any_of(placed_imports.begin(), placed_imports.end(), [&](const PlacedImport &other) {
-                return other.heap == contract.heap_identity &&
-                    contract.heap_offset < other.end && other.begin < end;
-            }))
-                return fail("RenderGraph imports overlapping placed resources without an alias contract.");
             placed_imports.push_back({contract.heap_identity, contract.heap_offset, end});
         }
     }
+    std::sort(imported_identities.begin(), imported_identities.end());
+    if (std::adjacent_find(imported_identities.begin(), imported_identities.end()) != imported_identities.end())
+        return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
+    // Nonempty, overflow-checked ranges need only their neighbor on each heap.
+    std::sort(placed_imports.begin(), placed_imports.end(), [](const auto &a, const auto &b) {
+        return a.heap == b.heap ? a.begin < b.begin : std::less<void *>{}(a.heap, b.heap);
+    });
+    for (std::size_t index = 1; index < placed_imports.size(); ++index)
+        if (placed_imports[index - 1].heap == placed_imports[index].heap &&
+            placed_imports[index].begin < placed_imports[index - 1].end)
+            return fail("RenderGraph imports overlapping placed resources without an alias contract.");
     for (const auto &pass : impl_->passes)
         if (pass.external)
         {

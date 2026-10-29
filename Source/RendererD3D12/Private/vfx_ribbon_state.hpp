@@ -16,20 +16,23 @@ namespace hs::renderer_detail
 class VfxRibbonState
 {
 public:
-    [[nodiscard]] static bool ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error);
-    [[nodiscard]] bool ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources, std::string &error);
+    [[nodiscard]] static bool ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
+        std::span<const VfxRibbonOutputInput> frame_outputs = {});
+    [[nodiscard]] bool ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
+        std::span<const VfxRibbonOutputInput> frame_outputs = {});
     [[nodiscard]] bool Update(std::span<const VfxRibbonSourceInput> sources,
                                Tick tick, std::uint64_t session,
                                std::uint64_t catalog_generation,
                                std::uint32_t point_budget, float interpolation,
-                               Float3 previous_eye, std::string &error);
+                               Float3 previous_eye, std::string &error,
+                               std::span<const VfxRibbonOutputInput> frame_outputs = {});
 
     [[nodiscard]] std::span<const GpuRibbonSourceUpdate> Updates() const noexcept { return updates_; }
     [[nodiscard]] std::span<const GpuRibbonOutput> Outputs() const noexcept { return outputs_; }
     [[nodiscard]] std::uint32_t DroppedSources() const noexcept { return dropped_sources_; }
     [[nodiscard]] std::uint32_t Capacity() const noexcept { return capacity_; }
     [[nodiscard]] bool OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
-                                        std::size_t output_capacity);
+        std::size_t output_capacity, std::span<const VfxRibbonOutputInput> frame_outputs = {});
 
 private:
     friend class hs::D3D12Renderer;
@@ -37,7 +40,8 @@ private:
                                        Tick tick, std::uint64_t session,
                                        std::uint64_t catalog_generation,
                                        std::uint32_t point_budget, float interpolation,
-                                       Float3 previous_eye, std::string &error);
+                                       Float3 previous_eye, std::string &error,
+                                       std::span<const VfxRibbonOutputInput> frame_outputs = {});
     using Key = std::tuple<std::uint64_t, VfxEffectHandle, std::uint32_t>;
     struct KeyHash
     {

@@ -1,6 +1,7 @@
 #include "renderer_scene_sample.hpp"
 #include "visibility_encoding.hpp"
 #include <hs/presentation/snapshot_exchange.hpp>
+#include <hs/render_data/render_snapshot.hpp>
 #include <array>
 #include <atomic>
 #include <thread>
@@ -49,6 +50,93 @@ void TestSnapshotExchange()
         previous.CopyDynamicFrom(pair.current);
     }
     Check(exchange.DroppedPublishes() == 0, "snapshot no drops");
+}
+
+void TestRetainedSnapshotExchange()
+{
+    hs::RenderSnapshotExchange exchange(4, 4, 4, 4);
+    hs::RenderSnapshotExchange::Consumer consumer(exchange);
+    hs::RenderSnapshotStorage current_source(2, 2, 2, 2);
+    current_source.header.session_id = 9;
+    current_source.header.tick = 12;
+    current_source.header.dynamic_pair_revision = 40;
+    hs::RenderInstance instance{};
+    instance.stable_id = 90;
+    instance.position.x = 10;
+    current_source.AddInstance(instance);
+    hs::AnimationPoseRef pose{};
+    pose.revision = 41;
+    current_source.AddPose(pose);
+    current_source.AddCapturedInstance({});
+    current_source.AddLight({});
+    current_source.AddPersistentVfx({});
+
+    hs::RenderSnapshotStorage previous_source(2, 2, 2, 2);
+    previous_source.header.session_id = 9;
+    previous_source.header.tick = 11;
+    previous_source.header.dynamic_pair_revision = 39;
+    instance.position.x = 9;
+    previous_source.AddInstance(instance);
+    previous_source.AddPose(pose);
+    previous_source.AddCapturedInstance({});
+    previous_source.AddLight({});
+    previous_source.AddPersistentVfx({});
+    const auto previous_sample = previous_source.View();
+    std::array<const hs::RenderInstance *, 3> current_arrays{};
+    std::array<const hs::RenderInstance *, 3> previous_arrays{};
+    std::array<bool, 3> slot_seen{};
+
+    for (hs::Sequence publication = 1; publication <= 4; ++publication)
+    {
+        current_source.header.checksum = publication;
+        current_source.camera.target.x = static_cast<float>(publication);
+        auto scene = std::make_shared<hs::StaticRenderScene>();
+        scene->content_generation_id = publication % 2 ? "first" : "second";
+        current_source.SetStaticScene(scene);
+        const auto current_sample = current_source.View();
+        auto slot = exchange.TryBeginRetainedWrite();
+        Check(slot.has_value(), "retained snapshot writer slot");
+        Check(slot->index < slot_seen.size(), "retained writer returned a known slot");
+        const auto slot_index = slot->index;
+        const bool copied = slot->storage->CopyRetainedDynamicFrom(current_sample);
+        const bool first_use = !slot_seen[slot_index];
+        Check(copied == first_use,
+            "retained slot must copy once, then reuse the same immutable dynamic sample");
+        slot->storage->AddUi({});
+        exchange.Publish(*slot, publication, &previous_sample);
+        const auto pair = consumer.AcquireLatest();
+        Check(pair.has_current && pair.has_previous && pair.current.header.tick == 12 &&
+            pair.previous.header.tick == 11 && pair.current.header.checksum == publication &&
+            pair.current.camera.target.x == static_cast<float>(publication) &&
+            pair.current.static_scene == scene && pair.current.ui.size() == 1 &&
+            pair.current.instances.size() == 1 && pair.current.instances[0].position.x == 10 &&
+            pair.previous.instances.size() == 1 && pair.previous.instances[0].position.x == 9,
+            "retained publication must refresh current envelope/UI and preserve the previous sample pair");
+        if (first_use)
+        {
+            current_arrays[slot_index] = pair.current.instances.data();
+            previous_arrays[slot_index] = pair.previous.instances.data();
+            slot_seen[slot_index] = true;
+        }
+        else
+            Check(pair.current.instances.data() == current_arrays[slot_index] &&
+                pair.previous.instances.data() == previous_arrays[slot_index],
+                "reused retained slot must keep both current and previous array backing");
+    }
+    Check(exchange.DroppedPublishes() == 0, "retained snapshot publication must not drop");
+
+    hs::RenderSnapshotExchange raw_exchange(2, 0, 0, 0);
+    for (hs::Sequence publication = 1; publication <= 3; ++publication)
+    {
+        auto raw_slot = raw_exchange.TryBeginWrite();
+        Check(raw_slot.has_value(), "raw snapshot writer slot");
+        raw_slot->storage->AddInstance({});
+        raw_exchange.Publish(*raw_slot, publication);
+    }
+    auto raw_slot = raw_exchange.TryBeginWrite();
+    Check(raw_slot.has_value() && raw_slot->storage->View().instances.empty(),
+        "ordinary TryBeginWrite must continue clearing reused storage");
+    raw_exchange.Abandon(*raw_slot);
 }
 
 void TestSnapshotExchangeQueuedPublications()
@@ -258,6 +346,175 @@ void CheckSnapshotStorageInputs()
     Check(packet.View().instances.empty() && packet.View().poses.empty() &&
               packet.View().captured_instances.empty(), "packet reuse clears all logical operands");
 }
+
+void CheckRetainedSnapshotCopy()
+{
+    hs::RenderSnapshotStorage source(4, 4, 4, 4);
+    source.header.session_id = 7;
+    source.header.tick = 12;
+    source.header.dynamic_pair_revision = 31;
+    source.header.checksum = 99;
+    source.camera.target = {1, 2, 3};
+    hs::RenderInstance instance{};
+    instance.stable_id = 101;
+    instance.position.x = 4;
+    source.AddInstance(instance);
+    hs::AnimationPoseRef pose{};
+    pose.revision = 22;
+    source.AddPose(pose);
+    hs::CapturedRenderInstance captured{};
+    captured.sequence = 33;
+    source.AddCapturedInstance(captured);
+    source.AddLight({});
+    source.AddPersistentVfx({});
+    source.AddUi({});
+    auto first_scene = std::make_shared<hs::StaticRenderScene>();
+    first_scene->content_generation_id = "first";
+    source.SetStaticScene(first_scene);
+
+    auto sample = source.View();
+    hs::RenderSnapshotStorage retained(0, 0, 0, 0);
+    retained.AddUi({});
+    Check(retained.CopyRetainedDynamicFrom(sample),
+        "first identified retained copy must copy dynamic arrays");
+    auto view = retained.View();
+    Check(view.instances.size() == 1 && view.instances[0].stable_id == 101 &&
+        view.poses.size() == 1 && view.poses[0].revision == 22 &&
+        view.captured_instances.size() == 1 && view.captured_instances[0].sequence == 33 &&
+        view.lights.size() == 1 && view.persistent_vfx.size() == 1 && view.ui.empty(),
+        "retained copy must transfer all dynamic arrays and clear UI");
+    const auto *instances = view.instances.data();
+    const auto *poses = view.poses.data();
+    const auto *captures = view.captured_instances.data();
+    const auto *lights = view.lights.data();
+    const auto *persistent = view.persistent_vfx.data();
+
+    source.header.checksum = 123;
+    source.camera.target = {8, 9, 10};
+    auto second_scene = std::make_shared<hs::StaticRenderScene>();
+    second_scene->content_generation_id = "second";
+    source.SetStaticScene(second_scene);
+    source.AddUi({});
+    sample = source.View();
+    retained.AddUi({});
+    Check(!retained.CopyRetainedDynamicFrom(sample),
+        "same identified immutable arrays must be reused");
+    view = retained.View();
+    Check(view.instances.data() == instances && view.poses.data() == poses &&
+        view.captured_instances.data() == captures && view.lights.data() == lights &&
+        view.persistent_vfx.data() == persistent && view.header.checksum == 123 &&
+        view.camera.target.x == 8 && view.static_scene == second_scene && view.ui.empty(),
+        "retained reuse must still refresh envelope/scene and clear UI");
+
+    auto copied = retained;
+    Check(!copied.CopyRetainedDynamicFrom(sample),
+        "default snapshot-storage copy must transfer its retained key with the arrays");
+    auto moved = std::move(copied);
+    Check(!moved.CopyRetainedDynamicFrom(sample),
+        "default snapshot-storage move must transfer its retained key with the arrays");
+    Check(copied.CopyRetainedDynamicFrom(sample) && copied.View().instances.size() == 1 &&
+        copied.View().instances[0].stable_id == 101 &&
+        !copied.CopyRetainedDynamicFrom(sample),
+        "moved-from storage must invalidate its retained key and restore moved arrays");
+
+    hs::RenderSnapshotStorage move_assigned(0, 0, 0, 0);
+    move_assigned = std::move(moved);
+    Check(!move_assigned.CopyRetainedDynamicFrom(sample) && moved.CopyRetainedDynamicFrom(sample) &&
+        moved.View().instances.size() == 1,
+        "move assignment must transfer the key and invalidate the source");
+    move_assigned = std::move(move_assigned);
+    Check(move_assigned.CopyRetainedDynamicFrom(sample) &&
+        !move_assigned.CopyRetainedDynamicFrom(sample),
+        "self-move must invalidate the retained key without losing dynamic contents");
+
+    hs::RenderSnapshotStorage copy_assigned(0, 0, 0, 0);
+    hs::RenderSnapshotStorage other_source(0, 0, 0, 0);
+    other_source.header.session_id = 77;
+    other_source.header.tick = 2;
+    other_source.header.dynamic_pair_revision = 5;
+    instance.stable_id = 707;
+    other_source.AddInstance(instance);
+    auto other_sample = other_source.View();
+    Check(copy_assigned.CopyRetainedDynamicFrom(other_sample),
+        "copy-assignment target must begin warm with a different key");
+    copy_assigned.AddUi({});
+    retained.AddUi({});
+    copy_assigned = retained;
+    const auto assigned_view = copy_assigned.View();
+    const auto *assigned_instances = assigned_view.instances.data();
+    Check(assigned_view.instances.size() == 1 && assigned_view.instances[0].stable_id == 101 &&
+        assigned_view.ui.size() == 1 && retained.View().ui.size() == 1 &&
+        !copy_assigned.CopyRetainedDynamicFrom(sample) &&
+        copy_assigned.View().instances.data() == assigned_instances &&
+        copy_assigned.View().ui.empty() && retained.View().ui.size() == 1,
+        "copy assignment must transfer content/key, preserve its source, and keep warm reuse");
+
+    const auto expect_copy = [&](const char *message) {
+        Check(retained.CopyRetainedDynamicFrom(sample), message);
+    };
+    ++source.header.dynamic_pair_revision;
+    sample = source.View();
+    expect_copy("same tick with a new dynamic revision must copy");
+    sample = source.View();
+    Check(!retained.CopyRetainedDynamicFrom(sample), "new revision must become reusable");
+    ++source.header.tick;
+    sample = source.View();
+    expect_copy("same session/revision with a new tick must copy");
+    ++source.header.session_id;
+    sample = source.View();
+    expect_copy("new session must copy");
+
+    source.header.session_id = 0;
+    sample = source.View();
+    expect_copy("zero session identity must copy");
+    expect_copy("unknown identities must never enter the reuse cache");
+    source.header.session_id = 8;
+    source.header.tick = 0;
+    sample = source.View();
+    expect_copy("identified tick0 must copy on first use");
+    Check(!retained.CopyRetainedDynamicFrom(sample), "identified tick0 must be reusable");
+    source.header.tick = 14;
+    source.header.dynamic_pair_revision = 0;
+    sample = source.View();
+    expect_copy("zero dynamic revision must copy");
+
+    source.header.dynamic_pair_revision = 40;
+    sample = source.View();
+    expect_copy("identified sample must recache after unknown identity");
+    const auto expect_mutation_invalidates = [&](auto &&mutate, const char *message) {
+        Check(!retained.CopyRetainedDynamicFrom(sample), "fixture must begin with a warm retained key");
+        mutate(retained);
+        Check(retained.CopyRetainedDynamicFrom(sample), message);
+        Check(!retained.CopyRetainedDynamicFrom(sample), "successful repair must restore a reusable key");
+    };
+    expect_mutation_invalidates([](auto &storage) { storage.AddInstance({}); },
+        "AddInstance must invalidate retained array identity");
+    expect_mutation_invalidates([](auto &storage) { storage.AddPose({}); },
+        "AddPose must invalidate retained array identity");
+    expect_mutation_invalidates([](auto &storage) { storage.AddCapturedInstance({}); },
+        "AddCapturedInstance must invalidate retained array identity");
+    expect_mutation_invalidates([](auto &storage) { storage.AddLight({}); },
+        "AddLight must invalidate retained array identity");
+    expect_mutation_invalidates([](auto &storage) { storage.AddPersistentVfx({}); },
+        "AddPersistentVfx must invalidate retained array identity");
+    expect_mutation_invalidates([](auto &storage) { storage.Clear(); },
+        "Clear must invalidate retained array identity");
+
+    retained.AddUi({});
+    (void)retained.TakeUiModels();
+    retained.SetStaticScene(first_scene);
+    Check(!retained.CopyRetainedDynamicFrom(sample),
+        "UI and static-scene operations must preserve dynamic retained identity");
+
+    source.AddInstance({});
+    sample = source.View(); // Same key with mutated rows is valid only for the raw-copy test.
+    retained.CopyDynamicFrom(sample);
+    Check(retained.View().instances.size() == 2 && retained.View().instances.back().stable_id == 0,
+        "raw CopyDynamicFrom must keep its unconditional copy semantics");
+    Check(retained.CopyRetainedDynamicFrom(sample),
+        "raw CopyDynamicFrom must invalidate retained identity");
+}
+
 void CheckExactFinalPoseInputs()
 {
     hs::RenderInstance instance;
@@ -329,10 +586,12 @@ int main()
     try
     {
         TestSnapshotExchange();
+        TestRetainedSnapshotExchange();
         TestSnapshotExchangeQueuedPublications();
         TestSnapshotExchangeConcurrentOwnership();
         TestStaticSceneViewLifetime();
-    CheckSnapshotStorageInputs();
+        CheckSnapshotStorageInputs();
+        CheckRetainedSnapshotCopy();
         CheckExactFinalPoseInputs();
         CheckInstantMotionSample();
         hs::RenderSnapshotPair camera_pair;

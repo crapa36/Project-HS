@@ -1093,6 +1093,7 @@ struct D3D12Renderer::Impl
         VolumetricSystem volumetrics;
         LightListSystem light_list;
         DecalSurfaceSystem decal_surface;
+        bool decal_surface_active{};
         ReconstructionGuidesSystem reconstruction_guides;
         std::unique_ptr<ReconstructionProvider> reconstruction_provider;
         ReconstructionPlan reconstruction_plan;

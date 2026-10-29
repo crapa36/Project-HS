@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/renderer/renderer.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/render_data/static_shadow.hpp>
 #include <hs/render_data/static_shadow_archive.hpp>
 #include <nlohmann/json.hpp>

@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -26,6 +27,14 @@ static_assert(std::is_nothrow_move_assignable_v<VfxRibbonState>);
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+template<class T>
+bool SameBytes(std::span<const T> lhs, std::span<const T> rhs)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    return lhs.size() == rhs.size() &&
+        (lhs.empty() || std::memcmp(lhs.data(), rhs.data(), lhs.size_bytes()) == 0);
 }
 
 VfxRibbonSourceInput Source(std::uint64_t owner, std::uint32_t importance = 1)
@@ -221,8 +230,63 @@ void TestRibbonDuplicateValidationScratchRecovery()
           "duplicate rejection changed existing ribbon outputs");
     Check(state.Update(original, 11, 1, 1, 64, .5f, {}, error), error.c_str());
     Check(state.Updates().size() == 1 && state.Outputs().size() == 1 &&
-              state.Updates()[0].identity == identity && state.Outputs()[0].metadata == output_metadata,
+              state.Updates()[0].identity[0] == identity[0] &&
+              state.Updates()[0].identity[1] == 11 &&
+              state.Updates()[0].identity[2] == identity[2] &&
+              state.Updates()[0].identity[3] == 1 &&
+              state.Outputs()[0].metadata == output_metadata,
           "valid ribbon frame did not recover after duplicate rejection");
+}
+
+void TestPoolBackedRibbonState()
+{
+    auto owning = Source(71);
+    const auto frame_outputs = owning.outputs;
+    auto pooled = owning;
+    pooled.outputs.clear();
+    pooled.frame_output_first = 0;
+    pooled.frame_output_count = static_cast<std::uint32_t>(frame_outputs.size());
+
+    VfxRibbonState owning_state, pooled_state;
+    std::string error;
+    Check(owning_state.Update(std::span(&owning, 1), 8, 2, 3, 64, .25f, {1, 2, 3}, error), error.c_str());
+    Check(pooled_state.Update(std::span(&pooled, 1), 8, 2, 3, 64, .25f, {1, 2, 3}, error,
+              frame_outputs), error.c_str());
+    Check(SameBytes(owning_state.Updates(), pooled_state.Updates()) &&
+              SameBytes(owning_state.Outputs(), pooled_state.Outputs()) &&
+              owning_state.DroppedSources() == pooled_state.DroppedSources(),
+          "pool-backed ribbon state changed source updates, outputs, or drop count");
+
+    const auto preserve_state = [&] {
+        const auto updates = std::vector(pooled_state.Updates().begin(), pooled_state.Updates().end());
+        const auto outputs = std::vector(pooled_state.Outputs().begin(), pooled_state.Outputs().end());
+        const auto dropped = pooled_state.DroppedSources();
+        return [&, updates = std::move(updates), outputs = std::move(outputs), dropped] {
+            Check(SameBytes(pooled_state.Updates(), std::span(updates)) &&
+                      SameBytes(pooled_state.Outputs(), std::span(outputs)) &&
+                      pooled_state.DroppedSources() == dropped,
+                  "rejected pooled ribbon input changed retained state");
+        };
+    };
+    const auto reject_without_mutation = [&](VfxRibbonSourceInput rejected,
+                                             std::span<const VfxRibbonOutputInput> outputs) {
+        const auto unchanged = preserve_state();
+        Check(!pooled_state.Update(std::span(&rejected, 1), 9, 4, 5, 128, .5f, {}, error, outputs),
+              "invalid pool-backed ribbon storage was accepted");
+        unchanged();
+    };
+
+    auto missing = pooled;
+    reject_without_mutation(missing, {});
+    auto out_of_range = pooled;
+    out_of_range.frame_output_first = 1;
+    reject_without_mutation(out_of_range, frame_outputs);
+    auto mixed = owning;
+    mixed.frame_output_count = 1;
+    reject_without_mutation(mixed, frame_outputs);
+    auto nonfinite_outputs = frame_outputs;
+    nonfinite_outputs[0].hdr = std::numeric_limits<float>::quiet_NaN();
+    reject_without_mutation(pooled, nonfinite_outputs);
 }
 
 void TestRibbonBufferFailureRecovery()
@@ -356,6 +420,7 @@ int main()
         TestRibbonLookupLifecycle();
         TestRejectedResetKeepsState();
         TestRibbonDuplicateValidationScratchRecovery();
+        TestPoolBackedRibbonState();
         TestRibbonBufferFailureRecovery();
         TestRibbonOutputCapacityAcrossPackedWords();
         std::string error;

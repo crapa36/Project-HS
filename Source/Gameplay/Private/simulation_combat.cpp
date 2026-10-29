@@ -1255,7 +1255,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
             geometry.source_id = action.cast_id;
             EmitVfx(DomainSignalKind::BossAreaActivated, action.position, {},
                     action.radius / 2.2f, 0.12f, 0, 0, geometry);
-            SpawnArea(AreaKind::EnemyDamage, SkillKind::Count, action.position,
+            auto *area = SpawnArea(AreaKind::EnemyDamage, SkillKind::Count, action.position,
                       action.radius,
                       static_cast<float>(action.damage) /
                           std::max(EffectiveAttack(), 1.0f),
@@ -1263,6 +1263,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                        action.cast_id, 0, 0.0f, 0.0f, 0.0f, false,
                        kNoTelemetrySource, kNoTelemetrySource,
                        static_cast<std::uint8_t>(EnemyTelemetryIndex(*boss)));
+            area->interval = std::max<Tick>(1, action.interval);
         }
         else
         {
@@ -3078,7 +3079,14 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
 
     projectile_timing.Finish();
     auto area_timing = Measure(SimulationTimingId::AreaCollision);
-    std::vector<ScheduledAction> pending_areas;
+    struct PendingFireArea
+    {
+        Float2 position{};
+        std::uint64_t cast_id{};
+        SkillKind skill{};
+        std::uint8_t source_upgrade{};
+    };
+    std::vector<PendingFireArea> pending_fire_areas;
     const auto initial_area_count = actors->areas.size();
     for (std::size_t area_index = 0; area_index < initial_area_count; ++area_index)
     {
@@ -3241,13 +3249,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 trap_damage_signal.upgrade_owner_id = area.id.value;
                 if (HasUpgrade(area.upgrade_mask, 5))
                 {
-                    pending_areas.push_back(
-                        {tick, ScheduledKind::Area, area.skill, target->motion.position, {},
-                          rules.upgrades.trap.trigger_burn_and_fire_area.damage_multiplier_per_tick,
-                          rules.upgrades.trap.trigger_burn_and_fire_area.area_radius,
-                          static_cast<float>(rules.upgrades.trap.trigger_burn_and_fire_area.area_duration_ticks) / 60.0f,
-                          1, 0,
-                         EffectOrigin::Derived, area.cast_id, 4});
+                    pending_fire_areas.push_back(
+                        {target->motion.position, area.cast_id, area.skill, 4});
                 }
                 ++area.trigger_count;
                 if (HasUpgrade(area.upgrade_mask, 3) && area.trigger_count == 1)
@@ -3417,13 +3420,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                          runtime.spawn_count < rules.upgrades.arrow_rain
                                                .apply_burn_and_create_fire_areas.maximum_areas_per_cast)
                     {
-                        pending_areas.push_back(
-                            {tick, ScheduledKind::Area, area.skill, enemy.motion.position, {},
-                              rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.damage_multiplier_per_tick,
-                              rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.radius,
-                              static_cast<float>(rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.duration_ticks) / 60.0f,
-                              1, 0,
-                              EffectOrigin::Derived, area.cast_id, 3});
+                        pending_fire_areas.push_back(
+                            {enemy.motion.position, area.cast_id, area.skill, 3});
                         ++runtime.spawn_count;
                     }
                 }
@@ -3538,13 +3536,41 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
             }
         }
     }
-    for (const auto &pending : pending_areas)
+    for (const auto &pending : pending_fire_areas)
     {
-        SpawnArea(AreaKind::Damage, pending.skill, pending.position,
-                  pending.radius, pending.damage_coefficient, pending.duration,
-                  0.0f, pending.origin, pending.cast_id, pending.upgrade_mask,
+        float radius{}, damage_multiplier{};
+        Tick duration{}, interval{};
+        switch (pending.source_upgrade)
+        {
+        case 3:
+        {
+            const auto &recipe = rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas;
+            radius = recipe.radius;
+            duration = recipe.duration_ticks;
+            interval = recipe.tick_interval_ticks;
+            damage_multiplier = recipe.damage_multiplier_per_tick;
+            break;
+        }
+        case 4:
+        {
+            const auto &recipe = rules.upgrades.trap.trigger_burn_and_fire_area;
+            radius = recipe.area_radius;
+            duration = recipe.area_duration_ticks;
+            interval = recipe.tick_interval_ticks;
+            damage_multiplier = recipe.damage_multiplier_per_tick;
+            break;
+        }
+        default:
+            assert(false && "unknown fire-area upgrade source");
+            continue;
+        }
+        auto *area = SpawnArea(AreaKind::Damage, pending.skill, pending.position,
+                  radius, damage_multiplier,
+                  static_cast<float>(duration) / 60.0f, 0.0f,
+                  EffectOrigin::Derived, pending.cast_id, 0,
                   0.0f, 0.0f, 0.0f, false,
-                  pending.source_upgrade, pending.source_relic);
+                  pending.source_upgrade, kNoTelemetrySource);
+        area->interval = interval;
     }
 }
 

@@ -1,5 +1,6 @@
 #include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_entity_surface_commands.hpp"
+#include "vfx_profile_admission.hpp"
 
 #include <array>
 #include <iostream>
@@ -92,6 +93,10 @@ void AppendRetainsCapturedOwnerAndPrefix()
 
     hs::runtime_detail::AppendVfxTypedEntitySurfaceCommands(
         image.View(), captures, {}, 120, 0, result);
+    Check(result.size() - 1 <= captures.size() * hs::runtime_detail::PrepareVfxEventProfileAdmission(
+              image.View(), first.input.effect_handle).frame_rows[
+                  static_cast<std::size_t>(hs::runtime_detail::ActiveEffectStore::Profile::EntitySurface)],
+          "prepared surface reservation was smaller than actual output");
     Check(result.size() == 3 && result.capacity() == capacity &&
           result[1].owner_id == 31 && result[1].event_sequence == 101 &&
           result[1].stable_seed == 7 && result[2].owner_id == 32 &&

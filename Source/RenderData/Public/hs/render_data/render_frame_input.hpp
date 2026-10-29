@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_view_input.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/ui_draw_content.hpp>
 #include <hs/render_data/render_scene_ref.hpp>
 #include <hs/render_data/devtools_frame_data.hpp>
@@ -50,6 +51,9 @@ struct RenderVfxFrameInput
     VfxEntitySurfaceInputs entity_surfaces;
     // Unspecified preserves legacy snapshot-tick stepping.
     std::optional<RenderVfxWorldBatch> world_batch;
+    // Borrowed with the other frame spans; commands address slices by index.
+    std::span<const float> distortion_gap_angles;
+    std::span<const float> ground_gap_angles;
 };
 // Borrowed frame package: the caller keeps snapshot leases and all spans alive
 // until Render returns. One common scene is rendered sequentially into views;

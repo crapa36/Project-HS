@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -65,13 +66,27 @@ struct VfxGroundGeometry
     std::uint32_t mask_slice{0xffffffffu};
     float mask_strength{};
     VfxUniformRingGaps uniform_gaps{};
+    std::uint32_t frame_gap_first{};
+    std::uint32_t frame_gap_count{};
 
     [[nodiscard]] std::size_t GapCount() const noexcept
-    { return uniform_gaps.Active() ? uniform_gaps.count : gap_angles_radians.size(); }
-    [[nodiscard]] float GapAngleRadians(std::size_t index) const noexcept
-    { return uniform_gaps.Active() ? uniform_gaps.GroundRadians(static_cast<std::uint32_t>(index)) : gap_angles_radians[index]; }
-    [[nodiscard]] bool GapStorageConsistent() const noexcept
-    { return uniform_gaps.Valid() && (!uniform_gaps.Active() || gap_angles_radians.empty()); }
+    { return uniform_gaps.Active() ? uniform_gaps.count : (frame_gap_count ? frame_gap_count : gap_angles_radians.size()); }
+    [[nodiscard]] float GapAngleRadians(std::size_t index,
+        std::span<const float> frame_gap_angles = {}) const noexcept
+    {
+        if (uniform_gaps.Active()) return uniform_gaps.GroundRadians(static_cast<std::uint32_t>(index));
+        return frame_gap_count ? frame_gap_angles[frame_gap_first + index] : gap_angles_radians[index];
+    }
+    [[nodiscard]] bool GapStorageConsistent(std::size_t frame_gap_size = 0) const noexcept
+    {
+        if (!uniform_gaps.Valid()) return false;
+        if (uniform_gaps.Active())
+            return gap_angles_radians.empty() && frame_gap_first == 0 && frame_gap_count == 0;
+        if (frame_gap_count != 0)
+            return gap_angles_radians.empty() && frame_gap_first <= frame_gap_size &&
+                frame_gap_count <= frame_gap_size - frame_gap_first;
+        return frame_gap_first == 0;
+    }
 };
 using VfxTransform = std::array<float, 16>;
 inline constexpr VfxTransform kVfxIdentityTransform{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};

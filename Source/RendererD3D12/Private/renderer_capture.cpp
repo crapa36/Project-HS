@@ -722,19 +722,26 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto contract_failure = [](std::string message) {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
+    const auto decal_surfaces = owner.decal_surface.DiagnosticResources();
+    if (owner.decal_surface_active &&
+        (!decal_surfaces[0] || !decal_surfaces[1] || !decal_surfaces[2]))
+        return contract_failure("Submitted decal Surface exports are unavailable for capture.");
+    const auto *surface_base = owner.decal_surface_active ? decal_surfaces[0] : &owner.targets.gbuffer_base;
+    const auto *surface_normal = owner.decal_surface_active ? decal_surfaces[1] : &owner.targets.gbuffer_normal;
+    const auto *surface_material = owner.decal_surface_active ? decal_surfaces[2] : &owner.targets.gbuffer_material;
     std::vector<SurfaceCapture> surfaces{
         SurfaceCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
                        DXGI_FORMAT_R32G32_UINT, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_normal", &owner.targets.gbuffer_normal,
+        SurfaceCapture{"gbuffer_normal", surface_normal,
                        DXGI_FORMAT_R16G16_SNORM, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_material", &owner.targets.gbuffer_material,
+        SurfaceCapture{"gbuffer_material", surface_material,
                        DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
         SurfaceCapture{"gbuffer_motion", &owner.targets.gbuffer_motion,
                        DXGI_FORMAT_R16G16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"surface_history", &owner.targets.gbuffer_surface_history,
                        DXGI_FORMAT_R32G32_FLOAT, Access::ShaderRead},
         SurfaceCapture{"depth", &owner.targets.depth, DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
-        SurfaceCapture{"gbuffer_base", &owner.targets.gbuffer_base,
+        SurfaceCapture{"gbuffer_base", surface_base,
                        DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
         SurfaceCapture{"lighting_hdr", &owner.targets.hdr_color,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
@@ -1046,6 +1053,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         light_resources.allocated_bytes, light_resources.upload_allocated_bytes,
         light_resources.capacity.width, light_resources.capacity.height,
         light_resources.frame_slot_count, light_resources.frame_slot);
+    metadata_output << std::format("  \"decal_surface_active\": {},\n", owner.decal_surface_active);
     metadata_output << "  \"terrain_texture_mips\": [";
     bool first_texture = true;
     for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)

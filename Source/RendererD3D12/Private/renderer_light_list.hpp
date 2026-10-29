@@ -2,7 +2,7 @@
 
 #include "render_graph.hpp"
 #include "view_state.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>

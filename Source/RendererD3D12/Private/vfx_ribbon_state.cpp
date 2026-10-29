@@ -16,7 +16,8 @@ using Key = std::tuple<std::uint64_t, VfxEffectHandle, std::uint32_t>;
 Key SourceKey(const VfxRibbonSourceInput &source) { return {source.owner_id, source.effect_handle, source.source_id}; }
 std::uint32_t MotionCode(VfxMotionKind motion);
 bool ValidateRibbonSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
-                           std::vector<std::size_t> &source_order)
+                           std::vector<std::size_t> &source_order,
+                           std::span<const VfxRibbonOutputInput> frame_outputs)
 {
     source_order.clear();
     const auto reject = [&](const char *message) {
@@ -31,9 +32,10 @@ bool ValidateRibbonSources(std::span<const VfxRibbonSourceInput> sources, std::s
             (!source.analytic && (source.history_seconds <= 0.0f || source.history_seconds > 62.0f / 60.0f)) ||
             (source.analytic && (!Finite(source.control) || source.segments < 1 || source.segments >= kRibbonHistorySamples ||
                 !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1)) ||
-            !std::isfinite(source.start_alpha) || source.start_alpha < 0.0f || source.start_alpha > 1.0f || source.outputs.empty())
+            !std::isfinite(source.start_alpha) || source.start_alpha < 0.0f || source.start_alpha > 1.0f ||
+            !source.OutputStorageConsistent(frame_outputs.size()) || source.OutputCount() == 0)
             return reject("Ribbon source has invalid identity, transform, history, alpha, or outputs");
-        for (const auto &output : source.outputs)
+        for (const auto &output : source.OutputSpan(frame_outputs))
         {
             const auto motion = MotionCode(output.motion);
             if ((output.profile != VfxOutputProfile::RibbonAdd && output.profile != VfxOutputProfile::RibbonOit) ||
@@ -94,7 +96,8 @@ std::size_t VfxRibbonState::KeyHash::operator()(const Key &key) const noexcept
 }
 
 bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
-                                     std::size_t output_capacity)
+                                     std::size_t output_capacity,
+                                     std::span<const VfxRibbonOutputInput> frame_outputs)
 {
     constexpr auto word_bits = std::numeric_limits<std::size_t>::digits;
     source_scratch_.assign(slots_.size() / word_bits + (slots_.size() % word_bits != 0), 0);
@@ -104,8 +107,9 @@ bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sour
     };
     for (const auto &source : sources)
     {
-        if (source.outputs.size() > output_capacity) return finish(true);
-        output_capacity -= source.outputs.size();
+        if (!source.OutputStorageConsistent(frame_outputs.size())) return finish(true);
+        if (source.OutputCount() > output_capacity) return finish(true);
+        output_capacity -= source.OutputCount();
         if (const auto found = slot_by_key_.find(SourceKey(source)); found != slot_by_key_.end())
             source_scratch_[found->second / word_bits] |= std::size_t{1} << (found->second % word_bits);
     }
@@ -121,29 +125,34 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
                             std::uint64_t catalog_generation,
                             std::uint32_t point_budget, float interpolation,
-                            Float3 previous_eye, std::string &error)
+                            Float3 previous_eye, std::string &error,
+                            std::span<const VfxRibbonOutputInput> frame_outputs)
 {
-    if (!ValidateFrameSources(sources, error)) return false;
-    return UpdateValidated(sources, tick, session, catalog_generation, point_budget, interpolation, previous_eye, error);
+    if (!ValidateFrameSources(sources, error, frame_outputs)) return false;
+    return UpdateValidated(sources, tick, session, catalog_generation, point_budget, interpolation, previous_eye, error,
+        frame_outputs);
 }
 
-bool VfxRibbonState::ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error)
+bool VfxRibbonState::ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
+                                     std::span<const VfxRibbonOutputInput> frame_outputs)
 {
     std::vector<std::size_t> source_order;
-    return ValidateRibbonSources(sources, error, source_order);
+    return ValidateRibbonSources(sources, error, source_order, frame_outputs);
 }
 
 bool VfxRibbonState::ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources,
-                                         std::string &error)
+                                         std::string &error,
+                                         std::span<const VfxRibbonOutputInput> frame_outputs)
 {
-    return ValidateRibbonSources(sources, error, source_scratch_);
+    return ValidateRibbonSources(sources, error, source_scratch_, frame_outputs);
 }
 
 bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
                             std::uint64_t catalog_generation,
                             std::uint32_t point_budget, float interpolation,
-                            Float3 previous_eye, std::string &error)
+                            Float3 previous_eye, std::string &error,
+                            std::span<const VfxRibbonOutputInput> frame_outputs)
 {
     if (point_budget < kRibbonHistorySamples)
     {
@@ -249,8 +258,9 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
             source.previous_position.x + (source.position.x - source.previous_position.x) * interpolation,
             source.previous_position.y + (source.position.y - source.previous_position.y) * interpolation,
             source.previous_position.z + (source.position.z - source.previous_position.z) * interpolation, 1.0f};
-        if (!source.outputs.empty() &&
-            source.outputs[0].motion == VfxMotionKind::HistoryRibbonTearsBackward)
+        const auto source_outputs = source.OutputSpan(frame_outputs);
+        if (!source_outputs.empty() &&
+            source_outputs[0].motion == VfxMotionKind::HistoryRibbonTearsBackward)
             update.rendered_head = {
                 slot.previous_head.x + (slot.current_head.x - slot.previous_head.x) * interpolation,
                 slot.previous_head.y + (slot.current_head.y - slot.previous_head.y) * interpolation,
@@ -259,7 +269,7 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
         if (source.analytic) update.rendered_head = {source.position.x, source.position.y, source.position.z, 1};
         updates_.push_back(update);
         slot.outputs.clear();
-        for (const auto &output : source.outputs)
+        for (const auto &output : source_outputs)
         {
             GpuRibbonOutput gpu{};
             gpu.metadata = {static_cast<std::uint32_t>(slot_index), output.gradient_row, MotionCode(output.motion),

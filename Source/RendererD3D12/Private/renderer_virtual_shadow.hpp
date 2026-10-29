@@ -3,7 +3,7 @@
 #include "render_graph.hpp"
 #include "view_state.hpp"
 #include "renderer_shadow_guarantee.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>
 #include <array>

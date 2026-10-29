@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <span>
 #include <unordered_map>

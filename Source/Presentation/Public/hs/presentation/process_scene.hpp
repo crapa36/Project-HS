@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/game_domain/tick_read_view.hpp>
 #include <hs/presentation/environment_layout.hpp>
 

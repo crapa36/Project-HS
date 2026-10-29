@@ -322,4 +322,9 @@ Result DecalSurfaceSystem::ResetAfterCompletion(const CompletionSet &completed)
         return Failure(ErrorCode::InvalidState, "Complete and drain all decal Surface queue uses before reset.");
     targets_.reset(); return Result::Success();
 }
+std::array<const AllocationResource *, 4> DecalSurfaceSystem::DiagnosticResources() const noexcept
+{
+    if (!targets_ || !targets_->usable || pending_graph_) return {};
+    return {&targets_->outputs[0], &targets_->outputs[1], &targets_->outputs[2], &targets_->outputs[3]};
+}
 } // namespace hs

@@ -2,6 +2,7 @@
 #include "vfx_light_reference.hpp"
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_light_commands.hpp"
+#include "../Source/Runtime/Private/vfx_profile_admission.hpp"
 #include <bit>
 #include <array>
 #include <cmath>
@@ -92,5 +93,19 @@ void AppendContract()
  Check(result.size()==3&&result[1].stable_id==expected_first[0].stable_id&&result[2].stable_id==expected_second[0].stable_id&&result.capacity()==capacity,
        "light append changed order, prefix, or caller capacity");
 }
+void FrameFanoutPlan()
+{
+ auto p=Program();const auto output=p.outputs.front();p.outputs.push_back(output);p.outputs.push_back(output);p.sources[0].outputs.count=3;
+ hs::VfxImageData data;hs::PrepareVfxLightRecipes(p.View(),data.light_effect_ranges,data.light_recipes);auto image=data.View();image.program=p.View();
+ const auto plan=hs::runtime_detail::PrepareVfxEventProfileAdmission(image,1);
+ auto input=Input();
+ Check(plan.frame_rows[static_cast<std::size_t>(hs::runtime_detail::ActiveEffectStore::Profile::Light)]==3&&
+       hs::runtime_detail::BuildVfxTypedLightCommands(image,std::span(&input,1),145).size()==3,
+       "prepared frame fanout must cover all emitted Light recipes");
+ input.quality=hs::VfxQuality::Low;
+ Check(hs::runtime_detail::BuildVfxTypedLightCommands(image,std::span(&input,1),145).empty()&&
+       plan.frame_rows[static_cast<std::size_t>(hs::runtime_detail::ActiveEffectStore::Profile::Light)]==3,
+       "frame reservation must cover later quality changes without another activation");
 }
-int RunVfxLightTests(){try{PreparedSkipsAndOrder();ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();AppendContract();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int RunVfxLightTests(){try{PreparedSkipsAndOrder();ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();AppendContract();FrameFanoutPlan();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

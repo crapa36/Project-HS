@@ -15,6 +15,12 @@ std::uint64_t FakeClock() noexcept { return ++clock_ticks; }
 
 void CheckFramePerformanceSchema()
 {
+    using hs::runtime_detail::kFramePerformanceTaskNames;
+    using hs::runtime_detail::kVfxProfilePrepareTaskIndex;
+    Check(kFramePerformanceTaskNames.size() == 24);
+    Check(kFramePerformanceTaskNames[10] == "vfx_local_outputs");
+    Check(kVfxProfilePrepareTaskIndex == 23);
+    Check(kFramePerformanceTaskNames[kVfxProfilePrepareTaskIndex] == "vfx_profile_prepare");
     const auto header = hs::runtime_detail::FramePerformanceCsvHeader();
     std::string sentinel_row;
     std::size_t sentinel_index{};
@@ -42,6 +48,14 @@ void CheckFramePerformanceSchema()
     const auto names = split(header_line);
     const auto values = split(row_line);
     Check(names.size() == values.size() && names.size() == sentinel_index);
+    Check(names.size() == 194);
+    const auto profile_task_name = std::find(names.begin(), names.end(), "vfx_profile_prepare_us");
+    Check(profile_task_name != names.end());
+    const auto profile_task_column = static_cast<std::size_t>(profile_task_name - names.begin());
+    Check(names[profile_task_column] == "vfx_profile_prepare_us");
+    Check(names[profile_task_column + 1] == "vfx_profile_prepare_calls");
+    Check(names[profile_task_column - 2] == "vfx_fresnel_us");
+    Check(names[profile_task_column - 1] == "vfx_fresnel_calls");
     auto unique_names = names;
     std::sort(unique_names.begin(), unique_names.end());
     Check(std::adjacent_find(unique_names.begin(), unique_names.end()) == unique_names.end());
@@ -59,14 +73,19 @@ void CheckNativeCopyHeadroom()
     pending.resize(prepared.capacity());
     Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
     prepared.push_back(1);
-    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == pending.size() * sizeof(int));
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) ==
+          (pending.size() / 2) * sizeof(int));
     frozen.reserve(pending.size());
     Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
     pending.resize(frozen.capacity() + 1);
-    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == sizeof(int));
+    Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
     prepared.clear();
     prepared.reserve(pending.size());
     Check(NativeCopyGrowthBytes(pending, frozen, prepared) == 0);
+
+    const auto nonempty_retained = NativeCopyGrowthBytes(12, 0, 4, sizeof(int));
+    const auto empty_retained = NativeCopyGrowthBytes(12, 0, 0, sizeof(int));
+    Check(nonempty_retained == 2 * sizeof(int) && empty_retained == 6 * sizeof(int));
 }
 struct FailedSink : std::streambuf
 {

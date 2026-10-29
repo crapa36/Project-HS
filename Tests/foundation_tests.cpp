@@ -231,10 +231,32 @@ void TestSpscQueueSize()
     });
     std::jthread consumer([&] {
         std::uint32_t value{};
+        std::uint32_t expected{};
+        bool rejected_current = false;
         while (!producer_done.load(std::memory_order_acquire) || queue.Size() != 0)
         {
-            (void)queue.TryPop(value);
+            if (!queue.TryPopIf(value, [&](const std::uint32_t &candidate) {
+                    if (candidate != expected)
+                    {
+                        failed.store(true, std::memory_order_relaxed);
+                        return true;
+                    }
+                    if (!rejected_current && candidate != 0 && candidate % 997 == 0)
+                    {
+                        rejected_current = true;
+                        return false;
+                    }
+                    rejected_current = false;
+                    return true;
+                }))
+                continue;
+
+            if (value != expected)
+                failed.store(true, std::memory_order_relaxed);
+            ++expected;
         }
+        if (expected != 100'000)
+            failed.store(true, std::memory_order_relaxed);
     });
     while (!producer_done.load(std::memory_order_acquire))
     {
@@ -243,6 +265,61 @@ void TestSpscQueueSize()
     producer.join();
     consumer.join();
     Check(!failed.load(std::memory_order_relaxed), "SPSC observed size stays bounded");
+}
+
+void TestSpscQueueConditionalPop()
+{
+    hs::BoundedSpscQueue<std::uint32_t, 3> queue;
+    std::uint32_t output = 99;
+    bool called = false;
+    Check(!queue.TryPopIf(output, [&](const std::uint32_t &) {
+              called = true;
+              return true;
+          }) &&
+              !called && output == 99 && queue.Size() == 0,
+          "conditional pop does not call the predicate for an empty queue");
+
+    Check(queue.TryPush(1) && queue.TryPush(2) && queue.TryPush(3) &&
+              !queue.TryPush(4),
+          "conditional pop fixture fills its bounded queue");
+    called = false;
+    Check(!queue.TryPopIf(output, [&](const std::uint32_t &candidate) {
+              called = true;
+              return candidate != 1;
+          }) &&
+              called && output == 99 && queue.Size() == 3,
+          "rejected conditional pop preserves output and FIFO head");
+
+    try
+    {
+        (void)queue.TryPopIf(output, [](const std::uint32_t &) -> bool {
+            throw std::runtime_error("predicate failure");
+        });
+        throw std::runtime_error("conditional pop swallowed a predicate exception");
+    }
+    catch (const std::runtime_error &exception)
+    {
+        Check(std::string_view(exception.what()) == "predicate failure" && output == 99 &&
+                  queue.Size() == 3,
+              "throwing conditional pop preserves output and FIFO head");
+    }
+
+    Check(queue.TryPopIf(output, [](const std::uint32_t &candidate) {
+              return candidate == 1;
+          }) &&
+              output == 1 && queue.TryPush(4),
+          "conditional pop can retry the same head and wrap the producer index");
+    for (const auto expected : {2u, 3u, 4u})
+    {
+        Check(queue.TryPopIf(output, [expected](const std::uint32_t &candidate) {
+                  return candidate == expected;
+              }) &&
+                  output == expected,
+              "conditional pop preserves FIFO order across wrap");
+    }
+    Check(!queue.TryPopIf(output, [](const std::uint32_t &) { return true; }) &&
+              queue.Size() == 0,
+          "conditional pop drains wrapped queue");
 }
 
 void TestVfxEventParameters()
@@ -367,6 +444,7 @@ int main(int argc, char **argv)
             TestResult();
             TestFixedStepClock();
             TestSpscQueueSize();
+            TestSpscQueueConditionalPop();
             TestVfxEventParameters();
             TestCookedHeaderValidation();
             TestCanonicalBytes();

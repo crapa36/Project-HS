@@ -32,6 +32,20 @@ hs::Tick ToTicks(double seconds, std::string_view file, std::string_view path)
     return CheckedInteger<hs::Tick>(std::llround(seconds * 60.0), file, path);
 }
 
+hs::Tick ToAreaTickInterval(double seconds, std::string_view file, std::string_view path)
+{
+    const auto ticks = ToTicks(seconds, file, path);
+    try
+    {
+        return detail::CheckedPositiveTickInterval(ticks);
+    }
+    catch (const std::invalid_argument &)
+    {
+        ThrowValidationError(file, path,
+                             "recurring area interval must round to at least one 60 Hz tick");
+    }
+}
+
 namespace
 {
 using Json = nlohmann::json;
@@ -118,19 +132,41 @@ void RequireParameterKeys(const Json &entry, std::string_view file, std::string_
                                                                   expected);
 }
 
-float Number(const Json &entry, std::string_view file, const std::string &path,
-             std::string_view key)
+float CheckedFloatValue(double source, std::string_view file,
+                        const std::string &path)
 {
-    const auto source = ParameterNumber(entry, file, path, key);
     try
     {
         return detail::CheckedFloat(source);
     }
     catch (const std::logic_error &)
     {
-        ThrowValidationError(file, path + "/parameters/" + std::string(key),
+        ThrowValidationError(file, path,
                              "number is not representable as a finite float");
     }
+}
+
+float RequiredFloat(const Json &entry, std::string_view file,
+                    const std::string &path, std::string_view key)
+{
+    return CheckedFloatValue(RequireNumber(entry, file, path, key), file,
+                             path + "/" + std::string(key));
+}
+
+float CoordinateFloat(const Json &value, std::string_view file, const std::string &path)
+{
+    if (!value.is_number()) ThrowValidationError(file, path, "coordinate must be numeric");
+    // JSON integers fit float range; retain their original direct rounding.
+    if (!value.is_number_float()) return value.get<float>();
+    return CheckedFloatValue(value.get<double>(), file, path);
+}
+
+float Number(const Json &entry, std::string_view file, const std::string &path,
+             std::string_view key)
+{
+    const auto source = ParameterNumber(entry, file, path, key);
+    return CheckedFloatValue(source, file,
+                             path + "/parameters/" + std::string(key));
 }
 
 float PositiveProjectileSpeed(const Json &entry, std::string_view file,
@@ -146,6 +182,15 @@ float PositiveProjectileSpeed(const Json &entry, std::string_view file,
         ThrowValidationError(file, path + "/parameters/projectile_speed",
                              "projectile speed must be representable as a positive float");
     }
+}
+
+void RequireProjectileRangeProgress(float speed, float max_leg_range,
+                                    std::string_view file,
+                                    const std::string &path)
+{
+    if (!detail::MakesFiniteProjectileRangeProgress(speed, max_leg_range))
+        ThrowValidationError(file, path,
+                             "projectile motion cannot make finite 60 Hz range progress");
 }
 
 template <typename Type>
@@ -168,7 +213,10 @@ std::array<float, Size> Angles(const Json &entry, std::string_view file,
     {
         if (!value[index].is_number() || !std::isfinite(value[index].get<double>()))
             ThrowValidationError(file, path + "/parameters/" + std::string(key), "angle must be finite");
-        result[index] = static_cast<float>(value[index].get<double>());
+        result[index] = CheckedFloatValue(
+            value[index].get<double>(), file,
+            path + "/parameters/" + std::string(key) + "/" +
+                std::to_string(index));
     }
     return result;
 }
@@ -206,10 +254,10 @@ hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources)
     const auto &character = sources.documents.at("characters")["entries"][0];
     const auto &camera = character["camera"];
     presentation.camera = {
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "yaw_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "pitch_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "vertical_fov_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "distance_m")),
+        RequiredFloat(camera, "characters", "$/entries/0/camera", "yaw_degrees"),
+        RequiredFloat(camera, "characters", "$/entries/0/camera", "pitch_degrees"),
+        RequiredFloat(camera, "characters", "$/entries/0/camera", "vertical_fov_degrees"),
+        RequiredFloat(camera, "characters", "$/entries/0/camera", "distance_m"),
         CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "minimum_distance_percent"), "characters", "$/entries/0/camera/minimum_distance_percent"),
         CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "maximum_distance_percent"), "characters", "$/entries/0/camera/maximum_distance_percent")};
     if (presentation.camera.minimum_distance_percent > presentation.camera.maximum_distance_percent)
@@ -237,13 +285,13 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &base = stat["base_values"];
     data.stats.maximum_points_per_stat = CheckedInteger<std::uint8_t>(
         RequireInteger(stat, "stats", "$/entries/0", "maximum_points_per_stat"), "stats", "$/entries/0/maximum_points_per_stat");
-    data.stats.base_maximum_hp = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "maximum_hp"));
-    data.stats.base_current_hp = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "current_hp"));
-    data.stats.base_attack_power = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "attack_power"));
-    data.stats.base_basic_attack_rate_per_second = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "basic_attack_rate_per_second"));
-    data.stats.base_movement_speed_mps = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "movement_speed_mps"));
-    data.stats.base_magnet_radius_m = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "magnet_radius_m"));
-    data.stats.base_global_cooldown_reduction = static_cast<float>(RequireNumber(base, "stats", "$/entries/0/base_values", "global_cooldown_reduction"));
+    data.stats.base_maximum_hp = RequiredFloat(base, "stats", "$/entries/0/base_values", "maximum_hp");
+    data.stats.base_current_hp = RequiredFloat(base, "stats", "$/entries/0/base_values", "current_hp");
+    data.stats.base_attack_power = RequiredFloat(base, "stats", "$/entries/0/base_values", "attack_power");
+    data.stats.base_basic_attack_rate_per_second = RequiredFloat(base, "stats", "$/entries/0/base_values", "basic_attack_rate_per_second");
+    data.stats.base_movement_speed_mps = RequiredFloat(base, "stats", "$/entries/0/base_values", "movement_speed_mps");
+    data.stats.base_magnet_radius_m = RequiredFloat(base, "stats", "$/entries/0/base_values", "magnet_radius_m");
+    data.stats.base_global_cooldown_reduction = RequiredFloat(base, "stats", "$/entries/0/base_values", "global_cooldown_reduction");
     data.player_health = CheckedInteger<std::int32_t>(data.stats.base_maximum_hp, "stats", "$/entries/0/base_values/maximum_hp");
     data.player_attack = data.stats.base_attack_power;
     data.player_attack_speed = data.stats.base_basic_attack_rate_per_second;
@@ -266,20 +314,20 @@ BuiltGameData BuildGameData(const ContentSources &sources)
                 allocation_targets[index])
             ThrowValidationError("stats", path,
                                  "stat allocation order is part of the cooked ABI");
-        data.stats.allocations[index].amount_per_point = static_cast<float>(RequireNumber(allocations[index], "stats", path, "amount_per_point"));
-        data.stats.allocations[index].immediate_current_hp_restore_per_point = static_cast<float>(RequireNumber(allocations[index], "stats", path, "immediate_current_hp_restore_per_point"));
+        data.stats.allocations[index].amount_per_point = RequiredFloat(allocations[index], "stats", path, "amount_per_point");
+        data.stats.allocations[index].immediate_current_hp_restore_per_point = RequiredFloat(allocations[index], "stats", path, "immediate_current_hp_restore_per_point");
     }
     const auto &combat = stat["combat"];
     data.stats.combat.minimum_final_damage = CheckedInteger<std::int32_t>(RequireInteger(combat, "stats", "$/entries/0/combat", "minimum_final_damage"), "stats", "$/entries/0/combat/minimum_final_damage");
     data.stats.combat.minimum_cooldown_ticks = ToTicks(RequireNumber(combat, "stats", "$/entries/0/combat", "minimum_cooldown_seconds"), "stats", "$/entries/0/combat/minimum_cooldown_seconds");
-    data.stats.combat.skill_cooldown_upgrade_multiplier = static_cast<float>(RequireNumber(combat, "stats", "$/entries/0/combat", "skill_cooldown_upgrade_multiplier"));
+    data.stats.combat.skill_cooldown_upgrade_multiplier = RequiredFloat(combat, "stats", "$/entries/0/combat", "skill_cooldown_upgrade_multiplier");
     data.stats.combat.maximum_basic_attacks_per_tick = CheckedInteger<std::uint8_t>(RequireInteger(combat, "stats", "$/entries/0/combat", "maximum_basic_attacks_per_tick"), "stats", "$/entries/0/combat/maximum_basic_attacks_per_tick");
     data.stats.combat.critical_hits = RequireMember(combat, "stats", "$/entries/0/combat", "critical_hits").get<bool>();
     data.stats.combat.armor = RequireMember(combat, "stats", "$/entries/0/combat", "armor").get<bool>();
     data.stats.combat.hit_invulnerability = RequireMember(combat, "stats", "$/entries/0/combat", "hit_invulnerability").get<bool>();
     data.stats.combat.player_hit_knockback = RequireMember(combat, "stats", "$/entries/0/combat", "player_hit_knockback").get<bool>();
     data.stats.first_status_tick_delay_ticks = ToTicks(RequireNumber(combat, "stats", "$/entries/0/combat", "first_tick_delay_seconds"), "stats", "$/entries/0/combat/first_tick_delay_seconds");
-    data.stats.player_collision_radius = static_cast<float>(RequireNumber(combat, "stats", "$/entries/0/combat", "player_collision_radius"));
+    data.stats.player_collision_radius = RequiredFloat(combat, "stats", "$/entries/0/combat", "player_collision_radius");
 
     const auto &statuses = stat["statuses"];
     const auto status_path = [](std::size_t index) { return "$/entries/0/statuses/" + std::to_string(index); };
@@ -313,16 +361,16 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &level = sources.documents.at("level")["entries"][0];
     const auto &experience = level["experience"];
     const auto &required_xp = experience["required_xp"];
-    data.growth.required_xp_base = static_cast<float>(RequireNumber(required_xp, "level", "$/entries/0/experience/required_xp", "base"));
-    data.growth.required_xp_linear = static_cast<float>(RequireNumber(required_xp, "level", "$/entries/0/experience/required_xp", "linear"));
-    data.growth.required_xp_quadratic = static_cast<float>(RequireNumber(required_xp, "level", "$/entries/0/experience/required_xp", "quadratic"));
+    data.growth.required_xp_base = RequiredFloat(required_xp, "level", "$/entries/0/experience/required_xp", "base");
+    data.growth.required_xp_linear = RequiredFloat(required_xp, "level", "$/entries/0/experience/required_xp", "linear");
+    data.growth.required_xp_quadratic = RequiredFloat(required_xp, "level", "$/entries/0/experience/required_xp", "quadratic");
     const auto &pickup = experience["pickup"];
-    data.growth.experience_pickup_speed = static_cast<float>(RequireNumber(pickup, "level", "$/entries/0/experience/pickup", "speed_mps"));
-    data.growth.experience_pickup_radius = static_cast<float>(RequireNumber(pickup, "level", "$/entries/0/experience/pickup", "collision_radius_m"));
-    data.growth.utility_pickup_base_chance = static_cast<float>(RequireNumber(experience, "level", "$/entries/0/experience", "utility_pickup_base_chance"));
-    data.growth.utility_pickup_miss_increment = static_cast<float>(RequireNumber(experience, "level", "$/entries/0/experience", "utility_pickup_miss_increment"));
-    data.growth.heal_pickup_chance_multiplier = static_cast<float>(RequireNumber(experience, "level", "$/entries/0/experience", "heal_pickup_chance_multiplier"));
-    data.growth.magnet_pickup_chance_multiplier = static_cast<float>(RequireNumber(experience, "level", "$/entries/0/experience", "magnet_pickup_chance_multiplier"));
+    data.growth.experience_pickup_speed = RequiredFloat(pickup, "level", "$/entries/0/experience/pickup", "speed_mps");
+    data.growth.experience_pickup_radius = RequiredFloat(pickup, "level", "$/entries/0/experience/pickup", "collision_radius_m");
+    data.growth.utility_pickup_base_chance = RequiredFloat(experience, "level", "$/entries/0/experience", "utility_pickup_base_chance");
+    data.growth.utility_pickup_miss_increment = RequiredFloat(experience, "level", "$/entries/0/experience", "utility_pickup_miss_increment");
+    data.growth.heal_pickup_chance_multiplier = RequiredFloat(experience, "level", "$/entries/0/experience", "heal_pickup_chance_multiplier");
+    data.growth.magnet_pickup_chance_multiplier = RequiredFloat(experience, "level", "$/entries/0/experience", "magnet_pickup_chance_multiplier");
     data.utility_pickup_base_chance = data.growth.utility_pickup_base_chance;
     data.utility_pickup_miss_increment = data.growth.utility_pickup_miss_increment;
     data.heal_pickup_chance_multiplier = data.growth.heal_pickup_chance_multiplier;
@@ -359,14 +407,19 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto width = RequireNumber(arena, "level", "$/entries/0/arena", "width_m");
     if (width != RequireNumber(arena, "level", "$/entries/0/arena", "depth_m"))
         ThrowValidationError("level", "$/entries/0/arena", "boundary extent must use matching width and depth");
-    data.arena_half_extent = static_cast<float>(width * 0.5);
+    data.arena_half_extent = CheckedFloatValue(width * 0.5, "level",
+                                               "$/entries/0/arena/width_m");
     const auto &boundary = RequireArray(arena, "level", "$/entries/0/arena", "boundary_points_m");
     if (boundary.size() > kArenaBoundaryMaxPoints) ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "too many boundary points");
     data.arena_boundary.count = static_cast<std::uint8_t>(boundary.size());
     for (std::size_t i = 0; i < boundary.size(); ++i)
     {
         if (!boundary[i].is_array() || boundary[i].size() != 2) ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "each point requires x and y");
-        data.arena_boundary.points[i] = {boundary[i][0].get<float>(), boundary[i][1].get<float>()};
+        const auto point_path = "$/entries/0/arena/boundary_points_m/" +
+                                std::to_string(i);
+        data.arena_boundary.points[i] = {
+            CoordinateFloat(boundary[i][0], "level", point_path + "/0"),
+            CoordinateFloat(boundary[i][1], "level", point_path + "/1")};
         if (!std::isfinite(data.arena_boundary.points[i].x) || !std::isfinite(data.arena_boundary.points[i].y) ||
             std::abs(data.arena_boundary.points[i].x) > data.arena_half_extent ||
             std::abs(data.arena_boundary.points[i].y) > data.arena_half_extent)
@@ -395,8 +448,10 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         else ThrowValidationError("level", path + "/kind", "unknown obstacle kind");
         const auto &center = RequireArray(obstacles[i], "level", path, "center_m");
         if (center.size() != 2) ThrowValidationError("level", path + "/center_m", "center requires x and y");
-        data.arena_obstacles[i].center = {center[0].get<float>(), center[1].get<float>()};
-        data.arena_obstacles[i].radius = static_cast<float>(RequireNumber(obstacles[i], "level", path, "radius_m"));
+        data.arena_obstacles[i].center = {
+            CoordinateFloat(center[0], "level", path + "/center_m/0"),
+            CoordinateFloat(center[1], "level", path + "/center_m/1")};
+        data.arena_obstacles[i].radius = RequiredFloat(obstacles[i], "level", path, "radius_m");
         if (!std::isfinite(data.arena_obstacles[i].center.x) || !std::isfinite(data.arena_obstacles[i].center.y) ||
             !std::isfinite(data.arena_obstacles[i].radius) || data.arena_obstacles[i].radius <= 0.0f ||
             !ContainsArenaPoint(data.arena_boundary, data.arena_obstacles[i].center, data.arena_obstacles[i].radius))
@@ -443,7 +498,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     data.character_initial.starting_active_skill_count = CheckedInteger<std::uint8_t>(starting_skills.size(), "characters", "$/entries/0/starting_active_skill_ids");
     data.character_initial.starting_relic_count = CheckedInteger<std::uint8_t>(starting_relics.size(), "characters", "$/entries/0/starting_relic_ids");
     const auto &movement = character["movement"];
-    data.character_initial.movement_stop_distance_m = static_cast<float>(RequireNumber(movement, "characters", "$/entries/0/movement", "stop_distance_m"));
+    data.character_initial.movement_stop_distance_m = RequiredFloat(movement, "characters", "$/entries/0/movement", "stop_distance_m");
 
     const auto &skill_document = sources.documents.at("skills");
     const auto acquisition_level = CheckedInteger<std::uint8_t>(
@@ -487,12 +542,35 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         if (index == 3) { s.maximum_charge_time_ticks = ticks("maximum_charge_time"); s.duration_ticks = s.maximum_charge_time_ticks; s.minimum_damage_multiplier = n("minimum_damage_multiplier"); s.maximum_damage_multiplier = n("maximum_damage_multiplier"); s.damage_coefficient = s.maximum_damage_multiplier; s.minimum_range = n("minimum_range"); s.maximum_range = n("maximum_range"); s.range = s.maximum_range; s.minimum_collision_radius = n("minimum_collision_radius"); s.maximum_collision_radius = n("maximum_collision_radius"); s.collision_radius = s.maximum_collision_radius; s.projectile_speed = n("projectile_speed"); s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); s.movement_speed_multiplier_while_charging = n("movement_speed_multiplier_while_charging"); s.cooldown_ticks = ticks("cooldown"); }
         if (index == 4) { s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.explosion_radius = n("explosion_radius"); s.area_radius = s.explosion_radius; s.explosion_damage_multiplier = n("explosion_damage_multiplier"); s.damage_coefficient = s.explosion_damage_multiplier; }
         if (index == 5) { s.cooldown_ticks = ticks("cooldown"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.initial_range = n("initial_range"); s.range = s.initial_range; s.ricochet_search_radius = n("ricochet_search_radius"); s.area_radius = s.ricochet_search_radius; s.maximum_ricochets = Integer<std::uint8_t>(skills[index], "skills", path, "maximum_ricochets"); s.pierce_count = s.maximum_ricochets; }
-        if (index == 6) { s.target_range = n("target_range"); s.range = s.target_range; s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.area_radius = n("radius"); s.duration_ticks = ticks("duration"); s.tick_interval_ticks = ticks("tick_interval"); s.damage_coefficient = n("damage_multiplier_per_tick"); s.total_damage_ticks = Integer<std::uint8_t>(skills[index], "skills", path, "total_damage_ticks"); }
+        if (index == 6) { s.target_range = n("target_range"); s.range = s.target_range; s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.area_radius = n("radius"); s.duration_ticks = ticks("duration"); s.tick_interval_ticks = ToAreaTickInterval(n("tick_interval"), "skills", path + "/parameters/tick_interval"); s.damage_coefficient = n("damage_multiplier_per_tick"); s.total_damage_ticks = Integer<std::uint8_t>(skills[index], "skills", path, "total_damage_ticks"); }
         if (index == 7) { s.forward_roll_distance = n("forward_roll_distance"); s.range = s.forward_roll_distance; s.forward_roll_duration_ticks = ticks("forward_roll_duration"); s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.active_duration_ticks = ticks("active_duration"); s.duration_ticks = s.active_duration_ticks; s.detection_radius = n("detection_radius"); s.explosion_radius = n("explosion_radius"); s.area_radius = s.explosion_radius; s.damage_coefficient = n("damage_multiplier"); s.slow_fraction = n("slow_fraction"); s.slow_duration_ticks = ticks("slow_duration"); }
         if (index == 8) { s.forced_move_duration_ticks = ticks("forced_move_duration"); s.duration_ticks = s.forced_move_duration_ticks; s.forced_move_distance = n("forced_move_distance"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.projectile_range = n("projectile_range"); s.range = s.projectile_range; s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); }
     }
     data.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed =
         PositiveProjectileSpeed(skills[0], "skills", "$/entries/0");
+    // DifferentSkillTracker can emit a projectile for any active skill, including Trap.
+    for (std::size_t index = 0; index < data.skills.size(); ++index)
+    {
+        const auto &skill = data.skills[index];
+        const auto path = "$/entries/" + std::to_string(index);
+        const auto effective_speed = skill.projectile_speed > 0.0f
+                                         ? skill.projectile_speed
+                                         : data.skills[static_cast<std::size_t>(SkillKind::BasicAttack)]
+                                               .projectile_speed;
+        const auto range_parameter = index == 3 ? "maximum_range"
+                                     : index == 5 ? "initial_range"
+                                     : index == 6 ? "target_range"
+                                     : index == 7 ? "forward_roll_distance"
+                                     : index == 8 ? "projectile_range"
+                                                  : "range";
+        RequireProjectileRangeProgress(
+            effective_speed, skill.range, "skills",
+            path + "/parameters/" + range_parameter);
+        if (index == 5)
+            RequireProjectileRangeProgress(effective_speed, skill.ricochet_search_radius,
+                                           "skills",
+                                           path + "/parameters/ricochet_search_radius");
+    }
 
     const auto &upgrade_groups = sources.documents.at("upgrades")["groups"];
     constexpr std::array upgrade_skill_ids{"skill.basic_attack", "skill.piercing_shot", "skill.multishot", "skill.charged_shot", "skill.explosive_arrow", "skill.ricochet_arrow", "skill.arrow_rain", "skill.trap", "skill.retreat_shot"};
@@ -548,18 +626,19 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     // Assigning the remaining groups is intentionally explicit per typed field in the
     // following compact conversions; no generic upgrade table is retained.
     auto tick = [&](std::size_t g, std::size_t i, std::string_view key) { return ToTicks(Number(U(g,i),"upgrades",upath(g,i),key),"upgrades",upath(g,i)+"/parameters/"+std::string(key)); };
-    u.piercing_shot.delayed_followup={tick(1,0,"delay"),Number(U(1,0),"upgrades",upath(1,0),"damage_multiplier")}; u.piercing_shot.range_end_split={Angles<2>(U(1,1),"upgrades",upath(1,1),"angles"),Integer<std::uint32_t>(U(1,1),"upgrades",upath(1,1),"projectile_count"),Number(U(1,1),"upgrades",upath(1,1),"damage_multiplier"),Number(U(1,1),"upgrades",upath(1,1),"search_radius")}; u.piercing_shot.apply_bleed={Integer<std::uint32_t>(U(1,2),"upgrades",upath(1,2),"bleed_stacks")}; u.piercing_shot.damaging_slow_trail={Number(U(1,3),"upgrades",upath(1,3),"width"),tick(1,3,"duration"),tick(1,3,"tick_interval"),Number(U(1,3),"upgrades",upath(1,3),"damage_multiplier_per_tick"),Number(U(1,3),"upgrades",upath(1,3),"slow_fraction"),tick(1,3,"slow_duration")}; u.piercing_shot.per_three_pierces_perpendicular={Integer<std::uint32_t>(U(1,4),"upgrades",upath(1,4),"normal_enemy_pierce_interval"),Integer<std::uint32_t>(U(1,4),"upgrades",upath(1,4),"projectile_count"),Number(U(1,4),"upgrades",upath(1,4),"angle_from_direction"),Number(U(1,4),"upgrades",upath(1,4),"damage_multiplier")}; u.piercing_shot.align_hit_normal_enemy={Number(U(1,5),"upgrades",upath(1,5),"move_distance")}; u.piercing_shot.apply_and_transfer_burn={Integer<std::uint32_t>(U(1,6),"upgrades",upath(1,6),"maximum_transfer_targets")}; u.piercing_shot.cooldown_multiplier={Number(U(1,7),"upgrades",upath(1,7),"cooldown_multiplier")};
+    auto area_interval = [&](std::size_t g, std::size_t i) { return ToAreaTickInterval(Number(U(g,i),"upgrades",upath(g,i),"tick_interval"),"upgrades",upath(g,i)+"/parameters/tick_interval"); };
+    u.piercing_shot.delayed_followup={tick(1,0,"delay"),Number(U(1,0),"upgrades",upath(1,0),"damage_multiplier")}; u.piercing_shot.range_end_split={Angles<2>(U(1,1),"upgrades",upath(1,1),"angles"),Integer<std::uint32_t>(U(1,1),"upgrades",upath(1,1),"projectile_count"),Number(U(1,1),"upgrades",upath(1,1),"damage_multiplier"),Number(U(1,1),"upgrades",upath(1,1),"search_radius")}; u.piercing_shot.apply_bleed={Integer<std::uint32_t>(U(1,2),"upgrades",upath(1,2),"bleed_stacks")}; u.piercing_shot.damaging_slow_trail={Number(U(1,3),"upgrades",upath(1,3),"width"),tick(1,3,"duration"),area_interval(1,3),Number(U(1,3),"upgrades",upath(1,3),"damage_multiplier_per_tick"),Number(U(1,3),"upgrades",upath(1,3),"slow_fraction"),tick(1,3,"slow_duration")}; u.piercing_shot.per_three_pierces_perpendicular={Integer<std::uint32_t>(U(1,4),"upgrades",upath(1,4),"normal_enemy_pierce_interval"),Integer<std::uint32_t>(U(1,4),"upgrades",upath(1,4),"projectile_count"),Number(U(1,4),"upgrades",upath(1,4),"angle_from_direction"),Number(U(1,4),"upgrades",upath(1,4),"damage_multiplier")}; u.piercing_shot.align_hit_normal_enemy={Number(U(1,5),"upgrades",upath(1,5),"move_distance")}; u.piercing_shot.apply_and_transfer_burn={Integer<std::uint32_t>(U(1,6),"upgrades",upath(1,6),"maximum_transfer_targets")}; u.piercing_shot.cooldown_multiplier={Number(U(1,7),"upgrades",upath(1,7),"cooldown_multiplier")};
     u.multishot.delayed_second_fan={tick(2,0,"delay"),Number(U(2,0),"upgrades",upath(2,0),"fan_angle"),Integer<std::uint32_t>(U(2,0),"upgrades",upath(2,0),"projectile_count"),Number(U(2,0),"upgrades",upath(2,0),"damage_multiplier_per_arrow")}; u.multishot.original_arrow_first_hit_split={Angles<2>(U(2,1),"upgrades",upath(2,1),"angles"),Integer<std::uint32_t>(U(2,1),"upgrades",upath(2,1),"projectile_count_per_original"),Number(U(2,1),"upgrades",upath(2,1),"damage_multiplier")}; u.multishot.additional_pierce_per_arrow={Integer<std::uint32_t>(U(2,2),"upgrades",upath(2,2),"additional_pierce")}; u.multishot.rear_fan={Integer<std::uint32_t>(U(2,3),"upgrades",upath(2,3),"projectile_count"),Number(U(2,3),"upgrades",upath(2,3),"damage_multiplier"),Number(U(2,3),"upgrades",upath(2,3),"fan_angle")}; u.multishot.first_cast_hit_bleed={Integer<std::uint32_t>(U(2,4),"upgrades",upath(2,4),"bleed_stacks")}; u.multishot.apply_burn_and_transfer_arrow={Number(U(2,5),"upgrades",upath(2,5),"damage_multiplier"),Integer<std::uint32_t>(U(2,5),"upgrades",upath(2,5),"maximum_transfers_per_cast")}; u.multishot.two_additional_outer_arrows={Integer<std::uint32_t>(U(2,6),"upgrades",upath(2,6),"additional_projectiles"),Angles<2>(U(2,6),"upgrades",upath(2,6),"outer_angles"),Number(U(2,6),"upgrades",upath(2,6),"damage_multiplier")}; u.multishot.missed_arrow_retarget={Number(U(2,7),"upgrades",upath(2,7),"damage_multiplier"),Integer<std::uint32_t>(U(2,7),"upgrades",upath(2,7),"maximum_retargets"),Number(U(2,7),"upgrades",upath(2,7),"search_radius")};
     u.charged_shot.extended_full_charge_explosion={tick(3,0,"maximum_charge_time"),Number(U(3,0),"upgrades",upath(3,0),"maximum_damage_multiplier"),Number(U(3,0),"upgrades",upath(3,0),"full_charge_end_explosion_damage_multiplier"),Number(U(3,0),"upgrades",upath(3,0),"explosion_radius")}; u.charged_shot.faster_charge={Number(U(3,1),"upgrades",upath(3,1),"charge_time_multiplier")}; u.charged_shot.increase_minimum_charge_damage={Number(U(3,2),"upgrades",upath(3,2),"minimum_damage_multiplier")}; u.charged_shot.additional_pierce={Integer<std::uint32_t>(U(3,3),"upgrades",upath(3,3),"additional_pierce")}; u.charged_shot.charge_bleed_full_charge_rupture={Integer<std::uint32_t>(U(3,4),"upgrades",upath(3,4),"bleed_stacks"),Integer<std::uint32_t>(U(3,4),"upgrades",upath(3,4),"existing_bleed_stacks_for_rupture"),Number(U(3,4),"upgrades",upath(3,4),"rupture_damage_multiplier")}; u.charged_shot.boss_or_fifth_pierce_split={Integer<std::uint32_t>(U(3,5),"upgrades",upath(3,5),"normal_enemy_pierce_count"),Angles<8>(U(3,5),"upgrades",upath(3,5),"angles"),Integer<std::uint32_t>(U(3,5),"upgrades",upath(3,5),"projectile_count"),Number(U(3,5),"upgrades",upath(3,5),"damage_multiplier")}; u.charged_shot.first_hit_burn_explosion={Number(U(3,6),"upgrades",upath(3,6),"radius"),Number(U(3,6),"upgrades",upath(3,6),"damage_multiplier")}; u.charged_shot.full_charge_multi_kill_cooldown_refund={Integer<std::uint32_t>(U(3,7),"upgrades",upath(3,7),"minimum_normal_enemy_kills"),Number(U(3,7),"upgrades",upath(3,7),"current_cooldown_refund_fraction")};
-    u.explosive_arrow.delayed_reexplosion={tick(4,0,"delay"),Number(U(4,0),"upgrades",upath(4,0),"radius"),Number(U(4,0),"upgrades",upath(4,0),"damage_multiplier")}; u.explosive_arrow.three_delayed_satellite_bombs={Integer<std::uint32_t>(U(4,1),"upgrades",upath(4,1),"bomb_count"),Number(U(4,1),"upgrades",upath(4,1),"angular_spacing"),Number(U(4,1),"upgrades",upath(4,1),"placement_radius"),tick(4,1,"delay"),Number(U(4,1),"upgrades",upath(4,1),"explosion_radius"),Number(U(4,1),"upgrades",upath(4,1),"damage_multiplier")}; u.explosive_arrow.eight_direction_fragments={Integer<std::uint32_t>(U(4,2),"upgrades",upath(4,2),"direction_count"),Number(U(4,2),"upgrades",upath(4,2),"damage_multiplier"),Number(U(4,2),"upgrades",upath(4,2),"collision_radius_multiplier"),Integer<std::uint32_t>(U(4,2),"upgrades",upath(4,2),"pierce")}; u.explosive_arrow.explosion_leaves_burning_area={Number(U(4,3),"upgrades",upath(4,3),"radius"),tick(4,3,"duration"),tick(4,3,"tick_interval"),Number(U(4,3),"upgrades",upath(4,3),"damage_multiplier_per_tick")}; u.explosive_arrow.apply_bleed_and_blood_explosions={Number(U(4,4),"upgrades",upath(4,4),"radius"),Number(U(4,4),"upgrades",upath(4,4),"damage_multiplier"),Integer<std::uint32_t>(U(4,4),"upgrades",upath(4,4),"maximum_explosions_per_cast"),Integer<std::uint32_t>(U(4,4),"upgrades",upath(4,4),"bleed_stacks")}; u.explosive_arrow.pre_explosion_pull={tick(4,5,"duration"),Number(U(4,5),"upgrades",upath(4,5),"pull_radius")}; u.explosive_arrow.direct_hit_mark_other_active_explosion={Number(U(4,6),"upgrades",upath(4,6),"immediate_explosion_damage_multiplier"),Number(U(4,6),"upgrades",upath(4,6),"mark_explosion_damage_multiplier"),tick(4,6,"mark_duration"),Number(U(4,6),"upgrades",upath(4,6),"mark_explosion_radius")}; u.explosive_arrow.cooldown_multiplier={Number(U(4,7),"upgrades",upath(4,7),"cooldown_multiplier")};
+    u.explosive_arrow.delayed_reexplosion={tick(4,0,"delay"),Number(U(4,0),"upgrades",upath(4,0),"radius"),Number(U(4,0),"upgrades",upath(4,0),"damage_multiplier")}; u.explosive_arrow.three_delayed_satellite_bombs={Integer<std::uint32_t>(U(4,1),"upgrades",upath(4,1),"bomb_count"),Number(U(4,1),"upgrades",upath(4,1),"angular_spacing"),Number(U(4,1),"upgrades",upath(4,1),"placement_radius"),tick(4,1,"delay"),Number(U(4,1),"upgrades",upath(4,1),"explosion_radius"),Number(U(4,1),"upgrades",upath(4,1),"damage_multiplier")}; u.explosive_arrow.eight_direction_fragments={Integer<std::uint32_t>(U(4,2),"upgrades",upath(4,2),"direction_count"),Number(U(4,2),"upgrades",upath(4,2),"damage_multiplier"),Number(U(4,2),"upgrades",upath(4,2),"collision_radius_multiplier"),Integer<std::uint32_t>(U(4,2),"upgrades",upath(4,2),"pierce")}; u.explosive_arrow.explosion_leaves_burning_area={Number(U(4,3),"upgrades",upath(4,3),"radius"),tick(4,3,"duration"),area_interval(4,3),Number(U(4,3),"upgrades",upath(4,3),"damage_multiplier_per_tick")}; u.explosive_arrow.apply_bleed_and_blood_explosions={Number(U(4,4),"upgrades",upath(4,4),"radius"),Number(U(4,4),"upgrades",upath(4,4),"damage_multiplier"),Integer<std::uint32_t>(U(4,4),"upgrades",upath(4,4),"maximum_explosions_per_cast"),Integer<std::uint32_t>(U(4,4),"upgrades",upath(4,4),"bleed_stacks")}; u.explosive_arrow.pre_explosion_pull={tick(4,5,"duration"),Number(U(4,5),"upgrades",upath(4,5),"pull_radius")}; u.explosive_arrow.direct_hit_mark_other_active_explosion={Number(U(4,6),"upgrades",upath(4,6),"immediate_explosion_damage_multiplier"),Number(U(4,6),"upgrades",upath(4,6),"mark_explosion_damage_multiplier"),tick(4,6,"mark_duration"),Number(U(4,6),"upgrades",upath(4,6),"mark_explosion_radius")}; u.explosive_arrow.cooldown_multiplier={Number(U(4,7),"upgrades",upath(4,7),"cooldown_multiplier")};
     u.ricochet_arrow.return_to_player_rehit={Number(U(5,0),"upgrades",upath(5,0),"damage_multiplier"),Integer<std::uint32_t>(U(5,0),"upgrades",upath(5,0),"maximum_rehit_targets")}; u.ricochet_arrow.first_ricochet_branch_chain={Number(U(5,1),"upgrades",upath(5,1),"damage_multiplier"),Integer<std::uint32_t>(U(5,1),"upgrades",upath(5,1),"maximum_targets")}; u.ricochet_arrow.apply_bleed_and_extend_ricochets={Integer<std::uint32_t>(U(5,2),"upgrades",upath(5,2),"additional_ricochets_per_bleeding_hit"),Integer<std::uint32_t>(U(5,2),"upgrades",upath(5,2),"maximum_additional_ricochets")}; u.ricochet_arrow.apply_and_copy_burn_to_next_target={1}; u.ricochet_arrow.kill_small_arrows={Number(U(5,4),"upgrades",upath(5,4),"damage_multiplier"),Integer<std::uint32_t>(U(5,4),"upgrades",upath(5,4),"arrows_per_kill"),Integer<std::uint32_t>(U(5,4),"upgrades",upath(5,4),"maximum_arrows_per_cast"),Number(U(5,4),"upgrades",upath(5,4),"search_radius")}; u.ricochet_arrow.original_ricochet_kill_new_chain={Integer<std::uint32_t>(U(5,5),"upgrades",upath(5,5),"new_chain_targets"),Number(U(5,5),"upgrades",upath(5,5),"damage_multiplier"),Number(U(5,5),"upgrades",upath(5,5),"search_radius")}; u.ricochet_arrow.ricochet_cooldown_reduction={tick(5,6,"cooldown_reduction_per_ricochet"),tick(5,6,"maximum_reduction")}; u.ricochet_arrow.cooldown_multiplier={Number(U(5,7),"upgrades",upath(5,7),"cooldown_multiplier")};
-    u.arrow_rain.delayed_forward_secondary_area={tick(6,0,"delay"),Number(U(6,0),"upgrades",upath(6,0),"forward_offset"),Number(U(6,0),"upgrades",upath(6,0),"radius"),tick(6,0,"duration"),Number(U(6,0),"upgrades",upath(6,0),"damage_multiplier_per_tick")}; u.arrow_rain.first_damage_tick_pull={Number(U(6,1),"upgrades",upath(6,1),"pull_radius")}; u.arrow_rain.third_area_hit_bleed={Integer<std::uint32_t>(U(6,2),"upgrades",upath(6,2),"hit_ordinal"),Integer<std::uint32_t>(U(6,2),"upgrades",upath(6,2),"bleed_stacks")}; u.arrow_rain.apply_burn_and_create_fire_areas={Number(U(6,3),"upgrades",upath(6,3),"radius"),tick(6,3,"duration"),tick(6,3,"tick_interval"),Number(U(6,3),"upgrades",upath(6,3),"damage_multiplier_per_tick"),Integer<std::uint32_t>(U(6,3),"upgrades",upath(6,3),"maximum_areas_per_cast")}; u.arrow_rain.tracking_arrow_each_damage_tick={Number(U(6,4),"upgrades",upath(6,4),"search_radius"),Number(U(6,4),"upgrades",upath(6,4),"damage_multiplier")}; u.arrow_rain.area_slow={Number(U(6,5),"upgrades",upath(6,5),"slow_fraction"),tick(6,5,"slow_duration")}; u.arrow_rain.area_kill_arrow_outside={Number(U(6,6),"upgrades",upath(6,6),"damage_multiplier"),Integer<std::uint32_t>(U(6,6),"upgrades",upath(6,6),"maximum_triggers_per_cast")}; u.arrow_rain.extend_area_and_leave_slow={tick(6,7,"area_duration"),Integer<std::uint32_t>(U(6,7),"upgrades",upath(6,7),"additional_damage_ticks"),tick(6,7,"post_area_duration"),Number(U(6,7),"upgrades",upath(6,7),"post_area_slow_fraction"),tick(6,7,"post_area_slow_duration")};
-    u.trap.roll_path_traps={Integer<std::uint32_t>(U(7,0),"upgrades",upath(7,0),"trap_count"),Number(U(7,0),"upgrades",upath(7,0),"damage_multiplier_per_trap"),Number(U(7,0),"upgrades",upath(7,0),"spacing")}; u.trap.landing_slow_area={Number(U(7,1),"upgrades",upath(7,1),"radius"),Number(U(7,1),"upgrades",upath(7,1),"slow_fraction"),tick(7,1,"duration")}; u.trap.single_reactivation={tick(7,2,"reactivation_delay"),Integer<std::uint32_t>(U(7,2),"upgrades",upath(7,2),"maximum_reactivations")}; u.trap.trigger_bleed={Integer<std::uint32_t>(U(7,3),"upgrades",upath(7,3),"bleed_stacks")}; u.trap.trigger_burn_and_fire_area={Number(U(7,4),"upgrades",upath(7,4),"area_radius"),tick(7,4,"area_duration"),tick(7,4,"tick_interval"),Number(U(7,4),"upgrades",upath(7,4),"damage_multiplier_per_tick")}; u.trap.pre_explosion_pull_and_slow={Number(U(7,5),"upgrades",upath(7,5),"pull_radius"),Number(U(7,5),"upgrades",upath(7,5),"slow_fraction"),tick(7,5,"slow_duration")}; u.trap.trigger_mark_other_active_damage={Number(U(7,6),"upgrades",upath(7,6),"immediate_damage_multiplier"),Number(U(7,6),"upgrades",upath(7,6),"mark_explosion_damage_multiplier"),tick(7,6,"mark_duration"),Number(U(7,6),"upgrades",upath(7,6),"mark_explosion_radius")}; u.trap.trap_kill_small_trap={Number(U(7,7),"upgrades",upath(7,7),"detection_radius"),Number(U(7,7),"upgrades",upath(7,7),"explosion_radius"),tick(7,7,"activation_delay"),tick(7,7,"active_duration"),Number(U(7,7),"upgrades",upath(7,7),"damage_multiplier"),Integer<std::uint32_t>(U(7,7),"upgrades",upath(7,7),"maximum_small_traps_per_cast")};
+    u.arrow_rain.delayed_forward_secondary_area={tick(6,0,"delay"),Number(U(6,0),"upgrades",upath(6,0),"forward_offset"),Number(U(6,0),"upgrades",upath(6,0),"radius"),tick(6,0,"duration"),Number(U(6,0),"upgrades",upath(6,0),"damage_multiplier_per_tick")}; u.arrow_rain.first_damage_tick_pull={Number(U(6,1),"upgrades",upath(6,1),"pull_radius")}; u.arrow_rain.third_area_hit_bleed={Integer<std::uint32_t>(U(6,2),"upgrades",upath(6,2),"hit_ordinal"),Integer<std::uint32_t>(U(6,2),"upgrades",upath(6,2),"bleed_stacks")}; u.arrow_rain.apply_burn_and_create_fire_areas={Number(U(6,3),"upgrades",upath(6,3),"radius"),tick(6,3,"duration"),area_interval(6,3),Number(U(6,3),"upgrades",upath(6,3),"damage_multiplier_per_tick"),Integer<std::uint32_t>(U(6,3),"upgrades",upath(6,3),"maximum_areas_per_cast")}; u.arrow_rain.tracking_arrow_each_damage_tick={Number(U(6,4),"upgrades",upath(6,4),"search_radius"),Number(U(6,4),"upgrades",upath(6,4),"damage_multiplier")}; u.arrow_rain.area_slow={Number(U(6,5),"upgrades",upath(6,5),"slow_fraction"),tick(6,5,"slow_duration")}; u.arrow_rain.area_kill_arrow_outside={Number(U(6,6),"upgrades",upath(6,6),"damage_multiplier"),Integer<std::uint32_t>(U(6,6),"upgrades",upath(6,6),"maximum_triggers_per_cast")}; u.arrow_rain.extend_area_and_leave_slow={tick(6,7,"area_duration"),Integer<std::uint32_t>(U(6,7),"upgrades",upath(6,7),"additional_damage_ticks"),tick(6,7,"post_area_duration"),Number(U(6,7),"upgrades",upath(6,7),"post_area_slow_fraction"),tick(6,7,"post_area_slow_duration")};
+    u.trap.roll_path_traps={Integer<std::uint32_t>(U(7,0),"upgrades",upath(7,0),"trap_count"),Number(U(7,0),"upgrades",upath(7,0),"damage_multiplier_per_trap"),Number(U(7,0),"upgrades",upath(7,0),"spacing")}; u.trap.landing_slow_area={Number(U(7,1),"upgrades",upath(7,1),"radius"),Number(U(7,1),"upgrades",upath(7,1),"slow_fraction"),tick(7,1,"duration")}; u.trap.single_reactivation={tick(7,2,"reactivation_delay"),Integer<std::uint32_t>(U(7,2),"upgrades",upath(7,2),"maximum_reactivations")}; u.trap.trigger_bleed={Integer<std::uint32_t>(U(7,3),"upgrades",upath(7,3),"bleed_stacks")}; u.trap.trigger_burn_and_fire_area={Number(U(7,4),"upgrades",upath(7,4),"area_radius"),tick(7,4,"area_duration"),area_interval(7,4),Number(U(7,4),"upgrades",upath(7,4),"damage_multiplier_per_tick")}; u.trap.pre_explosion_pull_and_slow={Number(U(7,5),"upgrades",upath(7,5),"pull_radius"),Number(U(7,5),"upgrades",upath(7,5),"slow_fraction"),tick(7,5,"slow_duration")}; u.trap.trigger_mark_other_active_damage={Number(U(7,6),"upgrades",upath(7,6),"immediate_damage_multiplier"),Number(U(7,6),"upgrades",upath(7,6),"mark_explosion_damage_multiplier"),tick(7,6,"mark_duration"),Number(U(7,6),"upgrades",upath(7,6),"mark_explosion_radius")}; u.trap.trap_kill_small_trap={Number(U(7,7),"upgrades",upath(7,7),"detection_radius"),Number(U(7,7),"upgrades",upath(7,7),"explosion_radius"),tick(7,7,"activation_delay"),tick(7,7,"active_duration"),Number(U(7,7),"upgrades",upath(7,7),"damage_multiplier"),Integer<std::uint32_t>(U(7,7),"upgrades",upath(7,7),"maximum_small_traps_per_cast")};
     u.retreat_shot.replace_with_three_arrows={Integer<std::uint32_t>(U(8,0),"upgrades",upath(8,0),"projectile_count"),Number(U(8,0),"upgrades",upath(8,0),"damage_multiplier_per_arrow"),Angles<3>(U(8,0),"upgrades",upath(8,0),"angles")}; u.retreat_shot.small_trap_at_start={Number(U(8,1),"upgrades",upath(8,1),"damage_multiplier"),Number(U(8,1),"upgrades",upath(8,1),"detection_radius"),Number(U(8,1),"upgrades",upath(8,1),"explosion_radius"),tick(8,1,"activation_delay"),tick(8,1,"active_duration")}; u.retreat_shot.slow_trail={tick(8,2,"duration"),Number(U(8,2),"upgrades",upath(8,2),"slow_fraction"),Number(U(8,2),"upgrades",upath(8,2),"radius"),tick(8,2,"slow_duration")}; u.retreat_shot.apply_bleed_and_tracking_arrow={Number(U(8,3),"upgrades",upath(8,3),"damage_multiplier"),Integer<std::uint32_t>(U(8,3),"upgrades",upath(8,3),"maximum_triggers_per_cast"),Number(U(8,3),"upgrades",upath(8,3),"search_radius"),Integer<std::uint32_t>(U(8,3),"upgrades",upath(8,3),"bleed_stacks")}; u.retreat_shot.landing_damage_and_push={Number(U(8,4),"upgrades",upath(8,4),"radius"),Number(U(8,4),"upgrades",upath(8,4),"damage_multiplier"),Number(U(8,4),"upgrades",upath(8,4),"push_distance")}; u.retreat_shot.next_other_active_cooldown_refund={tick(8,5,"activation_window"),Number(U(8,5),"upgrades",upath(8,5),"cooldown_refund_fraction")}; u.retreat_shot.boss_or_three_normal_hits_heal={Integer<std::uint32_t>(U(8,6),"upgrades",upath(8,6),"minimum_normal_enemy_hits"),Number(U(8,6),"upgrades",upath(8,6),"maximum_hp_heal_fraction")}; u.retreat_shot.delayed_second_retreat_and_arrow={tick(8,7,"delay_after_first_move"),Number(U(8,7),"upgrades",upath(8,7),"additional_move_distance"),Number(U(8,7),"upgrades",upath(8,7),"damage_multiplier")};
 
     const auto &enemy_document = sources.documents.at("enemies");
-    data.enemy_scaling = {EnemyScalingMachine::CompletedMinutes, static_cast<float>(RequireNumber(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "hp_fraction_per_completed_minute")), static_cast<float>(RequireNumber(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "damage_fraction_per_completed_minute")), RequireMember(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "updates_existing_enemies").get<bool>(), RequireMember(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "applies_to_bosses").get<bool>()};
-    const float common_enemy_radius = static_cast<float>(RequireNumber(enemy_document["common"], "enemies", "$/common", "collision_radius"));
+    data.enemy_scaling = {EnemyScalingMachine::CompletedMinutes, RequiredFloat(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "hp_fraction_per_completed_minute"), RequiredFloat(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "damage_fraction_per_completed_minute"), RequireMember(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "updates_existing_enemies").get<bool>(), RequireMember(enemy_document["spawn_scaling"], "enemies", "$/spawn_scaling", "applies_to_bosses").get<bool>()};
+    const float common_enemy_radius = RequiredFloat(enemy_document["common"], "enemies", "$/common", "collision_radius");
     const auto &enemy_entries = enemy_document["entries"];
     constexpr std::array enemy_ids{"enemy.melee", "enemy.ranged", "enemy.suicide"};
     constexpr std::array enemy_logics{"straight_chase_melee", "approach_and_shoot_projectile", "straight_chase_self_destruct"};
@@ -575,14 +654,18 @@ BuiltGameData BuildGameData(const ContentSources &sources)
                                  "enemy role requires its selected monster asset");
         auto &enemy = data.enemies[index];
         enemy.health = CheckedInteger<std::int32_t>(RequireInteger(enemy_entries[index], "enemies", path, "base_hp"), "enemies", path + "/base_hp");
-        enemy.move_speed = static_cast<float>(RequireNumber(enemy_entries[index], "enemies", path, "movement_speed_mps"));
+        enemy.move_speed = RequiredFloat(enemy_entries[index], "enemies", path, "movement_speed_mps");
         enemy.collision_radius = enemy_entries[index].contains("collision_radius")
-            ? static_cast<float>(RequireNumber(enemy_entries[index], "enemies", path, "collision_radius"))
+            ? RequiredFloat(enemy_entries[index], "enemies", path, "collision_radius")
             : common_enemy_radius;
         if (index == 0) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"attack_range","telegraph_duration","base_damage","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"attack_range"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); }
         if (index == 1) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"maximum_hold_distance","telegraph_duration","base_damage","projectile_speed","projectile_range","projectile_collision_radius","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"maximum_hold_distance"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); enemy.projectile_speed=PositiveProjectileSpeed(enemy_entries[index],"enemies",path); enemy.projectile_range=Number(enemy_entries[index],"enemies",path,"projectile_range"); enemy.projectile_collision_radius=Number(enemy_entries[index],"enemies",path,"projectile_collision_radius"); enemy.ranged_projectile_radius=enemy.projectile_collision_radius; }
         if (index == 2) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"stop_distance","telegraph_duration","explosion_radius","base_damage"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"stop_distance"); enemy.suicide_stop_distance=enemy.attack_range; enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.suicide_explosion_radius=Number(enemy_entries[index],"enemies",path,"explosion_radius"); enemy.projectile_range=enemy.suicide_explosion_radius; }
     }
+    const auto &ranged_enemy = data.enemies[1];
+    RequireProjectileRangeProgress(ranged_enemy.projectile_speed,
+                                   ranged_enemy.projectile_range, "enemies",
+                                   "$/entries/1/parameters/projectile_speed");
     for (std::size_t index = 0; index < enemy_entries.size(); ++index) {
         const auto path = "$/entries/" + std::to_string(index);
         const auto xp = CheckedInteger<std::uint32_t>(RequireInteger(enemy_entries[index], "enemies", path, "xp_reward"), "enemies", path + "/xp_reward");
@@ -592,14 +675,14 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &relic_document = sources.documents.at("relics");
     const auto &box = relic_document["box_rules"];
     data.relic_drop.guaranteed_boxes_per_mid_boss = CheckedInteger<std::uint32_t>(RequireInteger(box,"relics","$/box_rules","guaranteed_boxes_per_mid_boss"),"relics","$/box_rules/guaranteed_boxes_per_mid_boss");
-    data.relic_drop.mid_boss_maximum_hp_heal_fraction = static_cast<float>(RequireNumber(box,"relics","$/box_rules","mid_boss_maximum_hp_heal_fraction"));
-    data.relic_drop.normal_enemy_base_probability = static_cast<float>(RequireNumber(box,"relics","$/box_rules","normal_enemy_base_probability_percent") / 100.0);
-    data.relic_drop.normal_enemy_probability_increment_per_kill = static_cast<float>(RequireNumber(box,"relics","$/box_rules","normal_enemy_probability_increment_per_kill_percent") / 100.0);
-    data.relic_drop.normal_enemy_probability_cap = static_cast<float>(RequireNumber(box,"relics","$/box_rules","normal_enemy_probability_cap_percent") / 100.0);
+    data.relic_drop.mid_boss_maximum_hp_heal_fraction = RequiredFloat(box, "relics", "$/box_rules", "mid_boss_maximum_hp_heal_fraction");
+    data.relic_drop.normal_enemy_base_probability = CheckedFloatValue(RequireNumber(box, "relics", "$/box_rules", "normal_enemy_base_probability_percent") / 100.0, "relics", "$/box_rules/normal_enemy_base_probability_percent");
+    data.relic_drop.normal_enemy_probability_increment_per_kill = CheckedFloatValue(RequireNumber(box, "relics", "$/box_rules", "normal_enemy_probability_increment_per_kill_percent") / 100.0, "relics", "$/box_rules/normal_enemy_probability_increment_per_kill_percent");
+    data.relic_drop.normal_enemy_probability_cap = CheckedFloatValue(RequireNumber(box, "relics", "$/box_rules", "normal_enemy_probability_cap_percent") / 100.0, "relics", "$/box_rules/normal_enemy_probability_cap_percent");
     data.relic_drop.maximum_choices_per_box = CheckedInteger<std::uint32_t>(RequireInteger(box,"relics","$/box_rules","maximum_choices_per_box"),"relics","$/box_rules/maximum_choices_per_box");
     data.relic_drop.hard_pity=box["hard_pity"].get<bool>(); data.relic_drop.reset_kill_counter_on_box_spawn=box["reset_kill_counter_on_box_spawn"].get<bool>(); data.relic_drop.stable_id_sort_before_seeded_shuffle=box["stable_id_sort_before_seeded_shuffle"].get<bool>(); data.relic_drop.stop_normal_box_rolls_after_all_acquired=box["stop_normal_box_rolls_after_all_acquired"].get<bool>();
     const auto &healing = relic_document["healing_pickup"];
-    data.relic_drop.healing_pickup_probability = static_cast<float>(RequireNumber(healing,"relics","$/healing_pickup","normal_enemy_drop_probability_percent") / 100.0); data.relic_drop.healing_pickup_maximum_hp_heal_fraction=static_cast<float>(RequireNumber(healing,"relics","$/healing_pickup","maximum_hp_heal_fraction")); data.relic_drop.healing_pickup_independent_from_other_rewards=healing["independent_from_other_rewards"].get<bool>(); data.relic_drop.healing_pickup_can_coexist_with_xp_and_relic_box=healing["can_coexist_with_xp_and_relic_box"].get<bool>(); data.relic_chest_base_chance=data.relic_drop.normal_enemy_base_probability; data.relic_chest_miss_increment=data.relic_drop.normal_enemy_probability_increment_per_kill;
+    data.relic_drop.healing_pickup_probability = CheckedFloatValue(RequireNumber(healing, "relics", "$/healing_pickup", "normal_enemy_drop_probability_percent") / 100.0, "relics", "$/healing_pickup/normal_enemy_drop_probability_percent"); data.relic_drop.healing_pickup_maximum_hp_heal_fraction=RequiredFloat(healing, "relics", "$/healing_pickup", "maximum_hp_heal_fraction"); data.relic_drop.healing_pickup_independent_from_other_rewards=healing["independent_from_other_rewards"].get<bool>(); data.relic_drop.healing_pickup_can_coexist_with_xp_and_relic_box=healing["can_coexist_with_xp_and_relic_box"].get<bool>(); data.relic_chest_base_chance=data.relic_drop.normal_enemy_base_probability; data.relic_chest_miss_increment=data.relic_drop.normal_enemy_probability_increment_per_kill;
     const auto &relics = relic_document["entries"];
     const auto relic_number = [&](std::size_t index,std::string_view key){return Number(relics[index],"relics","$/entries/"+std::to_string(index),key);}; const auto relic_ticks=[&](std::size_t index,std::string_view key){return ToTicks(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));}; const auto relic_count=[&](std::size_t index,std::string_view key){return CheckedInteger<std::uint32_t>(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));};
     data.relics.bleed_kill_heal={relic_number(0,"maximum_hp_heal_fraction"),relic_ticks(0,"internal_cooldown")}; data.relics.burn_propagation={relic_number(1,"search_radius"),relic_number(1,"copied_burn_strength"),relic_count(1,"maximum_targets")}; data.relics.kill_cooldown_surge={relic_count(2,"kills_per_trigger"),relic_ticks(2,"all_active_cooldown_reduction")}; data.relics.bleed_burn_explosion={relic_number(3,"radius"),relic_number(3,"damage_multiplier"),relic_ticks(3,"per_target_cooldown")}; data.relics.radial_basic_attack={relic_count(4,"cadence_interval"),relic_count(4,"direction_count"),relic_number(4,"damage_multiplier")}; data.relics.basic_kill_tracker={relic_number(5,"search_radius"),relic_number(5,"damage_multiplier"),relic_count(5,"maximum_triggers_per_original_attack")}; data.relics.movement_echo={relic_number(6,"required_cumulative_distance"),relic_ticks(6,"position_history_age"),relic_number(6,"damage_multiplier")}; data.relics.alternating_skills={relic_ticks(7,"window"),relic_number(7,"cooldown_refund_fraction")}; data.relics.different_skill_tracker={relic_ticks(8,"window"),relic_number(8,"damage_multiplier"),relic_ticks(8,"per_target_cooldown")}; data.relics.damage_knockback={relic_number(9,"radius"),relic_number(9,"push_distance"),relic_number(9,"slow_fraction"),relic_ticks(9,"slow_duration"),relic_ticks(9,"cooldown")}; data.relics.once_revive={relic_number(10,"revive_hp_fraction"),relic_ticks(10,"invulnerability_duration"),relic_count(10,"maximum_triggers_per_session")}; data.relics.combat_hit_chain={relic_count(11,"direct_hits_per_trigger"),relic_number(11,"search_radius"),relic_count(11,"maximum_targets"),relic_number(11,"damage_multiplier")}; data.relics.projectile_cadence_reward={relic_count(12,"hits_per_trigger"),relic_ticks(12,"cooldown_reduction")}; data.relics.pre_damage_guard={relic_number(13,"damage_reduction_fraction"),relic_ticks(13,"cooldown")}; data.relics.slow_synergy={relic_number(14,"damage_multiplier"),relic_ticks(14,"per_target_cooldown")}; data.relics.area_resonance={relic_number(15,"damage_multiplier"),relic_ticks(15,"cooldown")}; data.relics.boss_pressure={relic_number(16,"damage_multiplier"),relic_ticks(16,"per_target_cooldown")}; data.relics.hit_streak_reward={relic_count(17,"direct_hits_per_trigger"),relic_number(17,"damage_multiplier")}; data.relics.pickup_reward={relic_number(18,"attack_power_fraction"),relic_ticks(18,"duration")}; data.relics.low_health_survival={relic_number(19,"health_threshold_fraction"),relic_number(19,"damage_reduction_fraction"),relic_ticks(19,"cooldown")};
@@ -622,12 +705,106 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         ThrowValidationError("spawn_schedule", "$/continuous_intervals", "composition is outside intervals");
     }; for(std::size_t index=0;index<compositions.size();++index){const auto seconds=RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"start_seconds"); data.spawn_stages[index]={CheckedInteger<std::uint16_t>(seconds/60,"spawn_schedule","$/compositions/start_seconds"),ToTicks(static_cast<double>(seconds),"spawn_schedule","$/compositions/start_seconds"),rate_at(seconds),{CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"melee_weight"),"spawn_schedule","$/compositions/melee_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"ranged_weight"),"spawn_schedule","$/compositions/ranged_weight"),CheckedInteger<std::uint8_t>(RequireInteger(compositions[index],"spawn_schedule","$/compositions/"+std::to_string(index),"suicide_weight"),"spawn_schedule","$/compositions/suicide_weight")}};}
     const auto &waves=spawn["waves"]; for(std::size_t index=0;index<waves.size();++index){const auto path="$/waves/"+std::to_string(index); const auto seconds=RequireNumber(waves[index],"spawn_schedule",path,"start_seconds"); const auto duration=ToTicks(RequireNumber(waves[index],"spawn_schedule",path,"duration_seconds"),"spawn_schedule",path+"/duration_seconds"); if(duration!=CheckedInteger<hs::Tick>(RequireInteger(waves[index],"spawn_schedule",path,"duration_ticks"),"spawn_schedule",path+"/duration_ticks")) ThrowValidationError("spawn_schedule",path,"duration ticks disagree with seconds"); data.waves[index]={CheckedInteger<std::uint16_t>(seconds/60.0,"spawn_schedule",path+"/start_seconds"),ToTicks(seconds,"spawn_schedule",path+"/start_seconds"),CheckedInteger<std::uint16_t>(RequireInteger(waves[index],"spawn_schedule",path,"total_count"),"spawn_schedule",path+"/total_count"),duration};}
-    const auto &placement=sources.documents.at("spawn_schedule")["placement"]; data.spawn_placement={static_cast<float>(RequireNumber(placement,"spawn_schedule","$/placement","minimum_player_distance_m")),static_cast<float>(RequireNumber(placement,"spawn_schedule","$/placement","maximum_player_distance_m")),placement["require_inside_arena"].get<bool>(),placement["require_outside_max_zoom_view"].get<bool>(),ToTicks(RequireNumber(placement,"spawn_schedule","$/placement","fallback_warning_seconds"),"spawn_schedule","$/placement/fallback_warning_seconds"),SpawnFallbackLocation::FarthestArenaEdge,spawn_view.min_forward,spawn_view.max_forward,spawn_view.half_right,spawn_view.forward_x,spawn_view.forward_z};
+    const auto &placement=sources.documents.at("spawn_schedule")["placement"]; data.spawn_placement={RequiredFloat(placement,"spawn_schedule","$/placement","minimum_player_distance_m"),RequiredFloat(placement,"spawn_schedule","$/placement","maximum_player_distance_m"),placement["require_inside_arena"].get<bool>(),placement["require_outside_max_zoom_view"].get<bool>(),ToTicks(RequireNumber(placement,"spawn_schedule","$/placement","fallback_warning_seconds"),"spawn_schedule","$/placement/fallback_warning_seconds"),SpawnFallbackLocation::FarthestArenaEdge,spawn_view.min_forward,spawn_view.max_forward,spawn_view.half_right,spawn_view.forward_x,spawn_view.forward_z};
 
     // Boss fields and pattern PODs are loaded by the same fixed key/logic contract;
     // the remaining runtime fields are populated in the next integration pass.
-    const auto &boss_document=sources.documents.at("bosses"); const auto &common_boss=boss_document["common"]; data.boss_common={static_cast<float>(RequireNumber(common_boss,"bosses","$/common","collision_radius")),ToTicks(RequireNumber(common_boss,"bosses","$/common","spawn_warning_seconds"),"bosses","$/common/spawn_warning_seconds"),ToTicks(RequireNumber(common_boss,"bosses","$/common","initial_pattern_delay_seconds"),"bosses","$/common/initial_pattern_delay_seconds"),CheckedInteger<std::uint32_t>(RequireInteger(common_boss,"bosses","$/common","preferred_pattern_weight"),"bosses","$/common/preferred_pattern_weight"),CheckedInteger<std::uint32_t>(RequireInteger(common_boss,"bosses","$/common","other_pattern_weight"),"bosses","$/common/other_pattern_weight"),CheckedInteger<std::uint32_t>(RequireInteger(common_boss,"bosses","$/common","maximum_same_pattern_repeats"),"bosses","$/common/maximum_same_pattern_repeats"),common_boss["body_contact_damage"].get<bool>(),common_boss["time_scaling"].get<bool>(),common_boss["affected_by_damage"].get<bool>(),common_boss["affected_by_bleed"].get<bool>(),common_boss["affected_by_burn"].get<bool>(),common_boss["affected_by_slow"].get<bool>(),common_boss["immune_to_pull"].get<bool>(),common_boss["immune_to_push"].get<bool>(),common_boss["immune_to_alignment_move"].get<bool>(),static_cast<float>(RequireNumber(common_boss,"bosses","$/common","projectile_range")),static_cast<float>(RequireNumber(common_boss,"bosses","$/common","projectile_collision_radius"))};
-    const auto &bosses=boss_document["entries"]; constexpr std::array boss_ids{"boss.mid_5m","boss.mid_10m","boss.final_15m"}; for(std::size_t index=0;index<bosses.size();++index){const auto path="$/entries/"+std::to_string(index); if(RequireString(bosses[index],"bosses",path,"id")!=boss_ids[index]) ThrowValidationError("bosses",path+"/id","boss order is part of the cooked ABI"); auto &boss=data.bosses[index]; boss.health=CheckedInteger<std::int32_t>(RequireInteger(bosses[index],"bosses",path,"hp"),"bosses",path+"/hp"); boss.spawn_growth_ticks=ToTicks(RequireNumber(bosses[index],"bosses",path,"spawn_growth_seconds"),"bosses",path+"/spawn_growth_seconds"); boss.target_kill_ticks=ToTicks(RequireNumber(bosses[index],"bosses",path,"target_kill_seconds"),"bosses",path+"/target_kill_seconds"); boss.movement_speed=static_cast<float>(RequireNumber(bosses[index],"bosses",path,"movement_speed_mps")); boss.collision_radius=data.boss_common.collision_radius; boss.projectile_range=data.boss_common.projectile_range; boss.projectile_collision_radius=data.boss_common.projectile_collision_radius; const auto &thresholds=bosses[index]["preference_thresholds"]; boss.preferred_distance_near=static_cast<float>(RequireNumber(thresholds,"bosses",path+"/preference_thresholds","near_m")); boss.preferred_distance_far=static_cast<float>(RequireNumber(thresholds,"bosses",path+"/preference_thresholds","far_m")); boss.phase_two_preferred_distance_near=static_cast<float>(RequireNumber(thresholds,"bosses",path+"/preference_thresholds","phase_two_near_m")); boss.phase_two_preferred_distance_far=static_cast<float>(RequireNumber(thresholds,"bosses",path+"/preference_thresholds","phase_two_far_m")); const auto &single=bosses[index]["single_pattern_recovery_seconds"]; const auto &interval=bosses[index]["phase2_pattern_interval_seconds"]; if(single.is_number()) boss.recovery_ticks=ToTicks(single.get<double>(),"bosses",path+"/single_pattern_recovery_seconds"); if(interval.is_number()){boss.phase2_pattern_interval_ticks=ToTicks(interval.get<double>(),"bosses",path+"/phase2_pattern_interval_seconds"); if(!single.is_number()) boss.recovery_ticks=boss.phase2_pattern_interval_ticks;} const auto &cycle=bosses[index]["phase2_cycle_recovery_seconds"]; if(cycle.is_number()) boss.phase2_cycle_recovery_ticks=ToTicks(cycle.get<double>(),"bosses",path+"/phase2_cycle_recovery_seconds"); const auto &reward=bosses[index]["reward"]; boss.reward={CheckedInteger<std::uint32_t>(RequireInteger(reward,"bosses",path+"/reward","relic_chest_count"),"bosses",path+"/reward/relic_chest_count"),static_cast<float>(RequireNumber(reward,"bosses",path+"/reward","maximum_hp_heal_fraction"))}; const auto &transition=bosses[index]["phase_transition"]; if(!transition.is_null()){boss.has_phase_transition=true; boss.phase_transition={static_cast<float>(RequireNumber(transition,"bosses",path+"/phase_transition","hp_fraction")),ToTicks(RequireNumber(transition,"bosses",path+"/phase_transition","invulnerability_seconds"),"bosses",path+"/phase_transition/invulnerability_seconds"),transition["remove_enemy_projectiles"].get<bool>(),transition["remove_enemy_areas"].get<bool>(),transition["keep_normal_enemies"].get<bool>(),transition["keep_mid_bosses"].get<bool>(),transition["keep_pickups"].get<bool>(),transition["keep_player_projectiles"].get<bool>(),transition["keep_player_areas"].get<bool>()};}}
+    const auto &boss_document = sources.documents.at("bosses");
+    const auto &common_boss = boss_document["common"];
+    data.boss_common = {
+        RequiredFloat(common_boss, "bosses", "$/common", "collision_radius"),
+        ToTicks(RequireNumber(common_boss, "bosses", "$/common", "spawn_warning_seconds"), "bosses", "$/common/spawn_warning_seconds"),
+        ToTicks(RequireNumber(common_boss, "bosses", "$/common", "initial_pattern_delay_seconds"), "bosses", "$/common/initial_pattern_delay_seconds"),
+        CheckedInteger<std::uint32_t>(RequireInteger(common_boss, "bosses", "$/common", "preferred_pattern_weight"), "bosses", "$/common/preferred_pattern_weight"),
+        CheckedInteger<std::uint32_t>(RequireInteger(common_boss, "bosses", "$/common", "other_pattern_weight"), "bosses", "$/common/other_pattern_weight"),
+        CheckedInteger<std::uint32_t>(RequireInteger(common_boss, "bosses", "$/common", "maximum_same_pattern_repeats"), "bosses", "$/common/maximum_same_pattern_repeats"),
+        common_boss["body_contact_damage"].get<bool>(),
+        common_boss["time_scaling"].get<bool>(),
+        common_boss["affected_by_damage"].get<bool>(),
+        common_boss["affected_by_bleed"].get<bool>(),
+        common_boss["affected_by_burn"].get<bool>(),
+        common_boss["affected_by_slow"].get<bool>(),
+        common_boss["immune_to_pull"].get<bool>(),
+        common_boss["immune_to_push"].get<bool>(),
+        common_boss["immune_to_alignment_move"].get<bool>(),
+        RequiredFloat(common_boss, "bosses", "$/common", "projectile_range"),
+        RequiredFloat(common_boss, "bosses", "$/common", "projectile_collision_radius")};
+    const auto &bosses = boss_document["entries"];
+    constexpr std::array boss_ids{"boss.mid_5m", "boss.mid_10m", "boss.final_15m"};
+    for (std::size_t index = 0; index < bosses.size(); ++index)
+    {
+        const auto path = "$/entries/" + std::to_string(index);
+        if (RequireString(bosses[index], "bosses", path, "id") != boss_ids[index])
+            ThrowValidationError("bosses", path + "/id",
+                                 "boss order is part of the cooked ABI");
+        auto &boss = data.bosses[index];
+        boss.health = CheckedInteger<std::int32_t>(
+            RequireInteger(bosses[index], "bosses", path, "hp"), "bosses",
+            path + "/hp");
+        boss.spawn_growth_ticks = ToTicks(
+            RequireNumber(bosses[index], "bosses", path, "spawn_growth_seconds"),
+            "bosses", path + "/spawn_growth_seconds");
+        boss.target_kill_ticks = ToTicks(
+            RequireNumber(bosses[index], "bosses", path, "target_kill_seconds"),
+            "bosses", path + "/target_kill_seconds");
+        boss.movement_speed = RequiredFloat(bosses[index], "bosses", path,
+                                            "movement_speed_mps");
+        boss.collision_radius = data.boss_common.collision_radius;
+        boss.projectile_range = data.boss_common.projectile_range;
+        boss.projectile_collision_radius = data.boss_common.projectile_collision_radius;
+        const auto &thresholds = bosses[index]["preference_thresholds"];
+        boss.preferred_distance_near = RequiredFloat(
+            thresholds, "bosses", path + "/preference_thresholds", "near_m");
+        boss.preferred_distance_far = RequiredFloat(
+            thresholds, "bosses", path + "/preference_thresholds", "far_m");
+        boss.phase_two_preferred_distance_near = RequiredFloat(
+            thresholds, "bosses", path + "/preference_thresholds", "phase_two_near_m");
+        boss.phase_two_preferred_distance_far = RequiredFloat(
+            thresholds, "bosses", path + "/preference_thresholds", "phase_two_far_m");
+        const auto &single = bosses[index]["single_pattern_recovery_seconds"];
+        const auto &interval = bosses[index]["phase2_pattern_interval_seconds"];
+        if (single.is_number())
+            boss.recovery_ticks = ToTicks(single.get<double>(), "bosses",
+                                          path + "/single_pattern_recovery_seconds");
+        if (interval.is_number())
+        {
+            boss.phase2_pattern_interval_ticks = ToTicks(
+                interval.get<double>(), "bosses",
+                path + "/phase2_pattern_interval_seconds");
+            if (!single.is_number())
+                boss.recovery_ticks = boss.phase2_pattern_interval_ticks;
+        }
+        const auto &cycle = bosses[index]["phase2_cycle_recovery_seconds"];
+        if (cycle.is_number())
+            boss.phase2_cycle_recovery_ticks = ToTicks(
+                cycle.get<double>(), "bosses",
+                path + "/phase2_cycle_recovery_seconds");
+        const auto &reward = bosses[index]["reward"];
+        boss.reward = {
+            CheckedInteger<std::uint32_t>(
+                RequireInteger(reward, "bosses", path + "/reward", "relic_chest_count"),
+                "bosses", path + "/reward/relic_chest_count"),
+            RequiredFloat(reward, "bosses", path + "/reward",
+                          "maximum_hp_heal_fraction")};
+        const auto &transition = bosses[index]["phase_transition"];
+        if (!transition.is_null())
+        {
+            boss.has_phase_transition = true;
+            boss.phase_transition = {
+                RequiredFloat(transition, "bosses", path + "/phase_transition",
+                              "hp_fraction"),
+                ToTicks(RequireNumber(transition, "bosses", path + "/phase_transition",
+                                      "invulnerability_seconds"), "bosses",
+                        path + "/phase_transition/invulnerability_seconds"),
+                transition["remove_enemy_projectiles"].get<bool>(),
+                transition["remove_enemy_areas"].get<bool>(),
+                transition["keep_normal_enemies"].get<bool>(),
+                transition["keep_mid_bosses"].get<bool>(),
+                transition["keep_pickups"].get<bool>(),
+                transition["keep_player_projectiles"].get<bool>(),
+                transition["keep_player_areas"].get<bool>()};
+        }
+    }
     constexpr std::array boss_meshes{"monster.mesh.turtle_shell",
                                      "monster.mesh.chest_monster",
                                      "monster.mesh.beholder"};
@@ -700,6 +877,10 @@ BuiltGameData BuildGameData(const ContentSources &sources)
                 RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "fan_angle", "projectile_count", "projectile_speed", "damage"});
                 out.logic=BossPatternLogic::FanProjectiles; out.fan_angle_degrees=n("fan_angle"); out.projectile_count=i("projectile_count");
                 out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                RequireProjectileRangeProgress(out.projectile_speed,
+                                               data.boss_common.projectile_range,
+                                               "bosses",
+                                               path + "/parameters/projectile_speed");
             }
             else if (logic == "predicted_position_ground_areas")
             {
@@ -720,6 +901,10 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             {
                 RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "volley_count", "interval", "projectiles_per_volley", "second_volley_angle_offset", "projectile_speed", "damage"});
                 out.logic=BossPatternLogic::DoubleOffsetFanProjectiles; out.volley_count=i("volley_count"); out.interval_ticks=d("interval"); out.projectiles_per_volley=i("projectiles_per_volley"); out.second_volley_angle_offset_degrees=n("second_volley_angle_offset"); out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                RequireProjectileRangeProgress(out.projectile_speed,
+                                               data.boss_common.projectile_range,
+                                               "bosses",
+                                               path + "/parameters/projectile_speed");
             }
             else ThrowValidationError("bosses", path + "/id", "unknown boss pattern ID");
         }

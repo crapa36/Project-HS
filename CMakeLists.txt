@@ -2084,7 +2084,8 @@ if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
         add_dependencies(hs_shipping_content hs_shipping_image)
     endif()
     hs_configure_target(hs_shipping_content)
-    target_link_libraries(hs_runtime PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
+    target_link_libraries(ProjectHS PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
+    target_link_libraries(hs_experiment PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
 endif()
 
 if(HS_BUILD_TESTS)
@@ -2603,7 +2604,7 @@ if(HS_BUILD_TESTS)
         COMMAND hs_render_test_runner
             --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/residency-streaming
-            --frames=12 --barriers=enhanced --gpu-validation
+            --frames=128 --barriers=enhanced --gpu-validation
             --residency-streaming-probe
             --require-multi-queue
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
@@ -2838,7 +2839,8 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_residency_streaming_tests)
     add_test(NAME rendering.residency-streaming COMMAND hs_residency_streaming_tests)
     add_executable(hs_render_graph_multi_queue_tests
-        Tests/render_graph_multi_queue_tests.cpp)
+        Tests/render_graph_multi_queue_tests.cpp
+        Tests/texture_streaming_native_tests.cpp)
     target_link_libraries(hs_render_graph_multi_queue_tests PRIVATE
         hs_renderer_d3d12 hs_render_data D3D12MemoryAllocator d3d12 dxgi)
     target_include_directories(hs_render_graph_multi_queue_tests PRIVATE
@@ -2894,12 +2896,11 @@ if(HS_BUILD_TESTS)
         Source/RendererD3D12/Public Source/RendererD3D12/Private)
     hs_configure_target(hs_vfx_ribbon_state_tests)
     add_test(NAME runtime.vfx-ribbon-state COMMAND hs_vfx_ribbon_state_tests)
-    if(TARGET hs_shipping_content)
-    add_executable(hs_runtime_tests Tests/runtime_tests.cpp Tests/shipping_image_tests.cpp)
+    add_executable(hs_runtime_tests Tests/runtime_tests.cpp)
     target_sources(hs_runtime_tests PRIVATE
         $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_audio_io>>
         $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_vfx_io>>)
-    target_link_libraries(hs_runtime_tests PRIVATE hs_runtime hs_asset_manifest hs_presentation hs_presentation_io hs_game_rules_io hs_shipping_content hs_vfx_image_io)
+    target_link_libraries(hs_runtime_tests PRIVATE hs_runtime hs_asset_manifest hs_presentation hs_presentation_io hs_game_rules_io hs_vfx_image_io)
     target_compile_definitions(hs_runtime_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_dependencies(hs_runtime_tests hs_runtime_assets)
     target_include_directories(hs_runtime_tests PRIVATE
@@ -2911,7 +2912,7 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_RUNTIME_TEST_GENERATION_TARGET})
     set_tests_properties(runtime.integration PROPERTIES TIMEOUT 30 ENVIRONMENT
         "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_RUNTIME_TEST_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_RUNTIME_TEST_GENERATION_SCOPE}")
-    endif()
+
     if(HS_BUILD_CONTENT_TOOLS)
         set(HS_UI_TEXT_GENERATION_TARGET hs_test_gameplay_generation)
         set(HS_UI_TEXT_GENERATION_SCOPE test-gameplay)
@@ -2919,10 +2920,31 @@ if(HS_BUILD_TESTS)
         set(HS_UI_TEXT_GENERATION_TARGET ${HS_RUNTIME_TEST_GENERATION_TARGET})
         set(HS_UI_TEXT_GENERATION_SCOPE ${HS_RUNTIME_TEST_GENERATION_SCOPE})
     endif()
-    add_test(NAME runtime.ui-text-fit COMMAND hs_runtime_tests ui-text-fit
-        BUILD_DEPENDS ${HS_UI_TEXT_GENERATION_TARGET})
-    set_tests_properties(runtime.ui-text-fit PROPERTIES TIMEOUT 30 ENVIRONMENT
-        "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_UI_TEXT_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_UI_TEXT_GENERATION_SCOPE}")
+    if(TARGET hs_shipping_content)
+        add_executable(hs_runtime_shipping_tests
+            Tests/shipping_content_tests.cpp
+            Tests/shipping_image_tests.cpp)
+        target_sources(hs_runtime_shipping_tests PRIVATE
+            $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_audio_io>>
+            $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_vfx_io>>)
+        target_link_libraries(hs_runtime_shipping_tests PRIVATE hs_runtime hs_asset_manifest hs_presentation
+            hs_presentation_io hs_game_rules_io hs_shipping_content hs_vfx_image_io)
+        target_compile_definitions(hs_runtime_shipping_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        add_dependencies(hs_runtime_shipping_tests hs_runtime_assets)
+        target_include_directories(hs_runtime_shipping_tests PRIVATE
+            Source/Runtime/Private
+            Source/RendererD3D12/Public
+        )
+        hs_configure_target(hs_runtime_shipping_tests)
+        add_test(NAME runtime.shipping-content COMMAND hs_runtime_shipping_tests
+            BUILD_DEPENDS ${HS_RUNTIME_TEST_GENERATION_TARGET})
+        set_tests_properties(runtime.shipping-content PROPERTIES TIMEOUT 30 ENVIRONMENT
+            "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_RUNTIME_TEST_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_RUNTIME_TEST_GENERATION_SCOPE}")
+        add_test(NAME runtime.ui-text-fit COMMAND hs_runtime_shipping_tests ui-text-fit
+            BUILD_DEPENDS ${HS_UI_TEXT_GENERATION_TARGET})
+        set_tests_properties(runtime.ui-text-fit PROPERTIES TIMEOUT 30 ENVIRONMENT
+            "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_UI_TEXT_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_UI_TEXT_GENERATION_SCOPE}")
+    endif()
     add_executable(hs_graphics_settings_store_tests
         Tests/graphics_settings_store_tests.cpp)
     target_link_libraries(hs_graphics_settings_store_tests PRIVATE hs_runtime)

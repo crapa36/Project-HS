@@ -21,6 +21,11 @@ inline constexpr std::uint32_t kTextureFormatRg8Snorm = 51;  // DXGI_FORMAT_R8G8
 inline constexpr std::uint32_t kTextureFormatR16Float = 54;  // DXGI_FORMAT_R16_FLOAT
 inline constexpr std::uint32_t kTextureFormatRgba16Float = 10; // DXGI_FORMAT_R16G16B16A16_FLOAT
 inline constexpr std::uint32_t kTextureFormatRgba32Float = 2; // DXGI_FORMAT_R32G32B32A32_FLOAT
+inline constexpr std::size_t kTextureMetadataHeaderBytes = 40; // TXM1 v2 fixed header
+inline constexpr std::size_t kTextureMetadataRecordBytes = 48; // TXM1 v2 record with SHA-256
+inline constexpr std::size_t kMaxTextureSubresources = 4096;
+inline constexpr std::size_t kMaxTextureMetadataBytes =
+    kTextureMetadataHeaderBytes + kMaxTextureSubresources * kTextureMetadataRecordBytes;
 
 struct TextureDescription
 {

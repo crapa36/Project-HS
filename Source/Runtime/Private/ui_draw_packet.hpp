@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/render_view_input.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/presentation/projector.hpp>

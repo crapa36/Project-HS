@@ -853,17 +853,44 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     auto second_contract = first_contract;
     second_contract.native_resource = plan_imports[1].Get();
     second_contract.resource_identity = second_identity.Get();
-    second_contract.heap_offset = 512;
-    plan_graph.Reset();
-    const auto placed_a = plan_graph.ImportBuffer({plan_imports[0].Get(), {}, hs::QueueHint::Direct,
-        {}, &first_contract}, hs::Access::Common, "placed A");
-    const auto placed_b = plan_graph.ImportBuffer({plan_imports[1].Get(), {}, hs::QueueHint::Direct,
-        {}, &second_contract}, hs::Access::Common, "placed B");
-    auto placed_reader = plan_graph.AddPass(0, "overlap candidate", hs::QueueHint::Direct);
-    placed_reader.Read(plan_graph.Version(placed_a), hs::Access::CopySource);
-    placed_reader.Read(plan_graph.Version(placed_b), hs::Access::CopySource);
-    placed_reader.SetExecute([](hs::RenderPassContext &) {});
-    Check(!plan_graph.Prepare(first).Succeeded(), "certified placed imports reject overlapping heap intervals");
+    struct PlacedCase
+    {
+        std::uint64_t first_offset, first_size, second_offset, second_size;
+        std::uintptr_t second_heap;
+        bool accepted;
+    };
+    constexpr std::array placed_cases{
+        PlacedCase{0, 1024, 512, 1024, 1, false},
+        PlacedCase{0, 1024, 1024, 1024, 1, true},
+        PlacedCase{1024, 1024, 0, 1024, 1, true},
+        PlacedCase{0, 1024, 16, 32, 1, false},
+        PlacedCase{0, 1024, 0, 1024, 1, false},
+        PlacedCase{0, 1024, 0, 1024, 2, true},
+        PlacedCase{UINT64_MAX - 1024, 1024, UINT64_MAX - 512, 512, 1, false},
+        PlacedCase{0, 1024, UINT64_MAX - 512, 1024, 1, false},
+        PlacedCase{0, 1024, 2048, 0, 1, false}};
+    for (std::size_t index = 0; index < placed_cases.size(); ++index)
+    {
+        const auto &test = placed_cases[index];
+        first_contract.heap_offset = test.first_offset;
+        first_contract.heap_size = test.first_size;
+        second_contract.heap_offset = test.second_offset;
+        second_contract.heap_size = test.second_size;
+        second_contract.heap_identity = reinterpret_cast<void *>(test.second_heap);
+        plan_graph.Reset();
+        const auto placed_a = plan_graph.ImportBuffer({plan_imports[0].Get(), {}, hs::QueueHint::Direct,
+            {}, &first_contract}, hs::Access::Common, "placed A");
+        const auto placed_b = plan_graph.ImportBuffer({plan_imports[1].Get(), {}, hs::QueueHint::Direct,
+            {}, &second_contract}, hs::Access::Common, "placed B");
+        auto placed_reader = plan_graph.AddPass(0, "placed interval candidate", hs::QueueHint::Direct);
+        placed_reader.Read(plan_graph.Version(placed_a), hs::Access::CopySource);
+        placed_reader.Read(plan_graph.Version(placed_b), hs::Access::CopySource);
+        placed_reader.SetExecute([](hs::RenderPassContext &) {});
+        const auto prepared = plan_graph.Prepare(first);
+        if (prepared.Succeeded() != test.accepted)
+            throw std::runtime_error("placed import case " + std::to_string(index) + ": " +
+                std::string(prepared.Message()));
+    }
     hs::RenderGraphBuilder contract_graph;
     const auto declare_contract = [&](hs::BufferRange range, hs::Access incoming = hs::Access::Common) {
         contract_graph.Reset();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/core/result.hpp>
 #include <hs/render_data/character_animation_extension.hpp>
 #include <hs/render_data/character_descriptor.hpp>

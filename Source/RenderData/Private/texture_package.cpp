@@ -15,10 +15,10 @@ namespace
 {
 constexpr std::uint32_t kMetadataMagic = 0x314d5854; // TXM1
 constexpr std::uint32_t kMetadataVersion = 2;
-constexpr std::size_t kMetadataHeader = 40;
-constexpr std::size_t kRecordStride = 48;
+constexpr std::size_t kMetadataHeader = kTextureMetadataHeaderBytes;
+constexpr std::size_t kRecordStride = kTextureMetadataRecordBytes;
 constexpr std::uint64_t kMaxPayload = 32ull * 1024 * 1024;
-constexpr std::uint32_t kMaxSubresources = 4096;
+constexpr std::uint32_t kMaxSubresources = static_cast<std::uint32_t>(kMaxTextureSubresources);
 
 void Require(bool ok, std::string_view message)
 {

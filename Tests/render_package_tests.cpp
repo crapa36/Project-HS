@@ -1,4 +1,5 @@
 #include <hs/core/cooked_format.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/core/sha256.hpp>
 #include "../Source/RendererD3D12/Private/renderer_packed_assets.hpp"
 #include "../Source/RendererD3D12/Private/renderer_hlod_scene.hpp"
@@ -3212,6 +3213,49 @@ void TestTexturePackage()
         }
     };
     check_descriptor(package, decoded);
+
+    const auto max_records_asset = hs::MakeAssetId("render/texture/max-metadata.rpkg");
+    const rd::TextureDescription max_records_description{2, 2, 2048, 2, rd::kTextureFormatR8};
+    std::vector<std::byte> max_records_payload(2048u * (4u + 1u));
+    const auto max_records_package = rd::BuildTexturePackage(max_records_asset, dependencies,
+        max_records_description, max_records_payload);
+    const auto max_records_directory = rd::ReadPackageDirectory(
+        std::span(max_records_package).first(std::min<std::size_t>(max_records_package.size(), 16 * 1024)),
+        max_records_package.size(), max_records_asset);
+    const auto &max_records_metadata = max_records_directory.chunks.front();
+    const auto max_records_full = rd::CompileTextureDescriptor(max_records_package, max_records_asset, 9);
+    const auto max_records_proof = rd::CompileTextureMetadataDescriptor(max_records_directory,
+        std::span(max_records_package).subspan(static_cast<std::size_t>(max_records_metadata.offset),
+            static_cast<std::size_t>(max_records_metadata.byte_count)), 9, max_records_package.size());
+    const auto full_view = max_records_full.View();
+    const auto proof_view = max_records_proof.View();
+    Require(max_records_metadata.type == rd::ChunkType::TextureMetadata && max_records_metadata.version == 2 &&
+            max_records_metadata.byte_count == rd::kMaxTextureMetadataBytes &&
+            max_records_directory.chunks.size() == 2 &&
+            full_view.asset_id.value == proof_view.asset_id.value &&
+            full_view.bulk_index == proof_view.bulk_index &&
+            full_view.description.width == proof_view.description.width &&
+            full_view.description.height == proof_view.description.height &&
+            full_view.description.array_size == proof_view.description.array_size &&
+            full_view.description.mip_count == proof_view.description.mip_count &&
+            full_view.description.format == proof_view.description.format &&
+            full_view.dimension == proof_view.dimension && full_view.depth == proof_view.depth &&
+            full_view.dependencies.size() == proof_view.dependencies.size() &&
+            full_view.subresources.size() == rd::kMaxTextureSubresources &&
+            proof_view.subresources.size() == full_view.subresources.size(),
+            "maximum-size TXM1 v2 metadata proof shape differs from full descriptor");
+    for (std::size_t i = 0; i < full_view.dependencies.size(); ++i)
+        Require(full_view.dependencies[i].value == proof_view.dependencies[i].value,
+                "maximum-size TXM1 v2 metadata proof dependencies differ from full descriptor");
+    for (std::size_t i = 0; i < full_view.subresources.size(); ++i)
+    {
+        const auto &full = full_view.subresources[i], &proof = proof_view.subresources[i];
+        Require(full.offset == proof.offset && full.row_pitch == proof.row_pitch &&
+                full.slice_pitch == proof.slice_pitch && full.byte_count == proof.byte_count &&
+                full.digest == proof.digest && full.has_digest == proof.has_digest,
+                "maximum-size TXM1 v2 metadata proof differs from full descriptor layout");
+    }
+
     const auto compiled = rd::CompileTextureDescriptor(package, asset, 7);
     const auto payload_end = compiled.subresources.back().offset + compiled.subresources.back().slice_pitch;
     Reject([&] { rd::ValidateTextureDescriptor(compiled.View(), payload_end - 1); },

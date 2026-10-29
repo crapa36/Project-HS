@@ -1,4 +1,5 @@
 #include <hs/runtime/application.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/runtime/shipping_content.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -1325,17 +1326,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::PreparedPairFacts vfx_pair_facts;
         runtime_detail::VfxTypedFrameInputs typed_vfx;
-        std::vector<PresentationEvent> ready_events, frame_events, dispatched_event_scratch;
+        std::vector<PresentationEvent> frame_events, dispatched_event_scratch;
         std::vector<VfxScreenInput> typed_screen;
         std::vector<VfxVolumeInput> typed_volumes;
         std::vector<VfxLightInput> typed_lights;
         std::vector<VfxDistortionInput> typed_distortions;
+        std::vector<float> distortion_gap_angles;
         std::vector<VfxDecalInput> typed_decals;
         std::vector<VfxEntitySurfaceCommand> typed_surfaces;
         std::vector<VfxOwnedMeshInput> typed_mesh_spawns;
         std::vector<VfxFresnelInput> typed_fresnels;
-        std::vector<runtime_detail::VfxTypedGroundCommand> ground_commands;
         std::vector<VfxGroundSpawnInput> typed_ground_spawns;
+        std::vector<float> ground_gap_angles;
         std::vector<VfxFlashSpawnInput> visible_flashes;
         std::vector<VfxFlashSpawnInput> status_stamp_flashes;
         std::vector<runtime_detail::VfxPreparedFireSource> prepared_fire_sources;
@@ -1363,14 +1365,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         using VfxEventStore = runtime_detail::ActiveEffectStore;
         using VfxEventProfile = VfxEventStore::Profile;
         std::vector<VfxEventStore::AppendRequest> profile_additions;
-        std::vector<std::uint16_t> cosmetic_profile_masks;
-        std::uint64_t cosmetic_profile_generation{};
+        std::vector<runtime_detail::VfxEventProfileAdmission> profile_admission_plans;
+        std::uint64_t profile_admission_generation{};
         VfxEventStore::PreparedAppendBatch prepared_profiles;
         const auto profile_bit = [](VfxEventProfile profile) -> std::uint16_t {
             return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
         };
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
+        std::size_t typed_vfx_payload_capacity_bytes{};
         const auto vfx_workspace_breakdown = [&]() noexcept {
             using namespace runtime_detail::vfx_retained_size;
             runtime_detail::VfxWorkspaceSample sample;
@@ -1381,7 +1384,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             sample.raw_event_bytes = vfx_session.raw_events.LogicalCapacityBytes();
             sample.prepared_bytes = Add(prepared_births.LogicalCapacityBytes(),
                 Add(prepared_profiles.LogicalCapacityBytes(),
-                    Add(Vector(cosmetic_profile_masks),
+                    Add(Vector(profile_admission_plans),
                         Add(Vector(profile_additions), Vector(prepared_mote_bursts)))));
             for (const auto bytes : {Vector(prepared_status_mote_bursts), Vector(prepared_flash_outputs),
                     Vector(prepared_ballistic_bursts), Vector(prepared_legacy_events),
@@ -1393,23 +1396,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             };
             const auto vectors = [&](const auto &...items) { (charge(Vector(items)), ...); };
             vectors(typed_vfx.events, typed_vfx.persistent, typed_vfx.unsupported_effect_ids,
-                ready_events, frame_events, dispatched_event_scratch, typed_screen, typed_volumes,
-                typed_lights, typed_distortions, typed_decals, typed_surfaces, typed_mesh_spawns,
-                typed_fresnels, ground_commands, typed_ground_spawns, visible_flashes,
+                frame_events, dispatched_event_scratch, typed_screen, typed_volumes,
+                typed_lights, typed_distortions, distortion_gap_angles, typed_decals, typed_surfaces, typed_mesh_spawns,
+                typed_fresnels, typed_ground_spawns, ground_gap_angles, visible_flashes,
                 status_stamp_flashes, prepared_fire_sources, surface_capture_inputs,
                 surface_persistent, ground_birth_suppressions, replaced_particle_sequences,
                 superseded_pickup_sequences, owned_status_sequences, owned_status_mote_sequences,
                 replaced_legacy_mesh_sequences, replaced_burst_shell_sequences, vfx_row_indices,
                 status_burst_keys, status_shard_commands);
-            for (const auto &input : typed_vfx.events) charge(RingGapPayload(input.payload));
-            for (const auto &input : typed_vfx.persistent) charge(RingGapPayload(input.payload));
+            charge(typed_vfx_payload_capacity_bytes);
             for (const auto &capture : surface_capture_inputs) charge(RingGapPayload(capture.input.payload));
             for (const auto &capture : surface_persistent) charge(RingGapPayload(capture.input.payload));
-            for (const auto &command : ground_commands) charge(Vector(command.geometry.gap_angles_radians));
-            for (const auto &command : typed_ground_spawns) charge(Vector(command.geometry.gap_angles_radians));
-            for (const auto &command : typed_distortions) charge(Vector(command.gap_angles_degrees));
-            charge(Multiply(ribbon_inputs.StorageCapacity(), sizeof(VfxRibbonSourceInput)));
-            for (const auto &source : ribbon_inputs.Storage()) charge(Vector(source.outputs));
+            charge(ribbon_inputs.LogicalCapacityBytes());
             return sample;
         };
         runtime_detail::VfxWorkspacePeak vfx_workspace_sampled_peak;
@@ -1631,6 +1629,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::size_t vfx_birth_requested_rows{}, vfx_birth_allowed_rows{};
         std::uint64_t vfx_profile_budget_limited_frames{};
         std::size_t vfx_profile_requested_memberships{}, vfx_profile_admitted_memberships{};
+        std::size_t vfx_profile_ground_reserved_peak_rows{}, vfx_profile_light_reserved_peak_rows{}, vfx_profile_decal_reserved_peak_rows{};
+        std::size_t vfx_profile_volume_reserved_peak_rows{}, vfx_profile_screen_reserved_peak_rows{};
+        std::size_t vfx_profile_distortion_reserved_peak_rows{}, vfx_profile_distortion_reserved_peak_gaps{};
+        std::size_t vfx_profile_ground_reserved_peak_gaps{}, vfx_profile_ribbon_reserved_peak_rows{}, vfx_profile_ribbon_reserved_peak_outputs{};
         std::size_t vfx_fire_admission_peak_bytes{};
         std::uint64_t typed_vfx_unsupported_inputs{};
         bool captured{};
@@ -2104,30 +2106,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             // AcquireLatest below observes the simulation's completed publication.
             runtime_detail::DiagnosticScope event_drain_scope(vfx_work[0], capture_clock);
-            std::size_t event_count{};
-            bool vfx_event_overflow{};
-            PresentationEvent event;
-            while (event_count < 256 && vfx_session.raw_events.HasCapacity() &&
-                   channels.presentation_events.TryPop(event))
-            {
-                ++event_count;
-                if (event.kind == PresentationKind::Vfx)
-                    if (!vfx_session.raw_events.Enqueue(event))
-                    {
-                        vfx_event_overflow = true;
-                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                            "Bounded VFX raw-event scheduler is full."));
-                        break;
-                    }
+            vfx_session.raw_events.DrainIngress(channels.presentation_events, [&](const PresentationEvent &event) {
                 if (capture_diagnostics) event_lines.Append(
                     std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{},"
                                 "\"asset\":{},\"position\":[{},{},{}]}}\n",
                                 event.sequence, event.tick, static_cast<unsigned>(event.kind),
                                 event.asset.value, event.position.x, event.position.y,
                                 event.position.z));
-            }
+            });
             event_drain_scope.Stop();
-            if (vfx_event_overflow) break;
             runtime_detail::DiagnosticScope snapshot_scope(vfx_work[1], capture_clock);
             auto snapshots = snapshot_consumer.AcquireLatest();
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -2165,11 +2152,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 auto retained_particle_count = pending_particle_spawns.size();
                 const auto &ready_batch = vfx_session.raw_events.Prepare(
                     current_snapshot.header.tick, vfx_session.session_id);
-                ready_events.clear();
-                ready_events.reserve(ready_batch.entries.size());
-                for (const auto &entry : ready_batch.entries) ready_events.push_back(entry.event);
                 if (auto dispatched = runtime_detail::DispatchVfxUpgradeEvents(
-                        vfx_catalog.Program(), ready_events, frame_events, &dispatched_event_scratch); !dispatched)
+                        vfx_catalog.Program(), ready_batch.events, frame_events, &dispatched_event_scratch); !dispatched)
                 {
                     record_thread_failure(dispatched);
                     break;
@@ -2266,6 +2250,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
                     typed_vfx, &vfx_pair_facts, sample_alpha, active_vfx_quality);
                 frame_adapter_scope.Stop();
+                {
+                    runtime_detail::DiagnosticScope movement_scope(vfx_work[6], capture_clock);
+                    vfx_upgrade_movements.Append(vfx_catalog.Image(), frame_events,
+                        snapshots.has_current ? snapshots.current.header.tick : Tick{},
+                        typed_vfx.persistent, sample_alpha, active_vfx_quality);
+                }
                 // Reserve retained profile storage before generating the birth fanout.
                 const auto phase_effect = vfx_catalog.Image().entity_surface_routes.phase_effect;
                 const auto death_effect = vfx_catalog.Image().entity_surface_routes.death_effect;
@@ -2273,90 +2263,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto is_effect = [](const VfxEventInput &input, std::uint32_t handle) {
                     return handle != 0 && input.effect_handle == handle;
                 };
-                {
-                    runtime_detail::DiagnosticScope profile_prepare_scope(vfx_work[10], capture_clock);
-                    profile_additions.clear();
-                    const auto &image = vfx_catalog.Image();
-                    if (cosmetic_profile_generation != vfx_catalog_generation)
-                    {
-                        cosmetic_profile_masks.resize(image.program.effects.size());
-                        for (std::size_t i = 0; i < cosmetic_profile_masks.size(); ++i)
-                            cosmetic_profile_masks[i] = image.program.effects[i].handle == i + 1
-                                ? runtime_detail::ClassifyCosmeticVfxEventProfiles(
-                                    image, image.program.effects[i].handle, UINT16_MAX, false) : 0;
-                        cosmetic_profile_generation = vfx_catalog_generation;
-                    }
-                    for (const auto &input : typed_vfx.events)
-                    {
-                        std::uint16_t mask{};
-                        const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
-                        if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
-                        if (is_effect(input, phase_effect) || is_effect(input, death_effect))
-                            mask |= profile_bit(VfxEventProfile::EntitySurface);
-                        if (is_effect(input, trap_effect)) mask |= profile_bit(VfxEventProfile::PointRate);
-                        if (input.effect_handle != 0 && input.effect_handle <= image.program.effects.size())
-                        {
-                            if (input.effect_handle <= image.light_effect_ranges.size() &&
-                                image.light_effect_ranges[input.effect_handle - 1].count != 0)
-                                mask |= profile_bit(VfxEventProfile::Light);
-                            if (image.HasDistortionRecipes(input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Distortion);
-                            if (image.HasDecalRecipes(input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Decal);
-                            if (runtime_detail::IsVfxTypedVolumeEffect(image, input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Volume);
-                            if (runtime_detail::IsVfxTypedScreenEffect(image, input.effect_handle))
-                                mask |= profile_bit(VfxEventProfile::Screen);
-                        }
-                        if (input.effect_handle != 0 && input.effect_handle <= image.ribbon_effect_recipes.size() &&
-                            (image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonAdd) ||
-                             image.HasOutput(input.effect_handle, VfxOutputProfile::RibbonOit)))
-                        {
-                            const auto &effect = image.ribbon_effect_recipes[input.effect_handle - 1];
-                            if (effect.input_mode == 0 && effect.timing_kind == 0 &&
-                                std::isfinite(effect.seconds) && effect.seconds > 0.0f &&
-                                (std::holds_alternative<VfxPointPayload>(input.payload) ||
-                                 std::holds_alternative<VfxProjectilePayload>(input.payload) ||
-                                 std::holds_alternative<VfxConePayload>(input.payload) ||
-                                 std::holds_alternative<VfxCirclePayload>(input.payload) ||
-                                 std::holds_alternative<VfxEntityPayload>(input.payload) ||
-                                 std::holds_alternative<VfxContextPayload>(input.payload) ||
-                                 std::holds_alternative<VfxLinkPayload>(input.payload)))
-                                mask |= profile_bit(VfxEventProfile::Ribbon);
-                        }
-                        if (mask)
-                        {
-                            const auto cosmetic = static_cast<std::uint16_t>(
-                                !ground_admission.replace_context_owner && input.effect_handle != 0 &&
-                                input.effect_handle <= cosmetic_profile_masks.size()
-                                ? mask & cosmetic_profile_masks[input.effect_handle - 1] : 0u);
-                            const auto importance = input.effect_handle != 0 &&
-                                input.effect_handle <= image.program.effects.size()
-                                ? image.program.effects[input.effect_handle - 1].importance : 0u;
-                            profile_additions.push_back({&input, mask,
-                                ground_admission.replace_context_owner, cosmetic, importance});
-                        }
-                    }
-                    VfxEventStore::ProfileAdmission admission{
-                        vfx_workspace_breakdown().TotalBytes(),
-                        runtime_detail::kVfxWorkspaceSoftBudgetBytes, birth_order};
-                    if (!profile_additions.empty() &&
-                        !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles, &admission))
-                    {
-                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                            "VFX event profiles could not be prepared."));
-                        break;
-                    }
-                    using runtime_detail::vfx_retained_size::Add;
-                    vfx_profile_requested_memberships = Add(vfx_profile_requested_memberships,
-                        admission.requested_cosmetic_memberships);
-                    vfx_profile_admitted_memberships = Add(vfx_profile_admitted_memberships,
-                        admission.admitted_cosmetic_memberships);
-                    vfx_profile_budget_limited_frames += admission.admitted_cosmetic_memberships <
-                        admission.requested_cosmetic_memberships;
-                    vfx_session.ReserveSurfaceCaptures(profile_additions.empty() ? 0 :
-                        prepared_profiles.AdditionalProfileRows(VfxEventProfile::EntitySurface));
-                }
                 runtime_detail::DiagnosticScope ground_birth_scope(vfx_work[11], capture_clock);
                 ground_birth_suppressions.clear();
                 runtime_detail::AppendVfxTypedEventGroundBirthSuppression(
@@ -2566,9 +2472,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             Add(required_rows[plan.definition->kind == VfxDefinitionKind::Line ? 1 : 0],
                                 plan.maximum_required_count);
                     const auto required_suffix = Add(status_stamp_flashes.size(), required_fire);
-                    const auto select_birth_rows = [&](std::array<std::size_t, 3> &rows) {
+                    const auto select_birth_rows = [&](std::array<std::size_t, 3> &rows,
+                        std::span<BirthRequest> requests) {
                         runtime_detail::vfx_birth_admission::ReserveAndSelectBirthRows(rows,
-                            birth_requests, birth_order,
+                            requests, birth_order,
                             [&]() noexcept { return vfx_workspace_breakdown().TotalBytes(); },
                             prepared_births.particle_spawns, pending_particle_spawns,
                             vfx_session.native_batch.particle_spawns,
@@ -2576,14 +2483,271 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             vfx_session.native_batch.effect_lines,
                             prepared_births.flashes, active_vfx_flashes, visible_flashes,
                             required_suffix, runtime_detail::kVfxWorkspaceSoftBudgetBytes);
-                        for (const auto &request : birth_requests)
+                        for (const auto &request : requests)
                         {
                             vfx_birth_requested_rows = Add(vfx_birth_requested_rows, request.count);
                             vfx_birth_allowed_rows = Add(vfx_birth_allowed_rows, *request.admitted);
                             birth_budget_limited |= *request.admitted < request.count;
                         }
                     };
-                    select_birth_rows(required_rows);
+                    select_birth_rows(required_rows, {});
+                    mote_birth_scope.Stop();
+                    {
+                        runtime_detail::DiagnosticScope profile_prepare_scope(
+                            vfx_work[runtime_detail::kVfxProfilePrepareTaskIndex], capture_clock);
+                        profile_additions.clear();
+                        const auto &image = vfx_catalog.Image();
+                        if (profile_admission_generation != vfx_catalog_generation)
+                        {
+                            profile_admission_plans.resize(image.program.effects.size());
+                            for (std::size_t i = 0; i < profile_admission_plans.size(); ++i)
+                                profile_admission_plans[i] = image.program.effects[i].handle == i + 1
+                                    ? runtime_detail::PrepareVfxEventProfileAdmission(
+                                        image, image.program.effects[i].handle) : runtime_detail::VfxEventProfileAdmission{};
+                            profile_admission_generation = vfx_catalog_generation;
+                        }
+                        // These arrays stay unchanged through all later admission queries.
+                        typed_vfx_payload_capacity_bytes = 0;
+                        for (const auto &input : typed_vfx.events)
+                        {
+                            typed_vfx_payload_capacity_bytes = runtime_detail::vfx_retained_size::Add(
+                                typed_vfx_payload_capacity_bytes,
+                                runtime_detail::vfx_retained_size::RingGapPayload(input.payload));
+                            std::uint16_t mask{};
+                            const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
+                            if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
+                            if (is_effect(input, phase_effect) || is_effect(input, death_effect))
+                                mask |= profile_bit(VfxEventProfile::EntitySurface);
+                            if (is_effect(input, trap_effect)) mask |= profile_bit(VfxEventProfile::PointRate);
+                            if (input.effect_handle != 0 && input.effect_handle <= image.program.effects.size())
+                            {
+                                if (input.effect_handle <= image.light_effect_ranges.size() &&
+                                    image.light_effect_ranges[input.effect_handle - 1].count != 0)
+                                    mask |= profile_bit(VfxEventProfile::Light);
+                                if (image.HasDistortionRecipes(input.effect_handle))
+                                    mask |= profile_bit(VfxEventProfile::Distortion);
+                                if (image.HasDecalRecipes(input.effect_handle))
+                                    mask |= profile_bit(VfxEventProfile::Decal);
+                                if (runtime_detail::IsVfxTypedVolumeEffect(image, input.effect_handle))
+                                    mask |= profile_bit(VfxEventProfile::Volume);
+                                if (runtime_detail::IsVfxTypedScreenEffect(image, input.effect_handle))
+                                    mask |= profile_bit(VfxEventProfile::Screen);
+                            }
+                            if (input.effect_handle != 0 && input.effect_handle <= profile_admission_plans.size() &&
+                                profile_admission_plans[input.effect_handle - 1].frame_rows[
+                                    static_cast<std::size_t>(VfxEventProfile::Ribbon)] != 0)
+                                mask |= profile_bit(VfxEventProfile::Ribbon);
+                            if (mask)
+                            {
+                                const auto cosmetic = static_cast<std::uint16_t>(
+                                    !ground_admission.replace_context_owner && input.effect_handle != 0 &&
+                                    input.effect_handle <= profile_admission_plans.size()
+                                    ? mask & profile_admission_plans[input.effect_handle - 1].cosmetic_mask : 0u);
+                                const auto importance = input.effect_handle != 0 &&
+                                    input.effect_handle <= image.program.effects.size()
+                                    ? image.program.effects[input.effect_handle - 1].importance : 0u;
+                                const auto *frame_rows = input.effect_handle != 0 &&
+                                    input.effect_handle <= profile_admission_plans.size()
+                                    ? &profile_admission_plans[input.effect_handle - 1].frame_rows : nullptr;
+                                const auto ribbon_outputs = frame_rows
+                                    ? profile_admission_plans[input.effect_handle - 1].ribbon_frame_outputs : 0u;
+                                profile_additions.push_back({&input, mask,
+                                    ground_admission.replace_context_owner, cosmetic, importance, frame_rows, ribbon_outputs});
+                            }
+                        }
+                        using runtime_detail::vfx_retained_size::Add;
+                        constexpr auto ground_profile = static_cast<std::size_t>(VfxEventProfile::Ground);
+                        constexpr auto ribbon_profile = static_cast<std::size_t>(VfxEventProfile::Ribbon);
+                        constexpr auto light_profile = static_cast<std::size_t>(VfxEventProfile::Light);
+                        constexpr auto distortion_profile = static_cast<std::size_t>(VfxEventProfile::Distortion);
+                        constexpr auto decal_profile = static_cast<std::size_t>(VfxEventProfile::Decal);
+                        constexpr auto volume_profile = static_cast<std::size_t>(VfxEventProfile::Volume);
+                        constexpr auto screen_profile = static_cast<std::size_t>(VfxEventProfile::Screen);
+                        constexpr auto surface_profile = static_cast<std::size_t>(VfxEventProfile::EntitySurface);
+                        std::array<std::size_t, static_cast<std::size_t>(VfxEventProfile::Count)> frame_rows{};
+                        std::size_t frame_distortion_gaps{};
+                        std::size_t frame_ground_gaps{}, frame_ribbon_outputs{};
+                        std::size_t frame_mesh_rows{}, frame_fresnel_rows{}, frame_surface_persistent_rows{};
+                        const auto frame_surface_captures = Add(vfx_session.decoded.entity_surface_captures.size(),
+                            active_effects.ProfileEvents(VfxEventProfile::EntitySurface).size());
+                        for (const auto profile : {VfxEventProfile::Ground, VfxEventProfile::Light,
+                                                  VfxEventProfile::Distortion, VfxEventProfile::Decal,
+                                                  VfxEventProfile::Volume, VfxEventProfile::Screen, VfxEventProfile::Ribbon,
+                                                  VfxEventProfile::EntitySurface})
+                            for (const auto &input : active_effects.ProfileEvents(profile))
+                                if (input.effect_handle != 0 && input.effect_handle <= profile_admission_plans.size())
+                                {
+                                    const auto index = static_cast<std::size_t>(profile);
+                                    const auto rows = profile_admission_plans[input.effect_handle - 1].frame_rows[index];
+                                    frame_rows[index] = Add(frame_rows[index], rows);
+                                    if ((profile == VfxEventProfile::Distortion || profile == VfxEventProfile::Ground) && rows != 0)
+                                        if (const auto *ring = std::get_if<VfxRingGapsPayload>(&input.payload);
+                                            ring && !ring->uniform_gaps.Active())
+                                        {
+                                            auto &gaps = profile == VfxEventProfile::Ground ? frame_ground_gaps : frame_distortion_gaps;
+                                            gaps = Add(gaps, ring->gap_angles_degrees.size());
+                                        }
+                                    if (profile == VfxEventProfile::Ribbon)
+                                        frame_ribbon_outputs = Add(frame_ribbon_outputs,
+                                            profile_admission_plans[input.effect_handle - 1].ribbon_frame_outputs);
+                                }
+                        for (const auto &capture : vfx_session.decoded.entity_surface_captures)
+                            if (const auto *input = active_effects.Get(capture.row);
+                                input && input->effect_handle != 0 && input->effect_handle <= profile_admission_plans.size())
+                                frame_rows[surface_profile] = Add(frame_rows[surface_profile],
+                                    profile_admission_plans[input->effect_handle - 1].frame_rows[surface_profile]);
+                        for (const auto &input : typed_vfx.persistent)
+                        {
+                            typed_vfx_payload_capacity_bytes = Add(typed_vfx_payload_capacity_bytes,
+                                runtime_detail::vfx_retained_size::RingGapPayload(input.payload));
+                            if (input.effect_handle != 0 && input.effect_handle <= profile_admission_plans.size())
+                            {
+                                const auto &persistent_rows = profile_admission_plans[input.effect_handle - 1].persistent_frame_rows;
+                                const auto &plan = profile_admission_plans[input.effect_handle - 1];
+                                if (std::holds_alternative<VfxProjectilePayload>(input.payload))
+                                    frame_mesh_rows = Add(frame_mesh_rows, plan.persistent_mesh_rows);
+                                if (std::holds_alternative<VfxEntityPayload>(input.payload))
+                                {
+                                    frame_fresnel_rows = Add(frame_fresnel_rows, plan.persistent_fresnel_rows);
+                                    if (input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::BossPhaseTransition))
+                                    {
+                                        frame_rows[surface_profile] = Add(frame_rows[surface_profile], persistent_rows[surface_profile]);
+                                        frame_surface_persistent_rows = Add(frame_surface_persistent_rows, 1);
+                                    }
+                                }
+                                if (std::holds_alternative<VfxCirclePayload>(input.payload) ||
+                                    std::holds_alternative<VfxLinePayload>(input.payload) ||
+                                    std::holds_alternative<VfxRingGapsPayload>(input.payload) ||
+                                    std::holds_alternative<VfxEntityPayload>(input.payload) ||
+                                    (input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::WaveTimer) &&
+                                     std::holds_alternative<VfxContextPayload>(input.payload)))
+                                {
+                                    frame_rows[ground_profile] = Add(frame_rows[ground_profile], persistent_rows[ground_profile]);
+                                    if (persistent_rows[ground_profile] != 0)
+                                        if (const auto *ring = std::get_if<VfxRingGapsPayload>(&input.payload);
+                                            ring && !ring->uniform_gaps.Active())
+                                            frame_ground_gaps = Add(frame_ground_gaps, ring->gap_angles_degrees.size());
+                                }
+                                frame_rows[ribbon_profile] = Add(frame_rows[ribbon_profile], persistent_rows[ribbon_profile]);
+                                frame_ribbon_outputs = Add(frame_ribbon_outputs,
+                                    profile_admission_plans[input.effect_handle - 1].persistent_ribbon_frame_outputs);
+                                if (std::holds_alternative<VfxCirclePayload>(input.payload))
+                                    frame_rows[decal_profile] = Add(frame_rows[decal_profile], persistent_rows[decal_profile]);
+                                if (std::holds_alternative<VfxProjectilePayload>(input.payload))
+                                    frame_rows[distortion_profile] = Add(frame_rows[distortion_profile], persistent_rows[distortion_profile]);
+                                frame_rows[volume_profile] = Add(frame_rows[volume_profile], persistent_rows[volume_profile]);
+                                frame_rows[screen_profile] = Add(frame_rows[screen_profile], persistent_rows[screen_profile]);
+                            }
+                        }
+                        typed_ground_spawns.reserve(frame_rows[ground_profile]);
+                        typed_mesh_spawns.reserve(frame_mesh_rows);
+                        typed_fresnels.reserve(frame_fresnel_rows);
+                        typed_surfaces.reserve(frame_rows[surface_profile]);
+                        surface_persistent.reserve(frame_surface_persistent_rows);
+                        vfx_session.decoded.entity_surface_captures.reserve(frame_surface_captures);
+                        surface_capture_inputs.reserve(frame_surface_captures);
+                        if (frame_ground_gaps > std::numeric_limits<std::uint32_t>::max() ||
+                            frame_ribbon_outputs > std::numeric_limits<std::uint32_t>::max())
+                            throw std::length_error("VFX frame pool exceeds uint32 offsets");
+                        ground_gap_angles.reserve(frame_ground_gaps);
+                        ribbon_inputs.Reserve(frame_rows[ribbon_profile], frame_ribbon_outputs);
+                        typed_lights.reserve(frame_rows[light_profile]);
+                        if (frame_distortion_gaps > std::numeric_limits<std::uint32_t>::max())
+                            throw std::length_error("too many frame distortion gap angles");
+                        typed_distortions.reserve(frame_rows[distortion_profile]);
+                        distortion_gap_angles.reserve(frame_distortion_gaps);
+                        typed_decals.reserve(frame_rows[decal_profile]);
+                        typed_volumes.reserve(frame_rows[volume_profile]);
+                        typed_screen.reserve(frame_rows[screen_profile]);
+                        VfxEventStore::ProfileAdmission admission{
+                            Add(vfx_workspace_breakdown().TotalBytes(),
+                                Add(NativeCopyGrowthBytes(Add(pending_particle_spawns.size(), required_rows[0]),
+                                        vfx_session.native_batch.particle_spawns.capacity(),
+                                        pending_particle_spawns.empty() ? 0 : prepared_births.particle_spawns.capacity(),
+                                        sizeof(ParticleSpawnCommand)),
+                                    NativeCopyGrowthBytes(Add(pending_effect_lines.size(), required_rows[1]),
+                                        vfx_session.native_batch.effect_lines.capacity(),
+                                        pending_effect_lines.empty() ? 0 : prepared_births.effect_lines.capacity(),
+                                        sizeof(VfxLineSpawnCommand)))),
+                            runtime_detail::kVfxWorkspaceSoftBudgetBytes, birth_order};
+                        admission.frame_storage[ground_profile] = {
+                            sizeof(VfxGroundSpawnInput), typed_ground_spawns.capacity(), frame_rows[ground_profile]};
+                        admission.ground_gap_storage = {sizeof(float), ground_gap_angles.capacity(), frame_ground_gaps};
+                        admission.frame_storage[ribbon_profile] = {
+                            sizeof(VfxRibbonSourceInput), ribbon_inputs.StorageCapacity(), frame_rows[ribbon_profile]};
+                        admission.ribbon_output_storage = {
+                            sizeof(VfxRibbonOutputInput), ribbon_inputs.OutputCapacity(), frame_ribbon_outputs};
+                        admission.frame_storage[light_profile] = {
+                            sizeof(VfxLightInput), typed_lights.capacity(), frame_rows[light_profile]};
+                        admission.frame_storage[distortion_profile] = {
+                            sizeof(VfxDistortionInput), typed_distortions.capacity(), frame_rows[distortion_profile]};
+                        admission.distortion_gap_storage = {
+                            sizeof(float), distortion_gap_angles.capacity(), frame_distortion_gaps};
+                        admission.frame_storage[decal_profile] = {
+                            sizeof(VfxDecalInput), typed_decals.capacity(), frame_rows[decal_profile]};
+                        admission.frame_storage[volume_profile] = {
+                            sizeof(VfxVolumeInput), typed_volumes.capacity(), frame_rows[volume_profile]};
+                        admission.frame_storage[screen_profile] = {
+                            sizeof(VfxScreenInput), typed_screen.capacity(), frame_rows[screen_profile]};
+                        admission.frame_storage[surface_profile] = {
+                            sizeof(VfxEntitySurfaceCommand), typed_surfaces.capacity(), frame_rows[surface_profile]};
+                        admission.surface_capture_storage = {sizeof(runtime_detail::RetainedVfxEntitySurfaceCapture),
+                            vfx_session.decoded.entity_surface_captures.capacity(), frame_surface_captures};
+                        admission.surface_capture_input_storage = {sizeof(runtime_detail::VfxEntitySurfaceEventCapture),
+                            surface_capture_inputs.capacity(), frame_surface_captures};
+                        if (!profile_additions.empty() &&
+                            !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles, &admission))
+                        {
+                            record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                "VFX event profiles could not be prepared."));
+                            break;
+                        }
+                        if (!profile_additions.empty())
+                        {
+                            typed_ground_spawns.reserve(admission.reserved_frame_rows[ground_profile]);
+                            ground_gap_angles.reserve(admission.reserved_ground_gaps);
+                            ribbon_inputs.Reserve(admission.reserved_frame_rows[ribbon_profile], admission.reserved_ribbon_outputs);
+                            typed_lights.reserve(admission.reserved_frame_rows[light_profile]);
+                            typed_distortions.reserve(admission.reserved_frame_rows[distortion_profile]);
+                            distortion_gap_angles.reserve(admission.reserved_distortion_gaps);
+                            typed_decals.reserve(admission.reserved_frame_rows[decal_profile]);
+                            typed_volumes.reserve(admission.reserved_frame_rows[volume_profile]);
+                            typed_screen.reserve(admission.reserved_frame_rows[screen_profile]);
+                            typed_surfaces.reserve(admission.reserved_frame_rows[surface_profile]);
+                            vfx_session.decoded.entity_surface_captures.reserve(admission.reserved_surface_captures);
+                            surface_capture_inputs.reserve(admission.reserved_surface_captures);
+                        }
+                        vfx_profile_ground_reserved_peak_rows = std::max(vfx_profile_ground_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[ground_profile] : admission.reserved_frame_rows[ground_profile]);
+                        vfx_profile_ground_reserved_peak_gaps = std::max(vfx_profile_ground_reserved_peak_gaps,
+                            profile_additions.empty() ? frame_ground_gaps : admission.reserved_ground_gaps);
+                        vfx_profile_ribbon_reserved_peak_rows = std::max(vfx_profile_ribbon_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[ribbon_profile] : admission.reserved_frame_rows[ribbon_profile]);
+                        vfx_profile_ribbon_reserved_peak_outputs = std::max(vfx_profile_ribbon_reserved_peak_outputs,
+                            profile_additions.empty() ? frame_ribbon_outputs : admission.reserved_ribbon_outputs);
+                        vfx_profile_light_reserved_peak_rows = std::max(vfx_profile_light_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[light_profile] : admission.reserved_frame_rows[light_profile]);
+                        vfx_profile_distortion_reserved_peak_rows = std::max(vfx_profile_distortion_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[distortion_profile] : admission.reserved_frame_rows[distortion_profile]);
+                        vfx_profile_distortion_reserved_peak_gaps = std::max(vfx_profile_distortion_reserved_peak_gaps,
+                            profile_additions.empty() ? frame_distortion_gaps : admission.reserved_distortion_gaps);
+                        vfx_profile_decal_reserved_peak_rows = std::max(vfx_profile_decal_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[decal_profile] : admission.reserved_frame_rows[decal_profile]);
+                        vfx_profile_volume_reserved_peak_rows = std::max(vfx_profile_volume_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[volume_profile] : admission.reserved_frame_rows[volume_profile]);
+                        vfx_profile_screen_reserved_peak_rows = std::max(vfx_profile_screen_reserved_peak_rows,
+                            profile_additions.empty() ? frame_rows[screen_profile] : admission.reserved_frame_rows[screen_profile]);
+                        vfx_profile_requested_memberships = Add(vfx_profile_requested_memberships,
+                            admission.requested_cosmetic_memberships);
+                        vfx_profile_admitted_memberships = Add(vfx_profile_admitted_memberships,
+                            admission.admitted_cosmetic_memberships);
+                        vfx_profile_budget_limited_frames += admission.admitted_cosmetic_memberships <
+                            admission.requested_cosmetic_memberships;
+                        vfx_session.ReserveSurfaceCaptures(profile_additions.empty() ? 0 :
+                            prepared_profiles.AdditionalProfileRows(VfxEventProfile::EntitySurface));
+                    }
+                    runtime_detail::DiagnosticScope mote_emission_scope(vfx_work[13], capture_clock);
+                    select_birth_rows(required_rows, birth_requests);
 
                     runtime_detail::AppendVfxPreparedFlashOutputs(prepared_flash_outputs,
                         prepared_births.flashes, &superseded_pickup_sequences);
@@ -2643,7 +2807,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         if (plan.count) birth_requests.push_back({plan.count, &plan.admitted_count, plan.importance, 0});
                     }
                     if (channels.stop_requested.load(std::memory_order_acquire)) break;
-                    select_birth_rows(required_rows);
+                    select_birth_rows(required_rows, birth_requests);
                     for (const auto &plan : prepared_legacy_events)
                     {
                         const auto prefix = prepared_births.MarkBirths();
@@ -2674,7 +2838,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (performance_lines)
                 {
                     using namespace runtime_detail::vfx_retained_size;
-                    vfx_activation_raw_rows = vfx_session.raw_events.in_flight.entries.size();
+                    vfx_activation_raw_rows = vfx_session.raw_events.in_flight.events.size();
                     vfx_activation_typed_rows = typed_vfx.events.size();
                     vfx_activation_birth_rows = Add(Add(prepared_births.particle_spawns.size(),
                         prepared_births.effect_lines.size()), Add(prepared_births.flashes.size(),
@@ -2755,7 +2919,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return true;
                 });
                 surface_capture_inputs.clear();
-                surface_capture_inputs.reserve(vfx_session.decoded.entity_surface_captures.size());
                 for (const auto &capture : vfx_session.decoded.entity_surface_captures)
                     if (const auto *input = active_effects.Get(capture.row))
                         surface_capture_inputs.push_back({*input, capture.instance,
@@ -2783,11 +2946,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     surface_capture_inputs, surface_persistent, display_tick,
                     death_current_tick, typed_surfaces);
                 surface_scope.Stop();
-                runtime_detail::DiagnosticScope movement_scope(vfx_work[6], capture_clock);
-                vfx_upgrade_movements.Append(vfx_catalog.Image(), frame_events,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    typed_vfx.persistent, sample_alpha, active_vfx_quality);
-                movement_scope.Stop();
                 runtime_detail::DiagnosticScope ballistic_scope(vfx_work[7], capture_clock);
                 typed_vfx_unsupported_inputs += typed_vfx.unsupported_effect_ids.size();
                 // Compatibility cancellation is a post-commit mutation: the staged
@@ -2806,10 +2964,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 status_scope.Stop();
                 runtime_detail::DiagnosticScope ground_scope(vfx_work[9], capture_clock);
-                ground_commands.clear();
+                typed_ground_spawns.clear();
+                ground_gap_angles.clear();
                 runtime_detail::AppendVfxTypedGroundCommands(
                     vfx_catalog.Image(), typed_vfx.persistent,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{}, ground_commands);
+                    snapshots.has_current ? snapshots.current.header.tick : Tick{}, typed_ground_spawns, ground_gap_angles);
                 ground_scope.Stop();
                 runtime_detail::DiagnosticScope local_scope(vfx_work[10], capture_clock);
                 const auto light_tick = display_tick;
@@ -2847,23 +3006,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
                         (light_tick >= input.event_tick && static_cast<double>(light_tick-input.event_tick)/60.0 >= effect.seconds);
                 };
-                active_effects.RefreshProfile(VfxEventProfile::Light, refresh_owner_event);
-                active_effects.EraseIf(VfxEventProfile::Light, owner_event_expired);
+                active_effects.RefreshProfile(VfxEventProfile::Light, refresh_owner_event, owner_event_expired);
                 runtime_detail::DiagnosticScope light_scope(vfx_work[19], capture_clock);
                 typed_lights.clear();
                 runtime_detail::AppendVfxTypedLightCommands(vfx_catalog.Image(),
                     active_effects.ProfileEvents(VfxEventProfile::Light), light_tick, typed_lights);
                 light_scope.Stop();
-                active_effects.RefreshProfile(VfxEventProfile::Distortion, refresh_owner_event);
-                active_effects.EraseIf(VfxEventProfile::Distortion, owner_event_expired);
+                active_effects.RefreshProfile(VfxEventProfile::Distortion, refresh_owner_event, owner_event_expired);
                 runtime_detail::DiagnosticScope distortion_scope(vfx_work[20], capture_clock);
-                typed_distortions.clear();
-                runtime_detail::AppendVfxTypedDistortionCommands(vfx_catalog.Image(),
+                runtime_detail::RebuildVfxTypedDistortionCommands(vfx_catalog.Image(),
                     active_effects.ProfileEvents(VfxEventProfile::Distortion),
-                    typed_vfx.persistent, light_tick, typed_distortions);
+                    typed_vfx.persistent, light_tick, typed_distortions, distortion_gap_angles);
                 distortion_scope.Stop();
-                active_effects.RefreshProfile(VfxEventProfile::Decal, refresh_owner_event);
-                active_effects.EraseIf(VfxEventProfile::Decal, owner_event_expired);
+                active_effects.RefreshProfile(VfxEventProfile::Decal, refresh_owner_event, owner_event_expired);
                 runtime_detail::DiagnosticScope decal_scope(vfx_work[21], capture_clock);
                 typed_decals.clear();
                 runtime_detail::AppendVfxTypedDecalCommands(vfx_catalog.Image(),
@@ -2877,8 +3032,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 retained_particle_count = runtime_detail::vfx_birth_retirement::RetireGroundSuppressedBirthRows(
                     pending_particle_spawns, retained_particle_count, ground_birth_suppressions);
                 const Tick ground_tick = snapshots.current.header.tick;
-                active_effects.RefreshProfile(VfxEventProfile::Ground, refresh_owner_event);
-                active_effects.EraseIf(VfxEventProfile::Ground, [&](const VfxEventInput &input) {
+                active_effects.RefreshProfile(VfxEventProfile::Ground, refresh_owner_event, [&](const VfxEventInput &input) {
                     if (input.geometry_owner_id != 0)
                         return display_tick >= input.geometry_end_tick;
                     const auto seconds = vfx_catalog.Program().effects[input.effect_handle - 1].seconds;
@@ -2887,7 +3041,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 });
                 runtime_detail::AppendVfxTypedEventGroundCommands(
                     vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ground),
-                    display_tick, ground_commands);
+                    display_tick, typed_ground_spawns, ground_gap_angles);
                 ground_event_scope.Stop();
                 if (inject_pickup_showcase && std::ranges::count_if(superseded_pickup_sequences,
                         [](Sequence sequence) { return sequence >= 0xF100u && sequence < 0xF104u; }) != 4)
@@ -2909,13 +3063,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 vfx_mote_allowed_rows = runtime_detail::vfx_retained_size::Add(
                     vfx_mote_allowed_rows, mote_admission.admitted_rows);
                 vfx_mote_budget_limited_frames += mote_admission.budget_limited;
-                typed_ground_spawns.clear();
-                typed_ground_spawns.reserve(ground_commands.size());
-                for (auto &source : ground_commands)
-                    typed_ground_spawns.push_back(
-                        {source.command, source.additive, source.stable_id, source.effect_handle,
-                         source.source_visual_kind, source.motion, source.gradient_row, source.hdr,
-                         std::move(source.geometry)});
                 mote_scope.Stop();
                 runtime_detail::DiagnosticScope mesh_scope(vfx_work[14], capture_clock);
                 typed_mesh_spawns.clear();
@@ -2939,7 +3086,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::AppendVfxEventRibbonInputs(
                     vfx_catalog.Image(), active_effects.ProfileEvents(VfxEventProfile::Ribbon),
                     display_tick, ribbon_inputs);
-                const VfxRibbonFrameInput typed_ribbons{ribbon_inputs.Sources(), vfx_catalog_generation};
+                const VfxRibbonFrameInput typed_ribbons{
+                    ribbon_inputs.Sources(), vfx_catalog_generation, ribbon_inputs.Outputs()};
                 ribbon_scope.Stop();
                 runtime_detail::DiagnosticScope sort_scope(vfx_work[16], capture_clock);
                 // Authored source delays can cross later event deliveries. Keep the ready prefix chronological.
@@ -3000,6 +3148,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         .screen = typed_screen,
                         .entity_surfaces = typed_surfaces,
                         .world_batch = native_world,
+                        .distortion_gap_angles = distortion_gap_angles,
+                        .ground_gap_angles = ground_gap_angles,
                     },
                     .devtools = devtools,
                     .ui_draw_content = snapshots.ui_frame
@@ -3386,6 +3536,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   "\"vfx_profile_requested_memberships\":{},"
                                   "\"vfx_profile_admitted_memberships\":{},"
                                   "\"vfx_profile_budget_limited_frames\":{},"
+                                  "\"vfx_profile_light_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_ground_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_ground_reserved_peak_gaps\":{},"
+                                  "\"vfx_profile_ribbon_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_ribbon_reserved_peak_outputs\":{},"
+                                  "\"vfx_profile_distortion_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_distortion_reserved_peak_gaps\":{},"
+                                  "\"vfx_profile_decal_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_volume_reserved_peak_rows\":{},"
+                                  "\"vfx_profile_screen_reserved_peak_rows\":{},"
                                   "\"vfx_workspace_sampled_logical_peak_bytes\":{},"
                                   "\"typed_vfx_mesh_peak\":{},"
                                   "\"typed_vfx_fresnel_peak\":{},"
@@ -3417,6 +3577,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   vfx_birth_requested_rows, vfx_birth_allowed_rows, vfx_birth_budget_limited_frames,
                                   vfx_profile_requested_memberships, vfx_profile_admitted_memberships,
                                   vfx_profile_budget_limited_frames,
+                                  vfx_profile_light_reserved_peak_rows,
+                                  vfx_profile_ground_reserved_peak_rows,
+                                  vfx_profile_ground_reserved_peak_gaps,
+                                  vfx_profile_ribbon_reserved_peak_rows, vfx_profile_ribbon_reserved_peak_outputs,
+                                  vfx_profile_distortion_reserved_peak_rows, vfx_profile_distortion_reserved_peak_gaps,
+                                  vfx_profile_decal_reserved_peak_rows,
+                                  vfx_profile_volume_reserved_peak_rows, vfx_profile_screen_reserved_peak_rows,
                                   vfx_workspace_sampled_peak.TotalBytes(),
                                   typed_vfx_mesh_peak, typed_vfx_fresnel_peak,
                                   typed_vfx_ribbon_peak, typed_vfx_ribbon_dropped,
@@ -3910,9 +4077,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     runtime_detail::DiagnosticScope observe_scope(simulation_work[4], capture_clock);
                     auto read_scope = simulation.BorrowTickReadView();
                     const auto &model = read_scope.View();
-                    runtime_detail::DiagnosticScope animation_scope(simulation_work[5], capture_clock);
-                    enemy_animations.Update(model, model.domain_signals);
-                    animation_scope.Stop();
+                    const bool new_session = !has_dynamic_sample ||
+                        dynamic_current.header.session_id != model.session_id;
+                    const bool tick_changed = !has_dynamic_sample ||
+                        dynamic_current.header.tick != model.tick;
+                    const bool project_dynamic = new_session || tick_changed || tick.world_changed ||
+                        forced_dynamic_refresh || harness_added != 0;
+                    if (project_dynamic)
+                    {
+                        runtime_detail::DiagnosticScope animation_scope(simulation_work[5], capture_clock);
+                        enemy_animations.Update(model, model.domain_signals);
+                    }
                     const auto &probe = model.session;
                     if (capture_clock)
                     {
@@ -4002,10 +4177,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     const auto next_clock_mode = !realtime ? RenderClockMode::Scripted
                         : tick.phase == SessionPhase::Playing ? RenderClockMode::RealtimeRunning
                                                             : RenderClockMode::Frozen;
-                    const bool new_session = !has_dynamic_sample ||
-                        dynamic_current.header.session_id != model.session_id;
-                    const bool tick_changed = !has_dynamic_sample ||
-                        dynamic_current.header.tick != model.tick;
                     auto current_boundary = first_tick_boundary + FixedStepClock::kFixedStep * local_tick;
                     if (realtime && has_dynamic_sample &&
                         (new_session || model.tick < dynamic_current.header.tick ||
@@ -4028,8 +4199,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             model.tick - dynamic_current.header.tick == 1;
                         std::swap(dynamic_previous, dynamic_current);
                     }
-                    const bool project_dynamic = new_session || tick_changed || tick.world_changed ||
-                        forced_dynamic_refresh || harness_added != 0;
                     if (project_dynamic) dynamic_current.Clear();
                     if (project_dynamic)
                     {
@@ -4055,7 +4224,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         final_smoke_frame || config.smoke_render_lockstep)
                     {
                         runtime_detail::DiagnosticScope wait_scope(simulation_work[8], capture_clock);
-                        auto slot = channels.snapshots.TryBeginWrite();
+                        auto slot = channels.snapshots.TryBeginRetainedWrite();
                         // The terminal snapshot must reach the renderer.  Waiting
                         // here only applies to exchange backpressure for that final
                         // frame; it never advances the simulation another tick.
@@ -4063,7 +4232,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                !channels.stop_requested.load(std::memory_order_acquire))
                         {
                             std::this_thread::yield();
-                            slot = channels.snapshots.TryBeginWrite();
+                            slot = channels.snapshots.TryBeginRetainedWrite();
                         }
                         wait_scope.Stop();
                         if (slot)
@@ -4083,7 +4252,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             const auto input_rejected = channels.ui_input_rejected.load(std::memory_order_acquire);
                             try
                             {
-                                slot->storage->CopyDynamicFrom(dynamic_current.View());
+                                (void)slot->storage->CopyRetainedDynamicFrom(dynamic_current.View());
                                 CaptureUiProjectionFacts(model, presentation_catalog, ui_draw_state,
                                     projection_settings, static_cast<std::uint8_t>(modal_phase),
                                     pending_rebind, input_rejected, ui_projection_facts);

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_asset_format.hpp>
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 
 #include <array>
 #include <cstddef>

@@ -2,7 +2,7 @@
 #include "../Source/Runtime/Private/vfx_typed_ground_commands.hpp"
 #include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 
 #include <algorithm>
 #include <array>
@@ -60,6 +60,79 @@ std::vector<hs::runtime_detail::VfxGroundBirthSuppressionFacts> GroundBirthFacts
 void Require(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+bool SameGroundSpawn(const hs::runtime_detail::VfxTypedGroundCommand &typed,
+                     const hs::VfxGroundSpawnInput &render,
+                     std::span<const float> frame_gap_angles = {})
+{
+    const auto &a = typed.command;
+    const auto &b = render.command;
+    const auto same3 = [](hs::Float3 x, hs::Float3 y) {
+        return x.x == y.x && x.y == y.y && x.z == y.z;
+    };
+    const auto same4 = [](hs::Float4 x, hs::Float4 y) {
+        return x.x == y.x && x.y == y.y && x.z == y.z && x.w == y.w;
+    };
+    if (a.sequence != b.sequence || a.tick != b.tick || a.shape != b.shape ||
+        a.velocity_mode != b.velocity_mode || a.facing != b.facing ||
+        a.renderer != b.renderer || a.primitive != b.primitive || a.sprite != b.sprite ||
+        a.frame_columns != b.frame_columns || a.frame_rows != b.frame_rows ||
+        a.seed != b.seed || a.count != b.count || typed.additive != render.additive ||
+        typed.stable_id != render.stable_id || typed.effect_handle != render.effect_handle ||
+        typed.source_visual_kind != render.source_visual_kind ||
+        typed.gradient_row != render.gradient_row || typed.hdr != render.hdr ||
+        typed.motion.rate_hz != render.motion.rate_hz ||
+        typed.motion.amplitude != render.motion.amplitude ||
+        typed.motion.inset_fraction != render.motion.inset_fraction ||
+        a.authored_ballistic != b.authored_ballistic ||
+        typed.geometry.shape != render.geometry.shape ||
+        typed.geometry.GapCount() != render.geometry.GapCount()) return false;
+    if (!same3(a.position, b.position) || !same3(a.shape_extent, b.shape_extent) ||
+        !same3(a.direction, b.direction) || !same4(a.start_color, b.start_color) ||
+        !same4(a.end_color, b.end_color) ||
+        a.speed_min != b.speed_min || a.speed_max != b.speed_max ||
+        a.cone_radians != b.cone_radians || a.lifetime_min != b.lifetime_min ||
+        a.lifetime_max != b.lifetime_max || a.start_size_min != b.start_size_min ||
+        a.start_size_max != b.start_size_max || a.end_size_min != b.end_size_min ||
+        a.end_size_max != b.end_size_max || a.gravity != b.gravity ||
+        a.rotation_min != b.rotation_min || a.rotation_max != b.rotation_max ||
+        a.angular_velocity_min != b.angular_velocity_min ||
+        a.angular_velocity_max != b.angular_velocity_max || a.stretch != b.stretch ||
+        a.uv_repeat != b.uv_repeat || a.scroll_speed != b.scroll_speed ||
+        a.authored_initial_velocity.x != b.authored_initial_velocity.x ||
+        a.authored_initial_velocity.y != b.authored_initial_velocity.y ||
+        a.authored_initial_velocity.z != b.authored_initial_velocity.z ||
+        a.authored_drag != b.authored_drag || a.authored_bounce != b.authored_bounce ||
+        a.authored_ground_y != b.authored_ground_y ||
+        a.authored_collision_radius != b.authored_collision_radius ||
+        a.authored_hdr != b.authored_hdr || a.authored_birth_fraction != b.authored_birth_fraction ||
+        a.authored_birth_tick != b.authored_birth_tick ||
+        a.authored_gradient_row != b.authored_gradient_row ||
+        typed.geometry.direction.x != render.geometry.direction.x ||
+        typed.geometry.direction.y != render.geometry.direction.y ||
+        typed.geometry.direction.z != render.geometry.direction.z ||
+        typed.geometry.half_width != render.geometry.half_width ||
+        typed.geometry.half_length != render.geometry.half_length ||
+        typed.geometry.edge_width != render.geometry.edge_width ||
+        typed.geometry.spacing != render.geometry.spacing || typed.geometry.scroll != render.geometry.scroll ||
+        typed.geometry.range != render.geometry.range ||
+        typed.geometry.half_angle_radians != render.geometry.half_angle_radians ||
+        typed.geometry.inner_radius != render.geometry.inner_radius ||
+        typed.geometry.outer_radius != render.geometry.outer_radius ||
+        typed.geometry.gap_half_angle_radians != render.geometry.gap_half_angle_radians ||
+        typed.geometry.progress != render.geometry.progress ||
+        typed.geometry.animation_phase != render.geometry.animation_phase ||
+        typed.geometry.tick_count != render.geometry.tick_count ||
+        typed.geometry.spokes != render.geometry.spokes || typed.geometry.rings != render.geometry.rings ||
+        typed.geometry.mask_slice != render.geometry.mask_slice ||
+        typed.geometry.mask_strength != render.geometry.mask_strength ||
+        typed.geometry.uniform_gaps.offset_degrees != render.geometry.uniform_gaps.offset_degrees ||
+        typed.geometry.uniform_gaps.count != render.geometry.uniform_gaps.count ||
+        typed.geometry.uniform_gaps.formula != render.geometry.uniform_gaps.formula) return false;
+    for (std::size_t i = 0; i < typed.geometry.GapCount(); ++i)
+        if (typed.geometry.GapAngleRadians(i) != render.geometry.GapAngleRadians(i, frame_gap_angles)) return false;
+    return true;
 }
 
 bool PreviousGroundAdmission(const hs::VfxImage &image,const hs::VfxEventInput &input)
@@ -351,15 +424,26 @@ void GroundAppendPreservesPrefixAndRejectedInputs()
     appended.reserve(16);
     const auto capacity = appended.capacity();
     hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), persistent, 712, appended);
+    std::vector<hs::VfxGroundSpawnInput> render_appended(1);
+    render_appended.front().stable_id = 0x9988;
+    render_appended.front().command.sequence = 0x8877;
+    render_appended.reserve(16);
+    const auto render_capacity = render_appended.capacity();
+    hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), persistent, 712, render_appended);
     Require(appended.size() == 3 && appended.front().stable_id == 0x9988 &&
             appended.front().command.sequence == 0x8877 &&
             Near(appended[1].edge_width_world, 0.055f) &&
-            Near(appended[2].edge_width_world, 0.075f),
+            Near(appended[2].edge_width_world, 0.075f) && render_appended.size() == appended.size() &&
+            SameGroundSpawn(appended[1], render_appended[1]) &&
+            SameGroundSpawn(appended[2], render_appended[2]),
             "persistent append lost prefix or authored output order");
     auto rejected = CircleInput();
     std::get<hs::VfxCirclePayload>(rejected.payload).radius = -1.0f;
     hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), std::span(&rejected, 1), 712, appended);
-    Require(appended.size() == 3, "rejected persistent append changed existing output");
+    hs::runtime_detail::AppendVfxTypedGroundCommands(image.View(), std::span(&rejected, 1), 712, render_appended);
+    Require(appended.size() == 3 && render_appended.size() == 3 &&
+            render_appended.capacity() == render_capacity,
+            "rejected persistent append changed existing output or reusable capacity");
 
     program.effects.front().input_mode = 0;
     program.effects.front().timing_kind = 0;
@@ -367,13 +451,19 @@ void GroundAppendPreservesPrefixAndRejectedInputs()
     const auto event_image = PreparedImage(program);
     auto event = CircleEvent();
     hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 99, appended);
-    Require(appended.size() == 3, "inactive event append changed existing output");
+    hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 99, render_appended);
+    Require(appended.size() == 3 && render_appended.size() == 3,
+            "inactive event append changed existing output");
     hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 160, appended);
+    hs::runtime_detail::AppendVfxTypedEventGroundCommands(event_image.View(), std::span(&event, 1), 160, render_appended);
     Require(appended.size() == 5 && appended.front().stable_id == 0x9988 &&
             appended[3].stable_id == event.sequence && appended[4].stable_id == event.sequence &&
             appended[3].command.tick == event.event_tick &&
             appended[3].command.sequence != appended[4].command.sequence &&
-            appended.capacity() == capacity,
+            appended.capacity() == capacity && render_appended.size() == appended.size() &&
+            SameGroundSpawn(appended[3], render_appended[3]) &&
+            SameGroundSpawn(appended[4], render_appended[4]) &&
+            render_appended.capacity() == render_capacity,
             "event append lost identity, order or reusable capacity");
 }
 
@@ -639,6 +729,77 @@ void RingGapsPreservesGeometryAndOwnerAge()
             Near(border.geometry.gap_angles_radians[3],0)&&Near(border.geometry.gap_half_angle_radians,7*radians),
             "irregular gap angles or wrapping lost");
     Require(Near(border.normalized_age,.6f)&&Near(border.lifetime01,.6f)&&Near(fill.command.stretch,.31f),"authoritative age or flow lost");
+    {
+        const auto image = PreparedImage(cooked);
+        std::vector<hs::VfxGroundSpawnInput> pooled;
+        pooled.emplace_back();
+        pooled.front().stable_id = 0xfeedu;
+        std::vector<float> frame_gaps{123.0f};
+        const std::array inputs{input};
+        hs::runtime_detail::AppendVfxTypedGroundCommands(
+            image.View(), inputs, 700, pooled, frame_gaps);
+        Require(pooled.size() == 3 && pooled.front().stable_id == 0xfeedu && frame_gaps.size() == 5 &&
+                pooled[1].geometry.frame_gap_first == 1 &&
+                pooled[1].geometry.frame_gap_count == 4 &&
+                pooled[2].geometry.frame_gap_first == pooled[1].geometry.frame_gap_first &&
+                pooled[2].geometry.frame_gap_count == pooled[1].geometry.frame_gap_count,
+                "ground frame pool did not share one input slice across recipe rows");
+        Require(SameGroundSpawn(commands[0], pooled[1], frame_gaps) &&
+                SameGroundSpawn(commands[1], pooled[2], frame_gaps),
+                "pooled ground rows differ from owning output");
+
+        auto second = input;
+        std::get<hs::VfxRingGapsPayload>(second.payload).gap_angles_degrees = {15.0f, 30.0f};
+        second.stable_id++;
+        const std::array two_inputs{input, second};
+        pooled.clear();
+        frame_gaps.assign(1, 123.0f);
+        hs::runtime_detail::AppendVfxTypedGroundCommands(
+            image.View(), two_inputs, 700, pooled, frame_gaps);
+        Require(pooled.size() == 4 && frame_gaps.size() == 7 &&
+                pooled[0].geometry.frame_gap_first == 1 && pooled[1].geometry.frame_gap_first == 1 &&
+                pooled[2].geometry.frame_gap_first == 5 && pooled[3].geometry.frame_gap_first == 5 &&
+                pooled[2].geometry.frame_gap_count == 2,
+                "ground frame pool slices did not retain per-input offsets");
+        const auto owning_two = BuildGround(cooked, two_inputs, 700);
+        Require(owning_two.size() == pooled.size(), "ground pool changed multiple-input row count");
+        for (std::size_t row = 0; row < pooled.size(); ++row)
+            Require(SameGroundSpawn(owning_two[row], pooled[row], frame_gaps),
+                    "ground pooled multiple-input row changed value or order");
+        const auto output_capacity = pooled.capacity();
+        const auto gap_capacity = frame_gaps.capacity();
+        pooled.clear();
+        frame_gaps.clear();
+        hs::runtime_detail::AppendVfxTypedGroundCommands(
+            image.View(), two_inputs, 700, pooled, frame_gaps);
+        Require(pooled.size() == 4 && frame_gaps.size() == 6 &&
+                pooled.capacity() == output_capacity && frame_gaps.capacity() == gap_capacity,
+                "warm ground frame-pool append reallocated retained output storage");
+
+        hs::VfxGroundGeometry pooled_range{};
+        pooled_range.frame_gap_first = 1;
+        pooled_range.frame_gap_count = 2;
+        Require(pooled_range.GapStorageConsistent(3) &&
+                !pooled_range.GapStorageConsistent(2),
+                "ground frame-pool range validation accepted an out-of-range slice");
+        pooled_range.uniform_gaps = {0.0f, 1, hs::VfxGapAngleFormula::EventSpacing};
+        Require(!pooled_range.GapStorageConsistent(3),
+                "ground frame-pool validation accepted conflicting uniform and pooled storage");
+
+        auto uniform = input;
+        auto &uniform_ring = std::get<hs::VfxRingGapsPayload>(uniform.payload);
+        uniform_ring.gap_angles_degrees.clear();
+        uniform_ring.uniform_gaps = {719.0f, 7, hs::VfxGapAngleFormula::OwnerNormalized};
+        pooled.clear();
+        frame_gaps.assign(1, 123.0f);
+        hs::runtime_detail::AppendVfxTypedGroundCommands(
+            image.View(), std::span(&uniform, 1), 700, pooled, frame_gaps);
+        Require(pooled.size() == 2 && frame_gaps.size() == 1 &&
+                pooled[0].geometry.frame_gap_count == 0 &&
+                pooled[0].geometry.GapCount() == 7 &&
+                SameGroundSpawn(BuildGround(cooked, std::span(&uniform, 1), 700)[0], pooled[0], frame_gaps),
+                "uniform ground gaps used the frame pool or changed output");
+    }
     std::get<hs::VfxRingGapsPayload>(input.payload).gap_angles_degrees.clear();
     Require(border.geometry.gap_angles_radians.size() == 4 &&
             fill.geometry.gap_angles_radians.size() == 4 &&
@@ -759,6 +920,20 @@ void OwnedRingPreviewUsesIntegratedPulse()
     auto commands=run(160);
     Require(commands.size()==2&&commands[0].geometry.shape==hs::VfxGroundShape::RingGapsPreviewBorder&&
             commands[1].geometry.shape==hs::VfxGroundShape::RingGapsTicks,"preview shape pair missing");
+    {
+        const auto image = PreparedImage(cooked);
+        std::vector<hs::VfxGroundSpawnInput> pooled;
+        std::vector<float> frame_gaps;
+        hs::runtime_detail::AppendVfxTypedEventGroundCommands(
+            image.View(), std::span(&input, 1), 160, pooled, frame_gaps);
+        Require(pooled.size() == commands.size() && frame_gaps.size() == 3 &&
+                pooled[0].geometry.frame_gap_first == 0 &&
+                pooled[1].geometry.frame_gap_first == pooled[0].geometry.frame_gap_first &&
+                pooled[0].geometry.frame_gap_count == 3 &&
+                SameGroundSpawn(commands[0], pooled[0], frame_gaps) &&
+                SameGroundSpawn(commands[1], pooled[1], frame_gaps),
+                "event ground rows did not share the equivalent pooled gap slice");
+    }
     Require(Near(commands[0].geometry.animation_phase,1.9f)&&Near(commands[0].geometry.progress,.5f)&&
             Near(commands[0].command.lifetime_max,2),"pulse used nominal duration or instantaneous frequency times age");
     Require(commands[1].geometry.tick_count==12&&Near(commands[0].geometry.inner_radius,3)&&Near(commands[0].geometry.outer_radius,17)&&
@@ -2392,6 +2567,14 @@ void GroundAdmissionProducerCoversPreparedRoutes()
             charged_admission.accepted && charged_admission.replace_context_owner &&
             BuildEventGround(charged_program, std::span(&charged, 1), 100).size() == 2,
             "prepared charged pulse Soft recipe did not admit and produce its event outputs");
+    const auto charged_typed = BuildEventGround(charged_program, std::span(&charged, 1), 100);
+    std::vector<hs::VfxGroundSpawnInput> charged_render;
+    hs::runtime_detail::AppendVfxTypedEventGroundCommands(
+        charged_image.View(), std::span(&charged, 1), 100, charged_render);
+    Require(charged_render.size() == charged_typed.size() &&
+            SameGroundSpawn(charged_typed[0], charged_render[0]) &&
+            SameGroundSpawn(charged_typed[1], charged_render[1]),
+            "direct charged pulse output changed its fixed two-row order or values");
 
     auto wave_program = ChargedPulseProgram();
     wave_program.effect_lookup[0].effect_id = Hash64("particle.session.wave_start");
@@ -2410,10 +2593,16 @@ void GroundAdmissionProducerCoversPreparedRoutes()
     timer.normalized_age = .5f;
     timer.payload = hs::VfxContextPayload{0, {}, 0.0f, 10.0f, 0.0f};
     const auto timer_commands = BuildGround(wave_program, std::span(&timer, 1), 100);
+    std::vector<hs::VfxGroundSpawnInput> timer_render;
+    hs::runtime_detail::AppendVfxTypedGroundCommands(
+        wave_image.View(), std::span(&timer, 1), 100, timer_render);
     Require(timer_commands.size() == 2 &&
             timer_commands[0].source_visual_kind == timer.source_visual_kind &&
             Near(timer_commands[0].command.lifetime_min, 2.0f / 60.0f) &&
-            Near(timer_commands[1].command.lifetime_max, 2.0f / 60.0f),
+            Near(timer_commands[1].command.lifetime_max, 2.0f / 60.0f) &&
+            timer_render.size() == timer_commands.size() &&
+            SameGroundSpawn(timer_commands[0], timer_render[0]) &&
+            SameGroundSpawn(timer_commands[1], timer_render[1]),
             "persistent WaveTimer lost its prepared source outputs or short lifetime");
 }
 

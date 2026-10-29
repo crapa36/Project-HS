@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vfx_session_state.hpp"
+#include "vfx_ribbon_frame_bounds.hpp"
 #include <hs/runtime/vfx_image.hpp>
 
 #include <array>
@@ -179,5 +180,108 @@ namespace hs::runtime_detail
         }
     }
     return static_cast<std::uint16_t>(found_mask & prepared_mask & ~unsafe_mask);
+}
+struct VfxEventProfileAdmission
+{
+    std::uint16_t cosmetic_mask{};
+    // All-quality maxima cover later quality changes without another event.
+    ActiveEffectStore::FrameRows frame_rows{};
+    ActiveEffectStore::FrameRows persistent_frame_rows{};
+    std::uint32_t ribbon_frame_outputs{}, persistent_ribbon_frame_outputs{};
+    std::uint32_t persistent_mesh_rows{}, persistent_fresnel_rows{};
+};
+
+[[nodiscard]] inline VfxEventProfileAdmission PrepareVfxEventProfileAdmission(
+    const VfxImage &image, VfxEffectHandle handle)
+{
+    using Profile = ActiveEffectStore::Profile;
+    VfxEventProfileAdmission prepared;
+    prepared.cosmetic_mask = ClassifyCosmeticVfxEventProfiles(image, handle, UINT16_MAX, false);
+    const auto ribbon = VfxRibbonFrameBoundsForEffect(image, handle);
+    prepared.frame_rows[static_cast<std::size_t>(Profile::Ribbon)] = ribbon.event_sources;
+    prepared.persistent_frame_rows[static_cast<std::size_t>(Profile::Ribbon)] = ribbon.persistent_sources;
+    prepared.ribbon_frame_outputs = ribbon.event_outputs;
+    prepared.persistent_ribbon_frame_outputs = ribbon.persistent_outputs;
+    if (image.HasGroundRecipes(handle))
+    {
+        const auto count = image.ground_effect_ranges[handle - 1].count;
+        prepared.frame_rows[static_cast<std::size_t>(Profile::Ground)] = count;
+        prepared.persistent_frame_rows[static_cast<std::size_t>(Profile::Ground)] = count;
+    }
+    if (HasPreparedVfxAdmissionProfile(image, handle, Profile::Light))
+        prepared.frame_rows[static_cast<std::size_t>(Profile::Light)] =
+            image.light_effect_ranges[handle - 1].count;
+    if (HasPreparedVfxAdmissionProfile(image, handle, Profile::Distortion))
+    {
+        const auto range = image.distortion_effect_ranges[handle - 1];
+        for (const auto &recipe : image.distortion_recipes.subspan(range.first, range.count))
+        {
+            if (recipe.input_mode == 0 && recipe.timing_kind == 0)
+                ++prepared.frame_rows[static_cast<std::size_t>(Profile::Distortion)];
+            else if (recipe.input_mode == 1 && recipe.timing_kind == 1)
+                ++prepared.persistent_frame_rows[static_cast<std::size_t>(Profile::Distortion)];
+        }
+    }
+    if (HasPreparedVfxAdmissionProfile(image, handle, Profile::Decal))
+    {
+        const auto range = image.decal_effect_ranges[handle - 1];
+        for (const auto &recipe : image.decal_recipes.subspan(range.first, range.count))
+        {
+            if (recipe.input_mode == 0 && recipe.timing_kind == 0)
+                ++prepared.frame_rows[static_cast<std::size_t>(Profile::Decal)];
+            else if (recipe.input_mode == 1 && recipe.timing_kind == 1)
+                ++prepared.persistent_frame_rows[static_cast<std::size_t>(Profile::Decal)];
+        }
+    }
+    for (const auto profile : {Profile::Volume, Profile::Screen})
+        if (HasPreparedVfxAdmissionProfile(image, handle, profile))
+        {
+            const auto count = profile == Profile::Volume
+                ? image.volume_effect_recipes[handle - 1].outputs.count
+                : image.screen_effect_recipes[handle - 1].outputs.count;
+            prepared.frame_rows[static_cast<std::size_t>(profile)] = count;
+            prepared.persistent_frame_rows[static_cast<std::size_t>(profile)] = count;
+        }
+
+    if (handle != 0 && handle <= image.mesh_effect_recipes.size())
+    {
+        const auto &effect = image.mesh_effect_recipes[handle - 1];
+        if (effect.route_valid && effect.effect_handle == handle &&
+            ValidVfxAdmissionRange(effect.outputs, image.mesh_recipes.size()))
+        {
+            for (const auto &recipe : image.mesh_recipes.subspan(effect.outputs.first, effect.outputs.count))
+                if (recipe.effect_handle == handle && recipe.min_quality <= 2)
+                    ++prepared.persistent_mesh_rows;
+        }
+    }
+    if (handle != 0 && handle <= image.fresnel_effect_recipes.size())
+    {
+        const auto &effect = image.fresnel_effect_recipes[handle - 1];
+        if (effect.route_valid && effect.effect_handle == handle &&
+            ValidVfxAdmissionRange(effect.outputs, image.fresnel_recipes.size()))
+        {
+            for (const auto &recipe : image.fresnel_recipes.subspan(effect.outputs.first, effect.outputs.count))
+                if (recipe.effect_handle == handle && recipe.kind == effect.kind && recipe.min_quality <= 2)
+                    ++prepared.persistent_fresnel_rows;
+        }
+    }
+    if (handle != 0 && handle <= image.entity_surface_effect_recipes.size())
+    {
+        const auto &effect = image.entity_surface_effect_recipes[handle - 1];
+        if (ValidVfxAdmissionRange(effect.outputs, image.entity_surface_recipes.size()))
+        {
+            for (const auto &recipe : image.entity_surface_recipes.subspan(effect.outputs.first, effect.outputs.count))
+            {
+                // The emitter consumes this effect's output range directly;
+                // unlike Mesh/Fresnel it does not gate on recipe.effect_handle.
+                if (recipe.min_quality > 2) continue;
+                if (recipe.persistent)
+                    ++prepared.persistent_frame_rows[static_cast<std::size_t>(Profile::EntitySurface)];
+                else
+                    ++prepared.frame_rows[static_cast<std::size_t>(Profile::EntitySurface)];
+            }
+        }
+    }
+    return prepared;
 }
 } // namespace hs::runtime_detail

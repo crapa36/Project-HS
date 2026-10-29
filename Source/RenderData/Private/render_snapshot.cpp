@@ -1,4 +1,4 @@
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 
 #include <bit>
 #include <array>
@@ -251,8 +251,66 @@ RenderSnapshotStorage::RenderSnapshotStorage(std::size_t instance_capacity,
     persistent_vfx_.reserve(instance_capacity);
 }
 
+RenderSnapshotStorage &RenderSnapshotStorage::operator=(const RenderSnapshotStorage &other)
+{
+    if (this == &other) return *this;
+
+    retained_dynamic_identity_valid_ = false;
+    header = other.header;
+    camera = other.camera;
+    instances_ = other.instances_;
+    poses_ = other.poses_;
+    captured_instances_ = other.captured_instances_;
+    lights_ = other.lights_;
+    ui_ = other.ui_;
+    persistent_vfx_ = other.persistent_vfx_;
+    static_scene_ = other.static_scene_;
+    retained_session_id_ = other.retained_session_id_;
+    retained_dynamic_pair_revision_ = other.retained_dynamic_pair_revision_;
+    retained_tick_ = other.retained_tick_;
+    retained_dynamic_identity_valid_ = other.retained_dynamic_identity_valid_;
+    return *this;
+}
+
+RenderSnapshotStorage::RenderSnapshotStorage(RenderSnapshotStorage &&other) noexcept
+    : header(other.header), camera(other.camera), instances_(std::move(other.instances_)),
+      poses_(std::move(other.poses_)), captured_instances_(std::move(other.captured_instances_)),
+      lights_(std::move(other.lights_)), ui_(std::move(other.ui_)),
+      persistent_vfx_(std::move(other.persistent_vfx_)), static_scene_(std::move(other.static_scene_)),
+      retained_dynamic_identity_valid_(std::exchange(other.retained_dynamic_identity_valid_, false)),
+      retained_session_id_(other.retained_session_id_),
+      retained_dynamic_pair_revision_(other.retained_dynamic_pair_revision_),
+      retained_tick_(other.retained_tick_)
+{
+}
+
+RenderSnapshotStorage &RenderSnapshotStorage::operator=(RenderSnapshotStorage &&other) noexcept
+{
+    if (this == &other)
+    {
+        retained_dynamic_identity_valid_ = false;
+        return *this;
+    }
+
+    header = other.header;
+    camera = other.camera;
+    instances_ = std::move(other.instances_);
+    poses_ = std::move(other.poses_);
+    captured_instances_ = std::move(other.captured_instances_);
+    lights_ = std::move(other.lights_);
+    ui_ = std::move(other.ui_);
+    persistent_vfx_ = std::move(other.persistent_vfx_);
+    static_scene_ = std::move(other.static_scene_);
+    retained_dynamic_identity_valid_ = std::exchange(other.retained_dynamic_identity_valid_, false);
+    retained_session_id_ = other.retained_session_id_;
+    retained_dynamic_pair_revision_ = other.retained_dynamic_pair_revision_;
+    retained_tick_ = other.retained_tick_;
+    return *this;
+}
+
 void RenderSnapshotStorage::Clear() noexcept
 {
+    retained_dynamic_identity_valid_ = false;
     instances_.clear();
     poses_.clear();
     captured_instances_.clear();
@@ -264,6 +322,7 @@ void RenderSnapshotStorage::Clear() noexcept
 
 void RenderSnapshotStorage::CopyDynamicFrom(const RenderSnapshot &sample)
 {
+    retained_dynamic_identity_valid_ = false;
     header = sample.header;
     camera = sample.camera;
     instances_.assign(sample.instances.begin(), sample.instances.end());
@@ -275,23 +334,58 @@ void RenderSnapshotStorage::CopyDynamicFrom(const RenderSnapshot &sample)
     ui_.clear();
 }
 
+bool RenderSnapshotStorage::CopyRetainedDynamicFrom(const RenderSnapshot &sample)
+{
+    header = sample.header;
+    camera = sample.camera;
+    static_scene_ = sample.static_scene;
+    ui_.clear();
+
+    const bool identified = sample.header.session_id != 0 &&
+        sample.header.dynamic_pair_revision != 0;
+    if (identified && retained_dynamic_identity_valid_ &&
+        retained_session_id_ == sample.header.session_id &&
+        retained_tick_ == sample.header.tick &&
+        retained_dynamic_pair_revision_ == sample.header.dynamic_pair_revision)
+        return false;
+
+    retained_dynamic_identity_valid_ = false;
+    instances_.assign(sample.instances.begin(), sample.instances.end());
+    poses_.assign(sample.poses.begin(), sample.poses.end());
+    captured_instances_.assign(sample.captured_instances.begin(), sample.captured_instances.end());
+    lights_.assign(sample.lights.begin(), sample.lights.end());
+    persistent_vfx_.assign(sample.persistent_vfx.begin(), sample.persistent_vfx.end());
+    if (identified)
+    {
+        retained_session_id_ = sample.header.session_id;
+        retained_tick_ = sample.header.tick;
+        retained_dynamic_pair_revision_ = sample.header.dynamic_pair_revision;
+        retained_dynamic_identity_valid_ = true;
+    }
+    return true;
+}
+
 void RenderSnapshotStorage::AddInstance(const RenderInstance &instance)
 {
+    retained_dynamic_identity_valid_ = false;
     instances_.push_back(instance);
 }
 
 void RenderSnapshotStorage::AddPose(const AnimationPoseRef &pose)
 {
+    retained_dynamic_identity_valid_ = false;
     poses_.push_back(pose);
 }
 
 void RenderSnapshotStorage::AddCapturedInstance(const CapturedRenderInstance &capture)
 {
+    retained_dynamic_identity_valid_ = false;
     captured_instances_.push_back(capture);
 }
 
 void RenderSnapshotStorage::AddLight(const LightView &light)
 {
+    retained_dynamic_identity_valid_ = false;
     lights_.push_back(light);
 }
 
@@ -302,6 +396,7 @@ void RenderSnapshotStorage::AddUi(const UiModel &ui)
 
 void RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
 {
+    retained_dynamic_identity_valid_ = false;
     persistent_vfx_.push_back(visual);
 }
 

@@ -1,4 +1,5 @@
 #include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include "vfx_upgrade_dispatch.hpp"
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_image_fixture.hpp"

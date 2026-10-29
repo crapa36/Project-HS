@@ -41,6 +41,11 @@ __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\";
 
 using Microsoft::WRL::ComPtr;
 
+void RunTextureStreamingNative(ID3D12Device *, D3D12MA::Allocator *,
+                               hs::RenderGraphQueueExecutor &);
+void RunReservedTextureStreamingNative(ID3D12Device *, D3D12MA::Allocator *,
+                                       hs::RenderGraphQueueExecutor &);
+
 namespace hs
 {
 struct RenderGraphTestAccess
@@ -2556,6 +2561,103 @@ RWByteAddressBuffer Output : register(u0);
     }
 }
 
+void RunSameStateRepeatedRead(Fixture &fixture)
+{
+    constexpr std::size_t size = 512;
+    const auto description = BufferDescription(size);
+    auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+    ComPtr<ID3D12Resource> upload;
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)),
+        "create repeated-read upload");
+    std::array<std::byte, size> expected{};
+    for (std::size_t index = 0; index < expected.size(); ++index)
+        expected[index] = static_cast<std::byte>((index * 29u + 7u) & 0xffu);
+    void *mapped{};
+    const D3D12_RANGE no_read{0, 0};
+    Hr(upload->Map(0, &no_read, &mapped), "map repeated-read upload");
+    std::memcpy(mapped, expected.data(), expected.size());
+    upload->Unmap(0, nullptr);
+
+    heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+    std::array<ComPtr<ID3D12Resource>, 2> readbacks;
+    for (auto &readback : readbacks)
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)),
+            "create repeated-read output");
+
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(),
+        "initialize repeated-read pool");
+    hs::RenderGraphBuilder graph;
+    std::array<hs::ResourceHandle, 2> sources{
+        graph.CreateBuffer({size, D3D12_RESOURCE_FLAG_NONE}, "first repeated-read source"),
+        graph.CreateBuffer({size, D3D12_RESOURCE_FLAG_NONE}, "second repeated-read source")};
+    D3D12_RESOURCE_DESC texture_description{};
+    texture_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_description.Width = texture_description.Height = 1;
+    texture_description.DepthOrArraySize = texture_description.MipLevels = 1;
+    texture_description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_description.SampleDesc.Count = 1;
+    texture_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    std::array<ComPtr<ID3D12Resource>, 2> textures;
+    heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    for (auto &texture : textures)
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+            &texture_description, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr,
+            IID_PPV_ARGS(&texture)), "create repeated-read texture");
+    std::array<hs::ResourceHandle, 2> sampled_textures{
+        graph.ImportTexture({textures[0].Get()}, hs::Access::AllShaderRead, "first repeated-read texture"),
+        graph.ImportTexture({textures[1].Get()}, hs::Access::AllShaderRead, "second repeated-read texture")};
+    auto seed = graph.AddPass(10, "seed repeated-read source", hs::QueueHint::Copy);
+    std::array<hs::ResourceVersion, 2> seeded;
+    for (std::size_t index = 0; index < sources.size(); ++index)
+        seeded[index] = seed.Write(graph.Version(sources[index]), hs::Access::CopyDest);
+    seed.SetExecute([&](hs::RenderPassContext &context) {
+        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (const auto source : sources)
+            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(source)),
+                0, upload.Get(), 0, size);
+    });
+    std::array<hs::ResourceHandle, 2> destinations;
+    for (std::size_t index = 0; index < readbacks.size(); ++index)
+        destinations[index] = graph.ImportBuffer({readbacks[index].Get()},
+            hs::Access::CopyDest, index == 0 ? "first repeated-read output" : "second repeated-read output");
+    auto read = graph.AddPass(20, "same-state repeated source read", hs::QueueHint::Direct);
+    read.Read(seeded[0], hs::Access::CopySource);
+    // These distinct same-state texture reads used to split the real buffer
+    // transitions into separate enhanced-barrier groups.
+    read.Read(graph.Version(sampled_textures[0]), hs::Access::AllShaderRead);
+    read.Read(seeded[1], hs::Access::CopySource);
+    read.Read(graph.Version(sampled_textures[1]), hs::Access::AllShaderRead);
+    for (const auto destination : destinations)
+        (void)read.Write(graph.Version(destination), hs::Access::CopyDest);
+    read.SetExecute([&](hs::RenderPassContext &context) {
+        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (std::size_t index = 0; index < sources.size(); ++index)
+            commands->CopyBufferRegion(readbacks[index].Get(), 0,
+                static_cast<ID3D12Resource *>(context.Resolve(sources[index])), 0, size);
+    });
+    const auto prepared = graph.Prepare(pool);
+    if (!prepared)
+        throw std::runtime_error("prepare same-state repeated-read graph: " + std::string(prepared.Message()));
+    hs::CompletionSet completion;
+    fixture.Execute(graph, 0, hs::BarrierMode::Enhanced, completion,
+        "execute same-state repeated-read graph");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait same-state repeated-read graph");
+    for (auto &readback : readbacks)
+    {
+        D3D12_RANGE read_range{0, size};
+        Hr(readback->Map(0, &read_range, &mapped), "map repeated-read output");
+        Check(std::memcmp(mapped, expected.data(), expected.size()) == 0,
+            "same-state repeated read preserves copied bytes");
+        const D3D12_RANGE no_write{0, 0};
+        readback->Unmap(0, &no_write);
+    }
+    fixture.CheckValidation();
+    pool.ResetCompletedClaims(fixture.executor.Completed());
+}
+
 void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
 {
     constexpr std::size_t kSize = 4096;
@@ -2862,6 +2964,9 @@ int main(int argc, char **argv)
         RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunInstanceIdOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunSharedTextureReaders(fixture, hs::BarrierMode::Legacy, 0);
+        RunTextureStreamingNative(fixture.device.Get(), fixture.allocator, fixture.executor);
+        RunReservedTextureStreamingNative(fixture.device.Get(), fixture.allocator, fixture.executor);
+        fixture.CheckValidation();
         std::puts("Legacy Copy -> Compute -> Direct queue chain passed.");
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
@@ -2875,6 +2980,7 @@ int main(int argc, char **argv)
             RunExternal(fixture, hs::BarrierMode::Enhanced, 1);
             RunPlanReuse(fixture, hs::BarrierMode::Enhanced, 1);
             RunUavClear(fixture, hs::BarrierMode::Enhanced, 1);
+            RunSameStateRepeatedRead(fixture);
             RunBatchedBufferBarriers(fixture, hs::BarrierMode::Enhanced, 1);
             RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Enhanced, 1);
             RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Enhanced, 1);

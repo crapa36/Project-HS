@@ -16,7 +16,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <hs/core/result.hpp>
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/devtools_frame_data.hpp>
 #include <hs/core/types.hpp>
 #include <hs/render_data/render_bulk.hpp>

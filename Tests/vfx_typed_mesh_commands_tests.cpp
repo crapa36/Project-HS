@@ -1,6 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 #include "vfx_typed_mesh_commands.hpp"
+#include "vfx_profile_admission.hpp"
 #include <bit>
 #include <iostream>
 #include <limits>
@@ -98,6 +99,9 @@ int RunVfxMeshTests()
         Check(appended.size()==1&&appended[0].owner_id==77&&appended.capacity()==capacity,
               "empty/rejected mesh append changed prefix or capacity");
         hs::runtime_detail::AppendVfxTypedMeshCommands(image,std::span(&owner,1),appended);
+        Check(appended.size() - 1 <= hs::runtime_detail::PrepareVfxEventProfileAdmission(
+                  image, owner.effect_handle).persistent_mesh_rows,
+              "prepared mesh reservation was smaller than actual output");
         Check(appended.size()==2&&appended[1].owner_id==owner.stable_id&&
               appended[1].position.x==owner.current_transform[12]&&appended.capacity()==capacity,
               "mesh append lost actual owner geometry or reused capacity");

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "geometry_cooker.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/scene_hlod.hpp>
 
 #include <array>

@@ -1,6 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_decal_commands.hpp"
+#include "../Source/Runtime/Private/vfx_profile_admission.hpp"
 #include <bit>
 #include <array>
 #include <cmath>
@@ -60,6 +61,9 @@ void AppendContract()
  Check(result.size()==1&&result[0].stable_id==99&&result.capacity()==capacity,"empty/rejected append changed decal prefix or capacity");
  const std::array inputs{first,second};hs::runtime_detail::AppendVfxTypedDecalCommands(data.View(),inputs,{},166,result);
  const auto expected_first=Run(p,first),expected_second=Run(p,second);
+ const auto frame_plan=hs::runtime_detail::PrepareVfxEventProfileAdmission(data.View(),1);
+ Check(frame_plan.frame_rows[static_cast<std::size_t>(hs::runtime_detail::ActiveEffectStore::Profile::Decal)]==expected_first.size(),
+       "decal frame reservation must cover the actual event command count");
  Check(result.size()==3&&result[1].stable_id==expected_first[0].stable_id&&result[2].stable_id==expected_second[0].stable_id&&
        result[2].stable_seed==second.stable_seed&&result.capacity()==capacity,
        "decal append changed order, seed, prefix, or caller capacity");

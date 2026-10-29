@@ -170,6 +170,8 @@ void TestGameDataFloatConversion()
     using hs::content::detail::CheckedFloat;
     using hs::content::detail::CheckedPositiveFloat;
     using hs::content::detail::CheckedSpawnRate;
+    using hs::content::detail::CheckedPositiveTickInterval;
+    using hs::content::detail::MakesFiniteProjectileRangeProgress;
     const auto rejects = [](auto &&convert) {
         try
         {
@@ -188,12 +190,33 @@ void TestGameDataFloatConversion()
         CheckedFloat(-maximum) != std::numeric_limits<float>::lowest() ||
         CheckedPositiveFloat(1.25) != 1.25f)
         throw std::runtime_error("game-data float conversion changed valid values or allowed zero");
+    if (CheckedFloat(maximum * 2.0 * 0.5) != std::numeric_limits<float>::max())
+        throw std::runtime_error("arena half-width conversion changed a representable extent");
     rejects([] { return CheckedFloat(std::numeric_limits<double>::infinity()); });
     rejects([] { return CheckedFloat(std::numeric_limits<double>::quiet_NaN()); });
     rejects([&] { return CheckedFloat(std::nextafter(maximum, std::numeric_limits<double>::infinity())); });
     rejects([&] { return CheckedFloat(std::nextafter(-maximum, -std::numeric_limits<double>::infinity())); });
+    rejects([&] { return CheckedFloat(maximum * 4.0 * 0.5); });
     rejects([] { return CheckedPositiveFloat(0.0); });
     rejects([] { return CheckedPositiveFloat(1e-50); });
+    if (!MakesFiniteProjectileRangeProgress(32.0f, 18.0f))
+        throw std::runtime_error("normal projectile speed/range stopped making 60 Hz progress");
+    if (MakesFiniteProjectileRangeProgress(1e-20f, 18.0f) ||
+        MakesFiniteProjectileRangeProgress(1e-22f, 18.0f) ||
+        MakesFiniteProjectileRangeProgress(1e30f, 18.0f) ||
+        MakesFiniteProjectileRangeProgress(32.0f, 1e20f))
+        throw std::runtime_error("non-progressing projectile speed/range was accepted");
+    if (!MakesFiniteProjectileRangeProgress(1e30f, 0.0f) ||
+        !MakesFiniteProjectileRangeProgress(1e30f, -1.0f))
+        throw std::runtime_error("nonpositive projectile leg no longer keeps immediate-retirement semantics");
+    if (CheckedPositiveTickInterval(1) != 1 ||
+        CheckedPositiveTickInterval(std::uint64_t{1} << 33) != (std::uint64_t{1} << 33))
+        throw std::runtime_error("positive recurring interval changed a valid 60 Hz tick");
+    const auto positive_subtick_rounded = static_cast<std::uint64_t>(std::llround(1e-4 * 60.0));
+    if (positive_subtick_rounded != 0)
+        throw std::runtime_error("sub-tick interval fixture no longer rounds to zero");
+    rejects([&] { return CheckedPositiveTickInterval(positive_subtick_rounded); });
+    rejects([] { return CheckedPositiveTickInterval(0); });
     if (CheckedSpawnRate(4.8) != static_cast<float>(4.8) || CheckedSpawnRate(120) != 120.0f)
         throw std::runtime_error("spawn rate conversion changed normal or multi-spawn ticks");
     rejects([] { return CheckedSpawnRate(1e20); });

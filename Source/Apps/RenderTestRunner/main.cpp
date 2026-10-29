@@ -1,4 +1,5 @@
 #include <hs/core/shipped_content_owner.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
@@ -1745,7 +1746,7 @@ int main(int argc, char **argv)
                 config.vfx_quality = hs::VfxQuality::High;
             config.grid_floor_disable_aa = grid_aa_mode == GridAaMode::Off;
         }
-        if (persistent_scene_probe || material_reload_probe || static_shadow_bake_probe)
+        if (persistent_scene_probe || material_reload_probe || static_shadow_bake_probe || residency_streaming_probe)
         {
             // These probes compare scene/material publications. Unrelated
             // temporal and high-quality effects add history and costly driver
@@ -1756,6 +1757,11 @@ int main(int argc, char **argv)
             config.contact_shadows = false;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
             config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+        }
+        if (residency_streaming_probe)
+        {
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.bloom = config.outline = false;
         }
         if (provider_switch_probe)
         {
@@ -2616,6 +2622,16 @@ int main(int argc, char **argv)
                 {"captures", Json::object()},
             };
         }
+        constexpr std::array residency_texture_qualities{
+            hs::GraphicsQuality::Ultra, hs::GraphicsQuality::Low, hs::GraphicsQuality::Ultra};
+        std::array<std::uint64_t, residency_texture_qualities.size()> residency_quality_generations{};
+        std::array<std::uint32_t, residency_texture_qualities.size()> residency_quality_frames{};
+        std::array<std::uint32_t, residency_texture_qualities.size()> residency_quality_mips{};
+        std::array<std::uint64_t, residency_texture_qualities.size()> residency_quality_publication_baselines{};
+        std::array<bool, residency_texture_qualities.size()> residency_quality_applied{};
+        std::array<bool, residency_texture_qualities.size()> residency_quality_settled{};
+        std::size_t residency_quality_phase{};
+        Json residency_quality_samples = Json::array();
         measure("render", [&] {
             if (owned_view_probe)
             {
@@ -2630,6 +2646,18 @@ int main(int argc, char **argv)
                 queue_totals = renderer.LastQueueStats();
                 return;
             }
+            const auto request_residency_texture_phase = [&](std::size_t phase, std::uint32_t request_frame) {
+                auto status = renderer.GetGraphicsSettingsStatus();
+                status.requested.texture_quality = residency_texture_qualities[phase];
+                residency_quality_generations[phase] = status.generation + 1u;
+                residency_quality_frames[phase] = request_frame;
+                const auto texture = renderer.GetTextureStreamingStatus(
+                    "render/texture/environment_terrain_gaussian.rpkg");
+                residency_quality_publication_baselines[phase] = texture.publications;
+                Require(renderer.RequestGraphicsSettings({residency_quality_generations[phase],
+                    hs::GraphicsSettingsRequestCause::User, status.requested}));
+            };
+            if (residency_streaming_probe) request_residency_texture_phase(0, 0);
             for (std::uint32_t frame = 1; frame <= frames; ++frame)
             {
                 if (hero_layer_probe && frame == 5)
@@ -3132,6 +3160,54 @@ int main(int argc, char **argv)
                         Require(renderer.Render(render_input, frame_result));
                     });
                 else Require(renderer.Render(render_input, frame_result));
+                if (residency_streaming_probe && residency_quality_phase < residency_texture_qualities.size())
+                {
+                    const auto settings = renderer.GetGraphicsSettingsStatus();
+                    const auto texture = renderer.GetTextureStreamingStatus(
+                        "render/texture/environment_terrain_gaussian.rpkg");
+                    const auto phase = residency_quality_phase;
+                    const bool applied = settings.actual_applied_available &&
+                        settings.generation == residency_quality_generations[phase] &&
+                        settings.error == hs::ErrorCode::None &&
+                        (settings.state == hs::SettingsApplyState::Applied ||
+                         settings.state == hs::SettingsApplyState::Confirmed) &&
+                        settings.actual_applied.texture_quality == residency_texture_qualities[phase];
+                    residency_quality_applied[phase] = residency_quality_applied[phase] || applied;
+                    const bool settled = applied && texture.registered && texture.publication_complete &&
+                        !texture.pending && texture.publications > residency_quality_publication_baselines[phase] &&
+                        texture.actual_resident_mip == texture.effective_desired_mip &&
+                        texture.actual_resident_mip == texture.target_mip &&
+                        (phase == 1
+                            ? texture.actual_resident_mip >= 2 && texture.actual_resident_mip > residency_quality_mips[0]
+                            : texture.actual_resident_mip <= 1 &&
+                                (phase != 2 || texture.actual_resident_mip < residency_quality_mips[1]));
+                    residency_quality_settled[phase] = settled;
+                    residency_quality_samples.push_back({
+                        {"frame", frame}, {"phase", phase},
+                        {"request_frame", residency_quality_frames[phase]},
+                        {"request_generation", residency_quality_generations[phase]},
+                        {"settings_generation", settings.generation},
+                        {"settings_state", static_cast<unsigned>(settings.state)},
+                        {"actual_quality_available", settings.actual_applied_available},
+                        {"actual_texture_quality", settings.actual_applied_available
+                            ? Json(static_cast<unsigned>(settings.actual_applied.texture_quality)) : Json(nullptr)},
+                        {"phase_applied", applied}, {"phase_settled", settled},
+                        {"required_mip_direction_observed", settled}, {"registered", texture.registered},
+                        {"pending", texture.pending}, {"resident_mip", texture.actual_resident_mip},
+                        {"effective_desired_mip", texture.effective_desired_mip},
+                        {"target_mip", texture.target_mip}, {"revision", texture.revision},
+                        {"requests", texture.requests}, {"uploads", texture.uploads},
+                        {"publications", texture.publications}, {"reclaims", texture.reclaims}});
+                    if (settled)
+                    {
+                        residency_quality_mips[phase] = texture.actual_resident_mip;
+                        residency_quality_phase = phase + 1u;
+                        if (residency_quality_phase < residency_texture_qualities.size())
+                        {
+                            request_residency_texture_phase(residency_quality_phase, frame + 1u);
+                        }
+                    }
+                }
                 if (!frame_result.vfx_world_step_submitted ||
                     frame_result.vfx_world_tick != pair.current.header.tick ||
                     frame_result.vfx_world_session_id != pair.current.header.session_id)
@@ -3815,7 +3891,18 @@ int main(int argc, char **argv)
                 {"geometry_reclaims", residency_stats.geometry_streaming_reclaims},
                 {"geometry_generation", residency_stats.geometry_streaming_generation},
                 {"geometry_state", residency_stats.geometry_streaming_state},
+                {"texture_quality_phases", {
+                    {"requested_qualities", {static_cast<unsigned>(residency_texture_qualities[0]),
+                        static_cast<unsigned>(residency_texture_qualities[1]),
+                        static_cast<unsigned>(residency_texture_qualities[2])}},
+                    {"request_frames", residency_quality_frames},
+                    {"applied", residency_quality_applied},
+                    {"settled", residency_quality_settled},
+                    {"settled_mips", residency_quality_mips},
+                    {"samples", std::move(residency_quality_samples)}}},
             };
+            if (std::ranges::any_of(residency_quality_settled, [](bool settled) { return !settled; }))
+                throw std::runtime_error("Texture streaming did not publish a settled fine→coarse→fine mip sequence within the probe's frame bound.");
         }
         receipt["diagnostics"] = DiagnosticsReceipt(renderer.GetDiagnostics());
         receipt["lighting_status"] = LightingStatusReceipt(renderer.GetLightingStatus());

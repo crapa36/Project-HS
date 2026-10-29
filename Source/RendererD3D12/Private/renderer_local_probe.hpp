@@ -1,7 +1,7 @@
 #pragma once
 
 #include "render_graph.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/scene_probe.hpp>
 #include <DirectXMath.h>
 #include <d3d12.h>

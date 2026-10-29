@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/gameplay/game_simulation_development.hpp>
 #include <hs/presentation/projector.hpp>
 

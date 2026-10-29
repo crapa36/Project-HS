@@ -1,6 +1,6 @@
 #include "vfx_typed_ballistic_commands.hpp"
 #include "vfx_workspace_size.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>

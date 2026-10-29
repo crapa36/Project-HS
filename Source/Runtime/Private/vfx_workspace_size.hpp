@@ -139,13 +139,21 @@ inline std::size_t Multiply(std::size_t count, std::size_t size) noexcept
 { return count && size > std::numeric_limits<std::size_t>::max() / count
     ? std::numeric_limits<std::size_t>::max() : count * size; }
 
+inline std::size_t NativeCopyGrowthBytes(std::size_t pending_rows,
+    std::size_t frozen_capacity, std::size_t reusable_capacity, std::size_t row_bytes) noexcept
+{
+    const auto capacity = std::max(frozen_capacity, reusable_capacity);
+    // A freeze copies at most the smaller partition; the larger keeps the original backing.
+    const auto copied = pending_rows / 2;
+    return Multiply(copied - std::min(copied, capacity), row_bytes);
+}
+
 template<class Rows>
 std::size_t NativeCopyGrowthBytes(const Rows &pending, const Rows &frozen,
     const Rows &prepared) noexcept
 {
-    const auto reusable = prepared.empty() ? prepared.capacity() : 0;
-    const auto capacity = std::max(frozen.capacity(), reusable);
-    return Multiply(pending.size() - std::min(pending.size(), capacity), sizeof(typename Rows::value_type));
+    return NativeCopyGrowthBytes(pending.size(), frozen.capacity(),
+        prepared.empty() ? prepared.capacity() : 0, sizeof(typename Rows::value_type));
 }
 
 inline std::size_t AppendRowsWithinBudget(std::size_t row_bytes, std::size_t requested,

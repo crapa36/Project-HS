@@ -3,7 +3,7 @@
 #include "../Source/Runtime/Private/vfx_typed_mote_commands.hpp"
 #include "../Source/Runtime/Private/vfx_visible_outputs.hpp"
 #include "test_generation_paths.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <bit>
 #include <algorithm>
 #include <array>

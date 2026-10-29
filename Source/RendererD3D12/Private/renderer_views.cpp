@@ -252,8 +252,11 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     {
             const auto &source = input.command;
             const auto &geometry = input.geometry;
-            if (!geometry.GapStorageConsistent())
+            if (!geometry.GapStorageConsistent(frame_input.vfx.ground_gap_angles.size()))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored ring-gap storage.");
+            const auto gap_angles = geometry.frame_gap_count != 0
+                ? frame_input.vfx.ground_gap_angles.subspan(geometry.frame_gap_first, geometry.frame_gap_count)
+                : std::span<const float>(geometry.gap_angles_radians);
             const bool line = geometry.shape == VfxGroundShape::LineBorder ||
                               geometry.shape == VfxGroundShape::LineHatch;
             const bool cone = geometry.shape == VfxGroundShape::ConeBorder ||
@@ -288,7 +291,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                 (circle_preview && (geometry.inner_radius != 0 || geometry.GapCount() != 0 || geometry.gap_half_angle_radians != 0)) ||
                 !std::isfinite(geometry.gap_half_angle_radians) || geometry.gap_half_angle_radians < 0 ||
                 geometry.gap_half_angle_radians > std::numbers::pi_v<float> ||
-                std::ranges::any_of(geometry.gap_angles_radians, [](float angle) { return !std::isfinite(angle); })))
+                std::ranges::any_of(gap_angles, [](float angle) { return !std::isfinite(angle); })))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored annulus geometry.");
             const float direction_length = std::hypot(geometry.direction.x, geometry.direction.z);
             if (safe_sector && (!std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0 ||
@@ -461,8 +464,11 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     for (const auto &source : input.vfx.distortions)
     {
         const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
-        if (!source.GapStorageConsistent())
+        if (!source.GapStorageConsistent(input.vfx.distortion_gap_angles.size()))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored distortion gap storage.");
+        const auto gap_angles = source.frame_gap_count != 0
+            ? input.vfx.distortion_gap_angles.subspan(source.frame_gap_first, source.frame_gap_count)
+            : std::span<const float>(source.gap_angles_degrees);
         if (!finite(source.position) || !finite(source.direction) || !std::isfinite(source.radius) || source.radius <= 0 ||
             !std::isfinite(source.strength) || source.strength < 0 || !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 ||
             !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1 ||
@@ -480,8 +486,8 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                          source.gap_half_width_degrees < 0 || source.gap_half_width_degrees > 180 ||
                          source.half_angle_degrees != 0 ||
                          (source.GapCount() != 0 && source.gap_half_width_degrees == 0) ||
-                         std::any_of(source.gap_angles_degrees.begin(),source.gap_angles_degrees.end(),
-                             [](float angle){return !std::isfinite(angle); }))) ||
+                         std::any_of(gap_angles.begin(), gap_angles.end(),
+                                     [](float angle) { return !std::isfinite(angle); }))) ||
             (!cone && !annulus && (source.inner_radius != 0 || source.half_angle_degrees != 0 ||
                                    source.gap_half_width_degrees != 0 || source.GapCount() != 0)))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid exact distortion geometry.");
@@ -626,7 +632,8 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         static_cast<float>(camera.camera.position.y-camera.scene_origin.y), static_cast<float>(camera.camera.position.z-camera.scene_origin.z)};
     if (!std::isfinite(camera_scene_position.x) || !std::isfinite(camera_scene_position.y) || !std::isfinite(camera_scene_position.z))
         return ViewFailure("Ribbon interpolation and previous eye must be finite");
-    if (!ribbon_state.ValidateFrameSources(input.vfx.ribbons.sources, ribbon_error))
+    if (!ribbon_state.ValidateFrameSources(input.vfx.ribbons.sources, ribbon_error,
+            input.vfx.ribbons.outputs))
         return ViewFailure(ribbon_error);
     return Result::Success();
 }
@@ -1110,7 +1117,8 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         impl_->render_scene_inputs = first;
         const auto view_render_start = std::chrono::steady_clock::now();
         result = Render(snapshots, input.events, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
-            v.effect_lines, v.event_count, v.persistent_count, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
+            first ? v.effect_lines : std::span<const VfxLineSpawnCommand>{},
+            v.event_count, v.persistent_count, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
             v.lights, v.distortions, v.decals, input.devtools, rendered, v.volumes, v.screen, v.entity_surfaces);
         view_render_time += std::chrono::steady_clock::now() - view_render_start;
         if (rendered.presented_ui_packet_generation)

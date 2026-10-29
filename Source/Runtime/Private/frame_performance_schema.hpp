@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -18,7 +19,11 @@ inline constexpr std::array kFramePerformanceTaskNames{
     std::string_view{"vfx_spawn_sort"}, std::string_view{"vfx_screen"},
     std::string_view{"vfx_volume"}, std::string_view{"vfx_light"},
     std::string_view{"vfx_distortion"}, std::string_view{"vfx_decal"},
-    std::string_view{"vfx_fresnel"}};
+    std::string_view{"vfx_fresnel"}, std::string_view{"vfx_profile_prepare"}};
+
+inline constexpr std::size_t kVfxProfilePrepareTaskIndex =
+    kFramePerformanceTaskNames.size() - 1;
+static_assert(kFramePerformanceTaskNames[kVfxProfilePrepareTaskIndex] == "vfx_profile_prepare");
 
 inline std::string FramePerformanceCsvHeader()
 {

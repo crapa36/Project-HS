@@ -18,13 +18,24 @@ RenderSnapshotExchange::RenderSnapshotExchange(std::size_t instance_capacity,
 
 std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBeginWrite() noexcept
 {
+    return AcquireWriteSlot(false);
+}
+
+std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBeginRetainedWrite() noexcept
+{
+    return AcquireWriteSlot(true);
+}
+
+std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::AcquireWriteSlot(bool retained) noexcept
+{
     for (std::size_t index = 0; index < slots_.size(); ++index)
     {
         auto expected = SlotState::Free;
         if (slots_[index].state.compare_exchange_strong(expected, SlotState::Writing,
                                                         std::memory_order_acquire))
         {
-            slots_[index].storage.Clear();
+            if (!retained) slots_[index].storage.Clear();
+            slots_[index].retained_write = retained;
             slots_[index].ui_frame.reset();
             return WriteSlot{index, &slots_[index].storage};
         }
@@ -51,7 +62,8 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
         if (slots_[*oldest].state.compare_exchange_strong(expected, SlotState::Writing,
                                                           std::memory_order_acquire))
         {
-            slots_[*oldest].storage.Clear();
+            if (!retained) slots_[*oldest].storage.Clear();
+            slots_[*oldest].retained_write = retained;
             slots_[*oldest].ui_frame.reset();
             return WriteSlot{*oldest, &slots_[*oldest].storage};
         }
@@ -71,7 +83,11 @@ void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
         previous_sample->header.session_id == current.session_id &&
         previous_sample->header.tick < current.tick &&
         current.tick - previous_sample->header.tick == 1;
-    if (packet.has_previous) packet.previous.CopyDynamicFrom(*previous_sample);
+    if (packet.has_previous)
+    {
+        if (packet.retained_write) (void)packet.previous.CopyRetainedDynamicFrom(*previous_sample);
+        else packet.previous.CopyDynamicFrom(*previous_sample);
+    }
     else packet.previous.Clear();
     packet.ui_frame = std::move(ui_frame);
     slots_[slot.index].publish_sequence.store(publish_sequence, std::memory_order_relaxed);

@@ -101,6 +101,99 @@ void ExactBossGeometry()
     ring.gap_angles_degrees[1]=121;i.payload=ring;
     Check(Run(p,i).empty(),"unsupported recipe was coerced to exact boss distortion");
 }
+void FrameGapPool()
+{
+    auto program = Program(hs::VfxMotionKind::ShortRefractiveShock);
+    program.effects[0].payload_kind = Hash("RingWithGapsPayload");
+    auto image = Image(program);
+    image.distortion_recipes.push_back(image.distortion_recipes.front());
+    image.distortion_effect_ranges[0].count = 2;
+
+    hs::VfxEventInput first;
+    first.effect_handle = 1;
+    first.event_tick = 100;
+    first.sequence = 51;
+    first.stable_seed = 7;
+    hs::VfxRingGapsPayload first_ring;
+    first_ring.center = {1, 2, 3};
+    first_ring.inner_radius = 1;
+    first_ring.outer_radius = 4;
+    first_ring.gap_half_width_degrees = 8;
+    first_ring.gap_angles_degrees = {10, 80, 210};
+    first.payload = first_ring;
+    auto second = first;
+    second.sequence = 52;
+    second.stable_seed = 9;
+    hs::VfxRingGapsPayload second_ring = first_ring;
+    second_ring.gap_angles_degrees = {15, 45, 135, 300};
+    second.payload = second_ring;
+    std::array events{first, second};
+    const auto repeated_events = events;
+
+    const auto owning = hs::runtime_detail::BuildVfxTypedDistortionCommands(
+        image.View(), events, {}, 145);
+    std::vector<hs::VfxDistortionInput> frame_rows;
+    std::vector<float> frame_gaps;
+    frame_gaps.reserve(1);
+    hs::runtime_detail::RebuildVfxTypedDistortionCommands(
+        image.View(), events, {}, 145, frame_rows, frame_gaps);
+    Check(owning.size() == 4 && frame_rows.size() == owning.size() &&
+          frame_gaps == std::vector<float>{10, 80, 210, 15, 45, 135, 300},
+          "frame distortion pool did not capture each source gap list once");
+    for (std::size_t row = 0; row < frame_rows.size(); ++row)
+    {
+        const auto &frame = frame_rows[row];
+        const auto &owner = owning[row];
+        Check(frame.stable_id == owner.stable_id && frame.stable_seed == owner.stable_seed &&
+              frame.shape == owner.shape && frame.GapCount() == owner.GapCount() &&
+              frame.GapStorageConsistent(frame_gaps.size()),
+              "frame-pool distortion changed output order, identity or storage contract");
+        const auto expected_first = row < 2 ? 0u : 3u;
+        Check(frame.frame_gap_first == expected_first && frame.frame_gap_count == owner.GapCount(),
+              "recipe outputs did not share their source gap slice");
+        for (std::size_t index = 0; index < owner.GapCount(); ++index)
+            Check(frame.GapAngleDegrees(index, frame_gaps) == owner.GapAngleDegrees(index),
+                  "frame-pool distortion angle differs from owning output");
+    }
+
+    const auto pooled_capacity = frame_gaps.capacity();
+    const auto *pooled_data = frame_gaps.data();
+    std::get<hs::VfxRingGapsPayload>(events[0].payload).gap_angles_degrees.clear();
+    std::get<hs::VfxRingGapsPayload>(events[1].payload).gap_angles_degrees.clear();
+    Check(frame_rows[0].GapAngleDegrees(0, frame_gaps) == 10 &&
+          frame_rows[2].GapAngleDegrees(0, frame_gaps) == 15,
+          "source payload mutation changed frame-owned angle slices");
+    hs::runtime_detail::RebuildVfxTypedDistortionCommands(
+        image.View(), repeated_events, {}, 145, frame_rows, frame_gaps);
+    Check(frame_gaps.capacity() == pooled_capacity && frame_gaps.data() == pooled_data &&
+          frame_gaps.size() == 7 && frame_rows.size() == owning.size(),
+          "warm distortion frame pool failed to reuse its backing allocation");
+
+    auto uniform = first;
+    auto uniform_ring = first_ring;
+    uniform_ring.gap_angles_degrees.clear();
+    uniform_ring.uniform_gaps = {5.0f, 3, hs::VfxGapAngleFormula::EventSpacing};
+    uniform.payload = uniform_ring;
+    hs::runtime_detail::RebuildVfxTypedDistortionCommands(
+        image.View(), std::span(&uniform, 1), {}, 145, frame_rows, frame_gaps);
+    Check(frame_rows.size() == 2 && frame_gaps.empty() &&
+          frame_rows[0].uniform_gaps.Active() && frame_rows[0].frame_gap_count == 0 &&
+          frame_rows[0].GapAngleDegrees(2, frame_gaps) == 245,
+          "uniform distortion gaps allocated or copied into the frame pool");
+
+    hs::VfxDistortionInput invalid;
+    invalid.frame_gap_first = 1;
+    Check(!invalid.GapStorageConsistent(), "zero-count frame gap accepted a nonzero offset");
+    invalid.frame_gap_first = 0;
+    invalid.frame_gap_count = 2;
+    Check(!invalid.GapStorageConsistent(1), "out-of-range frame gap slice was accepted");
+    Check(invalid.GapStorageConsistent(2), "in-range frame gap slice was rejected");
+    invalid.gap_angles_degrees = {10};
+    Check(!invalid.GapStorageConsistent(2), "owned and frame gap storage were both accepted");
+    invalid.gap_angles_degrees.clear();
+    invalid.uniform_gaps = {0, 3, hs::VfxGapAngleFormula::OwnerNormalized};
+    Check(!invalid.GapStorageConsistent(2), "uniform and frame gap storage were both accepted");
+}
 void TextureContracts()
 {
  auto p=Program();auto i=Input();
@@ -134,4 +227,4 @@ void AppendContract()
        "distortion append changed order, seed, prefix, or caller capacity");
 }
 }
-int RunVfxDistortionTests(){try{GeometryClockAndIdentity();Presence();ExactBossGeometry();TextureContracts();Invalid();AppendContract();std::cout<<"Typed distortion commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxDistortionTests(){try{GeometryClockAndIdentity();Presence();ExactBossGeometry();FrameGapPool();TextureContracts();Invalid();AppendContract();std::cout<<"Typed distortion commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

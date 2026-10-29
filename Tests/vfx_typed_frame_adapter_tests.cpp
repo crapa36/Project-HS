@@ -2,6 +2,7 @@
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_image_fixture.hpp"
 #include "vfx_session_state.hpp"
+#include "vfx_profile_admission.hpp"
 #include "vfx_typed_screen_commands.hpp"
 #include "vfx_typed_volume_commands.hpp"
 
@@ -1702,6 +1703,10 @@ void TestLowHealthPulseClock()
             tick, static_cast<double>(tick), hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
     };
     emit(1000);
+    const auto screen_plan = hs::runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
+    Check(screen_plan.persistent_frame_rows[static_cast<std::size_t>(
+              hs::runtime_detail::ActiveEffectStore::Profile::Screen)] == output.size(),
+          "screen frame reservation must cover the actual persistent command count");
     Check(output.size() == 1 && output[0].envelope == 0 && pulse.phase == 0,
           "health entry did not start its own short transition");
     const auto *screen_storage = output.data();
@@ -1786,6 +1791,10 @@ void TestPreparedVolumeCommands()
               output[0].steps == 12 && output[0].authored_scale == 1 &&
               output[0].elapsed_seconds == .5f,
           "prepared LocalVolume recipe lost live event or authored output values");
+    const auto volume_plan = hs::runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
+    Check(volume_plan.frame_rows[static_cast<std::size_t>(
+              hs::runtime_detail::ActiveEffectStore::Profile::Volume)] == output.size(),
+          "volume frame reservation must cover the actual event command count");
     const auto *volume_storage = output.data();
     Check(hs::runtime_detail::BuildVfxTypedVolumeCommands(
               image, std::span(&event, 1), {}, 31, hs::VfxQuality::High, output).Succeeded() &&
@@ -2385,6 +2394,36 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
     Check(output[1].stable_id != 0 && output[1].elapsed_ticks == 0.0 &&
               output[2].stable_id != 0 && output[2].elapsed_ticks == 0.0,
           "retreat append lost captured source identity or start age");
+
+    std::array<VfxRibbonLinkEffectRecipe, 2> link_effects{};
+    link_effects[0].effect_handle = 1;
+    link_effects[0].kind = VfxRibbonLinkKind::CapturedLine;
+    link_effects[0].outputs = {0, 2};
+    link_effects[1].effect_handle = 2;
+    link_effects[1].kind = VfxRibbonLinkKind::CapturedContext;
+    link_effects[1].outputs = {2, 2};
+    std::array<VfxRibbonLinkOutputRecipe, 4> link_outputs{};
+    for (std::size_t index = 0; index < link_outputs.size(); ++index)
+    {
+        link_outputs[index].min_quality = 0;
+        link_outputs[index].output.profile = index % 2 == 0
+            ? VfxOutputProfile::RibbonAdd : VfxOutputProfile::RibbonOit;
+    }
+    image.ribbon_link_effect_recipes = std::span<const VfxRibbonLinkEffectRecipe>(link_effects);
+    image.ribbon_link_output_recipes = std::span<const VfxRibbonLinkOutputRecipe>(link_outputs);
+    const auto base_only = runtime_detail::VfxRibbonFrameBoundsForEffect(
+        image, output.front().effect_handle);
+    std::uint32_t suffix_sources{}, suffix_outputs{};
+    for (std::size_t index = 1; index < output.size(); ++index)
+    {
+        const auto bounds = runtime_detail::VfxRibbonFrameBoundsForEffect(
+            image, output[index].effect_handle);
+        suffix_sources += bounds.persistent_sources;
+        suffix_outputs += bounds.persistent_outputs;
+    }
+    Check(base_only.persistent_sources == 0 && base_only.persistent_outputs == 0 &&
+              suffix_sources == 2 && suffix_outputs == 4,
+          "captured Line/Context suffix was omitted from Ribbon source/output reservation bounds");
 
     const auto retained_before_rebind = state.RetainedCapacityBytes();
     Check(state.Rebind(image.program, image.program) == 0 &&

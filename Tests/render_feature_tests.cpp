@@ -1,11 +1,14 @@
 #include "renderer_post_subgraph_plan.hpp"
 #include "renderer_feature_resolve.hpp"
+#include "renderer_vfx_candidates.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -14,6 +17,49 @@ using namespace hs;
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void BoundedDecalCandidates()
+{
+    std::array<VfxDecalInput, 513> inputs{};
+    std::vector<VfxDecalCandidate> expected;
+    for (std::size_t i = 0; i < inputs.size(); ++i)
+    {
+        inputs[i].importance = i < 128 ? 3u : static_cast<std::uint32_t>((i * 17) % 5);
+        inputs[i].stable_id = i < 128 ? 7u : (i * 23) % 41;
+        inputs[i].stable_seed = i < 128 ? 1u : static_cast<std::uint32_t>(i % 5);
+        expected.push_back({&inputs[i], i < 128 ? .5f : static_cast<float>(i % 9) / 8.0f});
+    }
+    auto stable_reference = expected;
+    std::stable_sort(stable_reference.begin(), stable_reference.end(), [](const auto &a, const auto &b) {
+        if (a.source->importance != b.source->importance) return a.source->importance > b.source->importance;
+        if (a.area != b.area) return a.area > b.area;
+        if (a.source->stable_id != b.source->stable_id) return a.source->stable_id < b.source->stable_id;
+        return a.source->stable_seed < b.source->stable_seed;
+    });
+    for (const std::size_t limit : {0u, 1u, 2u, 7u, 31u, 64u})
+    {
+        VfxDecalCandidates candidates(limit);
+        for (const auto candidate : expected) candidates.Add(candidate);
+        const auto selected = candidates.Sorted();
+        Check(selected.size() == limit, "decal candidate storage remains bounded by the actual output limit");
+        for (std::size_t i = 0; i < selected.size(); ++i)
+            Check(selected[i].source == stable_reference[i].source && selected[i].area == stable_reference[i].area,
+                "bounded decal selection must match the original stable-sort prefix, including ties");
+    }
+    VfxDecalCandidates sparse(64);
+    for (const auto candidate : std::span(expected).first(3))
+        sparse.Add(candidate);
+    Check(sparse.Sorted().size() == 3, "sparse decal input never exposes uninitialized candidate slots");
+    VfxDecalCandidates ties(64);
+    for (auto &input : inputs)
+    {
+        input.importance = 5; input.stable_id = 1; input.stable_seed = 7;
+        ties.Add({&input, .5f});
+    }
+    const auto tied = ties.Sorted();
+    for (std::size_t i = 0; i < tied.size(); ++i)
+        Check(tied[i].source == &inputs[i], "equal-ranked decals keep the original first64 input order");
 }
 
 ResourceVersion Texture(std::uint32_t id, std::uint32_t version = 0)
@@ -250,6 +296,7 @@ int main()
         ConfiguredPostTopology();
         ExternalPostTopology();
         IdentityFxaaTopology();
+        BoundedDecalCandidates();
         std::puts("Configured post topology checks passed.");
         return 0;
     }

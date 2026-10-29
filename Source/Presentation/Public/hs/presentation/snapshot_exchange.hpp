@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 
 #include <array>
 #include <atomic>
@@ -51,6 +51,9 @@ class RenderSnapshotExchange
                            std::size_t light_capacity, std::size_t ui_capacity);
 
     [[nodiscard]] std::optional<WriteSlot> TryBeginWrite() noexcept;
+    // Preserves slot arrays for CopyRetainedDynamicFrom; the caller still updates
+    // the current sample before Publish. Normal writers receive cleared storage.
+    [[nodiscard]] std::optional<WriteSlot> TryBeginRetainedWrite() noexcept;
     // One producer supplies increasing publication sequences independently of
     // simulation ticks. Reset/wrap requires a new exchange and consumer.
     void Publish(WriteSlot slot, Sequence publish_sequence,
@@ -81,11 +84,13 @@ class RenderSnapshotExchange
         RenderSnapshotStorage previous;
         std::shared_ptr<const UiFrame> ui_frame;
         bool has_previous{};
+        bool retained_write{};
         std::atomic<SlotState> state{SlotState::Free};
         std::atomic<Sequence> publish_sequence{};
     };
 
     [[nodiscard]] std::optional<std::size_t> AcquireNewestReady() noexcept;
+    [[nodiscard]] std::optional<WriteSlot> AcquireWriteSlot(bool retained) noexcept;
     void ReleaseRead(std::optional<std::size_t> &index) noexcept;
 
     std::array<Slot, 3> slots_;

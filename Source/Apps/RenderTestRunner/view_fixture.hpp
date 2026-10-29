@@ -24,10 +24,17 @@ struct OwnedViewProbeEvidence
     // actual public submission stamps, including opaque provider provenance.
     std::array<std::array<RenderViewFrameResult, 3>, 3> frames;
     std::array<std::uint32_t, 3> admitted_decals{};
+    std::array<std::uint32_t, 3> admitted_distortions{};
+    std::array<std::uint32_t, 3> admitted_ribbons{};
+    std::array<std::uint32_t, 3> admitted_ground{};
+    std::array<bool, 4> invalid_distortion_gap_rejected{};
+    std::array<bool, 4> invalid_ribbon_pool_rejected{};
+    std::array<bool, 4> invalid_ground_gap_rejected{};
     std::array<std::uint64_t, 2> archer_clip_ids{};
     std::uint64_t motion_epoch_target_id{}, motion_epoch_before{}, motion_epoch_after{};
     RendererFrameResult final_frame;
     std::uint64_t submissions_before{}, submissions_after_bad_preflight{}, submissions_after{};
+    std::uint64_t overwrite_submission_id{};
     bool duplicate_rejected{}, nonfinite_origin_rejected{}, rejected_outputs_unchanged{}, stale_diagnostics_rejected{};
     bool nonfinite_flash_history_rejected{};
     std::array<std::filesystem::path, 2> captures;
@@ -113,7 +120,7 @@ inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
 // Opt-in integration probe. The caller owns the ordinary internal renderer
 // configuration and snapshot leases. This helper never requests a native SDK
 // provider or manufactures a provider token. It performs exactly three frame
-// packages with skipped-view history, rejected preflights and native readbacks.
+// packages with skipped-view history and readbacks, then one auxiliary-only overwrite.
 inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts,
     AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
@@ -146,6 +153,14 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     capture.camera.position.x += 4.0; capture.camera.target.x += 2.0;
     capture.view_origin = capture.camera.position;
     std::array<RenderViewInput, 3> views{main, preview, capture};
+    // Start in one large global basis; moving that basis mid-probe would be a real camera cut.
+    for (auto &view : views)
+    {
+        view.scene_origin.x = 1.0e9;
+        view.camera.position.x += 1.0e9;
+        view.camera.target.x += 1.0e9;
+        view.view_origin.x += 1.0e9;
+    }
     const std::array<VfxDecalInput, 2> decals{{
         {.stable_id = 0x44454341u, .position = {-2, 0, 0}, .radius = 8,
          .linear_rgb = {0.7f, 0.3f, 0.1f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
@@ -154,6 +169,70 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
          .linear_rgb = {0.2f, 0.6f, 0.3f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
          .kind = VfxDecalKind::Organic, .stable_seed = 47, .voronoi_cells = 64, .edge_glow = 0.3f}
     }};
+    const std::array<float, 3> distortion_gap_pool{0.5f, 1.25f, 2.0f};
+    const VfxLineSpawnCommand effect_line{.sequence = 0x4c494e45u,
+        .start = {-.5f, 0, -2}, .end = {.5f, 0, -2}, .color = {1, .5f, .1f, 1},
+        .width = .1f, .lifetime = .2f, .uv_repeat = 1};
+    const auto annulus = [](std::uint64_t id, Float3 position) {
+        VfxDistortionInput command{};
+        command.stable_id = id;
+        command.position = position;
+        command.radius = 1.0f; // Keep both commands within the ordinary projected-area budget.
+        command.strength = 0.2f;
+        command.normalized_age = 0.2f;
+        command.alpha = 0.7f;
+        command.shape = VfxDistortionShape::GappedAnnulus;
+        command.inner_radius = 0.25f;
+        command.gap_half_width_degrees = 5.0f;
+        return command;
+    };
+    std::array<VfxDistortionInput, 2> package0_distortions{
+        annulus(0x44495331u, {-2, 0, 0}), annulus(0x44495332u, {2, 0, 0})};
+    package0_distortions[0].gap_angles_degrees = {0.75f};
+    package0_distortions[1].frame_gap_first = 1;
+    package0_distortions[1].frame_gap_count = 1;
+    std::array<VfxDistortionInput, 2> package2_distortions{
+        annulus(0x44495333u, {-2, 0, 0}), annulus(0x44495334u, {2, 0, 0})};
+    for (auto &command : package2_distortions)
+    {
+        command.frame_gap_first = 0;
+        command.frame_gap_count = 2;
+    }
+    const std::array<float, 3> ground_gap_pool{0.5f, 1.25f, 2.0f};
+    const auto ground_annulus = [](std::uint64_t id, Float3 position) {
+        VfxGroundSpawnInput input{};
+        input.effect_handle = 1; input.stable_id = id; input.hdr = 1;
+        input.command.renderer = VfxRenderer::Ground;
+        input.command.primitive = VfxPrimitive::ExactRing;
+        input.command.position = position; input.command.start_size_min = 2;
+        input.geometry.shape = VfxGroundShape::RingGapsBorder;
+        input.geometry.inner_radius = 0.5f; input.geometry.outer_radius = 2;
+        input.geometry.edge_width = 0.1f; input.geometry.gap_half_angle_radians = 0.1f;
+        return input;
+    };
+    std::array<VfxGroundSpawnInput, 2> package0_ground{
+        ground_annulus(0x47524e31u, {-2, 0, 0}), ground_annulus(0x47524e32u, {2, 0, 0})};
+    package0_ground[0].geometry.gap_angles_radians = {0.75f};
+    package0_ground[1].geometry.frame_gap_first = 1;
+    package0_ground[1].geometry.frame_gap_count = 1;
+    std::array<VfxGroundSpawnInput, 2> package2_ground{
+        ground_annulus(0x47524e33u, {-2, 0, 0}), ground_annulus(0x47524e34u, {2, 0, 0})};
+    for (auto &command : package2_ground) command.geometry.frame_gap_count = 2;
+    const std::array<VfxRibbonOutputInput, 2> ribbon_outputs{{
+        {.profile = VfxOutputProfile::RibbonAdd, .motion = VfxMotionKind::CurvedLinkTravelingHead,
+         .color = {1, .3f, .1f, 1}, .width_head = .12f, .width_tail = .04f, .hdr = 1},
+        {.profile = VfxOutputProfile::RibbonOit, .motion = VfxMotionKind::SoftWiderSheath,
+         .color = {.2f, .5f, 1, .5f}, .width_head = .2f, .width_tail = .08f, .hdr = 1}
+    }};
+    VfxRibbonSourceInput owning_ribbon;
+    owning_ribbon.owner_id = 0x52494242u;
+    owning_ribbon.effect_handle = 1; owning_ribbon.source_id = 1;
+    owning_ribbon.position = {.5f, 1, 0}; owning_ribbon.previous_position = {-.5f, 1, 0};
+    owning_ribbon.analytic = true; owning_ribbon.control = {0, 1.25f, 0};
+    owning_ribbon.segments = 8; owning_ribbon.normalized_age = .4f;
+    owning_ribbon.outputs.assign(ribbon_outputs.begin(), ribbon_outputs.end());
+    auto pooled_ribbon = owning_ribbon;
+    pooled_ribbon.outputs.clear(); pooled_ribbon.frame_output_count = 2;
     std::vector<RenderInstance> moving_instances(snapshots.current.instances.begin(), snapshots.current.instances.end());
     const auto archer = std::ranges::find(moving_instances, RenderMesh::Archer, &RenderInstance::mesh);
     const auto clips = renderer.GetCharacterAnimationClips();
@@ -189,19 +268,11 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     {
         if (package == 1)
         {
-            // Rebase the whole packet consistently. Preview is omitted, so it
-            // must retain its old origin/projection until it is submitted again.
+            // Only Capture changes its basis; skipped Preview retains its own history.
             views[2].camera.position.x += 2.0;
             views[2].camera.target.x += 0.25;
             views[2].view_origin.x += 64.0;
             views[2].camera_cut = true;
-            for (auto &view : views)
-            {
-                view.scene_origin.x = 1.0e9;
-                view.camera.position.x += 1.0e9;
-                view.camera.target.x += 1.0e9;
-                view.view_origin.x += 1.0e9;
-            }
         }
         else if (package == 2)
         {
@@ -229,6 +300,10 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             ++moving_archer->revisions.transform;
         }
         const auto admitted = package == 1 ? std::span<const VfxDecalInput>{} : std::span<const VfxDecalInput>{decals};
+        const std::span<const VfxDistortionInput> admitted_distortions = package == 0
+            ? std::span<const VfxDistortionInput>{package0_distortions}
+            : package == 2 ? std::span<const VfxDistortionInput>{package2_distortions}
+                           : std::span<const VfxDistortionInput>{};
         const std::vector<RenderViewInput> submitted_views = package == 0
             ? std::vector<RenderViewInput>{views[0], views[2], views[1]}
             : package == 1 ? std::vector<RenderViewInput>{views[0], views[2]}
@@ -238,7 +313,16 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1,
             .sequence = package == 1 ? 0u : package == 0 ? 1u : 2u};
         const RenderFrameInput input{.views = submitted_views, .snapshots = package_snapshots,
-            .vfx = {.decals = admitted, .world_batch = world}, .delta_seconds = 1.0f / 60.0f};
+            .vfx = {.effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
+                .ground = package == 1 ? std::span<const VfxGroundSpawnInput>{} :
+                    package == 0 ? std::span<const VfxGroundSpawnInput>{package0_ground} :
+                                   std::span<const VfxGroundSpawnInput>{package2_ground},
+                .ribbons = {package == 0 ? std::span(&owning_ribbon, 1) : std::span(&pooled_ribbon, 1),
+                               1, ribbon_outputs},
+                .distortions = admitted_distortions, .decals = admitted,
+                .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
+                .ground_gap_angles = ground_gap_pool},
+            .delta_seconds = 1.0f / 60.0f};
         if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
         if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
             (world.sequence != 0 && (!result.vfx_world_step_submitted ||
@@ -246,8 +330,20 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 result.vfx_world_batch_sequence != world.sequence)))
             return Failure("World receipt must identify its frozen producer batch independently of snapshot tick and view order.");
         evidence.admitted_decals[package] = result.typed_vfx_decal_count;
+        evidence.admitted_distortions[package] = result.typed_vfx_distortion_count;
+        evidence.admitted_ribbons[package] = result.typed_vfx_ribbon_count;
+        evidence.admitted_ground[package] = result.typed_vfx_ground_count;
+        if (result.typed_vfx_ground_count != (package == 1 ? 0u : 2u))
+            return Failure("Ground owning/pooled gap package did not retain its commands or clear the empty package.");
+        if (result.typed_vfx_ribbon_count != ribbon_outputs.size())
+            return Failure("Owning/pooled ribbon packet did not retain both analytic outputs.");
         if (result.typed_vfx_decal_count != admitted.size())
             return Failure("Decal Surface probe did not admit both authored command kinds or clear the empty package.");
+        const auto expected_distortions = package == 1 ? 0u : 2u;
+        if (result.typed_vfx_distortion_count != expected_distortions)
+            return Failure("Distortion gap-pool package " + std::to_string(package) +
+                " admitted " + std::to_string(result.typed_vfx_distortion_count) +
+                " commands; expected " + std::to_string(expected_distortions) + ".");
         if (result.views.size() != submitted_views.size() || result.identity.view_id != kMainRenderViewId)
             return Failure("Frame package did not return its actual keyed submissions and Main result.");
         for (std::size_t view = 0; view < submitted_views.size(); ++view)
@@ -337,24 +433,83 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
             ParticleSpawnCommand bad_selector{};
             bad_selector.mesh_index = 8;
-            std::array<RenderFrameInput, 4> invalid_payloads;
+            std::array<RenderFrameInput, 17> invalid_payloads;
             for (auto &invalid : invalid_payloads) { invalid.views = views; invalid.snapshots = snapshots; }
             invalid_payloads[0].vfx.lights = std::span(&bad_light, 1);
             invalid_payloads[1].vfx.decals = std::span(&bad_decal, 1);
             invalid_payloads[2].vfx.particle_spawns = std::span(&bad_ballistic, 1);
             invalid_payloads[3].vfx.particle_spawns = std::span(&bad_selector, 1);
-            for (const auto &invalid : invalid_payloads)
+            auto missing_gap_pool = annulus(0x494e5641u, {-2, 0, 0});
+            missing_gap_pool.frame_gap_count = 1;
+            auto out_of_range_gap_pool = annulus(0x494e5642u, {-2, 0, 0});
+            out_of_range_gap_pool.frame_gap_first = 2;
+            out_of_range_gap_pool.frame_gap_count = 2;
+            auto mixed_gap_storage = annulus(0x494e5643u, {-2, 0, 0});
+            mixed_gap_storage.gap_angles_degrees = {0.5f};
+            mixed_gap_storage.frame_gap_count = 1;
+            auto nonfinite_gap_pool = annulus(0x494e5644u, {-2, 0, 0});
+            nonfinite_gap_pool.frame_gap_count = 1;
+            const std::array<float, 1> nan_gap_pool{std::numeric_limits<float>::quiet_NaN()};
+            invalid_payloads[4].vfx.distortions = std::span(&missing_gap_pool, 1);
+            invalid_payloads[5].vfx.distortions = std::span(&out_of_range_gap_pool, 1);
+            invalid_payloads[5].vfx.distortion_gap_angles = distortion_gap_pool;
+            invalid_payloads[6].vfx.distortions = std::span(&mixed_gap_storage, 1);
+            invalid_payloads[6].vfx.distortion_gap_angles = distortion_gap_pool;
+            invalid_payloads[7].vfx.distortions = std::span(&nonfinite_gap_pool, 1);
+            invalid_payloads[7].vfx.distortion_gap_angles = nan_gap_pool;
+            std::array<VfxRibbonSourceInput, 4> bad_ribbons{pooled_ribbon, pooled_ribbon,
+                pooled_ribbon, pooled_ribbon};
+            bad_ribbons[1].frame_output_first = 1;
+            bad_ribbons[2].outputs = {ribbon_outputs[0]};
+            auto bad_ribbon_outputs = ribbon_outputs;
+            bad_ribbon_outputs[0].width_head = std::numeric_limits<float>::quiet_NaN();
+            for (std::size_t i = 0; i < bad_ribbons.size(); ++i)
+                invalid_payloads[8 + i].vfx.ribbons = {std::span(&bad_ribbons[i], 1), 1,
+                    i == 0 ? std::span<const VfxRibbonOutputInput>{} :
+                    i == 3 ? std::span<const VfxRibbonOutputInput>{bad_ribbon_outputs} :
+                             std::span<const VfxRibbonOutputInput>{ribbon_outputs}};
+            std::array<VfxGroundSpawnInput, 4> bad_ground{package2_ground[0], package2_ground[0],
+                package2_ground[0], package2_ground[0]};
+            bad_ground[1].geometry.frame_gap_first = 2;
+            bad_ground[2].geometry.gap_angles_radians = {0.5f};
+            for (std::size_t i = 0; i < bad_ground.size(); ++i)
             {
+                bad_ground[i].geometry.frame_gap_count = 2;
+                invalid_payloads[12 + i].vfx.ground = std::span(&bad_ground[i], 1);
+                invalid_payloads[12 + i].vfx.ground_gap_angles =
+                    i == 0 ? std::span<const float>{} :
+                    i == 3 ? std::span<const float>{nan_gap_pool} : std::span<const float>{ground_gap_pool};
+            }
+            bad_ground[3].geometry.frame_gap_count = 1;
+            invalid_payloads[16].vfx.effect_lines = std::span(&effect_line, 1);
+            invalid_payloads[16].vfx.world_batch = RenderVfxWorldBatch{
+                .session = snapshots.current.header.session_id,
+                .stateful_target = world.stateful_target};
+            for (std::size_t invalid_index = 0; invalid_index < invalid_payloads.size(); ++invalid_index)
+            {
+                const auto &invalid = invalid_payloads[invalid_index];
                 const auto rejected = renderer.Render(invalid, result);
                 if (rejected || rejected.Code() != ErrorCode::InvalidArgument ||
                     !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                    return Failure("VFX admission must reject malformed lights, decals, ballistics and selectors before any view submission.");
+                    return Failure("VFX admission must reject malformed payloads and frame-pool storage before any view submission.");
+                if (invalid_index >= 4 && invalid_index < 8)
+                    evidence.invalid_distortion_gap_rejected[invalid_index - 4] = true;
+                else if (invalid_index >= 8 && invalid_index < 12)
+                    evidence.invalid_ribbon_pool_rejected[invalid_index - 8] = true;
+                else if (invalid_index >= 12 && invalid_index < 16)
+                    evidence.invalid_ground_gap_rejected[invalid_index - 12] = true;
             }
             evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
             evidence.rejected_outputs_unchanged = duplicate_preserved && nonfinite_preserved && SameRejectedResultEvidence(result, accepted) &&
                 evidence.submissions_after_bad_preflight == before;
             if (!evidence.duplicate_rejected || !evidence.nonfinite_origin_rejected ||
-                !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged)
+                !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged ||
+                !std::ranges::all_of(evidence.invalid_distortion_gap_rejected,
+                    [](bool rejected) { return rejected; }) ||
+                !std::ranges::all_of(evidence.invalid_ribbon_pool_rejected,
+                    [](bool rejected) { return rejected; }) ||
+                !std::ranges::all_of(evidence.invalid_ground_gap_rejected,
+                    [](bool rejected) { return rejected; }))
                 return Failure("Duplicate/nonfinite view or flash preflight was accepted or mutated submission/result evidence.");
         }
         if (package == 0)
@@ -362,6 +517,8 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
                     artifacts / "owned-view-preview-before-skip.json",
                     evidence.frames[0][1].rendered_frame, preview_before_skip); !captured) return captured;
+            if (!preview_before_skip.value("decal_surface_active", false))
+                return Failure("Preview capture did not use its submitted decal Surface exports.");
             evidence.motion_readbacks["preview_before_skip"] = preview_before_skip;
         }
         else if (package == 1)
@@ -369,6 +526,8 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbeCapture,
                     artifacts / "owned-view-capture-origin-reset.json",
                     evidence.frames[1][2].rendered_frame, capture_origin_reset); !captured) return captured;
+            if (capture_origin_reset.value("decal_surface_active", true))
+                return Failure("Empty Capture frame retained a stale decal Surface export.");
             const auto &inputs = capture_origin_reset.at("temporal_inputs");
             const auto current = ReadMatrix(inputs, "current_vp");
             const auto previous_instance = ReadMatrix(inputs,
@@ -384,6 +543,8 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
                     artifacts / "owned-view-preview-after-skip.json",
                     evidence.frames[2][1].rendered_frame, preview_after_skip); !captured) return captured;
+            if (!preview_after_skip.value("decal_surface_active", false))
+                return Failure("Reappearing Preview capture did not use its new decal Surface exports.");
             const auto previous = ReadMatrix(preview_after_skip.at("temporal_inputs"),
                 "previous_instance_unjittered_view_projection");
             const auto old_preview_current = ReadMatrix(preview_before_skip.at("temporal_inputs"), "current_vp");
@@ -399,9 +560,27 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
         }
     }
     evidence.final_frame = std::move(result);
+    // The three submission banks still hold Main after package 2. Reuse its bank
+    // with a real auxiliary submission before testing stale diagnostic rejection.
+    const RenderVfxWorldBatch held_world{.session = package_snapshots.current.header.session_id,
+        .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1};
+    const RenderFrameInput overwrite{.views = std::span(&views[1], 1), .snapshots = package_snapshots,
+        .vfx = {.ground = package2_ground,
+            .ribbons = {std::span(&pooled_ribbon, 1), 1, ribbon_outputs},
+            .distortions = package2_distortions, .decals = decals,
+            .world_batch = held_world, .distortion_gap_angles = distortion_gap_pool,
+            .ground_gap_angles = ground_gap_pool},
+        .delta_seconds = 1.0f / 60.0f};
+    RendererFrameResult overwrite_result;
+    if (auto submitted = renderer.Render(overwrite, overwrite_result); !submitted) return submitted;
+    if (overwrite_result.views.size() != 1 || overwrite_result.views[0].identity.view_id != kOwnedViewProbePreview ||
+        overwrite_result.views[0].submission_id <= evidence.frames[2][1].submission_id ||
+        overwrite_result.vfx_world_step_submitted)
+        return Failure("Auxiliary overwrite did not submit independently while holding the existing world batch.");
+    evidence.overwrite_submission_id = overwrite_result.views[0].submission_id;
     evidence.submissions_after = renderer.GetDiagnostics().total_rendered_frames;
-    if (evidence.submissions_after != evidence.submissions_before + 8u)
-        return Failure("Owned-view probe did not produce exactly eight actual view submissions with Preview skipped once.");
+    if (evidence.submissions_after != evidence.submissions_before + 9u)
+        return Failure("Owned-view probe did not produce eight scene-view submissions plus one auxiliary overwrite.");
     const auto stale_capture = renderer.Capture({.path = artifacts / "stale-main-geometry.json",
         .kind = CaptureKind::GeometryDiagnostics});
     evidence.stale_diagnostics_rejected = !stale_capture && stale_capture.Code() == ErrorCode::InvalidState;
@@ -443,7 +622,14 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
         }
         packages.push_back(std::move(views));
     }
-    return {{"packages", std::move(packages)}, {"admitted_decals", evidence.admitted_decals},
+    return {{"packages", std::move(packages)}, {"overwrite_submission_id", evidence.overwrite_submission_id},
+        {"admitted_decals", evidence.admitted_decals},
+        {"admitted_distortions", evidence.admitted_distortions},
+        {"admitted_ribbons", evidence.admitted_ribbons},
+        {"admitted_ground", evidence.admitted_ground},
+        {"invalid_distortion_gap_rejected", evidence.invalid_distortion_gap_rejected},
+        {"invalid_ribbon_pool_rejected", evidence.invalid_ribbon_pool_rejected},
+        {"invalid_ground_gap_rejected", evidence.invalid_ground_gap_rejected},
         {"archer_clip_ids", evidence.archer_clip_ids},
         {"motion_epoch_break", {{"stable_id", evidence.motion_epoch_target_id},
             {"before", evidence.motion_epoch_before}, {"after", evidence.motion_epoch_after}}},

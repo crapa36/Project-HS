@@ -3,7 +3,7 @@
 #include <hs/core/input.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/ui_draw_content.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/domain_signal.hpp>
@@ -21,6 +21,7 @@
 
 namespace hs
 {
+class RenderSnapshotStorage;
 
 struct UiInteraction
 {

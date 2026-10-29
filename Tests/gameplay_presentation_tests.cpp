@@ -393,8 +393,7 @@ void TestNonGameplayUiFactsIgnoreHiddenSimulation()
     model.session.phase = hs::SessionPhase::Paused;
     ui.page = hs::UiPage::Root;
     model.session.growth_ticks = 100;
-    std::array paused_wave{hs::WaveView{400, 60}};
-    model.waves = std::span<const hs::WaveView>(paused_wave);
+    model.waves[0] = hs::WaveView{400, 60};
     capture(first);
     ++model.summary.direct_damage;
     capture(same);
@@ -404,7 +403,7 @@ void TestNonGameplayUiFactsIgnoreHiddenSimulation()
     Check(changed != same, "pause root retains the visible HUD health value");
     ++model.session.health;
     capture(same);
-    paused_wave[0].start = 401;
+    model.waves[0].start = 401;
     capture(changed);
     Check(changed != same, "pause root tracks a wave alert entering the visible countdown window");
 }

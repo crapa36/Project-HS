@@ -3,7 +3,7 @@
 #include "../Source/Runtime/Private/vfx_visible_outputs.hpp"
 #include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 
 #include <array>
 #include <algorithm>

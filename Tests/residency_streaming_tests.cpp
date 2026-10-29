@@ -938,6 +938,33 @@ int main()
               streaming.Cancel(cancelled_mapping) && streaming.Collect({}) == 1,
               "unsubmitted mapping-only request could not be cancelled and collected");
 
+        const auto gpu_copy = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
+            "software-mip-copy:2", "generation-copy", 100);
+        Check(gpu_copy && !streaming.BeginGpuCopy(gpu_copy, "stale-generation"),
+              "resident GPU copy accepted a stale generation");
+        const auto copy_requested = streaming.Find(gpu_copy);
+        Check(copy_requested && copy_requested->state == hs::StreamingPageState::Requested &&
+              !copy_requested->read_submitted && !copy_requested->read_finished &&
+              !streaming.BeginUpload(gpu_copy, "generation-copy"),
+              "failed GPU-copy admission changed the request or bypassed the explicit transition");
+        Check(streaming.BeginGpuCopy(gpu_copy, "generation-copy"),
+              "valid resident GPU copy did not enter its payloadless queue state");
+        const auto copy_uploading = streaming.Find(gpu_copy);
+        Check(copy_uploading && copy_uploading->state == hs::StreamingPageState::Uploading &&
+              !copy_uploading->read_submitted && !copy_uploading->read_finished,
+              "resident GPU copy fabricated a read/decode completion");
+        Check(streaming.SubmitUpload(gpu_copy, "generation-copy", {0, 0, 13}) &&
+              !streaming.TryPublish(gpu_copy, "generation-copy", {0, 0, 12}) &&
+              streaming.TryPublish(gpu_copy, "generation-copy", {0, 0, 13}) &&
+              streaming.Retire(gpu_copy, {0, 0, 13}) &&
+              streaming.Collect({0, 0, 13}) == 1,
+              "resident GPU copy skipped its queue completion/publication lifecycle");
+        const auto cancelled_copy = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
+            "software-mip-copy:3", "generation-copy-cancel", 100);
+        Check(cancelled_copy && streaming.BeginGpuCopy(cancelled_copy, "generation-copy-cancel") &&
+              streaming.Cancel(cancelled_copy) && streaming.Collect({}) == 1,
+              "unsubmitted resident GPU copy could not be cancelled and collected");
+
         const auto texture = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
                                                "mips:0-3", "generation-d", 100);
         const auto geometry = streaming.Request("render/trunk_0.rpkg",

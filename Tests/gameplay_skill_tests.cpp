@@ -25,6 +25,72 @@ std::size_t CountVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind 
         [kind](const hs::DomainSignal &event) { return event.kind == kind; });
 }
 
+void CheckDerivedFireAreaCadence(hs::GameSimulation &simulation,
+                                 hs::SkillKind skill, std::uint8_t source_upgrade,
+                                 hs::Tick interval)
+{
+    hs::GameReadModelStorage model;
+    const auto fire_area = [&]() -> const hs::AreaView * {
+        hs::CopyReadModelForDevelopment(simulation, model);
+        const auto found = std::ranges::find_if(model.View().areas,
+            [skill, source_upgrade](const hs::AreaView &area) {
+                return area.skill == skill && area.origin == hs::EffectOrigin::Derived &&
+                       area.source_upgrade == source_upgrade;
+            });
+        return found == model.View().areas.end() ? nullptr : &*found;
+    };
+    const hs::AreaView *derived{};
+    for (std::uint32_t tick = 0; tick < 120 && !derived; ++tick)
+    {
+        (void)Tick(simulation);
+        derived = fire_area();
+    }
+    Check(derived != nullptr, "burning skill creates its derived fire area");
+    if (!derived) return;
+    const auto derived_id = derived->id;
+    const auto fire_active_tick = derived->active_tick;
+    const auto expected_damage_count =
+        (derived->expires - fire_active_tick + interval - 1) / interval;
+    Check(!model.View().enemies.empty(), "fire area target remains observable");
+    if (model.View().enemies.empty()) return;
+    auto enemy_health = model.View().enemies.front().health;
+    std::vector<hs::Tick> fire_damage_ticks;
+    bool fire_area_alive = true;
+    for (std::uint32_t tick = 0; tick < 30 && fire_area_alive; ++tick)
+    {
+        (void)Tick(simulation);
+        hs::CopyReadModelForDevelopment(simulation, model);
+        if (!model.View().enemies.empty() && model.View().enemies.front().health < enemy_health)
+        {
+            fire_damage_ticks.push_back(model.View().tick);
+            enemy_health = model.View().enemies.front().health;
+        }
+        fire_area_alive = std::ranges::any_of(model.View().areas,
+            [derived_id](const hs::AreaView &area) { return area.id.value == derived_id.value; });
+    }
+    Check(fire_damage_ticks.size() == expected_damage_count,
+          "derived fire area delivers every scheduled damage tick before retirement");
+    if (!fire_damage_ticks.empty())
+        Check(fire_damage_ticks.front() == fire_active_tick + 1,
+              "directly materialized fire area first damages on the following tick");
+    if (fire_damage_ticks.size() >= 2)
+        Check(fire_damage_ticks[1] - fire_damage_ticks[0] == interval - 1,
+              "first fire-area spacing includes its creation-tick phase");
+    for (std::size_t index = 2; index < fire_damage_ticks.size(); ++index)
+        if (fire_damage_ticks[index] - fire_damage_ticks[index - 1] != interval)
+        {
+            auto diagnostic = std::format(
+                "derived fire area expected later interval {} but damage ticks were", interval);
+            for (const auto tick : fire_damage_ticks)
+                diagnostic += std::format(" {}", tick);
+            Check(false, diagnostic);
+            break;
+        }
+    Check(!fire_area_alive && std::ranges::none_of(model.View().areas,
+        [derived_id](const hs::AreaView &area) { return area.id.value == derived_id.value; }),
+        "derived fire area expires on its authored duration");
+}
+
 } // namespace
 
 void TestSkillMovementPauseAndResume()
@@ -606,6 +672,78 @@ void TestArrowRainTrackingProjectileMoves()
                                                current_projectile->velocity.y)) < 0.0001f,
           "tracking arrow orientation follows its current velocity");
     Check(simulation.Shutdown().Succeeded(), "arrow rain tracking shutdown");
+}
+
+void TestArrowRainFireAreasUseTheirAuthoredInterval()
+{
+    auto data = QuietGameData();
+    auto &arrow_rain = data.skills[static_cast<std::size_t>(hs::SkillKind::ArrowRain)];
+    arrow_rain.duration_ticks = 2;
+    arrow_rain.tick_interval_ticks = 30;
+    arrow_rain.area_radius = 6.0f;
+    auto &fire = data.upgrades.arrow_rain.apply_burn_and_create_fire_areas;
+    fire.radius = 5.0f;
+    fire.duration_ticks = 23;
+    fire.tick_interval_ticks = 5;
+    fire.damage_multiplier_per_tick = 1.0f;
+    fire.maximum_areas_per_cast = 1;
+    data.statuses.first_tick_delay_ticks = 120;
+    data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].health = 1'000'000;
+    data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].move_speed = 0.0f;
+
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0xA11F1u}, data).Succeeded(),
+          "arrow rain fire interval initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::ArrowRain));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::ArrowRain), 3);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {5.0f, 0.0f});
+    hs::HeldInputState held;
+    held.aim_world = {5.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+
+    CheckDerivedFireAreaCadence(simulation, hs::SkillKind::ArrowRain, 3, 5);
+    Check(simulation.Shutdown().Succeeded(), "arrow rain fire interval shutdown");
+}
+
+void TestTrapFireAreasUseTheirAuthoredInterval()
+{
+    auto data = QuietGameData();
+    data.arena_obstacle_count = 0;
+    auto &trap = data.skills[static_cast<std::size_t>(hs::SkillKind::Trap)];
+    trap.activation_delay_ticks = 0;
+    trap.active_duration_ticks = 60;
+    trap.detection_radius = 6.0f;
+    trap.area_radius = 6.0f;
+    auto &fire = data.upgrades.trap.trigger_burn_and_fire_area;
+    fire.area_radius = 5.0f;
+    fire.area_duration_ticks = 23;
+    fire.tick_interval_ticks = 5;
+    fire.damage_multiplier_per_tick = 1.0f;
+    data.statuses.first_tick_delay_ticks = 120;
+    data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].health = 1'000'000;
+    data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].move_speed = 0.0f;
+
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0x7A9F1u}, data).Succeeded(),
+          "trap fire interval initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::Trap));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::Trap), 4);
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {0.5f, 0.0f});
+    CheckDerivedFireAreaCadence(simulation, hs::SkillKind::Trap, 4, 5);
+    Check(simulation.Shutdown().Succeeded(), "trap fire interval shutdown");
 }
 
 void TestProjectileAndAreaVisualTruth()

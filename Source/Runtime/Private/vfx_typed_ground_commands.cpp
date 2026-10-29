@@ -1,6 +1,6 @@
 #include "vfx_typed_ground_commands.hpp"
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -50,6 +50,128 @@ constexpr auto kPickupMagnetIdle = Hash64("particle.pickup.magnet.idle");
 constexpr auto kPickupRelicIdle = Hash64("particle.pickup.relic_chest.idle");
 constexpr auto kLinePayload = Hash32("LineAreaPayload");
 constexpr auto kConePayload = Hash32("ConePayload");
+
+class GroundCommandOutput
+{
+  public:
+    explicit GroundCommandOutput(std::vector<VfxTypedGroundCommand> &output) noexcept
+        : typed_(&output) {}
+    explicit GroundCommandOutput(std::vector<VfxGroundSpawnInput> &output) noexcept
+        : render_(&output) {}
+    GroundCommandOutput(std::vector<VfxGroundSpawnInput> &output,
+                        std::vector<float> &frame_gap_angles) noexcept
+        : render_(&output), frame_gap_angles_(&frame_gap_angles) {}
+
+    [[nodiscard]] std::size_t Size() const noexcept
+    { return typed_ ? typed_->size() : render_->size(); }
+
+    void Resize(std::size_t size)
+    {
+        if (typed_) typed_->resize(size);
+        else render_->resize(size);
+    }
+
+    void Push(VfxTypedGroundCommand &&command)
+    {
+        if (typed_) typed_->push_back(std::move(command));
+        else render_->push_back({std::move(command.command), command.additive, command.stable_id,
+            command.effect_handle, command.source_visual_kind, command.motion, command.gradient_row,
+            command.hdr, std::move(command.geometry)});
+    }
+
+    void AppendPulseRows(std::span<VfxTypedGroundCommand> commands)
+    {
+        if (typed_)
+        {
+            typed_->insert(typed_->end(), commands.begin(), commands.end());
+            return;
+        }
+        for (auto &command : commands) Push(std::move(command));
+    }
+
+    void BeginInput(const VfxRingGapsPayload *ring) noexcept
+    {
+        current_ring_ = ring;
+        current_gap_first_ = 0;
+        current_gap_count_ = 0;
+        current_gap_ready_ = false;
+    }
+
+    void SetRingGapSlice(VfxGroundGeometry &geometry, const VfxRingGapsPayload &ring)
+    {
+        geometry.uniform_gaps = ring.uniform_gaps;
+        if (ring.uniform_gaps.Active()) return;
+        if (!frame_gap_angles_)
+        {
+            geometry.gap_angles_radians.reserve(ring.GapCount());
+            for (std::size_t index = 0; index < ring.GapCount(); ++index)
+            {
+                const float degrees = ring.GapAngleDegrees(index);
+                float wrapped = std::fmod(degrees, 360.0f);
+                if (wrapped < 0.0f) wrapped += 360.0f;
+                geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
+            }
+            return;
+        }
+        if (current_gap_ready_ && current_ring_ == &ring)
+        {
+            geometry.frame_gap_first = current_gap_first_;
+            geometry.frame_gap_count = current_gap_count_;
+            return;
+        }
+        const auto count = ring.GapCount();
+        if (count == 0)
+        {
+            current_ring_ = &ring;
+            current_gap_first_ = current_gap_count_ = 0;
+            current_gap_ready_ = true;
+            return;
+        }
+        if (count > UINT32_MAX || frame_gap_angles_->size() > UINT32_MAX ||
+            count > UINT32_MAX - frame_gap_angles_->size())
+            throw std::length_error("Ground gap pool exceeds native index capacity.");
+        const auto first = static_cast<std::uint32_t>(frame_gap_angles_->size());
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const float degrees = ring.GapAngleDegrees(index);
+            float wrapped = std::fmod(degrees, 360.0f);
+            if (wrapped < 0.0f) wrapped += 360.0f;
+            frame_gap_angles_->push_back(wrapped * (3.14159265358979323846f / 180.0f));
+        }
+        current_ring_ = &ring;
+        current_gap_first_ = first;
+        current_gap_count_ = static_cast<std::uint32_t>(count);
+        current_gap_ready_ = true;
+        geometry.frame_gap_first = first;
+        geometry.frame_gap_count = static_cast<std::uint32_t>(count);
+    }
+
+    void MarkWaveTimer(std::size_t first, std::uint8_t source_visual_kind)
+    {
+        if (typed_)
+            for (std::size_t index = first; index < typed_->size(); ++index)
+            {
+                auto &command = (*typed_)[index];
+                command.source_visual_kind = source_visual_kind;
+                command.command.lifetime_min = command.command.lifetime_max = 2.0f / 60.0f;
+            }
+        else
+            for (std::size_t index = first; index < render_->size(); ++index)
+            {
+                auto &command = (*render_)[index];
+                command.source_visual_kind = source_visual_kind;
+                command.command.lifetime_min = command.command.lifetime_max = 2.0f / 60.0f;
+            }
+    }
+
+  private:
+    std::vector<VfxTypedGroundCommand> *typed_{};
+    std::vector<VfxGroundSpawnInput> *render_{};
+    std::vector<float> *frame_gap_angles_{};
+    const VfxRingGapsPayload *current_ring_{};
+    std::uint32_t current_gap_first_{}, current_gap_count_{};
+    bool current_gap_ready_{};
+};
 
 bool Finite(Float3 value) noexcept
 {
@@ -144,7 +266,7 @@ struct GroundOwner
 
 void AppendSourceOutputs(const VfxImage &image, std::span<const VfxGroundRecipe> recipes,
                          const GroundOwner &owner,
-                         std::vector<VfxTypedGroundCommand> &result,
+                         GroundCommandOutput &result,
                          VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto cooked = image.program;
@@ -241,18 +363,7 @@ void AppendSourceOutputs(const VfxImage &image, std::span<const VfxGroundRecipe>
             item.geometry.outer_radius = owner.ring_gaps->outer_radius;
             item.geometry.edge_width = width;
             item.geometry.gap_half_angle_radians = owner.ring_gaps->gap_half_width_degrees * (3.14159265358979323846f / 180.0f);
-            item.geometry.uniform_gaps = owner.ring_gaps->uniform_gaps;
-            if (!item.geometry.uniform_gaps.Active())
-            {
-                item.geometry.gap_angles_radians.reserve(owner.ring_gaps->GapCount());
-                for (std::size_t i = 0; i < owner.ring_gaps->GapCount(); ++i)
-                {
-                    const float degrees = owner.ring_gaps->GapAngleDegrees(i);
-                    float wrapped = std::fmod(degrees, 360.0f);
-                    if (wrapped < 0) wrapped += 360.0f;
-                    item.geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
-                }
-            }
+            result.SetRingGapSlice(item.geometry, *owner.ring_gaps);
         }
         if(owner.is_circle_preview && (preview || ticks))
         {
@@ -284,14 +395,14 @@ void AppendSourceOutputs(const VfxImage &image, std::span<const VfxGroundRecipe>
         }
         command.start_color = command.end_color = color;
         command.seed = owner.stable_seed;
-        result.push_back(std::move(item));
+        result.Push(std::move(item));
     }
 }
 void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effect,
                             const VfxEventInput &input, float age,
                             std::span<const VfxGroundRecipe> recipes,
                             const std::array<std::span<const VfxGroundRecipe>, 2> &source_recipes,
-                            std::vector<VfxTypedGroundCommand> &result,
+                            GroundCommandOutput &result,
                             VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto cooked=image.program;
@@ -346,7 +457,7 @@ void AppendWaveGroundOutputs(const VfxImage &image, const VfxEffectRecord &effec
 
 void AppendExpandingRingOutputs(const VfxEventInput &input, float age, float envelope,
                                 float duration, std::span<const VfxGroundRecipe> recipes,
-                                std::vector<VfxTypedGroundCommand> &result,
+                                GroundCommandOutput &result,
                                 VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
@@ -401,7 +512,7 @@ void AppendExpandingRingOutputs(const VfxEventInput &input, float age, float env
         command.stretch = radius / size;
         command.start_color = command.end_color = color;
         command.seed = input.stable_seed;
-        result.push_back(item);
+        result.Push(std::move(item));
     }
 }
 bool HexMask(const VfxImage &image,const VfxGroundRecipe &recipe,
@@ -424,7 +535,7 @@ bool HexMask(const VfxImage &image,const VfxGroundRecipe &recipe,
 
 void AppendHexConstellationOutputs(const VfxImage &image, const VfxEventInput &input, float age, float envelope,
                                    float duration, std::span<const VfxGroundRecipe> recipes,
-                                   std::vector<VfxTypedGroundCommand> &result)
+                                   GroundCommandOutput &result)
 {
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
@@ -483,12 +594,12 @@ void AppendHexConstellationOutputs(const VfxImage &image, const VfxEventInput &i
         if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
             !std::isfinite(command.start_color.w)) continue;
         command.seed = input.stable_seed;
-        result.push_back(item);
+        result.Push(std::move(item));
     }
 }
 void AppendBossSignatureOutputs(const VfxEventInput &input, float age, float envelope,
                                 float duration, std::span<const VfxGroundRecipe> recipes,
-                                std::vector<VfxTypedGroundCommand> &result)
+                                GroundCommandOutput &result)
 {
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
@@ -530,18 +641,7 @@ void AppendBossSignatureOutputs(const VfxEventInput &input, float age, float env
             geometry.inner_radius = ring->inner_radius;
             geometry.gap_half_angle_radians = ring->gap_half_width_degrees *
                 (3.14159265358979323846f / 180.0f);
-            geometry.uniform_gaps = ring->uniform_gaps;
-            if (!geometry.uniform_gaps.Active())
-            {
-                geometry.gap_angles_radians.reserve(ring->GapCount());
-                for (std::size_t i = 0; i < ring->GapCount(); ++i)
-                {
-                    const float degrees = ring->GapAngleDegrees(i);
-                    float wrapped = std::fmod(degrees, 360.0f);
-                    if (wrapped < 0.0f) wrapped += 360.0f;
-                    geometry.gap_angles_radians.push_back(wrapped * (3.14159265358979323846f / 180.0f));
-                }
-            }
+            result.SetRingGapSlice(geometry, *ring);
         }
         if (cone)
         {
@@ -572,12 +672,12 @@ void AppendBossSignatureOutputs(const VfxEventInput &input, float age, float env
         if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
             !std::isfinite(command.start_color.w)) continue;
         command.seed = input.stable_seed;
-        result.push_back(std::move(item));
+        result.Push(std::move(item));
     }
 }
 void AppendRemainingEventGroundOutputs(const VfxEventInput &input, float age, float envelope,
                                        float duration, std::span<const VfxGroundRecipe> recipes,
-                                       std::vector<VfxTypedGroundCommand> &result)
+                                       GroundCommandOutput &result)
 {
     const auto *point = std::get_if<VfxPointPayload>(&input.payload);
     const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
@@ -675,7 +775,7 @@ void AppendRemainingEventGroundOutputs(const VfxEventInput &input, float age, fl
         if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
             !std::isfinite(command.start_color.w)) continue;
         command.seed = input.stable_seed;
-        result.push_back(item);
+        result.Push(std::move(item));
     }
 }
 struct ChargedPulseOutput
@@ -733,7 +833,7 @@ void AppendChargedPulseGroundOutputs(const VfxImage &image,
                                      const VfxEventInput &input, float age,
                                      std::span<const VfxGroundRecipe> recipes,
                                      const std::array<std::span<const VfxGroundRecipe>, 2> &source_recipes,
-                                     std::vector<VfxTypedGroundCommand> &result,
+                                     GroundCommandOutput &result,
                                      VfxGroundBirthSuppressionFacts *birth_facts = nullptr)
 {
     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
@@ -804,12 +904,12 @@ void AppendChargedPulseGroundOutputs(const VfxImage &image,
         command.seed = input.stable_seed;
         commands[index] = item;
     }
-    result.insert(result.end(), commands.begin(), commands.begin() + output_count);
+    result.AppendPulseRows(std::span<VfxTypedGroundCommand>(commands.data(), output_count));
 }
 
 void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                                   const VfxPersistentInput &input, Tick current_tick,
-                                  std::vector<VfxTypedGroundCommand> &result)
+                                  GroundCommandOutput &result)
 {
     const auto cooked=image.program;
     if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size() ||
@@ -945,7 +1045,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                              command.start_color.z}) ||
                     !std::isfinite(command.start_color.w)) continue;
                 command.seed = input.stable_seed;
-                result.push_back(item);
+                result.Push(std::move(item));
                 continue;
             }
             if (effect_id == kPlayerInvulnerable)
@@ -994,7 +1094,7 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
                     recipe.rgb.x * recipe.hdr, recipe.rgb.y * recipe.hdr,
                     recipe.rgb.z * recipe.hdr, recipe.alpha * envelope};
                 command.seed = input.stable_seed;
-                result.push_back(item);
+                result.Push(std::move(item));
                 continue;
             }
             const bool teeth=recipe.kind==VfxGroundRecipeKind::BrokenCrown;
@@ -1044,14 +1144,14 @@ void AppendPersistentEntityGroundOutputs(const VfxImage &image,
             if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
                 !std::isfinite(command.start_color.w)) continue;
             command.seed = input.stable_seed;
-            result.push_back(item);
+            result.Push(std::move(item));
         }
     }
 }
 void AppendPersistentChevronOutputs(std::span<const VfxGroundRecipe> recipes,
                                     const VfxPersistentInput &input,
                                     const VfxLinePayload &line, Tick current_tick,
-                                    std::vector<VfxTypedGroundCommand> &result)
+                                    GroundCommandOutput &result)
 {
     if (recipes.empty()) return;
     const auto &source = recipes.front();
@@ -1126,11 +1226,11 @@ void AppendPersistentChevronOutputs(std::span<const VfxGroundRecipe> recipes,
         if (!Finite({command.start_color.x, command.start_color.y, command.start_color.z}) ||
             !std::isfinite(command.start_color.w)) continue;
         command.seed = input.stable_seed;
-        result.push_back(item);
+        result.Push(std::move(item));
     }
 }
 void AppendSafeSector(const VfxImage &image, const VfxEventInput &input,
-                      double tick, std::vector<VfxTypedGroundCommand> &result)
+                      double tick, GroundCommandOutput &result)
 {
     const auto cooked=image.program;
     if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size()) return;
@@ -1191,7 +1291,7 @@ void AppendSafeSector(const VfxImage &image, const VfxEventInput &input,
                 recipe.rgb.z*recipe.hdr, recipe.alpha*envelope};
             if (!Finite({command.start_color.x,command.start_color.y,command.start_color.z}) || !std::isfinite(command.start_size_max)) continue;
             command.seed = input.stable_seed;
-            result.push_back(item);
+            result.Push(std::move(item));
         }
     }
 }
@@ -1199,11 +1299,12 @@ void AppendPersistentGroundCommands(
     const VfxImage &image,
     std::span<const VfxPersistentInput> inputs,
     Tick current_tick,
-    std::vector<VfxTypedGroundCommand> &result)
+    GroundCommandOutput &result)
 {
     const auto cooked=image.program;
     for (const auto &input : inputs)
     {
+        result.BeginInput(std::get_if<VfxRingGapsPayload>(&input.payload));
         if (input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::WaveTimer))
         {
             if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size() ||
@@ -1232,14 +1333,10 @@ void AppendPersistentGroundCommands(
             std::array<std::span<const VfxGroundRecipe>, 2> source_recipes{};
             for (std::size_t offset = 0; offset < source_recipes.size(); ++offset)
                 source_recipes[offset] = SourceRecipes(recipes, source_first + offset);
-            const auto first = result.size();
+            const auto first = result.Size();
             AppendWaveGroundOutputs(image, effect, timer, input.normalized_age,
                                     recipes, source_recipes, result);
-            for (std::size_t index = first; index < result.size(); ++index)
-            {
-                result[index].source_visual_kind = input.source_visual_kind;
-                result[index].command.lifetime_min = result[index].command.lifetime_max = 2.0f / 60.0f;
-            }
+            result.MarkWaveTimer(first, input.source_visual_kind);
             continue;
         }
         if (std::holds_alternative<VfxEntityPayload>(input.payload))
@@ -1343,12 +1440,13 @@ void AppendEventGroundCommands(
     const VfxImage &image,
     VfxEventView inputs,
     double current_tick,
-    std::vector<VfxTypedGroundCommand> &result,
+    GroundCommandOutput &result,
     std::vector<VfxGroundBirthSuppressionFacts> *birth_facts)
 {
     const auto cooked=image.program;
     for (const auto &input : inputs)
     {
+        result.BeginInput(std::get_if<VfxRingGapsPayload>(&input.payload));
         VfxGroundBirthSuppressionFacts *event_birth_facts{};
         if (birth_facts)
         {
@@ -1535,9 +1633,36 @@ void AppendVfxTypedGroundCommands(const VfxImage &image,
     std::span<const VfxPersistentInput> inputs, Tick current_tick,
     std::vector<VfxTypedGroundCommand> &result)
 {
-    const auto first = result.size();
-    try { AppendPersistentGroundCommands(image, inputs, current_tick, result); }
-    catch (...) { result.resize(first); throw; }
+    GroundCommandOutput output(result);
+    const auto first = output.Size();
+    try { AppendPersistentGroundCommands(image, inputs, current_tick, output); }
+    catch (...) { output.Resize(first); throw; }
+}
+
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxGroundSpawnInput> &result)
+{
+    GroundCommandOutput output(result);
+    const auto first = output.Size();
+    try { AppendPersistentGroundCommands(image, inputs, current_tick, output); }
+    catch (...) { output.Resize(first); throw; }
+}
+
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles)
+{
+    GroundCommandOutput output(result, frame_gap_angles);
+    const auto first = output.Size();
+    const auto first_gap = frame_gap_angles.size();
+    try { AppendPersistentGroundCommands(image, inputs, current_tick, output); }
+    catch (...)
+    {
+        output.Resize(first);
+        frame_gap_angles.resize(first_gap);
+        throw;
+    }
 }
 
 std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
@@ -1551,9 +1676,35 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
 void AppendVfxTypedEventGroundCommands(const VfxImage &image,
     VfxEventView inputs, double current_tick, std::vector<VfxTypedGroundCommand> &result)
 {
-    const auto first = result.size();
-    try { AppendEventGroundCommands(image, inputs, current_tick, result, nullptr); }
-    catch (...) { result.resize(first); throw; }
+    GroundCommandOutput output(result);
+    const auto first = output.Size();
+    try { AppendEventGroundCommands(image, inputs, current_tick, output, nullptr); }
+    catch (...) { output.Resize(first); throw; }
+}
+
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick, std::vector<VfxGroundSpawnInput> &result)
+{
+    GroundCommandOutput output(result);
+    const auto first = output.Size();
+    try { AppendEventGroundCommands(image, inputs, current_tick, output, nullptr); }
+    catch (...) { output.Resize(first); throw; }
+}
+
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick,
+    std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles)
+{
+    GroundCommandOutput output(result, frame_gap_angles);
+    const auto first = output.Size();
+    const auto first_gap = frame_gap_angles.size();
+    try { AppendEventGroundCommands(image, inputs, current_tick, output, nullptr); }
+    catch (...)
+    {
+        output.Resize(first);
+        frame_gap_angles.resize(first_gap);
+        throw;
+    }
 }
 
 std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
@@ -1571,6 +1722,7 @@ void AppendVfxTypedEventGroundBirthSuppression(
     std::vector<VfxGroundBirthSuppressionFacts> &result)
 {
     std::vector<VfxTypedGroundCommand> discard;
+    GroundCommandOutput output(discard);
     const auto first = result.size();
     if (inputs.size() > result.max_size() - first)
         throw std::length_error("too many VFX ground birth facts");
@@ -1579,7 +1731,7 @@ void AppendVfxTypedEventGroundBirthSuppression(
     {
         for (const auto &input : inputs)
             AppendEventGroundCommands(image, std::span(&input, 1),
-                                      static_cast<double>(input.event_tick), discard, &result);
+                                      static_cast<double>(input.event_tick), output, &result);
     }
     catch (...) { result.resize(first); throw; }
 }

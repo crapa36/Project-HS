@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/game_domain/arena_boundary.hpp>
 #include <hs/game_domain/arena_obstacle.hpp>
 

@@ -517,6 +517,77 @@ void TestTenMinuteBossGroundAreasStaySeparated()
     Check(ring_simulation.Shutdown().Succeeded(), "zero-gap shockwave collision shutdown");
 }
 
+void TestBossAreaUsesAuthoredTickInterval()
+{
+    auto data = QuietGameData();
+    data.arena_obstacle_count = 0;
+    data.stats.base_maximum_hp = 1'000'000.0f;
+    data.stats.base_current_hp = 1'000'000.0f;
+    data.boss_common.initial_pattern_delay_ticks = 1;
+    auto &boss = data.bosses[static_cast<std::size_t>(hs::BossKind::FiveMinute)];
+    boss.movement_speed = 0.0f;
+    boss.recovery_ticks = 1'000;
+    boss.preferred_distance_near = 100.0f;
+    boss.preferred_distance_far = 200.0f;
+    boss.pattern_count = 1;
+    boss.patterns[0] = {};
+    boss.patterns[0].logic = hs::BossPatternLogic::PredictedPositionGroundAreas;
+    boss.patterns[0].phase = 1;
+    boss.patterns[0].telegraph_duration_ticks = 1;
+    boss.patterns[0].area_count = 1;
+    boss.patterns[0].radius = 8.0f;
+    boss.patterns[0].duration_ticks = 23;
+    boss.patterns[0].tick_interval_ticks = 7;
+    boss.patterns[0].damage_per_tick = 1;
+
+    hs::SimulationConfig config{0xA8EAu};
+    config.scenario = {.player_stationary = true,
+                       .player_invulnerable = false,
+                       .progression_enabled = false};
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize(config, data).Succeeded(),
+          "custom boss area interval initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::FiveMinute));
+
+    hs::EntityId area_id{};
+    std::vector<std::pair<hs::Sequence, hs::Tick>> area_ticks;
+    std::vector<hs::Sequence> seen_sequences;
+    const auto collect_area_ticks = [&] {
+        for (const auto &signal : simulation.PendingDomainSignals())
+        {
+            if (signal.kind != hs::DomainSignalKind::BossAreaTicked ||
+                signal.geometry.source_id == 0 ||
+                std::ranges::find(seen_sequences, signal.sequence) != seen_sequences.end())
+                continue;
+            if (area_id.value == 0) area_id = {signal.geometry.source_id};
+            if (signal.geometry.source_id != area_id.value) continue;
+            seen_sequences.push_back(signal.sequence);
+            area_ticks.emplace_back(signal.sequence, signal.geometry.start_tick);
+        }
+    };
+    for (std::uint32_t tick = 0; tick < 2'000 && area_ticks.empty(); ++tick)
+    {
+        (void)Tick(simulation);
+        collect_area_ticks();
+    }
+    Check(area_id.value != 0 && !area_ticks.empty(),
+          "custom boss area emits its first tick");
+    for (std::uint32_t tick = 0; tick < 26; ++tick)
+    {
+        (void)Tick(simulation);
+        collect_area_ticks();
+    }
+    Check(area_ticks.size() == 4,
+          "boss area ticks throughout its authored duration then exits");
+    for (std::size_t index = 1; index < area_ticks.size(); ++index)
+        Check(area_ticks[index].second - area_ticks[index - 1].second == 7,
+              "boss area uses its nondefault seven-tick interval");
+    Check(simulation.GetObservation().enemy_area_count == 0,
+          "boss area is removed after its authored duration");
+    Check(simulation.Shutdown().Succeeded(), "custom boss area interval shutdown");
+}
+
 void TestRangedWarningAndExplosiveArea()
 {
     auto ranged_data = QuietGameData();

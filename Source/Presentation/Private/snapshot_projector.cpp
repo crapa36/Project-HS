@@ -1,4 +1,5 @@
 #include <hs/presentation/projector.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/core/result.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/environment_layout.hpp>

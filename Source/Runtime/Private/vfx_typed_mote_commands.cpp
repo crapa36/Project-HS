@@ -1,7 +1,7 @@
 #include "vfx_typed_mote_commands.hpp"
 #include "vfx_generation_rebind.hpp"
 #include "vfx_workspace_size.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>

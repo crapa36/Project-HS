@@ -1,6 +1,7 @@
 #include "renderer_texture_streaming.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <bit>
 #include <cstring>
@@ -63,6 +64,7 @@ struct MipBacking
 struct UploadBatch
 {
     ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Resource> software_copy_source;
     AllocationResource candidate_owner, upload;
     ResidencyTicket upload_ticket;
     std::vector<MipBacking> maps;
@@ -74,7 +76,7 @@ struct UploadBatch
     std::uint32_t target_mip{};
     std::size_t transaction_chunk_end{};
     CompletionSet completion;
-    bool reserved{}, software_upload_window{}, software_final_chunk{}, scheduled{}, started{}, submitted{};
+    bool reserved{}, software_upload_window{}, software_final_chunk{}, software_copy{}, scheduled{}, started{}, submitted{};
 };
 struct SoftwareUploadFootprint
 {
@@ -143,6 +145,11 @@ struct TextureOwner
         return reserved_published || software.resource.Get() != nullptr;
     }
 };
+[[nodiscard]] bool IsSoftwareCopyCoarsening(const TextureOwner &texture) noexcept
+{
+    return texture.software_transaction && !texture.request_reserved && texture.software.resource &&
+        texture.transaction_target_mip > texture.first_mip;
+}
 bool BuildSoftwareUploadWindowPlan(ID3D12Device *device, const TextureOwner &texture,
     std::uint32_t target, std::vector<std::uint64_t> &footprint_bytes,
     std::vector<SoftwareUploadFootprint> &native_plan,
@@ -374,6 +381,7 @@ struct RendererTextureStreaming::Impl
         return minimum_budget_bytes;
     }
     Result Prepare(TextureOwner &, std::uint32_t, ResidencyManager &, StreamingManager &);
+    Result PrepareSoftwareCopy(TextureOwner &, ResidencyManager &, StreamingManager &);
     Result EnsureSoftwareUploadWindow(TextureOwner &, ResidencyManager &, bool &ready);
     std::uint64_t PhysicalBytes(bool include_uploads) const noexcept;
 };
@@ -972,6 +980,163 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
     }
     catch (...) { rollback(); throw; }
 }
+
+Result RendererTextureStreaming::Impl::PrepareSoftwareCopy(TextureOwner &texture,
+    ResidencyManager &residency, StreamingManager &streaming)
+{
+    if (!IsSoftwareCopyCoarsening(texture) || !texture.request ||
+        !texture.software.resource || !texture.software.allocation || !texture.software_ticket ||
+        static_cast<bool>(texture.software_candidate.resource) !=
+            static_cast<bool>(texture.software_candidate_ticket) ||
+        texture.transaction_target_mip >= texture.registration.description.mip_count ||
+        texture.transaction_target_mip > texture.tail_mip ||
+        texture.first_mip >= texture.transaction_target_mip ||
+        texture.request_reserved || !texture.request_ranges.empty() ||
+        !texture.request_subresources.empty() || !texture.transaction_subresources.empty() ||
+        texture.read_ticket || texture.decode_ticket)
+        return Failure("Software coarsening copy is missing its published source or fixed target.");
+
+    const auto source_description = texture.software.resource->GetDesc();
+    const auto expected_source = Description(texture.registration.description, texture.first_mip);
+    const auto destination_description = Description(texture.registration.description,
+        texture.transaction_target_mip);
+    const auto same_texture_shape = [](const D3D12_RESOURCE_DESC &actual,
+                                       const D3D12_RESOURCE_DESC &expected) noexcept {
+        return actual.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+            actual.Dimension == expected.Dimension && actual.Width == expected.Width &&
+            actual.Height == expected.Height && actual.DepthOrArraySize == expected.DepthOrArraySize &&
+            actual.MipLevels == expected.MipLevels && actual.Format == expected.Format &&
+            actual.SampleDesc.Count == expected.SampleDesc.Count &&
+            actual.SampleDesc.Quality == expected.SampleDesc.Quality;
+    };
+    if (!same_texture_shape(source_description, expected_source) ||
+        !destination_description.MipLevels)
+        return Failure("Published software texture does not match its coarsening copy range.");
+    const auto source_subresources = static_cast<std::uint64_t>(source_description.DepthOrArraySize) *
+        source_description.MipLevels;
+    const auto destination_subresources = static_cast<std::uint64_t>(destination_description.DepthOrArraySize) *
+        destination_description.MipLevels;
+    constexpr auto max_subresource_count = static_cast<std::uint64_t>(UINT32_MAX) + 1u;
+    if (!source_subresources || source_subresources > max_subresource_count ||
+        !destination_subresources || destination_subresources > max_subresource_count)
+        return Failure("Software coarsening copy subresource range overflowed.");
+
+    const auto target = texture.transaction_target_mip;
+    const auto candidate_cost = Cost(texture, target);
+    if (candidate_cost == UINT64_MAX || !candidate_cost ||
+        (texture.software_candidate.resource && (!texture.software_candidate.allocation ||
+            texture.software_candidate.allocation->GetSize() > candidate_cost)))
+        return Failure("Software coarsening candidate has no valid native allocation cost.");
+    const auto candidate_bytes = texture.software_candidate.resource ? 0u : candidate_cost;
+    if (!texture.software_candidate.resource)
+        SampleAllocatorStats(residency);
+    ScopedGpuAdmission admission(residency, candidate_bytes, 0);
+    if (candidate_bytes && !admission) return Result::Success();
+
+    const bool candidate_created_here = !texture.software_candidate.resource;
+    const auto rollback = [&] {
+        if (candidate_created_here)
+        {
+            const auto ticket = texture.software_candidate_ticket;
+            texture.software_candidate_ticket = {};
+            texture.software_candidate.Reset();
+            if (ticket) static_cast<void>(residency.ReleaseNow(ticket));
+        }
+    };
+    try
+    {
+        if (candidate_created_here)
+        {
+            if (auto created = Create(texture.software_candidate, destination_description,
+                    D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON); !created)
+            {
+                rollback();
+                return created;
+            }
+            if (!texture.software_candidate.allocation ||
+                texture.software_candidate.allocation->GetSize() > Cost(texture, target))
+            {
+                rollback();
+                return Failure("Software coarsening candidate exceeded its admitted native size.");
+            }
+            texture.software_candidate_ticket = RegisterNativeAllocation(residency,
+                ResidencyCategory::Texture, texture.software_candidate.allocation->GetSize(), false,
+                D3D12_HEAP_TYPE_DEFAULT);
+            if (!texture.software_candidate_ticket)
+            {
+                rollback();
+                return Failure("Could not account the software coarsening candidate.");
+            }
+        }
+
+        auto batch = std::make_shared<UploadBatch>();
+        batch->resource = texture.software_candidate.resource;
+        batch->software_copy_source = texture.software.resource;
+        batch->request = texture.request;
+        batch->target_mip = target;
+        batch->software_copy = true;
+        batch->software_final_chunk = true;
+
+        HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+            IID_PPV_ARGS(&batch->allocator));
+        if (SUCCEEDED(hr))
+            hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
+                batch->allocator.Get(), nullptr, IID_PPV_ARGS(&batch->list));
+        if (FAILED(hr))
+        {
+            rollback();
+            return NativeFailure("Create software texture copy list", hr);
+        }
+        const auto source_mips = static_cast<std::uint64_t>(source_description.MipLevels);
+        const auto destination_mips = static_cast<std::uint64_t>(destination_description.MipLevels);
+        for (std::uint32_t slice = 0; slice < texture.registration.description.array_size; ++slice)
+            for (std::uint32_t mip = target; mip < texture.registration.description.mip_count; ++mip)
+            {
+                const auto source_index = static_cast<std::uint64_t>(slice) * source_mips +
+                    (mip - texture.first_mip);
+                const auto destination_index = static_cast<std::uint64_t>(slice) * destination_mips +
+                    (mip - target);
+                if (source_index >= source_subresources || destination_index >= destination_subresources ||
+                    source_index > UINT32_MAX || destination_index > UINT32_MAX)
+                {
+                    rollback();
+                    return Failure("Software coarsening copy subresource index is out of range.");
+                }
+                D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+                source.pResource = batch->software_copy_source.Get();
+                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                source.SubresourceIndex = static_cast<UINT>(source_index);
+                destination.pResource = batch->resource.Get();
+                destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                destination.SubresourceIndex = static_cast<UINT>(destination_index);
+                batch->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            }
+        hr = batch->list->Close();
+        if (FAILED(hr))
+        {
+            rollback();
+            return NativeFailure("Close software texture copy list", hr);
+        }
+
+        // Reserve publication retirement before the copy can be submitted.
+        retired.reserve(retired.size() + textures.size());
+        if (!streaming.BeginGpuCopy(texture.request, texture.registration.generation))
+        {
+            rollback();
+            return Failure("Software texture copy request was stale or invalid.");
+        }
+        texture.pending = std::move(batch);
+        texture.pending->candidate_owner = std::move(texture.software_candidate);
+        admission.Complete();
+        return Result::Success();
+    }
+    catch (...)
+    {
+        rollback();
+        throw;
+    }
+}
+
 Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &completed,
     RendererAssetIo &io, StreamingManager &streaming, ResidencyManager &residency)
 {
@@ -1208,6 +1373,13 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         if (texture.registration.pinned || texture.pending) continue;
         const bool fallback_target = texture.desired_mip == texture.registration.fallback_first_mip;
         const bool coarsening = texture.desired_mip > texture.resident_mip;
+        // A requested-but-not-submitted GPU copy borrows the published source.
+        // If the existing fallback/pressure policy drops that source, cancel
+        // this copy request first so the normal payload path can rebuild from
+        // the fallback instead of using a stale source plan.
+        if (coarsening && (fallback_target || global_pressure) &&
+            IsSoftwareCopyCoarsening(texture))
+            abandon_software_transaction(texture);
         if (!texture.reserved && texture.software.resource && coarsening &&
             (fallback_target || global_pressure))
         {
@@ -1322,12 +1494,13 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             abandon_software_transaction(texture);
             continue;
         }
-        const auto target_fit = texture.software_transaction
+        const bool software_copy_coarsening = IsSoftwareCopyCoarsening(texture);
+        const auto target_fit = texture.software_transaction && !software_copy_coarsening
             ? TextureTargetFitsHost(texture, texture.transaction_target_mip, host_budget_snapshot)
             : HostTargetFit::Fits;
         if (target_fit == HostTargetFit::Invalid)
             return Failure("Selected texture authenticated host range metadata is invalid.");
-        if (texture.software_transaction && target_fit == HostTargetFit::NoFit)
+        if (texture.software_transaction && !software_copy_coarsening && target_fit == HostTargetFit::NoFit)
         {
             abandon_software_transaction(texture);
             continue;
@@ -1367,12 +1540,13 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             abandon_software_transaction(texture);
             continue;
         }
-        const auto target_fit = texture.software_transaction
+        const bool software_copy_coarsening = IsSoftwareCopyCoarsening(texture);
+        const auto target_fit = texture.software_transaction && !software_copy_coarsening
             ? TextureTargetFitsHost(texture, texture.transaction_target_mip, host_budget_snapshot)
             : HostTargetFit::Fits;
         if (target_fit == HostTargetFit::Invalid)
             return Failure("Selected texture authenticated host range metadata is invalid.");
-        if (texture.software_transaction && target_fit == HostTargetFit::NoFit)
+        if (texture.software_transaction && !software_copy_coarsening && target_fit == HostTargetFit::NoFit)
         {
             const auto *page = texture.request ? streaming.Find(texture.request) : nullptr;
             if (!texture.request || (page && page->state != StreamingPageState::Reading &&
@@ -1410,12 +1584,14 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 texture.request_reserved = false;
             }
             const auto request = streaming.Request(texture.registration.logical_id,
-                "texture-package", texture.registration.generation, texture.priority);
+                IsSoftwareCopyCoarsening(texture) ? "resident-software-mip-copy" : "texture-package",
+                texture.registration.generation, texture.priority);
             if (!request) return Failure("Could not register selected texture mip demand.");
             texture.request = request;
             ++texture.requests;
             texture.request_ranges.clear(); texture.request_subresources.clear();
-            if (!texture.ranged_descriptor.subresources.empty())
+            const bool software_copy_coarsening = IsSoftwareCopyCoarsening(texture);
+            if (!texture.ranged_descriptor.subresources.empty() && !software_copy_coarsening)
             {
                 const auto &descriptor = texture.ranged_descriptor;
                 if (!continuing_software)
@@ -1448,14 +1624,22 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 if (!texture.request_reserved && texture.transaction_subresources.empty())
                     return Failure("Software texture replacement has no required mip ranges.");
             }
-            if (!MetadataReservationBytes(texture, texture.metadata_reservation_bytes))
-                return Failure("Selected texture prepared metadata size overflow.");
-            if (!texture.decode_ticket) texture.metadata_ticket_committed = false;
+            if (!software_copy_coarsening)
+            {
+                if (!MetadataReservationBytes(texture, texture.metadata_reservation_bytes))
+                    return Failure("Selected texture prepared metadata size overflow.");
+                if (!texture.decode_ticket) texture.metadata_ticket_committed = false;
+            }
             // Each transaction owns a fixed target and only its authenticated subresource ranges.
         }
         const auto *page = streaming.Find(texture.request);
         if (!page) return Failure("Selected texture request ledger disappeared.");
         static_cast<void>(streaming.UpdatePriority(texture.request, texture.priority));
+        if (page->state == StreamingPageState::Requested && IsSoftwareCopyCoarsening(texture))
+        {
+            if (auto result = impl_->PrepareSoftwareCopy(texture, residency, streaming); !result) return result;
+            continue;
+        }
         if (page->state == StreamingPageState::Requested && texture.software_transaction &&
             !texture.ranged_descriptor.subresources.empty() &&
             !texture.software_upload_window.resource)
@@ -1626,6 +1810,7 @@ bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
             if(entry.separate_target!=(batch->resource.Get()!=view.resource)||
                 (entry.separate_target&&!entry.candidate)||
                 entry.reserved!=batch->reserved||entry.copy_upload!=bool(batch->upload.resource)||
+                entry.software_copy!=batch->software_copy||
                 entry.target_mip!=batch->target_mip||entry.map_count!=batch->maps.size()||
                 entry.unmap_count!=batch->unmaps.size()||
                 entry.pass_id!=first_pass+index)return false;
@@ -1700,6 +1885,10 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
         auto version = graph.Version(handle); const auto batch = texture.pending;
         if (batch && !batch->submitted)
         {
+            if (batch->software_copy && (batch->reserved || batch->upload.resource ||
+                batch->software_copy_source.Get() != view.resource ||
+                batch->resource.Get() == view.resource))
+                return Failure("Software texture copy lost its published source or separate candidate.");
             auto target = handle;
             if (batch->resource.Get() != view.resource)
             {
@@ -1722,6 +1911,7 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
                 capture->pending=true;capture->separate_target=target.value!=handle.value;
                 capture->candidate=capture->separate_target?target:TextureHandle{};
                 capture->reserved=batch->reserved;capture->copy_upload=bool(batch->upload.resource);
+                capture->software_copy=batch->software_copy;
                 capture->target_mip=batch->target_mip;
                 capture->map_count=static_cast<std::uint32_t>(batch->maps.size());
                 capture->unmap_count=static_cast<std::uint32_t>(batch->unmaps.size());
@@ -1731,9 +1921,13 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
             }
             auto pass=retained?*graph.BindPass(entry.pass_index,entry.pass_id):
                 graph.AddPass(first_pass+static_cast<std::uint32_t>(index),"Texture mip map/upload",QueueHint::Copy);
+            if (batch->software_copy && !retained) pass.Read(graph.Version(handle), Access::CopySource);
             const auto written=retained?ResourceVersion{target,1}:
                 pass.Write(graph.Version(target),Access::CopyDest);
-            const ExternalResourceAccess access{target, Access::Common, Access::Common};
+            const std::array<ExternalResourceAccess, 2> copy_accesses{{
+                {handle, Access::Common, Access::Common},
+                {target, Access::Common, Access::Common}}};
+            const ExternalResourceAccess target_access{target, Access::Common, Access::Common};
             auto retained_queue = queue; retained_queue.resource_lease = batch;
             auto execute=[batch](RenderExternalPassContext &context, ExternalQueueCompletion &completion) {
                     completion.resource_lease = batch;
@@ -1761,7 +1955,9 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
                     return Result::Success();
                 };
             if(retained)pass.BindExternalExecute(std::move(retained_queue),std::move(execute));
-            else pass.SetExternalExecute(std::move(retained_queue),{&access,1},std::move(execute));
+            else if (batch->software_copy)
+                pass.SetExternalExecute(std::move(retained_queue), copy_accesses, std::move(execute));
+            else pass.SetExternalExecute(std::move(retained_queue), {&target_access,1}, std::move(execute));
             batch->scheduled = true;
             if (target.value == handle.value) version = written;
             else if(!retained)graph.SetFinalAccess(written, Access::Common);
@@ -1806,7 +2002,11 @@ bool RendererTextureStreaming::HasStartedWork() const noexcept
 }
 void RendererTextureStreaming::CancelReads(RendererAssetIo &io, StreamingManager &streaming) noexcept
 {
-    for (auto &texture : impl_->textures) if (texture.request && !texture.pending) io.Cancel(texture.request, streaming);
+    for (auto &texture : impl_->textures) if (texture.request && !texture.pending)
+    {
+        if (IsSoftwareCopyCoarsening(texture)) static_cast<void>(streaming.Cancel(texture.request));
+        else io.Cancel(texture.request, streaming);
+    }
 }
 void RendererTextureStreaming::SwapState(RendererTextureStreaming &other) noexcept { impl_.swap(other.impl_); }
 std::uint64_t RendererTextureStreaming::PhysicalBytes() const noexcept

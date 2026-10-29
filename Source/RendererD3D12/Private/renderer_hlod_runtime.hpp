@@ -6,12 +6,15 @@
 #include "renderer_hlod_scene.hpp"
 #include "d3d12_resources.hpp"
 #include "residency_manager.hpp"
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/render_view_input.hpp>
 
 #include <array>
 #include <filesystem>
 #include <map>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace hs
 {

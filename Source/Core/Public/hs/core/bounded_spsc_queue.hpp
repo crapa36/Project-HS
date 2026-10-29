@@ -42,6 +42,27 @@ template <typename T, std::size_t Capacity> class BoundedSpscQueue
         return true;
     }
 
+    template <typename Accept>
+    [[nodiscard]] bool TryPopIf(T &value, Accept &&accept)
+    {
+        const auto read = read_.load(std::memory_order_relaxed);
+        if (read == write_.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        const auto &candidate = values_[read % Capacity];
+        // Consumer-only; the callback must not reenter or mutate this queue.
+        if (!accept(candidate))
+        {
+            return false;
+        }
+
+        value = candidate;
+        read_.store(read + 1, std::memory_order_release);
+        return true;
+    }
+
     void ClearConsumer() noexcept
     {
         read_.store(write_.load(std::memory_order_acquire), std::memory_order_release);

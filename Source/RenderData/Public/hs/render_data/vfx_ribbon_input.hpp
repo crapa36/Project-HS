@@ -1,6 +1,7 @@
 #pragma once
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/render_data/vfx_program_values.hpp>
+#include <cstddef>
 #include <span>
 
 namespace hs
@@ -29,10 +30,32 @@ struct VfxRibbonSourceInput
     Float3 control{};
     std::uint32_t segments{16};
     float normalized_age{};
+    std::uint32_t frame_output_first{}, frame_output_count{};
+
+    [[nodiscard]] std::size_t OutputCount() const noexcept
+    { return frame_output_count != 0 ? frame_output_count : outputs.size(); }
+
+    [[nodiscard]] std::span<const VfxRibbonOutputInput> OutputSpan(
+        std::span<const VfxRibbonOutputInput> frame_outputs = {}) const noexcept
+    {
+        if (frame_output_count == 0) return outputs;
+        if (frame_output_first > frame_outputs.size() ||
+            frame_output_count > frame_outputs.size() - frame_output_first) return {};
+        return frame_outputs.subspan(frame_output_first, frame_output_count);
+    }
+
+    [[nodiscard]] bool OutputStorageConsistent(std::size_t frame_output_size) const noexcept
+    {
+        if (frame_output_count == 0) return frame_output_first == 0;
+        if (!outputs.empty()) return false;
+        return frame_output_first <= frame_output_size &&
+            frame_output_count <= frame_output_size - frame_output_first;
+    }
 };
 struct VfxRibbonFrameInput
 {
     std::span<const VfxRibbonSourceInput> sources;
     std::uint64_t catalog_generation{};
+    std::span<const VfxRibbonOutputInput> outputs;
 };
 }

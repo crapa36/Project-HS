@@ -225,7 +225,7 @@ struct TextureStreamingLayout
         std::uint32_t map_count{}, unmap_count{}, pass_index{}, pass_id{};
         std::vector<std::uint32_t> mapped_mips, unmapped_mips;
         Access access{Access::Undefined};
-        bool pending{}, separate_target{}, reserved{}, copy_upload{};
+        bool pending{}, separate_target{}, reserved{}, copy_upload{}, software_copy{};
     };
     std::vector<Entry> entries;
     std::uint32_t first_pass_id{};

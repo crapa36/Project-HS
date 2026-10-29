@@ -14,6 +14,7 @@
 #include "renderer_entity_surface.hpp"
 #include "hero_coverage.hpp"
 #include "renderer_vfx_compatibility.hpp"
+#include "renderer_vfx_candidates.hpp"
 #include <DirectXPackedVector.h>
 #include <array>
 #include <bit>
@@ -707,7 +708,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     if (impl_->render_scene_inputs &&
         (ribbon_buffer_widths[0] != expected_history_bytes || ribbon_buffer_widths[1] != expected_history_bytes ||
          ribbon_buffer_widths[2] == 0 || impl_->ribbon_state.OutputsMayExceed(
-             ribbon_sources, ribbon_buffer_widths[2] / kRibbonArgumentStride)))
+             ribbon_sources, ribbon_buffer_widths[2] / kRibbonArgumentStride, typed_ribbons.outputs)))
         ribbon_checkpoint = impl_->ribbon_state;
     const auto reject_ribbon_update = [&](Result failure) {
         if (ribbon_checkpoint) impl_->ribbon_state = std::move(*ribbon_checkpoint);
@@ -717,7 +718,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     if (impl_->render_scene_inputs && !impl_->ribbon_state.UpdateValidated(
             ribbon_sources,
             snapshot.header.tick, snapshot.header.session_id, typed_ribbons.catalog_generation,
-            impl_->config.ribbon_history_points, interpolation, impl_->previous_ribbon_eye, vfx_error))
+            impl_->config.ribbon_history_points, interpolation, impl_->previous_ribbon_eye, vfx_error,
+            typed_ribbons.outputs))
         return reject_ribbon_update(Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error));
     const auto ribbon_updates = impl_->ribbon_state.Updates();
     const auto ribbon_outputs = impl_->ribbon_state.Outputs();
@@ -2123,7 +2125,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         DirectX::XMUINT4 metadata;
     };
     static_assert(sizeof(GpuDecal) == 96);
-    constexpr std::uint32_t kMaxDecals = 64;
+    constexpr std::uint32_t kMaxDecals = VfxDecalCandidates::kCapacity;
     const auto decal_data_offset = (distortion_data_offset + sizeof(GpuDistortion) * kMaxDistortions + 255u) & ~std::size_t{255u};
     constexpr std::size_t kMaxFresnelShells = 32;
     if (typed_fresnels.size() > kMaxFresnelShells)
@@ -2701,7 +2703,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                 gpu_ring.modes.x = gap_write_index;
                 gpu_ring.modes.y = static_cast<std::uint32_t>(geometry.GapCount());
                 for (std::uint32_t index = 0; index < geometry.GapCount(); ++index)
-                    gpu_ground_gaps[gap_write_index++] = geometry.GapAngleRadians(index);
+                    gpu_ground_gaps[gap_write_index++] = geometry.GapAngleRadians(
+                        index, impl_->explicit_frame->vfx.ground_gap_angles);
             }
             if (boss_signature)
             {
@@ -3088,6 +3091,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         vfx_quality_profile.vfx_light_fraction));
     const auto vfx_distortion_limit = static_cast<UINT>(std::floor(kMaxDistortions *
         vfx_quality_profile.vfx_distortion_fraction));
+    const auto vfx_distortion_coverage_limit = impl_->config.distortion_coverage *
+        vfx_quality_profile.vfx_distortion_fraction;
     const auto vfx_decal_limit = static_cast<UINT>(std::floor(kMaxDecals *
         vfx_quality_profile.vfx_decal_fraction));
     struct LightCandidate { const VfxLightInput *light; float screen_area; };
@@ -3145,9 +3150,10 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             std::abs(center.y) - center.z * vfx_tangent_y > radius * vfx_plane_y_scale) continue;
         const float distance = std::max(center.z - radius,near_plane);
         const float area = std::min(1.0f, 3.14159265f * radius * radius / (4 * distance * distance * vfx_tangent_x * vfx_tangent_y));
+        if (area > vfx_distortion_coverage_limit) continue;
         distortion_candidates.push_back({&source,area});
     }
-    std::stable_sort(distortion_candidates.begin(),distortion_candidates.end(),[](const auto &a,const auto &b) {
+    std::stable_sort(distortion_candidates.begin(), distortion_candidates.end(), [](const auto &a, const auto &b) {
         if (a.source->importance != b.source->importance) return a.source->importance > b.source->importance;
         if (a.area != b.area) return a.area > b.area;
         if (a.source->stable_id != b.source->stable_id) return a.source->stable_id < b.source->stable_id;
@@ -3160,8 +3166,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     {
         if (distortion_count >= vfx_distortion_limit) break;
         const auto &source = *candidate.source;
-        const auto fraction = vfx_quality_profile.vfx_distortion_fraction;
-        if (distortion_area + candidate.area > impl_->config.distortion_coverage * fraction) continue;
+        if (distortion_area + candidate.area > vfx_distortion_coverage_limit) continue;
         auto &gpu = gpu_distortions[distortion_count++];
         gpu.position_radius = {source.position.x,source.position.y,source.position.z,source.radius};
         gpu.direction_strength = {source.direction.x,source.direction.y,source.direction.z,source.strength};
@@ -3171,11 +3176,11 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
                         DirectX::XMConvertToRadians(source.gap_half_width_degrees),0.0f};
         gpu.gap_range = {gap_write_index,static_cast<UINT>(source.GapCount()),0,0};
         for (std::uint32_t index = 0; index < source.GapCount(); ++index)
-            gpu_ground_gaps[gap_write_index++] = DirectX::XMConvertToRadians(source.GapAngleDegrees(index));
+            gpu_ground_gaps[gap_write_index++] = DirectX::XMConvertToRadians(
+                source.GapAngleDegrees(index, impl_->explicit_frame->vfx.distortion_gap_angles));
         distortion_area += candidate.area;
     }
-    struct DecalCandidate { const VfxDecalInput *source; float area; };
-    std::vector<DecalCandidate> decal_candidates;
+    VfxDecalCandidates decal_candidates(vfx_decal_limit);
     for (const auto &source : typed_decals)
     {
         if (vfx_decal_limit == 0 || source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
@@ -3187,17 +3192,12 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             std::abs(center.x)-center.z*vfx_tangent_x > radius*vfx_plane_x_scale ||
             std::abs(center.y)-center.z*vfx_tangent_y > radius*vfx_plane_y_scale) continue;
         const float distance = std::max(center.z,near_plane);
-        decal_candidates.push_back({&source,std::min(1.0f,source.radius*source.radius/(distance*distance))});
+        decal_candidates.Add({&source,std::min(1.0f,source.radius*source.radius/(distance*distance))});
     }
-    std::stable_sort(decal_candidates.begin(),decal_candidates.end(),[](const auto &a,const auto &b) {
-        if(a.source->importance != b.source->importance) return a.source->importance > b.source->importance;
-        if(a.area != b.area) return a.area > b.area;
-        if(a.source->stable_id != b.source->stable_id) return a.source->stable_id < b.source->stable_id;
-        return a.source->stable_seed < b.source->stable_seed;
-    });
+    const auto selected_decals = decal_candidates.Sorted();
     auto *gpu_decals = reinterpret_cast<GpuDecal *>(frame.mapped+decal_data_offset);
     constants->vfx_decal_count = {};
-    for(const auto &candidate:decal_candidates)
+    for(const auto &candidate:selected_decals)
     {
         const auto &source=*candidate.source;
         if(constants->vfx_decal_count.x>=vfx_decal_limit) break;
@@ -11011,6 +11011,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         std::chrono::steady_clock::now() - cpu_recording_start).count();
     frame.cpu_recording_ms_valid = std::isfinite(frame.cpu_recording_ms) && frame.cpu_recording_ms > 0;
     if (use_visibility) owned_view.visibility_targets_initialized = true;
+    owned_view.decal_surface_active = decal_surface_outputs.active;
     for (const auto &[resource, handle] : imported_resources)
     {
         resource->graph_access = impl_->graph.FinalAccess(handle);

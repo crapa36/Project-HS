@@ -1,6 +1,6 @@
 #include "vfx_typed_ribbon_commands.hpp"
 
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -9,6 +9,7 @@
 #include <iterator>
 #include <optional>
 #include <numbers>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -192,15 +193,35 @@ void ResetRibbonSource(VfxRibbonSourceInput &ribbon)
     ribbon.start_alpha = 1.0f;
     // Keep the vector object alive so checked-iterator builds reuse its proxy and capacity.
     ribbon.outputs.clear();
+    ribbon.frame_output_first = ribbon.frame_output_count = 0;
     ribbon.analytic = false;
     ribbon.control = {};
     ribbon.segments = 16;
     ribbon.normalized_age = 0.0f;
 }
 
+class RibbonOutputWriter
+{
+public:
+    RibbonOutputWriter(VfxRibbonSourceInput &source, VfxRibbonInputScratch &scratch) noexcept
+        : source_(source), scratch_(scratch) {}
+
+    void Push(const VfxRibbonOutputInput &output)
+    {
+        scratch_.AppendOutput(output);
+    }
+
+    [[nodiscard]] bool Empty() const noexcept { return source_.frame_output_count == 0; }
+
+private:
+    VfxRibbonSourceInput &source_;
+    VfxRibbonInputScratch &scratch_;
+};
+
 bool BossDashWakeRibbon(
     const VfxImage &cooked, const VfxPersistentInput &input,
-    std::span<const VfxRibbonWakeRecipe> recipes, VfxRibbonSourceInput &ribbon)
+    std::span<const VfxRibbonWakeRecipe> recipes, VfxRibbonSourceInput &ribbon,
+    RibbonOutputWriter &outputs)
 {
     const auto *line = std::get_if<VfxLinePayload>(&input.payload);
     if (!line || input.stable_id == 0 ||
@@ -227,7 +248,7 @@ bool BossDashWakeRibbon(
             recipe.detail_slices.first, recipe.detail_slices.count);
         if (std::ranges::any_of(slices, [](std::uint32_t slice) { return slice >= 8u; })) continue;
 
-        if (!ribbon.outputs.empty()) return false;
+        if (!outputs.Empty()) return false;
         ribbon.owner_id = input.stable_id;
         ribbon.effect_handle = recipe.effect_handle;
         ribbon.source_id = kWakeRails;
@@ -249,16 +270,16 @@ bool BossDashWakeRibbon(
         translated.gradient_row = recipe.gradient_row;
         translated.detail_slice = slices[input.stable_seed % slices.size()];
         translated.detail_strength = recipe.detail_strength;
-        ribbon.outputs.push_back(translated);
+        outputs.Push(translated);
         // A stable owner can publish only one wake source.
     }
-    return !ribbon.outputs.empty();
+    return !outputs.Empty();
 }
 
 bool PickupCollectRibbon(
     const VfxImage &cooked, const VfxEventInput &event,
     const VfxRibbonLinkEffectRecipe &recipe, const VfxLinkPayload &link, double current_tick,
-    VfxRibbonSourceInput &ribbon)
+    VfxRibbonSourceInput &ribbon, RibbonOutputWriter &outputs)
 {
     if (recipe.kind != VfxRibbonLinkKind::PickupCollect || event.sequence == 0 ||
         current_tick < event.event_tick ||
@@ -304,7 +325,7 @@ bool PickupCollectRibbon(
     ribbon.history_seconds = end - start;
     ribbon.normalized_age = (elapsed - start) / (end - start);
     ribbon.segments = recipe.segments;
-    ribbon.outputs.push_back(translated);
+    outputs.Push(translated);
     return true;
 }
 
@@ -312,6 +333,7 @@ bool LinkRibbon(const VfxImage &c,
                                                const VfxPersistentInput &input,
                                                const VfxRibbonLinkEffectRecipe &recipe,
                                                VfxRibbonSourceInput &ribbon,
+                                               RibbonOutputWriter &outputs,
                                                bool allow_arrow_rain = false)
 {
     const bool basic_return = recipe.kind == VfxRibbonLinkKind::CapturedPath;
@@ -396,9 +418,9 @@ bool LinkRibbon(const VfxImage &c,
             if(out.detail_slice>=8)continue;
             out.detail_strength=detail.strength;
         }
-        ribbon.outputs.push_back(out);
+        outputs.Push(out);
     }
-    return !ribbon.outputs.empty();
+    return !outputs.Empty();
 }
 
 struct ProjectileGeometry
@@ -481,7 +503,7 @@ bool FixedEventRibbon(
     const VfxEventInput &event,
     const VfxRibbonFixedRecipe &recipe,
     double current_tick,
-    VfxRibbonSourceInput &ribbon)
+    VfxRibbonSourceInput &ribbon, RibbonOutputWriter &outputs)
 {
     if (recipe.effect_handle != event.effect_handle || event.sequence == 0 ||
         static_cast<std::uint32_t>(event.quality) > 2 || current_tick < event.event_tick)
@@ -523,15 +545,16 @@ bool FixedEventRibbon(
     ribbon.start_alpha = std::clamp((1.0f - ribbon.normalized_age) / 0.2f, 0.0f, 1.0f);
     ribbon.segments = recipe.segments;
     if (recipe.core_min_quality <= static_cast<std::uint32_t>(event.quality))
-        ribbon.outputs.push_back(core_output);
+        outputs.Push(core_output);
     if (recipe.outer_min_quality <= static_cast<std::uint32_t>(event.quality))
-        ribbon.outputs.push_back(outer_output);
-    return !ribbon.outputs.empty();
+        outputs.Push(outer_output);
+    return !outputs.Empty();
 }
 }
 
 VfxRibbonInputScratch::VfxRibbonInputScratch(VfxRibbonInputScratch &&other) noexcept
-    : rows_(std::move(other.rows_)), active_count_(std::exchange(other.active_count_, 0))
+    : rows_(std::move(other.rows_)), outputs_(std::move(other.outputs_)),
+      active_count_(std::exchange(other.active_count_, 0))
 {
 }
 
@@ -540,6 +563,7 @@ VfxRibbonInputScratch &VfxRibbonInputScratch::operator=(VfxRibbonInputScratch &&
     if (this != &other)
     {
         rows_ = std::move(other.rows_);
+        outputs_ = std::move(other.outputs_);
         active_count_ = std::exchange(other.active_count_, 0);
     }
     return *this;
@@ -547,29 +571,72 @@ VfxRibbonInputScratch &VfxRibbonInputScratch::operator=(VfxRibbonInputScratch &&
 
 VfxRibbonSourceInput &VfxRibbonInputScratch::PrepareAppendRow()
 {
+    if (outputs_.size() > std::numeric_limits<std::uint32_t>::max())
+        throw std::length_error("Ribbon frame output pool exceeds its index range.");
     if (active_count_ == rows_.size()) rows_.emplace_back();
     auto &row = rows_[active_count_];
     ResetRibbonSource(row);
+    row.frame_output_first = static_cast<std::uint32_t>(outputs_.size());
     return row;
+}
+
+void VfxRibbonInputScratch::AppendOutput(const VfxRibbonOutputInput &output)
+{
+    if (active_count_ >= rows_.size())
+        throw std::logic_error("Ribbon output has no active source row.");
+    if (outputs_.size() >= std::numeric_limits<std::uint32_t>::max())
+        throw std::length_error("Ribbon frame output pool exceeds its index range.");
+    auto &row = rows_[active_count_];
+    outputs_.push_back(output);
+    ++row.frame_output_count;
 }
 
 void VfxRibbonInputScratch::RejectAppendRow() noexcept
 {
-    if (active_count_ < rows_.size()) rows_[active_count_].outputs.clear();
+    if (active_count_ < rows_.size())
+    {
+        auto &row = rows_[active_count_];
+        outputs_.resize(row.frame_output_first);
+        row.frame_output_count = 0;
+    }
 }
 
 void VfxRibbonInputScratch::Rollback(std::size_t active_count) noexcept
 {
+    const auto output_size = active_count == 0 ? 0u :
+        static_cast<std::size_t>(rows_[active_count - 1].frame_output_first) +
+            rows_[active_count - 1].frame_output_count;
+    outputs_.resize(output_size);
     for (auto index = active_count; index < rows_.size(); ++index)
+    {
         rows_[index].outputs.clear();
+        rows_[index].frame_output_first = rows_[index].frame_output_count = 0;
+    }
     active_count_ = active_count;
 }
 
 std::vector<VfxRibbonSourceInput> VfxRibbonInputScratch::TakeSources() &&
 {
-    rows_.resize(active_count_);
-    active_count_ = 0;
-    return std::move(rows_);
+    try
+    {
+        rows_.resize(active_count_);
+        for (auto &row : rows_)
+        {
+            const auto outputs = row.OutputSpan(outputs_);
+            row.outputs.assign(outputs.begin(), outputs.end());
+            row.frame_output_first = row.frame_output_count = 0;
+        }
+        outputs_.clear();
+        active_count_ = 0;
+        return std::move(rows_);
+    }
+    catch (...)
+    {
+        rows_.clear();
+        outputs_.clear();
+        active_count_ = 0;
+        throw;
+    }
 }
 
 void AppendVfxTypedRibbonInputs(
@@ -591,8 +658,9 @@ void AppendVfxTypedRibbonInputs(
                     if (InRange(range, cooked.ribbon_wake_recipes))
                     {
                         auto &row = scratch.PrepareAppendRow();
+                        RibbonOutputWriter outputs(row, scratch);
                         if (BossDashWakeRibbon(cooked, input,
-                            cooked.ribbon_wake_recipes.subspan(range.first, range.count), row))
+                            cooked.ribbon_wake_recipes.subspan(range.first, range.count), row, outputs))
                             scratch.CommitAppendRow();
                         else scratch.RejectAppendRow();
                     }
@@ -601,7 +669,8 @@ void AppendVfxTypedRibbonInputs(
                 if (link_recipe && link_recipe->kind == VfxRibbonLinkKind::CapturedLine)
                 {
                     auto &row = scratch.PrepareAppendRow();
-                    if (LinkRibbon(cooked, input, *link_recipe, row)) scratch.CommitAppendRow();
+                    RibbonOutputWriter outputs(row, scratch);
+                    if (LinkRibbon(cooked, input, *link_recipe, row, outputs)) scratch.CommitAppendRow();
                     else scratch.RejectAppendRow();
                 }
                 continue;
@@ -614,7 +683,8 @@ void AppendVfxTypedRibbonInputs(
                 if (link_recipe)
                 {
                     auto &row = scratch.PrepareAppendRow();
-                    if (LinkRibbon(cooked, input, *link_recipe, row)) scratch.CommitAppendRow();
+                    RibbonOutputWriter outputs(row, scratch);
+                    if (LinkRibbon(cooked, input, *link_recipe, row, outputs)) scratch.CommitAppendRow();
                     else scratch.RejectAppendRow();
                 }
                 continue;
@@ -624,7 +694,8 @@ void AppendVfxTypedRibbonInputs(
                 if(link_recipe)
                 {
                     auto &row=scratch.PrepareAppendRow();
-                    if(LinkRibbon(cooked,input,*link_recipe,row))scratch.CommitAppendRow();
+                    RibbonOutputWriter outputs(row, scratch);
+                    if(LinkRibbon(cooked,input,*link_recipe,row,outputs))scratch.CommitAppendRow();
                     else scratch.RejectAppendRow();
                 }
                 continue;
@@ -646,6 +717,7 @@ void AppendVfxTypedRibbonInputs(
                 if (!InRange(source.outputs, cooked.ribbon_projectile_outputs)) continue;
 
                 auto &ribbon = scratch.PrepareAppendRow();
+                RibbonOutputWriter outputs(ribbon, scratch);
                 ribbon.owner_id = input.stable_id;
                 ribbon.effect_handle = input.effect_handle;
                 ribbon.source_id = source.source_id;
@@ -685,9 +757,9 @@ void AppendVfxTypedRibbonInputs(
                             (input.stable_seed % prepared_output.detail_slices.count)];
                         if (translated.detail_slice >= 8) continue;
                     }
-                    ribbon.outputs.push_back(translated);
+                    outputs.Push(translated);
                 }
-                if (!ribbon.outputs.empty()) scratch.CommitAppendRow();
+                if (!outputs.Empty()) scratch.CommitAppendRow();
                 else scratch.RejectAppendRow();
             }
         }
@@ -780,6 +852,7 @@ void AppendVfxEventRibbonInputs(
                                 ribbon.normalized_age = age;
                                 ribbon.start_alpha = 1.0f;
                                 ribbon.segments = 16;
+                                RibbonOutputWriter outputs(ribbon, scratch);
                                 VfxRibbonOutputInput translated;
                                 translated.profile = recipe.profile;
                                 translated.motion = recipe.motion;
@@ -788,7 +861,7 @@ void AppendVfxEventRibbonInputs(
                                 translated.gradient_row = recipe.gradient_row;
                                 translated.width_head = recipe.width_head * (1 - age);
                                 translated.width_tail = recipe.width_tail * (1 - age);
-                                ribbon.outputs.push_back(translated);
+                                outputs.Push(translated);
                                 scratch.CommitAppendRow();
                             }
                     }
@@ -806,7 +879,8 @@ void AppendVfxEventRibbonInputs(
                         recipe.kind != VfxRibbonFixedKind::Unsupported)
                     {
                         auto &row = scratch.PrepareAppendRow();
-                        if (FixedEventRibbon(event, recipe, current_tick, row))
+                        RibbonOutputWriter outputs(row, scratch);
+                        if (FixedEventRibbon(event, recipe, current_tick, row, outputs))
                             scratch.CommitAppendRow();
                         else scratch.RejectAppendRow();
                         continue;
@@ -819,8 +893,9 @@ void AppendVfxEventRibbonInputs(
                 if (recipe && recipe->kind == VfxRibbonLinkKind::PickupCollect)
                 {
                     auto &row = scratch.PrepareAppendRow();
+                    RibbonOutputWriter outputs(row, scratch);
                     if (PickupCollectRibbon(cooked, event, *recipe,
-                                            *link, current_tick, row))
+                                            *link, current_tick, row, outputs))
                         scratch.CommitAppendRow();
                     else scratch.RejectAppendRow();
                     continue;
@@ -845,7 +920,8 @@ void AppendVfxEventRibbonInputs(
                 synthetic.stable_seed = event.stable_seed;
                 synthetic.quality = event.quality;
                 auto &row = scratch.PrepareAppendRow();
-                if (LinkRibbon(cooked, synthetic, *recipe, row, true))
+                RibbonOutputWriter outputs(row, scratch);
+                if (LinkRibbon(cooked, synthetic, *recipe, row, outputs, true))
                     scratch.CommitAppendRow();
                 else scratch.RejectAppendRow();
                 continue;
@@ -883,6 +959,7 @@ void AppendVfxEventRibbonInputs(
                 const auto previous_elapsed = std::max(
                     start_seconds, elapsed - 1.0f / 60.0f);
                 auto &ribbon = scratch.PrepareAppendRow();
+                RibbonOutputWriter outputs(ribbon, scratch);
                 ribbon.owner_id = event.sequence;
                 ribbon.effect_handle = event.effect_handle;
                 ribbon.source_id = source.source_id;
@@ -920,7 +997,7 @@ void AppendVfxEventRibbonInputs(
                             prepared.detail_slices.first + (event.stable_seed % prepared.detail_slices.count)];
                         if (translated.detail_slice >= 8) continue;
                     }
-                    ribbon.outputs.push_back(translated);
+                    outputs.Push(translated);
                 }
                 const auto make_position = [&](float time) {
                     const auto arc_progress = std::clamp(
@@ -933,7 +1010,7 @@ void AppendVfxEventRibbonInputs(
                     const Float3 up{0.0f, radius * std::sin(theta), 0.0f};
                     return Add3(emitter->origin, Add3(forward, up));
                 };
-                if (!ribbon.outputs.empty())
+                if (!outputs.Empty())
                 {
                     if (projectile_event)
                     {

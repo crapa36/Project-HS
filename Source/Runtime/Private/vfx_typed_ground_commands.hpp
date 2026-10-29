@@ -58,6 +58,12 @@ struct VfxGroundEventAdmission
 void AppendVfxTypedGroundCommands(const VfxImage &image,
     std::span<const VfxPersistentInput> inputs, Tick current_tick,
     std::vector<VfxTypedGroundCommand> &result);
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxGroundSpawnInput> &result);
+void AppendVfxTypedGroundCommands(const VfxImage &image,
+    std::span<const VfxPersistentInput> inputs, Tick current_tick,
+    std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles);
 
 [[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
     const VfxImage &image,
@@ -66,6 +72,12 @@ void AppendVfxTypedGroundCommands(const VfxImage &image,
 void AppendVfxTypedEventGroundCommands(const VfxImage &image,
     VfxEventView inputs, double current_tick,
     std::vector<VfxTypedGroundCommand> &result);
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick,
+    std::vector<VfxGroundSpawnInput> &result);
+void AppendVfxTypedEventGroundCommands(const VfxImage &image,
+    VfxEventView inputs, double current_tick,
+    std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles);
 void AppendVfxTypedEventGroundBirthSuppression(
     const VfxImage &image, VfxEventView inputs,
     std::vector<VfxGroundBirthSuppressionFacts> &result);

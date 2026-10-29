@@ -1,6 +1,7 @@
 #include <hs/renderer/vfx_program_loader.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 #include "../Source/Runtime/Private/vfx_typed_fresnel_commands.hpp"
+#include "vfx_profile_admission.hpp"
 #include "test_generation_paths.hpp"
 
 #include <algorithm>
@@ -223,6 +224,9 @@ void AppendPreservesOwnerPrefixAndCapacity()
     Require(result.size()==1&&result[0].stable_id==77&&result.capacity()==capacity,
             "empty/rejected Fresnel append changed prefix or capacity");
     hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&owner,1),result);
+    Require(result.size() - 1 <= hs::runtime_detail::PrepareVfxEventProfileAdmission(
+                image, owner.effect_handle).persistent_fresnel_rows,
+            "prepared Fresnel reservation was smaller than actual output");
     Require(result.size()==2&&result[1].stable_id==owner.stable_id&&
             result[1].render_instance_id==std::get<hs::VfxEntityPayload>(owner.payload).render_instance_id&&
             result.capacity()==capacity,

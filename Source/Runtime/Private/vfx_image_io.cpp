@@ -1,6 +1,6 @@
 #include <hs/runtime/vfx_image_io.hpp>
 #include <hs/core/cooked_format.hpp>
-#include <hs/render_data/render_snapshot.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <cstring>
 #include <fstream>

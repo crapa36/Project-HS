@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/renderer/renderer.hpp>
+#include <hs/render_data/texture_package.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "checked_binary_read.hpp"
@@ -188,7 +189,9 @@ public:
             const auto prefix = read(0, static_cast<std::size_t>(std::min<std::uint64_t>(
                 kMaxPrefix, bulk.range.byte_count)));
             const auto directory = render_data::ReadPackageDirectory(prefix, bulk.range.byte_count, asset);
-            if (directory.chunks.empty() || directory.chunks.front().byte_count > 40 + 4096 * 16)
+            // TXV1 volume metadata is at most 40 + 15 * 20 bytes, below the TXM1 v2 bound.
+            if (directory.chunks.empty() ||
+                directory.chunks.front().byte_count > render_data::kMaxTextureMetadataBytes)
                 throw std::runtime_error("Developer texture metadata proof is unbounded");
             const auto &metadata = directory.chunks.front();
             const auto bytes = read(metadata.offset, static_cast<std::size_t>(metadata.byte_count));

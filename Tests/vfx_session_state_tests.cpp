@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <new>
 #include <stdexcept>
@@ -254,18 +255,20 @@ void CheckVfxBirthAdmissionBoundary()
     std::array<std::size_t, 3> retained_rows{2, 0, 0};
     std::vector<int> reusable_prepared_particles, nonempty_retained_particles, no_frozen_particles;
     reusable_prepared_particles.reserve(2);
-    nonempty_retained_particles.push_back(7);
+    nonempty_retained_particles.reserve(3);
+    nonempty_retained_particles.resize(nonempty_retained_particles.capacity() - 2, 7);
     std::vector<int> reusable_prepared_lines, no_retained_lines, no_frozen_lines;
-    std::vector<int> reusable_prepared_flashes, no_retained_flashes, no_frozen_flashes, no_visible_flashes;
+    std::vector<int> reusable_prepared_flashes, no_retained_flashes, no_visible_flashes;
     std::size_t retained_admitted{};
     std::array<BirthRequest, 1> retained_requests{{{1, &retained_admitted, 1, 0}}};
     std::vector<std::size_t> retained_order;
+    const auto retained_native_headroom = nonempty_retained_particles.size() * sizeof(int);
     ReserveAndSelectBirthRows(retained_rows, retained_requests, retained_order,
         [&]() noexcept { return std::size_t{0}; },
         reusable_prepared_particles, nonempty_retained_particles, no_frozen_particles,
         reusable_prepared_lines, no_retained_lines, no_frozen_lines,
-        reusable_prepared_flashes, no_retained_flashes, no_frozen_flashes,
-        no_visible_flashes, 0, 4 * sizeof(int));
+        reusable_prepared_flashes, no_retained_flashes, no_visible_flashes,
+        0, retained_native_headroom + 3 * sizeof(int));
     Check(retained_admitted == 1 && retained_rows[0] == 3,
         "prepared capacity reusable after append was charged again as native freeze growth");
 }
@@ -754,28 +757,32 @@ void CheckOptionalProfileAdmission()
     activation.Synchronize(61);
     hs::PresentationEvent raw{};
     raw.session_id = 61; raw.tick = 1; raw.sequence = 1;
-    Check(activation.raw_events.Enqueue(raw) && activation.raw_events.Prepare(1, 61).entries.size() == 1,
+    Check(activation.raw_events.Enqueue(raw) && activation.raw_events.Prepare(1, 61).events.size() == 1,
         "cosmetic admission fixture has a ready raw event");
     hs::VfxEventInput cosmetic{};
     cosmetic.sequence = 610;
     hs::VfxRingGapsPayload large_gaps;
     large_gaps.gap_angles_degrees.resize(512, 15.0f);
     cosmetic.payload = std::move(large_gaps);
+    Store::FrameRows cosmetic_frame_rows{};
+    cosmetic_frame_rows[static_cast<std::size_t>(Profile::Light)] = 100'000;
     const std::array cosmetic_request{Store::AppendRequest{&cosmetic, bit(Profile::Light), false,
-        bit(Profile::Light), 10}};
+        bit(Profile::Light), 10, &cosmetic_frame_rows}};
     Store::PreparedAppendBatch cosmetic_prepared;
     std::vector<std::size_t> order;
     using hs::runtime_detail::vfx_retained_size::Add;
     using hs::runtime_detail::vfx_retained_size::Vector;
     Store::ProfileAdmission zero_budget{Add(activation.TrackedLogicalCapacityBytes(),
         Add(cosmetic_prepared.LogicalCapacityBytes(), Vector(order))), 0, order};
+    zero_budget.frame_storage[static_cast<std::size_t>(Profile::Light)] = {sizeof(std::uint32_t), 0, 0};
     Check(activation.active_effects.PrepareAppendBatch(cosmetic_request, cosmetic_prepared, &zero_budget) &&
           zero_budget.requested_cosmetic_memberships == 1 && zero_budget.admitted_cosmetic_memberships == 0 &&
+          zero_budget.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 0 &&
           cosmetic_prepared.OwnedPayloadCapacityBytes() == 0 && activation.active_effects.Size() == 0,
-          "zero budget drops cosmetic row before payload cloning or index-node creation");
+          "large cosmetic frame fanout drops before retained payload cloning or index-node creation");
     hs::runtime_detail::DecodedVfxState no_births;
     Check(activation.CommitPreparedActivation(no_births, cosmetic_prepared, true) &&
-          activation.active_effects.Size() == 0 && activation.raw_events.Prepare(1, 61).entries.empty(),
+          activation.active_effects.Size() == 0 && activation.raw_events.Prepare(1, 61).events.empty(),
           "admitting no cosmetic profile still commits CPU activation and acknowledges raw input");
 
     // Required output survives the same tiny budget; cosmetic bits sharing its
@@ -789,13 +796,18 @@ void CheckOptionalProfileAdmission()
     auto required = Store::AppendRequest{&mixed_input,
         static_cast<std::uint16_t>(bit(Profile::Ribbon) | bit(Profile::Light)), false,
         bit(Profile::Light), 1};
+    Store::FrameRows mixed_frame_rows{};
+    mixed_frame_rows[static_cast<std::size_t>(Profile::Light)] = 128;
+    required.frame_rows = &mixed_frame_rows;
     Store::PreparedAppendBatch mixed_prepared;
     std::vector<std::size_t> mixed_order;
     Store::ProfileAdmission mixed_admission{held(mixed, mixed_prepared, mixed_order), 0, mixed_order};
+    mixed_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {sizeof(std::uint32_t), 0, 0};
     const std::array mixed_requests{required};
     Check(mixed.PrepareAppendBatch(mixed_requests, mixed_prepared, &mixed_admission) &&
           mixed_admission.requested_cosmetic_memberships == 1 &&
           mixed_admission.admitted_cosmetic_memberships == 0 && mixed.CommitAppendBatch(mixed_prepared) &&
+          mixed_admission.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 0 &&
           mixed.Size() == 1 && mixed.ProfileEvents(Profile::Ribbon).size() == 1 &&
           mixed.ProfileEvents(Profile::Light).empty() &&
           std::get<hs::VfxRingGapsPayload>(mixed.ProfileEvents(Profile::Ribbon)[0].payload)
@@ -804,19 +816,332 @@ void CheckOptionalProfileAdmission()
 
     Store duplicate_store;
     hs::VfxEventInput duplicate_input{}; duplicate_input.sequence = 621;
+    Store::FrameRows duplicate_frame_rows_a{}, duplicate_frame_rows_b{};
+    duplicate_frame_rows_a[static_cast<std::size_t>(Profile::Light)] = 5;
+    duplicate_frame_rows_b[static_cast<std::size_t>(Profile::Light)] = 9;
     const std::array duplicate_cosmetics{
-        Store::AppendRequest{&duplicate_input, bit(Profile::Light), false, bit(Profile::Light), 3},
-        Store::AppendRequest{&duplicate_input, bit(Profile::Light), false, bit(Profile::Light), 7}};
+        Store::AppendRequest{&duplicate_input, bit(Profile::Light), false, bit(Profile::Light), 3,
+            &duplicate_frame_rows_a},
+        Store::AppendRequest{&duplicate_input, bit(Profile::Light), false, bit(Profile::Light), 7,
+            &duplicate_frame_rows_b}};
     Store::PreparedAppendBatch duplicate_prepared;
     std::vector<std::size_t> duplicate_order;
     Store::ProfileAdmission duplicate_admission{held(duplicate_store, duplicate_prepared, duplicate_order),
         std::numeric_limits<std::size_t>::max(), duplicate_order};
+    duplicate_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {1, 11, 2};
     Check(duplicate_store.PrepareAppendBatch(duplicate_cosmetics, duplicate_prepared, &duplicate_admission) &&
           duplicate_admission.requested_cosmetic_memberships == 1 &&
           duplicate_admission.admitted_cosmetic_memberships == 1 &&
+          duplicate_admission.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 11 &&
           duplicate_store.CommitAppendBatch(duplicate_prepared) && duplicate_store.Size() == 1 &&
           duplicate_store.ProfileEvents(Profile::Light).size() == 1,
           "duplicate requests for one row/profile are planned and charged once");
+
+    Store required_frame_store;
+    hs::VfxEventInput required_frame_input{}; required_frame_input.sequence = 624;
+    Store::FrameRows required_frame_rows{};
+    required_frame_rows[static_cast<std::size_t>(Profile::Light)] = 10'000;
+    const std::array required_frame_requests{Store::AppendRequest{&required_frame_input,
+        bit(Profile::Light), false, 0, 0, &required_frame_rows}};
+    Store::PreparedAppendBatch required_frame_prepared;
+    std::vector<std::size_t> required_frame_order;
+    Store::ProfileAdmission required_frame_admission{held(required_frame_store,
+        required_frame_prepared, required_frame_order), 0, required_frame_order};
+    required_frame_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] =
+        {sizeof(std::uint32_t), 0, 0};
+    Check(required_frame_store.PrepareAppendBatch(required_frame_requests, required_frame_prepared,
+              &required_frame_admission) &&
+          required_frame_admission.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 10'000 &&
+          required_frame_store.CommitAppendBatch(required_frame_prepared) && required_frame_store.Size() == 1,
+          "required frame fanout is returned for pre-reservation even at zero cosmetic budget");
+
+    // Distortion output rows and its shared nonuniform gap pool are separate
+    // costs: recipe fanout reserves rows, but one canonical input owns one gap slice.
+    Store distortion_required;
+    hs::VfxEventInput distortion_input{}; distortion_input.sequence = 629;
+    hs::VfxRingGapsPayload distortion_payload;
+    distortion_payload.gap_angles_degrees = {11.0f, 29.0f, 47.0f};
+    distortion_input.payload = distortion_payload;
+    Store::FrameRows distortion_frame_rows{};
+    distortion_frame_rows[static_cast<std::size_t>(Profile::Distortion)] = 7;
+    const std::array distortion_required_requests{Store::AppendRequest{&distortion_input,
+        bit(Profile::Distortion), false, 0, 0, &distortion_frame_rows}};
+    Store::PreparedAppendBatch distortion_required_prepared;
+    std::vector<std::size_t> distortion_required_order;
+    Store::ProfileAdmission distortion_required_admission{held(distortion_required,
+        distortion_required_prepared, distortion_required_order), 0, distortion_required_order};
+    distortion_required_admission.distortion_gap_storage = {sizeof(float), 0, 2};
+    Check(distortion_required.PrepareAppendBatch(distortion_required_requests,
+              distortion_required_prepared, &distortion_required_admission) &&
+          distortion_required_admission.reserved_distortion_gaps == 5 &&
+          distortion_required.CommitAppendBatch(distortion_required_prepared),
+          "required distortion reserves base gaps plus one canonical nonuniform slice regardless of recipe fanout");
+
+    Store distortion_uniform;
+    hs::VfxEventInput distortion_uniform_input{}; distortion_uniform_input.sequence = 630;
+    hs::VfxRingGapsPayload distortion_uniform_payload;
+    distortion_uniform_payload.uniform_gaps = {4.0f, 9, hs::VfxGapAngleFormula::EventSpacing};
+    distortion_uniform_input.payload = distortion_uniform_payload;
+    Store::FrameRows distortion_uniform_rows{};
+    distortion_uniform_rows[static_cast<std::size_t>(Profile::Distortion)] = 5;
+    const std::array distortion_uniform_requests{Store::AppendRequest{&distortion_uniform_input,
+        bit(Profile::Distortion), false, 0, 0, &distortion_uniform_rows}};
+    Store::PreparedAppendBatch distortion_uniform_prepared;
+    std::vector<std::size_t> distortion_uniform_order;
+    Store::ProfileAdmission distortion_uniform_admission{held(distortion_uniform,
+        distortion_uniform_prepared, distortion_uniform_order), 0, distortion_uniform_order};
+    distortion_uniform_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(distortion_uniform.PrepareAppendBatch(distortion_uniform_requests,
+              distortion_uniform_prepared, &distortion_uniform_admission) &&
+          distortion_uniform_admission.reserved_distortion_gaps == 0 &&
+          distortion_uniform.CommitAppendBatch(distortion_uniform_prepared),
+          "uniform distortion gaps do not consume the shared float pool");
+
+    Store distortion_duplicates;
+    hs::VfxEventInput distortion_duplicate_a{}, distortion_duplicate_b{};
+    distortion_duplicate_a.sequence = distortion_duplicate_b.sequence = 631;
+    hs::VfxRingGapsPayload duplicate_gaps_a, duplicate_gaps_b;
+    duplicate_gaps_a.gap_angles_degrees = {13.0f, 31.0f};
+    duplicate_gaps_b.gap_angles_degrees = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+    distortion_duplicate_a.payload = duplicate_gaps_a;
+    distortion_duplicate_b.payload = duplicate_gaps_b;
+    Store::FrameRows distortion_duplicate_rows{};
+    distortion_duplicate_rows[static_cast<std::size_t>(Profile::Distortion)] = 4;
+    const std::array distortion_duplicate_requests{
+        Store::AppendRequest{&distortion_duplicate_a, bit(Profile::Distortion), false, 0, 0,
+            &distortion_duplicate_rows},
+        Store::AppendRequest{&distortion_duplicate_b, bit(Profile::Distortion), false, 0, 0,
+            &distortion_duplicate_rows}};
+    Store::PreparedAppendBatch distortion_duplicate_prepared;
+    std::vector<std::size_t> distortion_duplicate_order;
+    Store::ProfileAdmission distortion_duplicate_admission{held(distortion_duplicates,
+        distortion_duplicate_prepared, distortion_duplicate_order), 0, distortion_duplicate_order};
+    distortion_duplicate_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(distortion_duplicates.PrepareAppendBatch(distortion_duplicate_requests,
+              distortion_duplicate_prepared, &distortion_duplicate_admission) &&
+          distortion_duplicate_admission.reserved_distortion_gaps == 2 &&
+          distortion_duplicates.CommitAppendBatch(distortion_duplicate_prepared) &&
+          distortion_duplicates.ProfileEvents(Profile::Distortion).size() == 1 &&
+          std::get<hs::VfxRingGapsPayload>(
+              distortion_duplicates.ProfileEvents(Profile::Distortion)[0].payload).GapCount() == 2,
+          "duplicate new keys retain first-payload gap demand and pool slice only once");
+
+    Store distortion_existing;
+    hs::VfxEventInput canonical_distortion{}; canonical_distortion.sequence = 632;
+    hs::VfxRingGapsPayload canonical_distortion_gaps;
+    canonical_distortion_gaps.gap_angles_degrees = {19.0f, 37.0f, 55.0f};
+    canonical_distortion.payload = canonical_distortion_gaps;
+    distortion_existing.Append(Profile::Ground, canonical_distortion);
+    hs::VfxEventInput duplicate_existing_distortion = canonical_distortion;
+    std::get<hs::VfxRingGapsPayload>(duplicate_existing_distortion.payload).gap_angles_degrees.resize(8);
+    Store::FrameRows existing_distortion_rows{};
+    existing_distortion_rows[static_cast<std::size_t>(Profile::Distortion)] = 2;
+    const std::array existing_distortion_requests{Store::AppendRequest{&duplicate_existing_distortion,
+        bit(Profile::Distortion), false, 0, 0, &existing_distortion_rows}};
+    Store::PreparedAppendBatch existing_distortion_prepared;
+    std::vector<std::size_t> existing_distortion_order;
+    Store::ProfileAdmission existing_distortion_admission{held(distortion_existing,
+        existing_distortion_prepared, existing_distortion_order), 0, existing_distortion_order};
+    existing_distortion_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(distortion_existing.PrepareAppendBatch(existing_distortion_requests,
+              existing_distortion_prepared, &existing_distortion_admission) &&
+          existing_distortion_admission.reserved_distortion_gaps == 3 &&
+          distortion_existing.CommitAppendBatch(existing_distortion_prepared) &&
+          std::get<hs::VfxRingGapsPayload>(
+              distortion_existing.ProfileEvents(Profile::Distortion)[0].payload).GapCount() == 3,
+          "duplicate existing key sizes the pool from its retained canonical payload");
+
+    Store distortion_optional;
+    hs::VfxEventInput optional_distortion{}; optional_distortion.sequence = 633;
+    hs::VfxRingGapsPayload optional_distortion_gaps;
+    optional_distortion_gaps.gap_angles_degrees.resize(256, 21.0f);
+    optional_distortion.payload = optional_distortion_gaps;
+    hs::VfxEventInput warm_distortion{}; warm_distortion.sequence = 636;
+    distortion_optional.Append(Profile::Ground, optional_distortion);
+    distortion_optional.Append(Profile::Ground, warm_distortion);
+    Store::PreparedAppendBatch optional_distortion_prepared;
+    std::vector<std::size_t> optional_distortion_order;
+    Store::FrameRows warm_distortion_rows{};
+    warm_distortion_rows[static_cast<std::size_t>(Profile::Distortion)] = 1;
+    const std::array warm_distortion_requests{Store::AppendRequest{&warm_distortion,
+        bit(Profile::Distortion), false, bit(Profile::Distortion), 1, &warm_distortion_rows}};
+    Store::ProfileAdmission warm_distortion_admission{held(distortion_optional,
+        optional_distortion_prepared, optional_distortion_order),
+        std::numeric_limits<std::size_t>::max(), optional_distortion_order};
+    warm_distortion_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(distortion_optional.PrepareAppendBatch(warm_distortion_requests,
+              optional_distortion_prepared, &warm_distortion_admission) &&
+          distortion_optional.CommitAppendBatch(optional_distortion_prepared),
+          "distortion gap admission fixture warms existing-row staging capacity");
+    distortion_optional.EraseIf(Profile::Distortion, [&](const hs::VfxEventInput &input) {
+        return input.sequence == warm_distortion.sequence;
+    });
+    Store::FrameRows optional_distortion_rows{};
+    optional_distortion_rows[static_cast<std::size_t>(Profile::Distortion)] = 1;
+    const std::array optional_distortion_requests{Store::AppendRequest{&optional_distortion,
+        bit(Profile::Distortion), false, bit(Profile::Distortion), 1, &optional_distortion_rows}};
+    const auto optional_distortion_held = held(distortion_optional,
+        optional_distortion_prepared, optional_distortion_order);
+    Store::ProfileAdmission optional_distortion_admission{optional_distortion_held,
+        optional_distortion_held, optional_distortion_order};
+    optional_distortion_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(distortion_optional.PrepareAppendBatch(optional_distortion_requests,
+              optional_distortion_prepared, &optional_distortion_admission) &&
+          optional_distortion_admission.requested_cosmetic_memberships == 1 &&
+          optional_distortion_admission.admitted_cosmetic_memberships == 0 &&
+          optional_distortion_admission.reserved_distortion_gaps == 0 &&
+          distortion_optional.CommitAppendBatch(optional_distortion_prepared) &&
+          distortion_optional.ProfileEvents(Profile::Distortion).empty(),
+          "optional distortion membership is dropped when its shared gap pool cannot grow under budget");
+    constexpr std::size_t warm_distortion_gap_capacity = 256;
+    const auto warm_pool_bytes = warm_distortion_gap_capacity * sizeof(float);
+    const auto warm_pool_held = Add(held(distortion_optional,
+        optional_distortion_prepared, optional_distortion_order), warm_pool_bytes);
+    Store::ProfileAdmission warm_pool_admission{warm_pool_held, warm_pool_held,
+        optional_distortion_order};
+    warm_pool_admission.distortion_gap_storage = {
+        sizeof(float), warm_distortion_gap_capacity, 0};
+    Check(distortion_optional.PrepareAppendBatch(optional_distortion_requests,
+              optional_distortion_prepared, &warm_pool_admission) &&
+          warm_pool_admission.admitted_cosmetic_memberships == 1 &&
+          warm_pool_admission.reserved_distortion_gaps == warm_distortion_gap_capacity &&
+          distortion_optional.CommitAppendBatch(optional_distortion_prepared) &&
+          distortion_optional.ProfileEvents(Profile::Distortion).size() == 1,
+          "warmed distortion gap capacity has zero marginal pool cost at the soft budget");
+
+    Store distortion_gap_boundary;
+    hs::VfxEventInput boundary_distortion{}; boundary_distortion.sequence = 634;
+    hs::VfxRingGapsPayload boundary_gaps;
+    boundary_gaps.gap_angles_degrees = {1.0f};
+    boundary_distortion.payload = boundary_gaps;
+    Store::FrameRows boundary_rows{};
+    boundary_rows[static_cast<std::size_t>(Profile::Distortion)] = 1;
+    const std::array boundary_requests{Store::AppendRequest{&boundary_distortion,
+        bit(Profile::Distortion), false, bit(Profile::Distortion), 1, &boundary_rows}};
+    Store::PreparedAppendBatch boundary_prepared;
+    std::vector<std::size_t> boundary_order;
+    Store::ProfileAdmission boundary_admission{held(distortion_gap_boundary,
+        boundary_prepared, boundary_order), std::numeric_limits<std::size_t>::max(), boundary_order};
+    boundary_admission.distortion_gap_storage = {sizeof(float), 0,
+        std::numeric_limits<std::uint32_t>::max()};
+    Check(distortion_gap_boundary.PrepareAppendBatch(boundary_requests, boundary_prepared,
+              &boundary_admission) && boundary_admission.admitted_cosmetic_memberships == 0 &&
+          boundary_admission.reserved_distortion_gaps == std::numeric_limits<std::uint32_t>::max() &&
+          distortion_gap_boundary.CommitAppendBatch(boundary_prepared),
+          "optional distortion gaps beyond uint32 addressability are dropped without changing the boundary");
+
+    Store distortion_gap_required_boundary;
+    hs::VfxEventInput required_boundary_distortion{}; required_boundary_distortion.sequence = 635;
+    required_boundary_distortion.payload = boundary_gaps;
+    const std::array required_boundary_requests{Store::AppendRequest{&required_boundary_distortion,
+        bit(Profile::Distortion), false, 0, 0, &boundary_rows}};
+    Store::PreparedAppendBatch required_boundary_prepared;
+    std::vector<std::size_t> required_boundary_order;
+    Store::ProfileAdmission required_boundary_admission{held(distortion_gap_required_boundary,
+        required_boundary_prepared, required_boundary_order), 0, required_boundary_order};
+    required_boundary_admission.distortion_gap_storage = {sizeof(float), 0,
+        std::numeric_limits<std::uint32_t>::max()};
+    bool required_gap_boundary_rejected{};
+    try
+    {
+        (void)distortion_gap_required_boundary.PrepareAppendBatch(required_boundary_requests,
+            required_boundary_prepared, &required_boundary_admission);
+    }
+    catch (const std::length_error &) { required_gap_boundary_rejected = true; }
+    Check(required_gap_boundary_rejected && distortion_gap_required_boundary.Size() == 0,
+          "required distortion gaps outside uint32 addressability fail before store publication");
+
+    Store required_first;
+    Store::PreparedAppendBatch required_first_prepared;
+    std::vector<std::size_t> required_first_order;
+    hs::VfxEventInput required_event{}, decorative_event{};
+    required_event.sequence = 625; decorative_event.sequence = 626;
+    Store::FrameRows required_cost{}, decorative_cost{};
+    required_cost[static_cast<std::size_t>(Profile::Light)] = 1'000'000;
+    decorative_cost[static_cast<std::size_t>(Profile::Decal)] = 16;
+    const std::array required_first_requests{
+        Store::AppendRequest{&required_event, bit(Profile::Light), false, 0, 1, &required_cost},
+        Store::AppendRequest{&decorative_event, bit(Profile::Decal), false, bit(Profile::Decal), 1, &decorative_cost}};
+    Store::ProfileAdmission required_first_admission{
+        held(required_first, required_first_prepared, required_first_order),
+        held(required_first, required_first_prepared, required_first_order) + 64 * 1024, required_first_order};
+    required_first_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {4, 0, 0};
+    required_first_admission.frame_storage[static_cast<std::size_t>(Profile::Decal)] = {4, 0, 0};
+    Check(required_first.PrepareAppendBatch(required_first_requests, required_first_prepared,
+              &required_first_admission) && required_first_admission.requested_cosmetic_memberships == 1 &&
+          required_first_admission.admitted_cosmetic_memberships == 0 &&
+          required_first_admission.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 1'000'000 &&
+          required_first.CommitAppendBatch(required_first_prepared) &&
+          required_first.ProfileEvents(Profile::Light).size() == 1 &&
+          required_first.ProfileEvents(Profile::Decal).empty(),
+          "unallocated required frame growth must consume remaining workspace before decorative growth");
+
+    hs::runtime_detail::VfxSessionState missing_frame_state;
+    missing_frame_state.Synchronize(62);
+    raw.session_id = 62;
+    Check(missing_frame_state.raw_events.Enqueue(raw) &&
+          missing_frame_state.raw_events.Prepare(1, 62).events.size() == 1,
+          "missing frame-cost fixture has a ready raw event");
+    hs::VfxEventInput missing_frame_input{}; missing_frame_input.sequence = 628;
+    const std::array missing_frame_requests{Store::AppendRequest{&missing_frame_input, bit(Profile::Light)}};
+    Store::PreparedAppendBatch missing_frame_prepared;
+    std::vector<std::size_t> missing_frame_order;
+    Store::ProfileAdmission missing_frame_admission{
+        hs::runtime_detail::vfx_retained_size::Add(missing_frame_state.TrackedLogicalCapacityBytes(),
+            hs::runtime_detail::vfx_retained_size::Add(missing_frame_prepared.LogicalCapacityBytes(),
+                hs::runtime_detail::vfx_retained_size::Vector(missing_frame_order))),
+        std::numeric_limits<std::size_t>::max(), missing_frame_order};
+    missing_frame_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] =
+        {sizeof(std::uint32_t), 0, 0};
+    Check(!missing_frame_state.active_effects.PrepareAppendBatch(missing_frame_requests,
+              missing_frame_prepared, &missing_frame_admission) &&
+          missing_frame_state.active_effects.Size() == 0 &&
+          missing_frame_state.raw_events.Prepare(1, 62).events.size() == 1,
+          "enabled frame output without a cost record rejects before publication or raw acknowledgement");
+
+    // Warm retained and staging membership capacity, then show frame fanout is
+    // the only marginal cost for this existing canonical row.
+    Store frame_reuse_store;
+    hs::VfxEventInput frame_target{}, frame_warm{}, frame_light{};
+    frame_target.sequence = 625; frame_warm.sequence = 626; frame_light.sequence = 627;
+    frame_reuse_store.Append(Profile::Ground, frame_target);
+    frame_reuse_store.Append(Profile::Ground, frame_warm);
+    frame_reuse_store.Append(Profile::Light, frame_light);
+    Store::PreparedAppendBatch frame_reuse_prepared;
+    std::vector<std::size_t> frame_reuse_order;
+    Store::FrameRows warm_frame_rows{};
+    warm_frame_rows[static_cast<std::size_t>(Profile::Light)] = 1;
+    const std::array warm_frame_requests{Store::AppendRequest{&frame_warm,
+        bit(Profile::Light), false, bit(Profile::Light), 1, &warm_frame_rows}};
+    Store::ProfileAdmission warm_frame_admission{held(frame_reuse_store,
+        frame_reuse_prepared, frame_reuse_order), std::numeric_limits<std::size_t>::max(), frame_reuse_order};
+    Check(frame_reuse_store.PrepareAppendBatch(warm_frame_requests, frame_reuse_prepared,
+              &warm_frame_admission) && frame_reuse_store.CommitAppendBatch(frame_reuse_prepared),
+          "frame reuse fixture warms one optional profile membership");
+
+    Store::FrameRows large_frame_rows{};
+    large_frame_rows[static_cast<std::size_t>(Profile::Light)] = 100;
+    const std::array large_frame_requests{Store::AppendRequest{&frame_target,
+        bit(Profile::Light), false, bit(Profile::Light), 5, &large_frame_rows}};
+    const auto frame_held = held(frame_reuse_store, frame_reuse_prepared, frame_reuse_order);
+    Store::ProfileAdmission frame_limited{frame_held, frame_held, frame_reuse_order};
+    frame_limited.frame_storage[static_cast<std::size_t>(Profile::Light)] = {1, 12, 12};
+    Check(frame_reuse_store.PrepareAppendBatch(large_frame_requests, frame_reuse_prepared, &frame_limited) &&
+          frame_limited.requested_cosmetic_memberships == 1 &&
+          frame_limited.admitted_cosmetic_memberships == 0 &&
+          frame_limited.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 12 &&
+          frame_reuse_store.CommitAppendBatch(frame_reuse_prepared) &&
+          frame_reuse_store.ProfileEvents(Profile::Light).size() == 2,
+          "large optional fanout is rejected when retained capacities are warm but frame rows would grow");
+    Store::ProfileAdmission frame_reused{held(frame_reuse_store, frame_reuse_prepared, frame_reuse_order),
+        frame_held, frame_reuse_order};
+    frame_reused.frame_storage[static_cast<std::size_t>(Profile::Light)] = {1, 112, 12};
+    Check(frame_reuse_store.PrepareAppendBatch(large_frame_requests, frame_reuse_prepared, &frame_reused) &&
+          frame_reused.admitted_cosmetic_memberships == 1 &&
+          frame_reused.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 112 &&
+          frame_reuse_store.CommitAppendBatch(frame_reuse_prepared) &&
+          frame_reuse_store.ProfileEvents(Profile::Light).size() == 3,
+          "optional output reuses pre-reserved frame capacity without consuming growth budget");
 
     Store promoted;
     Store::PreparedAppendBatch promoted_prepared;
@@ -947,6 +1272,259 @@ void CheckOptionalProfileAdmission()
           prioritized.ProfileEvents(Profile::Light)[0].sequence == base.sequence &&
           held(prioritized, prepared, priority_order) == reuse_held,
           "zero-growth membership reuses existing row and reference capacity above the soft budget");
+}
+
+void CheckSupplementalFramePoolAdmission()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    using Profile = Store::Profile;
+    const auto bit = [](Profile profile) {
+        return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
+    };
+    const auto held = [](const Store &store, const Store::PreparedAppendBatch &prepared,
+                          const std::vector<std::size_t> &order) {
+        using namespace hs::runtime_detail::vfx_retained_size;
+        return Add(store.LogicalCapacityBytes(), Add(prepared.LogicalCapacityBytes(), Vector(order)));
+    };
+
+    Store shared_gap_store;
+    Store::PreparedAppendBatch shared_gap_prepared;
+    std::vector<std::size_t> shared_gap_order;
+    hs::VfxEventInput shared_gap{}; shared_gap.sequence = 680;
+    hs::VfxRingGapsPayload shared_payload;
+    shared_payload.gap_angles_degrees = {11.0f, 23.0f, 37.0f};
+    shared_gap.payload = shared_payload;
+    Store::FrameRows shared_rows{};
+    shared_rows[static_cast<std::size_t>(Profile::Ground)] = 1;
+    shared_rows[static_cast<std::size_t>(Profile::Distortion)] = 1;
+    const std::array shared_requests{Store::AppendRequest{&shared_gap,
+        static_cast<std::uint16_t>(bit(Profile::Ground) | bit(Profile::Distortion)),
+        false, 0, 0, &shared_rows}};
+    Store::ProfileAdmission shared_admission{held(shared_gap_store, shared_gap_prepared,
+        shared_gap_order), 0, shared_gap_order};
+    shared_admission.ground_gap_storage = {sizeof(float), 0, 0};
+    shared_admission.distortion_gap_storage = {sizeof(float), 0, 0};
+    Check(shared_gap_store.PrepareAppendBatch(shared_requests, shared_gap_prepared,
+              &shared_admission) && shared_admission.reserved_ground_gaps == 3 &&
+          shared_admission.reserved_distortion_gaps == 3 &&
+          shared_gap_store.CommitAppendBatch(shared_gap_prepared) &&
+          shared_gap_store.ProfileEvents(Profile::Ground).size() == 1 &&
+          shared_gap_store.ProfileEvents(Profile::Distortion).size() == 1,
+          "one canonical ring payload reserves its float gaps once in each requested pool");
+
+    Store ribbon_duplicates;
+    Store::PreparedAppendBatch ribbon_prepared;
+    std::vector<std::size_t> ribbon_order;
+    hs::VfxEventInput ribbon_first{}; ribbon_first.sequence = 681;
+    hs::VfxRingGapsPayload first_payload; first_payload.gap_angles_degrees = {17.0f};
+    ribbon_first.payload = first_payload;
+    hs::VfxEventInput ribbon_duplicate = ribbon_first;
+    std::get<hs::VfxRingGapsPayload>(ribbon_duplicate.payload).gap_angles_degrees = {29.0f, 41.0f};
+    Store::FrameRows ribbon_rows_first{}, ribbon_rows_duplicate{};
+    ribbon_rows_first[static_cast<std::size_t>(Profile::Ribbon)] = 1;
+    ribbon_rows_duplicate[static_cast<std::size_t>(Profile::Ribbon)] = 1;
+    const std::array ribbon_requests{
+        Store::AppendRequest{&ribbon_first, bit(Profile::Ribbon), false, bit(Profile::Ribbon), 2,
+            &ribbon_rows_first, 2},
+        Store::AppendRequest{&ribbon_duplicate, bit(Profile::Ribbon), false, bit(Profile::Ribbon), 4,
+            &ribbon_rows_duplicate, 5}};
+    Store::ProfileAdmission ribbon_admission{held(ribbon_duplicates, ribbon_prepared, ribbon_order),
+        std::numeric_limits<std::size_t>::max(), ribbon_order};
+    ribbon_admission.ribbon_output_storage = {sizeof(float), 0, 0};
+    Check(ribbon_duplicates.PrepareAppendBatch(ribbon_requests, ribbon_prepared,
+              &ribbon_admission) && ribbon_admission.requested_cosmetic_memberships == 1 &&
+          ribbon_admission.admitted_cosmetic_memberships == 1 &&
+          ribbon_admission.reserved_ribbon_outputs == 5 &&
+          ribbon_duplicates.CommitAppendBatch(ribbon_prepared) &&
+          ribbon_duplicates.Size() == 1 && ribbon_duplicates.ProfileEvents(Profile::Ribbon).size() == 1 &&
+          std::get<hs::VfxRingGapsPayload>(ribbon_duplicates.ProfileEvents(Profile::Ribbon)[0].payload)
+              .gap_angles_degrees == std::vector<float>{17.0f},
+          "duplicate ribbon requests reserve maximum fanout once and retain first-input payload");
+
+    Store ribbon_warm;
+    hs::VfxEventInput ribbon_target{}; ribbon_target.sequence = 686;
+    hs::VfxEventInput ribbon_warm_row{}; ribbon_warm_row.sequence = 687;
+    ribbon_warm.Append(Profile::Ground, ribbon_target);
+    Store::PreparedAppendBatch ribbon_warm_prepared;
+    std::vector<std::size_t> ribbon_warm_order;
+    Store::FrameRows ribbon_warm_rows{};
+    ribbon_warm_rows[static_cast<std::size_t>(Profile::Ribbon)] = 1;
+    const std::array ribbon_warm_request{Store::AppendRequest{&ribbon_warm_row,
+        bit(Profile::Ribbon), false, bit(Profile::Ribbon), 1, &ribbon_warm_rows, 1}};
+    Store::ProfileAdmission ribbon_warm_admission{held(ribbon_warm,
+        ribbon_warm_prepared, ribbon_warm_order), std::numeric_limits<std::size_t>::max(),
+        ribbon_warm_order};
+    Check(ribbon_warm.PrepareAppendBatch(ribbon_warm_request, ribbon_warm_prepared,
+              &ribbon_warm_admission) && ribbon_warm.CommitAppendBatch(ribbon_warm_prepared),
+          "Ribbon profile admission warms the owner and selection scratch");
+    ribbon_warm.EraseIf(Profile::Ribbon, [&](const hs::VfxEventInput &input) {
+        return input.sequence == ribbon_warm_row.sequence;
+    });
+    const std::array ribbon_reuse_request{Store::AppendRequest{&ribbon_target,
+        bit(Profile::Ribbon), false, bit(Profile::Ribbon), 1, &ribbon_warm_rows, 2}};
+    const auto ribbon_warm_held = held(ribbon_warm, ribbon_warm_prepared, ribbon_warm_order);
+    Store::ProfileAdmission ribbon_reuse_admission{ribbon_warm_held, ribbon_warm_held,
+        ribbon_warm_order};
+    ribbon_reuse_admission.ribbon_output_storage = {sizeof(float), 2, 0};
+    Check(ribbon_warm.PrepareAppendBatch(ribbon_reuse_request, ribbon_warm_prepared,
+              &ribbon_reuse_admission) && ribbon_reuse_admission.admitted_cosmetic_memberships == 1 &&
+          ribbon_reuse_admission.reserved_ribbon_outputs == 2 &&
+          ribbon_warm.CommitAppendBatch(ribbon_warm_prepared) &&
+          ribbon_warm.ProfileEvents(Profile::Ribbon).size() == 1 &&
+          held(ribbon_warm, ribbon_warm_prepared, ribbon_warm_order) == ribbon_warm_held,
+          "Ribbon output fanout reuses pre-reserved pool and owner capacity at zero growth budget");
+
+    Store required_ground;
+    hs::VfxEventInput required_gap{}; required_gap.sequence = 682;
+    hs::VfxRingGapsPayload required_payload;
+    required_payload.gap_angles_degrees = {3.0f, 5.0f, 7.0f, 11.0f};
+    required_gap.payload = required_payload;
+    hs::VfxEventInput optional_ribbon{}; optional_ribbon.sequence = 683;
+    Store::FrameRows ground_rows{}, optional_ribbon_rows{};
+    ground_rows[static_cast<std::size_t>(Profile::Ground)] = 1;
+    optional_ribbon_rows[static_cast<std::size_t>(Profile::Ribbon)] = 1;
+    const std::array ground_and_ribbon{
+        Store::AppendRequest{&required_gap, bit(Profile::Ground), false, 0, 0, &ground_rows},
+        Store::AppendRequest{&optional_ribbon, bit(Profile::Ribbon), false, bit(Profile::Ribbon), 1,
+            &optional_ribbon_rows, 1'000'000}};
+    Store::PreparedAppendBatch ground_ribbon_prepared;
+    std::vector<std::size_t> ground_ribbon_order;
+    const auto ground_ribbon_held = held(required_ground, ground_ribbon_prepared,
+        ground_ribbon_order);
+    Store::ProfileAdmission ground_ribbon_admission{ground_ribbon_held,
+        ground_ribbon_held + 1024 * 1024, ground_ribbon_order};
+    ground_ribbon_admission.ground_gap_storage = {sizeof(float), 0, 0};
+    ground_ribbon_admission.ribbon_output_storage = {sizeof(float), 0, 0};
+    Check(required_ground.PrepareAppendBatch(ground_and_ribbon, ground_ribbon_prepared,
+              &ground_ribbon_admission) && ground_ribbon_admission.reserved_ground_gaps == 4 &&
+          ground_ribbon_admission.admitted_cosmetic_memberships == 0 &&
+          ground_ribbon_admission.reserved_ribbon_outputs == 0 &&
+          required_ground.CommitAppendBatch(ground_ribbon_prepared) &&
+          required_ground.ProfileEvents(Profile::Ground).size() == 1 &&
+          required_ground.ProfileEvents(Profile::Ribbon).empty(),
+          "required Ground pool growth is charged before optional Ribbon output fanout");
+
+    Store incomplete;
+    Store::PreparedAppendBatch incomplete_prepared;
+    std::vector<std::size_t> incomplete_order;
+    hs::VfxEventInput incomplete_input{}; incomplete_input.sequence = 684;
+    Store::FrameRows incomplete_rows{};
+    incomplete_rows[static_cast<std::size_t>(Profile::Ribbon)] = 2;
+    const std::array incomplete_requests{Store::AppendRequest{&incomplete_input,
+        bit(Profile::Ribbon), false, 0, 0, &incomplete_rows, 0}};
+    Store::ProfileAdmission incomplete_admission{held(incomplete, incomplete_prepared,
+        incomplete_order), std::numeric_limits<std::size_t>::max(), incomplete_order};
+    incomplete_admission.ribbon_output_storage = {sizeof(float), 0, 0};
+    Check(!incomplete.PrepareAppendBatch(incomplete_requests, incomplete_prepared,
+              &incomplete_admission) && incomplete.Size() == 0,
+          "enabled Ribbon output pool rejects source rows with missing fanout metadata");
+
+    Store unrelated_profile;
+    Store::PreparedAppendBatch unrelated_prepared;
+    std::vector<std::size_t> unrelated_order;
+    hs::VfxEventInput unrelated_input{}; unrelated_input.sequence = 688;
+    Store::FrameRows unrelated_rows{};
+    unrelated_rows[static_cast<std::size_t>(Profile::Ground)] = 1;
+    unrelated_rows[static_cast<std::size_t>(Profile::Ribbon)] = 2;
+    const std::array unrelated_requests{Store::AppendRequest{&unrelated_input,
+        bit(Profile::Ground), false, 0, 0, &unrelated_rows, 3}};
+    Store::ProfileAdmission unrelated_admission{held(unrelated_profile, unrelated_prepared,
+        unrelated_order), std::numeric_limits<std::size_t>::max(), unrelated_order};
+    unrelated_admission.ribbon_output_storage = {sizeof(float), 0, 0};
+    Check(unrelated_profile.PrepareAppendBatch(unrelated_requests, unrelated_prepared,
+              &unrelated_admission) && unrelated_admission.reserved_ribbon_outputs == 0 &&
+          unrelated_profile.CommitAppendBatch(unrelated_prepared) &&
+          unrelated_profile.ProfileEvents(Profile::Ground).size() == 1 &&
+          unrelated_profile.ProfileEvents(Profile::Ribbon).empty(),
+          "unselected Ribbon columns in shared per-effect metadata do not reject another profile");
+
+    Store optional_boundary;
+    Store::PreparedAppendBatch boundary_prepared;
+    std::vector<std::size_t> boundary_order;
+    hs::VfxEventInput boundary_input{}; boundary_input.sequence = 685;
+    Store::FrameRows boundary_rows{};
+    boundary_rows[static_cast<std::size_t>(Profile::Ribbon)] = 1;
+    const std::array boundary_requests{Store::AppendRequest{&boundary_input,
+        bit(Profile::Ribbon), false, bit(Profile::Ribbon), 1, &boundary_rows, 1}};
+    Store::ProfileAdmission boundary_admission{held(optional_boundary, boundary_prepared,
+        boundary_order), std::numeric_limits<std::size_t>::max(), boundary_order};
+    boundary_admission.ribbon_output_storage = {sizeof(float),
+        std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max()};
+    Check(optional_boundary.PrepareAppendBatch(boundary_requests, boundary_prepared,
+              &boundary_admission) && boundary_admission.admitted_cosmetic_memberships == 0 &&
+          boundary_admission.reserved_ribbon_outputs == std::numeric_limits<std::uint32_t>::max() &&
+          optional_boundary.CommitAppendBatch(boundary_prepared) &&
+          optional_boundary.ProfileEvents(Profile::Ribbon).empty(),
+          "optional Ribbon output beyond uint32 addressability is skipped");
+
+    Store required_boundary;
+    Store::PreparedAppendBatch required_boundary_prepared;
+    std::vector<std::size_t> required_boundary_order;
+    const std::array required_boundary_requests{Store::AppendRequest{&boundary_input,
+        bit(Profile::Ribbon), false, 0, 0, &boundary_rows, 1}};
+    Store::ProfileAdmission required_boundary_admission{held(required_boundary,
+        required_boundary_prepared, required_boundary_order), 0, required_boundary_order};
+    required_boundary_admission.ribbon_output_storage = {sizeof(float),
+        std::numeric_limits<std::uint32_t>::max(), std::numeric_limits<std::uint32_t>::max()};
+    bool required_boundary_rejected{};
+    try
+    {
+        (void)required_boundary.PrepareAppendBatch(required_boundary_requests,
+            required_boundary_prepared, &required_boundary_admission);
+    }
+    catch (const std::length_error &) { required_boundary_rejected = true; }
+    Check(required_boundary_rejected && required_boundary.Size() == 0,
+          "required Ribbon output beyond uint32 addressability fails before publication");
+}
+
+void CheckSurfaceFrameCaptureAdmission()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    using Profile = Store::Profile;
+    const auto bit = [](Profile profile) {
+        return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
+    };
+    hs::VfxEventInput input{};
+    input.sequence = 689; input.effect_handle = 1;
+    Store::FrameRows rows{};
+    rows[static_cast<std::size_t>(Profile::EntitySurface)] = 2;
+    rows[static_cast<std::size_t>(Profile::Light)] = 1;
+    const std::array requests{
+        Store::AppendRequest{&input, bit(Profile::EntitySurface), false, 0, 0, &rows},
+        Store::AppendRequest{&input, bit(Profile::EntitySurface), false, 0, 0, &rows},
+        Store::AppendRequest{&input, bit(Profile::Light), false, bit(Profile::Light), 1, &rows}
+    };
+    constexpr std::size_t mib = 1024 * 1024;
+    for (const bool warm : {false, true})
+    {
+        Store store;
+        Store::PreparedAppendBatch prepared;
+        std::vector<std::size_t> order;
+        const auto held = hs::runtime_detail::vfx_retained_size::Add(store.LogicalCapacityBytes(),
+            prepared.LogicalCapacityBytes());
+        Store::ProfileAdmission admission{held, held + mib, order};
+        admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {mib / 4, 0, 0};
+        admission.surface_capture_storage = {mib, warm ? 3u : 2u, 2};
+        admission.surface_capture_input_storage = {mib, warm ? 3u : 2u, 2};
+        Check(store.PrepareAppendBatch(requests, prepared, &admission) &&
+              admission.reserved_surface_captures == 3 &&
+              prepared.AdditionalProfileRows(Profile::EntitySurface) == 1 &&
+              admission.admitted_cosmetic_memberships == (warm ? 1u : 0u) &&
+              store.CommitAppendBatch(prepared) &&
+              store.ProfileEvents(Profile::EntitySurface).size() == 1 &&
+              store.ProfileEvents(Profile::Light).size() == (warm ? 1u : 0u),
+              "surface capture growth must precede decoration, deduplicate memberships and reuse both warm buffers");
+    }
+    Store overflow;
+    Store::PreparedAppendBatch prepared;
+    std::vector<std::size_t> order;
+    Store::ProfileAdmission admission{0, mib, order};
+    admission.surface_capture_storage = {sizeof(float), SIZE_MAX, SIZE_MAX};
+    bool rejected{};
+    try { (void)overflow.PrepareAppendBatch(std::span(requests).first(1), prepared, &admission); }
+    catch (const std::length_error &) { rejected = true; }
+    Check(rejected && overflow.Size() == 0,
+          "surface capture size overflow must reject before CPU publication");
 }
 
 void CheckPreparedGroundOwnerReplacement()
@@ -1102,6 +1680,98 @@ void CheckOwnerBindingStorageReuse()
     allocation_budget = -1;
     Check(reused_without_growth && refresh_count == 3,
         "unrelated retained rows grew binding scratch or duplicated shared owner refresh");
+}
+
+void CheckFusedOwnerRefreshExpiryMatchesLegacy()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    struct Counts { std::size_t refresh{}, expiry{}; } legacy_counts, fused_counts;
+    Store legacy, fused;
+    const auto seed = [](Store &store)
+    {
+        const auto add = [&](hs::Sequence sequence, std::uint64_t owner, hs::Tick end,
+                             std::initializer_list<Store::Profile> profiles) {
+            hs::VfxEventInput input{};
+            input.sequence = sequence;
+            input.geometry_owner_id = owner;
+            input.geometry_end_tick = end;
+            for (const auto profile : profiles) store.Append(profile, input);
+        };
+        add(201, 101, 0, {Store::Profile::Ground, Store::Profile::Light});
+        add(202, 102, 20, {Store::Profile::Ground, Store::Profile::Light}); // owner refresh drops
+        add(203, 103, 20, {Store::Profile::Ground, Store::Profile::Light, Store::Profile::Ribbon}); // bound expiry
+        add(204, 0, 1, {Store::Profile::Ground, Store::Profile::Light}); // canonical expiry
+    };
+    seed(legacy);
+    seed(fused);
+
+    const auto compare = [&](const char *message)
+    {
+        for (const auto profile : {Store::Profile::Ground, Store::Profile::Light, Store::Profile::Ribbon})
+        {
+            const auto a = legacy.ProfileEvents(profile);
+            const auto b = fused.ProfileEvents(profile);
+            Check(a.size() == b.size(), message);
+            for (std::size_t i = 0; i < a.size(); ++i)
+                Check(a[i].sequence == b[i].sequence && a[i].event_tick == b[i].event_tick &&
+                    a[i].geometry_end_tick == b[i].geometry_end_tick, message);
+        }
+    };
+    const auto run_frame = [&](Store &store, bool fused_path, Counts &counts,
+                               unsigned frame, hs::Tick current_tick)
+    {
+        const auto refresh = [&](hs::VfxEventInput &bound) {
+            ++counts.refresh;
+            if (bound.geometry_owner_id == 102) return false;
+            bound.geometry_end_tick = bound.geometry_owner_id == 103 ? 1u : (frame == 1 ? 10u : 3u);
+            return true;
+        };
+        const auto expired = [&](const hs::VfxEventInput &input) {
+            ++counts.expiry;
+            return input.geometry_end_tick != 0 && input.geometry_end_tick <= current_tick;
+        };
+        store.BeginFrameBindings();
+        for (const auto profile : {Store::Profile::Ground, Store::Profile::Light})
+        {
+            if (fused_path) store.RefreshProfile(profile, refresh, expired);
+            else
+            {
+                store.RefreshProfile(profile, refresh);
+                store.EraseIf(profile, expired);
+            }
+        }
+    };
+
+    run_frame(legacy, false, legacy_counts, 1, 3);
+    run_frame(fused, true, fused_counts, 1, 3);
+    compare("fused refresh/expiry changed first-frame rows or bound values");
+    Check(legacy_counts.refresh == 3 && fused_counts.refresh == 3 &&
+        legacy_counts.expiry == 6 && fused_counts.expiry == 6,
+        "shared owner refresh or expiry callback ran a different number of times");
+
+    const auto rebind = [](hs::VfxEventInput &input) { ++input.event_tick; return true; };
+    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> legacy_captures, fused_captures;
+    legacy.RebindRows(rebind, legacy_captures);
+    fused.RebindRows(rebind, fused_captures);
+    legacy.Compact();
+    fused.Compact();
+    compare("rebind/compact changed fused-vs-legacy survivors or order");
+    Check(legacy.Size() == 2 && fused.Size() == 2,
+        "rebind/compact must preserve the shared live row and Ribbon-only row");
+
+    run_frame(legacy, false, legacy_counts, 2, 3);
+    run_frame(fused, true, fused_counts, 2, 3);
+    compare("frame reset changed fused-vs-legacy expiry results");
+    Check(legacy_counts.refresh == 4 && fused_counts.refresh == 4 &&
+        legacy_counts.expiry == 8 && fused_counts.expiry == 8,
+        "frame reset duplicated or skipped a shared owner refresh/expiry");
+    legacy.Compact();
+    fused.Compact();
+    compare("post-frame compact changed fused-vs-legacy survivors or order");
+    Check(legacy.Size() == 1 && fused.Size() == 1 &&
+        legacy.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203 &&
+        fused.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203,
+        "compaction must retain only the expected Ribbon-owned row");
 }
 
 void CheckOptionalFlashBudget()
@@ -1282,7 +1952,7 @@ void CheckTrackedVfxCapacityAccounting()
     const auto raw_pending = state.raw_events.LogicalCapacityBytes();
     state.raw_events.Prepare(10, 1);
     Check(raw_pending > 0 && state.raw_events.LogicalCapacityBytes() > 0 &&
-          state.raw_events.in_flight.entries.capacity() > 0,
+          state.raw_events.in_flight.events.capacity() > 0,
           "raw activation accounts pending and in-flight event storage");
 }
 
@@ -1663,7 +2333,7 @@ void CheckEmptyPreparedShardCapacityTransfer()
     raw.session_id = 21;
     raw.tick = 1;
     raw.sequence = 101;
-    Check(state.raw_events.Enqueue(raw) && state.raw_events.Prepare(1, 21).entries.size() == 1,
+    Check(state.raw_events.Enqueue(raw) && state.raw_events.Prepare(1, 21).events.size() == 1,
         "status shard fixture must have a ready raw activation");
 
     constexpr std::size_t shard_count = 2;
@@ -1717,14 +2387,14 @@ void CheckEmptyPreparedShardCapacityTransfer()
           state.decoded.particle_spawns.size() == shard_count &&
           state.decoded.particle_spawns[0].sequence == 201 &&
           state.decoded.particle_spawns[1].sequence == 202 &&
-          state.PersistentBurstCount() == 1 && state.raw_events.in_flight.entries.empty(),
+          state.PersistentBurstCount() == 1 && state.raw_events.in_flight.events.empty(),
         "empty prepared capacity must transfer before status shard append and raw acknowledgement");
 
     State stale;
     stale.Synchronize(22);
     raw.session_id = 22;
     raw.sequence = 102;
-    Check(stale.raw_events.Enqueue(raw) && stale.raw_events.Prepare(1, 22).entries.size() == 1,
+    Check(stale.raw_events.Enqueue(raw) && stale.raw_events.Prepare(1, 22).events.size() == 1,
         "stale shard fixture must have a ready raw activation");
     hs::runtime_detail::DecodedVfxState stale_births;
     std::array<std::size_t, 3> stale_required_rows{shard_count, 0, 0};
@@ -1753,7 +2423,7 @@ void CheckEmptyPreparedShardCapacityTransfer()
     Check(!stale.CommitPreparedActivation(stale_births, stale_profiles, true) &&
           stale_births.particle_spawns.data() == stale_prepared_storage &&
           stale.decoded.particle_spawns.data() == stale_destination_storage &&
-          stale.decoded.particle_spawns.empty() && stale.raw_events.Prepare(1, 22).entries.size() == 1,
+          stale.decoded.particle_spawns.empty() && stale.raw_events.Prepare(1, 22).events.size() == 1,
         "stale activation must not transfer empty prepared capacity or acknowledge its raw event");
 }
 
@@ -1767,7 +2437,7 @@ void CheckPreparedSurfaceCaptureReservation()
     raw.session_id = 7;
     raw.tick = 1;
     raw.sequence = 91;
-    Check(state.raw_events.Enqueue(raw) && state.raw_events.Prepare(1, 7).entries.size() == 1,
+    Check(state.raw_events.Enqueue(raw) && state.raw_events.Prepare(1, 7).events.size() == 1,
         "surface capture fixture did not retain its raw activation");
     hs::VfxEventInput input;
     input.sequence = raw.sequence;
@@ -1786,19 +2456,19 @@ void CheckPreparedSurfaceCaptureReservation()
     allocation_budget = -1;
     Check(failed && state.active_effects.Size() == 0 &&
         state.active_effects.CanCommitAppendBatch(profiles) &&
-        state.raw_events.in_flight.entries.size() == 1 &&
+        state.raw_events.in_flight.events.size() == 1 &&
         state.decoded.entity_surface_captures.empty(),
         "surface capture allocation failure published profiles or acknowledged raw input");
 
     state.ReserveSurfaceCaptures(profiles.AdditionalProfileRows(Store::Profile::EntitySurface));
-    Check(state.active_effects.Size() == 0 && state.raw_events.in_flight.entries.size() == 1 &&
+    Check(state.active_effects.Size() == 0 && state.raw_events.in_flight.events.size() == 1 &&
         state.decoded.entity_surface_captures.capacity() >= 1,
         "surface capture preflight published activation before birth preparation");
     allocation_budget = 0;
     const bool committed = state.CommitPreparedActivation(births, profiles, true);
     allocation_budget = -1;
     Check(committed &&
-        state.raw_events.in_flight.entries.empty() &&
+        state.raw_events.in_flight.events.empty() &&
         state.active_effects.ProfileEvents(Store::Profile::EntitySurface).size() == 1 &&
         state.decoded.entity_surface_captures.empty() &&
         state.decoded.entity_surface_captures.capacity() >= 1,
@@ -1835,7 +2505,7 @@ void CheckPreparedActivationCommit()
     event.session_id = 7;
     event.tick = 1;
     event.sequence = 1;
-    Check(state.raw_events.Enqueue(event) && state.raw_events.Prepare(1, 7).entries.size() == 1,
+    Check(state.raw_events.Enqueue(event) && state.raw_events.Prepare(1, 7).events.size() == 1,
         "raw activation must be ready before prepared commit");
     hs::VfxEventInput profile_input;
     profile_input.sequence = 90;
@@ -1860,13 +2530,13 @@ void CheckPreparedActivationCommit()
     allocation_budget = -1;
     Check(allocation_failed && state.decoded.particle_spawns.size() == pending_capacity &&
           state.decoded.particle_spawns[0].sequence == 80 && state.active_effects.Size() == 0 &&
-          births.particle_spawns.size() == 1 && state.raw_events.Prepare(1, 7).entries.size() == 1,
+          births.particle_spawns.size() == 1 && state.raw_events.Prepare(1, 7).events.size() == 1,
         "allocation failure must leave birth/profile contents and raw activation unpublished");
 
     Check(state.CommitPreparedActivation(births, profiles, true) &&
           state.decoded.particle_spawns.size() == pending_capacity + 1 &&
           state.decoded.particle_spawns[pending_capacity].sequence == 100 &&
-          state.active_effects.Size() == 1 && state.raw_events.Prepare(1, 7).entries.empty(),
+          state.active_effects.Size() == 1 && state.raw_events.Prepare(1, 7).events.empty(),
         "successful activation publishes births and profiles before acknowledging raw input");
     Check(state.native_batch_active && state.native_batch.particle_spawns.size() == 1 &&
           state.native_batch.particle_spawns[0].sequence == 70 &&
@@ -1876,7 +2546,7 @@ void CheckPreparedActivationCommit()
     State stale;
     stale.Synchronize(8);
     event.session_id = 8;
-    Check(stale.raw_events.Enqueue(event) && stale.raw_events.Prepare(1, 8).entries.size() == 1,
+    Check(stale.raw_events.Enqueue(event) && stale.raw_events.Prepare(1, 8).events.size() == 1,
         "stale fixture raw activation must be ready");
     profile_input.sequence = 91;
     const std::array stale_requests{Store::AppendRequest{&profile_input,
@@ -1891,13 +2561,13 @@ void CheckPreparedActivationCommit()
     stale_births.flashes.push_back({.stable_seed = 93});
     Check(!stale.CommitPreparedActivation(stale_births, stale_profiles, true) &&
           stale.active_effects.Size() == 1 && stale.decoded.flashes.empty() &&
-          stale_births.flashes.size() == 1 && stale.raw_events.Prepare(1, 8).entries.size() == 1,
+          stale_births.flashes.size() == 1 && stale.raw_events.Prepare(1, 8).events.size() == 1,
         "stale profiles must reject activation before births or raw acknowledgement");
 
     State cancelled;
     cancelled.Synchronize(9);
     event.session_id = 9;
-    Check(cancelled.raw_events.Enqueue(event) && cancelled.raw_events.Prepare(1, 9).entries.size() == 1,
+    Check(cancelled.raw_events.Enqueue(event) && cancelled.raw_events.Prepare(1, 9).events.size() == 1,
         "cancel fixture raw activation must be ready");
     Store::PreparedAppendBatch cancelled_profiles;
     hs::runtime_detail::DecodedVfxState cancelled_births;
@@ -1905,16 +2575,16 @@ void CheckPreparedActivationCommit()
     cancelled.active_effects.CancelAppendBatch(cancelled_profiles);
     Check(!cancelled.CommitPreparedActivation(cancelled_births, cancelled_profiles, true) &&
           cancelled.decoded.flashes.empty() && cancelled_births.flashes.size() == 1 &&
-          cancelled.raw_events.Prepare(1, 9).entries.size() == 1,
+          cancelled.raw_events.Prepare(1, 9).events.size() == 1,
         "cancelled profiles must reject activation before births or raw acknowledgement");
 
     State alias;
     alias.Synchronize(10);
     event.session_id = 10;
-    Check(alias.raw_events.Enqueue(event) && alias.raw_events.Prepare(1, 10).entries.size() == 1,
+    Check(alias.raw_events.Enqueue(event) && alias.raw_events.Prepare(1, 10).events.size() == 1,
         "alias fixture raw activation must be ready");
     Check(!alias.CommitPreparedActivation(alias.decoded, cancelled_profiles, false) &&
-          alias.raw_events.Prepare(1, 10).entries.size() == 1,
+          alias.raw_events.Prepare(1, 10).events.size() == 1,
         "aliased birth source must reject activation before raw acknowledgement");
 }
 
@@ -1926,18 +2596,18 @@ void CheckActivationBeforeNativeEmission()
     first.session_id = 7; first.tick = 100; first.sequence = 1;
     Check(state.raw_events.Enqueue(first), "first raw activation enqueue");
     const auto &activation = state.raw_events.Prepare(100, 7);
-    Check(activation.entries.size() == 1, "raw event did not reach CPU activation");
+    Check(activation.events.size() == 1, "raw event did not reach CPU activation");
     hs::ParticleSpawnCommand delayed;
-    delayed.sequence = activation.entries[0].event.sequence;
+    delayed.sequence = activation.events[0].sequence;
     delayed.tick = 120; delayed.authored_birth_tick = 120;
     state.decoded.particle_spawns.push_back(delayed);
     state.raw_events.AcknowledgeActivation();
-    Check(state.raw_events.Prepare(100, 7).entries.empty() &&
+    Check(state.raw_events.Prepare(100, 7).events.empty() &&
         state.decoded.particle_spawns.size() == 1 && state.decoded.particle_spawns[0].tick == 120,
         "native delay replayed raw activation or lost its owned emission");
     auto second = first;
     second.tick = 101; second.sequence = 2;
-    Check(state.raw_events.Enqueue(second) && state.raw_events.Prepare(101, 7).entries.size() == 1,
+    Check(state.raw_events.Enqueue(second) && state.raw_events.Prepare(101, 7).events.size() == 1,
         "pending native emission blocked the next CPU activation");
     auto immediate = delayed;
     immediate.tick = 101; immediate.authored_birth_tick = 101; immediate.sequence = 2;
@@ -1945,7 +2615,7 @@ void CheckActivationBeforeNativeEmission()
     state.decoded.SortNewParticleSpawns(1);
     state.raw_events.AcknowledgeActivation();
     Check(state.decoded.particle_spawns[0].sequence == 2 &&
-        state.decoded.particle_spawns[1].sequence == 1 && state.raw_events.Prepare(101, 7).entries.empty(),
+        state.decoded.particle_spawns[1].sequence == 1 && state.raw_events.Prepare(101, 7).events.empty(),
         "CPU activation order replaced native due order or activated twice");
 }
 
@@ -2089,11 +2759,15 @@ void CheckNativeBatchReusesPreparedStorage()
     scratch.effect_lines.reserve(1);
     const auto *particle_storage = scratch.particle_spawns.data();
     const auto *line_storage = scratch.effect_lines.data();
+    const auto *pending_particle_storage = state.decoded.particle_spawns.data();
+    const auto *pending_line_storage = state.decoded.effect_lines.data();
     allocation_budget = 0;
     auto *batch = state.PrepareNativeBatch(2, true, &scratch);
     allocation_budget = -1;
-    Check(batch && batch->particle_spawns.data() == particle_storage &&
+    Check(batch && batch->particle_spawns.data() == pending_particle_storage &&
+          state.decoded.particle_spawns.data() == particle_storage &&
           batch->effect_lines.data() == line_storage &&
+          state.decoded.effect_lines.data() == pending_line_storage &&
           batch->particle_spawns.size() == 2 && batch->particle_spawns[0].sequence == 11 &&
           batch->particle_spawns[1].sequence == 12 && batch->effect_lines.size() == 1 &&
           batch->effect_lines[0].sequence == 21 &&
@@ -2106,7 +2780,9 @@ void CheckNativeBatchReusesPreparedStorage()
     auto *retry = state.PrepareNativeBatch(3, true, &scratch);
     allocation_budget = -1;
     Check(retry == batch && retry->identity.sequence == identity.sequence &&
-          retry->particle_spawns.data() == particle_storage && retry->effect_lines.data() == line_storage &&
+          retry->particle_spawns.data() == pending_particle_storage &&
+          state.decoded.particle_spawns.data() == particle_storage &&
+          retry->effect_lines.data() == line_storage &&
           retry->particle_spawns.size() == 2 && retry->particle_spawns[0].sequence == 11 &&
           state.decoded.particle_spawns.size() == 1 && state.decoded.particle_spawns[0].sequence == 13,
           "native retry replaced frozen ownership while using reusable prepared storage");
@@ -2142,6 +2818,343 @@ void CheckNativeBatchReusesPreparedStorage()
     hs::runtime_detail::DecodedVfxState nonempty;
     nonempty.effect_lines.push_back({});
     reject_scratch(nonempty);
+
+    hs::runtime_detail::VfxSessionState growing;
+    growing.Synchronize(79);
+    growing.native_batch.particle_spawns.reserve(1);
+    hs::runtime_detail::DecodedVfxState partial_scratch;
+    partial_scratch.particle_spawns.reserve(4);
+    const auto scratch_capacity = partial_scratch.particle_spawns.capacity();
+    const auto due_count = scratch_capacity + 1;
+    for (std::size_t i = 0; i < due_count * 2; ++i)
+    {
+        particle.tick = i < due_count ? 1 : 4;
+        particle.sequence = 220 + i;
+        growing.decoded.particle_spawns.push_back(particle);
+    }
+    const auto old_native_storage = growing.native_batch.particle_spawns.data();
+    const auto old_capacity = growing.native_batch.particle_spawns.capacity() + scratch_capacity;
+    const auto reserved_growth = hs::runtime_detail::vfx_retained_size::NativeCopyGrowthBytes(
+        growing.decoded.particle_spawns, growing.native_batch.particle_spawns,
+        partial_scratch.particle_spawns);
+    const auto unconsumed_identity = growing.next_native_batch_sequence;
+    allocation_budget = 0;
+    allocation_failed = false;
+    try { (void)growing.PrepareNativeBatch(1, true, &partial_scratch); }
+    catch (const std::bad_alloc &) { allocation_failed = true; }
+    allocation_budget = -1;
+    Check(allocation_failed && !growing.native_batch_active &&
+          growing.next_native_batch_sequence == unconsumed_identity &&
+          growing.decoded.particle_spawns.size() == due_count * 2 &&
+          growing.decoded.particle_spawns[0].sequence == 220 &&
+          growing.native_batch.particle_spawns.capacity() == scratch_capacity &&
+          partial_scratch.particle_spawns.data() == old_native_storage,
+          "insufficient scratch must supply its larger allocation before reserve, without consuming input or identity");
+    batch = growing.PrepareNativeBatch(1, true, &partial_scratch);
+    const auto grown_capacity = growing.native_batch.particle_spawns.capacity() +
+        partial_scratch.particle_spawns.capacity() - old_capacity;
+    Check(batch && batch->particle_spawns.size() == due_count &&
+          batch->particle_spawns[0].sequence == 220 &&
+          growing.decoded.particle_spawns.size() == due_count &&
+          growing.decoded.particle_spawns[0].sequence == 220 + due_count &&
+          grown_capacity * sizeof(hs::ParticleSpawnCommand) <= reserved_growth,
+          "balanced mixed-prefix growth must fit credited reusable scratch headroom");
+}
+
+void CheckNativeBatchAllPartitions()
+{
+    std::uint64_t session = 1000;
+    for (std::size_t total = 1; total <= 8; ++total)
+    {
+        for (std::size_t due = 0; due <= total; ++due)
+        {
+            hs::runtime_detail::VfxSessionState state;
+            state.Synchronize(session++);
+            hs::ParticleSpawnCommand particle;
+            for (std::size_t index = 0; index < total; ++index)
+            {
+                particle.tick = index < due ? 1 : 2;
+                particle.sequence = 100 + index;
+                particle.seed = static_cast<std::uint32_t>(index + 17);
+                particle.authored_birth_tick = 90 + index;
+                state.decoded.particle_spawns.push_back(particle);
+            }
+            const auto *pending_storage = state.decoded.particle_spawns.data();
+            hs::runtime_detail::DecodedVfxState scratch;
+            scratch.particle_spawns.reserve(total);
+            const auto *scratch_storage = scratch.particle_spawns.data();
+
+            bool allocation_failed{};
+            allocation_budget = 0;
+            hs::runtime_detail::VfxSessionState::NativeEmissionBatch *batch{};
+            try { batch = state.PrepareNativeBatch(1, true, &scratch); }
+            catch (const std::bad_alloc &) { allocation_failed = true; }
+            allocation_budget = -1;
+            Check(!allocation_failed && batch && batch->particle_spawns.size() == due,
+                  "every due/future partition freezes without allocation from prepared backing");
+            for (std::size_t index = 0; index < due; ++index)
+                Check(batch->particle_spawns[index].sequence == 100 + index &&
+                          batch->particle_spawns[index].authored_birth_tick == 90 + index,
+                      "partition freeze preserves due prefix order and payload");
+            Check(state.decoded.particle_spawns.size() == total - due,
+                  "partition freeze retains exactly the future tail");
+            for (std::size_t index = due; index < total; ++index)
+                Check(state.decoded.particle_spawns[index - due].sequence == 100 + index,
+                      "partition freeze preserves future-tail FIFO order");
+
+            if (due > total - due)
+            {
+                Check(batch->particle_spawns.data() == pending_storage,
+                      "larger due partition transfers the pending backing to native output");
+                if (due < total)
+                    Check(state.decoded.particle_spawns.data() == scratch_storage,
+                          "smaller future partition reuses the credited scratch backing");
+            }
+            else if (due != 0)
+            {
+                Check(batch->particle_spawns.data() == scratch_storage &&
+                          state.decoded.particle_spawns.data() == pending_storage,
+                      "smaller or balanced due partition copies into prepared backing");
+            }
+            const auto first_identity = batch->identity;
+            Check(state.AcknowledgeNativeBatch(first_identity, true),
+                  "partition batch acknowledges before the next activation");
+
+            particle.tick = 2;
+            particle.sequence = 100 + total;
+            particle.seed = 999;
+            state.decoded.particle_spawns.push_back(particle);
+            batch = state.PrepareNativeBatch(2, true, &scratch);
+            Check(batch && batch->identity.sequence == first_identity.sequence + 1 &&
+                      batch->particle_spawns.size() == total - due + 1,
+                  "next activation receives the future tail followed by newly appended rows");
+            for (std::size_t index = 0; index < total - due; ++index)
+                Check(batch->particle_spawns[index].sequence == 100 + due + index,
+                      "next activation preserves future rows before new rows");
+            Check(batch->particle_spawns.back().sequence == 100 + total &&
+                      batch->particle_spawns.back().seed == 999,
+                  "next activation appends new rows after the prior future tail");
+            Check(state.AcknowledgeNativeBatch(batch->identity, true),
+                  "next activation batch acknowledges");
+        }
+    }
+}
+
+void CheckRequiredBirthReserveConstrainsOptionalProfiles()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    using Profile = Store::Profile;
+    using hs::runtime_detail::vfx_retained_size::Add;
+    using hs::runtime_detail::vfx_retained_size::BirthRequest;
+    using hs::runtime_detail::vfx_retained_size::Vector;
+    using hs::runtime_detail::vfx_retained_size::NativeCopyGrowthBytes;
+    const auto bit = [](Profile profile) {
+        return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
+    };
+
+    hs::VfxEventInput cosmetic{};
+    cosmetic.sequence = 2101;
+    Store::FrameRows frame_rows{};
+    frame_rows[static_cast<std::size_t>(Profile::Light)] = 1;
+    const std::array requests{Store::AppendRequest{&cosmetic,
+        static_cast<std::uint16_t>(bit(Profile::Ribbon) | bit(Profile::Light)), false,
+        bit(Profile::Light), 1, &frame_rows}};
+    const auto held_profile_bytes = [](const Store &store,
+        const Store::PreparedAppendBatch &prepared, const std::vector<std::size_t> &order) {
+        return Add(store.LogicalCapacityBytes(),
+            Add(prepared.LogicalCapacityBytes(), Vector(order)));
+    };
+
+    Store quote;
+    quote.Append(Profile::Ribbon, cosmetic);
+    Store::PreparedAppendBatch quote_prepared;
+    std::vector<std::size_t> quote_order;
+    const auto quote_before = held_profile_bytes(quote, quote_prepared, quote_order);
+    Store::ProfileAdmission quote_admission{quote_before,
+        std::numeric_limits<std::size_t>::max(), quote_order};
+    quote_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {
+        sizeof(hs::VfxLightInput), 0, 0};
+    Check(quote.PrepareAppendBatch(requests, quote_prepared, &quote_admission) &&
+              quote_admission.admitted_cosmetic_memberships == 1 &&
+              quote.CommitAppendBatch(quote_prepared),
+          "warm optional Light membership provides a retained-growth fixture");
+    const auto quote_after = held_profile_bytes(quote, quote_prepared, quote_order);
+    const auto optional_profile_growth = Add(quote_after - quote_before,
+                                              sizeof(hs::VfxLightInput));
+
+    hs::runtime_detail::VfxSessionState state;
+    state.Synchronize(2100);
+    hs::runtime_detail::DecodedVfxState prepared_births;
+    prepared_births.particle_spawns.reserve(4);
+    const auto required_particle_rows = std::size_t{4};
+    const auto extra_copy_rows = optional_profile_growth /
+                                     sizeof(hs::ParticleSpawnCommand) +
+                                 1;
+    const auto due_count = prepared_births.particle_spawns.capacity() + extra_copy_rows;
+    const auto total_rows = due_count * 2;
+    const auto pending_rows = total_rows - required_particle_rows;
+    hs::ParticleSpawnCommand birth;
+    for (std::size_t index = 0; index < pending_rows; ++index)
+    {
+        birth.tick = index < due_count ? 1 : 2;
+        birth.sequence = 800 + index;
+        state.decoded.particle_spawns.push_back(birth);
+    }
+
+    std::vector<hs::VfxLineSpawnCommand> prepared_lines;
+    std::vector<hs::VfxLineSpawnCommand> retained_lines;
+    std::vector<hs::VfxLineSpawnCommand> frozen_lines;
+    std::vector<int> prepared_flashes, retained_flashes, visible_flashes;
+    std::vector<std::size_t> order;
+    std::array<std::size_t, 3> required_rows{required_particle_rows, 0, 0};
+    hs::runtime_detail::vfx_birth_admission::ReserveAndSelectBirthRows(
+        required_rows, std::span<BirthRequest>{}, order, []() noexcept { return std::size_t{}; },
+        prepared_births.particle_spawns, state.decoded.particle_spawns,
+        state.native_batch.particle_spawns, prepared_lines, retained_lines, frozen_lines,
+        prepared_flashes, retained_flashes, visible_flashes, 0, 4096);
+    Check(prepared_births.particle_spawns.capacity() >= required_rows[0] &&
+              state.decoded.particle_spawns.capacity() >= pending_rows + required_rows[0],
+          "required rows reserve prepared and retained storage before profile selection");
+
+    const auto projected_native_growth = NativeCopyGrowthBytes(
+        Add(state.decoded.particle_spawns.size(), required_rows[0]),
+        state.native_batch.particle_spawns.capacity(),
+        state.decoded.particle_spawns.empty() ? 0 : prepared_births.particle_spawns.capacity(),
+        sizeof(hs::ParticleSpawnCommand));
+    Check(projected_native_growth == extra_copy_rows * sizeof(hs::ParticleSpawnCommand),
+          "required rows contribute the later balanced-prefix native growth to profile held bytes");
+    Check(projected_native_growth > optional_profile_growth,
+          "required native copy growth exceeds the optional profile growth measured by the store");
+
+    const auto birth_storage_components = Add(Vector(prepared_births.particle_spawns),
+        Add(Vector(state.decoded.particle_spawns), Vector(state.native_batch.particle_spawns)));
+    Store without_native_growth;
+    without_native_growth.Append(Profile::Ribbon, cosmetic);
+    Store::PreparedAppendBatch without_native_growth_prepared;
+    std::vector<std::size_t> without_native_growth_order;
+    const auto without_native_held = Add(
+        held_profile_bytes(without_native_growth, without_native_growth_prepared,
+                           without_native_growth_order),
+        birth_storage_components);
+    Store::ProfileAdmission without_native_admission{without_native_held,
+        Add(without_native_held, projected_native_growth), without_native_growth_order};
+    without_native_admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {
+        sizeof(hs::VfxLightInput), 0, 0};
+    Check(without_native_growth.PrepareAppendBatch(requests, without_native_growth_prepared,
+              &without_native_admission) &&
+              without_native_admission.admitted_cosmetic_memberships == 1 &&
+              without_native_growth.CommitAppendBatch(without_native_growth_prepared),
+          "optional profile fits when the same budget remains available before native growth");
+
+    Store effects;
+    effects.Append(Profile::Ribbon, cosmetic);
+    Store::PreparedAppendBatch prepared_profiles;
+    const auto profile_and_birth_components = Add(
+        held_profile_bytes(effects, prepared_profiles, order), birth_storage_components);
+    const auto held = Add(profile_and_birth_components, projected_native_growth);
+    Store::ProfileAdmission admission{held, held, order};
+    admission.frame_storage[static_cast<std::size_t>(Profile::Light)] = {
+        sizeof(hs::VfxLightInput), 0, 0};
+    Check(effects.PrepareAppendBatch(requests, prepared_profiles, &admission) &&
+              admission.requested_cosmetic_memberships == 1 &&
+              admission.admitted_cosmetic_memberships == 0 &&
+              admission.reserved_frame_rows[static_cast<std::size_t>(Profile::Light)] == 0 &&
+              effects.CommitAppendBatch(prepared_profiles) && effects.Size() == 1 &&
+              effects.ProfileEvents(Profile::Ribbon).size() == 1 &&
+              effects.ProfileEvents(Profile::Light).empty(),
+          "projected required-birth freeze growth leaves no soft-budget room for the optional profile");
+
+    for (std::size_t index = 0; index < required_rows[0]; ++index)
+    {
+        birth.tick = 2;
+        birth.sequence = 900 + index;
+        prepared_births.particle_spawns.push_back(birth);
+    }
+    Check(state.AppendPreparedBirths(prepared_births) &&
+              prepared_births.particle_spawns.empty(),
+          "required births publish through the retained prepared-storage transfer seam");
+    const auto initial_capacity = state.native_batch.particle_spawns.capacity() +
+                                  prepared_births.particle_spawns.capacity();
+    auto *batch = state.PrepareNativeBatch(1, true, &prepared_births);
+    const auto final_capacity = state.native_batch.particle_spawns.capacity() +
+                                prepared_births.particle_spawns.capacity();
+    Check(batch && batch->particle_spawns.size() == due_count &&
+              state.decoded.particle_spawns.size() == due_count &&
+              state.decoded.particle_spawns.front().sequence == 800 + due_count &&
+              state.decoded.particle_spawns.back().sequence == 903 &&
+              (final_capacity - initial_capacity) * sizeof(hs::ParticleSpawnCommand) <=
+                  projected_native_growth &&
+              state.AcknowledgeNativeBatch(batch->identity, true),
+          "committed required births freeze within the pre-admitted native headroom and retain FIFO tail");
+}
+
+void CheckRawIngressDrain()
+{
+    using Scheduler = hs::runtime_detail::VfxSessionState::RawEventScheduler;
+    using Queue = hs::BoundedSpscQueue<hs::PresentationEvent, 1024>;
+    auto ingress = std::make_unique<Queue>();
+    Scheduler scheduler;
+    for (std::uint64_t sequence = 1; sequence <= 600; ++sequence)
+        Check(ingress->TryPush({.sequence = sequence, .tick = 1,
+            .kind = hs::PresentationKind::Vfx, .session_id = 1}), "burst ingress enqueue");
+    std::uint64_t observed{};
+    const auto observe = [&](const hs::PresentationEvent &event) {
+        Check(event.sequence == ++observed, "ingress drain changed source order");
+    };
+    scheduler.DrainIngress(*ingress, observe);
+    Check(observed == 600 && ingress->Size() == 0 && scheduler.PendingCount() == 600,
+        "a published burst was throttled to an arbitrary frame quota");
+    const auto &ready = scheduler.Prepare(1, 1);
+    Check(ready.events.size() == 600, "ingress burst lost activation rows");
+    for (std::size_t row = 0; row < ready.events.size(); ++row)
+        Check(ready.events[row].sequence == row + 1, "ingress burst reordered activation");
+    scheduler.AcknowledgeActivation();
+
+    for (std::uint64_t sequence = 1; sequence <= Scheduler::kCapacity; ++sequence)
+        Check(scheduler.Enqueue({.sequence = sequence, .tick = 1, .session_id = 1}), "fill raw ingress");
+    Check(scheduler.Prepare(1, 1).events.size() == Scheduler::kCapacity && !scheduler.HasCapacity(),
+        "in-flight raw rows must continue to occupy ingress capacity");
+    for (const auto kind : {hs::PresentationKind::Ui, hs::PresentationKind::Audio,
+             hs::PresentationKind::Vfx, hs::PresentationKind::Ui})
+        Check(ingress->TryPush({.sequence = 601 + ingress->Size(), .tick = 1,
+            .kind = kind, .session_id = 1}), "mixed ingress enqueue");
+    scheduler.DrainIngress(*ingress, observe);
+    Check(observed == 602 && ingress->Size() == 2 && !scheduler.HasCapacity(),
+        "full raw ingress must drain a non-VFX prefix and retain the first blocked VFX");
+    scheduler.DrainIngress(*ingress, observe);
+    Check(observed == 602 && ingress->Size() == 2,
+        "a blocked VFX must not be dropped, duplicated or bypassed");
+    scheduler.AcknowledgeActivation();
+    scheduler.DrainIngress(*ingress, observe);
+    Check(observed == 604 && ingress->Size() == 0 && scheduler.PendingCount() == 1 &&
+        scheduler.PendingFront()->event.sequence == 603,
+        "acknowledged capacity must resume the original FIFO prefix");
+
+    Scheduler growing;
+    Check(ingress->TryPush({.sequence = 605, .tick = 2,
+        .kind = hs::PresentationKind::Vfx, .session_id = 1}), "failing ingress enqueue");
+    bool failed{};
+    allocation_budget = 0;
+    try { growing.DrainIngress(*ingress, observe); }
+    catch (const std::bad_alloc &) { failed = true; }
+    allocation_budget = -1;
+    Check(failed && observed == 604 && ingress->Size() == 1 && growing.PendingCount() == 0,
+        "raw allocation failure must leave the producer head unconsumed");
+    growing.DrainIngress(*ingress, observe);
+    Check(observed == 605 && ingress->Size() == 0 && growing.PendingCount() == 1,
+        "raw allocation retry lost or duplicated an event");
+
+    Check(ingress->TryPush({.sequence = 606, .kind = hs::PresentationKind::Ui}),
+        "bounded drain fixture enqueue");
+    growing.DrainIngress(*ingress, [&](const hs::PresentationEvent &event) {
+        observe(event);
+        Check(ingress->TryPush({.sequence = 607, .kind = hs::PresentationKind::Ui}),
+            "concurrent publication fixture enqueue");
+    });
+    Check(observed == 606 && ingress->Size() == 1,
+        "a drain must finish its initial prefix despite newer publications");
+    growing.DrainIngress(*ingress, observe);
+    Check(observed == 607 && ingress->Size() == 0, "later publication did not survive the bounded drain");
 }
 
 void CheckRawSchedulerAdaptiveStorage()
@@ -2154,13 +3167,13 @@ void CheckRawSchedulerAdaptiveStorage()
     for(std::uint64_t sequence=2;sequence<=301;++sequence)
         Check(future.Enqueue({.sequence=sequence,.tick=10000,.session_id=1}),"future event enqueue");
     const auto &first=future.Prepare(1,1);
-    Check(first.entries.size()==1&&first.entries.capacity()<future.PendingCount()&&
-        first.entries.front().event.sequence==1&&future.PendingFront()->event.sequence==2,
+    Check(first.events.size()==1&&first.events.capacity()<future.PendingCount()&&
+        first.events.front().sequence==1&&future.PendingFront()->event.sequence==2,
         "ready staging reserved or consumed the future tail");
-    const auto *frozen=first.entries.data();
+    const auto *frozen=first.events.data();
     for(std::uint64_t sequence=302;sequence<=700;++sequence)
         Check(future.Enqueue({.sequence=sequence,.tick=10000,.session_id=1}),"pending growth during activation");
-    Check(future.Prepare(10000,1).entries.data()==frozen&&first.entries.size()==1,
+    Check(future.Prepare(10000,1).events.data()==frozen&&first.events.size()==1,
         "pending ring growth invalidated the in-flight activation");
     future.AcknowledgeActivation();
 
@@ -2176,21 +3189,21 @@ void CheckRawSchedulerAdaptiveStorage()
     Check(failed&&growing.PendingCount()==initial_slots&&growing.PendingFront()->event.sequence==1&&
         growing.LogicalCapacityBytes()==held,"failed ring growth changed pending ownership");
     Check(growing.Enqueue({.sequence=initial_slots+1,.tick=2,.session_id=1})&&
-        growing.Prepare(1,1).entries.size()==initial_slots&&growing.PendingCount()==1,
+        growing.Prepare(1,1).events.size()==initial_slots&&growing.PendingCount()==1,
         "ring growth retry lost the ready prefix or future event");
 
     Scheduler wrapped;
     for(std::uint64_t sequence=1;sequence<=initial_slots;++sequence)
         Check(wrapped.Enqueue({.sequence=sequence,.tick=sequence<=initial_slots/2?1u:2u,.session_id=1}),
             "wrapped growth fixture enqueue");
-    Check(wrapped.Prepare(1,1).entries.size()==initial_slots/2,"wrapped growth initial prefix");
+    Check(wrapped.Prepare(1,1).events.size()==initial_slots/2,"wrapped growth initial prefix");
     wrapped.AcknowledgeActivation();
     for(std::uint64_t sequence=initial_slots+1;sequence<=initial_slots+initial_slots/2+1;++sequence)
         Check(wrapped.Enqueue({.sequence=sequence,.tick=2,.session_id=1}),"wrapped backing growth");
     const auto &wrapped_batch=wrapped.Prepare(2,1);
-    Check(wrapped_batch.entries.size()==initial_slots+1,"wrapped growth lost events");
-    for(std::size_t index=0;index<wrapped_batch.entries.size();++index)
-        Check(wrapped_batch.entries[index].event.sequence==initial_slots/2+index+1,
+    Check(wrapped_batch.events.size()==initial_slots+1,"wrapped growth lost events");
+    for(std::size_t index=0;index<wrapped_batch.events.size();++index)
+        Check(wrapped_batch.events[index].sequence==initial_slots/2+index+1,
             "wrapped growth changed FIFO order");
 
     Scheduler source;
@@ -2209,15 +3222,15 @@ void CheckRawSchedulerAdaptiveStorage()
         allocation_budget=-1;
         if(allocation_failed)
         {
-            mid_staging_failure|=candidate.in_flight.entries.capacity()!=0;
+            mid_staging_failure|=candidate.in_flight.events.capacity()!=0;
             Check(candidate.PendingCount()==65&&candidate.PendingFront()->event.sequence==0&&
-                candidate.in_flight.entries.empty(),"failed prefix staging partially consumed the raw FIFO");
+                candidate.in_flight.events.empty(),"failed prefix staging partially consumed the raw FIFO");
         }
         else completed=true;
         const auto &retry=candidate.Prepare(1,1);
-        Check(retry.entries.size()==64&&candidate.PendingCount()==0,"prefix staging retry lost events");
-        for(std::size_t index=0;index<retry.entries.size();++index)
-            Check(retry.entries[index].event.sequence==index+1,"prefix staging retry reordered events");
+        Check(retry.events.size()==64&&candidate.PendingCount()==0,"prefix staging retry lost events");
+        for(std::size_t index=0;index<retry.events.size();++index)
+            Check(retry.events[index].sequence==index+1,"prefix staging retry reordered events");
     }
     Check(completed&&mid_staging_failure,"ready staging allocation failures were not exercised");
 }
@@ -2243,20 +3256,20 @@ void CheckRawSchedulerRing()
     enqueue(2, half);
     Check(!scheduler.HasCapacity(), "raw ring must count all pending slots");
     const auto &first = scheduler.Prepare(1, 1);
-    Check(first.entries.size() == half && first.entries.front().event.sequence == 1 &&
-        first.entries.back().event.sequence == half && scheduler.PendingCount() == half,
+    Check(first.events.size() == half && first.events.front().sequence == 1 &&
+        first.events.back().sequence == half && scheduler.PendingCount() == half,
         "raw ring first ready prefix must preserve event order");
     Check(!scheduler.HasCapacity(), "in-flight ownership must retain its ingress slots");
     const auto reserved_bytes = scheduler.LogicalCapacityBytes();
-    Check(scheduler.Prepare(99, 1).entries.size() == half && scheduler.PendingCount() == half,
+    Check(scheduler.Prepare(99, 1).events.size() == half && scheduler.PendingCount() == half,
         "unacknowledged batch must not drain newer raw events");
     scheduler.AcknowledgeActivation();
     for (hs::Tick tick = 2; tick <= 7; ++tick)
     {
         enqueue(tick + 1, half);
         const auto &batch = scheduler.Prepare(tick, 1);
-        Check(batch.entries.size() == half && batch.entries.front().event.sequence ==
-            (tick - 1) * half + 1 && batch.entries.back().event.sequence == tick * half,
+        Check(batch.events.size() == half && batch.events.front().sequence ==
+            (tick - 1) * half + 1 && batch.events.back().sequence == tick * half,
             "raw ring wraparound changed FIFO order");
         Check(scheduler.LogicalCapacityBytes() == reserved_bytes &&
             scheduler.PendingCount() == half, "warm raw FIFO must reuse both bounded backings");
@@ -2268,18 +3281,18 @@ void CheckRawSchedulerRing()
         "session discard must retain and charge reusable FIFO capacity");
     session = 2;
     enqueue(9, 1);
-    Check(scheduler.Prepare(9, 2).entries.front().event.sequence == next_sequence - 1,
+    Check(scheduler.Prepare(9, 2).events.front().sequence == next_sequence - 1,
         "discarded wrapped FIFO must accept the next event without stale slots");
     Scheduler moved(std::move(scheduler));
     Check(scheduler.PendingCount() == 0 && !scheduler.PendingFront() &&
-        scheduler.Prepare(9, 2).entries.empty() && moved.Prepare(9, 2).entries.size() == 1,
+        scheduler.Prepare(9, 2).events.empty() && moved.Prepare(9, 2).events.size() == 1,
         "moving a wrapped FIFO must transfer both backings and reset source indices");
     Check(scheduler.Enqueue({.tick = 10, .session_id = 2}) &&
-        scheduler.Prepare(10, 2).entries.size() == 1,
+        scheduler.Prepare(10, 2).events.size() == 1,
         "moved-from FIFO must remain reusable");
     moved = std::move(scheduler);
-    Check(moved.Prepare(10, 2).entries.front().event.tick == 10 &&
-        scheduler.Prepare(9, 2).entries.front().event.tick == 9,
+    Check(moved.Prepare(10, 2).events.front().tick == 10 &&
+        scheduler.Prepare(9, 2).events.front().tick == 9,
         "FIFO move assignment must keep each swapped backing and its indices together");
 }
 
@@ -2300,8 +3313,11 @@ int main()
         CheckGeometrySectorIdentity();
         CheckPreparedActiveEffectAppendBatch();
         CheckOptionalProfileAdmission();
+        CheckSupplementalFramePoolAdmission();
+        CheckSurfaceFrameCaptureAdmission();
         CheckPreparedGroundOwnerReplacement();
         CheckOwnerBindingStorageReuse();
+        CheckFusedOwnerRefreshExpiryMatchesLegacy();
         CheckTrackedVfxCapacityAccounting();
         CheckOptionalFlashBudget();
         CheckPersistentBurstCommit();
@@ -2315,6 +3331,9 @@ int main()
         CheckActivationBeforeNativeEmission();
         CheckFrozenNativeBatches();
         CheckNativeBatchReusesPreparedStorage();
+        CheckNativeBatchAllPartitions();
+        CheckRequiredBirthReserveConstrainsOptionalProfiles();
+        CheckRawIngressDrain();
         CheckRawSchedulerAdaptiveStorage();
         CheckRawSchedulerRing();
         static_assert(noexcept(std::declval<hs::runtime_detail::VfxSessionState &>().SwapDecoded(
@@ -2363,14 +3382,14 @@ int main()
         Check(state.terminal_clock.has_value() && state.raw_events.PendingCount() == 1 &&
                   !state.MarkPersistentBurst(88, 3),
               "decoded clear must preserve pending events, clock and burst tombstones");
-        Check(state.raw_events.Prepare(139, 10).entries.empty(), "future event dispatched early");
+        Check(state.raw_events.Prepare(139, 10).events.empty(), "future event dispatched early");
         const auto &batch = state.raw_events.Prepare(140, 10);
-        Check(batch.entries.size() == 1 && batch.entries[0].event.sequence == 9,
+        Check(batch.events.size() == 1 && batch.events[0].sequence == 9,
               "pending event becomes ready at its authoritative tick");
-        Check(state.raw_events.Prepare(140, 10).entries.size() == 1,
+        Check(state.raw_events.Prepare(140, 10).events.size() == 1,
               "unacknowledged ready batch remains owned for retry");
         state.raw_events.AcknowledgeActivation();
-        Check(state.raw_events.Prepare(140, 10).entries.empty(),
+        Check(state.raw_events.Prepare(140, 10).events.empty(),
               "acknowledged event consumes exactly once");
         Resize(state.decoded, 1);
         Check(state.Synchronize(11), "new session");
@@ -2408,9 +3427,9 @@ int main()
         overflow.session_id = 1;
         Check(!scheduler.Enqueue(overflow), "bounded scheduler exceeded capacity");
         const auto &ordered = scheduler.Prepare(5, 1);
-        Check(ordered.entries.size() == scheduler.kCapacity, "raw FIFO missed ready entries");
-        for (std::size_t i = 0; i < ordered.entries.size(); ++i)
-            Check(ordered.entries[i].event.asset.value == i + 1,
+        Check(ordered.events.size() == scheduler.kCapacity, "raw FIFO missed ready entries");
+        for (std::size_t i = 0; i < ordered.events.size(); ++i)
+            Check(ordered.events[i].asset.value == i + 1,
                   "raw FIFO reordered same-tick projector fanout");
         scheduler.AcknowledgeActivation();
         hs::PresentationEvent future;
@@ -2419,14 +3438,14 @@ int main()
         current.session_id = 2; current.tick = 120; current.sequence = 2;
         Check(scheduler.Enqueue(current) && scheduler.Enqueue(future), "cross-session enqueue");
         const auto &current_batch = scheduler.Prepare(120, 2);
-        Check(current_batch.entries.size() == 1 && current_batch.entries[0].event.sequence == 2 &&
+        Check(current_batch.events.size() == 1 && current_batch.events[0].sequence == 2 &&
               scheduler.PendingCount() == 1 && scheduler.PendingFront()->event.session_id == 3,
               "future session must neither block nor activate in the current session");
         scheduler.AcknowledgeActivation();
-        Check(scheduler.Prepare(200, 2).entries.empty() && scheduler.PendingCount() == 1,
+        Check(scheduler.Prepare(200, 2).events.empty() && scheduler.PendingCount() == 1,
               "future session must retain ownership while the current session advances");
         scheduler.DiscardBeforeSession(3);
-        Check(scheduler.Prepare(0, 3).entries.size() == 1,
+        Check(scheduler.Prepare(0, 3).events.size() == 1,
               "retained future event must activate when its session begins");
         scheduler.AcknowledgeActivation();
         std::puts("VFX session state tests passed.");

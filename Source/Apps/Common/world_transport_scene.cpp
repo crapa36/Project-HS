@@ -1,4 +1,5 @@
 #include "world_transport_scene.hpp"
+#include <hs/render_data/render_snapshot_storage.hpp>
 
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/presentation/environment_layout.hpp>

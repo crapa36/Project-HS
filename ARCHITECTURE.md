@@ -102,13 +102,23 @@ RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotP
 VFX frame inputs and RenderFrameInput. Presentation owns RenderSnapshotExchange;
 Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
 so it has no dependency on Presentation's exchange or producer lifecycle.
+Snapshot values/helpers live in render_snapshot_values.hpp; mutable scene/snapshot
+builders live in render_snapshot_storage.hpp. The legacy render_snapshot.hpp
+includes both. Value consumers include values directly so builder changes do not
+invalidate renderer compilation. Builder users include storage explicitly.
 
 Presentation prepares an immutable ProcessSceneLayout for the actual launch seed,
 generation and environment geometry. Runtime retains that owner across session
 restarts with the same layout. Render packets share its read-only Core
 StaticRenderScene view; mutable scene storage is frozen before publication.
-Core snapshot read pairs expose the publication sequence of each retained slot;
+Snapshot read pairs expose the publication sequence of each retained slot;
 tick/session values alone are not a publication identity.
+Runtime's explicit retained writes reuse a slot's dynamic arrays only for a known
+immutable (session, actual tick, dynamic revision) sample. Header/camera/scene/UI
+still refresh on publication, and previous/current remain independently owned.
+Raw writes clear storage and raw copies always copy. Mutation and copy/move failure
+boundaries invalidate reuse; no hash or pointer identity validates the arrays.
+Animation updates share the existing actual-dynamic invalidation used by projection.
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
 
@@ -126,6 +136,11 @@ Release Runtime binds the content-linker's compiled const tables; developer
 Runtime retains the selected-Generation loaders. Simulation's canonical byte
 writer and C++ emitter share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
+The Release application entry points, ProjectHS and hs_experiment, link the
+compiled shipping content. The base Runtime target does not force that image's
+full cook into unrelated consumers. CPU runtime integration tests use their
+selected Generation; a separate shipping test target owns compiled-table/image
+and packed-font checks. Both remain part of full verification.
 Single-config Release can build with HS_BUILD_CONTENT_TOOLS=OFF using an existing
 Shipping/content.generated.cpp and Content/content.hsp in the build directory.
 This path has no content-producer or Generation-verification dependency. Missing
@@ -172,12 +187,21 @@ or index nodes. New-row staging reserves by unique keys; first-request indices
 preserve canonical first-input semantics without retaining caller pointers.
 Capture-only rows remain eligible for retirement, and expiry remaps the existing
 episode index incrementally.
+Row-local expiry shares owner-binding compaction in Runtime's Ground/Light/
+Distortion/Decal paths; the cached canonical owner is still refreshed once per frame.
 Gameplay's uniform ring gaps travel as count/offset plus the original event/owner
 angle formula through Runtime profiles and typed ground/distortion values. Only
 the native upload expands them into the existing flat angle buffer; shaders and
 cooked formats retain their ABI. Raw irregular vectors remain checked inputs.
+Runtime's rebuilt ground and distortion frames copy irregular angles once per input
+into caller-owned pools; command offsets share each slice across recipe outputs. Render
+borrows the pool until its call returns and validates each range before use. The
+owning Build/Append helpers remain available for callers without a frame pool.
 Raw events retain the simulation producer's session/tick FIFO order; CPU activation
 retires that ingress independently from pending native emission submission.
+Particle and effect-line births are passed only to a package's first selected view;
+the retained particle world is rendered by every view. An auxiliary-only package
+uses its first view for the same admission.
 The raw ring grows with occupancy under the existing combined4096-entry bound.
 Ready-prefix staging leaves pending ownership unchanged until allocation completes.
 Persistent birth tombstones are sorted keys; reusable key staging/union and command
@@ -197,6 +221,29 @@ contexts and unidentified contributors stay required. Retained profile admission
 unions required memberships before choosing cosmetic memberships by importance and
 original order; payload copies and index nodes follow the choice. The shared logical
 growth allowance covers this boundary, not a physical or whole-pipeline memory cap.
+The image plan holds Ground/Light/Distortion/Decal/Volume/Screen/Ribbon/EntitySurface fanout maxima across
+quality levels, including Ribbon source and output counts. Existing memberships and persistent base output reserve first;
+new memberships project frame-vector growth before selection and reserve before
+CPU publication. Ground and Distortion each charge one irregular-angle slice per
+membership, independent of recipe count; uniform descriptors need no pool rows.
+Ribbon separately charges its pooled outputs. Frame facts are borrowed only during
+preparation. Remaining nested geometry, capture
+and GPU lifetimes remain separate domains, not implicit zero-cost outputs.
+Upgrade movement inputs append before this plan, so captured Line/Context ribbons
+participate in the same reservation. Mesh/Fresnel persistent maxima are prepared
+with the image. EntitySurface captures reserve both retained and frame-input
+storage before CPU publication; only new unique memberships add prospective rows.
+Their separate existing capacities are credited independently.
+Ground emitters append directly to the final render input; owning typed helpers
+share the emitter and retain their observation fields. Runtime has no intermediate
+Ground command vector or final full-row conversion pass. Ribbon frame scratch uses
+one reusable output pool and source ranges; native state copies the selected spans
+into its existing retained GPU-facing slots. Owning helper results materialize
+vectors only at their return boundary. Frame spans stay borrowed through Render.
+Surface diagnostics use the successfully submitted view's current Surface packet:
+decal-owned base/normal/material exports when active, original GBuffer otherwise.
+The feature owns those resources and publishes their actual graph access/completion;
+capture retains its expected format/state checks and waits for GPU completion.
   Raw flash, ballistic, mote and compatibility output plans expose fanout before sampling. Required storage is reserved
 first; decoration spends only the remaining shared capacity across prepared,
 retained and visible destinations. Empty retained queues transfer ownership by swap.
@@ -209,6 +256,13 @@ retained destination, including shard-only activations. Mixed native due prefixe
 can exchange empty prepared allocations into the frozen owner; active batches keep
 their original buffers and identity until receipt. Renderer particle assembly uses
 view-owned CPU scratch; native upload and GPU completion ownership stay separate.
+Native prefix preparation also grows from the larger empty CPU allocation when
+neither allocation is large enough. This realizes the capacity credit without
+retaining a larger unused scratch beside newly allocated frozen storage.
+Per-view decal selection retains at most the existing64 GPU outputs in fixed
+local candidate storage. A small tournament tree preserves the prior stable-sort
+prefix without storing every candidate. Distortion coverage selection still sees
+all eligible candidates; GPU upload and resource completion contracts are unchanged.
 Retirement compacts canceled rows in its existing scans and carries forward the
 surviving old-prefix length for stable merging with new births. Later frame
 admission counts empty prepared storage as reusable native-copy capacity.
