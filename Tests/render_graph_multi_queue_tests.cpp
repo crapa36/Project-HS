@@ -2,6 +2,7 @@
 #include "render_graph_validation.hpp"
 #include "renderer_local_probe_draws.hpp"
 #include "renderer_local_probe.hpp"
+#include "renderer_pipeline_cache.hpp"
 #include "renderer_virtual_shadow.hpp"
 #include <hs/renderer/renderer.hpp>
 
@@ -269,6 +270,55 @@ void RunBakedProbePreparation(Fixture &fixture)
     ComPtr<ID3DBlob> code, diagnostics;
     Hr(compile(shader, sizeof(shader) - 1, nullptr, nullptr, nullptr, "main", "cs_5_1", 0, 0,
         &code, &diagnostics), "compile probe state-only filter fixture");
+    {
+        hs::RendererPipelineCache cache;
+        Check(cache.Initialize(fixture.device.Get(),fixture.adapter.Get(),{}).Succeeded(),
+            "initialize concurrent PSO cache fixture");
+        D3D12_ROOT_SIGNATURE_DESC root_description{};
+        ComPtr<ID3DBlob> root_bytes,root_errors;
+        Hr(D3D12SerializeRootSignature(&root_description,D3D_ROOT_SIGNATURE_VERSION_1,
+            &root_bytes,&root_errors),"serialize empty PSO cache fixture root");
+        ComPtr<ID3D12RootSignature> root;
+        Hr(fixture.device->CreateRootSignature(0,root_bytes->GetBufferPointer(),root_bytes->GetBufferSize(),
+            IID_PPV_ARGS(&root)),"create empty PSO cache fixture root");
+        Check(cache.RegisterRootSignature(root.Get(),std::span(
+            static_cast<const std::byte *>(root_bytes->GetBufferPointer()),root_bytes->GetBufferSize())).Succeeded(),
+            "register exact PSO cache fixture root bytes");
+        if(cache.Stats().library_supported)
+        {
+            constexpr std::size_t request_count=6;
+            std::array<ComPtr<ID3D12PipelineState>,request_count> outputs;
+            std::array<HRESULT,request_count> results{};
+            std::atomic_bool start{};
+            std::array<std::thread,request_count> workers;
+            D3D12_COMPUTE_PIPELINE_STATE_DESC state{};
+            state.pRootSignature=root.Get();
+            state.CS={code->GetBufferPointer(),code->GetBufferSize()};
+            for(std::size_t i=0;i<workers.size();++i)
+                workers[i]=std::thread([&,i] {
+                    while(!start.load(std::memory_order_acquire)) std::this_thread::yield();
+                    results[i]=cache.CreateCompute(&state,IID_PPV_ARGS(&outputs[i]));
+                });
+            start.store(true,std::memory_order_release);
+            for(auto &worker:workers) worker.join();
+            for(const auto result:results) Hr(result,"concurrent same-name PSO cache request");
+            auto stats=cache.Stats();
+            Check(stats.native_creates==1&&stats.stores==1&&stats.hits==request_count-1,
+                "same-name concurrent PSO requests did not share one stored creation");
+
+            D3D12_COMPUTE_PIPELINE_STATE_DESC malformed=state;
+            malformed.CS={nullptr,1};
+            ComPtr<ID3D12PipelineState> invalid;
+            Check(cache.CreateCompute(&malformed,IID_PPV_ARGS(&invalid))==E_INVALIDARG,
+                "malformed shader bytecode did not fail during semantic key validation");
+            ComPtr<ID3D12PipelineState> retry;
+            Hr(cache.CreateCompute(&state,IID_PPV_ARGS(&retry)),"valid PSO retry after malformed shader");
+            stats=cache.Stats();
+            Check(stats.key_failures==1&&stats.native_creates==1&&stats.stores==1&&stats.hits==request_count,
+                "malformed shader changed the cache or prevented a valid same-key retry");
+        }
+        else std::fprintf(stderr,"Skipping pipeline-cache concurrency fixture: pipeline libraries unsupported.\n");
+    }
     const hs::LocalProbeSystem::ShaderReader state_shader =
         [&](std::string_view, std::vector<std::byte> &output) {
             const auto *begin = static_cast<const std::byte *>(code->GetBufferPointer());
@@ -530,18 +580,22 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             cpu_passes.push_back({graph.CompiledPassId(position),
                 std::string(graph.CompiledPassName(position)),
                 static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
-        ComPtr<ID3D12QueryHeap> queries;
         const auto query_count = query_subset ? 4u : 12u;
         const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
-        Hr(fixture.device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(&queries)), "independent timestamp heap");
-        ComPtr<ID3D12Resource> timestamps;
+        std::array<ComPtr<ID3D12QueryHeap>, 3> queries;
+        std::array<ComPtr<ID3D12Resource>, 3> timestamps;
         const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
         const auto description = BufferDescription(query_count * sizeof(std::uint64_t));
+        const auto queue_index = static_cast<std::size_t>(queue);
+        Hr(fixture.device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(&queries[queue_index])), "independent timestamp heap");
         Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamps)), "independent timestamp readback");
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamps[queue_index])), "independent timestamp readback");
         hs::GraphExecutionOptions options;
-        options.timestamp_query_heap = timestamps_enabled ? queries.Get() : nullptr;
-        options.timestamp_readback = timestamps_enabled ? timestamps.Get() : nullptr;
+        if (timestamps_enabled)
+        {
+            options.timestamp_query_heaps[queue_index] = queries[queue_index].Get();
+            options.timestamp_readbacks[queue_index] = timestamps[queue_index].Get();
+        }
         std::array<std::uint32_t, 6> query_slots{UINT32_MAX, UINT32_MAX, UINT32_MAX,
                                                  UINT32_MAX, UINT32_MAX, UINT32_MAX};
         if (query_subset)
@@ -583,7 +637,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             {
             std::uint64_t *values{};
             D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
-            Hr(timestamps->Map(0, &range, reinterpret_cast<void **>(&values)),
+            Hr(timestamps[queue_index]->Map(0, &range, reinterpret_cast<void **>(&values)),
                "map independent timestamps");
             for (std::size_t pair = 0; pair < (query_subset ? 2u : 6u); ++pair)
             {
@@ -592,7 +646,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                       "independent lists preserve every GPU timestamp pair");
             }
             D3D12_RANGE no_write{};
-            timestamps->Unmap(0, &no_write);
+            timestamps[queue_index]->Unmap(0, &no_write);
             }
         }
     }
@@ -700,6 +754,125 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                   "failed recording graph submitted GPU work");
         fixture.CheckValidation();
     }
+}
+
+void RunTimestampResolveIsolation(Fixture &fixture)
+{
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "timestamp isolation pool");
+    hs::RenderGraphQueueExecutor executor;
+    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "timestamp isolation executor");
+    hs::RenderGraphBuilder graph;
+    graph.AddPass(1, "Direct timestamp producer", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
+    graph.AddPass(2, "Gated compute timestamp producer", hs::QueueHint::Compute).SetExecute([](hs::RenderPassContext &) {});
+    graph.AddPass(3, "Direct timestamp suffix", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
+    graph.AddPass(4, "Unmeasured copy", hs::QueueHint::Copy).SetExecute([](hs::RenderPassContext &) {});
+    Check(graph.Prepare(pool).Succeeded(), "timestamp isolation prepare");
+
+    constexpr std::size_t queue_count = 3;
+    const auto query_count = graph.PassCount() * 2;
+    const D3D12_QUERY_HEAP_DESC query_description{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
+    const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+    const auto readback_description = BufferDescription(query_count * sizeof(std::uint64_t));
+    std::array<ComPtr<ID3D12QueryHeap>, queue_count> queries;
+    std::array<ComPtr<ID3D12Resource>, queue_count> timestamps;
+    hs::GraphExecutionOptions options;
+    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    {
+        const auto index = static_cast<std::size_t>(queue);
+        Hr(fixture.device->CreateQueryHeap(&query_description, IID_PPV_ARGS(&queries[index])),
+           "create isolated timestamp query heap");
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+            &readback_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&timestamps[index])), "create isolated timestamp readback");
+        options.timestamp_query_heaps[index] = queries[index].Get();
+        options.timestamp_readbacks[index] = timestamps[index].Get();
+    }
+    std::vector<std::uint32_t> query_slots(graph.PassCount(), UINT32_MAX);
+    std::vector<std::uint32_t> direct_slots, compute_slots;
+    for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
+    {
+        const auto queue = graph.CompiledPassQueue(position);
+        if (queue == hs::QueueHint::Direct) direct_slots.push_back(position);
+        else if (queue == hs::QueueHint::Compute) compute_slots.push_back(position);
+        if (queue != hs::QueueHint::Copy) query_slots[position] = position;
+    }
+    Check(direct_slots.size() == 2 && compute_slots.size() == 1,
+          "timestamp isolation fixture keeps its Direct and Compute producers");
+    options.timestamp_query_slots = query_slots.data();
+    options.timestamp_query_slot_count = query_slots.size();
+
+    ComPtr<ID3D12Fence> compute_gate, copy_gate;
+    Hr(fixture.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&compute_gate)),
+       "timestamp compute gate");
+    Hr(fixture.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copy_gate)),
+       "timestamp copy gate");
+    hs::CompletionSet completion;
+    struct QueueCompletionGuard
+    {
+        hs::RenderGraphQueueExecutor &executor;
+        hs::CompletionSet &completion;
+        ComPtr<ID3D12Fence> compute_gate, copy_gate;
+        bool submitted{}, compute_released{}, copy_released{}, completed{};
+
+        void ReleaseGates() noexcept
+        {
+            if (!compute_released && SUCCEEDED(compute_gate->Signal(1))) compute_released = true;
+            if (!copy_released && SUCCEEDED(copy_gate->Signal(1))) copy_released = true;
+        }
+        ~QueueCompletionGuard()
+        {
+            ReleaseGates();
+            if (submitted && !completed) static_cast<void>(executor.Wait(completion));
+        }
+    } queue_guard{executor, completion, compute_gate, copy_gate};
+    Hr(executor.NativeQueue(hs::QueueHint::Compute)->Wait(compute_gate.Get(), 1),
+       "gate independent timestamp compute");
+    Hr(executor.NativeQueue(hs::QueueHint::Copy)->Wait(copy_gate.Get(), 1),
+       "gate unmeasured timestamp copy");
+
+    queue_guard.submitted = true;
+    Check(executor.Execute(graph, 0, hs::BarrierMode::Legacy, completion, &options).Succeeded(),
+          "timestamp isolation execute");
+    HANDLE direct_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    struct CloseEvent { HANDLE value; ~CloseEvent() { if (value) CloseHandle(value); } } close_event{direct_event};
+    Check(direct_event != nullptr, "create Direct timestamp completion event");
+    Hr(executor.NativeFence(hs::QueueHint::Direct)->SetEventOnCompletion(completion.direct, direct_event),
+       "watch Direct timestamp resolve");
+    const bool direct_resolved_while_compute_waited =
+        WaitForSingleObject(direct_event, 10000) == WAIT_OBJECT_0;
+    const bool compute_remained_gated = executor.Completed().compute < completion.compute;
+    const bool copy_remained_gated = executor.Completed().copy < completion.copy;
+    queue_guard.ReleaseGates();
+    const auto waited = executor.Wait(completion);
+    queue_guard.completed = waited.Succeeded();
+    Check(waited.Succeeded(), "wait both timestamp queues before releasing readbacks");
+
+    std::array<std::vector<std::uint64_t>, 2> values;
+    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    {
+        const auto index = static_cast<std::size_t>(queue);
+        std::uint64_t *mapped{};
+        D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
+        Hr(timestamps[index]->Map(0, &range, reinterpret_cast<void **>(&mapped)),
+           "map queue timestamp readback");
+        const auto &slots = queue == hs::QueueHint::Direct ? direct_slots : compute_slots;
+        for (const auto slot : slots)
+            values[index].insert(values[index].end(), {mapped[slot * 2], mapped[slot * 2 + 1]});
+        D3D12_RANGE no_write{};
+        timestamps[index]->Unmap(0, &no_write);
+    }
+    Check(direct_resolved_while_compute_waited && compute_remained_gated && copy_remained_gated,
+          "Direct timestamp resolve must not depend on unrelated gated Compute or Copy work");
+    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    {
+        const auto &queue_values = values[static_cast<std::size_t>(queue)];
+        Check(!queue_values.empty(), "each timestamp queue resolves its own producer pairs");
+        for (std::size_t pair = 0; pair < queue_values.size(); pair += 2)
+            Check(queue_values[pair] != 0 && queue_values[pair + 1] >= queue_values[pair],
+                  "queue-local timestamp pairs resolve after producer completion");
+    }
+    fixture.CheckValidation();
 }
 
 void RunFinalExports(Fixture &fixture, hs::BarrierMode barriers)
@@ -1865,6 +2038,18 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         parameters[5u + index].Descriptor = {uav_registers[index], 21u,
             D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     }
+    // Production binds CommandCounts through a sized raw UAV descriptor table.
+    // Keep this oracle slot bounded too, without padding the counter resource.
+    D3D12_DESCRIPTOR_RANGE1 count_range{};
+    count_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    count_range.NumDescriptors = 1u;
+    count_range.BaseShaderRegister = 6u;
+    count_range.RegisterSpace = 21u;
+    count_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
+    count_range.OffsetInDescriptorsFromTableStart = 0u;
+    parameters[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[10].DescriptorTable = {1u, &count_range};
     for (auto &parameter : parameters) parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
     root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -1876,6 +2061,13 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     ComPtr<ID3D12RootSignature> root;
     Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
         IID_PPV_ARGS(&root)), "create production virtual shadow CullCS root");
+    D3D12_DESCRIPTOR_HEAP_DESC count_heap_description{};
+    count_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    count_heap_description.NumDescriptors = 2u;
+    count_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    ComPtr<ID3D12DescriptorHeap> count_heap;
+    Hr(fixture.device->CreateDescriptorHeap(&count_heap_description, IID_PPV_ARGS(&count_heap)),
+        "create bounded CullCS root-counter descriptor heap");
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_description{};
     pipeline_description.pRootSignature = root.Get();
     pipeline_description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
@@ -1987,6 +2179,25 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         });
         const auto bind = [&](hs::RenderPassContext &context, UINT phase) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            auto *counts_resource = static_cast<ID3D12Resource *>(context.Resolve(counters_handle));
+            Check(counts_resource->GetDesc().Width == counters_bytes,
+                  "root-counter UAV resource matches its exact prefixed word range");
+            D3D12_UNORDERED_ACCESS_VIEW_DESC counts_view{};
+            counts_view.Format = DXGI_FORMAT_R32_TYPELESS;
+            counts_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            counts_view.Buffer.NumElements = counter_words;
+            counts_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            const UINT descriptor_index = phase == 3u ? 0u : 1u;
+            const auto descriptor_stride = fixture.device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            auto cpu_counts_handle = count_heap->GetCPUDescriptorHandleForHeapStart();
+            cpu_counts_handle.ptr += static_cast<SIZE_T>(descriptor_index) * descriptor_stride;
+            auto gpu_counts_handle = count_heap->GetGPUDescriptorHandleForHeapStart();
+            gpu_counts_handle.ptr += static_cast<UINT64>(descriptor_index) * descriptor_stride;
+            fixture.device->CreateUnorderedAccessView(counts_resource, nullptr, &counts_view,
+                cpu_counts_handle);
+            ID3D12DescriptorHeap *descriptor_heaps[]{count_heap.Get()};
+            list->SetDescriptorHeaps(1u, descriptor_heaps);
             list->SetComputeRootSignature(root.Get()); list->SetPipelineState(pipeline.Get());
             list->SetComputeRootConstantBufferView(0u, constant_upload->GetGPUVirtualAddress());
             list->SetComputeRoot32BitConstant(1u, phase, 0u);
@@ -1998,7 +2209,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             list->SetComputeRootUnorderedAccessView(7u, static_cast<ID3D12Resource *>(context.Resolve(records_handle))->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(8u, static_cast<ID3D12Resource *>(context.Resolve(indexed_handle))->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(9u, static_cast<ID3D12Resource *>(context.Resolve(mesh_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(10u, static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
+            list->SetComputeRootDescriptorTable(10u, gpu_counts_handle);
             list->SetComputeRootUnorderedAccessView(11u, static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
         };
         auto initialize = graph.AddPass(361u, "CullCS phase 3 root initialize", hs::QueueHint::Compute);
@@ -2954,6 +3165,7 @@ int main(int argc, char **argv)
         RunRemovedFenceSentinel(fixture);
         RunQueueJoinReuse(fixture);
         RunRecordingDispatch(fixture, hs::BarrierMode::Legacy);
+        RunTimestampResolveIsolation(fixture);
         RunFinalExports(fixture, hs::BarrierMode::Legacy);
         Run(fixture, hs::BarrierMode::Legacy, 0);
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);

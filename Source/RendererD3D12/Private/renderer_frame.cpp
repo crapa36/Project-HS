@@ -100,20 +100,20 @@ Result BuildExposureGraph(RenderGraphBuilder &graph, ResourceVersion composite_h
 }
 
 Result BuildFinalGraph(RenderGraphBuilder &graph, ResourceVersion back_buffer,
-                       bool reference_timing, bool output_ready, bool presentation,
+                       bool output_dependency_interval, bool output_ready, bool presentation,
                        FinalGraphLayout &layout, bool restore)
 {
     assert(!presentation || output_ready);
     if (restore)
     {
-        if (layout.reference_timing != reference_timing || layout.output_ready != output_ready ||
+        if (layout.output_dependency_interval != output_dependency_interval || layout.output_ready != output_ready ||
             layout.presentation != presentation ||
             layout.back_buffer != back_buffer)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Final pass does not match the retained graph plan.");
-        for (std::uint32_t index = 0; index < (reference_timing ? 2u : output_ready ? 1u : 0u); ++index)
+        for (std::uint32_t index = 0; index < (output_dependency_interval ? 2u : output_ready ? 1u : 0u); ++index)
         {
-            auto pass = graph.BindPass(layout.pass_indices[index], reference_timing ? 37u + index : 38u);
+            auto pass = graph.BindPass(layout.pass_indices[index], output_dependency_interval ? 37u + index : 38u);
             if (!pass)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Final pass binding is missing from the retained graph plan.");
@@ -121,25 +121,29 @@ Result BuildFinalGraph(RenderGraphBuilder &graph, ResourceVersion back_buffer,
         }
         return Result::Success();
     }
-    layout.reference_timing = reference_timing;
+    layout.output_dependency_interval = output_dependency_interval;
     layout.output_ready = output_ready;
     layout.presentation = presentation;
     layout.back_buffer = back_buffer;
-    if (reference_timing)
+    if (output_dependency_interval)
     {
         layout.pass_indices[0] = graph.PassCount();
-        auto begin = graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
+        auto begin = graph.AddPass(37, "OutputDependencyIntervalBegin", QueueHint::Direct);
         begin.SetExecute([](RenderPassContext &) {});
         layout.pass_indices[1] = graph.PassCount();
-        auto end = graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
+        auto end = graph.AddPass(38, "OutputDependencyIntervalEnd", QueueHint::Direct);
+        end.Read(back_buffer, Access::Present);
         end.SetExecute([](RenderPassContext &) {});
         for (std::uint32_t pass = 0; pass < graph.PassCount(); ++pass)
         {
             const auto id = graph.DeclaredPassId(pass);
             if (id == 37 || id == 38) continue;
             graph.AddOrderingDependency(37, id);
-            graph.AddOrderingDependency(id, 38);
         }
+        graph.AddOrderingDependency(37, 38);
+        // This joins output ancestors through the back-buffer Present read;
+        // unrelated Copy work is deliberately not an end dependency.
+        if (presentation) graph.AddOrderingDependency(904, 38);
     }
     else if (output_ready)
     {
@@ -336,8 +340,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         else
             sample = {current_timing && timing.critical_path_valid, timing.generated_frame,
                 timing.gpu_limited, timing.critical_path_ms,
-                timing.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan
-                    ? DynamicResolutionMetricKind::ReferenceGraphSpan : DynamicResolutionMetricKind::Unavailable};
+                timing.metric_kind == GpuFrameTimingKind::OutputDependencyInterval
+                    ? DynamicResolutionMetricKind::OutputDependencyInterval
+                    : DynamicResolutionMetricKind::Unavailable};
         auto selected = owned_view.dynamic_resolution_controller.Select(
             owned_view.state, resolution_config, sample);
         if (owned_view.reconstruction_provider && owned_view.reconstruction_provider->Initialized())
@@ -3047,13 +3052,15 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     DirectX::XMStoreFloat4(&constants->camera_time, eye);
     constants->camera_time.w =
         static_cast<float>(snapshot.header.simulation_time.count()) / 1'000'000'000.0f;
-    std::vector<LightView> frame_lights(snapshot.lights.begin(), snapshot.lights.end());
+    std::vector<LightView> owned_frame_lights;
+    std::span<const LightView> frame_lights = snapshot.lights;
     if (frame_lights.empty())
     {
         LightView sun{{-0.4f, -0.8f, 0.3f}, 3.0f * kLightWhiteLumensPerWatt, {1, 1, 1}};
         sun.stable_id = 1;
         sun.shadow_flags = kLightShadowRequested;
-        frame_lights.push_back(sun);
+        owned_frame_lights.push_back(sun);
+        frame_lights = owned_frame_lights;
     }
     const auto authoritative_light_count = frame_lights.size();
     std::vector<std::uint64_t> transient_light_ids;
@@ -3133,10 +3140,13 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         point.quantity = source.intensity * (4.0f * DirectX::XM_PI * kLightWhiteLumensPerWatt);
         point.legacy_attenuation = true;
         point.revision = owned_view.frame_number + 1;
+        if (owned_frame_lights.empty())
+            owned_frame_lights.assign(frame_lights.begin(), frame_lights.end());
         transient_light_ids.push_back(point.stable_id);
-        frame_lights.push_back(point);
+        owned_frame_lights.push_back(point);
         ++constants->vfx_light_count.x;
     }
+    if (!owned_frame_lights.empty()) frame_lights = owned_frame_lights;
     struct DistortionCandidate { const VfxDistortionInput *source; float area; };
     std::vector<DistortionCandidate> distortion_candidates;
     for (const auto &source : typed_distortions)
@@ -3932,11 +3942,29 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         });
     if (reconcile_packet_scene) impl_->dynamic_scene_slots.EndFrame();
     if (reconcile_packet_scene) prepared_scene.gpu_slots_ready = true;
-    const bool select_current_instance_scene = impl_->render_scene_inputs ||
-        !impl_->canonical_instance_current || !impl_->canonical_instance_current->submitted ||
-        !impl_->canonical_instance_current->scene.resource ||
-        impl_->canonical_instance_current->package_id != impl_->active_render_package_id ||
-        impl_->canonical_instance_current->device != impl_->device.Get();
+    const auto current_scene_payload_revision = impl_->dynamic_scene_slots.PayloadRevision();
+    const auto current_scene_slot_count = impl_->dynamic_scene_slots.SlotCount();
+    const auto &canonical_scene = impl_->canonical_instance_current;
+    // An unchanged packet can keep the already-submitted scene owner as both
+    // current and previous. This is read-only reuse; changed packets still get
+    // a distinct owner so motion history retains the prior payload.
+    const bool reuse_canonical_instance_scene = impl_->render_scene_inputs && !reconcile_packet_scene &&
+        entity_surface_frame.Bytes().empty() && canonical_scene && canonical_scene->submitted &&
+        canonical_scene->scene.resource && canonical_scene->package_id == impl_->active_render_package_id &&
+        canonical_scene->device == impl_->device.Get() &&
+        canonical_scene->uploaded_revision == current_scene_payload_revision &&
+        canonical_scene->slot_count == current_scene_slot_count &&
+        canonical_scene->capacity >= current_scene_slot_count &&
+        canonical_scene->entity_surface_bytes == 0 &&
+        canonical_scene->clock_epoch == snapshot.header.clock.epoch &&
+        canonical_scene->clock_mode == snapshot.header.clock.mode &&
+        canonical_scene->simulation_time == snapshot.header.simulation_time &&
+        canonical_scene->surface_package_id == impl_->active_render_package_id;
+    const bool select_current_instance_scene =
+        (impl_->render_scene_inputs && !reuse_canonical_instance_scene) ||
+        !canonical_scene || !canonical_scene->submitted || !canonical_scene->scene.resource ||
+        canonical_scene->package_id != impl_->active_render_package_id ||
+        canonical_scene->device != impl_->device.Get();
     std::shared_ptr<Impl::SubmittedInstanceFrame> current_instance_snapshot =
         impl_->canonical_instance_current;
     if (select_current_instance_scene)
@@ -5510,8 +5538,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         if (auto prepared = owned_view.local_shadows.PrepareFrameRecordData(
                 local_shadow_input, local_shadow_plan); !prepared) return prepared;
     }
-    const bool reference_frame_timing = presented_view && dynamic_resolution_active;
     const bool full_timing_capture = impl_->config.capture_timing_stream && impl_->config.capture_gpu_timings;
+    const bool output_dependency_interval = presented_view && dynamic_resolution_active && !full_timing_capture;
     const bool source_output_ready = full_timing_capture ||
         (presented_view && impl_->sdk_presentation.IsEnabled());
     const FrameGraphLayout::EarlyKey early_key{
@@ -5540,7 +5568,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         impl_->config.motion_blur != GraphicsMotionBlur::Off, impl_->config.depth_of_field,
         impl_->config.color_grading, presented_view && impl_->sdk_presentation.IsEnabled(),
         devtools_ui_hook,
-        reference_frame_timing, source_output_ready,
+        output_dependency_interval, source_output_ready,
         active_features.software_gi_enabled, impl_->config.contact_shadows,
         active_features.adaptive_raster_enabled, active_features.adaptive_compute_enabled,
         overlap_ao_csm,
@@ -6654,8 +6682,14 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         list->SetGraphicsRoot32BitConstant(6, 0, 0);
     };
     const auto particles = import_buffer(impl_->particles, Access::UnorderedWrite, "Particles");
-    const auto particle_input_index = impl_->particle_input_is_a ? 0u : 1u;
-    const auto particle_output_index = particle_input_index ^ 1u;
+    const auto active_particle_alive_index = impl_->particle_input_is_a ? 0u : 1u;
+    // In an explicit multi-view package, the first accepted view has already
+    // produced the shared world result. Later views bind that result as output
+    // for drawing but must not mutate the particle world a second time.
+    const auto particle_input_index = impl_->render_scene_inputs
+        ? active_particle_alive_index : (active_particle_alive_index ^ 1u);
+    const auto particle_output_index = impl_->render_scene_inputs
+        ? (active_particle_alive_index ^ 1u) : active_particle_alive_index;
     const auto particle_alive_input = import_buffer(impl_->particle_alive[particle_input_index], Access::UnorderedWrite, "ParticleAliveInput");
     const auto particle_alive_output = import_buffer(impl_->particle_alive[particle_output_index], Access::UnorderedWrite, "ParticleAliveOutput");
     const auto particle_dead = import_buffer(impl_->particle_dead, Access::UnorderedWrite, "ParticleDead");
@@ -7249,32 +7283,36 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             context.UavBarrier(particle_counters);
         };
 
-        if (initialize_particles)
+        if (impl_->render_scene_inputs)
         {
-            dispatch_phase(0, particle_capacity);
-            context.UavBarrier(particle_dead);
+            if (initialize_particles)
+            {
+                dispatch_phase(0, particle_capacity);
+                context.UavBarrier(particle_dead);
+                context.UavBarrier(particle_counters);
+            }
+            dispatch_phase(1, 1);
+            context.UavBarrier(particle_counters);
+            dispatch_phase(2, particle_capacity);
+            synchronize_particle_state();
+            if (total_particles_to_spawn != 0)
+            {
+                dispatch_phase(3, total_particles_to_spawn);
+                synchronize_particle_state();
+            }
+            dispatch_phase(5, 1);
             context.UavBarrier(particle_counters);
             context.UavBarrier(indirect_arguments);
         }
-        dispatch_phase(1, 1);
-        context.UavBarrier(particle_counters);
-        context.UavBarrier(indirect_arguments);
-        dispatch_phase(2, particle_capacity);
-        synchronize_particle_state();
-        if (total_particles_to_spawn != 0)
-        {
-            dispatch_phase(3, total_particles_to_spawn);
-            synchronize_particle_state();
-        }
-        dispatch_phase(5, 1);
-        context.UavBarrier(particle_counters);
-        context.UavBarrier(indirect_arguments);
         list->SetComputeRootShaderResourceView(17, frame.upload.resource->GetGPUVirtualAddress() + ribbon_update_offset);
         list->SetComputeRootShaderResourceView(18, frame.upload.resource->GetGPUVirtualAddress() + ribbon_output_offset);
         list->SetComputeRootUnorderedAccessView(21, impl_->ribbon_history.resource->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(22, impl_->ribbon_previous.resource->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(23, frame.ribbon_arguments.resource->GetGPUVirtualAddress());
-        if (!ribbon_updates.empty())
+        // Ribbon history is package world-space state and was updated by the
+        // first accepted view. RibbonArgsCS below remains per-view because it
+        // culls the same history against this view's projection.
+        if (impl_->render_scene_inputs && !ribbon_updates.empty())
         {
             list->SetPipelineState(impl_->ribbon_update_pipeline.Get());
             list->Dispatch(static_cast<UINT>(ribbon_updates.size()), 1, 1);
@@ -10540,9 +10578,9 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     impl_->graph.SetFinalAccess(back_buffer_version, Access::Present);
     }
     const auto timing_mode = full_timing_capture ? GpuTimingMode::Full :
-        reference_frame_timing ? GpuTimingMode::Critical : GpuTimingMode::Off;
+        output_dependency_interval ? GpuTimingMode::Critical : GpuTimingMode::Off;
     const bool collect_gpu_timing = timing_mode != GpuTimingMode::Off;
-    if (auto built = BuildFinalGraph(impl_->graph, back_buffer_version, reference_frame_timing,
+    if (auto built = BuildFinalGraph(impl_->graph, back_buffer_version, output_dependency_interval,
             source_output_ready, pending_effects.presentation, pending_graph_layout.final, restored_graph); !built) return built;
     record_graph_substage(cpu_timings.graph_post_us);
     cpu_timings.graph_build_us = measure_stage();
@@ -10614,7 +10652,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
             (!critical_begin_seen || !critical_end_seen || frame.timestamp_passes.size() != 2))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Critical timing endpoints are missing from the compiled graph.");
-        if (timing_mode == GpuTimingMode::Full && !reference_frame_timing)
+        if (timing_mode == GpuTimingMode::Full && !output_dependency_interval)
         {
             if (!pending_graph_layout.output_closure_cached)
             {
@@ -10673,8 +10711,14 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     GraphExecutionOptions execution_options;
     if (collect_gpu_timing)
     {
-        execution_options.timestamp_query_heap = frame.timestamp_heap.Get();
-        execution_options.timestamp_readback = frame.timestamp_readback.resource.Get();
+        constexpr std::array timing_queues{QueueHint::Direct, QueueHint::Compute};
+        for (const auto hint : timing_queues)
+        {
+            const auto queue_index = static_cast<std::size_t>(hint);
+            execution_options.timestamp_query_heaps[queue_index] = frame.timestamp_heaps[queue_index].Get();
+            execution_options.timestamp_readbacks[queue_index] =
+                frame.timestamp_readbacks[queue_index].resource.Get();
+        }
         execution_options.timestamp_query_slots = frame.timestamp_query_slots.data();
         execution_options.timestamp_query_slot_count = frame.timestamp_query_slots.size();
     }
@@ -10743,6 +10787,14 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
         for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
         return graph_result;
     }
+    // Execute accepted the shared particle mutation. Publish its ping-pong
+    // owner before any fallible post-submit service can return an error.
+    impl_->particles_initialized = true;
+    if (impl_->render_scene_inputs)
+    {
+        impl_->particle_input_is_a = !impl_->particle_input_is_a;
+        if (world_step_requested) impl_->last_particle_tick = stateful_target;
+    }
     // Accepted GPU payloads and their CPU revision must survive later service/Present errors together.
     impl_->dynamic_scene_slots.Commit();
     dynamic_scene.graph_access = impl_->graph.FinalAccess(dynamic_instances_buffer);
@@ -10751,6 +10803,7 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     current_instance_snapshot->uploaded_revision = impl_->dynamic_scene_slots.PayloadRevision();
     current_instance_snapshot->slot_count = required_slots;
     current_instance_snapshot->surface_package_id = impl_->active_render_package_id;
+    current_instance_snapshot->entity_surface_bytes = entity_surface_frame.Bytes().size();
     current_instance_snapshot->clock_epoch = snapshot.header.clock.epoch;
     current_instance_snapshot->clock_mode = snapshot.header.clock.mode;
     current_instance_snapshot->simulation_time = snapshot.header.simulation_time;
@@ -10852,7 +10905,8 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     if (collect_gpu_timing) ++frame.timing_layout_generation;
     if (collect_gpu_timing)
     {
-        frame.timing_kind = reference_frame_timing ? GpuFrameTimingKind::ReferenceGraphSpan : GpuFrameTimingKind::SourceOutputReady;
+        frame.timing_kind = output_dependency_interval ? GpuFrameTimingKind::OutputDependencyInterval :
+            GpuFrameTimingKind::SourceOutputReady;
         frame.timing_generation = impl_->view_configuration_revision;
         frame.timing_resize_epoch = owned_view.state.resize_epoch;
         frame.timing_render_active = owned_view.state.render_active;
@@ -11064,9 +11118,6 @@ Result D3D12Renderer::Render(const RenderSnapshotPair &snapshots,
     frame.timestamps_recorded = collect_gpu_timing;
     owned_view.ui_initialized[frame_slot] = true;
     owned_view.ui_dirty[frame_slot] = false;
-    impl_->particles_initialized = true;
-    impl_->particle_input_is_a = !impl_->particle_input_is_a;
-    if (impl_->render_scene_inputs && world_step_requested) impl_->last_particle_tick = stateful_target;
     impl_->render_session_id = snapshot.header.session_id;
     owned_view.last_presented_index = output_index;
     owned_view.transient_textures_common = false;

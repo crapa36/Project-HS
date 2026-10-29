@@ -6,6 +6,7 @@
 
 #include <d3d12.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -201,8 +202,8 @@ struct GpuPassTiming;
 
 struct GraphExecutionOptions
 {
-    void *timestamp_query_heap{};
-    void *timestamp_readback{};
+    std::array<void *, 3> timestamp_query_heaps{};
+    std::array<void *, 3> timestamp_readbacks{};
     std::uint32_t timestamp_base{};
     // Optional compiled execution-order to query-pair map; UINT32_MAX skips a pass.
     const std::uint32_t *timestamp_query_slots{};

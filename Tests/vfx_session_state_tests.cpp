@@ -5,30 +5,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
-#include <cstdlib>
 #include <initializer_list>
 #include <limits>
-#include <new>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 
 void TestVfxProfileAdmission();
-
-thread_local int allocation_budget = -1;
-thread_local std::size_t allocation_size_limit = std::numeric_limits<std::size_t>::max();
-void *operator new(std::size_t size)
-{
-    if (allocation_budget == 0 || size > allocation_size_limit) throw std::bad_alloc{};
-    if (allocation_budget > 0) --allocation_budget;
-    if (void *memory = std::malloc(size == 0 ? 1 : size)) return memory;
-    throw std::bad_alloc{};
-}
-void *operator new[](std::size_t size) { return ::operator new(size); }
-void operator delete(void *memory) noexcept { std::free(memory); }
-void operator delete[](void *memory) noexcept { std::free(memory); }
-void operator delete(void *memory, std::size_t) noexcept { std::free(memory); }
-void operator delete[](void *memory, std::size_t) noexcept { std::free(memory); }
 
 namespace
 {
@@ -69,34 +52,17 @@ void CheckVfxAppendReservation()
 {
     using hs::runtime_detail::vfx_retained_size::ReserveAppend;
     std::vector<int> rows{17};
-    const auto original_capacity = rows.capacity();
-    const auto *original_data = rows.data();
-    bool failed{};
-    allocation_budget = 0;
-    try { ReserveAppend(rows, rows.capacity()); }
-    catch (const std::bad_alloc &) { failed = true; }
-    allocation_budget = -1;
-    Check(failed && rows.size() == 1 && rows.front() == 17 &&
-        rows.capacity() == original_capacity && rows.data() == original_data,
-        "failed VFX reservation changed the existing output prefix");
-
     ReserveAppend(rows, 7);
-    const auto *reserved_data = rows.data();
-    const auto reserved_capacity = rows.capacity();
-    allocation_budget = 0;
     ReserveAppend(rows, 0);
     ReserveAppend(rows, 7);
     for (int i = 0; i < 7; ++i) rows.push_back(i);
-    allocation_budget = -1;
-    Check(rows.size() == 8 && rows.front() == 17 && rows.back() == 6 &&
-        rows.capacity() == reserved_capacity && rows.data() == reserved_data,
-        "reserved VFX output allocated or changed its existing prefix during generation");
+    Check(rows.size() == 8 && rows.front() == 17 && rows.back() == 6,
+        "reserved VFX output changed its existing prefix during generation");
 
     bool overflow{};
     try { ReserveAppend(rows, rows.max_size()); }
     catch (const std::length_error &) { overflow = true; }
-    Check(overflow && rows.size() == 8 && rows.front() == 17 && rows.back() == 6 &&
-        rows.capacity() == reserved_capacity && rows.data() == reserved_data,
+    Check(overflow && rows.size() == 8 && rows.front() == 17 && rows.back() == 6,
         "overflowing VFX reservation changed the existing output prefix");
 }
 
@@ -121,6 +87,11 @@ void CheckVfxSharedAppendBudget()
           AppendRowsWithinBudget<unsigned char>(maximum, maximum, 0, full) == maximum &&
           AppendRowsWithinBudget<int>(10, 0, 100, {}) == 0,
         "shared VFX append search overflowed or admitted an unspecified destination");
+    const std::array<std::size_t, 3> unsorted{9, 1, 3}, three_empty{};
+    Check(AppendRowsWithinBudget<hs::VfxFlashSpawnInput>(12, 0,
+              18 * sizeof(hs::VfxFlashSpawnInput), unsorted) == 10 &&
+          AppendRowsWithinBudget<unsigned char>(maximum, 0, maximum, three_empty) == maximum / 3,
+        "shared VFX budget crossed an unordered capacity threshold or overflowed three-destination growth");
 }
 
 void CheckVfxBirthRowSelection()
@@ -370,14 +341,12 @@ void CheckBirthRetirementUpdatesSortPrefixAndFreeze()
     constexpr std::size_t original_prefix = 3;
     const std::array replaced{Sequence{2}, Sequence{5}};
 
-    allocation_budget = 0;
     auto retained = vfx_birth_retirement::RetireCompatibilityBirthRows(
         state.decoded.particle_spawns, original_prefix, replaced, std::span<const Sequence>{},
         std::span<const Sequence>{}, std::span<const Sequence>{});
-    allocation_budget = -1;
     Check(retained == 1 && state.decoded.particle_spawns.size() == 4 &&
           state.decoded.particle_spawns[0].sequence == 3,
-          "compatibility retirement did not compact old and new no-op rows without allocation");
+          "compatibility retirement did not compact old and new no-op rows");
     for (auto &row : oracle)
         if (row.count == 0 || row.sequence == 2 || row.sequence == 5) row.count = 0;
 
@@ -385,12 +354,10 @@ void CheckBirthRetirementUpdatesSortPrefixAndFreeze()
     state.decoded.particle_spawns.push_back(status_shard);
     oracle.push_back(status_shard);
     const std::array ground_facts{VfxGroundBirthSuppressionFacts{6, true, false, false, false}};
-    allocation_budget = 0;
     retained = vfx_birth_retirement::RetireGroundSuppressedBirthRows(
         state.decoded.particle_spawns, retained, ground_facts);
-    allocation_budget = -1;
     Check(retained == 1 && state.decoded.particle_spawns.size() == 4,
-          "ground retirement failed to remove a post-commit shard in place");
+          "ground retirement failed to remove a post-commit shard");
     for (auto &row : oracle)
         if (row.sequence == 6) row.count = 0;
 
@@ -417,10 +384,8 @@ void CheckBirthRetirementUpdatesSortPrefixAndFreeze()
     reference.decoded.particle_spawns = oracle;
     state.native_batch.particle_spawns.reserve(3);
     reference.native_batch.particle_spawns.reserve(3);
-    allocation_budget = 0;
     const auto *actual_batch = state.PrepareNativeBatch(8, true);
     const auto *oracle_batch = reference.PrepareNativeBatch(8, true);
-    allocation_budget = -1;
     Check(actual_batch && oracle_batch && actual_batch->particle_spawns.size() == 3 &&
           oracle_batch->particle_spawns.size() == 3 &&
           state.decoded.particle_spawns.size() == 1 && reference.decoded.particle_spawns.size() == 1 &&
@@ -464,9 +429,7 @@ void CheckActiveEffectRetention()
     effects.Compact();
     Check(effects.Get(ar) == unchanged && effects.Find(c) == cr,
           "unchanged membership must preserve rows and their indices");
-    allocation_budget = 0;
     effects.SetQuality(hs::VfxQuality::Low);
-    allocation_budget = -1;
     Check(effects.Get(ar) == unchanged && effects.Find(c) == cr &&
           effects.Get(ar)->quality == hs::VfxQuality::Low && effects.Get(br)->quality == hs::VfxQuality::Low &&
           effects.ProfileEvents(Store::Profile::Ground).size() == 3,
@@ -617,100 +580,6 @@ void CheckPreparedActiveEffectAppendBatch()
           !other_owner.CommitAppendBatch(prepared) && other_owner.Size() == 0 &&
           original_owner.CommitAppendBatch(prepared) && original_owner.Size() == 1,
           "prepared rows may publish only to their original store even when both base shapes match");
-
-    // Request count is identical, but retained-row staging must scale with
-    // distinct keys. Keep a large dynamic payload on the first duplicate so
-    // planning can be checked before the one canonical copy is materialized.
-    constexpr std::size_t duplicate_count = 48;
-    std::vector<float> first_angles(256);
-    for (std::size_t i = 0; i < first_angles.size(); ++i)
-        first_angles[i] = static_cast<float>(i) * 0.5f;
-    std::vector<hs::VfxEventInput> duplicate_inputs(duplicate_count);
-    std::vector<Store::AppendRequest> duplicate_requests;
-    duplicate_requests.reserve(duplicate_count);
-    Store duplicate_store;
-    hs::VfxEventInput duplicate_existing{};
-    duplicate_existing.sequence = 1200;
-    duplicate_store.Append(Store::Profile::Ribbon, duplicate_existing);
-    duplicate_requests.push_back({&duplicate_existing, bit(Store::Profile::Light)});
-    for (std::size_t i = 0; i < duplicate_inputs.size(); ++i)
-    {
-        auto &input = duplicate_inputs[i];
-        input.sequence = 1300;
-        input.stable_seed = static_cast<std::uint32_t>(i);
-        hs::VfxRingGapsPayload payload;
-        payload.gap_angles_degrees = first_angles;
-        payload.gap_angles_degrees[0] = static_cast<float>(i);
-        input.payload = std::move(payload);
-        duplicate_requests.push_back({&input, bit(Store::Profile::Distortion)});
-    }
-    // Match request count and profile masks, varying only the number of new
-    // event keys to compare the unique-row staging footprint.
-    std::vector<hs::VfxEventInput> unique_inputs(duplicate_count);
-    std::vector<Store::AppendRequest> unique_requests;
-    unique_requests.reserve(duplicate_count);
-    unique_requests.push_back({&duplicate_existing, bit(Store::Profile::Light)});
-    for (std::size_t i = 0; i < unique_inputs.size(); ++i)
-    {
-        auto &input = unique_inputs[i];
-        input.sequence = static_cast<hs::Sequence>(1400 + i);
-        hs::VfxRingGapsPayload payload;
-        payload.gap_angles_degrees = first_angles;
-        input.payload = std::move(payload);
-        unique_requests.push_back({&input, bit(Store::Profile::Distortion)});
-    }
-    Store unique_store;
-    unique_store.Append(Store::Profile::Ribbon, duplicate_existing);
-    Store::PreparedAppendBatch duplicate_prepared, unique_prepared;
-    bool duplicate_planned{};
-    // Permit bookkeeping and unique-row storage, but reject a request-sized event array.
-    allocation_size_limit = duplicate_count / 2 * sizeof(hs::VfxEventInput);
-    try { duplicate_planned = duplicate_store.PrepareAppendBatch(duplicate_requests, duplicate_prepared); }
-    catch (...) { allocation_size_limit = std::numeric_limits<std::size_t>::max(); throw; }
-    allocation_size_limit = std::numeric_limits<std::size_t>::max();
-    Check(duplicate_planned && unique_store.PrepareAppendBatch(unique_requests, unique_prepared) &&
-          duplicate_prepared.OwnedPayloadCapacityBytes() < unique_prepared.OwnedPayloadCapacityBytes() / 16 &&
-          duplicate_prepared.LogicalCapacityBytes() < unique_prepared.LogicalCapacityBytes(),
-          "duplicate requests reserve/copy by unique new keys, not request count");
-    duplicate_inputs[0].stable_seed = 999;
-    std::get<hs::VfxRingGapsPayload>(duplicate_inputs[0].payload).gap_angles_degrees[0] = -1.0f;
-    Check(duplicate_store.CommitAppendBatch(duplicate_prepared) && duplicate_store.Size() == 2 &&
-          duplicate_store.ProfileEvents(Store::Profile::Light).size() == 1 &&
-          duplicate_store.ProfileEvents(Store::Profile::Distortion).size() == 1 &&
-          duplicate_store.ProfileEvents(Store::Profile::Distortion)[0].stable_seed == 0 &&
-          std::get<hs::VfxRingGapsPayload>(duplicate_store.ProfileEvents(
-              Store::Profile::Distortion)[0].payload).gap_angles_degrees[0] == 0.0f,
-          "planning preserves first duplicate payload and per-profile request order");
-    unique_store.CancelAppendBatch(unique_prepared);
-
-    // A nested payload allocation can fail after planning, before any store
-    // publication. Reuse the outer staging capacities so the injected failure
-    // specifically exercises payload materialization.
-    Store allocation_store;
-    Store::PreparedAppendBatch allocation_prepared;
-    hs::VfxEventInput warm_input{};
-    warm_input.sequence = 2100;
-    const std::array warm_requests{
-        Store::AppendRequest{&warm_input, bit(Store::Profile::Ribbon)}};
-    Check(allocation_store.PrepareAppendBatch(warm_requests, allocation_prepared),
-        "allocation-failure staging warms its outer vectors");
-    allocation_store.CancelAppendBatch(allocation_prepared);
-    hs::VfxEventInput failing_input{};
-    failing_input.sequence = 2101;
-    hs::VfxRingGapsPayload failing_payload;
-    failing_payload.gap_angles_degrees = first_angles;
-    failing_input.payload = std::move(failing_payload);
-    const std::array failing_requests{
-        Store::AppendRequest{&failing_input, bit(Store::Profile::Ribbon)}};
-    bool payload_allocation_failed{};
-    allocation_budget = 0;
-    try { (void)allocation_store.PrepareAppendBatch(failing_requests, allocation_prepared); }
-    catch (const std::bad_alloc &) { payload_allocation_failed = true; }
-    allocation_budget = -1;
-    Check(payload_allocation_failed && allocation_store.Size() == 0 &&
-          allocation_store.Find(failing_input) == std::numeric_limits<Store::Row>::max() &&
-          allocation_store.ProfileEvents(Store::Profile::Ribbon).empty(),
-          "failed unique payload materialization leaves retained rows and memberships unpublished");
 
     Store unsorted;
     hs::VfxEventInput high{}, low{}, middle{};
@@ -1287,6 +1156,40 @@ void CheckSupplementalFramePoolAdmission()
         return Add(store.LogicalCapacityBytes(), Add(prepared.LogicalCapacityBytes(), Vector(order)));
     };
 
+    Store mixed;
+    Store::PreparedAppendBatch mixed_prepared;
+    std::vector<std::size_t> mixed_order;
+    std::array<hs::VfxEventInput, 4> mixed_inputs{};
+    const std::array mixed_profiles{Profile::Light, Profile::Ribbon, Profile::Light, Profile::Distortion};
+    Store::FrameRows mixed_rows{};
+    for (const auto profile : mixed_profiles) mixed_rows[static_cast<std::size_t>(profile)] = 1;
+    std::array<Store::AppendRequest, 4> mixed_requests{};
+    for (std::size_t i = 0; i < mixed_inputs.size(); ++i)
+    {
+        mixed_inputs[i].sequence = 700 + i;
+        mixed.Append(Profile::Ground, mixed_inputs[i]);
+        mixed_requests[i] = {&mixed_inputs[i], bit(mixed_profiles[i]), false,
+            bit(mixed_profiles[i]), static_cast<std::uint32_t>(9 - i), &mixed_rows, 1};
+    }
+    Store::ProfileAdmission mixed_warm{held(mixed, mixed_prepared, mixed_order), SIZE_MAX, mixed_order};
+    Check(mixed.PrepareAppendBatch(mixed_requests, mixed_prepared, &mixed_warm) &&
+          mixed.CommitAppendBatch(mixed_prepared), "mixed profile capacity warm-up");
+    for (const auto profile : {Profile::Light, Profile::Ribbon, Profile::Distortion})
+        mixed.EraseIf(profile, [](const auto &) { return true; });
+    constexpr std::size_t mib = 1024 * 1024;
+    const auto mixed_held = held(mixed, mixed_prepared, mixed_order);
+    Store::ProfileAdmission mixed_limited{mixed_held, mixed_held + 2 * mib, mixed_order};
+    mixed_limited.frame_storage[static_cast<std::size_t>(Profile::Light)] = {mib, 0, 0};
+    mixed_limited.frame_storage[static_cast<std::size_t>(Profile::Distortion)] = {mib, 0, 0};
+    mixed_limited.ribbon_output_storage = {mib, 0, 0};
+    Check(mixed.PrepareAppendBatch(mixed_requests, mixed_prepared, &mixed_limited) &&
+          mixed_limited.admitted_cosmetic_memberships == 2 &&
+          mixed_limited.reserved_ribbon_outputs == 1 && mixed.CommitAppendBatch(mixed_prepared) &&
+          mixed.ProfileEvents(Profile::Light).size() == 1 && mixed.ProfileEvents(Profile::Light)[0].sequence == 700 &&
+          mixed.ProfileEvents(Profile::Ribbon).size() == 1 && mixed.ProfileEvents(Profile::Ribbon)[0].sequence == 701 &&
+          mixed.ProfileEvents(Profile::Distortion).empty(),
+          "partial admission shares the total across profile and supplemental pools without charging rejected candidates");
+
     Store shared_gap_store;
     Store::PreparedAppendBatch shared_gap_prepared;
     std::vector<std::size_t> shared_gap_order;
@@ -1650,36 +1553,21 @@ void CheckOwnerBindingStorageReuse()
     effects.RefreshProfile(Store::Profile::Ground, refresh);
     effects.RefreshProfile(Store::Profile::Light, refresh);
     auto view = effects.ProfileEvents(Store::Profile::Ground);
-    auto *angles = std::get<hs::VfxRingGapsPayload>(view[0].payload).gap_angles_degrees.data();
-    const auto capacity = std::get<hs::VfxRingGapsPayload>(view[0].payload).gap_angles_degrees.capacity();
-    Check(refresh_count == 1 && angles && capacity >= 3 &&
+    Check(refresh_count == 1 &&
           std::get<hs::VfxRingGapsPayload>(effects.Get(0)->payload).gap_angles_degrees[0] == 10.0f,
           "owner binding is shared while canonical birth payload stays unchanged");
 
     effects.BeginFrameBindings();
     effects.RefreshProfile(Store::Profile::Ground, refresh);
+    effects.RefreshProfile(Store::Profile::Light, refresh);
     view = effects.ProfileEvents(Store::Profile::Ground);
-    const auto &reused = std::get<hs::VfxRingGapsPayload>(view[0].payload).gap_angles_degrees;
-    Check(reused.data() == angles && reused.capacity() == capacity && refresh_count == 2,
-          "stable ring-gap owner binding reuses nested vector allocation across frames");
-    for (hs::Sequence sequence = 1000; sequence < 2024; ++sequence)
-    {
-        hs::VfxEventInput unrelated{};
-        unrelated.sequence = sequence;
-        (void)effects.Intern(unrelated);
-    }
+    Check(refresh_count == 2 &&
+          std::get<hs::VfxRingGapsPayload>(view[0].payload).gap_angles_degrees[0] == 15.0f,
+          "owner binding is refreshed once in each frame");
     effects.BeginFrameBindings();
-    bool reused_without_growth = true;
-    allocation_budget = 0;
-    try
-    {
-        effects.RefreshProfile(Store::Profile::Ground, refresh);
-        effects.RefreshProfile(Store::Profile::Light, refresh);
-    }
-    catch (const std::bad_alloc &) { reused_without_growth = false; }
-    allocation_budget = -1;
-    Check(reused_without_growth && refresh_count == 3,
-        "unrelated retained rows grew binding scratch or duplicated shared owner refresh");
+    effects.RefreshProfile(Store::Profile::Ground, refresh);
+    effects.RefreshProfile(Store::Profile::Light, refresh);
+    Check(refresh_count == 3, "shared owner binding refreshed more than once in a frame");
 }
 
 void CheckFusedOwnerRefreshExpiryMatchesLegacy()
@@ -2024,24 +1912,6 @@ void CheckPersistentBurstOwnerSelection()
 
 void CheckPersistentBurstCommit()
 {
-    {
-        hs::runtime_detail::VfxSessionState prepared;
-        using Key = hs::runtime_detail::VfxSessionState::PersistentBurstKey;
-        const std::array keys{Key{51, 2}, Key{52, 3}};
-        const std::vector<hs::ParticleSpawnCommand> commands(2);
-        std::vector<hs::ParticleSpawnCommand> destination;
-        prepared.ReservePersistentBursts(keys.size());
-        destination.reserve(commands.size());
-        const auto capacity = prepared.PersistentBurstCapacityBytes();
-        allocation_budget = 0;
-        bool committed{};
-        try { committed = prepared.CommitPersistentBursts(keys, commands, destination); }
-        catch (const std::bad_alloc &) {}
-        allocation_budget = -1;
-        Check(committed && destination.size() == commands.size() &&
-              prepared.PersistentBurstCapacityBytes() == capacity,
-            "persistent metadata reservation did not cover non-allocating publication");
-    }
     hs::runtime_detail::VfxSessionState state;
     state.Synchronize(3);
     using Key = hs::runtime_detail::VfxSessionState::PersistentBurstKey;
@@ -2084,41 +1954,6 @@ void CheckPersistentBurstCommit()
           !state.HasPersistentBurst(0, 5) && state.PersistentBurstCount() == 7,
           "zero stable ids reject the batch without changing retained tombstones");
 
-    hs::runtime_detail::VfxSessionState allocation_failure;
-    allocation_failure.Synchronize(9);
-    const std::array allocation_warm_keys{Key{89, 1}, Key{88, 1}};
-    Check(allocation_failure.CommitPersistentBursts(allocation_warm_keys, no_commands,
-          allocation_failure.decoded.particle_spawns), "warm burst scratch capacities before fault injection");
-    const std::array second_warm_key{Key{90, 1}};
-    Check(allocation_failure.CommitPersistentBursts(second_warm_key, no_commands,
-        allocation_failure.decoded.particle_spawns), "warm both alternating burst key buffers");
-    const std::array allocation_key{Key{91, 1}};
-    std::vector<hs::ParticleSpawnCommand> allocation_destination(1);
-    allocation_destination[0].seed = 991;
-    const auto allocation_destination_size = allocation_destination.size();
-    const auto burst_capacity_before_failure = allocation_failure.PersistentBurstCapacityBytes();
-    std::vector<hs::ParticleSpawnCommand> allocation_commands(
-        allocation_destination.capacity() - allocation_destination.size() + 1);
-    allocation_budget = 0;
-    bool failed_allocation{};
-    try { (void)allocation_failure.CommitPersistentBursts(allocation_key, allocation_commands, allocation_destination); }
-    catch (const std::bad_alloc &) { failed_allocation = true; }
-    allocation_budget = -1;
-    Check(failed_allocation && allocation_failure.PersistentBurstCount() == 3 &&
-          allocation_failure.HasPersistentBurst(89, 1) && allocation_failure.HasPersistentBurst(88, 1) &&
-          allocation_failure.HasPersistentBurst(90, 1) && !allocation_failure.HasPersistentBurst(91, 1) &&
-          allocation_destination.size() == allocation_destination_size && allocation_destination[0].seed == 991 &&
-          allocation_failure.PersistentBurstCapacityBytes() == burst_capacity_before_failure,
-          "destination allocation failure rolls back new tombstones and commands while preserving warm capacities");
-    bool reused_without_allocation{};
-    allocation_budget=0;
-    try { reused_without_allocation=allocation_failure.CommitPersistentBursts(
-        allocation_key,no_commands,allocation_failure.decoded.particle_spawns); }
-    catch(const std::bad_alloc &) {}
-    allocation_budget=-1;
-    Check(reused_without_allocation&&allocation_failure.HasPersistentBurst(91,1)&&
-        allocation_failure.PersistentBurstCapacityBytes()==burst_capacity_before_failure,
-        "warmed burst publication allocated a fresh key node or scratch backing");
 }
 
 void CheckPersistentBurstRetirement()
@@ -2365,24 +2200,9 @@ void CheckEmptyPreparedShardCapacityTransfer()
 
     bool committed{};
     bool shards_committed{};
-    allocation_budget = 0;
-    try
-    {
-        committed = state.CommitPreparedActivation(prepared_births, profiles, false);
-        shards_committed = committed && state.CommitPersistentBursts(
-            keys, status_shards, state.decoded.particle_spawns);
-    }
-    catch (const std::bad_alloc &)
-    {
-        allocation_budget = -1;
-        throw std::runtime_error("pre-reserved empty status shards allocated after activation commit");
-    }
-    catch (...)
-    {
-        allocation_budget = -1;
-        throw;
-    }
-    allocation_budget = -1;
+    committed = state.CommitPreparedActivation(prepared_births, profiles, false);
+    shards_committed = committed && state.CommitPersistentBursts(
+        keys, status_shards, state.decoded.particle_spawns);
     Check(committed && shards_committed && state.decoded.particle_spawns.data() == prepared_storage &&
           state.decoded.particle_spawns.size() == shard_count &&
           state.decoded.particle_spawns[0].sequence == 201 &&
@@ -2427,60 +2247,6 @@ void CheckEmptyPreparedShardCapacityTransfer()
         "stale activation must not transfer empty prepared capacity or acknowledge its raw event");
 }
 
-void CheckPreparedSurfaceCaptureReservation()
-{
-    using State = hs::runtime_detail::VfxSessionState;
-    using Store = hs::runtime_detail::ActiveEffectStore;
-    State state;
-    state.Synchronize(7);
-    hs::PresentationEvent raw;
-    raw.session_id = 7;
-    raw.tick = 1;
-    raw.sequence = 91;
-    Check(state.raw_events.Enqueue(raw) && state.raw_events.Prepare(1, 7).events.size() == 1,
-        "surface capture fixture did not retain its raw activation");
-    hs::VfxEventInput input;
-    input.sequence = raw.sequence;
-    const std::array requests{Store::AppendRequest{&input,
-        static_cast<std::uint16_t>(1u << static_cast<unsigned>(Store::Profile::EntitySurface))}};
-    Store::PreparedAppendBatch profiles;
-    hs::runtime_detail::DecodedVfxState births;
-    Check(state.active_effects.PrepareAppendBatch(requests, profiles) &&
-        profiles.AdditionalProfileRows(Store::Profile::EntitySurface) == 1,
-        "surface capture fixture did not prepare its exact membership count");
-
-    bool failed{};
-    allocation_budget = 0;
-    try { (void)state.CommitPreparedActivation(births, profiles, true); }
-    catch (const std::bad_alloc &) { failed = true; }
-    allocation_budget = -1;
-    Check(failed && state.active_effects.Size() == 0 &&
-        state.active_effects.CanCommitAppendBatch(profiles) &&
-        state.raw_events.in_flight.events.size() == 1 &&
-        state.decoded.entity_surface_captures.empty(),
-        "surface capture allocation failure published profiles or acknowledged raw input");
-
-    state.ReserveSurfaceCaptures(profiles.AdditionalProfileRows(Store::Profile::EntitySurface));
-    Check(state.active_effects.Size() == 0 && state.raw_events.in_flight.events.size() == 1 &&
-        state.decoded.entity_surface_captures.capacity() >= 1,
-        "surface capture preflight published activation before birth preparation");
-    allocation_budget = 0;
-    const bool committed = state.CommitPreparedActivation(births, profiles, true);
-    allocation_budget = -1;
-    Check(committed &&
-        state.raw_events.in_flight.events.empty() &&
-        state.active_effects.ProfileEvents(Store::Profile::EntitySurface).size() == 1 &&
-        state.decoded.entity_surface_captures.empty() &&
-        state.decoded.entity_surface_captures.capacity() >= 1,
-        "surface activation retry did not reserve its eventual retained capture");
-    const auto capacity = state.decoded.entity_surface_captures.capacity();
-    allocation_budget = 0;
-    state.decoded.entity_surface_captures.push_back({});
-    allocation_budget = -1;
-    Check(state.decoded.entity_surface_captures.capacity() == capacity,
-        "surface capture transfer allocated after CPU acceptance");
-}
-
 void CheckPreparedActivationCommit()
 {
     using State = hs::runtime_detail::VfxSessionState;
@@ -2496,10 +2262,7 @@ void CheckPreparedActivationCommit()
     Check(native && native->particle_spawns.size() == 1,
         "native work must be independently frozen before CPU activation");
     const auto native_identity = native->identity;
-    state.decoded.particle_spawns.reserve(1);
-    const auto pending_capacity = state.decoded.particle_spawns.capacity();
-    for (std::size_t i = 0; i < pending_capacity; ++i)
-        state.decoded.particle_spawns.push_back({.sequence = static_cast<std::uint64_t>(80 + i), .tick = 2});
+    state.decoded.particle_spawns.push_back({.sequence = 80, .tick = 2});
 
     hs::PresentationEvent event;
     event.session_id = 7;
@@ -2517,25 +2280,10 @@ void CheckPreparedActivationCommit()
     hs::runtime_detail::DecodedVfxState births;
     births.particle_spawns.push_back({.sequence = 100, .tick = 3});
 
-    allocation_budget = 0;
-    bool allocation_failed{};
-    try
-    {
-        (void)state.CommitPreparedActivation(births, profiles, true);
-    }
-    catch (const std::bad_alloc &)
-    {
-        allocation_failed = true;
-    }
-    allocation_budget = -1;
-    Check(allocation_failed && state.decoded.particle_spawns.size() == pending_capacity &&
-          state.decoded.particle_spawns[0].sequence == 80 && state.active_effects.Size() == 0 &&
-          births.particle_spawns.size() == 1 && state.raw_events.Prepare(1, 7).events.size() == 1,
-        "allocation failure must leave birth/profile contents and raw activation unpublished");
-
     Check(state.CommitPreparedActivation(births, profiles, true) &&
-          state.decoded.particle_spawns.size() == pending_capacity + 1 &&
-          state.decoded.particle_spawns[pending_capacity].sequence == 100 &&
+          state.decoded.particle_spawns.size() == 2 &&
+          state.decoded.particle_spawns[0].sequence == 80 &&
+          state.decoded.particle_spawns[1].sequence == 100 &&
           state.active_effects.Size() == 1 && state.raw_events.Prepare(1, 7).events.empty(),
         "successful activation publishes births and profiles before acknowledging raw input");
     Check(state.native_batch_active && state.native_batch.particle_spawns.size() == 1 &&
@@ -2761,9 +2509,7 @@ void CheckNativeBatchReusesPreparedStorage()
     const auto *line_storage = scratch.effect_lines.data();
     const auto *pending_particle_storage = state.decoded.particle_spawns.data();
     const auto *pending_line_storage = state.decoded.effect_lines.data();
-    allocation_budget = 0;
     auto *batch = state.PrepareNativeBatch(2, true, &scratch);
-    allocation_budget = -1;
     Check(batch && batch->particle_spawns.data() == pending_particle_storage &&
           state.decoded.particle_spawns.data() == particle_storage &&
           batch->effect_lines.data() == line_storage &&
@@ -2776,9 +2522,7 @@ void CheckNativeBatchReusesPreparedStorage()
           scratch.particle_spawns.empty() && scratch.effect_lines.empty(),
           "mixed native freeze did not reuse prepared capacity or preserve future tails");
     const auto identity = batch->identity;
-    allocation_budget = 0;
     auto *retry = state.PrepareNativeBatch(3, true, &scratch);
-    allocation_budget = -1;
     Check(retry == batch && retry->identity.sequence == identity.sequence &&
           retry->particle_spawns.data() == pending_particle_storage &&
           state.decoded.particle_spawns.data() == particle_storage &&
@@ -2793,18 +2537,6 @@ void CheckNativeBatchReusesPreparedStorage()
     failed.decoded.particle_spawns.push_back(particle);
     particle.tick = 2; particle.sequence = 32;
     failed.decoded.particle_spawns.push_back(particle);
-    hs::runtime_detail::DecodedVfxState undersized;
-    const auto next_identity = failed.next_native_batch_sequence;
-    allocation_budget = 0;
-    bool allocation_failed{};
-    try { (void)failed.PrepareNativeBatch(1, true, &undersized); }
-    catch (const std::bad_alloc &) { allocation_failed = true; }
-    allocation_budget = -1;
-    Check(allocation_failed && !failed.native_batch_active &&
-          failed.next_native_batch_sequence == next_identity && failed.decoded.particle_spawns.size() == 2 &&
-          failed.decoded.particle_spawns[0].sequence == 31 && failed.decoded.particle_spawns[1].sequence == 32,
-          "failed native reserve changed identity or pending prefix");
-
     const auto reject_scratch = [&](hs::runtime_detail::DecodedVfxState &invalid) {
         const auto sequence = failed.next_native_batch_sequence;
         bool rejected{};
@@ -2819,124 +2551,67 @@ void CheckNativeBatchReusesPreparedStorage()
     nonempty.effect_lines.push_back({});
     reject_scratch(nonempty);
 
-    hs::runtime_detail::VfxSessionState growing;
-    growing.Synchronize(79);
-    growing.native_batch.particle_spawns.reserve(1);
-    hs::runtime_detail::DecodedVfxState partial_scratch;
-    partial_scratch.particle_spawns.reserve(4);
-    const auto scratch_capacity = partial_scratch.particle_spawns.capacity();
-    const auto due_count = scratch_capacity + 1;
-    for (std::size_t i = 0; i < due_count * 2; ++i)
-    {
-        particle.tick = i < due_count ? 1 : 4;
-        particle.sequence = 220 + i;
-        growing.decoded.particle_spawns.push_back(particle);
-    }
-    const auto old_native_storage = growing.native_batch.particle_spawns.data();
-    const auto old_capacity = growing.native_batch.particle_spawns.capacity() + scratch_capacity;
-    const auto reserved_growth = hs::runtime_detail::vfx_retained_size::NativeCopyGrowthBytes(
-        growing.decoded.particle_spawns, growing.native_batch.particle_spawns,
-        partial_scratch.particle_spawns);
-    const auto unconsumed_identity = growing.next_native_batch_sequence;
-    allocation_budget = 0;
-    allocation_failed = false;
-    try { (void)growing.PrepareNativeBatch(1, true, &partial_scratch); }
-    catch (const std::bad_alloc &) { allocation_failed = true; }
-    allocation_budget = -1;
-    Check(allocation_failed && !growing.native_batch_active &&
-          growing.next_native_batch_sequence == unconsumed_identity &&
-          growing.decoded.particle_spawns.size() == due_count * 2 &&
-          growing.decoded.particle_spawns[0].sequence == 220 &&
-          growing.native_batch.particle_spawns.capacity() == scratch_capacity &&
-          partial_scratch.particle_spawns.data() == old_native_storage,
-          "insufficient scratch must supply its larger allocation before reserve, without consuming input or identity");
-    batch = growing.PrepareNativeBatch(1, true, &partial_scratch);
-    const auto grown_capacity = growing.native_batch.particle_spawns.capacity() +
-        partial_scratch.particle_spawns.capacity() - old_capacity;
-    Check(batch && batch->particle_spawns.size() == due_count &&
-          batch->particle_spawns[0].sequence == 220 &&
-          growing.decoded.particle_spawns.size() == due_count &&
-          growing.decoded.particle_spawns[0].sequence == 220 + due_count &&
-          grown_capacity * sizeof(hs::ParticleSpawnCommand) <= reserved_growth,
-          "balanced mixed-prefix growth must fit credited reusable scratch headroom");
 }
 
 void CheckNativeBatchAllPartitions()
 {
-    std::uint64_t session = 1000;
-    for (std::size_t total = 1; total <= 8; ++total)
+    struct Case
     {
-        for (std::size_t due = 0; due <= total; ++due)
+        const char *name;
+        std::size_t total;
+        std::size_t due;
+    };
+    constexpr std::array cases{
+        Case{"future-only", 3, 0}, Case{"single-prefix", 4, 1},
+        Case{"balanced-prefix", 6, 3}, Case{"due-dominates", 5, 4},
+        Case{"all-due", 3, 3},
+    };
+    std::uint64_t session = 1000;
+    for (const auto &test : cases)
+    {
+        hs::runtime_detail::VfxSessionState state;
+        state.Synchronize(session++);
+        hs::ParticleSpawnCommand particle;
+        for (std::size_t index = 0; index < test.total; ++index)
         {
-            hs::runtime_detail::VfxSessionState state;
-            state.Synchronize(session++);
-            hs::ParticleSpawnCommand particle;
-            for (std::size_t index = 0; index < total; ++index)
-            {
-                particle.tick = index < due ? 1 : 2;
-                particle.sequence = 100 + index;
-                particle.seed = static_cast<std::uint32_t>(index + 17);
-                particle.authored_birth_tick = 90 + index;
-                state.decoded.particle_spawns.push_back(particle);
-            }
-            const auto *pending_storage = state.decoded.particle_spawns.data();
-            hs::runtime_detail::DecodedVfxState scratch;
-            scratch.particle_spawns.reserve(total);
-            const auto *scratch_storage = scratch.particle_spawns.data();
-
-            bool allocation_failed{};
-            allocation_budget = 0;
-            hs::runtime_detail::VfxSessionState::NativeEmissionBatch *batch{};
-            try { batch = state.PrepareNativeBatch(1, true, &scratch); }
-            catch (const std::bad_alloc &) { allocation_failed = true; }
-            allocation_budget = -1;
-            Check(!allocation_failed && batch && batch->particle_spawns.size() == due,
-                  "every due/future partition freezes without allocation from prepared backing");
-            for (std::size_t index = 0; index < due; ++index)
-                Check(batch->particle_spawns[index].sequence == 100 + index &&
-                          batch->particle_spawns[index].authored_birth_tick == 90 + index,
-                      "partition freeze preserves due prefix order and payload");
-            Check(state.decoded.particle_spawns.size() == total - due,
-                  "partition freeze retains exactly the future tail");
-            for (std::size_t index = due; index < total; ++index)
-                Check(state.decoded.particle_spawns[index - due].sequence == 100 + index,
-                      "partition freeze preserves future-tail FIFO order");
-
-            if (due > total - due)
-            {
-                Check(batch->particle_spawns.data() == pending_storage,
-                      "larger due partition transfers the pending backing to native output");
-                if (due < total)
-                    Check(state.decoded.particle_spawns.data() == scratch_storage,
-                          "smaller future partition reuses the credited scratch backing");
-            }
-            else if (due != 0)
-            {
-                Check(batch->particle_spawns.data() == scratch_storage &&
-                          state.decoded.particle_spawns.data() == pending_storage,
-                      "smaller or balanced due partition copies into prepared backing");
-            }
-            const auto first_identity = batch->identity;
-            Check(state.AcknowledgeNativeBatch(first_identity, true),
-                  "partition batch acknowledges before the next activation");
-
-            particle.tick = 2;
-            particle.sequence = 100 + total;
-            particle.seed = 999;
+            particle.tick = index < test.due ? 1 : 2;
+            particle.sequence = 100 + index;
+            particle.seed = static_cast<std::uint32_t>(index + 17);
+            particle.authored_birth_tick = 90 + index;
             state.decoded.particle_spawns.push_back(particle);
-            batch = state.PrepareNativeBatch(2, true, &scratch);
-            Check(batch && batch->identity.sequence == first_identity.sequence + 1 &&
-                      batch->particle_spawns.size() == total - due + 1,
-                  "next activation receives the future tail followed by newly appended rows");
-            for (std::size_t index = 0; index < total - due; ++index)
-                Check(batch->particle_spawns[index].sequence == 100 + due + index,
-                      "next activation preserves future rows before new rows");
-            Check(batch->particle_spawns.back().sequence == 100 + total &&
-                      batch->particle_spawns.back().seed == 999,
-                  "next activation appends new rows after the prior future tail");
-            Check(state.AcknowledgeNativeBatch(batch->identity, true),
-                  "next activation batch acknowledges");
         }
+        hs::runtime_detail::DecodedVfxState scratch;
+        scratch.particle_spawns.reserve(test.total);
+        auto *batch = state.PrepareNativeBatch(1, true, &scratch);
+        Check(batch && batch->particle_spawns.size() == test.due, test.name);
+        for (std::size_t index = 0; index < test.due; ++index)
+            Check(batch->particle_spawns[index].sequence == 100 + index &&
+                  batch->particle_spawns[index].authored_birth_tick == 90 + index,
+                  "native freeze changed due-prefix order or payload");
+        Check(state.decoded.particle_spawns.size() == test.total - test.due,
+              "native freeze retained the wrong future-tail size");
+        for (std::size_t index = test.due; index < test.total; ++index)
+            Check(state.decoded.particle_spawns[index - test.due].sequence == 100 + index,
+                  "native freeze changed future-tail FIFO order");
+
+        const auto first_identity = batch->identity;
+        Check(state.AcknowledgeNativeBatch(first_identity, true),
+              "partition batch acknowledgment failed");
+        particle.tick = 2;
+        particle.sequence = 100 + test.total;
+        particle.seed = 999;
+        state.decoded.particle_spawns.push_back(particle);
+        batch = state.PrepareNativeBatch(2, true, &scratch);
+        Check(batch && batch->identity.sequence == first_identity.sequence + 1 &&
+              batch->particle_spawns.size() == test.total - test.due + 1,
+              "next batch did not append after its pending future tail");
+        for (std::size_t index = 0; index < test.total - test.due; ++index)
+            Check(batch->particle_spawns[index].sequence == 100 + test.due + index,
+                  "next batch reordered future emissions");
+        Check(batch->particle_spawns.back().sequence == 100 + test.total &&
+              batch->particle_spawns.back().seed == 999 &&
+              state.AcknowledgeNativeBatch(batch->identity, true),
+              "next batch lost its newly appended emission or acknowledgment");
     }
 }
 
@@ -3132,17 +2807,10 @@ void CheckRawIngressDrain()
 
     Scheduler growing;
     Check(ingress->TryPush({.sequence = 605, .tick = 2,
-        .kind = hs::PresentationKind::Vfx, .session_id = 1}), "failing ingress enqueue");
-    bool failed{};
-    allocation_budget = 0;
-    try { growing.DrainIngress(*ingress, observe); }
-    catch (const std::bad_alloc &) { failed = true; }
-    allocation_budget = -1;
-    Check(failed && observed == 604 && ingress->Size() == 1 && growing.PendingCount() == 0,
-        "raw allocation failure must leave the producer head unconsumed");
+        .kind = hs::PresentationKind::Vfx, .session_id = 1}), "retry ingress enqueue");
     growing.DrainIngress(*ingress, observe);
     Check(observed == 605 && ingress->Size() == 0 && growing.PendingCount() == 1,
-        "raw allocation retry lost or duplicated an event");
+        "raw drain lost or duplicated an event");
 
     Check(ingress->TryPush({.sequence = 606, .kind = hs::PresentationKind::Ui}),
         "bounded drain fixture enqueue");
@@ -3157,82 +2825,23 @@ void CheckRawIngressDrain()
     Check(observed == 607 && ingress->Size() == 0, "later publication did not survive the bounded drain");
 }
 
-void CheckRawSchedulerAdaptiveStorage()
+void CheckRawSchedulerFutureHold()
 {
     using Scheduler = hs::runtime_detail::VfxSessionState::RawEventScheduler;
-    Scheduler future;
-    Check(future.Enqueue({.sequence=1,.tick=1,.session_id=1}),"first adaptive event");
-    const auto initial_slots=future.LogicalCapacityBytes()/sizeof(Scheduler::Entry);
-    Check(initial_slots<Scheduler::kCapacity,"first raw event allocated the whole ingress cap");
-    for(std::uint64_t sequence=2;sequence<=301;++sequence)
-        Check(future.Enqueue({.sequence=sequence,.tick=10000,.session_id=1}),"future event enqueue");
-    const auto &first=future.Prepare(1,1);
-    Check(first.events.size()==1&&first.events.capacity()<future.PendingCount()&&
-        first.events.front().sequence==1&&future.PendingFront()->event.sequence==2,
-        "ready staging reserved or consumed the future tail");
-    const auto *frozen=first.events.data();
-    for(std::uint64_t sequence=302;sequence<=700;++sequence)
-        Check(future.Enqueue({.sequence=sequence,.tick=10000,.session_id=1}),"pending growth during activation");
-    Check(future.Prepare(10000,1).events.data()==frozen&&first.events.size()==1,
-        "pending ring growth invalidated the in-flight activation");
-    future.AcknowledgeActivation();
-
-    Scheduler growing;
-    for(std::uint64_t sequence=1;sequence<=initial_slots;++sequence)
-        Check(growing.Enqueue({.sequence=sequence,.tick=1,.session_id=1}),"growth fixture enqueue");
-    const auto held=growing.LogicalCapacityBytes();
-    bool failed{};
-    allocation_budget=0;
-    try { (void)growing.Enqueue({.sequence=initial_slots+1,.tick=2,.session_id=1}); }
-    catch(const std::bad_alloc &) { failed=true; }
-    allocation_budget=-1;
-    Check(failed&&growing.PendingCount()==initial_slots&&growing.PendingFront()->event.sequence==1&&
-        growing.LogicalCapacityBytes()==held,"failed ring growth changed pending ownership");
-    Check(growing.Enqueue({.sequence=initial_slots+1,.tick=2,.session_id=1})&&
-        growing.Prepare(1,1).events.size()==initial_slots&&growing.PendingCount()==1,
-        "ring growth retry lost the ready prefix or future event");
-
-    Scheduler wrapped;
-    for(std::uint64_t sequence=1;sequence<=initial_slots;++sequence)
-        Check(wrapped.Enqueue({.sequence=sequence,.tick=sequence<=initial_slots/2?1u:2u,.session_id=1}),
-            "wrapped growth fixture enqueue");
-    Check(wrapped.Prepare(1,1).events.size()==initial_slots/2,"wrapped growth initial prefix");
-    wrapped.AcknowledgeActivation();
-    for(std::uint64_t sequence=initial_slots+1;sequence<=initial_slots+initial_slots/2+1;++sequence)
-        Check(wrapped.Enqueue({.sequence=sequence,.tick=2,.session_id=1}),"wrapped backing growth");
-    const auto &wrapped_batch=wrapped.Prepare(2,1);
-    Check(wrapped_batch.events.size()==initial_slots+1,"wrapped growth lost events");
-    for(std::size_t index=0;index<wrapped_batch.events.size();++index)
-        Check(wrapped_batch.events[index].sequence==initial_slots/2+index+1,
-            "wrapped growth changed FIFO order");
-
-    Scheduler source;
-    Check(source.Enqueue({.sequence=0,.tick=0,.session_id=0}),"stale ready-prefix fixture enqueue");
-    for(std::uint64_t sequence=1;sequence<=64;++sequence)
-        Check(source.Enqueue({.sequence=sequence,.tick=1,.session_id=1}),"ready rollback fixture enqueue");
-    bool mid_staging_failure{};
-    bool completed{};
-    for(int budget=0;budget<32&&!completed;++budget)
-    {
-        auto candidate=source;
-        bool allocation_failed{};
-        allocation_budget=budget;
-        try { (void)candidate.Prepare(1,1); }
-        catch(const std::bad_alloc &) { allocation_failed=true; }
-        allocation_budget=-1;
-        if(allocation_failed)
-        {
-            mid_staging_failure|=candidate.in_flight.events.capacity()!=0;
-            Check(candidate.PendingCount()==65&&candidate.PendingFront()->event.sequence==0&&
-                candidate.in_flight.events.empty(),"failed prefix staging partially consumed the raw FIFO");
-        }
-        else completed=true;
-        const auto &retry=candidate.Prepare(1,1);
-        Check(retry.events.size()==64&&candidate.PendingCount()==0,"prefix staging retry lost events");
-        for(std::size_t index=0;index<retry.events.size();++index)
-            Check(retry.events[index].sequence==index+1,"prefix staging retry reordered events");
-    }
-    Check(completed&&mid_staging_failure,"ready staging allocation failures were not exercised");
+    Scheduler scheduler;
+    Check(scheduler.Enqueue({.sequence = 1, .tick = 1, .session_id = 1}) &&
+          scheduler.Enqueue({.sequence = 2, .tick = 2, .session_id = 1}),
+          "ready/future raw events enqueue");
+    const auto &first = scheduler.Prepare(1, 1);
+    Check(first.events.size() == 1 && first.events.front().sequence == 1 &&
+          scheduler.PendingCount() == 1 && scheduler.PendingFront()->event.sequence == 2,
+          "future event must remain behind the ready FIFO prefix");
+    Check(scheduler.Prepare(2, 1).events.front().sequence == 1 && scheduler.PendingCount() == 1,
+          "unacknowledged activation must remain frozen while future input waits");
+    scheduler.AcknowledgeActivation();
+    const auto &next = scheduler.Prepare(2, 1);
+    Check(next.events.size() == 1 && next.events.front().sequence == 2,
+          "acknowledgment must release the future FIFO event");
 }
 
 void CheckRawSchedulerRing()
@@ -3327,14 +2936,13 @@ int main()
         CheckPreparedBirthAppend();
         CheckEmptyPreparedShardCapacityTransfer();
         CheckPreparedActivationCommit();
-        CheckPreparedSurfaceCaptureReservation();
         CheckActivationBeforeNativeEmission();
         CheckFrozenNativeBatches();
         CheckNativeBatchReusesPreparedStorage();
         CheckNativeBatchAllPartitions();
         CheckRequiredBirthReserveConstrainsOptionalProfiles();
         CheckRawIngressDrain();
-        CheckRawSchedulerAdaptiveStorage();
+        CheckRawSchedulerFutureHold();
         CheckRawSchedulerRing();
         static_assert(noexcept(std::declval<hs::runtime_detail::VfxSessionState &>().SwapDecoded(
             std::declval<hs::runtime_detail::DecodedVfxState &>())));

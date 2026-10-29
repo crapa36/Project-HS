@@ -51,6 +51,11 @@ Use the narrowest existing check that answers the risk introduced by the change.
 
 For localized changes, prefer the relevant build/test target before broader workflows.
 
+Keep only tests that detect a distinct product contract. Extend an existing case
+table before adding a new test file or executable; separate runners require a real
+isolation or dependency boundary. Do not add source-spelling assertions, disconnected
+algorithm copies, or permanent before/after tools for a completed optimization.
+
 Use:
 
 ```powershell

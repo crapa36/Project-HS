@@ -157,9 +157,9 @@ struct FrameContext
     mutable std::uint64_t timing_stream_published_frame_id{};
     float cpu_recording_ms{};
     bool cpu_recording_ms_valid{};
-    Microsoft::WRL::ComPtr<ID3D12QueryHeap> timestamp_heap;
-    AllocationResource timestamp_readback;
-    std::uint64_t *mapped_timestamps{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12QueryHeap>, 3> timestamp_heaps;
+    std::array<AllocationResource, 3> timestamp_readbacks;
+    std::array<std::uint64_t *, 3> mapped_timestamps{};
     std::uint32_t timestamp_capacity{};
     std::uint64_t ui_upload_bytes{};
     std::vector<GpuPassTiming> timestamp_passes;

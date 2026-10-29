@@ -8,11 +8,14 @@
 #include "../Source/Apps/AssetPipeline/dxc_process.hpp"
 #endif
 #include "../Source/Apps/AssetPipeline/shader_source_snapshot.hpp"
+#include <fstream>
+#include <iterator>
 #include "../Source/Apps/Content/game_data_numbers.hpp"
 
 #include <stdexcept>
 #include <sstream>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <exception>
@@ -35,6 +38,35 @@ void TestAssetActionSnapshot()
         ap::RemoveStageAfterFailure(cleanup_stage);
         if (fs::exists(cleanup_stage))
             throw std::runtime_error("best-effort failure cleanup did not remove an unlocked stage");
+
+        const auto isolated_cwd = root / "empty-cleanup-cwd";
+        ap::MakeDirectory(isolated_cwd);
+        const auto sentinel = isolated_cwd / "keep.bin";
+        ap::WriteBytes(sentinel, std::as_bytes(std::span(partial_bytes.data(), partial_bytes.size())));
+        const auto previous_cwd = fs::current_path();
+        fs::current_path(isolated_cwd);
+        try { ap::RemoveStage({}); }
+        catch (...) { fs::current_path(previous_cwd); throw; }
+        fs::current_path(previous_cwd);
+        if (ap::ReadBytes(sentinel) != partial_bytes)
+            throw std::runtime_error("empty stage cleanup changed the working directory contents");
+
+        const auto long_stage = root / "long-cleanup";
+        auto long_directory = long_stage;
+        while (long_directory.native().size() < 300)
+            long_directory /= std::string(40, 'd');
+        ap::MakeDirectory(long_directory);
+        const auto long_file = long_directory / "payload.bin";
+        ap::WriteBytes(long_file, std::as_bytes(std::span(partial_bytes.data(), partial_bytes.size())));
+        {
+            std::ifstream input(ap::NativeFilePath(long_file), std::ios::binary);
+            const std::string actual{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+            if (actual != partial_bytes)
+                throw std::runtime_error("native stream path did not read the long staged input");
+        }
+        ap::RemoveStage(long_stage);
+        if (fs::exists(long_stage))
+            throw std::runtime_error("long stage cleanup left files behind");
 
 #ifdef _WIN32
         const auto locked_stage = ap::CreateStage(root / "cleanup-locked");
@@ -206,6 +238,9 @@ void TestGameDataFloatConversion()
         MakesFiniteProjectileRangeProgress(1e30f, 18.0f) ||
         MakesFiniteProjectileRangeProgress(32.0f, 1e20f))
         throw std::runtime_error("non-progressing projectile speed/range was accepted");
+    if (MakesFiniteProjectileRangeProgress(std::bit_cast<float>(std::uint32_t{0x1d0e050a}),
+                                          std::bit_cast<float>(std::uint32_t{0x25b504e9})))
+        throw std::runtime_error("axis progress admitted a projectile whose diagonal length underflows to zero");
     if (!MakesFiniteProjectileRangeProgress(1e30f, 0.0f) ||
         !MakesFiniteProjectileRangeProgress(1e30f, -1.0f))
         throw std::runtime_error("nonpositive projectile leg no longer keeps immediate-retirement semantics");

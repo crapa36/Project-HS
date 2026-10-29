@@ -1,7 +1,7 @@
 # DEV_STATE
 
 AI implementation continuity only. Current base:
-d29b4af51793739401e986a0c6c1199fb1c60a53 (Bound VFX growth and harden content pipelines).
+0dbde985889e58d0b09565c7130fc38b9be49de8 (Bound VFX growth and streamline render paths).
 The dirty worktree is authoritative. Preserve unrelated changes and
 .codex-remote-attachments/. No new commit/push/worktree is requested.
 
@@ -9,12 +9,168 @@ The dirty worktree is authoritative. Preserve unrelated changes and
 
 Goal ACTIVE: finish accepted reviews/directives and Debug /Od/assertions/checked
 iterators,1080pUltra100%,200enemies,60FPS. Not achieved.
-Source edits first; batch narrow verification. The authorized minimum CPU-memory
-calibration completed; do not repeat broad GPU/FPS/cook per small change.
+Latest steering requests foreground/FPS measurement; the current Debug200 run is
+Build/foreground-200-20261029/ (in progress). Its actual GI mode must be reported.
+Batch affected checks;
+retain distinct behavior/lifetime/ABI contracts, remove source-shape assertions and
+disconnected models. No new permanent runner without an isolation/dependency need.
+Minimum CPU-memory calibration remains checkpoint evidence, not a global cap.
+Latest VFX steering is moderate: keep existing simple overload protection and
+normal authored output; essential attack/risk warnings remain protected. Do not
+expand whole-VFX maximum proofs/managers or remove all capacities. The temporary
+request to remove every limit was superseded by that choice; no quota removal
+was implemented. The prior200-enemy capture admits34781/34781 CPU birth rows and
+5118/5118 profiles, zero budget-limited frames, sampled logical peak12.3MiB/64MiB.
 Subagents: explicit Luna/high only. No Sol subagents. No Computer Use session.
-W12 per-queue timestamp/readback separation remains explicitly deferred.
+W12/G02 deferral was explicitly lifted by the user on2026-10-29; queue-local
+timestamp/readback and output-dependency interval changes are implemented and
+pass the integrated build/native checks. No global timing wait is added.
+Linux execution is removed by user request: Windows-only CI and presets.
+Keep Windows low-level/portable checks; no Linux qualification remains required.
 
 ## Current implementation
+
+- ProjectileMotion retains its assigned scalar speed, used by homing rather than
+  repeated Length(velocity). Ricochet/Basic retargets keep that effective speed,
+  including BasicAttack fallback when Ricochet authored speed is nonpositive;
+  boss/ranged producer overrides still set their actual assigned speed.
+  The scalar participates in canonical checksum; gameplay_hash_version=8 and
+  old7/6 replays are explicitly rejected. No arbitrary expiry was added.
+  ProcessInput shares squared aim distance and ignores nonfinite/overflowing aim
+  targets while retaining the last valid direction. Cooker checks Ricochet return
+  progress using actual arena-boundary extents, separately from initial/search legs.
+  Current13 documents pass; a private-copy tiny initial/search leg with stalled
+  return is rejected at boundary_points_m. Originals are unchanged. OFF/OFF19 and
+  five selected Debug contracts pass at the first scalar checkpoint; latest
+  fallback production path and checksum case pass the existing internal fixture.
+  That fixture's borrow scope/1-based upgrade bit errors were corrected, with
+  assertions preserved. Its CRT assertion diagnostics now use stderr to avoid a
+  blocking GUI dialog. Final affected Debug relink succeeds; final combat and
+  determinism2/2 pass. Foreground input specs prepared before this version8
+  binary are stale and must have their build hash regenerated before reuse.
+- Owned-view GBV boundary markers flush capture/Shutdown entry and actual renderer
+  destruction boundaries. The180s diagnosis initializes7.1s without a completed
+  package marker. A subsequent bounded45s CDB diagnosis has real private-symbol
+  stacks at20/40s: main joins render-recording tasks; workers are in
+  DrawClusterGeometry/DrawGeometry through SDK layers/NVIDIA modules. Offline
+  matching-EXE/PDB return-address lookup resolves both to SetPipelineState
+  (renderer_cluster_graph.cpp:666, renderer_geometry.cpp:156), consistent with
+  GBV first-use patched-PSO compilation. No engine rerun was needed for lookup.
+  These are not GPU-fence waits or proof of the earlier teardown stall's cause.
+  Moving compilation to creation is not proven to reduce total work and was not
+  adopted. Both bounded runs time out, not pass. Earlier622s run
+  did complete helper captures. No further blind long repeat is planned.
+  Corrected evidence: Build/gbv-stack-corrected-20261029/RESULTS.md. Earlier
+  gbv-stack-20261029 CDB logs failed -pd and are not stack evidence. CDB is local
+  to Build/tooling/dbgeng/, Microsoft-signed, and qualified on an owned helper.
+- New minimal/GPU/test-slimming reports have been read and reconciled with the
+  dirty source; full review notes are in Build/directive-intake-20261029/.
+  Runtime defers rejected candidate hash growth, removes closed commit rechecks,
+  uses aggregate all-fit profile admission, hoists Light facts per event and gives
+  birth buffers to the existing session owner. Fixed1–3 destination row admission
+  uses capacity thresholds after the original all-fit fast path. Actual old/new
+  production headers and232/80/192-byte row types match in531441 cases. First
+  no-fast-path trial was rejected for a common-path regression; final Debug
+  limited-case microbench is about53→13ms for300000 calls, not frame/FPS evidence.
+  Shortage admission now caches row/profile/supplemental cost components and
+  recalculates only the candidate's affected components, retaining overflow and
+  zero-growth semantics. The existing fixture covers cross-profile rejection
+  after accepted Light/Ribbon growth; allocation-failure rollback still passes.
+  GPU world particles/Ribbon history update once per explicit package; per-view
+  draws/RibbonArgs remain. Queue-local query/readback ownership and the new
+  OutputDependencyInterval metric avoid unrelated work joining automatic DRS.
+  Existing owned-view fixture now includes an actual retained GPU particle.
+  Integrated Debug build passes after fixing a duplicate local and a fixture's
+  designated-initializer order. OFF/OFF19 passed, with the affected2 leaves repeated
+  after a declaration-warning fix. Debug CPU16 passed and the initially unbuilt
+  isolated failure leaf subsequently passed (17 selected contracts cumulatively).
+  Actual multi-queue native graph passes42.60s, including independent query resolve
+  while Compute/Copy are gated. Full/Critical timing probes and owned-view control
+  pass with validation0. The owned-view particle oracle is3 (one explicit birth
+  plus two existing effect-line births), not1. Owned-view GBV was stopped after
+  622s without a final receipt. Its per-package readbacks and owned-view captures
+  prove the helper renders completed; the earlier first-render inference was
+  wrong. Generic capture/wait versus later teardown remains unresolved.
+- Actual Debug200-enemy diagnosis completes1800ticks/405frames, timing coverage405/405.
+  All steady samples are background; requested Software GI falls back to Probe
+  (consumer_unavailable, HS_WITH_BRIXELIZER=OFF). Source-output cadence
+  p50/p95/p99=32.851/34.761/35.449ms; this does not qualify fullUltra/foreground60FPS.
+  Largest measured individual GPU passes are GBuffer+Depth6.94ms median and
+  GTAO3.44ms; overlapping queue durations must not be summed. Cold frame local
+  probes take13.65s, matched by26 new PSO creates totaling13.59s. The new existing-
+  executor fork/join batch parallelizes distinct material PSOs; same-key cache
+  requests serialize, lifecycle changes wait for creators, all accepted jobs join
+  before return/recording. Native fallback without pipeline libraries stays serial.
+  Debug build and4 affected CPU contracts pass; WARP+GBV native graph including
+  same-key concurrency/malformed-shader retry passes35.72s, no validation errors.
+  Offscreen current200-enemy180-tick execution passes (2 rendered frames), no
+  cache load/store errors; existing ordinary15s heartbeat guard is unchanged.
+  Its first local-probe prep is76.153ms, warm repeat58.545ms. Warm old-after is
+  91.749ms for the same25 post-init PSOs; this is a single component observation,
+  not a robust speed ratio. Driver-cache effects dominate the first A/B: old
+  initial run hits the running watchdog, then old warm prep3.425s becomes91.749ms
+  after the candidate. Do not attribute the cold13.65s-to-warm change to this
+  patch. Receipts/dump remain in Build/directive-intake-20261029/pso-component/.
+  Foreground FPS remains deferred; full-renderer GBV timeout is still unresolved.
+- Named Debug ProjectHS/hs_experiment builds reuse the selected Generation instead
+  of depending on whole-content cooking. Default ALL/runtime and Release shipping
+  preparation retain their existing generation dependencies. Actual requested
+  app rebuild drops233 scheduled commands to6, without recooking. Content edits
+  still require the existing explicit hs_content_generation target.
+- Frame lights borrow the immutable snapshot prefix; fallback/default sun or an
+  accepted typed light materializes storage once. Authoritative count, sun choice,
+  transient order and borrowed lifetime are preserved. Static shadow wind radius
+  still invalidates its expanded-bound batch; removing that identity alone is
+  unsafe and was not adopted. Geometry-demand bounds already persist in StaticDrawData.
+- Desloppify is installed locally from GitHub3a7735d in Build/tooling/desloppify/.venv;
+  official Codex skill installed. First C++ ci-profile scan completed:530 production,
+  89 test files,898 raw candidates. Local tool-only C++ extractor regex fix avoids
+  case-label backtracking; its8 existing checks pass. status/next/backlog ran.
+  No engine changes/tests were added for scores. CMake translation units are false
+  orphan candidates; numeric statm fscanf is a confirmed heuristic false positive.
+  The test log's7546 is weighted potential, not file count. Native analyzers are
+  unavailable and20 subjective dimensions are unassessed; no stability/FPS claim.
+  Tools/tooling/WORKFLOW.md documents usage and the reinstall caveat; raw results
+  and triage are in Build/tooling/desloppify/RESULTS.md. W12 was later approved.
+- Current test slimming: nine disconnected Python models and registrations removed;
+  shader-reconstruction retains only FrameConstants ABI and light-shadow lookup only
+  the real capture reader. Ground admission uses named expected cases instead of the previous implementation.
+  Windows CI builds/runs the portable superset once. Linux CI and its configure,
+  build, test and workflow presets are removed. Independent Windows verify-core
+  remains available. Existing CTest labels are merged.
+  VFX native partitions are five named boundary cases, not the full Cartesian set.
+  Global allocation injection lives only in one isolated native-free executable;
+  it prepares fixtures before injecting exactly one commit operation, then verifies
+  rollback and a reserved nonallocating retry. The16 Ground admission boundary rows
+  now run in the existing no-cook legacy test; cooked Ground keeps actual product
+  integration. Explicitly invoked actual AO DXIL comparison remains; no new framework.
+  OFF/OFF19 and portable39 passed cumulatively (only the repaired failure-injection
+  leaf was repeated). Logs: slimming-core-console/slimming-failure-leaf-console,
+  slimming-portable-tests/slimming-portable-failure-test.
+- Windows full gate at this base plus dirty fixes built/cooked successfully and
+  ran119 tests:110 passed/9 failed (verify-20261029T030832654Z-16284.log).
+  Selected followup repaired environment-family action/offscreen/presentation and
+  long native path handling. Actual Ground/Runtime and retained ABI/reader contracts
+  passed. Persistent-scene/HZB native checks pass. Full WARP graph Legacy+Enhanced
+  passed directly52.55s and in CTest45.61s after its measured timeout budget was
+  corrected45->90s. No validation guard/canary was removed. DynamicLOD now excludes
+  unrelated post effects, preserves8frames/GBV/history assertions and passes251.38s,
+  validation0. Residency stops only after all existing required phases/counters;
+  GBV-OFF control passes83frames/17.60s with validation0. GBV-ON reaches all success
+  receipts at86frames, then times out600s inside renderer destruction. LOD logged
+  renderer destructor109.793s versus0.17s in the GBV-OFF streaming control; explicit
+  Shutdown is0.2-0.36s and task destruction1ms. Do not call GBV streaming a pass.
+  Logs: verify-20261029T045826298Z-17992.log and streaming-postshutdown-control.*.
+  One-frame intentional-incomplete-phase diagnostic took318s rendering and was
+  stopped after reaching teardown; its destructor Shutdown116.869ms and body end
+  116.919ms prove the remaining delay is later Impl member destruction. It is not a
+  qualification pass. Temporary renderer/runner destructor timers are now removed;
+  original shutdown/resource lifetimes remain. Final cleanup build/fast native
+  check passes (slimming-clean-final-console.log). The existing owned-view/history
+  probe passes9.00s/validation0 on the final binary (slimming-owned-view-final.*).
+  The two regenerable control/
+  diagnostic packs were deleted (2598816764 bytes); receipts/logs remain.
+  GBV streaming teardown qualification remains unresolved.
 
 - Snapshot values and mutable builders have separate public headers; the existing
   render_snapshot.hpp remains a compatibility entry point. Renderer's compiled
@@ -48,8 +204,10 @@ W12 per-queue timestamp/readback separation remains explicitly deferred.
   staging and clone first inputs/index nodes. Planning records request indices,
   not borrowed pointers in a ready batch. Optional membership selection now precedes
   payload/node creation; profile-admission-bounded records Debug compile/CPU evidence.
-  Cosmetic masks are prepared once per catalog generation. Ground, EntitySurface,
-  PointRate, replacement contexts and unknown/authoritative contributors stay required.
+  Cosmetic masks are prepared once per catalog generation. Only completely prepared
+  fixed-time Direct nonauthoritative cosmetic Ground outputs may be omitted; owner-
+  bound Ground, EntitySurface, PointRate, replacement contexts and unknown or
+  authoritative contributors stay required.
   Duplicate keys union required bits before selection. Cosmetic memberships rank by
   importance/first request, then publish in original per-profile order. Actual map
   bucket backing and matching vector growth are charged; warmed zero-growth reuse
@@ -132,12 +290,18 @@ W12 per-queue timestamp/readback separation remains explicitly deferred.
   recipe supplies the other fields. MSVC x64 probe:96B ScheduledAction→24B local row.
   Source tags3/4, original skill/cast/order/Derived origin/mask0/no-relic default
   and float(duration_ticks)/60 stay. Exact hit-count/cadence/retirement fixtures pass.
-- Cooker now performs the necessary axis float-progress check for positive legs,
+- Cooker now performs a conservative single-step float-progress check for positive legs,
   preserving BasicAttack speed fallback and nonpositive-leg retirement. It covers
   all player skills including Trap via DifferentSkillTracker, Ricochet search reset,
   ranged enemies and projectile-producing boss patterns. Original inputs remain
-  unchanged in actual producer16-case before/after tests. This does not establish
-  all-direction/homing lifetime, arena return, repeated legs or a whole-VFX cap.
+  unchanged in actual producer16-case before/after tests. The later range-direction
+  batch closes diagonal square-underflow admission using a half-speed component
+  lower bound for finite normalized2D directions; no movement code or runtime check.
+  Debug two-target build and existing HLOD/number CPU check pass. Actual producer
+  accepts13 current documents and rejects the precise diagonal counterexample in
+  an isolated source copy at skills:$/entries/1/parameters/range. Temporary copies
+  were removed. Repeated homing speed drift, arena return, multiple-leg lifetime
+  and whole-VFX bounds remain unproven. Evidence: range-direction/RESULTS.md.
 - Typed VFX nested capacity is accumulated in existing preparation loops once,
   before workspace queries. Both arrays are const afterward. This removes repeated
   scans without a registry/new cap/dropped rows/double charge. Saturating capacity
@@ -456,51 +620,39 @@ the original build-stdout.log records the successful build. See
 
 ## Remaining implementation and qualification
 
-1. I02: whole required/future/native bounds remain incomplete. Optional retained
-   profile selection is local; required cardinality and subsequent frame/GPU bounds
-   are not certified. Existing
-   cosmetic64MiB allowance, ingress4096 and GPU particle10000 are local limits.
-   Derive producer rate/lifetime/fanout from loaded rules and recipe ranges;
-   protect essential warnings before CPU commit. No silent drop or arbitrary cap.
-   Automatic ordinary schedule has finite content bounds, debug spawning differs.
-   See vfx-producer-bounds-20261028.md for source facts and formula gaps.
-   vfx-projectile-envelope-20261029.md derives reset/return legs from loaded rules;
-   its nominal tick totals still need float progress/rounding qualification.
-   vfx-producer-rate-envelope-20261029.md records cadence/fanout composition and
-   pending delays; formulas are not yet an implemented mandatory admission contract.
-   vfx-area-status-envelope-20261029.md adds area/status/link lifetimes and the
-   four-active-status-identities-per-live-enemy bound. Rounded-zero intervals are
-   rejected; boss and both derived fire intervals are consumed. Necessary axis
-   progress failures are rejected, but direction/homing/multiple-leg bounds remain.
-   Raw ingress now drains its published prefix without the arbitrary256 limit.
-   Conditional pop keeps a blocked/unallocated VFX head in the producer FIFO while
-   consuming an earlier non-VFX prefix even when raw slots are full. Existing8192
-   producer/4096 pending+in-flight bounds and loss diagnostics remain. Backpressure
-   at the first blocked VFX still delays later rows; audio has its own FIFO.
-   Whole-event discard by importance is not adopted: current metadata proves
-   profile/legacy-emitter cosmetics, while an importance2 enemy warning is required.
-   Preserve FIFO/CPU ACK and use output-level admission; no new queue/arbitrary cap.
-   Fixed-row frame families, Ground/Distortion angle pools, Ribbon source/output
-   pools and prospective capture capacity are covered by current admission.
-   Required birth reservations and projected native split growth now precede
-   cosmetic profile quota; future rows cannot spend that same headroom twice.
-   Whole required/future producer retention and native/GPU peaks remain open.
-   Persistent base output is preserved,
-   not cosmetically reselected. Logical growth excludes allocator-transient peak/RSS.
-   The necessary axis check alone cannot prove homing/range progress; do not add an
-   arbitrary scalar cap as a substitute for the missing numerical proof.
+1. I02 latest scope: preserve the existing small local cosmetic-growth/native
+   capacities and protect essential warnings; do not expand a whole-VFX peak proof
+   or new manager. The user explicitly selected moderate overload protection.
+   Current ingress4096, cosmetic-growth64MiB and GPU particle10000 are distinct
+   limits, not a global hard cap. Normal200-enemy checkpoint has zero CPU budget
+   omissions. Typed Ground upload covers the full input count; coverage suppresses
+   duplicate compatibility output, not warnings. Preview mode is explicit.
+   Retained speed, fallback-preserving redirects, finite aim input and arena-return
+   cook checks close the identified numeric issues. No arbitrary lifetime cap.
+   Existing pending/native/visible owner, actual completion, ACK, deterministic
+   source ordinal/seed and warm storage reuse contracts remain. Whole-event FIFO
+   discard by importance stays unadopted because low-importance warnings may be
+   required. Prior producer/rate/projectile/area envelope notes are reference
+   investigations, not additional mandatory admission machinery.
 2. I03: existing birth/visible/native/receipt ownership and failure seams are
    retained. ReadyBatch duplicate copy is removed. Further generic extraction is
    not adopted without a concrete data/failure benefit; do not merge retirement
    across persistent-burst publication or unify the three ACK/receipt meanings.
 3. Q01: fast native refine/coarsen/refine, source-absent coarsening, read cancellation,
    four array-slice pixels and actual reserved unmap are qualified. Full-renderer
-   Enhanced+GBV128-frame quality cycle also passes, validation0. Small/dynamically changing budgets, generation
-   replacement, late in-flight old readers and bake readiness remain unqualified.
+   Enhanced+GBV128-frame quality cycle also passes, validation0. The existing
+   native graph now passes43.56s including two software owners sharing host
+   budget32MiB→7KiB→32MiB: published mip2/backing survives the clamp, pending
+   work drains and both retained demands refine to mip0 with four-slice pixel
+   checks. The software fixture uses Legacy; arbitrary budget schedules/fairness,
+   generation replacement, late in-flight old readers and bake readiness remain
+   unqualified. Early fixture descriptor/demand/target/import mistakes were fixed
+   without production changes; readback now matches Direct sampled imports.
+   Build/vfx-admission-20261028/shared-host-budget-verified-20261029/RESULTS.md.
    Source review: metadata tickets belong to pending IO/GPU work and release at
    intermediate chunk completion; no all-idle metadata hold-and-wait cycle found
-   in that ranged path. A new progress manager is not adopted. Two-owner dynamic
-   budget/native qualification and fairness are not proven by this source review.
+   in that ranged path. A new progress manager is not adopted. The bounded
+   two-owner case has native evidence; it does not establish general fairness.
 4. Q02/Q03/Q04: current multiview/submission/history failure cases, same-tick/UI
    regression, matching generated/cooked/shader artifacts and install/portable
    closure. Previous success does not qualify changed owners.
@@ -511,8 +663,13 @@ the original build-stdout.log records the successful build. See
 6. Conditional GI MRT, compact feedback reduction, HZB dispatch grouping, material
    domains and remaining C/D/X candidates require equal-quality whole-cost evidence
    before adoption. Keep existing useful lifetime/bind checks.
-7. Finish earlier accepted directives, then queued51d5055 detailed source review.
-   Intake read; do not call that review complete based on overlapping fixes.
+7. Queued51d5055 full detailed source review is complete:
+   Build/remaining-directives-20261029/51d5055-review.md. Stale Release/W01
+   architecture paragraphs now match compiled descriptors and the shipping-pack
+   owner. No further accepted source fix was identified. RT4 broad extraction
+   is not adopted: existing activation/receipt/sample owners already isolate
+   the relevant boundaries, and moving more lines removes no demonstrated work
+   or failure seam. Qualification gaps remain; D1-D4 generator is unavailable.
 8. Final matching-source native stability/performance qualification remains. Debug
    target requires Debug results; no /O2, lower quality or component-time claims.
    The unadopted graph-cpu-followup trial failed DEVICE_HUNG; its candidates remain

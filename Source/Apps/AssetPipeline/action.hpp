@@ -11,12 +11,26 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace hs::asset_pipeline
 {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
+
+// Extend only OS-bound Windows paths; action identities and depfiles keep their original paths.
+[[nodiscard]] inline fs::path NativeFilePath(const fs::path &path)
+{
+#ifdef _WIN32
+    auto value = fs::absolute(path).lexically_normal().make_preferred().native();
+    if (value.starts_with(L"\\\\?\\")) return fs::path(std::move(value));
+    if (value.starts_with(L"\\\\")) return fs::path(L"\\\\?\\UNC\\" + value.substr(2));
+    return fs::path(L"\\\\?\\" + value);
+#else
+    return path;
+#endif
+}
 
 struct Input
 {

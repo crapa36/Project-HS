@@ -591,26 +591,38 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
     D3D12_QUERY_HEAP_DESC description{};
     description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     description.Count = pass_count * 2;
-    ComPtr<ID3D12QueryHeap> next_heap;
-    auto result = device->CreateQueryHeap(&description, IID_PPV_ARGS(&next_heap));
-    if (FAILED(result)) return HResultFailure("Create frame timestamp query heap", result);
-    AllocationResource next_readback;
+    std::array<ComPtr<ID3D12QueryHeap>, 3> next_heaps;
+    std::array<AllocationResource, 3> next_readbacks;
+    std::array<std::uint64_t *, 3> next_mapped{};
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
-    if (auto created = CreateAllocation(next_readback, allocation,
-            BufferDescription(static_cast<UINT64>(description.Count) * sizeof(std::uint64_t)),
-            D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
-    std::uint64_t *next_mapped{};
     D3D12_RANGE range{0, static_cast<SIZE_T>(description.Count) * sizeof(std::uint64_t)};
-    result = next_readback.resource->Map(0, &range, reinterpret_cast<void **>(&next_mapped));
-    if (FAILED(result)) return HResultFailure("Map frame timestamp readback", result);
-    if (frame.mapped_timestamps)
+    for (std::size_t queue = 0; queue < 2; ++queue)
     {
-        D3D12_RANGE no_write{};
-        frame.timestamp_readback.resource->Unmap(0, &no_write);
+        auto result = device->CreateQueryHeap(&description, IID_PPV_ARGS(&next_heaps[queue]));
+        if (FAILED(result)) return HResultFailure("Create frame timestamp query heap", result);
+        if (auto created = CreateAllocation(next_readbacks[queue], allocation,
+                BufferDescription(static_cast<UINT64>(description.Count) * sizeof(std::uint64_t)),
+                D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
     }
-    frame.timestamp_heap = std::move(next_heap);
-    frame.timestamp_readback = std::move(next_readback);
+    for (std::size_t queue = 0; queue < 2; ++queue)
+    {
+        const auto result = next_readbacks[queue].resource->Map(
+            0, &range, reinterpret_cast<void **>(&next_mapped[queue]));
+        if (FAILED(result))
+        {
+            D3D12_RANGE no_write{};
+            for (std::size_t mapped = 0; mapped < queue; ++mapped)
+                next_readbacks[mapped].resource->Unmap(0, &no_write);
+            return HResultFailure("Map frame timestamp readback", result);
+        }
+    }
+    D3D12_RANGE no_write{};
+    for (std::size_t queue = 0; queue < 2; ++queue)
+        if (frame.mapped_timestamps[queue])
+            frame.timestamp_readbacks[queue].resource->Unmap(0, &no_write);
+    frame.timestamp_heaps = std::move(next_heaps);
+    frame.timestamp_readbacks = std::move(next_readbacks);
     frame.mapped_timestamps = next_mapped;
     frame.timestamp_capacity = pass_count;
     return Result::Success();
@@ -619,7 +631,9 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
 GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &frame) const
 {
     GpuPassTimings timings;
-    if (!frame.mapped_timestamps || !frame.timestamps_recorded || frame.timing_mode == GpuTimingMode::Off ||
+    if (!frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Direct)] ||
+        !frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Compute)] ||
+        !frame.timestamps_recorded || frame.timing_mode == GpuTimingMode::Off ||
         frame.timing_layout_generation == 0 || frame.timing_layout_capacity > frame.timestamp_capacity ||
         !frame.completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         return timings;
@@ -705,7 +719,12 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             duplicate_endpoint |= end_slot != timings.passes.size();
             end_slot = slot;
         }
-        if (!pass.measured) continue; // Copy queue timestamps are unsupported.
+        if (pass.queue == RenderQueue::Copy)
+        {
+            pass.measured = false;
+            continue; // Copy queue timestamps are unsupported.
+        }
+        if (!pass.measured) continue;
         const auto query_slot = frame.timestamp_pass_query_slots[slot];
         if (query_slot >= frame.timing_layout_capacity)
         {
@@ -713,8 +732,15 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             pass_timings_valid = false;
             continue;
         }
-        const auto begin = frame.mapped_timestamps[query_slot * 2];
-        const auto end = frame.mapped_timestamps[query_slot * 2 + 1];
+        const auto queue_index = static_cast<std::size_t>(pass.queue);
+        if (queue_index >= frame.mapped_timestamps.size() || !frame.mapped_timestamps[queue_index])
+        {
+            pass.measured = false;
+            pass_timings_valid = false;
+            continue;
+        }
+        const auto begin = frame.mapped_timestamps[queue_index][query_slot * 2];
+        const auto end = frame.mapped_timestamps[queue_index][query_slot * 2 + 1];
         const auto frequency = frame.timestamp_frequencies[slot];
         pass.begin_ticks = begin;
         pass.end_ticks = end;
@@ -735,7 +761,6 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             continue;
         }
         pass.nanoseconds = static_cast<std::uint64_t>(nanoseconds);
-        const auto queue_index = static_cast<std::size_t>(pass.queue);
         if (queue_index < calibrations.size() && calibrations[queue_index].available)
         {
             const auto &clock = calibrations[queue_index];
@@ -914,7 +939,9 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         timings.pacing_gap = current.pacing_gap;
         return publish();
     }
-    if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan) return publish();
+    if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan &&
+        timings.metric_kind != GpuFrameTimingKind::OutputDependencyInterval)
+        return publish();
     if (!pass_timings_valid || duplicate_endpoint || begin_slot == timings.passes.size() ||
         end_slot == timings.passes.size())
         return publish();
@@ -932,12 +959,13 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         frame.timestamp_frequencies[end_slot] != direct_frequency)
         return publish();
 
-    // These endpoints share the Direct queue clock. Explicit graph edges bracket
-    // every render queue, so this interval includes cross-queue overlap and waits.
+    // Both endpoints share the Direct queue clock. ReferenceGraphSpan is retained
+    // for explicit legacy diagnostics. OutputDependencyInterval ends at the
+    // Present read of the output and excludes unrelated work outside its closure.
     if (begin_query_slot >= frame.timing_layout_capacity || end_query_slot >= frame.timing_layout_capacity)
         return publish();
-    const auto begin = frame.mapped_timestamps[begin_query_slot * 2];
-    const auto end = frame.mapped_timestamps[end_query_slot * 2 + 1];
+    const auto begin = frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Direct)][begin_query_slot * 2];
+    const auto end = frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Direct)][end_query_slot * 2 + 1];
     if (end <= begin) return publish();
     timings.critical_path_ms = static_cast<double>(
         static_cast<long double>(end - begin) * 1000.0L / direct_frequency);

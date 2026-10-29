@@ -173,15 +173,24 @@ inline std::size_t AppendRowsWithinBudget(std::size_t row_bytes, std::size_t req
         return true;
     };
     if (fits(requested)) return requested;
-    std::size_t low{}, high = requested;
-    while (low < high)
+    auto remaining = growth_rows;
+    auto admitted = requested;
+    for (const auto unused : unused_rows)
+        if (unused < admitted) admitted = unused;
+    // Cross each free-capacity threshold once; production has at most three destinations.
+    while (admitted < requested)
     {
-        const auto distance = high - low;
-        const auto middle = low + distance / 2 + distance % 2;
-        if (fits(middle)) low = middle;
-        else high = middle - 1;
+        std::size_t destinations{}, next = requested;
+        for (const auto unused : unused_rows)
+            if (unused <= admitted) ++destinations;
+            else next = std::min(next, unused);
+        const auto affordable = remaining / destinations;
+        const auto distance = next - admitted;
+        if (affordable < distance) return admitted + affordable;
+        remaining -= distance * destinations;
+        admitted = next;
     }
-    return low;
+    return admitted;
 }
 
 template<class T>

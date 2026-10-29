@@ -25,6 +25,7 @@
 #include "recording_io.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
+#include "vfx_profile_admission.hpp"
 #include "renderer_receipts.hpp"
 #include <hs/runtime/vfx_image_io.hpp>
 #include "test_generation_paths.hpp"
@@ -43,6 +44,7 @@
 
 #include <array>
 #include <algorithm>
+#include <tuple>
 #include <charconv>
 #include <cstdint>
 #include <cmath>
@@ -766,6 +768,7 @@ void TestVfxCatalog()
     transferred.Swap(catalog);
     catalog = std::move(transferred);
     std::size_t compared_policies{};
+    bool checked_replacement_rollback{};
     for (const auto &lookup : catalog.Program().effect_lookup)
     {
         const auto *definition = catalog.FindEffect({lookup.effect_id});
@@ -777,6 +780,38 @@ void TestVfxCatalog()
                 return source.authoritative || source.type == hs::VfxSourceType::ProjectileFollow;
             });
         event.asset = {lookup.effect_id};
+        if (!checked_replacement_rollback)
+        {
+            hs::VfxPreparedLegacyEvent plan;
+            std::vector<std::uint32_t> indices;
+            Check(catalog.PrepareEvent(event, 1.0f, plan, indices).Succeeded(),
+                "replacement rollback fixture prepares");
+            if (plan.index_count >= 2)
+            {
+                const auto before = plan;
+                auto &last = indices[plan.first_index + plan.index_count - 1];
+                const auto valid_last = last;
+                last = definition->first_emitter + definition->emitter_count;
+                Check(!catalog.SetPreparedReplacements(plan, indices, true, false).Succeeded() &&
+                    plan.particles_replaced == before.particles_replaced &&
+                    plan.mesh_replaced == before.mesh_replaced &&
+                    plan.maximum_required_count == before.maximum_required_count &&
+                    plan.required_count == before.required_count && plan.count == before.count &&
+                    plan.admitted_count == before.admitted_count &&
+                    plan.replacement_counts_ready == before.replacement_counts_ready,
+                    "a late invalid emitter must not partially publish replacement policy");
+                last = valid_last;
+                Check(catalog.SetPreparedReplacements(plan, indices, true, false).Succeeded() &&
+                    plan.maximum_required_count == before.maximum_required_count &&
+                    plan.required_count == 0 && plan.count == 0 && plan.admitted_count == 0,
+                    "valid replacement retry suppresses the original outputs");
+                Check(catalog.SetPreparedReplacements(plan, indices, false, false).Succeeded() &&
+                    plan.required_count == before.required_count && plan.count == before.count &&
+                    plan.admitted_count == before.admitted_count,
+                    "restoring the original route restores its complete counts");
+                checked_replacement_rollback = true;
+            }
+        }
         std::vector<hs::ParticleSpawnCommand> reference;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
         Check(catalog.ExpandEvent(event, 1.0f, reference, ignored_lines).Succeeded(),
@@ -799,6 +834,92 @@ void TestVfxCatalog()
         ++compared_policies;
     }
     Check(compared_policies != 0, "catalog policy regression visits authored legacy effects");
+    Check(checked_replacement_rollback, "replacement rollback visits a multi-emitter definition");
+
+    for (const auto &[effect_name, cosmetic, circle] : {
+             std::tuple{"particle.session.wave_start", true, false},
+             std::tuple{"particle.enemy.spawn_warning", false, true},
+             std::tuple{"particle.skill.charged_shot.pulse", false, false}})
+    {
+        hs::PresentationEvent raw;
+        raw.kind = hs::PresentationKind::Vfx;
+        raw.sequence = 650;
+        raw.tick = 100;
+        raw.asset = hs::MakeAssetId(effect_name);
+        raw.position = {1, .1f, 2};
+        raw.parameters = hs::EncodeVfxParameters({{0, 0, 1}, .5f, {}, 0});
+        if (circle)
+        {
+            raw.geometry.kind = hs::PresentationGeometryKind::Circle;
+            raw.geometry.radius = 20;
+            raw.geometry.source_id = 42;
+            raw.geometry.start_tick = raw.tick;
+            raw.geometry.end_tick = raw.tick + 60;
+        }
+        else if (raw.asset.value == hs::MakeAssetId("particle.skill.charged_shot.pulse").value)
+            raw.geometry.source_id = 1ull << 60;
+        hs::runtime_detail::VfxTypedFrameInputs typed;
+        hs::runtime_detail::BuildVfxTypedFrameInputs(catalog.Image(), std::span(&raw, 1), {}, {}, raw.tick, typed);
+        Check(typed.events.size() == 1,
+            (std::string("authored Ground event decodes to one typed input: ") + effect_name).c_str());
+        const auto &input = typed.events.front();
+        const auto route = hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(catalog.Image(), input);
+        if (!route.accepted)
+        {
+            const auto &image = catalog.Image();
+            const auto &effect = image.program.effects[input.effect_handle - 1];
+            const auto range = image.ground_effect_ranges[input.effect_handle - 1];
+            std::cerr << "Ground route: " << effect_name << " handle=" << input.effect_handle
+                << " payload=" << input.payload.index() << " recipes=" << range.count
+                << " mode=" << effect.input_mode << " timing=" << effect.timing_kind
+                << " seconds=" << effect.seconds;
+            if (range.count) std::cerr << " profiles=" << image.ground_recipes[range.first].event_admission_profiles;
+            std::cerr << '\n';
+        }
+        Check(route.accepted, "authored Ground event has a supported emission route");
+        const auto plan = hs::runtime_detail::PrepareVfxEventProfileAdmission(catalog.Image(), input.effect_handle);
+        using Store = hs::runtime_detail::ActiveEffectStore;
+        constexpr auto ground_bit = static_cast<std::uint16_t>(1u << static_cast<unsigned>(Store::Profile::Ground));
+        const auto optional = !route.replace_context_owner && (plan.cosmetic_mask & ground_bit) != 0;
+        Check(optional == cosmetic, "authored cosmetic policy preserves real warnings and context replacement");
+        Store effects;
+        Store::PreparedAppendBatch prepared;
+        std::vector<std::size_t> order;
+        Store::ProfileAdmission admission{0, 0, order};
+        admission.frame_storage[static_cast<std::size_t>(Store::Profile::Ground)] = {
+            sizeof(hs::VfxGroundSpawnInput), 0, 0};
+        const std::array requests{Store::AppendRequest{&input, ground_bit,
+            route.replace_context_owner, plan.cosmetic_mask,
+            catalog.Program().effects[input.effect_handle - 1].importance, &plan.frame_rows}};
+        Check(effects.PrepareAppendBatch(requests, prepared, &admission) && effects.CommitAppendBatch(prepared),
+            "authored Ground policy prepares and commits against the fixture's exhausted cosmetic budget");
+        const auto baseline = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+            catalog.Image(), std::span<const hs::VfxEventInput>(typed.events), raw.tick + 1.0);
+        const auto selected = hs::runtime_detail::BuildVfxTypedEventGroundCommands(
+            catalog.Image(), effects.ProfileEvents(Store::Profile::Ground), raw.tick + 1.0);
+        Check(!baseline.empty() && selected.size() == (cosmetic ? 0 : baseline.size()),
+            "budget selection drops only authored cosmetic Ground and retains actual warning emission");
+        if (!cosmetic)
+            Check(selected.front().command.seed == baseline.front().command.seed,
+                "required Ground retains its original output seed");
+    }
+
+    hs::PersistentVfxVisual wave_timer;
+    wave_timer.kind = hs::PersistentVfxKind::WaveTimer;
+    wave_timer.stable_id = 0x4242;
+    wave_timer.effect_asset = hs::MakeAssetId("particle.session.wave_warning");
+    wave_timer.position = {0, .025f, 0};
+    wave_timer.radius = 20;
+    wave_timer.active_tick = 100;
+    wave_timer.source_horizon_tick = 130;
+    hs::runtime_detail::VfxTypedFrameInputs timer_inputs;
+    hs::runtime_detail::BuildVfxTypedFrameInputs(
+        catalog.Image(), {}, std::span(&wave_timer, 1), {}, 100, timer_inputs);
+    Check(timer_inputs.events.empty() && timer_inputs.persistent.size() == 1,
+        "wave warning keeps its actual snapshot-owned timer route");
+    Check(!hs::runtime_detail::BuildVfxTypedGroundCommands(
+        catalog.Image(), timer_inputs.persistent, 100).empty(),
+        "snapshot-owned wave warning remains visible outside event cosmetic selection");
 
     event.asset = hs::MakeAssetId("particle.boss.shockwave.release");
     event.geometry.kind = hs::PresentationGeometryKind::RingGaps;
@@ -1772,6 +1893,7 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     reject_version("simulation_version", hs::kSimulationVersion, 4);
     reject_version("simulation_version", hs::kSimulationVersion, 5);
     reject_version("gameplay_hash_version", hs::kGameplayHashVersion, 6);
+    reject_version("gameplay_hash_version", hs::kGameplayHashVersion, 7);
     {
         std::ofstream output(directory / "metadata.json", std::ios::trunc);
         output << metadata;

@@ -312,8 +312,28 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .session = package_snapshots.current.header.session_id,
             .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1,
             .sequence = package == 1 ? 0u : package == 0 ? 1u : 2u};
+        const ParticleSpawnCommand particle_birth{
+            .sequence = 0x50415254u,
+            .tick = world.stateful_target,
+            .position = {0, 0, -2},
+            .shape = ParticleShape::Point,
+            .velocity_mode = ParticleVelocity::Direction,
+            .facing = ParticleFacing::Camera,
+            .renderer = VfxRenderer::Sprite,
+            .primitive = VfxPrimitive::Soft,
+            .direction = {0, 0, 1},
+            .lifetime_min = 3600.0f,
+            .lifetime_max = 3600.0f,
+            .start_color = {1, 0.25f, 0.1f, 1},
+            .end_color = {1, 0.25f, 0.1f, 0},
+            .start_size_min = 0.25f,
+            .start_size_max = 0.25f,
+            .count = 1,
+            .seed = 0x51a7u};
         const RenderFrameInput input{.views = submitted_views, .snapshots = package_snapshots,
-            .vfx = {.effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
+            .vfx = {.particle_spawns = package == 0 ? std::span(&particle_birth, 1) :
+                    std::span<const ParticleSpawnCommand>{},
+                .effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
                 .ground = package == 1 ? std::span<const VfxGroundSpawnInput>{} :
                     package == 0 ? std::span<const VfxGroundSpawnInput>{package0_ground} :
                                    std::span<const VfxGroundSpawnInput>{package2_ground},
@@ -592,6 +612,12 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     evidence.hdr_capture = artifacts / "owned-view-capture-b.hdr";
     if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture,
             .path = evidence.hdr_capture, .kind = CaptureKind::HdrColor}); !captured) return captured;
+    const auto live_particle_draws = renderer.LastParticleCount();
+    // The capture includes the one long-lived package birth plus one short-lived
+    // converted effect-line particle in each nonempty world batch (packages 0 and 2).
+    if (live_particle_draws != 3)
+        return Failure("The package particle birth and two effect-line particles must survive the owned-view sequence; captured " +
+            std::to_string(live_particle_draws) + " live draw instances, expected 3.");
     return Result::Success();
 }
 

@@ -1419,14 +1419,17 @@ Result D3D12Renderer::Shutdown()
             frame.ui_mapped = nullptr;
         }
         frame.ui_upload_bytes = 0;
-        if (frame.timestamp_readback.resource && frame.mapped_timestamps)
+        for (std::size_t queue = 0; queue < frame.timestamp_readbacks.size(); ++queue)
         {
-            D3D12_RANGE no_write{};
-            frame.timestamp_readback.resource->Unmap(0, &no_write);
+            if (frame.timestamp_readbacks[queue].resource && frame.mapped_timestamps[queue])
+            {
+                D3D12_RANGE no_write{};
+                frame.timestamp_readbacks[queue].resource->Unmap(0, &no_write);
+            }
+            frame.timestamp_readbacks[queue].Reset();
+            frame.timestamp_heaps[queue].Reset();
         }
-        frame.timestamp_readback.Reset();
-        frame.timestamp_heap.Reset();
-        frame.mapped_timestamps = nullptr;
+        frame.mapped_timestamps = {};
         frame.timestamp_capacity = 0;
         frame.timestamp_passes.clear();
         frame.timestamp_frequencies.clear();

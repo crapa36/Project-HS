@@ -43,14 +43,15 @@ void AppendVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,doubl
  {
   if(static_cast<std::uint32_t>(input.quality)>2 || !input.effect_handle || input.effect_handle>image.light_effect_ranges.size() || current_tick<input.event_tick)continue;
   const auto range=image.light_effect_ranges[input.effect_handle-1];
+  if(!range.count)continue;
+  const auto center=Center(input,image.light_recipes[range.first].payload_kind);if(!center)continue;
+  const auto start=input.geometry_owner_id?input.geometry_start_tick:input.event_tick;
+  if(current_tick<start || (input.geometry_owner_id && input.geometry_end_tick<=start))continue;
+  const double ticks=input.geometry_owner_id?static_cast<double>(input.geometry_end_tick-start):static_cast<double>(image.light_recipes[range.first].seconds)*60;
+  const float age=static_cast<float>(static_cast<double>(current_tick-start)/ticks);
+  if(!std::isfinite(age)||age<0||age>=1)continue;
   for(const auto &r:image.light_recipes.subspan(range.first,range.count))
   {
-   const auto center=Center(input,r.payload_kind);if(!center)continue;
-   const auto start=input.geometry_owner_id?input.geometry_start_tick:input.event_tick;
-   if(current_tick<start || (input.geometry_owner_id && input.geometry_end_tick<=start))continue;
-   const double ticks=input.geometry_owner_id?static_cast<double>(input.geometry_end_tick-start):static_cast<double>(r.seconds)*60;
-   const float age=static_cast<float>(static_cast<double>(current_tick-start)/ticks);
-   if(!std::isfinite(age)||age<0||age>=1)continue;
    const float end=r.knots[r.knot_count-1];
    if(age<r.knots[0] || age>=end)continue;
    float envelope=1;

@@ -308,10 +308,9 @@ std::optional<ProjectileRow> GameSimulation::SimulationWorld::FireProjectile(Ski
     projectile.motion.position = projectile.motion.previous_position = position;
     projectile.combat.spawned_tick = tick;
     const auto normalized = Normalize(direction);
-    projectile.motion.velocity = Multiply(
-        normalized, player_owned ? projectile_speed
-                                 : rules.enemies[static_cast<std::size_t>(
-                                       EnemyKind::Ranged)].projectile_speed);
+    projectile.motion.speed = player_owned ? projectile_speed
+        : rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)].projectile_speed;
+    projectile.motion.velocity = Multiply(normalized, projectile.motion.speed);
     projectile.motion.remaining_range = player_owned
                                      ? definition.range
                                      : rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)]
@@ -1240,7 +1239,8 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                          kNoTelemetrySource, kNoTelemetrySource,
                          static_cast<std::uint8_t>(EnemyTelemetryIndex(*boss))))
                 {
-                    shot->motion.velocity = Multiply(Normalize(shot->motion.velocity), action.speed);
+                    shot->motion.speed = action.speed;
+                    shot->motion.velocity = Multiply(Normalize(shot->motion.velocity), shot->motion.speed);
                     shot->motion.remaining_range = rules.boss_common.projectile_range;
                 }
             }
@@ -1839,7 +1839,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
             {
                 projectile.motion.velocity = Multiply(
                     Normalize(Subtract(target->motion.position, projectile.motion.position)),
-                    Length(projectile.motion.velocity));
+                    projectile.motion.speed);
             }
         }
         const auto step = Multiply(projectile.motion.velocity, kTickSeconds);
@@ -2605,8 +2605,7 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
             projectile.combat.homing_target = next->id.value;
             projectile.motion.velocity = Multiply(Normalize(Subtract(next->motion.position,
                                                               projectile.motion.position)),
-                                            rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)]
-                                                .projectile_speed);
+                                            projectile.motion.speed);
             projectile.motion.remaining_range = search_radius;
             return true;
         }
@@ -2636,7 +2635,7 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
             Length(Subtract(actors->player.position, projectile.motion.position)));
         projectile.motion.velocity = Multiply(
             Normalize(Subtract(actors->player.position, projectile.motion.position)),
-            rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed);
+            projectile.motion.speed);
         return true;
     }
     if (projectile.combat.pierce_remaining > 0 && (!enemy.life.boss || projectile.combat.pierce_remaining != 255))
@@ -3033,7 +3032,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     0.1f, Length(Subtract(actors->player.position, projectile.motion.position)));
                 projectile.motion.velocity = Multiply(
                     Normalize(Subtract(actors->player.position, projectile.motion.position)),
-                    rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed);
+                    projectile.motion.speed);
                 projectile.combat.damage = RoundFinalDamage(EffectiveAttack() *
                     rules.upgrades.ricochet_arrow.return_to_player_rehit.damage_multiplier, rules);
                 projectile.combat.source_upgrade = 0;
@@ -3059,7 +3058,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     projectile.motion.remaining_range = rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].range;
                     projectile.motion.velocity = Multiply(
                         Normalize(Subtract(target->motion.position, projectile.motion.position)),
-                        rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed);
+                        projectile.motion.speed);
                     projectile.motion.radius *= 2.0f;
                     projectile.combat.homing = true;
                     projectile.combat.homing_target = target->id.value;

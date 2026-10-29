@@ -1531,6 +1531,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     pass.cpu_callback_begin_qpc, pass.cpu_callback_end_qpc, static_cast<unsigned>(pass.cpu_callback_valid));
                 runtime_detail::AppendCsvText(gpu_live_row,
                     gpu.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan ? "reference_graph_span" :
+                        gpu.metric_kind == GpuFrameTimingKind::OutputDependencyInterval ? "output_dependency_interval" :
                         gpu.metric_kind == GpuFrameTimingKind::SourceOutputReady ? "source_output_ready" : "unavailable");
                 runtime_detail::AppendCsvValues(gpu_live_row,
                     gpu.metric_generation, gpu.resize_epoch, gpu.render_active.width, gpu.render_active.height,
@@ -2474,15 +2475,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     const auto required_suffix = Add(status_stamp_flashes.size(), required_fire);
                     const auto select_birth_rows = [&](std::array<std::size_t, 3> &rows,
                         std::span<BirthRequest> requests) {
-                        runtime_detail::vfx_birth_admission::ReserveAndSelectBirthRows(rows,
-                            requests, birth_order,
+                        vfx_session.SelectBirthRows(rows, requests, birth_order,
                             [&]() noexcept { return vfx_workspace_breakdown().TotalBytes(); },
-                            prepared_births.particle_spawns, pending_particle_spawns,
-                            vfx_session.native_batch.particle_spawns,
-                            prepared_births.effect_lines, pending_effect_lines,
-                            vfx_session.native_batch.effect_lines,
-                            prepared_births.flashes, active_vfx_flashes, visible_flashes,
-                            required_suffix, runtime_detail::kVfxWorkspaceSoftBudgetBytes);
+                            prepared_births, visible_flashes, required_suffix,
+                            runtime_detail::kVfxWorkspaceSoftBudgetBytes);
                         for (const auto &request : requests)
                         {
                             vfx_birth_requested_rows = Add(vfx_birth_requested_rows, request.count);

@@ -2,7 +2,10 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
+#include <string_view>
+#include <vector>
 
 namespace
 {
@@ -21,10 +24,12 @@ void TestVfxProfileAdmission()
 {
     using namespace hs;
     using Profile = runtime_detail::ActiveEffectStore::Profile;
+    using Store = runtime_detail::ActiveEffectStore;
 
     std::array<VfxEffectRecord, 1> effects{};
     std::array<VfxSourceRecord, 2> sources{};
     std::array<VfxOutputRecord, 3> outputs{};
+    std::array<VfxEffectLookupRecord, 2> effect_lookup{};
     std::array<std::uint32_t, 1> output_profiles{};
     std::array<VfxRange, 1> light_ranges{};
     std::array<VfxLightRecipe, 3> light_recipes{};
@@ -50,6 +55,7 @@ void TestVfxProfileAdmission()
     image.program.effects = effects;
     image.program.sources = sources;
     image.program.outputs = outputs;
+    image.program.effect_lookup = std::span(effect_lookup).first(1);
     image.effect_output_profiles = output_profiles;
     image.light_effect_ranges = light_ranges;
     image.light_recipes = light_recipes;
@@ -96,10 +102,15 @@ void TestVfxProfileAdmission()
         output_profiles = {};
         effects[0].handle = 1;
         effects[0].sources = {0, 2};
+        effect_lookup = {};
+        effect_lookup[0] = {0x123456789abcdef0ull, 1};
+        image.program.effect_lookup = std::span(effect_lookup).first(1);
         sources[0].effect = 1;
+        sources[0].stable_id = 101;
         sources[0].type = VfxSourceType::Direct;
         sources[0].outputs = {0, 1};
         sources[1].effect = 1;
+        sources[1].stable_id = 102;
         sources[1].type = VfxSourceType::Direct;
         sources[1].outputs = {1, 1};
         outputs[0].source = 0;
@@ -126,6 +137,49 @@ void TestVfxProfileAdmission()
     {
         outputs[0].profile = profile;
         output_profiles[0] |= 1u << static_cast<unsigned>(profile);
+    };
+    const auto hash32 = [](std::string_view value)
+    {
+        std::uint32_t hash = 2166136261u;
+        for (const auto character : value)
+        {
+            hash ^= static_cast<unsigned char>(character);
+            hash *= 16777619u;
+        }
+        return hash;
+    };
+    auto configureCosmeticGround = [&](std::size_t count = 1)
+    {
+        initialize();
+        effects[0].input_mode = 0;
+        effects[0].timing_kind = 0;
+        effects[0].seconds = 1.0f;
+        effects[0].payload_kind = 17;
+        effects[0].must_match_logic = 0;
+        effects[0].readability = hash32("cosmetic_event");
+        sources[0].outputs = {0, 1};
+        sources[1].outputs = {1, count > 1 ? 1u : 0u};
+        outputs[0].source = 0;
+        outputs[0].profile = VfxOutputProfile::GroundSdfSoft;
+        outputs[1].source = 1;
+        outputs[1].profile = VfxOutputProfile::GroundSdfOit;
+        output_profiles[0] = (1u << static_cast<unsigned>(VfxOutputProfile::GroundSdfSoft)) |
+            (count > 1 ? 1u << static_cast<unsigned>(VfxOutputProfile::GroundSdfOit) : 0u);
+        ground_ranges[0] = {0, static_cast<std::uint32_t>(count)};
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            auto &recipe = ground_recipes[i];
+            recipe.effect_handle = 1;
+            recipe.effect_id = effect_lookup[0].effect_id;
+            recipe.source_index = static_cast<std::uint32_t>(i);
+            recipe.source_stable_id = sources[i].stable_id;
+            recipe.output_index = static_cast<std::uint32_t>(i);
+            recipe.source_type = VfxSourceType::Direct;
+            recipe.profile = outputs[i].profile;
+            recipe.payload_kind = effects[0].payload_kind;
+            recipe.timing_kind = effects[0].timing_kind;
+            recipe.effect_lookup_count = 1;
+        }
     };
 
     initialize();
@@ -197,6 +251,113 @@ void TestVfxProfileAdmission()
     initialize();
     setOutputProfile(VfxOutputProfile::LocalVolume);
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Volume), false) == Bit(Profile::Volume));
+
+    configureCosmeticGround(2);
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) ==
+        Bit(Profile::Ground));
+    auto ground_plan = runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
+    Require((ground_plan.cosmetic_mask & Bit(Profile::Ground)) != 0 &&
+        ground_plan.frame_rows[static_cast<std::size_t>(Profile::Ground)] == 2);
+
+    // Gameplay readability, logic matching, or an authoritative Ground contributor keeps the row required.
+    effects[0].readability = hash32("gameplay_area");
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    effects[0].readability = hash32("unknown_readability");
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    effects[0].readability = hash32("cosmetic_event");
+    effects[0].must_match_logic = 1;
+    sources[0].authoritative = 1;
+    ground_recipes[0].kind = VfxGroundRecipeKind::SafeSector;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+
+    configureCosmeticGround();
+    ground_recipes[0].kind = VfxGroundRecipeKind::SafeSector;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    effects[0].timing_kind = 1;
+    ground_recipes[0].timing_kind = 1;
+    ground_recipes[0].kind = VfxGroundRecipeKind::Preview;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+
+    configureCosmeticGround(2);
+    sources[1].type = VfxSourceType::ProjectileFollow;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround(2);
+    ground_ranges[0].count = 1;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround(2);
+    ground_recipes[1].output_index = 0;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    ground_recipes[0].source_stable_id++;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    ground_recipes[0].effect_id++;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    ground_recipes[0].effect_lookup_count = 0;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    effect_lookup[0].effect_id = 0;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    effect_lookup[0].handle = 2;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround();
+    effect_lookup[1] = {effect_lookup[0].effect_id, 2};
+    image.program.effect_lookup = effect_lookup;
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
+    configureCosmeticGround(2);
+    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), true) == 0);
+
+    // The verified image plan feeds the existing store policy: cosmetics may drop,
+    // while bound-owner Ground and duplicate-key required membership stay required.
+    configureCosmeticGround();
+    ground_plan = runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
+    Store ground_store;
+    Store::PreparedAppendBatch ground_prepared;
+    std::vector<std::size_t> ground_order;
+    VfxEventInput cosmetic_ground{};
+    cosmetic_ground.sequence = 901;
+    cosmetic_ground.payload = VfxContextPayload{};
+    auto ground_rows = ground_plan.frame_rows;
+    Store::AppendRequest cosmetic_ground_request{&cosmetic_ground, Bit(Profile::Ground), false,
+        ground_plan.cosmetic_mask, 1, &ground_rows};
+    Store::ProfileAdmission ground_budget{0, 0, ground_order};
+    Require(ground_store.PrepareAppendBatch(std::span(&cosmetic_ground_request, 1), ground_prepared,
+                &ground_budget) && ground_budget.requested_cosmetic_memberships == 1 &&
+            ground_budget.admitted_cosmetic_memberships == 0 &&
+            ground_store.CommitAppendBatch(ground_prepared) &&
+            ground_store.ProfileEvents(Profile::Ground).empty());
+
+    Store bound_ground_store;
+    Store::PreparedAppendBatch bound_ground_prepared;
+    std::vector<std::size_t> bound_ground_order;
+    cosmetic_ground.sequence = 902;
+    cosmetic_ground.geometry_owner_id = 44;
+    Store::AppendRequest bound_ground_request{&cosmetic_ground, Bit(Profile::Ground), false,
+        ground_plan.cosmetic_mask, 1, &ground_rows};
+    Store::ProfileAdmission bound_ground_budget{0, 0, bound_ground_order};
+    Require(bound_ground_store.PrepareAppendBatch(std::span(&bound_ground_request, 1),
+                bound_ground_prepared, &bound_ground_budget) &&
+            bound_ground_budget.requested_cosmetic_memberships == 0 &&
+            bound_ground_store.CommitAppendBatch(bound_ground_prepared) &&
+            bound_ground_store.ProfileEvents(Profile::Ground).size() == 1);
+
+    Store duplicate_ground_store;
+    Store::PreparedAppendBatch duplicate_ground_prepared;
+    std::vector<std::size_t> duplicate_ground_order;
+    cosmetic_ground.sequence = 903;
+    cosmetic_ground.geometry_owner_id = 0;
+    const std::array duplicate_ground_requests{
+        Store::AppendRequest{&cosmetic_ground, Bit(Profile::Ground), false,
+            ground_plan.cosmetic_mask, 1, &ground_rows},
+        Store::AppendRequest{&cosmetic_ground, Bit(Profile::Ground), false, 0, 1, &ground_rows}};
+    Store::ProfileAdmission duplicate_ground_budget{0, 0, duplicate_ground_order};
+    Require(duplicate_ground_store.PrepareAppendBatch(duplicate_ground_requests,
+                duplicate_ground_prepared, &duplicate_ground_budget) &&
+            duplicate_ground_budget.requested_cosmetic_memberships == 0 &&
+            duplicate_ground_store.CommitAppendBatch(duplicate_ground_prepared) &&
+            duplicate_ground_store.ProfileEvents(Profile::Ground).size() == 1);
 
     initialize();
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 0, Bit(Profile::Screen), false) == 0);

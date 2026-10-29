@@ -246,24 +246,6 @@ class Sha256
 };
 #endif
 
-// Windows' legacy MAX_PATH limit applies to filesystem status and CRT file
-// opens independently of the path stored in an Action. Use an extended native
-// path only at the OS boundary; input identities and depfiles keep their
-// original paths.
-fs::path NativeFilePath(const fs::path &path)
-{
-#ifdef _WIN32
-    auto value = fs::absolute(path).lexically_normal().make_preferred().native();
-    if (value.starts_with(L"\\\\?\\"))
-        return fs::path(std::move(value));
-    if (value.starts_with(L"\\\\"))
-        return fs::path(L"\\\\?\\UNC\\" + value.substr(2));
-    return fs::path(L"\\\\?\\" + value);
-#else
-    return path;
-#endif
-}
-
 bool IsReparsePoint(const fs::path &path)
 {
 #ifdef _WIN32
@@ -655,7 +637,7 @@ void RequireDirectory(const fs::path &path)
 void MakeDirectory(const fs::path &path)
 {
     RejectReparseAncestors(path);
-    fs::create_directories(path);
+    fs::create_directories(NativeFilePath(path));
     RequireDirectory(path);
 }
 
@@ -947,7 +929,7 @@ Json ReadActionResult(const fs::path &build_root, std::string_view namespace_pat
 void WriteBytes(const fs::path &path, std::span<const std::byte> bytes)
 {
     RejectReparseAncestors(path);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    std::ofstream output(NativeFilePath(path), std::ios::binary | std::ios::trunc);
     Require(output.is_open(), "cannot write staged file: " + path.string());
     output.write(reinterpret_cast<const char *>(bytes.data()),
                  static_cast<std::streamsize>(bytes.size()));
@@ -1010,7 +992,7 @@ fs::path CreateStage(const fs::path &actions)
              std::to_string(TickCount()) + "-" + std::to_string(i));
         RejectReparseAncestors(path);
         std::error_code error;
-        if (fs::create_directory(path, error))
+        if (fs::create_directory(NativeFilePath(path), error))
             return path;
         Require(!error || error == std::errc::file_exists,
                 "cannot create staging directory: " + error.message());
@@ -1021,11 +1003,13 @@ fs::path CreateStage(const fs::path &actions)
 
 void RemoveStage(const fs::path &stage)
 {
-    if (fs::exists(stage))
+    if (stage.empty()) return;
+    const auto native_stage = NativeFilePath(stage);
+    if (fs::exists(native_stage))
     {
         RejectReparseAncestors(stage);
         std::error_code error;
-        fs::remove_all(stage, error);
+        fs::remove_all(native_stage, error);
         Require(!error, "cannot remove staging directory: " + error.message());
     }
 }

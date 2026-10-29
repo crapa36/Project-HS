@@ -142,6 +142,21 @@ void TestOrdinaryRateAndIgnoredSamples()
     Check(!controller.Select(view, config, slow_sample).sample_accepted, "disabled DRS ignores timing");
 }
 
+void TestOutputDependencyIntervalMetric()
+{
+    ViewState view;
+    Check(UpdateViewState(view, {1920, 1080}, {1920, 1080}, {1920, 1080}),
+          "output-interval DRS view");
+    DynamicResolutionController controller;
+    const DynamicResolutionConfig config{true, 60, 50, 100};
+    const DynamicResolutionSample sample{true, false, true, 30.0,
+        DynamicResolutionMetricKind::OutputDependencyInterval};
+    const auto selected = controller.Select(view, config, sample);
+    Check(selected.sample_accepted && selected.changed &&
+          selected.metric_kind == DynamicResolutionMetricKind::OutputDependencyInterval,
+          "output dependency interval selects DRS under its own metric identity");
+}
+
 DynamicResolutionSample SourceSample(const ViewState &view, std::uint64_t frame)
 {
     DynamicResolutionSample sample;
@@ -315,6 +330,7 @@ int main()
         TestPreparedIntegerDomains();
         TestHardBoundsBeforeAlignmentAndRate();
         TestOrdinaryRateAndIgnoredSamples();
+        TestOutputDependencyIntervalMetric();
         TestQualifiedSourceTiming();
         std::cout << "dynamic_resolution_tests passed\n";
         return 0;

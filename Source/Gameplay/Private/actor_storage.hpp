@@ -97,6 +97,8 @@ struct ProjectileMotion
     Float2 position{};
     Float2 previous_position{};
     Float2 velocity{};
+    // Preserve the assigned magnitude instead of remeasuring rounded velocity during homing.
+    float speed{};
     float remaining_range{};
     float radius{};
 };

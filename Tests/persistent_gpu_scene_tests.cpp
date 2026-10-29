@@ -168,7 +168,7 @@ void SkinChannelTransactionsPreserveScene()
           scene.Instances()[slot.index].mesh == submitted_instance.mesh &&
           scene.Instances()[slot.index].yaw == submitted_instance.yaw &&
           scene.ContentRevision() == revision &&
-          scene.Revisions(slot.index).transform == submitted_transform_revision &&
+          scene.Revisions(slot.index).transform == transform_revision &&
           scene.Revisions(slot.index).material == submitted_material_revision && scene.ActiveCount() == 1,
         "committed skin history preserves current-scene revisions and active slot identity");
     Check(scene.PayloadRevision() == payload_revision + 1,

@@ -44,7 +44,7 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    // Hash v7 includes the complete movement-echo position history.
+    // Hash v8 adds retained projectile speed alongside the movement-echo history.
     constexpr hs::GameplayChecksum kGameplayOracle = 15816561498904262959ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");

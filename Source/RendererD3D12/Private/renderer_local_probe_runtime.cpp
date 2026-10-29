@@ -507,7 +507,7 @@ void CopyCaptureDescriptors(ID3D12Device *device,D3D12_CPU_DESCRIPTOR_HANDLE des
     empty.Buffer.NumElements=sizeof(GpuSceneSkinEntry)/sizeof(UINT);
     device->CreateShaderResourceView(nullptr,&empty,destination);
 }
-void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capture,
+Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capture,
     const RendererConfig &config, RendererPipelineCache *pipeline_cache, bool color,
     std::span<const bool> selected={}, INT depth_bias=-800, bool procedural_two_sided=false)
 {
@@ -524,7 +524,7 @@ void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capt
             (procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow);
     }
     const bool needs_sky=color&&!capture->sky;
-    if(!needs_material&&!needs_shadow&&!needs_sky)return;
+    if(!needs_material&&!needs_shadow&&!needs_sky)return Result::Success();
     const auto vertex=needs_material||needs_shadow
         ?ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil"):std::vector<std::byte>{};
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
@@ -554,49 +554,123 @@ void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capt
     p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; p.NumRenderTargets=2;
     p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT; p.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
     p.DSVFormat=DXGI_FORMAT_D32_FLOAT; p.SampleDesc={1,0};
+    std::vector<std::size_t> work;
+    work.reserve(rd::kAuthoredMaterialNames.size());
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
     {
         if(!selected_material(i)) continue;
-        p.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
+        const bool create_material=color&&!capture->materials[i];
+        const bool create_shadow=!capture->shadows[i];
+        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow;
+        if(create_material||create_shadow||create_procedural_shadow) work.push_back(i);
+    }
+    const auto prepare_material=[&](std::size_t i)->Result
+    {
+        auto material=p;
+        material.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
         const bool create_material=color&&!capture->materials[i];
         const bool create_shadow=!capture->shadows[i];
         const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow;
         if(create_material)
         {
-            const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
-            p.PS={pixel.data(),pixel.size()};
-            Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->materials[i])),"Create static local-probe material capture PSO");
+            try
+            {
+                const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
+                material.PS={pixel.data(),pixel.size()};
+                const auto result=pipeline_cache->CreateGraphics(&material,IID_PPV_ARGS(&capture->materials[i]));
+                if(FAILED(result)) return Failure("Create static local-probe material capture PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
+            }
+            catch(const std::exception &error) { return Failure(error.what()); }
+            catch(...) { return Failure("Create static local-probe material capture PSO failed with an unknown exception."); }
         }
         if(create_shadow||create_procedural_shadow)
         {
-            const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
-            auto depth=p; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
-            for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
-            // Virtual pages use zero constant bias; probes retain their directional bias.
-            depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
-            if(create_shadow)
-                Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i])),"Create pure-static capture shadow PSO");
-            if(create_procedural_shadow)
+            try
             {
-                depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
-                Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow)),"Create virtual procedural shadow PSO");
+                const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
+                auto depth=material; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
+                for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
+                // Virtual pages use zero constant bias; probes retain their directional bias.
+                depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
+                if(create_shadow)
+                {
+                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i]));
+                    if(FAILED(result)) return Failure("Create pure-static capture shadow PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
+                }
+                if(create_procedural_shadow)
+                {
+                    depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow));
+                    if(FAILED(result)) return Failure("Create virtual procedural shadow PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
+                }
             }
+            catch(const std::exception &error) { return Failure(error.what()); }
+            catch(...) { return Failure("Create local-probe shadow PSO failed with an unknown exception."); }
+        }
+        return Result::Success();
+    };
+    std::vector<Result> work_results(work.size(),Result::Success());
+    const auto &executor=config.task_executor;
+    if(work.size()>1 && executor.submit && executor.join)
+    {
+        std::size_t submitted{};
+        Result dispatch=Result::Success();
+        for(;submitted<work.size();++submitted)
+        {
+            try
+            {
+                const auto index=submitted;
+                auto accepted=executor.submit([&,index] { work_results[index]=prepare_material(work[index]); });
+                if(!accepted) { dispatch=std::move(accepted); break; }
+            }
+            catch(const std::exception &error)
+            {
+                ++submitted; // A throwing submit callback may already have accepted the work.
+                dispatch=Failure(std::string("Submit local-probe PSO preparation task: ")+error.what());
+                break;
+            }
+            catch(...) { ++submitted; dispatch=Failure("Submit local-probe PSO preparation task failed with an unknown exception."); break; }
+        }
+        Result joined=Result::Success();
+        if(submitted)
+        {
+            try { joined=executor.join(); }
+            catch(const std::exception &error) { joined=Failure(std::string("Join local-probe PSO preparation tasks: ")+error.what()); }
+            catch(...) { joined=Failure("Join local-probe PSO preparation tasks failed with an unknown exception."); }
+        }
+        for(std::size_t i=0;i<submitted;++i) if(!work_results[i]) return work_results[i];
+        if(!dispatch) return dispatch;
+        if(!joined) return joined;
+    }
+    else
+    {
+        for(std::size_t i=0;i<work.size();++i)
+        {
+            work_results[i]=prepare_material(work[i]);
+            if(!work_results[i]) return work_results[i];
         }
     }
     if(needs_sky)
     {
-        const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
-        const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
-        p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
-        p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
-        p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
-        Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky)),"Create local-probe global sky capture PSO");
+        try
+        {
+            const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
+            const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
+            p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
+            p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
+            p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+            const auto result=pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky));
+            if(FAILED(result)) return Failure("Create local-probe global sky capture PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
+        }
+        catch(const std::exception &error) { return Failure(error.what()); }
+        catch(...) { return Failure("Create local-probe global sky capture PSO failed with an unknown exception."); }
     }
 #ifndef NDEBUG
     if(color)assert(capture->sky);
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
         if(selected_material(i))assert((!color||capture->materials[i])&&capture->shadows[i]);
 #endif
+    return Result::Success();
 }
 } // namespace
 
@@ -656,7 +730,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
             if(rd::IsRendererMaterialRevisionProduct(id)) capture->material_products.emplace(id,digest);
         capture->material_products["scene-probe/semantic-inputs"]=capture->input_identity;
         if(package.payload!=rd::SceneProbePayload::Baked)
-            PrepareCapturePipelines(capture,config,pipeline_cache,true);
+            if(auto pipelines=PrepareCapturePipelines(capture,config,pipeline_cache,true);!pipelines) return pipelines;
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
             try { output=ReadProduct(config,id); return Result::Success(); }
             catch(const std::exception &error) { return Failure(error.what()); }
@@ -886,7 +960,7 @@ Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInp
             assert(ordinal<selected.size());
             selected[ordinal]=true;
         }
-        PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true,selected);
+        if(auto pipelines=PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true,selected);!pipelines) return pipelines;
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result{
             try{output=ReadProduct(*in.config,id);return Result::Success();}
             catch(const std::exception &error){return Failure(error.what());}
@@ -1263,7 +1337,8 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
         }
         Require(std::any_of(materials.begin(),materials.end(),[](bool used) { return used; }),
             "Static shadow bake scene contains no eligible static casters");
-        PrepareCapturePipelines(frame->capture,impl_->config,&impl_->pipeline_cache,false,materials,0,procedural_two_sided);
+        if(auto pipelines=PrepareCapturePipelines(frame->capture,impl_->config,&impl_->pipeline_cache,
+            false,materials,0,procedural_two_sided);!pipelines) return pipelines;
         frame->pages.resize(rd::kEnvironmentMaterialNames.size()+1);
         for(std::size_t ordinal=0;ordinal<frame->pages.size();++ordinal)
         {

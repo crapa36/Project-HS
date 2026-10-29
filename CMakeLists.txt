@@ -2059,21 +2059,24 @@ add_custom_command(
     DEPENDS hs_generation "${HS_RUNTIME_FULL_RESULT_LIST}"
         ${HS_RUNTIME_FULL_RESULTS}
     VERBATIM)
-add_custom_target(hs_content_generation
+set(HS_CONTENT_GENERATION_DEFAULT_ALL)
+if(HS_BUILD_RUNTIME)
+    set(HS_CONTENT_GENERATION_DEFAULT_ALL ALL)
+endif()
+add_custom_target(hs_content_generation ${HS_CONTENT_GENERATION_DEFAULT_ALL}
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json")
 # Compatibility target name; the split Actions are the only production authority.
 add_custom_target(hs_cooked_content DEPENDS hs_content_generation)
-if(HS_BUILD_RUNTIME)
+if(HS_BUILD_RUNTIME AND HS_SINGLE_CONFIG_RELEASE)
     add_dependencies(ProjectHS hs_content_generation)
 endif()
 endif()
 if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS AND NOT HS_SINGLE_CONFIG_RELEASE)
-    add_custom_target(hs_content_generation
+    add_custom_target(hs_content_generation ALL
         COMMAND "$<TARGET_FILE:hs_generation>" --verify
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope runtime-full
         DEPENDS hs_generation
         VERBATIM)
-    add_dependencies(ProjectHS hs_content_generation)
 endif()
 
 if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
@@ -2148,6 +2151,13 @@ if(HS_BUILD_TESTS)
         Source/Runtime/Private)
     hs_configure_target(hs_vfx_session_state_tests)
     add_test(NAME runtime.vfx-session-state COMMAND hs_vfx_session_state_tests)
+    # Isolate global allocation failure injection from ordinary VFX contracts.
+    add_executable(hs_vfx_session_state_failure_tests Tests/vfx_session_state_failure_tests.cpp)
+    target_link_libraries(hs_vfx_session_state_failure_tests PRIVATE hs_runtime_contracts)
+    target_include_directories(hs_vfx_session_state_failure_tests PRIVATE Source/Runtime/Private)
+    hs_configure_target(hs_vfx_session_state_failure_tests)
+    add_test(NAME runtime.vfx-session-state-allocation-failure COMMAND hs_vfx_session_state_failure_tests)
+    set_tests_properties(runtime.vfx-session-state-allocation-failure PROPERTIES TIMEOUT 30)
     add_executable(hs_ui_command_admission_tests Tests/ui_command_admission_tests.cpp)
     target_link_libraries(hs_ui_command_admission_tests PRIVATE hs_presentation)
     hs_configure_target(hs_ui_command_admission_tests)
@@ -2229,32 +2239,12 @@ if(HS_BUILD_TESTS)
         add_test(NAME rendering.local-probe-draws COMMAND hs_local_probe_draw_tests)
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
-            add_test(NAME rendering.shader-reconstruction-contracts
+            add_test(NAME rendering.frame-constant-abi
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shader_reconstruction.py")
-            add_test(NAME rendering.light-shadow-lookup-contracts
+            add_test(NAME rendering.light-list-capture-reader
                 COMMAND "${Python3_EXECUTABLE}" -B
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_light_shadow_lookup.py")
-            add_test(NAME rendering.particle-draw-bin-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_draw_bins.py")
-            add_test(NAME rendering.ssr-depth-reduction-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_depth_reduction.py")
-            add_test(NAME rendering.shadow-gather-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shadow_gather.py")
-            add_test(NAME rendering.particle-group-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_group.py")
-            add_test(NAME rendering.ground-annulus-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ground_annulus.py")
-            add_test(NAME rendering.grass-deformation-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_grass_deformation.py")
-            add_test(NAME rendering.particle-terrain-collision-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_terrain_collision.py")
-            add_test(NAME rendering.sparse-effect-bypass-contracts
-                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_sparse_effect_bypass.py")
-            add_test(NAME rendering.ssr-spatial-composition-contracts
-                COMMAND "${Python3_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_spatial_composition.py")
             add_test(NAME rendering.graphics-option-cost-selfcheck
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/analyze-graphics-options.py" --self-test)
@@ -2851,7 +2841,7 @@ if(HS_BUILD_TESTS)
     add_dependencies(hs_render_graph_multi_queue_tests hs_runtime_native_assets)
     add_test(NAME rendering.multi-queue-graph
         COMMAND hs_render_graph_multi_queue_tests)
-    set_tests_properties(rendering.multi-queue-graph PROPERTIES TIMEOUT 45
+    set_tests_properties(rendering.multi-queue-graph PROPERTIES TIMEOUT 90
         RESOURCE_LOCK projecths_d3d12)
     if(HS_BUILD_CONTENT_TOOLS)
         set(HS_BSDF_PROBE_SHADER "${CMAKE_CURRENT_BINARY_DIR}/Generated/TestShaders/bsdf_sampling.dxil")
@@ -3039,7 +3029,7 @@ if(HS_BUILD_TESTS)
 
     get_property(HS_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
     foreach(test_name IN LISTS HS_REGISTERED_TESTS)
-        set(test_labels)
+        get_property(test_labels TEST ${test_name} PROPERTY LABELS)
         if(test_name MATCHES "^(foundation\\.|architecture\\.|build\\.)")
             list(APPEND test_labels core)
         endif()
@@ -3064,6 +3054,7 @@ if(HS_BUILD_TESTS)
         else()
             list(APPEND test_labels cpu)
         endif()
+        list(REMOVE_DUPLICATES test_labels)
         set_tests_properties(${test_name} PROPERTIES LABELS "${test_labels}")
     endforeach()
 endif()

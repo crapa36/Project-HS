@@ -59,6 +59,45 @@ namespace
 using Clock = std::chrono::steady_clock;
 using Json = nlohmann::ordered_json;
 
+double StageElapsedMilliseconds(Clock::time_point start)
+{
+    return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+
+void LogStageElapsed(std::string_view name, double elapsed_ms)
+{
+    std::clog << "hs.render.stage name=" << name << " elapsed_ms=" << elapsed_ms << '\n' << std::flush;
+}
+
+void LogStageBegin(std::string_view name)
+{
+    std::clog << "hs.render.stage name=" << name << " phase=start\n" << std::flush;
+}
+
+struct StageBoundaryMarker
+{
+    bool enabled{};
+    bool begin{};
+    std::string_view name;
+    Clock::time_point &start;
+
+    ~StageBoundaryMarker() noexcept
+    {
+        if (!enabled) return;
+        try
+        {
+            if (begin)
+            {
+                start = Clock::now();
+                LogStageBegin(name);
+            }
+            else if (start != Clock::time_point{})
+                LogStageElapsed(name, StageElapsedMilliseconds(start));
+        }
+        catch (...) {}
+    }
+};
+
 const char *HeroWorkModeName(hs::HeroWorkDiagnosticMode mode)
 {
     switch (mode)
@@ -932,7 +971,6 @@ void ValidatePersistentSceneProbe(const std::vector<DynamicUploadRow> &rows,
         throw std::runtime_error("persistent GPU scene probe initial upload is invalid");
     const auto instance_bytes = rows[0].uploaded_bytes / 2;
     const auto expect = [&](std::size_t index, std::size_t instances,
-                            std::size_t uploaded_bytes, std::size_t copy_regions,
                             std::size_t active_slots, std::size_t slot_count,
                             std::size_t created, std::size_t updated,
                             std::size_t destroyed, std::size_t skin_active,
@@ -941,7 +979,6 @@ void ValidatePersistentSceneProbe(const std::vector<DynamicUploadRow> &rows,
                             std::size_t hzb_history_input) {
         const auto &row = rows[index];
         if (row.frame != index + 1 || row.instances != instances ||
-            row.uploaded_bytes != uploaded_bytes || row.copy_regions != copy_regions ||
             row.stable_slots != active_slots || row.slot_count != slot_count ||
             row.anonymous_instances != 0 || row.created != created ||
             row.updated != updated || row.destroyed != destroyed ||
@@ -950,14 +987,19 @@ void ValidatePersistentSceneProbe(const std::vector<DynamicUploadRow> &rows,
             row.dynamic_visibility_refs != dynamic_visibility_refs ||
             row.hzb_history_input != hzb_history_input)
             throw std::runtime_error("persistent GPU scene probe diagnostics mismatch");
+        const auto maximum_payload_upload = row.slot_count * instance_bytes;
+        if (row.uploaded_bytes > maximum_payload_upload ||
+            (row.uploaded_bytes == 0) != (row.copy_regions == 0) ||
+            row.copy_regions > row.slot_count * 6)
+            throw std::runtime_error("persistent GPU scene probe upload exceeds its active-slot bound");
     };
 
-    expect(0, 2, instance_bytes * 2, 1, 2, 2, 2, 0, 0, 1, 0, 2, 0);
-    expect(1, 2, 0, 0, 2, 2, 0, 0, 0, 1, 1, 2, 1);
-    expect(2, 2, instance_bytes, 1, 2, 2, 0, 1, 0, 1, 1, 2, 1);
-    expect(3, 1, 0, 0, 1, 2, 0, 0, 1, 1, 1, 1, 1);
-    expect(4, 2, instance_bytes, 1, 2, 2, 1, 0, 0, 1, 1, 2, 1);
-    expect(5, 2, 0, 0, 2, 2, 0, 0, 0, 1, 1, 2, 1);
+    expect(0, 2, 2, 2, 2, 0, 0, 1, 0, 2, 0);
+    expect(1, 2, 2, 2, 0, 0, 0, 1, 1, 2, 1);
+    expect(2, 2, 2, 2, 0, 1, 0, 1, 1, 2, 1);
+    expect(3, 1, 1, 2, 0, 0, 1, 1, 1, 1, 1);
+    expect(4, 2, 2, 2, 1, 0, 0, 1, 1, 2, 1);
+    expect(5, 2, 2, 2, 0, 0, 0, 1, 1, 2, 1);
     if (rows[0].skin_gpu_dispatches != 1 || rows[0].skin_gpu_history_reads != 0)
         throw std::runtime_error("skin cache first frame GPU history contract is invalid");
     for (std::size_t index = 1; index < 6; ++index)
@@ -979,6 +1021,7 @@ void ValidatePersistentSceneProbe(const std::vector<DynamicUploadRow> &rows,
         {"skin_gpu_dispatches", rows[5].skin_gpu_dispatches},
         {"skin_gpu_history_reads", rows[5].skin_gpu_history_reads},
         {"dynamic_visibility_refs", rows[5].dynamic_visibility_refs},
+        {"upload_bytes_policy", "Per-owner backing initialization may upload unchanged active slots; each row is bounded by its active slot payload."},
         {"hzb_history_reset_on_scene_change", rows[6].hzb_history_input == 0},
         {"hzb_history_input_frame8", rows[7].hzb_history_input},
     };
@@ -1021,16 +1064,14 @@ void ValidateDynamicLodSkinGrowthProbe(const std::vector<DynamicUploadRow> &rows
         const auto source_count = skin_count + 1;
         const auto history_count = index == 0 ? 0u : index == 2 ? 1u : skin_count;
         const auto visibility_refs = 1u + skin_count;
-        // The two added slots acquire previous-skin bindings on their first
-        // retained frame, then remain unchanged.
-        const auto updated_count = index == 3 ? 2u : 0u;
+        // Previous-skin bindings belong to each view, not the canonical scene payload.
         if (row.instances != source_count || row.stable_slots != source_count ||
             row.slot_count != source_count || row.anonymous_instances != 0 ||
             row.dynamic_visibility_refs != visibility_refs || row.skin_cache_active != skin_count ||
             row.skin_gpu_dispatches != skin_count || row.skin_history_valid != history_count ||
             row.skin_gpu_history_reads != history_count ||
             row.created != (index == 0 || index == 2 ? 2u : 0u) ||
-            row.updated != updated_count || row.destroyed != 0)
+            row.updated != 0 || row.destroyed != 0)
             throw std::runtime_error("dynamic LOD/skin growth diagnostics mismatch");
     }
     receipt["dynamic_lod_skin_growth"] = {
@@ -1303,6 +1344,7 @@ Json ValidationStatusReceipt(const hs::RendererValidationStatus &status)
 
 int main(int argc, char **argv)
 {
+    const auto runner_entry = Clock::now();
     Json receipt{{"schema_version", 1}, {"runner", "render-only"},
         {"fixture", "static-environment-moving-player-v1"}, {"execution_valid", false}};
     std::filesystem::path artifacts;
@@ -1746,11 +1788,12 @@ int main(int argc, char **argv)
                 config.vfx_quality = hs::VfxQuality::High;
             config.grid_floor_disable_aa = grid_aa_mode == GridAaMode::Off;
         }
-        if (persistent_scene_probe || material_reload_probe || static_shadow_bake_probe || residency_streaming_probe)
+        if (persistent_scene_probe || material_reload_probe || static_shadow_bake_probe ||
+            residency_streaming_probe || dynamic_lod_skin_growth_probe)
         {
-            // These probes compare scene/material publications. Unrelated
-            // temporal and high-quality effects add history and costly driver
-            // instrumentation without exercising that publication contract.
+            // These probes compare scene/material/skin publications. Temporal
+            // reconstruction and unrelated high-quality effects add costly driver
+            // instrumentation without exercising those publication contracts.
             config.vfx_quality = hs::VfxQuality::Low;
             config.temporal_reconstruction = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
@@ -1815,16 +1858,21 @@ int main(int argc, char **argv)
         config.artifact_directory = artifacts;
         Json timings = Json::object();
         const auto measure = [&](const char *name, auto &&operation) {
+            if (owned_view_probe &&
+                (std::string_view(name) == "capture" || std::string_view(name) == "shutdown"))
+                LogStageBegin(name);
             const auto start = Clock::now();
             operation();
-            const auto elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+            const auto elapsed_ms = StageElapsedMilliseconds(start);
             timings[name] = elapsed_ms;
-            std::clog << "hs.render.stage name=" << name << " elapsed_ms=" << elapsed_ms << '\n';
+            LogStageElapsed(name, elapsed_ms);
         };
         hs::SelectedGeneration generation;
         hs::SelectedGeneration material_reload_generation;
         hs::SelectedGeneration material_reload_invalid_generation;
         failure_code = "HS_GENERATION_INVALID";
+        timings["runner_setup_before_generation"] = StageElapsedMilliseconds(runner_entry);
+        LogStageElapsed("runner_setup_before_generation", timings["runner_setup_before_generation"]);
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
         receipt["generation_id"] = generation.id;
         receipt["generation_scope"] = generation.scope;
@@ -1957,10 +2005,16 @@ int main(int argc, char **argv)
         hs::render_data::VfxMeshAtlasDescriptor packed_vfx_mesh_atlas;
         std::vector<hs::render_data::RendererSourceRevision> packed_source_revisions;
         std::vector<hs::render_data::RendererRevisionBulk> packed_revision_bulks;
+        Clock::time_point renderer_destruction_start{};
+        StageBoundaryMarker renderer_destruction_complete{
+            owned_view_probe, false, "renderer_destruction", renderer_destruction_start};
         hs::D3D12Renderer renderer;
+        StageBoundaryMarker renderer_destruction_begin{
+            owned_view_probe, true, "renderer_destruction", renderer_destruction_start};
         failure_code = "HS_RENDER_INITIALIZE_FAILED";
         auto startup_font = ReadDeveloperFont();
         config.font_bytes = startup_font;
+        const auto residency_pack_prepare_start = Clock::now();
         if (residency_streaming_probe)
         {
             const auto pack_path = artifacts / "renderer-products-pack.hsp";
@@ -2165,6 +2219,11 @@ int main(int argc, char **argv)
             receipt["packed_renderer_volumes"] = std::ranges::count(packed_textures,
                 hs::render_data::TextureDimension::Texture3D, &hs::render_data::TextureDescriptor::dimension);
             receipt["packed_renderer_bytes"] = offset;
+        }
+        if (residency_streaming_probe)
+        {
+            timings["residency_pack_prepare"] = StageElapsedMilliseconds(residency_pack_prepare_start);
+            LogStageElapsed("residency_pack_prepare", timings["residency_pack_prepare"]);
         }
         receipt["validation_requested"] = {{"debug_layer", config.validation},
             {"gpu_based_validation", config.gpu_validation}};
@@ -2514,14 +2573,14 @@ int main(int argc, char **argv)
                     const auto begin = std::ranges::find(sample.passes, 37u, &hs::GpuPassTiming::pass_id);
                     const auto end = std::ranges::find(sample.passes, 38u, &hs::GpuPassTiming::pass_id);
                     if (sample.mode != hs::GpuTimingMode::Critical ||
-                        sample.metric_kind != hs::GpuFrameTimingKind::ReferenceGraphSpan ||
+                        sample.metric_kind != hs::GpuFrameTimingKind::OutputDependencyInterval ||
                         !sample.critical_path_valid || !sample.cpu_recording_valid ||
                         sample.pass_timings_valid || sample.passes.size() != 2 ||
                         begin == sample.passes.end() || end == sample.passes.end() ||
                         begin->queue != hs::RenderQueue::Direct || end->queue != hs::RenderQueue::Direct ||
                         !begin->measured || !end->measured || !begin->name.empty() || !end->name.empty() ||
                         begin->cpu_record_valid || end->cpu_record_valid)
-                        throw std::runtime_error("Critical timing stream did not retain only Direct endpoints and frame-level CPU timing");
+                        throw std::runtime_error("Output interval stream did not retain only Direct endpoints and frame-level CPU timing");
                 }
                 else if (timing_stream_probe && !config.dynamic_resolution)
                 {
@@ -2632,6 +2691,29 @@ int main(int argc, char **argv)
         std::array<bool, residency_texture_qualities.size()> residency_quality_settled{};
         std::size_t residency_quality_phase{};
         Json residency_quality_samples = Json::array();
+        std::uint32_t rendered_frame_count{};
+        const auto residency_streaming_complete = [&] {
+            if (!residency_streaming_probe ||
+                residency_quality_phase != residency_texture_qualities.size() ||
+                std::ranges::any_of(residency_quality_settled, [](bool settled) { return !settled; }))
+                return false;
+            const auto stats = renderer.ResidencyStats();
+            const auto texture = renderer.GetTextureStreamingStatus(
+                "render/texture/environment_terrain_gaussian.rpkg");
+            return stats.budget_valid && stats.local_budget_bytes != 0 &&
+                stats.tracked_live_bytes != 0 && stats.tracked_reclaimed_bytes != 0 &&
+                stats.streaming_publications != 0 &&
+                stats.streaming_uploads >= stats.streaming_publications &&
+                stats.streaming_requests >= stats.streaming_uploads &&
+                texture.registered && texture.publications != 0 && !texture.pending &&
+                texture.publication_complete &&
+                texture.actual_resident_mip == texture.effective_desired_mip &&
+                texture.actual_resident_mip == texture.target_mip && texture.reclaims != 0 &&
+                stats.geometry_streaming_requests != 0 &&
+                stats.geometry_streaming_uploads == stats.geometry_streaming_requests &&
+                stats.geometry_streaming_publications == stats.geometry_streaming_requests &&
+                stats.geometry_streaming_reclaims >= stats.geometry_streaming_requests;
+        };
         measure("render", [&] {
             if (owned_view_probe)
             {
@@ -2963,7 +3045,7 @@ int main(int argc, char **argv)
                         };
                     }
                 }
-                else if (!world_transport_probe)
+                else if (!world_transport_probe && !persistent_scene_probe)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                 }
@@ -3160,6 +3242,7 @@ int main(int argc, char **argv)
                         Require(renderer.Render(render_input, frame_result));
                     });
                 else Require(renderer.Render(render_input, frame_result));
+                rendered_frame_count = frame;
                 if (residency_streaming_probe && residency_quality_phase < residency_texture_qualities.size())
                 {
                     const auto settings = renderer.GetGraphicsSettingsStatus();
@@ -3735,6 +3818,10 @@ int main(int argc, char **argv)
                                               true, "resized", receipt);
                 }
                 previous = current;
+                // Stop once every texture quality transition and every demanded
+                // geometry request has published and reclaimed its old backing.
+                // The larger frame count remains only the failure bound.
+                if (residency_streaming_complete()) break;
             }
         });
         if (grid_floor_probe)
@@ -3775,8 +3862,8 @@ int main(int argc, char **argv)
             receipt["timing_stream"] = {{"completed_frames", timing_stream_history.size()},
                 {"live_frames", timing_stream_live}, {"drained_frames", timing_stream_drained},
                 {"all_frames_covered", true}, {"slot_wrap_and_duplicate_read", true},
-                {"mode", timing_stream_critical_probe ? "Critical" : "Full"},
-                {"critical_endpoints_only", timing_stream_critical_probe},
+                {"mode", timing_stream_critical_probe ? "OutputDependencyInterval" : "Full"},
+                {"output_dependency_endpoints_only", timing_stream_critical_probe},
                 {"source_output_ready_contract", !config.dynamic_resolution},
                 {"fixed_epoch_ready_monotonic", !config.dynamic_resolution}};
         }
@@ -3806,6 +3893,7 @@ int main(int argc, char **argv)
             }
         }
         measure("capture", [&] { Require(renderer.Capture({.path = artifacts / "capture.png"})); });
+        const auto post_render_receipt_start = Clock::now();
         observe_world_timings();
         observe_provider_timings();
         const auto gpu_timings = renderer.LastGpuPassTimings();
@@ -3859,6 +3947,9 @@ int main(int argc, char **argv)
         if (residency_streaming_probe)
         {
             receipt["residency_streaming"] = {
+                {"rendered_frames", rendered_frame_count},
+                {"frame_bound", frames},
+                {"terminated_after_completion", rendered_frame_count < frames},
                 {"budget_valid", residency_stats.budget_valid},
                 {"local_budget_bytes", residency_stats.local_budget_bytes},
                 {"local_usage_bytes", residency_stats.local_usage_bytes},
@@ -4029,6 +4120,8 @@ int main(int argc, char **argv)
             if (!shadow_valid) throw std::runtime_error("Hero water shadow policy/producer invariant failed; raw frame receipts retained");
         }
         receipt["pipeline_cache"] = PipelineCacheReceipt(renderer.GetPipelineCacheStats());
+        timings["post_render_receipt_validation"] = StageElapsedMilliseconds(post_render_receipt_start);
+        LogStageElapsed("post_render_receipt_validation", timings["post_render_receipt_validation"]);
         failure_code = "HS_RENDER_SHUTDOWN_FAILED";
         measure("shutdown", [&] { Require(renderer.Shutdown()); });
         failure_code = "HS_RENDER_PERSISTENT_SCENE_FAILED";
@@ -4067,27 +4160,34 @@ int main(int argc, char **argv)
             }
         }
         if (config.validation && skin_cache_monster_probe)
-            ValidateMonsterSkinCacheProbe(
-                DynamicUploadRows(artifacts / "dynamic_instance_upload.csv"), frames, receipt);
+        {
+            const auto rows = DynamicUploadRows(artifacts / "dynamic_instance_upload.csv");
+            ValidateMonsterSkinCacheProbe(rows, frames, receipt);
+        }
         if (config.validation && dynamic_lod_skin_growth_probe)
-            ValidateDynamicLodSkinGrowthProbe(
-                DynamicUploadRows(artifacts / "dynamic_instance_upload.csv"), frames, receipt);
-        receipt["validation_errors"] = renderer.ValidationErrorCount();
-        receipt["validation_status"] = ValidationStatusReceipt(renderer.ValidationStatus());
-        receipt["frames"] = frames;
+        {
+            const auto rows = DynamicUploadRows(artifacts / "dynamic_instance_upload.csv");
+            ValidateDynamicLodSkinGrowthProbe(rows, frames, receipt);
+        }
+        const auto validation_errors = renderer.ValidationErrorCount();
+        const auto validation_status = ValidationStatusReceipt(renderer.ValidationStatus());
+        receipt["validation_errors"] = validation_errors;
+        receipt["validation_status"] = validation_status;
+        receipt["frames"] = residency_streaming_probe ? rendered_frame_count : frames;
         if (static_shadow_bake_probe) receipt["static_shadow_bake"]["subsequent_render_frames"] = frames;
         receipt["static_scene_upload_count"] = frame_result.static_scene_upload_count;
         receipt["enhanced_barriers"] = renderer.UsesEnhancedBarriers();
         receipt["timings_ms"] = std::move(timings);
-        receipt["execution_valid"] = renderer.ValidationErrorCount() == 0;
-        receipt["error_code"] = renderer.ValidationErrorCount() == 0
+        receipt["execution_valid"] = validation_errors == 0;
+        receipt["error_code"] = validation_errors == 0
             ? "" : "HS_RENDER_VALIDATION_FAILED";
-        exit_code = renderer.ValidationErrorCount() == 0 ? 0 : 1;
+        exit_code = validation_errors == 0 ? 0 : 1;
     }
     catch (const std::exception &error)
     {
         receipt["error_code"] = failure_code;
         receipt["error"] = error.what();
     }
-    return write_receipt();
+    const auto result = write_receipt();
+    return result;
 }

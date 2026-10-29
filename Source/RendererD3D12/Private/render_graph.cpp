@@ -1388,6 +1388,37 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     const auto cpu_passes = options
         ? std::span<GpuPassTiming>(options->cpu_pass_timings, options->cpu_pass_timing_count)
         : std::span<GpuPassTiming>{};
+    if (options)
+    {
+        for (std::size_t queue = 0; queue < 3; ++queue)
+            if ((options->timestamp_query_heaps[queue] == nullptr) !=
+                (options->timestamp_readbacks[queue] == nullptr))
+                return fail("Each timestamp queue requires both a query heap and a readback resource.");
+        const auto copy = static_cast<std::size_t>(QueueHint::Copy);
+        if (options->timestamp_query_heaps[copy] || options->timestamp_readbacks[copy])
+            return fail("Copy queue timestamps are unsupported.");
+        const auto direct = static_cast<std::size_t>(QueueHint::Direct);
+        const auto compute = static_cast<std::size_t>(QueueHint::Compute);
+        if (options->timestamp_query_heaps[direct] && options->timestamp_query_heaps[direct] ==
+                options->timestamp_query_heaps[compute])
+            return fail("Direct and Compute timestamps require separate query heaps.");
+        if (options->timestamp_readbacks[direct] && options->timestamp_readbacks[direct] ==
+                options->timestamp_readbacks[compute])
+            return fail("Direct and Compute timestamps require separate readback resources.");
+    }
+    const auto queries_for = [&](QueueHint queue) {
+        return options ? static_cast<ID3D12QueryHeap *>(
+            options->timestamp_query_heaps[QueueIndex(queue)]) : nullptr;
+    };
+    const auto readback_for = [&](QueueHint queue) {
+        return options ? static_cast<ID3D12Resource *>(
+            options->timestamp_readbacks[QueueIndex(queue)]) : nullptr;
+    };
+    const auto query_slot_for = [&](std::uint32_t position) {
+        return options && options->timestamp_query_slots &&
+            position < options->timestamp_query_slot_count
+            ? options->timestamp_query_slots[position] : position;
+    };
     if (!cpu_passes.empty())
     {
         if (cpu_passes.size() != g.schedule.execution_order.size())
@@ -1733,16 +1764,25 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     // Ordinary pass boundaries (and Legacy decay) are unchanged.
     for (const auto batch : final_exports)
         if (batch != UINT32_MAX) submission_order.push_back(batch);
-    auto *queries = options ? static_cast<ID3D12QueryHeap *>(options->timestamp_query_heap) : nullptr;
-    auto *readback = options ? static_cast<ID3D12Resource *>(options->timestamp_readback) : nullptr;
-    if (queries && readback && !g.passes.empty())
+    for (const auto queue : {QueueHint::Direct, QueueHint::Compute})
     {
+        if (!queries_for(queue) || !readback_for(queue)) continue;
+        auto last_query_producer = UINT32_MAX;
+        for (const auto index : submission_order)
+        {
+            const auto &batch = batches[index];
+            if (batch.queue != queue ||
+                (batch.pass == UINT32_MAX && batch.external_finish == UINT32_MAX) ||
+                query_slot_for(batch.position) == UINT32_MAX) continue;
+            last_query_producer = index;
+        }
+        if (last_query_producer == UINT32_MAX) continue;
         Batch resolve;
-        resolve.queue = QueueHint::Direct;
+        resolve.queue = queue;
         resolve.resolve_timestamps = true;
         const auto resolve_index = static_cast<std::uint32_t>(batches.size());
         batches.push_back(std::move(resolve));
-        for (const auto previous : submission_order) depend(resolve_index, previous);
+        depend(resolve_index, last_query_producer);
         submission_order.push_back(resolve_index);
     }
     // No vectors or graph resource states change after this point until every
@@ -1784,6 +1824,8 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     const auto record = [&](std::uint32_t index) {
         const auto &batch = batches[index];
         auto &recorder = slot.recorders[QueueIndex(batch.queue)][batch.recorder];
+        auto *queries = queries_for(batch.queue);
+        auto *readback = readback_for(batch.queue);
         auto *cpu_timing = batch.pass != UINT32_MAX && !cpu_passes.empty()
             ? &cpu_passes[batch.position] : nullptr;
         if (cpu_timing) cpu_timing->cpu_record_begin_qpc = cpu_counter();
@@ -1814,9 +1856,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             };
             for (const auto &barrier : batch.before) emit(barrier);
             buffer_barriers.Flush();
-            const auto query_slot = options && options->timestamp_query_slots &&
-                batch.position < options->timestamp_query_slot_count
-                ? options->timestamp_query_slots[batch.position] : batch.position;
+            const auto query_slot = query_slot_for(batch.position);
             const bool pass_has_queries = query_slot != UINT32_MAX;
             const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
             if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
@@ -1859,7 +1899,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                     const auto slot = options && options->timestamp_query_slots &&
                         position < options->timestamp_query_slot_count
                         ? options->timestamp_query_slots[position] : position;
-                    if (slot != UINT32_MAX && g.passes[g.schedule.execution_order[position]].queue != QueueHint::Copy)
+                    if (slot != UINT32_MAX && g.passes[g.schedule.execution_order[position]].queue == batch.queue)
                     {
                         const auto query = options->timestamp_base + slot * 2;
                         commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query, 2, readback,

@@ -1081,6 +1081,7 @@ Result ProjectDynamicTick(const TickReadView &model,
                     {projectile.position.x, render_height, projectile.position.y};
                 returning_link.projectile_previous_position =
                     {projectile.previous_position.x, render_height, projectile.previous_position.y};
+                returning_link.projectile_hitbox_radius = projectile.radius;
                 returning_link.link_target_position =
                     {model.player.position.x, render_height, model.player.position.y};
                 returning_link.return_start_position =

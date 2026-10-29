@@ -169,6 +169,8 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     DynamicResolutionSelection selection{view.render_active, false, false, filtered_ms_};
     if (!ValidView(view) || !ValidConfig(config)) return selection;
     const bool source_ready = sample.metric_kind == DynamicResolutionMetricKind::SourceOutputReady;
+    const bool output_dependency_interval =
+        sample.metric_kind == DynamicResolutionMetricKind::OutputDependencyInterval;
     if (!source_ready && resize_epoch_ != view.resize_epoch)
     {
         filtered_ms_ = 0.0;
@@ -210,7 +212,8 @@ DynamicResolutionSelection DynamicResolutionController::Select(
         selection.filtered_critical_path_ms = consumed.filtered_ms;
         if (!sample.calibration_valid || sample.calibration_drift) return selection;
     }
-    else if (sample.metric_kind != DynamicResolutionMetricKind::ReferenceGraphSpan ||
+    else if ((!output_dependency_interval &&
+              sample.metric_kind != DynamicResolutionMetricKind::ReferenceGraphSpan) ||
              !sample.gpu_limited || !std::isfinite(sample.render_critical_path_ms) ||
              sample.render_critical_path_ms <= 0.0)
         return selection;
@@ -243,7 +246,8 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     selection.metric_kind = source_ready
         ? (recovery ? DynamicResolutionMetricKind::DisplayDependencySpan
                     : DynamicResolutionMetricKind::SourceRenderReadyCadence)
-        : DynamicResolutionMetricKind::ReferenceGraphSpan;
+        : output_dependency_interval ? DynamicResolutionMetricKind::OutputDependencyInterval
+                                     : DynamicResolutionMetricKind::ReferenceGraphSpan;
 
     ViewExtent minimum, maximum;
     if (!ResolveDynamicResolutionExtent(view.output_extent, config.min_scale_percent, minimum) ||

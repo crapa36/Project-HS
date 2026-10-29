@@ -297,8 +297,12 @@ before emitter construction; ShockShell and unrelated layers retain their origin
 meaning. Native pending uses the same owner and stable legacy-before-typed order.
 Renderer accepts font bytes and DirectWrite owns its copy after initialization.
 Release reads the generated, verified font range from the pack; developer hosts
-load their explicit font input. Renderer texture/shader/bulk deployment still uses
-selected Generation products; this cutover does not complete those domains.
+load their explicit font input. Release Runtime supplies the renderer with the
+compiled bulk, texture, geometry, material, character, animation and VFX-atlas
+descriptors plus the retained shipping-image owner. Renderer asset resolution
+reads the descriptors' bounded ranges from that same pack, including shader
+products. Developer Runtime instead resolves renderer products through its
+selected Generation and keeps that Generation lease for resident resources.
 
 Runtime pairs small UI/session facts with each snapshot publication. Only the
 matching successful main-Present receipt promotes that frame's draw layout into
@@ -339,7 +343,12 @@ GI retains CSM until its off-camera receiver domain is closed. CPU policy and
 completed GPU publication are separate diagnostics.
 CPU frame/task capture can omit GPU timing queries and their measurement-only
 resolve. This is explicit in diagnostic metadata; absent GPU measurements are
-not zero-duration work. Active DRS retains its required reference timing samples.
+not zero-duration work. Direct and Compute own separate query/readback storage
+inside each submission slot; CPU reads only completed slots. Copy timing is
+unavailable. Active DRS uses an `OutputDependencyInterval` with both endpoints on
+Direct: the end reads the rendered output as Present and joins only its actual
+ancestors. The legacy whole-graph reference span remains a distinct diagnostic
+identity; full `SourceOutputReady` capture keeps its calibrated metric semantics.
 The fixed shadow command allocation is partitioned by actual coarse demand and
 active-group weight for approved no-CSM frames. Fallback frames retain the
 original floor division. CPU admission, GPU scatter and native indirect draws
@@ -366,7 +375,11 @@ named-animation descriptors retain small skeleton/clip/binding tables and verifi
 subranges of the original products. Packed TRS rows occupy 40 bytes; their sampling
 adapter returns Core's padded value only for accessed rows. Monster palette rows
 read directly into the existing upload vector in their cooked transposed order.
-The remaining W01 provenance and deployment cutover is still pending.
+ContentLinker emits these renderer descriptors into the compiled shipping tables;
+the matching payload ranges are stored in `Content/content.hsp`. Runtime opens the
+pack only after its extent and compiled 64-byte header match, then passes the same
+bounded owner to renderer resource readers. Producer provenance remains in the
+shipping receipt and ActionKey; it is separate from the shipping content identity.
 
 Environment materials have one canonical product per authored material, independent
 of geometry LOD. Geometry metadata products contain a checked material dependency
@@ -583,16 +596,22 @@ HS_BUILD_CONTENT_TOOLS=OFF
 
 It builds Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, and their low-level tests without AssetManifest, RenderData, ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex, or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`.
 
-## Portable verification
+## Windows verification
+
+Named Debug executable builds compile/link against existing content; they do not
+recook the full generation. Build `hs_content_generation` explicitly when content
+changes. The default ALL build still prepares/verifies the runtime generation,
+and Release retains its compiled shipping-image dependencies.
 
 Runtime VFX cases share two test executables, grouped by synthetic versus cooked
 inputs. Each case remains a separate CTest process and name. Only cooked cases
 prepare a Generation; compiling one group never compiles the other group's cases.
 
-`cmake --workflow --preset verify-core-linux` builds the platform-independent
-libraries and runs their low-level tests with GCC/Clang strict floating-point
-options. The Windows process APIs and MSVC `/fp:strict` path remain intact.
-Linux verification does not stand in for MSVC, D3D12, or GPU execution.
+`cmake --workflow --preset verify-core` builds the low-level libraries and tests
+with MSVC `/fp:strict`. `verify-portable` runs the core, CPU RenderData and asset
+pipeline superset once on Windows. CI runs only on Windows; Linux execution
+jobs and presets have been removed. These CPU checks do not replace D3D12 or
+GPU execution.
 
 `HS_BUILD_RENDER_DATA_TESTS=ON` explicitly opts into CPU RenderData, selected
 Generation, character-interchange, and the private production FrameGraph range

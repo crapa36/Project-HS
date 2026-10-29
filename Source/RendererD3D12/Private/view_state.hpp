@@ -58,6 +58,7 @@ enum class DynamicResolutionMetricKind : std::uint8_t
     SourceOutputReady,
     SourceRenderReadyCadence,
     DisplayDependencySpan,
+    OutputDependencyInterval,
 };
 
 struct DynamicResolutionSample
@@ -108,7 +109,8 @@ class DynamicResolutionController
 {
   public:
     // SourceOutputReady samples require proven cadence or independently qualified
-    // closure span. ReferenceGraphSpan remains the legacy reference path.
+    // closure span. OutputDependencyInterval is a same-Direct-queue begin/end
+    // interval ending at the rendered output; ReferenceGraphSpan is legacy.
     [[nodiscard]] DynamicResolutionSelection Select(
         const ViewState &view, const DynamicResolutionConfig &config,
         DynamicResolutionSample sample);

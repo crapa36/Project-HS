@@ -379,9 +379,11 @@ bool GameSimulation::SimulationWorld::ProcessInput()
     if (!current_input.held.basic_attack_held) selection_waiting_for_release = false;
     const auto aim_delta = Float2{current_input.held.aim_world.x - actors->player.position.x,
                                   current_input.held.aim_world.z - actors->player.position.y};
-    if (LengthSquared(aim_delta) > 0.0001f)
+    const auto aim_distance_squared = LengthSquared(aim_delta);
+    if (std::isfinite(aim_distance_squared) && aim_distance_squared > 0.0001f)
     {
-        const auto aim = Normalize(aim_delta, actors->player.aim);
+        const auto aim_distance = std::sqrt(aim_distance_squared);
+        const Float2 aim{aim_delta.x / aim_distance, aim_delta.y / aim_distance};
         changed |= aim.x != actors->player.aim.x || aim.y != actors->player.aim.y;
         actors->player.aim = aim;
     }
@@ -980,6 +982,7 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         vector2(projectile.motion.position);
         vector2(projectile.motion.previous_position);
         vector2(projectile.motion.velocity);
+        value(projectile.motion.speed);
         value(projectile.combat.spawned_tick);
         value(projectile.motion.remaining_range);
         value(projectile.motion.radius);
@@ -1804,8 +1807,8 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                                  enemy.id.value);
                     if (shot)
                     {
-                        shot->motion.velocity = Multiply(enemy.action.locked_aim,
-                                                   definition.projectile_speed);
+                        shot->motion.speed = definition.projectile_speed;
+                        shot->motion.velocity = Multiply(enemy.action.locked_aim, shot->motion.speed);
                         shot->motion.remaining_range = definition.projectile_range;
                     }
                 }

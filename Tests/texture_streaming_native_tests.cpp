@@ -126,7 +126,8 @@ class TextureStreamFixture
 {
   public:
     TextureStreamFixture(ID3D12Device *device, D3D12MA::Allocator *allocator,
-                         hs::RenderGraphQueueExecutor &executor, bool reserved_candidate = false)
+                         hs::RenderGraphQueueExecutor &executor, bool reserved_candidate = false,
+                         bool prepare_sibling = false)
         : device_(device), allocator_(allocator), executor_(executor)
     {
         description_ = reserved_candidate
@@ -170,6 +171,19 @@ class TextureStreamFixture
         io_.SetWaitForReads(true);
         Check(streaming_.SupplyDescriptor(logical_id_, std::move(descriptor_)).Succeeded(),
               "supply synthetic RTEX descriptor");
+        if (prepare_sibling)
+        {
+            sibling_logical_id_ = "test/native-texture-streaming-sibling";
+            sibling_package_ = hs::render_data::BuildTexturePackage(
+                hs::MakeAssetId(sibling_logical_id_), dependencies, description_, payload_);
+            auto sibling_descriptor = hs::render_data::CompileTextureDescriptor(
+                sibling_package_, hs::MakeAssetId(sibling_logical_id_), 0);
+            sibling_source_ = std::make_unique<TextureSourceFile>();
+            sibling_source_->Write(sibling_package_);
+            Check(streaming_.SupplyDescriptor(sibling_logical_id_, std::move(sibling_descriptor)).Succeeded(),
+                  "supply sibling synthetic RTEX descriptor");
+            sibling_prepared_ = true;
+        }
         hs::TextureStreamingCapabilities capabilities{};
         Check(streaming_.Initialize(device_, allocator_, hs::GraphicsQuality::Low, 0, 64,
             capabilities, 3, {}).Succeeded(), "initialize texture streaming");
@@ -209,6 +223,34 @@ class TextureStreamFixture
     }
 
     hs::TextureStreamId Id() const noexcept { return id_; }
+    hs::TextureStreamId AddSibling()
+    {
+        Check(sibling_prepared_ && !sibling_id_, "register prepared sibling texture only once");
+
+        const auto fallback_mip = std::min(4u, description_.mip_count - 1u);
+        const auto fallback_desc = TextureDescription(description_, fallback_mip);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        Hr(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &fallback_desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&sibling_fallback_)),
+            "create sibling synthetic fallback texture");
+        const auto allocation_info = device_->GetResourceAllocationInfo(0, 1, &fallback_desc);
+        Check(allocation_info.SizeInBytes && allocation_info.SizeInBytes != UINT64_MAX,
+              "query sibling fallback allocation bytes");
+        hs::TextureStreamRegistration registration{};
+        registration.generation = "native-fixture-sibling-generation";
+        registration.logical_id = sibling_logical_id_;
+        registration.source.path = sibling_source_->path;
+        registration.generation_lease = std::make_shared<int>(1);
+        registration.description = description_;
+        registration.fallback = sibling_fallback_;
+        registration.fallback_first_mip = fallback_mip;
+        registration.fallback_allocation_bytes = allocation_info.SizeInBytes;
+        registration.fallback_graph_access = hs::Access::Common;
+        Check(streaming_.Register(std::move(registration), residency_, sibling_id_).Succeeded(),
+              "register sibling streaming texture in shared manager");
+        return sibling_id_;
+    }
     hs::RendererTextureStreaming &Streaming() noexcept { return streaming_; }
     hs::RendererAssetIo &Io() noexcept { return io_; }
     hs::StreamingManager &Requests() noexcept { return requests_; }
@@ -218,12 +260,22 @@ class TextureStreamFixture
     TextureSourceFile &Source() noexcept { return source_; }
     hs::RenderGraphQueueExecutor &Executor() noexcept { return executor_; }
     void NextFrame() noexcept { ++frame_; }
+    void SetHostBudget(std::uint64_t bytes) noexcept
+    {
+        auto budget = residency_.HostAdmissionFacts().budget;
+        budget.host_budget_valid = true;
+        budget.host_fresh = true;
+        budget.host_staging_budget = bytes;
+        residency_.UpdateBudget(budget);
+    }
     const std::vector<std::byte> &Package() const noexcept { return package_; }
     std::uint32_t TailMip() const noexcept { return std::min(4u, description_.mip_count - 1u); }
     bool HardwareBacked() const noexcept { return streaming_.HardwareBacked(id_); }
-    std::string TimeoutDetails(std::uint32_t target_mip, std::uint32_t attempts) const
+    std::string TimeoutDetails(std::uint32_t target_mip, std::uint32_t attempts,
+                               hs::TextureStreamId id = {}) const
     {
-        const auto status = Status();
+        if (!id) id = id_;
+        const auto status = Status(id);
         const auto host = residency_.HostAdmissionFacts();
         const auto accounting = residency_.Accounting();
         std::ostringstream detail;
@@ -253,7 +305,22 @@ class TextureStreamFixture
 
     bool Pump(std::uint32_t target_mip)
     {
-        streaming_.Demand(id_, target_mip, 100, frame_);
+        return Pump(id_, target_mip);
+    }
+
+    bool Pump(hs::TextureStreamId id, std::uint32_t target_mip)
+    {
+        streaming_.Demand(id, target_mip, 100, frame_);
+        const auto result = streaming_.Pump(frame_, executor_.Completed(), io_, requests_, residency_);
+        if (!result) throw std::runtime_error("texture streaming pump failed: " + std::string(result.Message()));
+        return true;
+    }
+
+    bool PumpBoth(std::uint32_t first_target, std::uint32_t second_target)
+    {
+        Check(static_cast<bool>(sibling_id_), "pump both owners only after sibling registration");
+        streaming_.Demand(id_, first_target, 100, frame_);
+        streaming_.Demand(sibling_id_, second_target, 100, frame_);
         const auto result = streaming_.Pump(frame_, executor_.Completed(), io_, requests_, residency_);
         if (!result) throw std::runtime_error("texture streaming pump failed: " + std::string(result.Message()));
         return true;
@@ -262,7 +329,13 @@ class TextureStreamFixture
     bool PumpWithCompletion(std::uint32_t target_mip, hs::RendererAssetIo &io,
                             const hs::CompletionSet &completed)
     {
-        streaming_.Demand(id_, target_mip, 100, frame_);
+        return PumpWithCompletion(id_, target_mip, io, completed);
+    }
+
+    bool PumpWithCompletion(hs::TextureStreamId id, std::uint32_t target_mip,
+                            hs::RendererAssetIo &io, const hs::CompletionSet &completed)
+    {
+        streaming_.Demand(id, target_mip, 100, frame_);
         const auto result = streaming_.Pump(frame_, completed, io, requests_, residency_);
         if (!result) throw std::runtime_error("texture streaming pump failed: " + std::string(result.Message()));
         return true;
@@ -278,7 +351,7 @@ class TextureStreamFixture
         if (auto result = streaming_.AddPendingPasses(graph_, std::move(queue), 4000,
                 bindings, &layout); !result)
             throw std::runtime_error(std::string(result.Message()));
-        return !layout.entries.empty() && layout.entries[0].pending;
+        return std::ranges::any_of(layout.entries, [](const auto &entry) { return entry.pending; });
     }
 
     hs::CompletionSet SubmitPending()
@@ -289,7 +362,8 @@ class TextureStreamFixture
         if (auto executed = executor_.Execute(graph_, 0, hs::BarrierMode::Legacy, completion); !executed)
             throw std::runtime_error(std::string(executed.Message()));
         streaming_.MarkSubmitted(completion, requests_);
-        streaming_.MarkUse(id_, completion);
+        for (std::uint32_t value = 1; value <= streaming_.Count(); ++value)
+            streaming_.MarkUse({value}, completion);
         return completion;
     }
 
@@ -303,15 +377,32 @@ class TextureStreamFixture
 
     hs::TextureStreamingProductStatus Status() const
     {
-        return streaming_.ProductStatus(logical_id_, requests_, executor_.Completed());
+        return Status(id_);
+    }
+
+    hs::TextureStreamingProductStatus Status(hs::TextureStreamId id) const
+    {
+        const auto &logical_id = id == sibling_id_ ? sibling_logical_id_ : logical_id_;
+        return streaming_.ProductStatus(logical_id, requests_, executor_.Completed());
     }
 
     void ReadbackPublished(std::uint32_t logical_mip)
     {
-        const auto view = streaming_.View(id_);
-        Check(view.resource && logical_mip >= view.first_mip &&
-            logical_mip < view.logical_description.mip_count,
-            "published texture exposes requested logical mip");
+        ReadbackPublished(id_, logical_mip);
+    }
+
+    void ReadbackPublished(hs::TextureStreamId id, std::uint32_t logical_mip)
+    {
+        const auto view = streaming_.View(id);
+        if (!view.resource || logical_mip < view.first_mip ||
+            logical_mip >= view.logical_description.mip_count)
+        {
+            std::ostringstream detail;
+            detail << "readback owner=" << id.value << " requested_mip=" << logical_mip
+                << " first_mip=" << view.first_mip << " mip_count=" << view.logical_description.mip_count
+                << " resource=" << (view.resource != nullptr);
+            throw std::runtime_error("published texture does not expose requested mip: " + detail.str());
+        }
         ComPtr<ID3D12Resource> texture = view.resource;
         const auto description = texture->GetDesc();
         const auto local_mip = logical_mip - view.first_mip;
@@ -353,9 +444,9 @@ class TextureStreamFixture
             "create texture-streaming readback");
 
         graph_.Reset();
-        Check(!Status().pending, "readback starts from a settled texture owner");
+        Check(!Status(id).pending, "readback starts from a settled texture owner");
         const auto source = graph_.ImportTexture(
-            {texture.Get(), view.completion, hs::QueueHint::Copy, {}}, view.access,
+            {texture.Get(), view.completion, hs::QueueHint::Direct, {}}, view.access,
             "published texture readback source");
         const auto destination = graph_.ImportBuffer(
             {readback.Get(), {}, hs::QueueHint::Direct, {}}, hs::Access::CopyDest, "texture streaming readback");
@@ -383,7 +474,7 @@ class TextureStreamFixture
         hs::CompletionSet completion;
         if (auto executed = executor_.Execute(graph_, 0, hs::BarrierMode::Legacy, completion); !executed)
             throw std::runtime_error(std::string(executed.Message()));
-        streaming_.MarkUse(id_, completion);
+        streaming_.MarkUse(id, completion);
         if (auto waited = executor_.Wait(completion); !waited)
             throw std::runtime_error(std::string(waited.Message()));
         pool_.ResetCompletedClaims(executor_.Completed());
@@ -397,13 +488,28 @@ class TextureStreamFixture
         for (std::size_t slice_index = 0; slice_index < slices.size(); ++slice_index)
         {
             const auto &entry = slices[slice_index];
-            Check(entry.row_bytes == static_cast<UINT64>(width) * 4u && entry.rows == height,
-                  "readback footprint matches the logical array mip");
+            if (entry.row_bytes != static_cast<UINT64>(width) * 4u || entry.rows != height)
+            {
+                std::ostringstream detail;
+                detail << "owner=" << id.value << " mip=" << logical_mip << " slice=" << slice_index
+                    << " row_bytes=" << entry.row_bytes << " rows=" << entry.rows;
+                throw std::runtime_error("readback footprint does not match logical mip: " + detail.str());
+            }
             for (std::size_t index = 0; index < static_cast<std::size_t>(entry.row_bytes) * entry.rows; ++index)
-                Check(mapped[entry.footprint.Offset +
-                        (index / entry.row_bytes) * entry.footprint.Footprint.RowPitch + index % entry.row_bytes] ==
-                    static_cast<std::byte>(PixelByte(static_cast<std::uint32_t>(slice_index), logical_mip, index)),
-                    "published array mip bytes match the synthetic RTEX source");
+            {
+                const auto actual = mapped[entry.footprint.Offset +
+                    (index / entry.row_bytes) * entry.footprint.Footprint.RowPitch + index % entry.row_bytes];
+                const auto expected = static_cast<std::byte>(
+                    PixelByte(static_cast<std::uint32_t>(slice_index), logical_mip, index));
+                if (actual != expected)
+                {
+                    std::ostringstream detail;
+                    detail << "owner=" << id.value << " mip=" << logical_mip << " slice=" << slice_index
+                        << " byte=" << index << " actual=" << static_cast<unsigned>(actual)
+                        << " expected=" << static_cast<unsigned>(expected);
+                    throw std::runtime_error("published texture readback mismatch: " + detail.str());
+                }
+            }
         }
         D3D12_RANGE no_write{0, 0};
         readback->Unmap(0, &no_write);
@@ -445,16 +551,20 @@ class TextureStreamFixture
     D3D12MA::Allocator *allocator_{};
     hs::RenderGraphQueueExecutor &executor_;
     TextureSourceFile source_;
+    std::unique_ptr<TextureSourceFile> sibling_source_;
+    bool sibling_prepared_{};
     const std::string logical_id_{"test/native-texture-streaming"};
+    std::string sibling_logical_id_;
     hs::render_data::TextureDescription description_{};
     hs::render_data::TextureDescriptorStorage descriptor_;
-    std::vector<std::byte> payload_, package_;
+    std::vector<std::byte> payload_, package_, sibling_package_;
     hs::ResidencyManager residency_;
     hs::RendererAssetIo io_;
     hs::StreamingManager requests_;
     hs::RendererTextureStreaming streaming_;
     ComPtr<ID3D12Resource> fallback_;
-    hs::TextureStreamId id_{};
+    ComPtr<ID3D12Resource> sibling_fallback_;
+    hs::TextureStreamId id_{}, sibling_id_{};
     hs::TransientResourcePool pool_;
     hs::RenderGraphBuilder graph_;
     std::uint64_t frame_{1};
@@ -464,17 +574,20 @@ void SettleTarget(TextureStreamFixture &fixture, std::uint32_t target_mip,
                   std::optional<bool> expect_software_copy = std::nullopt,
                   ID3D12Resource *expected_old_owner = nullptr,
                   hs::RendererAssetIo *io_override = nullptr,
-                  bool expect_reserved_unmap = false)
+                  bool expect_reserved_unmap = false,
+                  hs::TextureStreamId owner = {})
 {
+    if (!owner) owner = fixture.Id();
     bool saw_copy{};
     bool saw_reserved_unmap{};
     for (std::uint32_t attempt = 0; attempt < 128; ++attempt)
     {
         Check(io_override
-                ? fixture.PumpWithCompletion(target_mip, *io_override, fixture.Executor().Completed())
-                : fixture.Pump(target_mip),
+                ? fixture.PumpWithCompletion(owner, target_mip, *io_override,
+                    fixture.Executor().Completed())
+                : fixture.Pump(owner, target_mip),
               "pump texture streaming target");
-        auto status = fixture.Status();
+        auto status = fixture.Status(owner);
         if (status.publication_complete && !status.pending && status.actual_resident_mip == target_mip)
         {
             if (expect_software_copy) Check(saw_copy == *expect_software_copy, "streaming path mode observed");
@@ -486,45 +599,214 @@ void SettleTarget(TextureStreamFixture &fixture, std::uint32_t target_mip,
         std::vector<hs::TextureStreamingGraphBinding> bindings;
         if (fixture.AddPendingGraph(layout, bindings))
         {
-            if (layout.entries[0].software_copy) saw_copy = true;
-            if (layout.entries[0].reserved && layout.entries[0].unmap_count)
+            const auto index = static_cast<std::size_t>(owner.value - 1u);
+            Check(index < layout.entries.size(), "streaming owner maps to its layout entry");
+            if (layout.entries[index].software_copy) saw_copy = true;
+            if (layout.entries[index].reserved && layout.entries[index].unmap_count)
                 saw_reserved_unmap = true;
-            if (layout.entries[0].software_copy)
+            if (layout.entries[index].software_copy)
             {
                 Check(expected_old_owner && io_override,
                       "software-copy lifetime fixture has its prior owner and fresh IO service");
-                Check(fixture.Streaming().View(fixture.Id()).resource == expected_old_owner,
+                Check(fixture.Streaming().View(owner).resource == expected_old_owner,
                       "software-copy candidate stays hidden before submission");
             }
             const auto completion = fixture.SubmitPending();
-            if (layout.entries[0].software_copy)
+            if (layout.entries[index].software_copy)
             {
                 hs::CompletionSet none;
-                Check(fixture.PumpWithCompletion(target_mip, *io_override, none),
+                Check(fixture.PumpWithCompletion(owner, target_mip, *io_override, none),
                       "pump before software-copy completion");
-                Check(fixture.Status().pending &&
-                    fixture.Streaming().View(fixture.Id()).resource == expected_old_owner,
+                Check(fixture.Status(owner).pending &&
+                    fixture.Streaming().View(owner).resource == expected_old_owner,
                     "software-copy candidate remains hidden before completion");
             }
             fixture.Wait(completion);
-            if (layout.entries[0].software_copy)
+            if (layout.entries[index].software_copy)
             {
-                Check(fixture.PumpWithCompletion(target_mip, *io_override, completion),
+                Check(fixture.PumpWithCompletion(owner, target_mip, *io_override, completion),
                       "publish software copy after real queue completion");
-                Check(fixture.Status().actual_resident_mip == target_mip &&
-                    fixture.Streaming().View(fixture.Id()).resource != expected_old_owner,
+                Check(fixture.Status(owner).actual_resident_mip == target_mip &&
+                    fixture.Streaming().View(owner).resource != expected_old_owner,
                     "software-copy candidate publishes after completion");
             }
         }
         fixture.NextFrame();
     }
     throw std::runtime_error("texture streaming did not settle within bounded native fixture iterations: " +
-        fixture.TimeoutDetails(target_mip, 128));
+        fixture.TimeoutDetails(target_mip, 128, owner));
+}
+
+void SettleBothTargets(TextureStreamFixture &fixture, hs::TextureStreamId first,
+                       hs::TextureStreamId second, std::uint32_t target_mip)
+{
+    for (std::uint32_t attempt = 0; attempt < 128; ++attempt)
+    {
+        fixture.PumpBoth(target_mip, target_mip);
+        const auto first_status = fixture.Status(first);
+        const auto second_status = fixture.Status(second);
+        if (!first_status.pending && !second_status.pending &&
+            first_status.publication_complete && second_status.publication_complete &&
+            first_status.actual_resident_mip == target_mip &&
+            second_status.actual_resident_mip == target_mip)
+            return;
+
+        hs::TextureStreamingLayout layout;
+        std::vector<hs::TextureStreamingGraphBinding> bindings;
+        if (fixture.AddPendingGraph(layout, bindings))
+        {
+            const auto completion = fixture.SubmitPending();
+            fixture.Wait(completion);
+        }
+        fixture.NextFrame();
+    }
+    throw std::runtime_error("paired texture streaming target did not settle: first=" +
+        fixture.TimeoutDetails(target_mip, 128, first) + " second=" +
+        fixture.TimeoutDetails(target_mip, 128, second));
+}
+
+void RunSharedHostBudgetTextureStreamingNative(ID3D12Device *device,
+    D3D12MA::Allocator *allocator, hs::RenderGraphQueueExecutor &executor)
+{
+    TextureStreamFixture fixture(device, allocator, executor, false, true);
+    const auto first = fixture.Id();
+    const auto second = fixture.AddSibling();
+    const auto original_host_budget = fixture.Residency().HostAdmissionFacts().budget.host_staging_budget;
+    Check(original_host_budget == 32ull * 1024u * 1024u,
+          "fixture remembers its original 32 MiB shared host budget");
+    // This fixture's mip 2 fits the 7 KiB transfer cap; mip 1's 16 KiB payload does not.
+    constexpr std::uint32_t coarse = 2u;
+    SettleBothTargets(fixture, first, second, coarse);
+    fixture.ReadbackPublished(first, coarse);
+    fixture.ReadbackPublished(second, coarse);
+    const auto first_owner = fixture.Streaming().View(first).resource;
+    const auto second_owner = fixture.Streaming().View(second).resource;
+    Check(first_owner && second_owner && first_owner != second_owner,
+          "shared-manager owners start from separate published software textures");
+    const auto first_publications = fixture.Status(first).publications;
+    const auto second_publications = fixture.Status(second).publications;
+    const auto first_uploads = fixture.Status(first).uploads;
+    const auto second_uploads = fixture.Status(second).uploads;
+
+    // Start both finer replacement transactions under the initial host budget.
+    // Observe at least one real chunk submission from each before shrinking the
+    // shared budget, while both published owners remain visible.
+    bool uploaded_first{}, uploaded_second{};
+    for (std::uint32_t attempt = 0; attempt < 32 && !(uploaded_first && uploaded_second); ++attempt)
+    {
+        fixture.PumpBoth(0u, 0u);
+        hs::TextureStreamingLayout layout;
+        std::vector<hs::TextureStreamingGraphBinding> bindings;
+        if (fixture.AddPendingGraph(layout, bindings))
+        {
+            const auto first_index = static_cast<std::size_t>(first.value - 1u);
+            const auto second_index = static_cast<std::size_t>(second.value - 1u);
+            Check(second_index < layout.entries.size(), "both texture owners have graph layout entries");
+            const bool first_pending = layout.entries[first_index].pending;
+            const bool second_pending = layout.entries[second_index].pending;
+            if (first_pending || second_pending)
+            {
+                Check(fixture.Streaming().View(first).resource == first_owner &&
+                    fixture.Streaming().View(second).resource == second_owner,
+                    "shared replacement candidates stay hidden before chunk completion");
+                const auto completion = fixture.SubmitPending();
+                fixture.Wait(completion);
+                uploaded_first |= first_pending && fixture.Status(first).uploads > first_uploads;
+                uploaded_second |= second_pending && fixture.Status(second).uploads > second_uploads;
+                Check(fixture.Streaming().View(first).resource == first_owner &&
+                    fixture.Streaming().View(second).resource == second_owner,
+                    "completed shared chunks do not replace either published owner");
+                fixture.PumpBoth(0u, 0u);
+                Check(fixture.Status(first).actual_resident_mip == coarse &&
+                    fixture.Status(second).actual_resident_mip == coarse &&
+                    fixture.Status(first).publications == first_publications &&
+                    fixture.Status(second).publications == second_publications,
+                    "fine transactions remain unpublished after their first chunks");
+            }
+        }
+        fixture.NextFrame();
+    }
+    Check(uploaded_first && uploaded_second,
+          "both owners receive a real upload chunk under the shared initial budget");
+
+    // The full fine target no longer fits. Existing published detail remains
+    // usable; the supported target is clamped to that resident mip while the
+    // now-infeasible replacement reads are retired.
+    constexpr std::uint64_t reduced_host_budget = 7u * 1024u;
+    fixture.SetHostBudget(reduced_host_budget);
+    bool settled_at_published_mips{};
+    for (std::uint32_t attempt = 0; attempt < 32; ++attempt)
+    {
+        fixture.PumpBoth(0u, 0u);
+        const auto first_status = fixture.Status(first);
+        const auto second_status = fixture.Status(second);
+        Check(first_status.effective_desired_mip == coarse &&
+            second_status.effective_desired_mip == coarse,
+            "reduced shared host budget clamps both fine demands to their published mip");
+        if (!first_status.pending && !second_status.pending &&
+            first_status.actual_resident_mip == coarse &&
+            second_status.actual_resident_mip == coarse)
+        {
+            settled_at_published_mips = true;
+            break;
+        }
+
+        hs::TextureStreamingLayout layout;
+        std::vector<hs::TextureStreamingGraphBinding> bindings;
+        if (fixture.AddPendingGraph(layout, bindings))
+        {
+            const auto second_index = static_cast<std::size_t>(second.value - 1u);
+            Check(second_index < layout.entries.size(), "both reduced-budget owners retain graph entries");
+            Check(fixture.Streaming().View(first).resource == first_owner &&
+                fixture.Streaming().View(second).resource == second_owner,
+                "both published owners remain visible while admitted chunks retire");
+            const auto completion = fixture.SubmitPending();
+            fixture.Wait(completion);
+            Check(fixture.Streaming().View(first).resource == first_owner &&
+                fixture.Streaming().View(second).resource == second_owner,
+                "reduced-budget cleanup preserves both owners through real queue completion");
+        }
+        fixture.NextFrame();
+    }
+    Check(settled_at_published_mips && !fixture.Io().HasPendingReads(),
+          "both infeasible refinements reach a bounded no-pending supported state");
+    for (const auto id : {first, second})
+    {
+        const auto status = fixture.Status(id);
+        Check(!status.pending && status.actual_resident_mip == coarse &&
+            status.publications == (id == first ? first_publications : second_publications),
+            "capped demand keeps the existing publication without scheduling an impossible replacement");
+        Check(fixture.Streaming().View(id).resource == (id == first ? first_owner : second_owner),
+              "each old published owner remains the sampled resource under the smaller budget");
+        fixture.ReadbackPublished(id, coarse);
+    }
+    Check(fixture.Residency().HostAdmissionFacts().held_bytes <= reduced_host_budget,
+          "shared host staging accounting returns below the reduced budget");
+
+    // Restoring the original budget must resume the still-requested fine mip
+    // for both owners; a temporary clamp must not silently discard demand or
+    // let one owner monopolize shared admission.
+    fixture.SetHostBudget(original_host_budget);
+    SettleBothTargets(fixture, first, second, 0u);
+    for (const auto id : {first, second})
+    {
+        const auto status = fixture.Status(id);
+        Check(status.effective_desired_mip == 0u && status.actual_resident_mip == 0u &&
+            status.publications > (id == first ? first_publications : second_publications),
+            "restored shared budget republishes the original fine target");
+        Check(fixture.Streaming().View(id).resource != (id == first ? first_owner : second_owner),
+              "fine replacement becomes visible only after its queue completion");
+        fixture.ReadbackPublished(id, 0u);
+    }
+    Check(!fixture.Io().HasPendingReads() &&
+        fixture.Residency().HostAdmissionFacts().held_bytes <= original_host_budget,
+        "restored-budget refinement drains source reads and shared host holds");
+    fixture.Drain();
 }
 } // namespace
 
-void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
-                               hs::RenderGraphQueueExecutor &executor)
+void RunTextureStreamingSingleNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
+                                     hs::RenderGraphQueueExecutor &executor)
 {
     TextureStreamFixture fixture(device, allocator, executor);
     const auto fine_mip = 0u;
@@ -576,6 +858,13 @@ void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocat
           "refinement after cancelled request publishes a new software generation");
     fixture.ReadbackPublished(fine_mip);
     fixture.Drain();
+}
+
+void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
+                               hs::RenderGraphQueueExecutor &executor)
+{
+    RunTextureStreamingSingleNative(device, allocator, executor);
+    RunSharedHostBudgetTextureStreamingNative(device, allocator, executor);
 }
 
 void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,

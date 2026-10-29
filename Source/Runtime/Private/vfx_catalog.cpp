@@ -197,31 +197,28 @@ Result VfxCatalog::SetPreparedReplacements(VfxPreparedLegacyEvent &prepared,
         prepared.mesh_replaced == mesh_replaced)
         return Result::Success();
 
+    std::size_t maximum_required_count{}, required_count{}, count{};
     for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
+    {
         if (emitter_index < prepared.definition->first_emitter ||
             emitter_index - prepared.definition->first_emitter >= prepared.definition->emitter_count)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Prepared legacy VFX emitter index is invalid.");
-
-    prepared.particles_replaced = particles_replaced;
-    prepared.mesh_replaced = mesh_replaced;
-    prepared.maximum_required_count = 0;
-    prepared.required_count = 0;
-    prepared.count = 0;
-    prepared.admitted_count = 0;
-    for (const auto emitter_index : emitter_indices.subspan(prepared.first_index, prepared.index_count))
-    {
         const auto &emitter = image_.emitters[emitter_index];
         const bool optional = prepared.decorative && emitter.renderer != VfxRenderer::Ground;
-        if (!optional) ++prepared.maximum_required_count;
+        if (!optional) ++maximum_required_count;
         if (particles_replaced ||
             (mesh_replaced && emitter.renderer == VfxRenderer::Mesh &&
              (emitter.primitive != VfxPrimitive::ShockShell ||
               prepared.event->asset.value == kExplosiveArrowMain.value)))
             continue;
-        if (optional) ++prepared.count;
-        else ++prepared.required_count;
+        if (optional) ++count;
+        else ++required_count;
     }
-    prepared.admitted_count = prepared.count;
+    prepared.particles_replaced = particles_replaced;
+    prepared.mesh_replaced = mesh_replaced;
+    prepared.maximum_required_count = maximum_required_count;
+    prepared.required_count = required_count;
+    prepared.count = prepared.admitted_count = count;
     prepared.replacement_counts_ready = true;
     return Result::Success();
 }

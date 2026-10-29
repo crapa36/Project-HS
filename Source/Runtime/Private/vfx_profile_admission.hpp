@@ -5,6 +5,7 @@
 #include <hs/runtime/vfx_image.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 
@@ -67,6 +68,10 @@ namespace hs::runtime_detail
     case VfxOutputProfile::RibbonAdd:
     case VfxOutputProfile::RibbonOit:
         return static_cast<int>(Profile::Ribbon);
+    case VfxOutputProfile::GroundSdfSoft:
+    case VfxOutputProfile::GroundSdfAdd:
+    case VfxOutputProfile::GroundSdfOit:
+        return static_cast<int>(Profile::Ground);
     case VfxOutputProfile::Light:
         return static_cast<int>(Profile::Light);
     case VfxOutputProfile::Distortion:
@@ -82,6 +87,68 @@ namespace hs::runtime_detail
     }
 }
 
+[[nodiscard]] inline bool HasCompletePreparedGroundCoverage(const VfxImage &image,
+    VfxEffectHandle handle)
+{
+    if (!handle || handle > image.program.effects.size() || handle > image.ground_effect_ranges.size()) return false;
+    const auto range = image.ground_effect_ranges[handle - 1];
+    if (!range.count || !ValidVfxAdmissionRange(range, image.ground_recipes.size())) return false;
+    const auto &effect = image.program.effects[handle - 1];
+    if (effect.handle != handle || !ValidVfxAdmissionRange(effect.sources, image.program.sources.size()))
+        return false;
+
+    std::uint64_t effect_id{};
+    std::size_t handle_matches{}, effect_id_matches{};
+    for (const auto &lookup : image.program.effect_lookup)
+    {
+        if (lookup.handle == handle)
+        {
+            ++handle_matches;
+            effect_id = lookup.effect_id;
+        }
+    }
+    if (handle_matches != 1 || !effect_id) return false;
+    for (const auto &lookup : image.program.effect_lookup)
+        if (lookup.effect_id == effect_id) ++effect_id_matches;
+    if (effect_id_matches != 1) return false;
+
+    std::size_t ground_outputs{};
+    for (std::size_t source_index = effect.sources.first;
+         source_index < static_cast<std::size_t>(effect.sources.first) + effect.sources.count; ++source_index)
+    {
+        const auto &source = image.program.sources[source_index];
+        if (source.effect != handle || !ValidVfxAdmissionRange(source.outputs, image.program.outputs.size()))
+            return false;
+        for (std::size_t output_index = source.outputs.first;
+             output_index < static_cast<std::size_t>(source.outputs.first) + source.outputs.count; ++output_index)
+        {
+            const auto &output = image.program.outputs[output_index];
+            if (!KnownVfxAdmissionOutputProfile(output.profile)) return false;
+            if (VfxAdmissionProfileBit(output.profile) != static_cast<int>(ActiveEffectStore::Profile::Ground))
+                continue;
+            if (output.source != source_index || source.type != VfxSourceType::Direct ||
+                source.authoritative != 0)
+                return false;
+
+            std::size_t matches{};
+            for (const auto &recipe : image.ground_recipes.subspan(range.first, range.count))
+                if (recipe.effect_handle == handle && recipe.source_index == source_index &&
+                    recipe.output_index == output_index && recipe.source_type == source.type &&
+                    recipe.effect_id == effect_id && recipe.effect_lookup_count == 1 &&
+                    recipe.source_stable_id == source.stable_id &&
+                    recipe.profile == output.profile && recipe.payload_kind == effect.payload_kind &&
+                    recipe.timing_kind == effect.timing_kind)
+                {
+                    if (recipe.kind == VfxGroundRecipeKind::SafeSector) return false;
+                    ++matches;
+                }
+            if (matches != 1) return false;
+            ++ground_outputs;
+        }
+    }
+    return ground_outputs != 0 && ground_outputs == range.count;
+}
+
 [[nodiscard]] inline bool HasPreparedVfxAdmissionProfile(const VfxImage &image,
     VfxEffectHandle handle, ActiveEffectStore::Profile profile) noexcept
 {
@@ -93,6 +160,10 @@ namespace hs::runtime_detail
             image.ribbon_effect_recipes[h - 1].handle == handle &&
             image.ribbon_effect_recipes[h - 1].valid_handle &&
             image.ribbon_effect_recipes[h - 1].sources.count != 0;
+    case ActiveEffectStore::Profile::Ground:
+        return h != 0 && h <= image.ground_effect_ranges.size() &&
+            image.ground_effect_ranges[h - 1].count != 0 &&
+            ValidVfxAdmissionRange(image.ground_effect_ranges[h - 1], image.ground_recipes.size());
     case ActiveEffectStore::Profile::Light:
         return h != 0 && h <= image.light_effect_ranges.size() &&
             image.light_effect_ranges[h - 1].count != 0 &&
@@ -124,7 +195,7 @@ namespace hs::runtime_detail
         return 0;
 
     constexpr std::array candidates{
-        Profile::Ribbon, Profile::Light, Profile::Distortion,
+        Profile::Ground, Profile::Ribbon, Profile::Light, Profile::Distortion,
         Profile::Decal, Profile::Volume, Profile::Screen
     };
     std::uint16_t prepared_mask = 0;
@@ -140,7 +211,11 @@ namespace hs::runtime_detail
             const auto output_bit = static_cast<unsigned>(profile);
             return output_bit < 32 && (authored_profiles & (1u << output_bit)) != 0;
         };
-        if (candidate == Profile::Ribbon
+        if (candidate == Profile::Ground
+            ? (!has_authored_profile(VfxOutputProfile::GroundSdfSoft) &&
+                !has_authored_profile(VfxOutputProfile::GroundSdfAdd) &&
+                !has_authored_profile(VfxOutputProfile::GroundSdfOit))
+            : candidate == Profile::Ribbon
             ? (!has_authored_profile(VfxOutputProfile::RibbonAdd) &&
                 !has_authored_profile(VfxOutputProfile::RibbonOit))
             : !has_authored_profile(candidate == Profile::Light ? VfxOutputProfile::Light :
@@ -155,6 +230,15 @@ namespace hs::runtime_detail
     const auto &effect = image.program.effects[handle - 1];
     if (effect.handle != handle || effect.sources.count == 0 ||
         !ValidVfxAdmissionRange(effect.sources, image.program.sources.size())) return 0;
+
+    const auto ground_bit = static_cast<std::uint16_t>(1u << static_cast<unsigned>(Profile::Ground));
+    const bool ground_candidate = (prepared_mask & ground_bit) != 0;
+    if (ground_candidate && (effect.input_mode != 0 || effect.timing_kind != 0 ||
+        effect.must_match_logic != 0 || effect.readability != VfxRibbonBoundsHash32("cosmetic_event") ||
+        !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
+        !HasCompletePreparedGroundCoverage(image, handle)))
+        prepared_mask = static_cast<std::uint16_t>(prepared_mask & ~ground_bit);
+    if (prepared_mask == 0) return 0;
 
     std::uint16_t found_mask = 0;
     std::uint16_t unsafe_mask = 0;

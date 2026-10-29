@@ -1,4 +1,5 @@
 #include "environment_mesh_cooker.hpp"
+#include "../AssetPipeline/action.hpp"
 #include <hs/core/cooked_format.hpp>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -23,10 +24,10 @@ constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1",
 struct Mesh { std::string name; std::vector<SkinnedVertex> vertices; };
 std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
 {
-    std::ifstream stream(path);
+    std::ifstream stream(asset_pipeline::NativeFilePath(path));
     if (!stream) throw std::runtime_error("Cannot open environment mesh source: " + path.string());
     auto root = nlohmann::json::parse(stream);
-    std::ifstream meadow(path.parent_path() / "meadow_surface_meshes.json");
+    std::ifstream meadow(asset_pipeline::NativeFilePath(path.parent_path() / "meadow_surface_meshes.json"));
     if (!meadow) throw std::runtime_error("Missing authored meadow surface geometry");
     const auto supplement = nlohmann::json::parse(meadow);
     if (supplement.at("version") != 1) throw std::runtime_error("Unsupported meadow geometry version");
@@ -131,11 +132,11 @@ void ValidateEnvironmentMeshes(const std::filesystem::path &source_json) { (void
 void CookEnvironmentMeshes(const std::filesystem::path &source_json, const std::filesystem::path &output)
 {
     const auto meshes = ReadMeshes(source_json);
-    std::filesystem::create_directories(output);
+    std::filesystem::create_directories(asset_pipeline::NativeFilePath(output));
     for (const auto &mesh : meshes)
     {
         const std::array<std::uint32_t,4> header{kMagic,1,static_cast<std::uint32_t>(mesh.vertices.size()),sizeof(SkinnedVertex)};
-        std::ofstream stream(output / ("environment_" + mesh.name + ".meshbin"), std::ios::binary);
+        std::ofstream stream(asset_pipeline::NativeFilePath(output / ("environment_" + mesh.name + ".meshbin")), std::ios::binary);
         stream.write(reinterpret_cast<const char *>(header.data()), sizeof(header));
         stream.write(reinterpret_cast<const char *>(mesh.vertices.data()), static_cast<std::streamsize>(mesh.vertices.size()*sizeof(SkinnedVertex)));
         if (!stream) throw std::runtime_error("Cannot write environment mesh: " + mesh.name);

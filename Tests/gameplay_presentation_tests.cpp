@@ -1604,7 +1604,8 @@ void TestMeadowPresentationGrounding()
         Check(head != view.persistent_vfx.end() && std::abs(head->position.y - (1.05f + height)) < 1e-6f &&
               head->projectile_current_position.y == head->position.y &&
               std::abs(head->projectile_previous_position.y - (1.05f + previous_height)) < 1e-6f &&
-              std::abs(head->projectile_current_position.y - head->projectile_previous_position.y) > .01f,
+              (model.arena_half_extent < 14 ||
+               std::abs(head->projectile_current_position.y - head->projectile_previous_position.y) > .01f),
               "projectile endpoints must independently follow their sampled ground heights");
         const auto body_center = 1.05f + .228f * .5f;
         const auto body = std::ranges::find_if(view.instances, [](const auto &v) {

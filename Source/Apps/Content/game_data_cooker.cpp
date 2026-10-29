@@ -567,9 +567,28 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             effective_speed, skill.range, "skills",
             path + "/parameters/" + range_parameter);
         if (index == 5)
+        {
             RequireProjectileRangeProgress(effective_speed, skill.ricochet_search_radius,
                                            "skills",
                                            path + "/parameters/ricochet_search_radius");
+            // A return can span the arena, independently of authored initial/search ranges.
+            auto minimum = data.arena_boundary.points[0];
+            auto maximum = minimum;
+            for (std::size_t point = 1; point < data.arena_boundary.count; ++point)
+            {
+                const auto &position = data.arena_boundary.points[point];
+                minimum.x = std::min(minimum.x, position.x);
+                minimum.y = std::min(minimum.y, position.y);
+                maximum.x = std::max(maximum.x, position.x);
+                maximum.y = std::max(maximum.y, position.y);
+            }
+            const auto diameter_x = maximum.x - minimum.x;
+            const auto diameter_y = maximum.y - minimum.y;
+            const auto return_range = std::max(0.1f, std::sqrt(
+                diameter_x * diameter_x + diameter_y * diameter_y));
+            RequireProjectileRangeProgress(effective_speed, return_range, "level",
+                                           "$/entries/0/arena/boundary_points_m");
+        }
     }
 
     const auto &upgrade_groups = sources.documents.at("upgrades")["groups"];

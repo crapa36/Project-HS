@@ -1,4 +1,5 @@
 #include "environment_histogram_cooker.hpp"
+#include "../AssetPipeline/action.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -74,7 +75,7 @@ std::vector<F3> LoadLinear(const std::filesystem::path& path)
 {
     DirectX::ScratchImage source, converted;
     DirectX::TexMetadata metadata{};
-    Check(DirectX::LoadFromWICFile(path.c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, source), "Load histogram source");
+    Check(DirectX::LoadFromWICFile(asset_pipeline::NativeFilePath(path).c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, source), "Load histogram source");
     if (metadata.width != kSize || metadata.height != kSize || metadata.arraySize != 1)
         throw std::runtime_error("Histogram source must be 2048x2048: " + path.string());
     Check(DirectX::Convert(source.GetImages(), source.GetImageCount(), metadata,
@@ -269,7 +270,7 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
 std::vector<std::filesystem::path> EnvironmentHistogramInputs(const std::filesystem::path& source)
 {
     const auto manifest_path = source / "project_hs_environment_materials_v9_LEAN.json";
-    std::ifstream input(manifest_path);
+    std::ifstream input(asset_pipeline::NativeFilePath(manifest_path));
     if (!input) throw std::runtime_error("Missing histogram terrain manifest");
     Json manifest; input >> manifest;
     const auto& layers = manifest.at("terrain").at("layers");
@@ -289,7 +290,7 @@ std::vector<std::filesystem::path> EnvironmentHistogramInputs(const std::filesys
 void CookEnvironmentHistogram(const std::filesystem::path& source,
     const std::filesystem::path& output, ID3D11Device* device)
 {
-    std::ifstream input(source/"project_hs_environment_materials_v9_LEAN.json");
+    std::ifstream input(asset_pipeline::NativeFilePath(source/"project_hs_environment_materials_v9_LEAN.json"));
     if (!input) throw std::runtime_error("Missing histogram terrain manifest");
     Json manifest; input>>manifest;
     const auto& layers=manifest.at("terrain").at("layers");
@@ -302,7 +303,7 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
         for (const auto& part:relative) if (part=="..") throw std::runtime_error("Histogram source escapes pack");
         paths[layer]=source/relative;
     }
-    std::filesystem::create_directories(output);
+    std::filesystem::create_directories(asset_pipeline::NativeFilePath(output));
     const auto gaussianPath=output/"environment_terrain_gaussian.dds";
     const auto histogramPath=output/"environment_terrain_histogram.dds";
     const auto qaPath=output/"environment_terrain_histogram.qa.json";
@@ -321,8 +322,8 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
     gaussian.Release();
     Json qa={{"recipe",kRecipe},{"description","Per-channel PCA marginal histogram reconstruction; finite LUT, BC7 and Gaussian tails are approximate. Joint RGB distribution is not guaranteed."},{"layers",Json::array()}};
     for (size_t layer=0;layer<kLayers;++layer) { MeasureDecoded(compressed,layer,data[layer]); qa["layers"].push_back(data[layer].qa); }
-    Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,gaussianPath.c_str()),"Save Gaussian terrain");
-    Check(DirectX::SaveToDDSFile(histogram.GetImages(),histogram.GetImageCount(),histogram.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,histogramPath.c_str()),"Save histogram terrain LUT");
-    { std::ofstream stream(qaPath); stream<<qa.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram QA"); }
+    Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,asset_pipeline::NativeFilePath(gaussianPath).c_str()),"Save Gaussian terrain");
+    Check(DirectX::SaveToDDSFile(histogram.GetImages(),histogram.GetImageCount(),histogram.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,asset_pipeline::NativeFilePath(histogramPath).c_str()),"Save histogram terrain LUT");
+    { std::ofstream stream(asset_pipeline::NativeFilePath(qaPath)); stream<<qa.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram QA"); }
 }
 } // namespace hs::content

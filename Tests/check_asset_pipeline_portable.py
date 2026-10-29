@@ -570,6 +570,8 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         for mode in ('missing', 'corrupt'):
             action = json.loads(action_path.read_text())
             item = next(p for p in action['products'] if p['logical_id'] == 'audio/replacement.wav')
+            current_products = {entry['logical_id']:
+                (build / entry['locator']).read_bytes() for entry in action['products']}
             product = build / item['locator']
             if mode == 'missing':
                 product.unlink()
@@ -588,14 +590,30 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
             assert pointer_path.read_bytes() == previous_pointer
             selected = action_path.read_bytes()
             damaged = product.read_bytes() if product.exists() else None
-            failure = without_preparation(False)
-            assert 'cannot inspect path' in failure or 'upstream product is missing or corrupt' in failure or 'missing regular file' in failure, failure
+            quarantine_root = build / 'CorruptProducts/audio'
+            previous_quarantines = {entry.name for entry in quarantine_root.iterdir()} \
+                if quarantine_root.exists() else set()
+            repaired = run(*producer)
+            assert 'shipping-audio PCM' in repaired, repaired
             assert action_path.read_bytes() == selected and pointer_path.read_bytes() == previous_pointer
-            assert (product.read_bytes() if product.exists() else None) == damaged
+            assert product.is_file() and product.read_bytes() == current_products[item['logical_id']]
+            quarantined = [p for p in quarantine_root.iterdir()
+                           if p.name.startswith(action['product_set_id'] + '-') and
+                           p.name not in previous_quarantines]
+            quarantine_set = next((p for p in quarantined
+                if ((not (p / product.name).exists()) if damaged is None else
+                    ((p / product.name).is_file() and (p / product.name).read_bytes() == damaged))), None)
+            assert quarantine_set is not None, 'corrupt copied-input ProductSet was not quarantined'
+            assert all(
+                (not (quarantine_set / entry['locator'].split('/')[-1]).exists())
+                if damaged is None and entry['logical_id'] == item['logical_id'] else
+                (quarantine_set / entry['locator'].split('/')[-1]).read_bytes() ==
+                    (damaged if entry['logical_id'] == item['logical_id'] else current_products[entry['logical_id']])
+                for entry in action['products']), 'quarantine did not preserve the prior ProductSet state'
+            verify()
             action_path.unlink()
             build_now()
             verify()
-        assert len(list((build / 'CorruptProducts/audio').iterdir())) == 2
         # Missing and same-size corrupt snapshots are repaired even with healthy producer bytes.
         for mode in ('missing', 'corrupt'):
             manifest = json.loads((build / json.loads(pointer_path.read_text())['manifest_locator']).read_text())

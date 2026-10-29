@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 #include <chrono>
 #include <iostream>
 #include <initializer_list>
@@ -175,6 +176,16 @@ void TestSmallFactsIgnoreNoOpMutation()
     const auto no_op = simulation.TickFixed(input, std::chrono::nanoseconds{16'666'667});
     Check(!no_op.world_changed && !world.observation.small_facts_dirty,
           "frozen no-op tick invalidated collection-derived facts");
+    const auto valid_aim = world.actors->player.aim;
+    for (const auto component : {std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::quiet_NaN()})
+    {
+        input.held.aim_world = {component, 0.0f, component};
+        const auto invalid_aim = simulation.TickFixed(input, std::chrono::nanoseconds{16'666'667});
+        Check(!invalid_aim.world_changed && world.actors->player.aim.x == valid_aim.x &&
+              world.actors->player.aim.y == valid_aim.y,
+              "unrepresentable aim changed the last valid firing direction");
+    }
     simulation.ApplyUiAction({hs::UiActionKind::Resume});
     Check(!world.observation.small_facts_dirty,
           "rejected UI action invalidated small facts");
@@ -289,6 +300,65 @@ void InitializePickupFixture(PickupWorld &world, bool auto_collect = false)
     world.rules.growth.experience_pickup_speed = 15.0f;
     world.rules.growth.experience_pickup_radius = 0.5f;
     world.InitializePlayerState();
+}
+
+void TestHomingProjectileUsesRetainedSpeed()
+{
+    using namespace hs;
+    using namespace hs::gameplay_detail;
+    PickupWorld world;
+    InitializePickupFixture(world);
+    world.StartSession();
+
+    PreparedEnemy target;
+    target.id = {77};
+    target.motion.position = {4.0f, 0.0f};
+    target.life.health = 100;
+    target.life.max_health = 100;
+    world.actors->enemies.push_back(std::move(target));
+
+    PreparedProjectile homing;
+    homing.id = {88};
+    homing.motion.speed = 6.0f;
+    homing.motion.velocity = {5.99f, 0.0f}; // Rounded instantaneous velocity differs from assigned speed.
+    homing.motion.remaining_range = 100.0f;
+    homing.combat.homing = true;
+    homing.combat.homing_target = 77;
+    world.actors->projectiles.push_back(std::move(homing));
+    world.next_entity_id = 89;
+
+    const auto assigned_speed_checksum = world.CalculateChecksum();
+    world.actors->projectiles.motion[0].speed = 7.0f;
+    const auto changed_speed_checksum = world.CalculateChecksum();
+    Check(assigned_speed_checksum != changed_speed_checksum,
+          "gameplay checksum includes retained projectile speed when all other state is unchanged");
+
+    world.actors->projectiles.motion[0].speed = 6.0f;
+    world.tick = 1;
+    world.MovementPhase();
+    {
+        const auto projectile = std::as_const(world.actors->projectiles)[0];
+        Check(projectile.motion.velocity.x == 6.0f && projectile.motion.velocity.y == 0.0f &&
+              projectile.motion.position.x == 6.0f * kTickSeconds,
+              "homing movement uses assigned speed instead of the rounded prior velocity magnitude");
+    }
+
+    world.rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed = 8.0f;
+    world.rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed = 0.0f;
+    world.actors->player.upgrades[static_cast<std::size_t>(SkillKind::RicochetArrow)] = 1;
+    {
+        auto ricochet = world.FireProjectile(SkillKind::RicochetArrow, {1.0f, 0.0f}, {1.0f, 0.0f},
+                                         1.0f, EffectOrigin::Original, 1, 1, true);
+        Check(ricochet && ricochet->motion.speed == 8.0f,
+              "Ricochet spawn retains the BasicAttack fallback when authored speed is nonpositive");
+        ricochet->motion.remaining_range = 0.0f;
+    }
+    world.pipeline_phase = SimulationPhaseId::CollisionHit;
+    world.CollisionHitPhase();
+    const auto returned = std::as_const(world.actors->projectiles).back();
+    Check(returned.combat.returning && returned.motion.speed == 8.0f &&
+              returned.motion.velocity.x == -8.0f && returned.motion.velocity.y == 0.0f,
+          "Ricochet return redirect keeps its effective spawn speed when authored speed is nonpositive");
 }
 
 // Pinned pre-N16 traversal is the independent semantic oracle, never a production fallback.
@@ -909,6 +979,9 @@ std::pair<double, std::uint64_t> BenchmarkHitIndex(bool combined_lookup)
 
 int main(int argc, char **argv)
 {
+#ifdef _MSC_VER
+    _set_error_mode(_OUT_TO_STDERR);
+#endif
     using namespace hs;
     using namespace hs::gameplay_detail;
     try
@@ -925,6 +998,7 @@ int main(int argc, char **argv)
         TestActorColumnStorage();
         TestSmallFactsIgnoreNoOpMutation();
         TestSimulationIdentityExhaustion();
+        TestHomingProjectileUsesRetainedSpeed();
         TestPickupWorkMembership();
         TestPickupWorkAgainstOriginalTraversal();
         TestPickupWorkStopRestartAndSparseTick();

@@ -553,6 +553,7 @@ enum class GpuFrameTimingKind : std::uint8_t
     Unavailable,
     ReferenceGraphSpan,
     SourceOutputReady,
+    OutputDependencyInterval,
 };
 
 enum class GpuTimingMode : std::uint8_t { Off, Critical, Full };

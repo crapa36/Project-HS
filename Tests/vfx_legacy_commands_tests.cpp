@@ -1,9 +1,14 @@
 #include "vfx_catalog.hpp"
+#include "../Source/Runtime/Private/vfx_typed_ground_commands.hpp"
+
+#include <hs/runtime/vfx_image_io.hpp>
 
 #include <array>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -174,6 +179,94 @@ void TestLegacyGroundSuppression()
               optional_output.size() == 1 && optional_output.front().renderer == hs::VfxRenderer::Ground,
           "zero optional admission removed protected ground output");
 }
+
+void TestGroundEventAdmissionBoundaries()
+{
+    hs::VfxImageData data;
+    data.program.effects.resize(8);
+    for (std::size_t index = 0; index < data.program.effects.size(); ++index)
+    {
+        data.program.effects[index].handle = static_cast<std::uint32_t>(index + 1);
+        data.program.effects[index].seconds = 1.0f;
+    }
+    data.program.effects[5].timing_kind = 2;
+    data.program.effects[6].input_mode = 1;
+    data.program.effects[7].timing_kind = 1;
+    data.ground_effect_ranges = {{0,1},{1,1},{2,1},{3,1},{4,2},{4,1},{4,1},{4,1}};
+    data.ground_recipes.resize(5);
+    const auto set_recipe = [&](std::size_t index, std::uint64_t id,
+                                hs::VfxOutputProfile profile, std::uint32_t flags)
+    {
+        auto &recipe = data.ground_recipes[index];
+        recipe.effect_id = id;
+        recipe.source_type = hs::VfxSourceType::Direct;
+        recipe.profile = profile;
+        recipe.event_admission_profiles = flags;
+    };
+    set_recipe(0, 0, hs::VfxOutputProfile::GroundSdfAdd, hs::kVfxGroundEventDirectAdd);
+    set_recipe(1, hs::MakeAssetId("particle.skill.charged_shot.pulse").value,
+               hs::VfxOutputProfile::GroundSdfSoft, hs::kVfxGroundEventDirectSoft);
+    set_recipe(2, hs::MakeAssetId("particle.session.wave_start").value,
+               hs::VfxOutputProfile::GroundSdfSoft, hs::kVfxGroundEventDirectSoft);
+    set_recipe(3, 0, hs::VfxOutputProfile::GroundSdfSoft, hs::kVfxGroundEventDirectSoft);
+    set_recipe(4, 0, hs::VfxOutputProfile::GroundSdfAdd, hs::kVfxGroundEventDirectAdd);
+    const auto image = data.View();
+    const auto event = [](std::uint32_t handle, hs::VfxPayload payload)
+    {
+        hs::VfxEventInput input;
+        input.effect_handle = handle;
+        input.payload = std::move(payload);
+        return input;
+    };
+    struct Case
+    {
+        const char *name;
+        hs::VfxEventInput input;
+        bool accepted;
+        bool replace_context_owner{};
+    };
+    const auto owned = [](hs::VfxEventInput input, std::uint64_t owner, hs::Tick start, hs::Tick end)
+    {
+        input.geometry_owner_id = owner;
+        input.geometry_start_tick = start;
+        input.geometry_end_tick = end;
+        return input;
+    };
+    const std::array cases{
+        Case{"Direct Add accepts point", event(1, hs::VfxPointPayload{}), true},
+        Case{"Direct Add accepts context", event(1, hs::VfxContextPayload{42}), true},
+        Case{"Direct Add accepts projectile", event(1, hs::VfxProjectilePayload{}), true},
+        Case{"charged pulse admits soft context and replaces owner", event(2, hs::VfxContextPayload{42}), true, true},
+        Case{"wave start admits soft context without replacement", event(3, hs::VfxContextPayload{42}), true},
+        Case{"charged pulse does not admit point through soft output", event(2, hs::VfxPointPayload{}), false},
+        Case{"generic soft output does not admit point", event(4, hs::VfxPointPayload{}), false},
+        Case{"generic soft output admits circle", event(4, hs::VfxCirclePayload{}), true},
+        Case{"unsupported link payload is rejected", event(4, hs::VfxPayload{hs::VfxLinkPayload{}}), false},
+        Case{"out-of-range prepared recipe range is rejected", event(5, hs::VfxCirclePayload{}), false},
+        Case{"unknown effect handle is rejected", event(99, hs::VfxCirclePayload{}), false},
+        Case{"non-default input mode is rejected", event(7, hs::VfxCirclePayload{}), false},
+        Case{"unsupported timing kind is rejected", event(6, hs::VfxCirclePayload{}), false},
+        Case{"owner-timed event without owner is rejected", event(8, hs::VfxCirclePayload{}), false},
+        Case{"owner-timed event with empty interval is rejected",
+             owned(event(8, hs::VfxCirclePayload{}), 9, 10, 10), false},
+        Case{"owner-timed event with valid interval is admitted",
+             owned(event(8, hs::VfxCirclePayload{}), 9, 10, 11), true},
+    };
+    for (const auto &test : cases)
+    {
+        const auto actual = hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, test.input);
+        const auto check = [&](const char *field, bool expected, bool value)
+        {
+            if (value == expected) return;
+            throw std::runtime_error(std::string("Ground admission case '") + test.name +
+                "' effect_handle=" + std::to_string(test.input.effect_handle) + " " + field +
+                " expected=" + (expected ? "true" : "false") +
+                " actual=" + (value ? "true" : "false"));
+        };
+        check("accepted", test.accepted, actual.accepted);
+        check("replace_context_owner", test.replace_context_owner, actual.replace_context_owner);
+    }
+}
 }
 
 int RunVfxLegacyTests()
@@ -182,6 +275,7 @@ int RunVfxLegacyTests()
     {
         TestLegacyMeshReplacement();
         TestLegacyGroundSuppression();
+        TestGroundEventAdmissionBoundaries();
         {
             hs::CookedVfxDefinition definition;
             definition.effect_id = hs::MakeAssetId("fixture.prepared_line").value;

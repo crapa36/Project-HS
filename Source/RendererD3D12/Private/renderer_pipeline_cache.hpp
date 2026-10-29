@@ -36,8 +36,8 @@ struct RendererPipelineCacheStats
 // adapter/driver/schema-specific, bounded at 256 MiB, and atomically replaced.
 // Caller explicitly observes Flush failures before Reset/shutdown. Reset and the
 // destructor perform no IO. Reset retains final diagnostics; Initialize starts
-// fresh diagnostics. All library loads/stores/serialization are serialized
-// so two preparations cannot concurrently Load the same library name.
+// fresh diagnostics. Distinct PSO names may load/create/store concurrently;
+// the cache synchronizes same-name loads and lifecycle mutations.
 class RendererPipelineCache
 {
   public:

@@ -728,7 +728,7 @@ struct ExposureGraphLayout
 
 struct FinalGraphLayout
 {
-    bool reference_timing{}, output_ready{}, presentation{};
+    bool output_dependency_interval{}, output_ready{}, presentation{};
     std::array<std::uint32_t, 2> pass_indices{};
     ResourceVersion back_buffer{};
 };
@@ -833,7 +833,7 @@ struct FrameGraphLayout
         bool bloom{}, outline{}, fxaa_identity{}, post_target_initialization{};
         bool screen_overlay_requested{}, entity_surface{}, decal_commands{};
         bool hdr_motion{}, hdr_dof{}, hdr_grade{}, sdk_presentation{}, devtools_ui{};
-        bool reference_timing{}, output_ready{};
+        bool output_dependency_interval{}, output_ready{};
         bool software_gi{}, contact_shadows{}, adaptive_raster{}, adaptive_compute{}, overlap_ao_csm{};
         GraphicsAoMode ao_mode{};
         GraphicsGiMode gi_mode{};
@@ -1052,7 +1052,7 @@ struct D3D12Renderer::Impl
         std::uint64_t clock_epoch{};
         RenderClockMode clock_mode{RenderClockMode::Scripted};
         std::chrono::nanoseconds simulation_time{};
-        std::size_t capacity{}, slot_count{};
+        std::size_t capacity{}, slot_count{}, entity_surface_bytes{};
         bool submitted{}, initialized{};
     };
     // View targets/history persist across selections; submission slots own the waited banks.

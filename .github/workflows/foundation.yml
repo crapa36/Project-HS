@@ -10,16 +10,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-      - name: Verify core
-        shell: pwsh
-        run: ./Tools/verify.ps1 -Workflow verify-core
-      - name: Retain full core failure details
-        if: failure()
-        shell: pwsh
-        run: Get-Content Build/msvc-core/Testing/Temporary/LastTest.log -ErrorAction SilentlyContinue
-      - name: Verify portable render data and asset pipeline
+      # Portable includes core with the same ABI/options; build and run it once.
+      # verify-core remains the independent minimal dependency qualification.
+      - name: Verify core, portable render data and asset pipeline
         shell: pwsh
         run: ./Tools/cmake.ps1 --workflow --preset verify-portable
+      - name: Retain full failure details
+        if: failure()
+        shell: pwsh
+        run: Get-Content Build/msvc-portable-tests/Testing/Temporary/LastTest.log -ErrorAction SilentlyContinue
 
   runtime-compile:
     runs-on: windows-2022
@@ -43,20 +42,3 @@ jobs:
       - name: Compile runtime and renderer
         shell: pwsh
         run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_runtime hs_renderer_d3d12 --parallel 2
-
-  linux-core:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Install isolated verification tools
-        run: |
-          python3 -m venv "$RUNNER_TEMP/hs-build-tools"
-          "$RUNNER_TEMP/hs-build-tools/bin/pip" install cmake==4.4.4 ninja==1.13.2
-          echo "$RUNNER_TEMP/hs-build-tools/bin" >> "$GITHUB_PATH"
-      - name: Verify core and portable correctness helpers
-        run: cmake --workflow --preset verify-core-linux
-      - name: Verify Linux render data and asset pipeline
-        run: |
-          cmake --preset linux-core -DHS_BUILD_RENDER_DATA_TESTS=ON -DHS_BUILD_ASSET_PIPELINE_TESTS=ON
-          cmake --build Build/linux-core --target all --parallel 2
-          ctest --test-dir Build/linux-core --output-on-failure

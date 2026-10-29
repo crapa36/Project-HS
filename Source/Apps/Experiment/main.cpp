@@ -149,6 +149,12 @@ struct Arguments
         command += L" --generation=" +
                    hs::QuoteWindowsCommandLineArgument(generation_pointer.wstring());
 
+    // A previous run's heartbeat must not start this child's running timeout.
+    const auto heartbeat_path = artifact_directory / "heartbeat.json";
+    std::error_code previous_heartbeat_error;
+    auto last_write = std::filesystem::last_write_time(heartbeat_path, previous_heartbeat_error);
+    if (previous_heartbeat_error) last_write = {};
+
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0,
@@ -161,10 +167,8 @@ struct Arguments
 
     const auto startup_started = std::chrono::steady_clock::now();
     const auto close_process = [&] { CloseHandle(process.hProcess); };
-    const auto heartbeat_path = artifact_directory / "heartbeat.json";
     auto last_progress = startup_started;
     bool running_heartbeat_started{};
-    std::filesystem::file_time_type last_write{};
     for (;;)
     {
         if (WaitForSingleObject(process.hProcess, 100) == WAIT_OBJECT_0) break;

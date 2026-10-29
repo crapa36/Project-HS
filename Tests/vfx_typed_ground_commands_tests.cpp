@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -132,35 +133,6 @@ bool SameGroundSpawn(const hs::runtime_detail::VfxTypedGroundCommand &typed,
         typed.geometry.uniform_gaps.formula != render.geometry.uniform_gaps.formula) return false;
     for (std::size_t i = 0; i < typed.geometry.GapCount(); ++i)
         if (typed.geometry.GapAngleRadians(i) != render.geometry.GapAngleRadians(i, frame_gap_angles)) return false;
-    return true;
-}
-
-bool PreviousGroundAdmission(const hs::VfxImage &image,const hs::VfxEventInput &input)
-{
-    const bool point=std::holds_alternative<hs::VfxPointPayload>(input.payload);
-    const bool context=std::holds_alternative<hs::VfxContextPayload>(input.payload);
-    const bool projectile=std::holds_alternative<hs::VfxProjectilePayload>(input.payload);
-    if(!point&&!context&&!projectile&&
-       !std::holds_alternative<hs::VfxCirclePayload>(input.payload)&&
-       !std::holds_alternative<hs::VfxLinePayload>(input.payload)&&
-       !std::holds_alternative<hs::VfxConePayload>(input.payload)&&
-       !std::holds_alternative<hs::VfxRingGapsPayload>(input.payload)&&
-       !std::holds_alternative<hs::VfxSafeSectorPayload>(input.payload))return false;
-    if(!input.effect_handle||input.effect_handle>image.program.effects.size())return false;
-    const auto &effect=image.program.effects[input.effect_handle-1];
-    if(input.effect_handle>image.ground_effect_ranges.size())return false;
-    const auto range=image.ground_effect_ranges[input.effect_handle-1];
-    if(range.first>image.ground_recipes.size()||range.count>image.ground_recipes.size()-range.first||!range.count)return false;
-    const auto prepared=image.ground_recipes.subspan(range.first,range.count);
-    const bool charged=context&&prepared.front().effect_id==Hash64("particle.skill.charged_shot.pulse");
-    const bool wave=context&&prepared.front().effect_id==Hash64("particle.session.wave_start");
-    const bool owned=input.geometry_owner_id!=0&&input.geometry_end_tick>input.geometry_start_tick;
-    if(effect.input_mode!=0||(effect.timing_kind==1?!owned:
-       (effect.timing_kind!=0||!std::isfinite(effect.seconds)||effect.seconds<=0)))return false;
-    if(point||context||projectile)
-        if(!std::ranges::any_of(prepared,[&](const auto &recipe){return recipe.source_type==hs::VfxSourceType::Direct&&
-            (recipe.profile==hs::VfxOutputProfile::GroundSdfAdd||
-             ((charged||wave)&&recipe.profile==hs::VfxOutputProfile::GroundSdfSoft));}))return false;
     return true;
 }
 
@@ -2440,69 +2412,6 @@ void GroundBirthSuppressionMatchesAcceptedEventOutputs()
             "wave-start soft ring/fill suppression diverged from accepted birth outputs");
 }
 
-void GroundEventAdmissionMatchesPreviousRules()
-{
-    hs::VfxImageData data;
-    data.program.effects.resize(9);
-    for(std::size_t i=0;i<data.program.effects.size();++i)
-    {
-        data.program.effects[i].handle=static_cast<std::uint32_t>(i+1);
-        data.program.effects[i].seconds=1.0f;
-    }
-    data.program.effects[5].timing_kind=2;
-    data.program.effects[6].input_mode=1;
-    data.program.effects[7].timing_kind=1;
-    data.program.effects[8].timing_kind=1;
-    data.ground_effect_ranges={{0,1},{1,1},{2,1},{3,1},{4,2},{4,1},{4,1},{4,1},{4,1}};
-    data.ground_recipes.resize(5);
-    const auto row=[&](std::size_t index,std::uint64_t id,hs::VfxOutputProfile profile,
-                       std::uint32_t flags){
-        auto &recipe=data.ground_recipes[index];recipe.effect_id=id;recipe.source_type=hs::VfxSourceType::Direct;
-        recipe.profile=profile;recipe.event_admission_profiles=flags;
-    };
-    row(0,0,hs::VfxOutputProfile::GroundSdfAdd,hs::kVfxGroundEventDirectAdd);
-    row(1,Hash64("particle.skill.charged_shot.pulse"),hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
-    row(2,Hash64("particle.session.wave_start"),hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
-    row(3,0,hs::VfxOutputProfile::GroundSdfSoft,hs::kVfxGroundEventDirectSoft);
-    row(4,0,hs::VfxOutputProfile::GroundSdfAdd,hs::kVfxGroundEventDirectAdd);
-    const auto image=data.View();
-    const auto event=[](std::uint32_t handle,hs::VfxPayload payload){
-        hs::VfxEventInput input;input.effect_handle=handle;input.payload=std::move(payload);return input;
-    };
-    std::vector<hs::VfxEventInput> inputs{
-        event(1,hs::VfxPointPayload{}),event(1,hs::VfxContextPayload{42}),
-        event(1,hs::VfxProjectilePayload{}),event(2,hs::VfxContextPayload{42}),
-        event(3,hs::VfxContextPayload{42}),event(2,hs::VfxPointPayload{}),
-        event(4,hs::VfxPointPayload{}),event(4,hs::VfxCirclePayload{}),
-        event(4,hs::VfxLinePayload{}),event(4,hs::VfxConePayload{}),
-        event(4,hs::VfxRingGapsPayload{}),event(4,hs::VfxSafeSectorPayload{}),
-        event(4,hs::VfxPayload{hs::VfxLinkPayload{}}),event(5,hs::VfxCirclePayload{}),
-        event(6,hs::VfxCirclePayload{}),event(7,hs::VfxCirclePayload{}),
-        event(8,hs::VfxCirclePayload{}),event(9,hs::VfxCirclePayload{})};
-    inputs[16].geometry_owner_id=9;inputs[16].geometry_start_tick=10;inputs[16].geometry_end_tick=11;
-    inputs[17].geometry_owner_id=9;inputs[17].geometry_start_tick=10;inputs[17].geometry_end_tick=10;
-    for(const auto &input:inputs)
-    {
-        const bool expected=PreviousGroundAdmission(image,input);
-        const auto actual=hs::runtime_detail::ClassifyVfxTypedEventGroundAdmission(image,input);
-        Require(actual.accepted==expected,"prepared Ground event admission diverged from previous policy");
-        Require(actual.replace_context_owner==(expected&&input.effect_handle==2&&
-                    std::holds_alternative<hs::VfxContextPayload>(input.payload)),
-                "charged-context replacement classification changed");
-    }
-    auto prepared=PreparedImage(Program());
-    std::uint32_t expected_profiles{};
-    for(const auto &recipe:prepared.ground_recipes)
-    {
-        if(recipe.source_type!=hs::VfxSourceType::Direct)continue;
-        if(recipe.profile==hs::VfxOutputProfile::GroundSdfAdd)expected_profiles|=hs::kVfxGroundEventDirectAdd;
-        if(recipe.profile==hs::VfxOutputProfile::GroundSdfSoft)expected_profiles|=hs::kVfxGroundEventDirectSoft;
-    }
-    Require(!prepared.ground_recipes.empty()&&
-            prepared.ground_recipes.front().event_admission_profiles==expected_profiles,
-            "ground effect admission summary was not prepared from direct outputs");
-}
-
 void GroundAdmissionProducerCoversPreparedRoutes()
 {
     const auto event = [] {
@@ -3224,7 +3133,6 @@ int RunVfxGroundTests()
         ChargedPulseUsesContextRatioAndAuthoredGroundOutputs();
         ChargedPulseRejectsMalformedContextAndCookedContract();
         GroundBirthSuppressionMatchesAcceptedEventOutputs();
-        GroundEventAdmissionMatchesPreviousRules();
         GroundAdmissionProducerCoversPreparedRoutes();
         CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable();
         PersistentStatusPolarRuneUsesOwnerFootprintAndClock();

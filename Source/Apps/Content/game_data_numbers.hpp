@@ -27,7 +27,7 @@ inline float CheckedPositiveFloat(double value)
     return converted;
 }
 
-// shortcut: necessary axis check only; complete direction/homing admission before deriving a lifetime bound.
+// Constant assigned speed and a finite normalized direction; each range leg is checked separately.
 inline bool MakesFiniteProjectileRangeProgress(float speed, float max_leg_range) noexcept
 {
     if (!(max_leg_range > 0.0f))
@@ -38,8 +38,9 @@ inline bool MakesFiniteProjectileRangeProgress(float speed, float max_leg_range)
     if (!std::isfinite(speed_squared))
         return false;
 
-    const auto step = speed * tick_seconds;
-    const auto step_length = std::sqrt(step * step);
+    // A finite normalized 2D direction has a component of at least one half.
+    const auto minimum_component = (speed * 0.5f) * tick_seconds;
+    const auto step_length = std::sqrt(minimum_component * minimum_component);
     return step_length > 0.0f &&
            max_leg_range - step_length < max_leg_range;
 }

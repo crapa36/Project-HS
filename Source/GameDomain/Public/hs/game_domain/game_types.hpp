@@ -18,7 +18,7 @@ inline constexpr std::size_t kStatCount = 6;
 inline constexpr std::size_t kEnemyArchetypeCount = 6;
 inline constexpr std::size_t kPickupKindCount = 4;
 inline constexpr std::uint32_t kSimulationVersion = 6;
-inline constexpr std::uint32_t kGameplayHashVersion = 7;
+inline constexpr std::uint32_t kGameplayHashVersion = 8;
 inline constexpr std::uint32_t kDeterminismProfile = 1;
 using RelicMask = std::uint32_t;
 static_assert(kRelicCount < 32);

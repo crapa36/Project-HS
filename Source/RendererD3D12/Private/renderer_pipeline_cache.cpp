@@ -12,6 +12,7 @@
 #include <iterator>
 #include <mutex>
 #include <new>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -35,6 +36,20 @@ void RecordCacheDuration(CacheClock::time_point start, std::uint64_t &total,
     total += ns;
     if (maximum) *maximum = std::max(*maximum, ns);
 }
+std::uint64_t CacheElapsed(CacheClock::time_point start) noexcept
+{
+    return start == CacheClock::time_point{} ? 0 : static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(CacheClock::now() - start).count());
+}
+template<class F> struct ScopeExit
+{
+    F action;
+    explicit ScopeExit(F value):action(std::move(value)) {}
+    ScopeExit(const ScopeExit &)=delete;
+    ScopeExit &operator=(const ScopeExit &)=delete;
+    ~ScopeExit() noexcept { action(); }
+};
+template<class F> ScopeExit<F> Finally(F action) { return ScopeExit<F>(std::move(action)); }
 struct CacheDuration
 {
     CacheClock::time_point start;
@@ -275,7 +290,11 @@ bool Unsupported(HRESULT native) { return native==DXGI_ERROR_UNSUPPORTED || nati
 
 struct RendererPipelineCache::Impl
 {
+    // Lifecycle mutations take this exclusively; PSO creation holds a shared
+    // lease so Reset/Flush cannot release device/library/shader owners mid-call.
+    mutable std::shared_mutex lifecycle_mutex;
     mutable std::mutex mutex;
+    std::unordered_map<std::wstring,std::shared_ptr<std::mutex>> key_mutexes;
     std::atomic_bool timing_enabled{};
     ComPtr<ID3D12Device> device;
     // Declaration/destruction order preserves the borrowed input blob until both
@@ -288,6 +307,18 @@ struct RendererPipelineCache::Impl
     std::array<std::byte,32> identity{};
     RendererPipelineCacheStats stats;
     bool dirty{};
+    std::shared_ptr<std::mutex> KeyMutex(const std::wstring &name)
+    {
+        auto &entry=key_mutexes[name];
+        if(!entry) entry=std::make_shared<std::mutex>();
+        return entry;
+    }
+    void ReleaseKeyMutex(const std::wstring &name,const std::shared_ptr<std::mutex> &entry) noexcept
+    {
+        const auto found=key_mutexes.find(name);
+        if(found!=key_mutexes.end() && found->second==entry && entry.use_count()==2)
+            key_mutexes.erase(found);
+    }
     std::array<std::byte,32> ShaderDigest(D3D12_SHADER_BYTECODE shader) const
     {
         if(shader.BytecodeLength && !shader.pShaderBytecode) throw KeyError{};
@@ -298,6 +329,7 @@ struct RendererPipelineCache::Impl
     }
     void Clear(bool clear_stats) noexcept
     {
+        key_mutexes.clear();
         library1.Reset(); library.Reset(); loaded_blob.clear(); shader_owners.clear(); device.Reset(); file.clear();
         identity={}; dirty=false; timing_enabled.store(false, std::memory_order_relaxed);
         if(clear_stats) stats={};
@@ -344,23 +376,32 @@ struct RendererPipelineCache::Impl
         if(!valid) { Discard(); return; }
         loaded_blob.assign(blob.begin(),blob.end()); stats.loaded_bytes=loaded_blob.size();
     }
-    void Store(const std::wstring &name,IUnknown *created) noexcept
+    HRESULT Store(const std::wstring &name,IUnknown *created,ID3D12PipelineLibrary *target) noexcept
     {
-        CacheDuration timing(stats.capture_timings, stats.library_store_ns, &stats.library_store_max_ns);
         ComPtr<ID3D12PipelineState> pipeline;
         auto native=created->QueryInterface(IID_PPV_ARGS(pipeline.ReleaseAndGetAddressOf()));
-        if(SUCCEEDED(native)) native=library->StorePipeline(name.c_str(),pipeline.Get());
-        if(FAILED(native)) { ++stats.store_failures; stats.last_cache_hresult=std::int32_t(native); }
-        else { ++stats.stores; dirty=true; }
+        if(SUCCEEDED(native)) native=target->StorePipeline(name.c_str(),pipeline.Get());
+        return native;
     }
 };
 RendererPipelineCache::RendererPipelineCache():impl_(std::make_unique<Impl>()) {}
 RendererPipelineCache::~RendererPipelineCache()=default;
-void RendererPipelineCache::Reset() noexcept { std::lock_guard lock(impl_->mutex); impl_->Clear(false); }
-RendererPipelineCacheStats RendererPipelineCache::Stats() const { std::lock_guard lock(impl_->mutex); return impl_->stats; }
+void RendererPipelineCache::Reset() noexcept
+{
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
+    std::lock_guard lock(impl_->mutex);
+    impl_->Clear(false);
+}
+RendererPipelineCacheStats RendererPipelineCache::Stats() const
+{
+    std::shared_lock lifecycle(impl_->lifecycle_mutex);
+    std::lock_guard lock(impl_->mutex);
+    return impl_->stats;
+}
 
 Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adapter,std::filesystem::path directory,bool capture_timings)
 {
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex); impl_->Clear(true);
     impl_->stats.capture_timings=capture_timings;
     impl_->timing_enabled.store(capture_timings, std::memory_order_relaxed);
@@ -432,6 +473,7 @@ Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adap
 }
 Result RendererPipelineCache::RegisterRootSignature(ID3D12RootSignature *root,std::span<const std::byte> serialized)
 {
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
     if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before registering roots.");
     if(!root || serialized.empty()) return Failure(ErrorCode::InvalidArgument,"Root registration requires native root and exact serialized bytes.");
@@ -447,6 +489,7 @@ Result RendererPipelineCache::RegisterRootSignature(ID3D12RootSignature *root,st
 Result RendererPipelineCache::RegisterShaderOwner(std::span<const std::byte> shader,
     std::string_view expected_digest,bool bytes_already_verified)
 {
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
     if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Register shader digest before initializing pipeline cache.");
     if(!impl_->library) return Result::Success();
@@ -481,12 +524,14 @@ Result RendererPipelineCache::RegisterShaderOwner(std::span<const std::byte> sha
 }
 void RendererPipelineCache::ClearShaderOwners() noexcept
 {
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex); impl_->shader_owners.clear();
 }
 HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
     const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-    std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    std::shared_lock lifecycle(impl_->lifecycle_mutex);
+    std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
     RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
@@ -495,35 +540,73 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library && output?GraphicsName(*description,root,false,{},
+        const bool use_library=impl_->library && output;
+        const auto name=use_library?GraphicsName(*description,root,false,{},
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
-        if(impl_->library && output)
+        if(!use_library)
         {
-            {
-                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
-                native=impl_->library->LoadGraphicsPipeline(name.c_str(),description,iid,output);
-            }
+            ++impl_->stats.native_creates;
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            return impl_->device->CreateGraphicsPipelineState(description,iid,output);
+        }
+        auto gate=impl_->KeyMutex(name);
+        auto device=impl_->device;
+        auto library=impl_->library;
+        state.unlock();
+        std::unique_lock key_lock(*gate);
+        auto release_gate=Finally([&] {
+            if(key_lock.owns_lock()) key_lock.unlock();
+            std::lock_guard lock(impl_->mutex);
+            impl_->ReleaseKeyMutex(name,gate);
+        });
+        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=library->LoadGraphicsPipeline(name.c_str(),description,iid,output);
+        const auto load_ns=CacheElapsed(load_start);
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_load_ns+=load_ns;
+            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
+            ++impl_->stats.native_creates;
         }
-        ++impl_->stats.native_creates;
+        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=device->CreateGraphicsPipelineState(description,iid,output);
+        const auto create_ns=CacheElapsed(create_start);
         {
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
-            native=impl_->device->CreateGraphicsPipelineState(description,iid,output);
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.native_create_ns+=create_ns;
+            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
         }
-        if(SUCCEEDED(native) && output && *output && impl_->library) impl_->Store(name,static_cast<IUnknown *>(*output));
+        if(SUCCEEDED(native) && output && *output)
+        {
+            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+            const auto stored=impl_->Store(name,static_cast<IUnknown *>(*output),library.Get());
+            const auto store_ns=CacheElapsed(store_start);
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_store_ns+=store_ns;
+            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
+            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
+            else { ++impl_->stats.stores; impl_->dirty=true; }
+        }
         return native;
     }
-    catch(const KeyError &) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); return E_INVALIDARG; }
+    catch(const KeyError &)
+    {
+        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        return E_INVALIDARG;
+    }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
     catch(...) { return E_FAIL; }
 }
 HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
     const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-    std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    std::shared_lock lifecycle(impl_->lifecycle_mutex);
+    std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
     RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
@@ -532,28 +615,65 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library && output?ComputeName(*description,root,
+        const bool use_library=impl_->library && output;
+        const auto name=use_library?ComputeName(*description,root,
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
-        if(impl_->library && output)
+        if(!use_library)
         {
-            {
-                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
-                native=impl_->library->LoadComputePipeline(name.c_str(),description,iid,output);
-            }
+            ++impl_->stats.native_creates;
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            return impl_->device->CreateComputePipelineState(description,iid,output);
+        }
+        auto gate=impl_->KeyMutex(name);
+        auto device=impl_->device;
+        auto library=impl_->library;
+        state.unlock();
+        std::unique_lock key_lock(*gate);
+        auto release_gate=Finally([&] {
+            if(key_lock.owns_lock()) key_lock.unlock();
+            std::lock_guard lock(impl_->mutex);
+            impl_->ReleaseKeyMutex(name,gate);
+        });
+        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=library->LoadComputePipeline(name.c_str(),description,iid,output);
+        const auto load_ns=CacheElapsed(load_start);
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_load_ns+=load_ns;
+            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
+            ++impl_->stats.native_creates;
         }
-        ++impl_->stats.native_creates;
+        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=device->CreateComputePipelineState(description,iid,output);
+        const auto create_ns=CacheElapsed(create_start);
         {
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
-            native=impl_->device->CreateComputePipelineState(description,iid,output);
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.native_create_ns+=create_ns;
+            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
         }
-        if(SUCCEEDED(native) && output && *output && impl_->library) impl_->Store(name,static_cast<IUnknown *>(*output));
+        if(SUCCEEDED(native) && output && *output)
+        {
+            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+            const auto stored=impl_->Store(name,static_cast<IUnknown *>(*output),library.Get());
+            const auto store_ns=CacheElapsed(store_start);
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_store_ns+=store_ns;
+            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
+            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
+            else { ++impl_->stats.stores; impl_->dirty=true; }
+        }
         return native;
     }
-    catch(const KeyError &) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); return E_INVALIDARG; }
+    catch(const KeyError &)
+    {
+        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        return E_INVALIDARG;
+    }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
     catch(...) { return E_FAIL; }
 }
@@ -561,7 +681,8 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
     D3D12_SHADER_BYTECODE mesh_shader,ID3D12PipelineState **output)
 {
     const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
-    std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    std::shared_lock lifecycle(impl_->lifecycle_mutex);
+    std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
     RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!device) return E_INVALIDARG;
@@ -578,37 +699,74 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library1 && output?GraphicsName(graphics,root,true,mesh_shader,
+        const bool use_library=impl_->library1 && output;
+        const auto name=use_library?GraphicsName(graphics,root,true,mesh_shader,
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         MeshStream stream(graphics,mesh_shader);
         const D3D12_PIPELINE_STATE_STREAM_DESC description{sizeof(stream),&stream};
-        if(impl_->library1 && output)
+        if(!use_library)
         {
-            {
-                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
-                native=impl_->library1->LoadPipeline(name.c_str(),&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
-            }
+            ++impl_->stats.uncached_mesh_creates;
+            ++impl_->stats.native_creates;
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            return device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+        }
+        auto gate=impl_->KeyMutex(name);
+        auto library=impl_->library1;
+        state.unlock();
+        std::unique_lock key_lock(*gate);
+        auto release_gate=Finally([&] {
+            if(key_lock.owns_lock()) key_lock.unlock();
+            std::lock_guard lock(impl_->mutex);
+            impl_->ReleaseKeyMutex(name,gate);
+        });
+        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=library->LoadPipeline(name.c_str(),&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+        const auto load_ns=CacheElapsed(load_start);
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_load_ns+=load_ns;
+            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
+            ++impl_->stats.native_creates;
         }
-        else ++impl_->stats.uncached_mesh_creates;
-        ++impl_->stats.native_creates;
+        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        native=device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+        const auto create_ns=CacheElapsed(create_start);
         {
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
-            native=device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.native_create_ns+=create_ns;
+            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
         }
-        if(SUCCEEDED(native) && output && *output && impl_->library1) impl_->Store(name,*output);
+        if(SUCCEEDED(native) && output && *output)
+        {
+            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+            const auto stored=impl_->Store(name,*output,library.Get());
+            const auto store_ns=CacheElapsed(store_start);
+            std::lock_guard lock(impl_->mutex);
+            impl_->stats.library_store_ns+=store_ns;
+            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
+            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
+            else { ++impl_->stats.stores; impl_->dirty=true; }
+        }
         return native;
     }
-    catch(const KeyError &) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); return E_INVALIDARG; }
+    catch(const KeyError &)
+    {
+        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        return E_INVALIDARG;
+    }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
     catch(...) { return E_FAIL; }
 }
 Result RendererPipelineCache::Flush()
 {
     const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+    std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
     RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before flushing.");

@@ -3,6 +3,49 @@
 Use the smallest tool that answers the current question. Installations and raw
 evidence are isolated under ignored `Build/tooling`; none is a game dependency.
 
+## Desloppify: on-demand cleanup candidates
+
+Local Python 3.13 environment: `Build/tooling/desloppify/.venv`. Installed
+`desloppify[full]` 1.0 from upstream commit
+`3a7735d531a96b6a226bfbdc9fd662b14195f857`; the official Codex skill is
+`.agents/skills/desloppify/SKILL.md`. No global PATH, CI hook, automatic review
+runner, or game dependency was added.
+
+```powershell
+& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx scan --path . --profile ci --no-badge
+& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx status
+& ./Build/tooling/desloppify/.venv/Scripts/desloppify.exe --lang cxx next
+```
+
+Run from the repository root. The initial scan used the existing validation
+compile database copied to ignored `compile_commands.json`; refresh that copy
+after relevant CMake changes. Local `.desloppify` state excludes build, external,
+Git and agent metadata. Explicit test-zone overrides correct upstream's failure
+to recognize `Tests/` and `_tests.cpp`; classify newly added tests with `zone set`.
+The first scan covered 530 production and 89 test C/C++ files. `ci` skips duplicate
+and subjective review phases; its score is not engine qualification.
+
+The installed C++ extractor needed one local fix: remove bare `:` from its return
+type separator character class (`[\s*&:]+` -> `[\s*&]+`). Qualified `::` tokens
+remain supported. Otherwise `material_ir.cpp` case labels caused catastrophic
+regex backtracking. Existing extractor/compile-database/dependency tests: 8 passed.
+Full Source extraction completed in 1.74 s (529 files, 4,566 functions); the
+original timed out, so whole-project old/new extraction equivalence is unproven.
+Patch: `Build/tooling/desloppify/local-cxx-extractor.patch`. Reinstallation removes
+this local fix. The AST grammar was downloaded into the host user's
+tree-sitter-language-pack cache; a sandbox with a different AppData cache needs
+its own accessible grammar.
+
+Initial scan/status/next completed. Treat findings as candidates: CMake builds
+translation units independently, so zero include importers does not mean dead
+code. The numeric `/proc/self/statm` fscanf warning is a confirmed regex false
+positive. The test log's "7546 production files" is a weighted potential, not a
+file count or measured coverage. clang-tidy/cppcheck are unavailable; security
+uses reduced regex coverage. No subjective score was supplied, no score-driven
+tests/deletions were made, and no issue was marked fixed without a change.
+Results and complete raw score table: `Build/tooling/desloppify/RESULTS.md`.
+Upstream: https://github.com/peteromallet/desloppify
+
 ## C++ navigation: adopted
 
 `hs_lsp` is registered in repo-local `.codex/config.toml` with an explicit project
@@ -154,6 +197,11 @@ Empty names, CLI flags, raw paths, and broad administrative targets such as
 `all` or `clean` are rejected. There is no working-tree inference or default
 all-target build. A partial build is not a verification receipt.
 
+Named Debug `ProjectHS`/`hs_experiment` builds reuse the admitted generation rather
+than recooking all content. After content edits, build `hs_content_generation`
+before running. Default ALL builds still prepare content; Release keeps the
+compiled shipping-image dependency.
+
 `hs_dev` now exposes only `build` and `verify`. For exact tests, use
 `Tools/hs_dev.ps1 verify -Workflow verify-core -Test simulation.determinism-core`
 or call `Tools/verify.ps1` directly. Verification retains CTest preparation
@@ -214,3 +262,31 @@ Four concrete DXGI/D3D12/XAudio2 questions were answered through the CLI when
 ordinary direct web retrieval failed for all four pages. This establishes a
 working alternative retrieval path, not a general speed advantage. Evidence:
 `Build/tooling/qualification-20260906/docs-cli/comparison.md`.
+
+## Native stall stacks: on demand
+
+The Microsoft-signed CDB is local to
+`Build/tooling/dbgeng/windbg-amd64/cdb.exe`; no global installation is required.
+For an owned probe process, use the matching executable/PDB directory and detach
+after a short noninvasive stack snapshot:
+
+```powershell
+$taskSymbols = (Resolve-Path Build/msvc-debug).Path
+& Build/tooling/dbgeng/windbg-amd64/cdb.exe -pv -sins -p $taskProcess.Id -y $taskSymbols -c '~* k 64; lm; .detach; q'
+```
+
+Verify that the process ID still belongs to the probe before attaching. Do not
+relink its executable/PDB while sampling. `-pv` briefly suspends the target;
+these snapshots are diagnosis, not FPS measurements. Keep symbol paths local.
+Check for actual thread stacks and private engine symbols: exit code zero alone
+did not prove a successful capture. This host rejects `-pd`; explicit `.detach`
+works. Missing optional debugger extensions did not prevent stack capture.
+
+The corrected owned-view GBV snapshots at20/40s put main in the recording-task
+join and workers inside draw recording through SDK layers/NVIDIA modules.
+An offline DbgHelp lookup of the retained return addresses against that matching
+EXE/PDB resolves both to `SetPipelineState`, without another engine run. This is
+consistent with GBV first-use patch compilation, not proof of a GPU-fence deadlock
+or the separate teardown stall. Evidence:
+`Build/gbv-stack-corrected-20261029/`; tool provenance and owned-helper attach
+qualification: `Build/tooling/dbgeng/`.

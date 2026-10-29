@@ -32,14 +32,14 @@ struct Group { std::string name; std::vector<Json> pages; std::vector<Rect> rect
 void Check(HRESULT hr, const std::string& action) { if (FAILED(hr)) throw std::runtime_error(action + " (HRESULT " + std::to_string(hr) + ")"); }
 Json Read(const std::filesystem::path& root)
 {
-    std::ifstream input(root / "project_hs_environment_materials_v9_LEAN.json");
+    std::ifstream input(asset_pipeline::NativeFilePath(root / "project_hs_environment_materials_v9_LEAN.json"));
     if (!input) throw std::runtime_error("Missing environment material manifest");
     Json j; input >> j;
     if (j.at("schema_version") != 9 || j.at("target").at("texture_size_px") != 2048 ||
         j.at("texture_cook").at("mip_levels").at("opaque") != 12 ||
         j.at("texture_cook").at("mip_levels").at("foliage") != 6)
         throw std::runtime_error("Unsupported environment texture contract");
-    std::ifstream baked_input(root / "baked_materials.json");
+    std::ifstream baked_input(asset_pipeline::NativeFilePath(root / "baked_materials.json"));
     if (!baked_input) throw std::runtime_error("Missing Blender baked material manifest");
     Json baked; baked_input >> baked;
     if (baked.at("version") != 1 || baked.at("bark").size() != 3 || baked.at("rock").size() != 4)
@@ -105,7 +105,7 @@ void ValidatePngRole(const std::filesystem::path& path, const std::string& role)
 {
     // Check PNG IHDR, including precision before WIC conversion.
     std::array<unsigned char, 26> header{};
-    std::ifstream f(path, std::ios::binary); f.read(reinterpret_cast<char*>(header.data()), header.size());
+    std::ifstream f(asset_pipeline::NativeFilePath(path), std::ios::binary); f.read(reinterpret_cast<char*>(header.data()), header.size());
     const std::array<unsigned char, 8> signature{137,80,78,71,13,10,26,10};
     if (!f || !std::equal(signature.begin(), signature.end(), header.begin()) ||
         (role == "height" && (header[24] != 16 || header[25] != 0)) ||
@@ -117,7 +117,7 @@ std::vector<Pixel> Load(const std::filesystem::path& path, const std::string& ro
     ValidatePngRole(path, role);
     DirectX::ScratchImage source, converted;
     DirectX::TexMetadata metadata{};
-    Check(DirectX::LoadFromWICFile(path.c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, source), "Load " + path.string());
+    Check(DirectX::LoadFromWICFile(asset_pipeline::NativeFilePath(path).c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, source), "Load " + path.string());
     if (metadata.width != 2048 || metadata.height != 2048) throw std::runtime_error("Environment PNG must be 2048 square: " + path.string());
     Check(DirectX::Convert(source.GetImages(), source.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT,
         DirectX::TEX_FILTER_DEFAULT, 0, converted), "Convert " + path.string());
@@ -284,7 +284,7 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
     else
         Check(DirectX::Compress(array.GetImages(),array.GetImageCount(),array.GetMetadata(),format,DirectX::TEX_COMPRESS_PARALLEL,.5f,compressed),"CPU compress environment "+group.name+" "+role);
     const auto path=OutputPath(output,group,role);
-    Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,path.c_str()),"Save "+path.string());
+    Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,asset_pipeline::NativeFilePath(path).c_str()),"Save "+path.string());
 }
 }
 void ValidateEnvironmentTextures(const std::filesystem::path& source)
@@ -347,7 +347,7 @@ void CookEnvironmentTextureRole(const std::filesystem::path& source,
                                 ID3D11Device* device)
 {
     const auto group=FindRoleGroup(Read(source),group_name,role);
-    std::filesystem::create_directories(output);
+    std::filesystem::create_directories(asset_pipeline::NativeFilePath(output));
     DecodedImageCache decoded;
     CookRole(source,output,group,role,device,decoded);
 }
@@ -362,7 +362,7 @@ void CookEnvironmentTextureRoles(const std::filesystem::path& source,
         if(!seen.emplace(request.group,request.role).second)
             throw std::runtime_error("Duplicate environment texture role in batch");
         const auto group=FindRoleGroup(manifest,request.group,request.role);
-        std::filesystem::create_directories(request.output);
+        std::filesystem::create_directories(asset_pipeline::NativeFilePath(request.output));
         CookRole(source,request.output,group,request.role,
                  request.role=="base_color"?device:nullptr,decoded);
     }
@@ -373,7 +373,7 @@ void CookEnvironmentTextures(const std::filesystem::path& source,const std::file
     const auto manifest=Read(source);
     const auto groups=Groups(manifest);
     DecodedImageCache decoded;
-    std::filesystem::create_directories(output);
+    std::filesystem::create_directories(asset_pipeline::NativeFilePath(output));
     for(const auto& group:groups) for(const auto& role:Roles(group)) {
         std::cout<<"Environment "<<group.name<<" "<<role<<": cooking"<<std::endl;
         CookRole(source,output,group,role,device,decoded);

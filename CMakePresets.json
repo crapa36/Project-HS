@@ -79,23 +79,6 @@
       }
     },
     {
-      "name": "linux-core",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/Build/${presetName}",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "HS_BUILD_TESTS": "ON",
-        "HS_BUILD_RUNTIME": "OFF",
-        "HS_BUILD_CONTENT_TOOLS": "OFF"
-      }
-    },
-    {
       "name": "msvc-portable-tests",
       "inherits": "msvc-core",
       "cacheVariables": {
@@ -121,6 +104,7 @@
         "hs_render_scene_extractor_tests",
         "hs_ui_command_admission_tests",
         "hs_vfx_session_state_tests",
+        "hs_vfx_session_state_failure_tests",
         "hs_runtime_diagnostics_tests",
         "hs_project_hs_arguments_tests"
       ]
@@ -149,10 +133,6 @@
       "configurePreset": "msvc-release"
     },
     {
-      "name": "linux-core",
-      "configurePreset": "linux-core"
-    },
-    {
       "name": "msvc-portable-tests",
       "configurePreset": "msvc-portable-tests",
       "targets": [
@@ -166,7 +146,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta|scene-sample)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
+          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta|scene-sample)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state(-allocation-failure)?)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {
@@ -205,13 +185,6 @@
     {
       "name": "msvc-gpu-validation",
       "configurePreset": "msvc-gpu-validation",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "linux-core",
-      "configurePreset": "linux-core",
       "output": {
         "outputOnFailure": true
       }
@@ -256,23 +229,6 @@
         {
           "type": "test",
           "name": "msvc-validation"
-        }
-      ]
-    },
-    {
-      "name": "verify-core-linux",
-      "steps": [
-        {
-          "type": "configure",
-          "name": "linux-core"
-        },
-        {
-          "type": "build",
-          "name": "linux-core"
-        },
-        {
-          "type": "test",
-          "name": "linux-core"
         }
       ]
     },
