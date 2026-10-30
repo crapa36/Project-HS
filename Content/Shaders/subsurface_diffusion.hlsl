@@ -1,6 +1,7 @@
 #include "material_parameters.hlsli"
 #include "material_sidecar.hlsli"
 #include "deferred_materials.generated.hlsli"
+#include "surface_metadata.hlsli"
 
 cbuffer SubsurfaceConstants : register(b0, space13)
 {
@@ -12,7 +13,7 @@ cbuffer SubsurfaceConstants : register(b0, space13)
 };
 Texture2D<float> SssDepth : register(t0, space13);
 Texture2D<float2> SssNormal : register(t1, space13);
-Texture2D<uint2> SssMetadata : register(t2, space13);
+Texture2D<uint> SssMetadata : register(t2, space13);
 Texture2D<float4> SssOriginalDiffuse : register(t3, space13);
 Texture2D<float4> SssHdr : register(t4, space13);
 Texture2D<float4> SssHorizontal : register(t5, space13);
@@ -37,7 +38,7 @@ SssGuide SssLoadGuide(int2 pixel)
     SssGuide guide=(SssGuide)0;
     if(any(pixel<0) || any(pixel>=int2(SssRenderSize.xy))) return guide;
     const float depth=SssDepth.Load(int3(pixel,0));
-    guide.material=SssMetadata.Load(int3(pixel,0)).x;
+    guide.material=HsUnpackSurfaceMetadata(SssMetadata.Load(int3(pixel,0))).x;
     guide.valid=depth>0.0 && guide.material!=0u;
     if(guide.valid)
     {

@@ -1275,6 +1275,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         monster_bucket_ranges[6 + asset * 2] = monster_lod_ranges[asset * 3 + 1];
         monster_bucket_ranges[7 + asset * 2] = monster_lod_ranges[asset * 3 + 2];
     }
+    const auto has_translucent_hero_binding = [&](std::size_t asset) {
+        return asset < impl_->hero_binding_ranges.size() && impl_->hero_binding_ranges[asset].w != 0;
+    };
+    const auto has_translucent_monster_bucket = [&](std::size_t bucket) {
+        const auto asset = bucket < 6 ? bucket : (bucket - 6) / 2;
+        return bucket < monster_bucket_ranges.size() && has_translucent_hero_binding(asset + 1);
+    };
     if (archer_range.second != 0)
     {
         dynamic_output_begins[kArcherVisibilityBucket] = static_cast<std::uint32_t>(archer_range.first);
@@ -1354,10 +1361,12 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         bucket_pages[bucket] = page;
         auto *pipeline = bucket < kEnvironmentVisibilityBucketCount ? environment_pipeline(bucket, false)
             : (use_visibility ? impl_->hero_visibility_pipeline.Get() : impl_->hero_scene_pipeline.Get());
-        // Depth peeling uses indexed SceneVS for both slime and water layers.
+        // Depth peeling uses indexed SceneVS for every admitted translucent actor and water layer.
+        const bool translucent_hero_bucket = bucket == kArcherVisibilityBucket
+            ? has_translucent_hero_binding(0)
+            : bucket >= kMonsterVisibilityBucketBegin && has_translucent_monster_bucket(monster_bucket);
         if (owned_view.hero_transparency.AllocatedBytes() != 0 &&
-            ((bucket >= kMonsterVisibilityBucketBegin &&
-              (monster_bucket < 3 || (monster_bucket >= 6 && (monster_bucket - 6) / 2 < 3))) ||
+            (translucent_hero_bucket ||
              (bucket < kEnvironmentVisibilityBucketCount &&
               bucket / 3 == render_data::kMeadowWaterGeometry)))
             pipeline = nullptr;
@@ -4445,7 +4454,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     auto *pipeline = environment ? environment_pipeline(bucket, true)
                         : hero ? impl_->hero_shadow_pipeline.Get() : impl_->shadow_pipeline.Get();
                     groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
-                        ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
+                        ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed,
+                        page->index_count,0,0,page->meshlet_count});
                     bindings.push_back({page, pipeline, material, immutable});
                 });
             VirtualShadowCaster caster;
@@ -4525,8 +4535,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             caster.source_ref = ref_index;
             caster.geometry_record = pass >> 2;
             caster.draw_group = draw_group;
-            caster.index_count = page->index_count;
-            caster.meshlet_count = page->meshlet_count;
             caster.immutable_source = immutable;
             caster.baked_source = immutable && render_data::IsStaticShadowCaster(source);
             Impl::ShadowCasterRecord *current{};
@@ -4573,7 +4581,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if(static_warm)
         {
             for(const auto &binding:static_shadow_batch->bindings)
-            { groups.push_back({binding.key,binding.frontend}); bindings.push_back({binding.page,binding.pipeline,binding.material,true}); }
+            {
+                groups.push_back({binding.key,binding.frontend,binding.page->index_count,0,0,
+                    binding.page->meshlet_count});
+                bindings.push_back({binding.page,binding.pipeline,binding.material,true});
+            }
             water_receiver=static_shadow_batch->water;
             receivers.insert(receivers.end(),static_shadow_batch->receivers.begin(),static_shadow_batch->receivers.end());
         }
@@ -5358,8 +5370,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         graph_substage_start = end;
     };
     std::size_t hero_candidate_count{};
-    for (const auto &range : std::span(monster_ranges).first(3))
-        hero_candidate_count += range.second;
+    if (has_translucent_hero_binding(0))
+        hero_candidate_count += archer_range.second;
+    for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+        if (has_translucent_hero_binding(asset + 1))
+            hero_candidate_count += monster_ranges[asset].second;
     if (impl_->static_gpu_scene)
         hero_candidate_count += static_environment_ranges[render_data::kMeadowWaterGeometry * 3].second;
     const auto hero_active = owned_view.state.render_active;
@@ -5393,10 +5408,17 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         // A visible dense set cannot be empty; keep its existing full-copy policy.
         return hero_candidate_count <= 8 && area * 4 < full_area * 3;
     };
+    if (hero_bounds_complete && has_translucent_hero_binding(0))
+        for (std::size_t index = archer_range.first;
+             index < archer_range.first + archer_range.second && hero_bounds_complete; ++index)
+            if (index >= render_instances.size() || !dynamic_cooked_skin_bounds[index] ||
+                !include_hero_sphere(current_gpu_instance(index).position))
+            { hero_bounds_complete = false; hero_all_outside = false; break; }
     if (hero_bounds_complete)
-        for (std::size_t asset = 0; asset < 3 && hero_bounds_complete; ++asset)
+        for (std::size_t asset = 0; asset < monster_ranges.size() && hero_bounds_complete; ++asset)
         {
             const auto [begin, count] = monster_ranges[asset];
+            if (!has_translucent_hero_binding(asset + 1)) continue;
             for (std::size_t index = begin; index < begin + count; ++index)
                 if (index >= render_instances.size() || !dynamic_cooked_skin_bounds[index] ||
                     !include_hero_sphere(current_gpu_instance(index).position))
@@ -5432,14 +5454,15 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (capture_hero_work && have_hero_contributors)
     {
+        if (has_translucent_hero_binding(0) && archer_range.second)
+            hero_work_source_mask |= 1u;
         for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
-            if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
-                if (monster_bucket_ranges[asset].second)
-                    hero_work_source_mask |= 1u << (asset < 3 ? asset : asset - 3);
+            if (has_translucent_monster_bucket(asset) && monster_bucket_ranges[asset].second)
+                hero_work_source_mask |= 1u << (asset + 1);
         if (impl_->static_gpu_scene)
             for (std::size_t lod = 0; lod < 3; ++lod)
                 if (static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second)
-                    hero_work_source_mask |= 1u << (lod + 9);
+                    hero_work_source_mask |= 1u << (lod + 19);
     }
 #endif
     const bool composite_gradient_read = flash_add_count || ground_add_count ||
@@ -6146,7 +6169,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
 #if defined(HS_DEVELOPMENT_TOOLS)
             std::array<HeroWorkContributorInput, HeroWorkRetainedLayout::kMaxContributors> work{};
             std::size_t work_count{};
-            for (std::uint32_t bit = 0; bit < 12; ++bit)
+            for (std::uint32_t bit = 0; bit < HeroWorkRetainedLayout::kMaxContributors; ++bit)
                 if (hero_work_source_mask & (1u << bit))
                 {
                     work[work_count].arguments = saved.hero.work.argument_versions[work_count];
@@ -6203,9 +6226,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     }
     if (active_features.software_gi_enabled && !software_scene_jobs.empty())
     {
-            std::vector<SoftwareSceneGeometry> geometries;
-            std::vector<SoftwareSceneInstance> instances;
-            geometries.reserve(software_scene_jobs.size()); instances.reserve(software_scene_jobs.size());
             for (std::size_t index = 0; index < software_scene_jobs.size(); ++index)
             {
                 const auto &job = software_scene_preview.geometries[index];
@@ -6220,21 +6240,20 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
                     frame.skin_cache_vertices.resource->GetDesc().Width))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
-                geometries.push_back({std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
+                SoftwareSceneGeometry geometry{std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
                     deformed ? software_scene_preview.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
                     page.storage.resource.Get(), {},
                     ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
                         skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
-                    page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session});
+                    page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session};
                 // Immutable shared pages retain their revision through frames.
-                if (!deformed && !skin) geometries.back().current_revision = page.generation;
+                if (!deformed && !skin) geometry.current_revision = page.generation;
                 DirectX::XMFLOAT4X4 world;
                 DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
                     DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
-                const auto mesh_key = MakeAssetId("render/geometry/page/" + std::to_string(page.page_slot)).value;
                 const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
-                instances.push_back({job.stable_gpu_scene_slot, job.instance_generation, static_cast<std::uint32_t>(index),
-                    material_id, mesh_key, page.generation, world});
+                const SoftwareSceneInstance instance{job.stable_gpu_scene_slot, job.instance_generation,
+                    static_cast<std::uint32_t>(index), material_id, 0, page.generation, world};
                 if (active_features.software_gi_enabled)
                 {
                     // Retain the allocator's actual backing in addition to COM
@@ -6270,7 +6289,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     const auto capabilities = ordinal < kAuthoredMaterialNames.size()
                         ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
                     const auto previous_leaf_count = brixelizer_geometries.size();
-                    if (auto appended = AppendBrixelizerLeaf(geometries.back(), instances.back(), page.submeshes, bindings,
+                    if (auto appended = AppendBrixelizerLeaf(geometry, instance, page.submeshes,
+                            page.brixelizer_submesh_keys, bindings,
                             std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
                             (job.flags & SceneGeometryTwoSided) != 0,
                             (job.flags & SceneGeometryTransmissive) != 0,
@@ -8670,7 +8690,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 list->ExecuteIndirect(batch.group.frontend == VirtualShadowFrontend::Mesh
                     ? impl_->cluster_mesh_signature.Get() : impl_->indexed_geometry_signature.Get(), batch.maximum_commands,
                     batch.group.frontend == VirtualShadowFrontend::Mesh ? outputs.mesh_arguments : outputs.indexed_arguments,
-                    batch.argument_offset, outputs.counts_resource, batch.count_offset);
+                    batch.argument_offset, batch.indexed_instanced ? nullptr : outputs.counts_resource,
+                    batch.indexed_instanced ? 0 : batch.count_offset);
             }
             return Result::Success();
         };
@@ -9681,12 +9702,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         list->SetGraphicsRoot32BitConstant(
             6, kDefaultSceneDrawMaterial | 1u, 1);
         bind_scene_deformation_roots(list, true, true);
-        const auto draw_cached_slime_range = [&](std::size_t asset) {
-            if (monster_bucket_ranges[asset].second == 0) return;
+        const auto draw_cached_hero_range = [&](std::size_t bucket) {
+            if (bucket_pages[bucket]->index_count == 0) return;
             list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
             list->SetGraphicsRootShaderResourceView(
                 35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
-            const auto bucket = kMonsterVisibilityBucketBegin + asset;
             if (auto result = impl_->DrawGeometry(list, frame_slot,
                     impl_->hero_translucent_pipeline.Get(), *bucket_pages[bucket],
                     dynamic_geometry_passes[bucket][0], frame.dynamic_draw_args.resource.Get(),
@@ -9695,9 +9715,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         };
         if (owned_view.hero_transparency.AllocatedBytes() == 0)
         {
+            if (has_translucent_hero_binding(0) && archer_range.second != 0)
+                draw_cached_hero_range(kArcherVisibilityBucket);
             for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
-                if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
-                    draw_cached_slime_range(asset);
+                if (has_translucent_monster_bucket(asset) && monster_bucket_ranges[asset].second != 0)
+                    draw_cached_hero_range(kMonsterVisibilityBucketBegin + asset);
             if (impl_->static_gpu_scene)
             {
                 list->SetGraphicsRootShaderResourceView(34,impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress());
@@ -9856,9 +9878,14 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             list->SetGraphicsRoot32BitConstant(6, kDefaultSceneDrawMaterial | 1u, 1);
             list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
             list->SetGraphicsRootShaderResourceView(35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
+            if (has_translucent_hero_binding(0) && archer_range.second != 0)
+                if (auto drawn = impl_->DrawGeometry(list, frame_slot, pipeline, *bucket_pages[kArcherVisibilityBucket],
+                        dynamic_geometry_passes[kArcherVisibilityBucket][0], frame.dynamic_draw_args.resource.Get(),
+                        kArcherVisibilityBucket * kGeometryArgumentStride); !drawn)
+                    throw std::runtime_error(std::string(drawn.Message()));
             for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
             {
-                if (asset >= 3 && (asset < 6 || (asset - 6) / 2 >= 3)) continue;
+                if (!has_translucent_monster_bucket(asset)) continue;
                 if (monster_bucket_ranges[asset].second == 0) continue;
                 const auto bucket = kMonsterVisibilityBucketBegin + asset;
                 if (auto drawn = impl_->DrawGeometry(list, frame_slot, pipeline, *bucket_pages[bucket],
@@ -9886,8 +9913,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             static_assert(kGeometryArgumentStride == 24);
             if (impl_->rendered_submission_count == UINT64_MAX)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
-            hero_work_contributors.reserve(12);
-            hero_work_bindings.reserve(12);
+            hero_work_contributors.reserve(HeroWorkRetainedLayout::kMaxContributors);
+            hero_work_bindings.reserve(HeroWorkRetainedLayout::kMaxContributors);
             const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
                 const auto &page = *bucket_pages[bucket];
                 HeroWorkContributorInput contributor;
@@ -9926,13 +9953,14 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 hero_work_contributors.push_back(std::move(contributor));
                 hero_work_bindings.push_back({bucket,immutable});
             };
+            if (has_translucent_hero_binding(0) && archer_range.second)
+                append_work(kArcherVisibilityBucket, false, static_cast<std::uint32_t>(archer_range.second), "archer");
             for (std::size_t asset=0;asset<monster_bucket_ranges.size();++asset)
-                if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
-                    if (monster_bucket_ranges[asset].second)
-                        append_work(kMonsterVisibilityBucketBegin+asset,false,
-                            static_cast<std::uint32_t>(monster_bucket_ranges[asset].second),
-                            "monster"+std::to_string(asset < 6 ? asset : (asset-6)/2)+
-                            "_lod"+std::to_string(asset < 6 ? 0 : 1+(asset-6)%2));
+                if (has_translucent_monster_bucket(asset) && monster_bucket_ranges[asset].second)
+                    append_work(kMonsterVisibilityBucketBegin+asset,false,
+                        static_cast<std::uint32_t>(monster_bucket_ranges[asset].second),
+                        "monster"+std::to_string(asset < 6 ? asset : (asset-6)/2)+
+                        "_lod"+std::to_string(asset < 6 ? 0 : 1+(asset-6)%2));
             if (impl_->static_gpu_scene)
                 for (std::size_t lod=0;lod<3;++lod)
                 {

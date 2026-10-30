@@ -13,13 +13,13 @@ namespace hs::material_content
 {
 namespace
 {
-// Recipe identity: hs.ggx-vndf-schlick-fullcoat/v1;extent=128x128;samples=4096;
+// Recipe identity: hs.ggx-vndf-schlick-fullcoat/v2;extent=256x256;noV=u^2;samples=4096;
 // alpha=max(r*r,0.002);moments=ABCD-fullFcNoL;sample=hammersley-base2
-// (FNV-1a64 2675eb81b8ba765d). The formula mirrors
+// The formula mirrors
 // HsBsdfAlpha/D/Smith and Schlick F in bsdf_metallic_roughness.hlsli plus
 // HsBsdfCoatFresnel in bsdf_layers.hlsli. XY are the original (A,B) moments;
 // ZW use the same integrand multiplied by full coat Fresnel at NoL.
-constexpr std::uint32_t kExtent = 128;
+constexpr std::uint32_t kExtent = 256;
 constexpr std::uint32_t kSamples = 4096;
 constexpr double kInvU32 = 1.0 / 4294967296.0;
 constexpr double kPi = 3.141592653589793238462643383279502884;
@@ -181,7 +181,9 @@ std::vector<std::byte> CookCoatedDfgDds()
     for (std::uint32_t y = 0; y < kExtent; ++y)
         for (std::uint32_t x = 0; x < kExtent; ++x)
         {
-            const auto dfg = IntegrateTexel((x + 0.5) / kExtent, (y + 0.5) / kExtent, samples);
+            const double no_v_coordinate = (x + 0.5) / kExtent;
+            const auto dfg = IntegrateTexel(no_v_coordinate * no_v_coordinate,
+                (y + 0.5) / kExtent, samples);
             const auto pixel = std::size_t(y) * kExtent + x;
             for (std::size_t channel = 0; channel < dfg.size(); ++channel)
                 PutU16(bytes, header_size + pixel * bytes_per_pixel + channel * 2, ToHalf(dfg[channel]));

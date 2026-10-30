@@ -231,8 +231,9 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         HsHeroWorkAdd(28u);
 #endif
         const float roughness=saturate(closure.roughness),coat_roughness=saturate(closure.coat_roughness);
-        const float4 base_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,roughness),0);
-        const float2 coat_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,coat_roughness),0).xy;
+        const float lut_no_v=sqrt(saturate(nv));
+        const float4 base_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(lut_no_v,roughness),0);
+        const float2 coat_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(lut_no_v,coat_roughness),0).xy;
         float3 diffuse_factor,base_specular_factor; float coat_specular_factor;
         HsBsdfCoatedIblFactors(closure,nv,base_dfg,coat_dfg,base_fresnel_override,
             diffuse_factor,base_specular_factor,coat_specular_factor);
@@ -344,7 +345,8 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
             thinWeight*backSky*saturate(closure.ao);
     }
     // The basic lobe uses the same sampled DFG as the authored GGX cube mips.
-    float2 AB=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,saturate(closure.roughness)),0).xy;
+    float2 AB=EnvironmentBrdfLut.SampleLevel(LinearClamp,
+        float2(sqrt(saturate(nv)),saturate(closure.roughness)),0).xy;
     float3 reflected=reflect(-v,n);float skyT=lerp(saturate(reflected.y*0.5+0.5),0.5,closure.roughness*closure.roughness);
     float3 sky=ProbeOptions.w>0.0 ?
         (indirect_specular_enabled ? HsSceneProbePrefiltered(world,reflected,saturate(closure.roughness)) :

@@ -16,7 +16,8 @@ Result D3D12Renderer::Impl::PrepareViewTargets(OptionTargets &targets,
     if (!capacity_width || !capacity_height || !output_width || !output_height)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "View target extents must be nonzero.");
-    for (const auto format : {DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32G32_UINT,
+    for (const auto format : {DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32_UINT,
+                              DXGI_FORMAT_R32G32_UINT,
                               DXGI_FORMAT_R16G16B16A16_FLOAT})
     {
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};

@@ -211,7 +211,7 @@ float HsBsdfCoatFresnel(float cosine)
 bool HsBsdfCanUseCoatedIbl(HsSurfaceClosure surface, float no_v)
 {
     // Keep the sampled path below the finite LUT's reliable grazing domain.
-    return no_v >= 1.0 / 64.0 && !surface.unlit && surface.coat_weight > 0.0 &&
+    return no_v >= 1.0 / 1024.0 && !surface.unlit && surface.coat_weight > 0.0 &&
         surface.anisotropy == 0.0 && HsBsdfThinTransmissionWeight(surface) == 0.0 &&
         !(surface.sheen_weight > 0.0 && any(surface.sheen_color > 0.0));
 }

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <stdexcept>
 #include <string_view>
@@ -223,6 +224,38 @@ void Engine()
             Check(end > begin, "ParallelFor wrapped"); ++chunks;
         });
     Check(large.Wait().Succeeded() && chunks == 2, "overflow-safe partition");
+
+    hs::TaskSystem async_tasks(1);
+    bool drained_partial_submission = false;
+    for (int budget = 0; budget < 32 && !drained_partial_submission; ++budget)
+    {
+        auto partial = async_tasks.CreateTaskGroup();
+        std::atomic<bool> entered{}, release{};
+        Check(partial.Submit([&](std::stop_token) {
+            entered.store(true);
+            entered.notify_one();
+            release.wait(false);
+        }), "block worker before partial ParallelFor submission");
+        entered.wait(false);
+
+        auto owner = std::make_shared<int>(1);
+        std::weak_ptr<int> accepted_owner = owner;
+        std::move_only_function<void(std::size_t, std::size_t)> task =
+            [owner = std::move(owner)](std::size_t, std::size_t) { (void)owner; };
+        bool threw = false;
+        allocation_budget = budget;
+        try { partial.ParallelFor(3, 1, std::move(task)); }
+        catch (const std::bad_alloc&) { threw = true; }
+        allocation_budget = -1;
+        const bool earlier_chunk_was_accepted = !accepted_owner.expired();
+        release.store(true);
+        release.notify_one();
+        const auto result = partial.Wait();
+        drained_partial_submission = !threw && earlier_chunk_was_accepted &&
+                                     result.Code() == hs::ErrorCode::TaskFailed;
+    }
+    Check(drained_partial_submission,
+          "ParallelFor records later chunk preparation failure after earlier admission");
 }
 
 void Reentry()

@@ -37,12 +37,6 @@
       "name": "sampled_roughness"
     },
     {
-      "id": "alpha",
-      "op": "context",
-      "type": "float",
-      "name": "sampled_alpha"
-    },
-    {
       "id": "ao",
       "op": "context",
       "type": "float",
@@ -74,32 +68,10 @@
       }
     },
     {
-      "id": "feature_alpha_threshold",
+      "id": "opacity",
       "op": "constant",
       "type": "float",
-      "value": 0.98
-    },
-    {
-      "id": "coverage",
-      "op": "less_equal",
-      "type": "bool",
-      "a": {
-        "node": "feature_alpha_threshold",
-        "type": "float"
-      },
-      "b": {
-        "node": "alpha",
-        "type": "float"
-      }
-    },
-    {
-      "id": "coverage_float",
-      "op": "convert",
-      "type": "float",
-      "input": {
-        "node": "coverage",
-        "type": "bool"
-      }
+      "value": 1
     },
     {
       "id": "basic",
@@ -126,7 +98,7 @@
         "type": "float"
       },
       "opacity": {
-        "node": "coverage_float",
+        "node": "opacity",
         "type": "float"
       }
     }
@@ -141,6 +113,6 @@
   },
   "render_flags": {
     "two_sided": false,
-    "alpha_mode": "mask"
+    "alpha_mode": "opaque"
   }
 }

@@ -445,7 +445,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     for (auto [resource, format, clear] : {
              std::tuple{&owner.targets.gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&owner.targets.gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
-             std::tuple{&owner.targets.gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
+             std::tuple{&owner.targets.gbuffer_metadata, DXGI_FORMAT_R32_UINT, metadata_clear},
              std::tuple{&owner.targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&owner.targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&owner.targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
@@ -503,7 +503,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     for (auto [resource, format] : {
              std::pair{owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
              std::pair{owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
-             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
+             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT},
              std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
              std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
@@ -813,7 +813,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
     for (auto [resource, format, clear] : {
              std::tuple{&targets.gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&targets.gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
-             std::tuple{&targets.gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
+             std::tuple{&targets.gbuffer_metadata, DXGI_FORMAT_R32_UINT, metadata_clear},
              std::tuple{&targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
@@ -963,7 +963,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
     for (auto [resource, format] : {
              std::pair{owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
              std::pair{owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
-             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
+             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT},
              std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
              std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
@@ -1034,7 +1034,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
             };
             create_srv(owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
             create_srv(owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-            create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
+            create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT);
             create_srv(owner.targets.shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
             create_srv(owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);

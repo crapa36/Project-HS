@@ -269,8 +269,6 @@ std::vector<std::byte> EncodeCharacterMaterialBindings(
         const auto name = kHeroMaterialNames[binding.hero_ordinal];
         Require(dependencies[binding.dependency_index] == "render/material/" + std::string(name) + "/material.rpkg",
                 "character material binding dependency disagrees with authored identity");
-        Require((binding.domain == HeroMaterialDomain::Translucent) == (name == "slime_body"),
-                "character material binding domain disagrees with closure domain");
         auto &seen = binding.domain == HeroMaterialDomain::Translucent ? translucent : opaque;
         Require(!seen[binding.slot], "duplicate character material slot/domain binding");
         seen[binding.slot] = true;
@@ -278,18 +276,8 @@ std::vector<std::byte> EncodeCharacterMaterialBindings(
         Put(bytes, i * 8 + 2, binding.dependency_index, 2);
         Put(bytes, i * 8 + 4, PackHeroMaterialDomainOrdinal(binding.domain, binding.hero_ordinal), 4);
     }
-    Require(std::ranges::all_of(opaque, [](bool value) { return value; }), "missing opaque character material binding");
-    for (const auto &binding : bindings)
-        if (binding.domain == HeroMaterialDomain::Translucent)
-        {
-            const auto feature = std::ranges::find_if(bindings, [&](const auto &candidate) {
-                return candidate.slot == binding.slot && candidate.domain == HeroMaterialDomain::Opaque;
-            });
-            Require(feature != bindings.end() && kHeroMaterialNames[feature->hero_ordinal] == "slime_features",
-                    "solid jelly body requires its opaque feature binding");
-        }
-        else if (kHeroMaterialNames[binding.hero_ordinal] == "slime_features")
-            Require(translucent[binding.slot], "jelly feature binding is missing its transparent body");
+    for (std::size_t slot = 0; slot < material_count; ++slot)
+        Require(opaque[slot] || translucent[slot], "missing character material slot binding");
     return bytes;
 }
 
@@ -696,13 +684,13 @@ std::vector<MaterialProgram> DecodeMaterialPrograms(
         else if (value >= static_cast<std::uint32_t>(MaterialProgramKind::HeroScenePS) &&
                  value <= static_cast<std::uint32_t>(MaterialProgramKind::HeroTranslucentPS))
         {
-            constexpr std::array suffixes{"_scene.dxil", "_visibility.dxil", "_resolve.dxil", "_shadow.dxil", "_translucent.dxil"};
+            constexpr std::array shader_ids{
+                "render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
+                "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil",
+                "render/shader/hero_translucent_ps.dxil"};
             const auto bit = 1u << (value - 4u);
             Require((hero_mask & bit) == 0, "duplicate hero material program");
-            const auto name = ShaderMaterialName(id, suffixes[value - 4u]);
-            Require(std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() &&
-                    (material_name.empty() || material_name == name), "hero programs belong to an unknown/different material");
-            material_name = name;
+            Require(id == shader_ids[value - 4u], "hero program kind references the wrong shared shader");
             hero_mask |= bit;
             kind = static_cast<MaterialProgramKind>(value);
         }
@@ -720,8 +708,8 @@ std::vector<MaterialProgram> DecodeMaterialPrograms(
             (!decal && hero_mask == 0 && programs.size() == 1 && opaque && !masked_scene && !masked_shadow) ||
             (hero_mask == 0 && programs.size() == 2 && !opaque && masked_scene && masked_shadow) ||
             (!opaque && !masked_scene && !masked_shadow &&
-             ((programs.size() == 4 && hero_mask == 15u && material_name != "slime_body") ||
-              (programs.size() == 1 && hero_mask == 16u && material_name == "slime_body"))),
+             ((programs.size() == 4 && hero_mask == 15u) ||
+              (programs.size() == 1 && hero_mask == 16u))),
             "missing required material program kind");
     return programs;
 }
@@ -836,9 +824,14 @@ HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std:
     result.surface = DecodeMaterialSurfaceLayout(find(ChunkType::MaterialSurfaceLayout).bytes);
     result.parameter_layout_hash = DecodeMaterialParameterLayout(find(ChunkType::MaterialParameterLayout).bytes);
     result.programs = DecodeMaterialPrograms(find(ChunkType::MaterialProgram).bytes, package.dependencies);
-    result.domain = name == "slime_body" ? HeroMaterialDomain::Translucent : HeroMaterialDomain::Opaque;
-    Require(((result.surface.capability_mask & 256u) != 0) == (result.domain == HeroMaterialDomain::Translucent) &&
-            (result.domain != HeroMaterialDomain::Translucent || (result.surface.capability_mask & 128u) == 0),
+    result.domain = (result.surface.capability_mask & 256u) != 0 ?
+        HeroMaterialDomain::Translucent : HeroMaterialDomain::Opaque;
+    const bool translucent_program = std::ranges::any_of(result.programs, [](const MaterialProgram &program) {
+        return program.kind == MaterialProgramKind::HeroTranslucentPS;
+    });
+    Require(translucent_program == (result.domain == HeroMaterialDomain::Translucent) &&
+            ((result.domain == HeroMaterialDomain::Translucent && result.programs.size() == 1) ||
+             (result.domain == HeroMaterialDomain::Opaque && result.programs.size() == 4)),
             "hero material surface capabilities disagree with its native domain");
     const auto parameter_id = "render/material/" + std::string(name) + "/parameters.rpkg";
     Require(std::ranges::find(package.dependencies, parameter_id) != package.dependencies.end(),
@@ -846,11 +839,13 @@ HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std:
     for (const auto &program : result.programs)
     {
         const auto kind = static_cast<std::uint32_t>(program.kind);
+        constexpr std::array shader_ids{
+            "render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
+            "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil",
+            "render/shader/hero_translucent_ps.dxil"};
         Require(kind >= 4u && kind <= 8u &&
-                package.dependencies[program.dependency_index].starts_with("render/shader/" + std::string(name) + "_"),
-                "hero material program identity disagrees with its package");
-        Require((program.kind == MaterialProgramKind::HeroTranslucentPS) ==
-                (result.domain == HeroMaterialDomain::Translucent), "hero program domain disagrees with its package");
+                package.dependencies[program.dependency_index] == shader_ids[kind - 4u],
+                "hero material program identity disagrees with shared program kind");
     }
     std::vector<std::string> expected_dependencies{parameter_id};
     for (const auto &program : result.programs)

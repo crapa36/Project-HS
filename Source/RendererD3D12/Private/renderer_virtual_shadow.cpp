@@ -27,13 +27,21 @@ namespace
 {
 constexpr std::uint32_t kComputeSrvs = 5, kComputeUavs = 9, kComputeDescriptors = kComputeSrvs+kComputeUavs;
 constexpr std::uint32_t kIndexedStride = 24, kMeshStride = 16, kClearStride = 20;
+constexpr std::uint32_t kGpuSegmentStride=32;
 constexpr std::uint32_t kSegmentMetadataOffset=512; // Preserve append-only root metadata before command segments.
 struct alignas(16) GpuCaster
 {
     DirectX::XMFLOAT4 current_bounds, previous_bounds;
-    DirectX::XMUINT4 draw, indexed, properties;
+    DirectX::XMUINT4 draw, properties;
 };
-static_assert(sizeof(GpuCaster) == 80);
+struct alignas(16) GpuCommandSegment
+{
+    std::uint32_t first{}, capacity{}, index_count{}, first_index{};
+    std::int32_t base_vertex{};
+    std::uint32_t meshlet_count{}, frontend{}, reserved{};
+};
+static_assert(sizeof(GpuCaster) == 64);
+static_assert(sizeof(GpuCommandSegment)==kGpuSegmentStride);
 static_assert(sizeof(VirtualShadowReceiver) == 32);
 Result Invalid(std::string_view message)
 {
@@ -695,7 +703,7 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
     t->receiver_offset = t->caster_offset+UINT64(profile.max_casters)*sizeof(GpuCaster);
     t->segment_offset=t->receiver_offset+UINT64(profile.max_receivers)*sizeof(VirtualShadowReceiver);
     const bool has_fixed_root=profile.baked && !profile.baked->root_static_pixels.empty();
-    const auto segment_bytes=UINT64(profile.max_draw_groups)*(has_fixed_root?3u:2u)*sizeof(ShadowCommandSegment);
+    const auto segment_bytes=UINT64(profile.max_draw_groups)*(has_fixed_root?3u:2u)*kGpuSegmentStride;
     t->upload_bytes=t->segment_offset+segment_bytes;
     // Root draw-record slots use caster IDs, including absent/baked holes.
     // Check the combined allocation, not only the number of emitted commands.
@@ -843,6 +851,13 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
         in.casters.size() > t->profile.max_casters ||
         in.draw_groups.size() > t->profile.max_draw_groups || !std::isfinite(in.depth_span) || in.depth_span <= 0)
         return Invalid("Virtual shadow frame exceeds its capacity or lacks required native bindings.");
+    for(const auto &group:in.draw_groups)
+    {
+        if((group.frontend==VirtualShadowFrontend::Indexed && !group.index_count) ||
+            (group.frontend==VirtualShadowFrontend::Mesh && (!group.meshlet_count || group.meshlet_count>65535u)) ||
+            (group.frontend!=VirtualShadowFrontend::Indexed && group.frontend!=VirtualShadowFrontend::Mesh))
+            return Invalid("Virtual shadow draw group lacks a complete native geometry/material template.");
+    }
     auto &f = t->frames[in.frame_slot];
     if (!f.completion.IsSatisfiedBy(in.completed)) return Invalid("Virtual shadow frame slot still has GPU readers.");
     const auto rounded_width = UINT64((in.render_active.width+7u)&~7u);
@@ -913,10 +928,8 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
             }
         if (caster.present)
         {
-            if (caster.draw_group >= in.draw_groups.size() ||
-                (in.draw_groups[caster.draw_group].frontend == VirtualShadowFrontend::Indexed && !caster.index_count) ||
-                (in.draw_groups[caster.draw_group].frontend == VirtualShadowFrontend::Mesh && (!caster.meshlet_count || caster.meshlet_count > 65535u)))
-                return Invalid("Virtual shadow caster lacks a complete native geometry/material draw group.");
+            if (caster.draw_group >= in.draw_groups.size())
+                return Invalid("Virtual shadow caster references a missing native geometry/material draw group.");
         }
     }
     return Result::Success();
@@ -1218,8 +1231,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
             (is_static ? 4u : 0u) | (was_static ? 8u : 0u) | (changed ? 16u : 0u) | (c.baked_source ? 64u : 0u);
         GpuCaster gpu{c.current_bounds, c.previous_bounds,
             {c.instance_index, c.instance_generation, c.source_ref, c.geometry_record},
-            {c.draw_group, c.index_count, c.first_index, std::uint32_t(c.base_vertex)},
-            {flags, c.meshlet_count, c.present ? std::uint32_t(in.draw_groups[c.draw_group].frontend) : 0u, head}};
+            {flags, c.draw_group, 0u, head}};
         if (changed && (is_static || was_static))
         {
             head = static_cast<std::uint32_t>(i);
@@ -1265,11 +1277,21 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
 #endif
     std::memcpy(bytes, &constants, sizeof(constants));
     if (!in.receivers.empty()) std::memcpy(bytes+t->receiver_offset, in.receivers.data(), in.receivers.size_bytes());
-    if(segment_count)std::memcpy(bytes+t->segment_offset,plan.command_segments.data(),segment_count*sizeof(ShadowCommandSegment));
+    auto *gpu_segments=reinterpret_cast<GpuCommandSegment *>(bytes+t->segment_offset);
+    const auto group_segment=[&](std::uint32_t first,std::uint32_t capacity,const VirtualShadowDrawGroup &group) {
+        return GpuCommandSegment{first,capacity,group.index_count,group.first_index,
+            group.base_vertex,group.meshlet_count,std::uint32_t(group.frontend),0u};
+    };
+    for(std::uint32_t segment=0;segment<segment_count;++segment)
+    {
+        const auto group=segment%group_count;
+        const auto layout=plan.command_segments[segment];
+        gpu_segments[segment]=group_segment(layout.first,layout.capacity,in.draw_groups[group]);
+    }
     f.root_batches.clear();
     if(plan.fixed_root)
     {
-        auto *root_segments=reinterpret_cast<ShadowCommandSegment *>(bytes+t->segment_offset)+segment_count;
+        auto *root_segments=gpu_segments+segment_count;
         f.root_groups.assign(in.draw_groups.size(),{});
         const auto fresh=[](const VirtualShadowCaster &caster) {
             return caster.present && !IsCompleteBakedStaticCaster(caster.present,caster.immutable_source,
@@ -1288,20 +1310,20 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
                 ++f.root_groups[caster.draw_group].count;
                 ++draw_count;
             }
-        std::uint32_t draw_cursor{},indexed_cursor{},mesh_cursor{};
+        std::uint32_t draw_cursor{};
         for(std::uint32_t group=0;group<in.draw_groups.size();++group)
         {
             auto &layout=f.root_groups[group];
             const auto frontend=in.draw_groups[group].frontend;
-            auto &command_cursor=frontend==VirtualShadowFrontend::Indexed?indexed_cursor:mesh_cursor;
-            layout.command_first=command_cursor;
-            draw_cursor+=layout.count; command_cursor+=layout.count;
-            root_segments[group]={layout.command_first,layout.count};
+            layout.command_first=draw_cursor;
+            draw_cursor+=layout.count;
+            root_segments[group]=group_segment(layout.command_first,layout.count,in.draw_groups[group]);
             if(!layout.count)continue;
             const auto stride=frontend==VirtualShadowFrontend::Indexed?kIndexedStride:kMeshStride;
-            f.root_batches.push_back({in.draw_groups[group],group,2u,layout.count,
+            const bool indexed_instanced=frontend==VirtualShadowFrontend::Indexed;
+            f.root_batches.push_back({in.draw_groups[group],group,2u,indexed_instanced?1u:layout.count,
                 (UINT64(t->profile.command_capacity)+layout.command_first)*stride,
-                (UINT64(t->profile.max_draw_groups)*2+2+group)*sizeof(std::uint32_t)});
+                (UINT64(t->profile.max_draw_groups)*2+2+group)*sizeof(std::uint32_t),indexed_instanced});
         }
         assert(draw_cursor==draw_count);
     }
@@ -1315,9 +1337,10 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
             const auto segment = layer*group_count+group;
             const auto layout=plan.command_segments[segment];
             if(!layout.capacity)continue;
-            const auto stride = in.draw_groups[group].frontend == VirtualShadowFrontend::Indexed ? kIndexedStride : kMeshStride;
-            f.batches.push_back({in.draw_groups[group], group, layer, layout.capacity,
-                UINT64(layout.first)*stride, UINT64(segment)*4});
+            const bool indexed_instanced=in.draw_groups[group].frontend==VirtualShadowFrontend::Indexed;
+            const auto stride = indexed_instanced ? kIndexedStride : kMeshStride;
+            f.batches.push_back({in.draw_groups[group], group, layer, indexed_instanced?1u:layout.capacity,
+                UINT64(layout.first)*stride, UINT64(segment)*4,indexed_instanced});
         }
         f.batch_counts[layer]=f.batches.size()-f.batch_begins[layer];
     }
@@ -1395,7 +1418,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         casters = pass.Write(casters, Access::CopyDest);
         receivers = pass.Write(receivers, Access::CopyDest);
         pass.SetExecute([t, slot=in.frame_slot, caster_bytes=in.casters.size()*sizeof(GpuCaster)-caster_copy_offset, caster_copy_offset,
-            receiver_bytes=in.receivers.size_bytes(),segment_bytes=UINT64(segment_count+(plan.fixed_root?group_count:0))*sizeof(ShadowCommandSegment)](RenderPassContext &ctx)
+            receiver_bytes=in.receivers.size_bytes(),segment_bytes=UINT64(segment_count+(plan.fixed_root?group_count:0))*kGpuSegmentStride](RenderPassContext &ctx)
         {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList()); auto &frame=t->frames[slot];
             list->CopyBufferRegion(frame.metadata.resource.Get(), 0, frame.upload.resource.Get(), 0, sizeof(VirtualShadowConstants));
@@ -1407,8 +1430,10 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
     }
     {
         auto pass = make_pass(148, "VirtualShadow.InitializeFeedback", QueueHint::Compute);
+        pass.Read(metadata,Access::ComputeRead);
         pages = pass.Write(pages, Access::UnorderedWrite); requests = pass.Write(requests, Access::UnorderedWrite);
         counts = pass.Write(counts, Access::UnorderedWrite);
+        indexed = pass.Write(indexed,Access::UnorderedWrite);
         page_draw_counts = pass.Write(page_draw_counts, Access::UnorderedWrite);
         residents = reset ? pass.Write(residents, Access::UnorderedWrite) : pass.ReadWrite(residents, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot](RenderPassContext &ctx)
@@ -1433,7 +1458,6 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         auto pass = make_pass(150, "VirtualShadow.ResidentAndDirty", QueueHint::Compute);
         pass.Read(casters, Access::ComputeRead); pass.Read(requests, Access::UnorderedRead);
         residents = pass.ReadWrite(residents, Access::UnorderedWrite); pages = pass.ReadWrite(pages, Access::UnorderedWrite);
-        counts = pass.ReadWrite(counts, Access::UnorderedWrite); clear = pass.Write(clear, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot, resident_handle=residents.resource, page_handle=pages.resource](RenderPassContext &ctx)
         {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
@@ -1467,7 +1491,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
             list->SetComputeRoot32BitConstant(3, 1, 0);
-            if (segment_count) list->Dispatch((segment_count+63)/64, 1, 1);
+            if (segment_count) list->Dispatch(segment_count, 1, 1);
         });
     }
     {
@@ -1476,14 +1500,17 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         if(baked_staging.resource) pass.Read(baked_staging,Access::ComputeRead);
         pass.Read(requests, Access::UnorderedRead);
         pass.Read(casters, Access::ComputeRead); pages = pass.ReadWrite(pages, Access::UnorderedWrite);
-        counts = pass.ReadWrite(counts, Access::UnorderedWrite); draws = pass.Write(draws, Access::UnorderedWrite);
-        indexed = pass.Write(indexed, Access::UnorderedWrite); mesh = pass.Write(mesh, Access::UnorderedWrite);
-        pass.SetExecute([t, slot=in.frame_slot, caster_count=std::uint32_t(in.casters.size())](RenderPassContext &ctx)
+        counts = pass.ReadWrite(counts, Access::UnorderedWrite); clear = pass.Write(clear, Access::UnorderedWrite);
+        draws = pass.Write(draws, Access::UnorderedWrite);
+        indexed = pass.ReadWrite(indexed, Access::UnorderedWrite); mesh = pass.Write(mesh, Access::UnorderedWrite);
+        pass.SetExecute([t, slot=in.frame_slot, caster_count=std::uint32_t(in.casters.size()),
+            entry_count=t->entries](RenderPassContext &ctx)
         {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
             list->SetComputeRoot32BitConstant(3, 2, 0);
-            if (caster_count) list->Dispatch((caster_count+63)/64, 1, 1);
+            const auto work = std::max(caster_count, entry_count);
+            if (work) list->Dispatch((work+63)/64, 1, 1);
         });
     }
     if(plan.fixed_root)
@@ -1494,12 +1521,12 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         mesh=pass.ReadWrite(mesh,Access::UnorderedWrite); counts=pass.ReadWrite(counts,Access::UnorderedWrite);
         pages=pass.ReadWrite(pages,Access::UnorderedWrite);
         pass.SetExecute([t,slot=in.frame_slot,group_count,caster_count=std::uint32_t(in.casters.size()),
-            count_handle=counts.resource,page_handle=pages.resource](RenderPassContext &ctx) {
+            count_handle=counts.resource,page_handle=pages.resource,indexed_handle=indexed.resource](RenderPassContext &ctx) {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list,*t,t->frames[slot],slot,3);
             list->SetComputeRoot32BitConstant(3,3,0);
             list->Dispatch((std::max(group_count,1u)+63)/64,1,1);
-            ctx.UavBarrier(count_handle); ctx.UavBarrier(page_handle);
+            ctx.UavBarrier(count_handle); ctx.UavBarrier(page_handle); ctx.UavBarrier(indexed_handle);
             list->SetComputeRoot32BitConstant(3,4,0);
             if(caster_count)list->Dispatch((caster_count+63)/64,1,1);
         });

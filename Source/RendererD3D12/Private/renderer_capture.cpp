@@ -308,6 +308,7 @@ struct SurfaceCapture
 {
     switch (format)
     {
+    case DXGI_FORMAT_R32_UINT: return "DXGI_FORMAT_R32_UINT";
     case DXGI_FORMAT_R32G32_UINT: return "DXGI_FORMAT_R32G32_UINT";
     case DXGI_FORMAT_R16G16_SNORM: return "DXGI_FORMAT_R16G16_SNORM";
     case DXGI_FORMAT_R8G8B8A8_UNORM: return "DXGI_FORMAT_R8G8B8A8_UNORM";
@@ -731,7 +732,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto *surface_material = owner.decal_surface_active ? decal_surfaces[2] : &owner.targets.gbuffer_material;
     std::vector<SurfaceCapture> surfaces{
         SurfaceCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
-                       DXGI_FORMAT_R32G32_UINT, Access::ShaderRead},
+                       DXGI_FORMAT_R32_UINT, Access::ShaderRead},
         SurfaceCapture{"gbuffer_normal", surface_normal,
                        DXGI_FORMAT_R16G16_SNORM, Access::ShaderRead},
         SurfaceCapture{"gbuffer_material", surface_material,
@@ -948,8 +949,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         for (std::uint32_t x = 0; x < width; ++x)
         {
             const auto depth_value = ReadFloat(pixel(depth, x, y));
-            const auto metadata_material = ReadU32(pixel(metadata, x, y));
-            const auto metadata_flags = ReadU32(pixel(metadata, x, y) + sizeof(std::uint32_t));
+            const auto decoded_metadata = render_data::DecodeSurfaceMetadata(
+                ReadU32(pixel(metadata, x, y)));
+            const auto metadata_material = decoded_metadata.material;
+            const auto metadata_flags = decoded_metadata.flags;
             const auto motion_x = ReadHalf(pixel(motion, x, y));
             const auto motion_y = ReadHalf(pixel(motion, x, y) + sizeof(std::uint16_t));
             const auto history_depth = ReadFloat(pixel(history, x, y));
@@ -1018,10 +1021,29 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         if (!raw)
             return unmap_failure("Could not open surface diagnostic raw output.");
         const auto *source = mapped + surface.footprint.Offset;
-        for (UINT row = 0; row < surface.rows; ++row)
-            raw.write(reinterpret_cast<const char *>(source +
-                         static_cast<std::size_t>(row) * surface.footprint.Footprint.RowPitch),
-                      static_cast<std::streamsize>(surface.row_size));
+        if (&surface == &metadata)
+        {
+            std::vector<std::uint32_t> logical_row(static_cast<std::size_t>(width) * 2u);
+            for (UINT row = 0; row < surface.rows; ++row)
+            {
+                const auto *native_row = source + static_cast<std::size_t>(row) *
+                    surface.footprint.Footprint.RowPitch;
+                for (std::uint32_t x = 0; x < width; ++x)
+                {
+                    const auto decoded = render_data::DecodeSurfaceMetadata(
+                        ReadU32(native_row + static_cast<std::size_t>(x) * sizeof(std::uint32_t)));
+                    logical_row[x * 2u] = decoded.material;
+                    logical_row[x * 2u + 1u] = decoded.flags;
+                }
+                raw.write(reinterpret_cast<const char *>(logical_row.data()),
+                          static_cast<std::streamsize>(logical_row.size() * sizeof(std::uint32_t)));
+            }
+        }
+        else
+            for (UINT row = 0; row < surface.rows; ++row)
+                raw.write(reinterpret_cast<const char *>(source +
+                             static_cast<std::size_t>(row) * surface.footprint.Footprint.RowPitch),
+                          static_cast<std::streamsize>(surface.row_size));
         if (!raw)
             return unmap_failure("Could not write surface diagnostic raw output.");
     }
@@ -1039,9 +1061,12 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         const auto description = surface.resource->resource->GetDesc();
         metadata_output << std::format(
             "    {{\"name\": \"{}\", \"file\": \"{}\", \"width\": {}, "
-            "\"height\": {}, \"format\": \"{}\", \"row_size\": {}, \"allocation_bytes\": {}}}{}\n",
+            "\"height\": {}, \"format\": \"{}\", \"native_format\": \"{}\", "
+            "\"row_size\": {}, \"native_row_size\": {}, \"allocation_bytes\": {}}}{}\n",
             surface.name, surface.raw_path.filename().string(), description.Width, description.Height,
-            FormatName(surface.format), surface.row_size,
+            &surface == &metadata ? "DXGI_FORMAT_R32G32_UINT" : FormatName(surface.format),
+            FormatName(description.Format),
+            &surface == &metadata ? surface.row_size * 2u : surface.row_size, surface.row_size,
             surface.resource->allocation ? surface.resource->allocation->GetSize() : 0,
             index + 1 == surfaces.size() ? "" : ",");
     }
@@ -1487,6 +1512,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             "  \"declared_formats\": {{\"visibility_ids\": \"DXGI_FORMAT_R32G32_UINT\", "
             "\"visibility_front_face\": \"DXGI_FORMAT_R8_UINT\", "
             "\"gbuffer_metadata\": \"DXGI_FORMAT_R32G32_UINT\"}},\n"
+            "  \"native_formats\": {{\"gbuffer_metadata\": \"DXGI_FORMAT_R32_UINT\"}},\n"
             "  \"sentinel\": {{\"visibility_ids\": [4294967295, 4294967295], "
             "\"front_face_clear\": 0}},\n  \"error\": \"{}\"\n}}\n",
             json_escape(message));
@@ -1603,7 +1629,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         TextureCapture{"visibility_front_face", &owner.targets.visibility_front_face,
                        DXGI_FORMAT_R8_UINT, 1},
         TextureCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
-                       DXGI_FORMAT_R32G32_UINT, 8},
+                       DXGI_FORMAT_R32_UINT, 4},
     };
     struct BufferCapture
     {
@@ -1817,6 +1843,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         return fail_mapped("Visibility diagnostic pixel count overflowed.");
     std::vector<std::uint32_t> visibility_ids(pixel_count * 2);
     std::vector<std::uint8_t> front_faces(pixel_count);
+    std::vector<std::uint32_t> packed_metadata(pixel_count);
     std::vector<std::uint32_t> metadata(pixel_count * 2);
     const auto copy_texture_rows = [&](const TextureCapture &texture, std::byte *destination) {
         const auto tight_row_size = static_cast<std::size_t>(texture.width) *
@@ -1830,7 +1857,13 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     };
     copy_texture_rows(textures[0], reinterpret_cast<std::byte *>(visibility_ids.data()));
     copy_texture_rows(textures[1], reinterpret_cast<std::byte *>(front_faces.data()));
-    copy_texture_rows(textures[2], reinterpret_cast<std::byte *>(metadata.data()));
+    copy_texture_rows(textures[2], reinterpret_cast<std::byte *>(packed_metadata.data()));
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+    {
+        const auto decoded = render_data::DecodeSurfaceMetadata(packed_metadata[pixel]);
+        metadata[pixel * 2] = decoded.material;
+        metadata[pixel * 2 + 1] = decoded.flags;
+    }
 
     const auto pixel_bytes = static_cast<std::size_t>(buffers[0].size);
     const auto count_bytes = kVisibilityVariantCount * 3u * sizeof(std::uint32_t);
@@ -2403,6 +2436,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
            << ",\n  \"declared_formats\": {\"visibility_ids\": \"DXGI_FORMAT_R32G32_UINT\", "
               "\"visibility_front_face\": \"DXGI_FORMAT_R8_UINT\", "
               "\"gbuffer_metadata\": \"DXGI_FORMAT_R32G32_UINT\"},\n"
+              "  \"native_formats\": {\"gbuffer_metadata\": \"DXGI_FORMAT_R32_UINT\"},\n"
               "  \"sentinel\": {\"visibility_ids\": [4294967295, 4294967295], "
               "\"front_face_clear\": 0}\n}\n";
     if (!output)

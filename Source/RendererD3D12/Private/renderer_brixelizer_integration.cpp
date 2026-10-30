@@ -1,10 +1,18 @@
 #include "renderer_impl.hpp"
 #include "renderer_brixelizer_scene.hpp"
+#include <hs/core/cooked_format.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <limits>
+#include <string>
 
 namespace hs
 {
+std::uint64_t BrixelizerSubmeshKey(std::uint64_t source_key, std::size_t part)
+{
+    return MakeAssetId("render/sdf/" + std::to_string(source_key) +
+        "/submesh/" + std::to_string(part)).value;
+}
+
 BrixelizerGeometryDomain ClassifyBrixelizerDomain(std::uint32_t capabilities, bool masked, bool transmissive)
 {
     constexpr auto thin = static_cast<std::uint32_t>(render_data::MaterialClosureCapability::ThinTransmission) |
@@ -24,6 +32,7 @@ Result AddBrixelizerExcludedCount(std::uint32_t &count, std::size_t submeshes)
 
 Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareSceneInstance &instance,
     std::span<const render_data::GeometrySubmesh> submeshes,
+    std::span<const std::uint64_t> submesh_keys,
     std::span<const render_data::CharacterMaterialBinding> bindings,
     std::span<const render_data::MaterialSurfaceLayout> hero_layouts,
     std::uint32_t environment_capabilities, bool masked, bool transmissive,
@@ -32,10 +41,16 @@ Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareS
     BrixelizerGeometryLookup &lookup,
     std::vector<SoftwareSceneGeometry> &geometries, std::vector<BrixelizerSceneInstance> &instances)
 {
+    if (submesh_keys.size() != submeshes.size())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+            "Native SDF submesh keys must match the geometry ranges.");
     constexpr auto thin = static_cast<std::uint32_t>(render_data::MaterialClosureCapability::ThinTransmission) |
         static_cast<std::uint32_t>(render_data::MaterialClosureCapability::SolidTransmission);
     for (std::size_t part = 0; part < submeshes.size(); ++part)
     {
+        if (!submesh_keys[part])
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                "Native SDF submesh key cannot be zero.");
         const auto &range = submeshes[part];
         auto domain = ClassifyBrixelizerDomain(environment_capabilities, masked, transmissive);
         auto material = instance.material_id;
@@ -73,8 +88,7 @@ Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareS
             !range.index_count || range.index_count % 3 || geometries.size() >= UINT32_MAX)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid native SDF submesh range.");
         auto geometry = source;
-        geometry.stable_key = MakeAssetId("render/sdf/" + std::to_string(source.stable_key) +
-            "/submesh/" + std::to_string(part)).value;
+        geometry.stable_key = submesh_keys[part];
         geometry.index_byte_offset += std::uint64_t(range.first_index) * index_stride;
         geometry.index_count = range.index_count;
         geometry.opaque = domain == BrixelizerGeometryDomain::Opaque;

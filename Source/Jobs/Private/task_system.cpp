@@ -278,34 +278,45 @@ void TaskSystem::ParallelFor(std::shared_ptr<TaskGroup::State> state,
         return;
     }
 
-    if (!impl_->executor)
+    try
     {
+        if (!impl_->executor)
+        {
+            for (std::size_t begin = 0; begin < count;)
+            {
+                const auto end = begin + std::min(grain, count - begin);
+                const auto submitted = Submit(state,
+                    [&task, begin, end](std::stop_token stop) {
+                        if (!stop.stop_requested()) task(begin, end);
+                    });
+                if (!submitted) break;
+                begin = end;
+            }
+            return;
+        }
+
+        auto shared_task =
+            std::make_shared<std::move_only_function<void(std::size_t, std::size_t)>>(std::move(task));
         for (std::size_t begin = 0; begin < count;)
         {
             const auto end = begin + std::min(grain, count - begin);
-            const auto submitted = Submit(state,
-                [&task, begin, end](std::stop_token stop) {
-                    if (!stop.stop_requested()) task(begin, end);
-                });
+            const auto submitted = Submit(state, [shared_task, begin, end](std::stop_token stop) {
+                if (!stop.stop_requested())
+                {
+                    (*shared_task)(begin, end);
+                }
+            });
             if (!submitted) break;
             begin = end;
         }
-        return;
     }
-
-    auto shared_task =
-        std::make_shared<std::move_only_function<void(std::size_t, std::size_t)>>(std::move(task));
-    for (std::size_t begin = 0; begin < count;)
+    catch (const std::exception &exception)
     {
-        const auto end = begin + std::min(grain, count - begin);
-        const auto submitted = Submit(state, [shared_task, begin, end](std::stop_token stop) {
-            if (!stop.stop_requested())
-            {
-                (*shared_task)(begin, end);
-            }
-        });
-        if (!submitted) break;
-        begin = end;
+        state->SetFailure(ErrorCode::TaskFailed, exception.what());
+    }
+    catch (...)
+    {
+        state->SetFailure(ErrorCode::TaskFailed, "unknown ParallelFor preparation exception");
     }
 }
 

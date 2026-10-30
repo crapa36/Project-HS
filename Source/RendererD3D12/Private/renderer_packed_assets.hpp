@@ -21,7 +21,7 @@ inline Result ValidatePackedRendererAssets(const ShippedContentOwner &owner,
     {
         const auto &range = entry.range;
         if (!entry.asset_id.value || entry.asset_id.value <= previous_id ||
-            range.format > render_data::RenderBulkFormat::ShaderDxil ||
+            range.format > render_data::RenderBulkFormat::SurfaceLayoutAbi ||
             !range.byte_count || range.byte_count > std::numeric_limits<std::size_t>::max() ||
             range.offset % 64 || range.offset < 64 || range.offset > owner.Size() ||
             range.byte_count > owner.Size() - range.offset)

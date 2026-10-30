@@ -484,6 +484,18 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     } shader_owner_scope{pipeline_cache};
     RendererConfig pipeline_config;
     if (auto selected = SelectTextureFeedbackShaders(request, pipeline_config); !selected) return selected;
+    RendererAssetSource abi_source;
+    if (auto resolved = ResolveRendererAsset(pipeline_config, render_data::SurfaceLayout::abi_product, abi_source);
+        !resolved) return resolved;
+    std::vector<std::byte> abi;
+    if (auto read = ReadBinary(abi_source, abi); !read) return read;
+    std::uint32_t abi_version{};
+    if (abi.size() == sizeof(abi_version))
+        for (std::size_t byte = 0; byte < sizeof(abi_version); ++byte)
+            abi_version |= std::to_integer<std::uint32_t>(abi[byte]) << (byte * 8u);
+    if (abi.size() != sizeof(abi_version) || abi_version != render_data::SurfaceLayout::version)
+        return Result::Failure(ErrorCode::InvalidState, "RendererSurfaceLayout",
+            "Selected shader generation has an incompatible surface layout ABI; recook renderer content.");
     mesh_pipeline_pairs.clear();
     virtual_shadow_indexed_pipelines.clear();
     virtual_shadow_mesh_pipelines.clear();
@@ -650,21 +662,16 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (auto registered = register_shader_owner("render/shader/deferred_ps.dxil", deferred_pixel,
         deferred_bytes_verified); !registered)
         return registered;
-    if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
-        render_data::MaterialProgramKind::HeroShadowPS, "archer_skin_shadow.dxil", hero_shadow_pixel); !read) return read;
-    if (auto read = read_material_shader("render/material/slime_body/material.rpkg",
-        render_data::MaterialProgramKind::HeroTranslucentPS, "slime_body_translucent.dxil", hero_translucent_pixel); !read) return read;
+    if (auto read = read_shader("hero_shadow_ps.dxil", hero_shadow_pixel); !read) return read;
+    if (auto read = read_shader("hero_translucent_ps.dxil", hero_translucent_pixel); !read) return read;
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
     {
-        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
-            render_data::MaterialProgramKind::HeroScenePS, "archer_skin_scene.dxil", hero_scene_pixel); !read) return read;
+        if (auto read = read_shader("hero_scene_ps.dxil", hero_scene_pixel); !read) return read;
     }
     else
     {
-        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
-            render_data::MaterialProgramKind::HeroVisibilityPS, "archer_skin_visibility.dxil", hero_visibility_pixel); !read) return read;
-        if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
-            render_data::MaterialProgramKind::HeroSurfaceResolveCS, "archer_skin_resolve.dxil", hero_resolve_compute); !read) return read;
+        if (auto read = read_shader("hero_visibility_ps.dxil", hero_visibility_pixel); !read) return read;
+        if (auto read = read_shader("hero_resolve_cs.dxil", hero_resolve_compute); !read) return read;
     }
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
         if (auto read = read_shader("scene_ps.dxil", scene_pixel); !read) return read;
@@ -817,8 +824,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                              material_sidecar_layout.plane_count;
     scene.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     scene.RTVFormats[1] = DXGI_FORMAT_R16G16_SNORM;
-    // Preserve world position precision for deferred shadow comparisons.
-    scene.RTVFormats[2] = DXGI_FORMAT_R32G32_UINT;
+    scene.RTVFormats[2] = DXGI_FORMAT_R32_UINT;
     scene.RTVFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;
     scene.RTVFormats[4] = DXGI_FORMAT_R16G16_FLOAT;
     scene.RTVFormats[5] = DXGI_FORMAT_R32G32_FLOAT;

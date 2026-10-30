@@ -241,7 +241,7 @@ RWStructuredBuffer<uint> DeadIndices : register(u4);
 RWByteAddressBuffer ParticleCounters : register(u5);
 Texture2D<float4> GBufferBase : register(t2);
 Texture2D<float2> GBufferNormal : register(t3);
-Texture2D<uint2> GBufferMetadata : register(t4);
+Texture2D<uint> GBufferMetadata : register(t4);
 Texture2D<float> SurfaceDepth : register(t0, space6);
 Texture2D<float2> SurfaceHistory : register(t1, space6);
 Texture2D<uint4> SurfaceSidecar0 : register(t2, space6);
@@ -687,14 +687,15 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.EnvironmentStableWorld = stable_world;
     output.AnimationClip = (instance.Mesh >> 8) & 0xff;
     output.AnimationProgress = saturate(instance.Padding);
-    output.ShadowClipDistance = HsShadowClipDistance(world, PassValue);
+    output.ShadowClipDistance = HsShadowClipDistance(world,
+        HsShadowIsDraw(PassValue) ? context.rasterRecordId : PassValue);
     output.Charge = mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2
         ? saturate(instance.Padding) : 0.0;
     return output;
 }
 
 SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_id,
-                                bool gpu_scene_refs, bool evaluate_history = true)
+                                bool gpu_scene_refs, bool evaluate_history, uint shadow_pass)
 {
     HsSceneVertexContext context = (HsSceneVertexContext)0;
     context.skinSlot = 0xffffffffu;
@@ -735,10 +736,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
     }
     if (HsShadowIsDraw(PassValue))
     {
-        const HsShadowDrawRecord shadow = HsShadowLoadDraw(PassValue);
+        const HsShadowDrawRecord shadow = HsShadowLoadDraw(shadow_pass);
         context.geometry = LoadGeometryDrawRecord(shadow.geometry_record);
         context.geometryValid = true;
-        context.rasterRecordId = 0xffffffffu;
+        context.rasterRecordId = shadow_pass;
     }
     else if (PassValue >= 4u)
     {
@@ -754,24 +755,24 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
 SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
-                               (SceneDrawMaterial & 1u) != 0);
+                               (SceneDrawMaterial & 1u) != 0, true, GeometryShadowPass(instance_id));
 }
 
 SceneOutput HeroCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     // Only the nearest composite writes motion guides; other Hero draws need the current pose.
     return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
-                               (SceneDrawMaterial & 1u) != 0, false);
+                               (SceneDrawMaterial & 1u) != 0, false, GeometryShadowPass(instance_id));
 }
 
 SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     // Shadows consume current coverage only; previous deformation is for motion vectors.
     SceneOutput output = EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
-        (SceneDrawMaterial & 1u) != 0, false);
+        (SceneDrawMaterial & 1u) != 0, false, GeometryShadowPass(instance_id));
     // Record IDs start at 1; legacy procedural draws retain cascades 0..2.
     if (HsShadowIsDraw(PassValue))
-        output.Position = HsShadowProject(output.WorldPosition, PassValue);
+        output.Position = HsShadowProject(output.WorldPosition, output.RasterDrawRecordId);
     else
     {
         const uint cascade = PassValue >= 4u ? (PassValue & 3u) - 1u : PassValue;
@@ -782,7 +783,7 @@ SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint ve
 void EnvironmentShadowPS(SceneOutput input, bool masked, bool front)
 {
     if(input.Mesh==22u && input.Material==1u) discard;
-    HsShadowRasterClip(input.Position.xy, PassValue);
+    HsShadowRasterClip(input.Position.xy, input.RasterDrawRecordId);
     const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
     EnvironmentLodClip(input);
     if (masked) clip(HsMaterialEvaluateOpacity(material_context) - HsMaterialOpacityCutoff);
@@ -791,7 +792,7 @@ void EnvironmentShadowPS(SceneOutput input, bool masked, bool front)
 void ShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     if(input.Mesh==22u && input.Material==1u) discard;
-    HsShadowRasterClip(input.Position.xy, PassValue);
+    HsShadowRasterClip(input.Position.xy, input.RasterDrawRecordId);
     const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
     EnvironmentLodClip(input);
     if (input.Mesh == 17 || input.Mesh == 19)
@@ -813,7 +814,7 @@ struct GBufferOutput
 {
     float4 BaseColor : SV_Target0;
     float2 Normal : SV_Target1;
-    uint2 Metadata : SV_Target2;
+    uint Metadata : SV_Target2;
     float4 Material : SV_Target3;
     float2 Motion : SV_Target4;
     float2 History : SV_Target5;
@@ -1103,7 +1104,7 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
     GBufferOutput output;
     output.BaseColor = input.Color;
     output.Material = float4(0.3, 0.0, 1.0, 0.0);
-    output.Metadata = uint2(input.MaterialId, input.SurfaceFlags);
+    output.Metadata = HsPackSurfaceMetadata(uint2(input.MaterialId, input.SurfaceFlags));
     output.Motion = 0.0;
     output.History = 0.0;
 #if HS_SURFACE_SIDECAR_PLANES > 0
@@ -1247,7 +1248,7 @@ GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ct
     GBufferOutput output = (GBufferOutput)0;
     output.BaseColor = float4(surface.base_color, 1.0);
     output.Normal = HsEncodeSurfaceNormal(normal);
-    output.Metadata = uint2(input.MaterialId, input.SurfaceFlags);
+    output.Metadata = HsPackSurfaceMetadata(uint2(input.MaterialId, input.SurfaceFlags));
     output.Material = float4(surface.roughness, saturate(surface.metallic), surface.ao, 0.0);
     const float2 current_uv = input.Position.xy * ScreenSize.zw - SurfaceJitterUv.xy;
     const float4 previous_unjittered = input.PreviousUnjitteredClipPosition;
@@ -1303,7 +1304,7 @@ GBufferOutput HeroScenePS(SceneOutput input, bool front : SV_IsFrontFace)
 void HeroShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     if(input.Mesh==22u && input.Material==1u) discard;
-    HsShadowRasterClip(input.Position.xy, PassValue);
+    HsShadowRasterClip(input.Position.xy, input.RasterDrawRecordId);
     const HsSceneGradients gradients = RasterSceneGradients(input);
     if (!HsHeroSceneCovered(input, front, gradients)) discard;
 }
@@ -2422,7 +2423,6 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
         const float2 uv=HsSurfaceClipUv(exit_clip);
         if(all(uv>=0.0) && all(uv<1.0))
         {
-            background_uv=uv;
             const uint2 sample_pixel=uint2(uv*ScreenSize.xy);
             const float depth=SurfaceDepth.Load(int3(sample_pixel,0));
             // Reverse-Z depth must lie behind the authored exit plane. Reject
@@ -2433,6 +2433,7 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
                     HsSurfaceRasterUv(int2(sample_pixel)),depth)+SurfaceViewOrigin.xyz;
                 if(dot(opaque_world-exit_world,transmitted)>=0.0)
                 {
+                    background_uv=uv;
                     if(fog_enabled)
                     {
                         background=VmRawOpaqueHdr.Load(int3(sample_pixel,0)).rgb;
@@ -2492,13 +2493,12 @@ HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGr
         water.absorption_per_m=float3(3.0,8.0,16.0);water.thickness_m=thickness;
         water.normal_is_world=true;return water;
     }
-    const uint transport_ordinal=5u;
     const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;
-    if(ordinal!=transport_ordinal) { HS_HERO_WORK_COUNT(11u); discard; }
+    if(!HsHeroTranslucentOrdinalValid(ordinal)) { HS_HERO_WORK_COUNT(11u); discard; }
     // discard does not let DXC narrow the later dynamic material switch.
-    const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,transport_ordinal);
+    const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,ordinal);
     HS_HERO_WORK_COUNT(13u);
-    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,transport_ordinal),ctx);
+    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
 #ifdef HS_CAPTURE_HERO_WORK
     if(surface.opacity-0.001<0.0) HsHeroWorkAdd(12u);
 #endif
@@ -2581,11 +2581,9 @@ OitOutput HeroOitTailPS(SceneOutput input,bool front:SV_IsFrontFace HS_HERO_WORK
 
 struct HeroTransparentGuideOutput
 {
-    float Depth;
     float2 Motion;
     float2 History;
     float4 Classification;
-    uint2 Metadata;
     float2 Transport;
 };
 
@@ -2614,9 +2612,7 @@ HsSurfaceClosure HsHeroSelectedSurface(SceneOutput input,bool front,uint hsHeroC
 HeroTransparentGuideOutput HsHeroSurfaceGuides(SceneOutput input,HsSurfaceClosure surface)
 {
     HeroTransparentGuideOutput output=(HeroTransparentGuideOutput)0;
-    output.Depth=input.Position.z;
     output.Classification=float4(HsEncodeSurfaceNormal(surface.normal),saturate(surface.opacity),surface.roughness);
-    output.Metadata=input.InstanceKey;
     output.Transport=float2(surface.solid_transmission_weight>0.0?1.0:0.0,any(surface.emission>0.0)?1.0:0.0);
     const float2 current_uv=input.Position.xy*ScreenSize.zw-SurfaceJitterUv.xy;
     const float4 previous=input.PreviousUnjitteredClipPosition;
@@ -2667,12 +2663,10 @@ float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surf
 struct HeroCompositeGuideOutput
 {
     float4 Color:SV_Target0;
-    float Depth:SV_Target1;
-    float2 Motion:SV_Target2;
-    float2 History:SV_Target3;
-    float4 Classification:SV_Target4;
-    uint2 Metadata:SV_Target5;
-    float2 Transport:SV_Target6;
+    float2 Motion:SV_Target1;
+    float2 History:SV_Target2;
+    float4 Classification:SV_Target3;
+    float2 Transport:SV_Target4;
 };
 
 // The existing guide product is the final layer0 composite. Reuse its original
@@ -2688,11 +2682,9 @@ HeroCompositeGuideOutput HeroTransparentGuidePS(SceneOutput input,bool front:SV_
     const HeroTransparentGuideOutput guides=HsHeroSurfaceGuides(input,surface);
     HeroCompositeGuideOutput output;
     output.Color=HsHeroCompositeSurface(input,front,surface);
-    output.Depth=guides.Depth;
     output.Motion=guides.Motion;
     output.History=guides.History;
     output.Classification=guides.Classification;
-    output.Metadata=guides.Metadata;
     output.Transport=guides.Transport;
     return output;
 }

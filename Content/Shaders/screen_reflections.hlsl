@@ -75,7 +75,7 @@ cbuffer ScreenReflectionsPass : register(b1, space16)
 Texture2D<float> SurfaceDepth : register(t0, space16);
 Texture2D<float4> GBufferBase : register(t1, space16);
 Texture2D<float2> GBufferNormal : register(t2, space16);
-Texture2D<uint2> GBufferMetadata : register(t3, space16);
+Texture2D<uint> GBufferMetadata : register(t3, space16);
 Texture2D<float4> GBufferMaterial : register(t4, space16);
 Texture2D<float2> SsrMotion : register(t5, space16);
 Texture2D<float2> SsrSurfaceHistory : register(t6, space16);
@@ -211,7 +211,7 @@ SsrGuide SsrLoadGuide(int2 pixel)
     SsrGuide g = (SsrGuide)0;
     g.pixel = clamp(pixel, int2(0, 0), int2(SsrRenderSize.xy) - 1);
     g.depth = SurfaceDepth.Load(int3(g.pixel, 0));
-    g.metadata = GBufferMetadata.Load(int3(g.pixel, 0));
+    g.metadata = HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(g.pixel, 0)));
     g.valid = HsSurfaceValid(g.depth, g.metadata);
     if (g.valid)
     {
@@ -262,7 +262,8 @@ float SsrUnpackRoughness(uint packed) { return float(packed >> 20u) / 4095.0; }
 bool SsrCompatible(uint4 validation, SsrGuide g, float expectedDepth)
 {
     float previousDepth = asfloat(validation.x);
-    return g.valid && expectedDepth > 0.0 && previousDepth > 0.0 && all(validation.zw == g.metadata) &&
+    return g.valid && expectedDepth > 0.0 && previousDepth > 0.0 &&
+        validation.z == HsPackSurfaceMetadata(g.metadata) &&
         abs(previousDepth - expectedDepth) <= max(0.01, expectedDepth * SsrFilterParameters.x) &&
         dot(SsrUnpackNormal(validation.y), g.normal) >= SsrFilterParameters.y &&
         abs(SsrUnpackRoughness(validation.y) - g.roughness) <= SsrFilterParameters.w;
@@ -336,8 +337,8 @@ bool SsrTraceRay(SsrGuide source, float3 directionWorld, out int2 hitPixel, out 
             {
                 float2 uv = (float2(pixel) + 0.5) * SsrRenderSize.zw;
                 float3 hitNormal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(pixel, 0)));
-                uint2 hitMetadata = GBufferMetadata.Load(int3(pixel, 0));
-                if (hitMetadata.x != 0u && dot(hitNormal, -directionWorld) > 0.0)
+                uint hitMetadata = GBufferMetadata.Load(int3(pixel, 0));
+                if ((hitMetadata & HsSurfaceMetadataMaterialMask) != 0u && dot(hitNormal, -directionWorld) > 0.0)
                 {
                     float edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
                     confidence = saturate(edge / 0.05) * (1.0 - smoothstep(SsrTraceParameters.y * 0.5, SsrTraceParameters.y, max(gap, 0.0)));
@@ -461,7 +462,8 @@ void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
     }
     SsrCurrentRadiance[pixel] = result;
     SsrCurrentValidation[pixel] = g.valid
-        ? uint4(asuint(g.view_depth), SsrPackNormalRoughness(g.normal, g.roughness), g.metadata) : uint4(0, 0, 0, 0);
+        ? uint4(asuint(g.view_depth), SsrPackNormalRoughness(g.normal, g.roughness),
+            HsPackSurfaceMetadata(g.metadata), 0u) : uint4(0, 0, 0, 0);
 }
 [numthreads(8, 8, 1)]
 void ScreenReflectionSpatialCS(uint3 dispatch : SV_DispatchThreadID)

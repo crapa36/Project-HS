@@ -75,29 +75,6 @@ uint HsVisibilityGroupOrdinal(uint3 groupId)
     return groupId.x + groupId.y * 65535u;
 }
 
-StaticDrawRef HsLoadRasterRef(uint source, uint index)
-{
-    StaticDrawRef draw = (StaticDrawRef)0;
-    if (source == 1u)
-        draw = HsStaticVisibleRefs[index];
-    else if (source == 2u)
-        draw = HsDynamicVisibleRefs[index];
-    else if (source == 3u)
-        draw = HsStaticRetestRefs[index];
-    else if (source == 4u)
-        draw = HsStaticInputRefs[index];
-    else if (source == 5u)
-        draw = HsDynamicInputRefs[index];
-    else if (source == 6u)
-        draw = HsClusterRefs[index];
-    return draw;
-}
-
-bool HsRasterSourceIsStatic(uint source)
-{
-    return source == 1u || source == 3u || source == 4u || source == 6u;
-}
-
 bool HsRasterIdValid(uint id)
 {
     return id != HsVisibilityInvalid;

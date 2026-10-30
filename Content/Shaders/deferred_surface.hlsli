@@ -71,7 +71,7 @@ HsSurfaceClosure HsReflectionLoadClosure(uint2 activePixel)
     uint4 plane0=0u,plane1=0u;
     if(MaterialSidecarInfo.z>0u) plane0=SurfaceSidecar0.Load(int3(activePixel,0));
     if(MaterialSidecarInfo.z>1u) plane1=SurfaceSidecar1.Load(int3(activePixel,0));
-    return HsReflectionDecodeClosure(GBufferMetadata.Load(int3(activePixel,0)),
+    return HsReflectionDecodeClosure(HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(activePixel,0))),
         GBufferBase.Load(int3(activePixel,0)),GBufferNormal.Load(int3(activePixel,0)),
         GBufferMaterial.Load(int3(activePixel,0)),plane0,plane1,activePixel);
 }

@@ -1,42 +1,16 @@
 #ifndef HS_SURFACE_LAYOUT_HLSLI
 #define HS_SURFACE_LAYOUT_HLSLI
 
-// CompactDeferred v1: base RGBA8, oct normal RG16_SNORM, metadata RG32_UINT,
+#include "surface_metadata.hlsli"
+
+// CompactDeferred v2: base RGBA8, oct normal RG16_SNORM, metadata R32_UINT,
 // perceptual roughness/metalness/AO/reserved RGBA8, motion RG16_FLOAT,
 // and expected previous jittered NDC depth/history confidence RG32_FLOAT.
-static const uint HsSurfaceLayoutVersion = 1u;
+static const uint HsSurfaceLayoutVersion = 5u;
 // Zero is reserved by every material namespace and exactly representable by
 // ClearRenderTargetView's float clear input for this integer render target.
 static const uint HsSurfaceInvalidMaterial = 0u;
 static const uint2 HsSurfaceInvalidMetadata = uint2(0u, 0u);
-static const uint HsSurfaceFlagValid = 1u;
-static const uint HsSurfaceModelShift = 1u;
-static const uint HsSurfaceModelMask = 0xfeu;
-static const uint HsSurfaceModelCel = 1u;
-static const uint HsSurfaceModelEnvironment = 2u;
-static const uint HsSurfaceModelJelly = 3u;
-static const uint HsSurfaceFoliageMask = 3u << 8u;
-static const uint HsSurfaceFoliageLeaf = 1u << 8u;
-static const uint HsSurfaceFoliageGrass = 2u << 8u;
-static const uint HsSurfaceFlagThinSheet = 1u << 10u;
-static const uint HsSurfaceOutlineShift = 16u;
-
-uint HsPackSurfaceFlags(uint model, uint foliage, uint outline_group)
-{
-    return HsSurfaceFlagValid | (model << HsSurfaceModelShift) | foliage |
-        (foliage != 0u ? HsSurfaceFlagThinSheet : 0u) |
-        (outline_group << HsSurfaceOutlineShift);
-}
-
-uint HsSurfaceModel(uint2 metadata)
-{
-    return (metadata.y & HsSurfaceModelMask) >> HsSurfaceModelShift;
-}
-
-uint HsSurfaceOutlineGroup(uint2 metadata)
-{
-    return metadata.y >> HsSurfaceOutlineShift;
-}
 
 float2 HsSurfaceSignNotZero(float2 value)
 {
@@ -95,7 +69,7 @@ HsSurfaceSample HsLoadSurface(float2 raster_uv)
     HsSurfaceSample surface;
     surface.pixel = HsSurfacePixel(raster_uv);
     surface.depth = SurfaceDepth.Load(int3(surface.pixel, 0));
-    surface.metadata = GBufferMetadata.Load(int3(surface.pixel, 0));
+    surface.metadata = HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(surface.pixel, 0)));
     return surface;
 }
 
@@ -108,7 +82,7 @@ float HsSurfaceOutlineMask(int2 pixel)
 {
     pixel = clamp(pixel, int2(0, 0), int2(ScreenSize.xy) - 1);
     const float depth = SurfaceDepth.Load(int3(pixel, 0));
-    const uint2 metadata = GBufferMetadata.Load(int3(pixel, 0));
+    const uint2 metadata = HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(pixel, 0)));
     return HsSurfaceValid(depth, metadata) && HsSurfaceOutlineGroup(metadata) != 0u ? 1.0 : 0.0;
 }
 

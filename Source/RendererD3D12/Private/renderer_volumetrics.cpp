@@ -610,16 +610,31 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     const ResourceVersion lightVersions[]{in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices};
     for(UINT i=0;i<4;++i)if(!ResourceRead(graph,lightVersions[i],in.lights.resources[i]))
         return Fail(ErrorCode::InvalidArgument,"Volumetric world-light query requires all four authoritative LightList resources.");
-    const ResourceVersion shadowVersions[]{in.shadows.metadata,in.shadows.page_table,in.shadows.static_bank,in.shadows.dynamic_bank,in.shadows.draw_records};
+    struct ShadowRead
+    {
+        ResourceVersion version;
+        ID3D12Resource *resource;
+        Access access;
+    };
+    const ShadowRead shadowReads[]{
+        {in.shadows.metadata,in.shadows.resources[0],Access::AllShaderRead},
+        {in.shadows.page_table,in.shadows.resources[1],Access::AllShaderRead},
+        {in.shadows.static_bank,in.shadows.resources[2],Access::AllShaderRead},
+        {in.shadows.dynamic_bank,in.shadows.resources[3],Access::AllShaderRead},
+        {in.shadows.root_static,in.shadows.resources[5],Access::ComputeRead},
+        {in.shadows.root_dynamic,in.shadows.resources[6],Access::ComputeRead}};
     const bool shadows=in.shadows.resources[0]!=nullptr;
-    for(UINT i=0;i<5;++i)if(shadows?!ResourceRead(graph,shadowVersions[i],in.shadows.resources[i]):
-        (in.shadows.resources[i]!=nullptr||bool(shadowVersions[i].resource)))
+    for(UINT i=0;i<4;++i)if(shadows?!ResourceRead(graph,shadowReads[i].version,shadowReads[i].resource):
+        (shadowReads[i].resource!=nullptr||bool(shadowReads[i].version.resource)))
         return Fail(ErrorCode::InvalidArgument,"Volumetric ShadowData must contain all five current resources or be absent.");
-    if(in.shadows.resources[5]?!ResourceRead(graph,in.shadows.root_static,in.shadows.resources[5]):
-        bool(in.shadows.root_static.resource))
+    if(shadows?!ResourceRead(graph,in.shadows.draw_records,in.shadows.resources[4]):
+        (in.shadows.resources[4]!=nullptr||bool(in.shadows.draw_records.resource)))
+        return Fail(ErrorCode::InvalidArgument,"Volumetric ShadowData must contain all five current resources or be absent.");
+    if(shadowReads[4].resource?!ResourceRead(graph,shadowReads[4].version,shadowReads[4].resource):
+        bool(shadowReads[4].version.resource))
         return Fail(ErrorCode::InvalidArgument,"Volumetric fixed-root static resource/version mismatch.");
-    if(in.shadows.resources[6]?!ResourceRead(graph,in.shadows.root_dynamic,in.shadows.resources[6]):
-        bool(in.shadows.root_dynamic.resource))
+    if(shadowReads[5].resource?!ResourceRead(graph,shadowReads[5].version,shadowReads[5].resource):
+        bool(shadowReads[5].version.resource))
         return Fail(ErrorCode::InvalidArgument,"Volumetric fixed-root dynamic resource/version mismatch.");
     const ResourceVersion localShadowVersions[]{in.local_shadows.metadata,in.local_shadows.records,
         in.local_shadows.static_bank,in.local_shadows.dynamic_bank,in.local_shadows.draw_records};
@@ -821,7 +836,8 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         constants(lighting);lighting.Read(p.medium,Access::ComputeRead);
         lighting.Read(p.phase,Access::ComputeRead);
         for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
-        if(shadows)for(auto version:shadowVersions)lighting.Read(version,Access::AllShaderRead);
+        if(shadows)for(const auto &read:shadowReads)
+            if(read.resource)lighting.Read(read.version,read.access);
         if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
         if(in.compact_shadow.identity.w)lighting.Read(in.compact_shadow.atlas.version,Access::ComputeRead);
         p.raw=p.heroes_state.empty()?lighting.Write(p.raw,Access::UnorderedWrite):

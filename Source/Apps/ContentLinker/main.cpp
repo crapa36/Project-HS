@@ -256,8 +256,11 @@ std::string ImageSource(std::string_view header,
 {
     std::string source =
         "\n#include <hs/runtime/shipping_content.hpp>\n"
+        "// Installer reads this section to verify the shipped content image.\n"
+        "#if defined(_MSC_VER)\n#pragma section(\".hsimage\", read)\n#define HS_SHIPPING_IMAGE_SECTION __declspec(allocate(\".hsimage\"))\n"
+        "#else\n#define HS_SHIPPING_IMAGE_SECTION __attribute__((section(\".hsimage\"), used))\n#endif\n"
         "namespace hs::shipping\n{\nnamespace\n{\n"
-        "constinit const ShippingImageInfo kImage{{";
+        "HS_SHIPPING_IMAGE_SECTION constinit const ShippingImageInfo kImage{{";
     for (std::size_t index = 0; index < header.size(); ++index)
     {
         if (index) source += ',';
@@ -422,12 +425,13 @@ void Link(const fs::path &build_root, const fs::path &font_path,
                 continue;
             }
             std::string format;
-            for (const auto &[suffix,token]:std::array<std::pair<const char *,const char *>,10>{{
+            for (const auto &[suffix,token]:std::array<std::pair<const char *,const char *>,11>{{
                 {".rpkg","Package"}, {".rpage","GeometryPage"}, {".ghbin","GeometryHierarchy"},
                 {".shl1","SceneHlod"}, {".index","StaticShadowIndex"}, {".pages","StaticShadowPages"},
-                {".dds","DdsTexture"}, {".spkg","SceneProbe"}, {".dxil","ShaderDxil"}, {".hsbin","VfxMeshAtlas"}}})
+                {".dds","DdsTexture"}, {".spkg","SceneProbe"}, {".dxil","ShaderDxil"}, {".hsbin","VfxMeshAtlas"}, {".abi","SurfaceLayoutAbi"}}})
                 if(id.ends_with(suffix))format=token;
-            Require(!format.empty() && (!id.ends_with(".hsbin") || id=="vfx/vfx_mesh_atlas.hsbin"), "unknown renderer bulk format");
+            Require(!format.empty() && (!id.ends_with(".hsbin") || id=="vfx/vfx_mesh_atlas.hsbin") &&
+                (!id.ends_with(".abi") || id=="render/abi/surface_layout.abi"), "unknown renderer bulk format");
             Require(bulks.emplace(hs::MakeAssetId(id).value,Bulk{&snapshot,std::string(id),format}).second,
                     "duplicate renderer bulk or AssetId collision");
         }
@@ -529,6 +533,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
             if(bulk.format=="DdsTexture") return F::DdsTexture;
             if(bulk.format=="SceneProbe") return F::SceneProbe;
             if(bulk.format=="VfxMeshAtlas") return F::VfxMeshAtlas;
+            if(bulk.format=="SurfaceLayoutAbi") return F::SurfaceLayoutAbi;
             Require(bulk.format=="ShaderDxil","unknown bulk descriptor format");return F::ShaderDxil;
         }();
         bulk_descriptors.push_back({hs::AssetId{asset},{aligned,dependency.size,

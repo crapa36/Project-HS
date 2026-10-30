@@ -221,7 +221,7 @@ Result AdaptiveShadingSystem::RegisterFrame(RenderGraphBuilder &graph,const Adap
     if(!(Guide(graph,in.depth,in.render_active,DXGI_FORMAT_R32_TYPELESS)||Guide(graph,in.depth,in.render_active,DXGI_FORMAT_R32_FLOAT)||
         Guide(graph,in.depth,in.render_active,DXGI_FORMAT_D32_FLOAT))||!Guide(graph,in.normal,in.render_active,DXGI_FORMAT_R16G16_SNORM)||
         !Guide(graph,in.base,in.render_active,DXGI_FORMAT_R8G8B8A8_UNORM)||!Guide(graph,in.material,in.render_active,DXGI_FORMAT_R8G8B8A8_UNORM)||
-        !Guide(graph,in.metadata,in.render_active,DXGI_FORMAT_R32G32_UINT)||!Guide(graph,in.motion,in.render_active,DXGI_FORMAT_R16G16_FLOAT)||
+        !Guide(graph,in.metadata,in.render_active,DXGI_FORMAT_R32_UINT)||!Guide(graph,in.motion,in.render_active,DXGI_FORMAT_R16G16_FLOAT)||
         !std::isfinite(in.depth_parameters.x)||!std::isfinite(in.depth_parameters.y)||!std::isfinite(in.depth_parameters.z)||!std::isfinite(in.depth_parameters.w))
         return Failure(ErrorCode::InvalidArgument,"Adaptive actual depth/normal/material/motion guides are invalid.");
     UINT previous{};for(const auto &policy:in.material_policy)
@@ -237,7 +237,7 @@ Result AdaptiveShadingSystem::RegisterFrame(RenderGraphBuilder &graph,const Adap
         if(capture)capture->guides[i]=guides[i].version;
     }
     const DXGI_FORMAT formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32G32_UINT,DXGI_FORMAT_R16G16_FLOAT};
+        DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32_UINT,DXGI_FORMAT_R16G16_FLOAT};
     for(UINT i=0;i<6;++i)s->Srv(in.frame_slot,i,guides[i].resource,formats[i]);
     Impl::Pending pending;pending.graph=&graph;pending.slot=in.frame_slot;
     std::size_t import_index{};bool bound=true;Result binding_result=Result::Success();

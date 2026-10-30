@@ -11,7 +11,7 @@ namespace hs::render_data
 enum class RenderBulkFormat : std::uint32_t
 {
     Package, GeometryPage, GeometryHierarchy, SceneHlod, StaticShadowIndex,
-    StaticShadowPages, DdsTexture, SceneProbe, VfxMeshAtlas, ShaderDxil
+    StaticShadowPages, DdsTexture, SceneProbe, VfxMeshAtlas, ShaderDxil, SurfaceLayoutAbi
 };
 
 struct BulkRange

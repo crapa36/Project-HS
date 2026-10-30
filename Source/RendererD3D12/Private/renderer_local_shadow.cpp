@@ -522,8 +522,10 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
                         return Failure(ErrorCode::InvalidState,"Local shadow emitted commands exceed their transactional preflight.");
                     const auto index=UINT(draws.size());
                     draws.push_back({c.geometry_record,c.source_ref,c.instance_index,c.instance_generation,slot,layer,group,face});
-                    indexed.push_back({kLocalShadowPassBit|index,{c.index_count,1,c.first_index,c.base_vertex,0}});
-                    mesh.push_back({kLocalShadowPassBit|index,{c.meshlet_count,1,1}});
+                    const auto &group_data=in.draw_groups[group];
+                    indexed.push_back({kLocalShadowPassBit|index,{group_data.index_count,1,
+                        group_data.first_index,group_data.base_vertex,0}});
+                    mesh.push_back({kLocalShadowPassBit|index,{group_data.meshlet_count,1,1}});
                 }
                 if(draws.size()!=begin)
                 {

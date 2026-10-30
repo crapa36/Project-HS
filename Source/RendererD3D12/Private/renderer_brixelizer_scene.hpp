@@ -4,6 +4,7 @@
 #include <hs/render_data/geometry_package.hpp>
 #include <hs/render_data/material_schema.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -11,6 +12,8 @@
 
 namespace hs
 {
+[[nodiscard]] std::uint64_t BrixelizerSubmeshKey(std::uint64_t source_key, std::size_t part);
+
 // A frame-local geometry identity. The stable key alone is insufficient for
 // SkinCache and rewritten buffers, where one mesh key can have distinct byte
 // ranges or graph versions in the same frame.
@@ -90,6 +93,7 @@ private:
 [[nodiscard]] Result AppendBrixelizerLeaf(
     const SoftwareSceneGeometry &, const SoftwareSceneInstance &,
     std::span<const render_data::GeometrySubmesh>,
+    std::span<const std::uint64_t> submesh_keys,
     std::span<const render_data::CharacterMaterialBinding>,
     std::span<const render_data::MaterialSurfaceLayout> hero_layouts,
     std::uint32_t environment_capabilities, bool masked, bool transmissive,

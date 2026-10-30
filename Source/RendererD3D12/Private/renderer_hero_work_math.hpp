@@ -5,7 +5,8 @@
 
 namespace hs
 {
-inline constexpr std::uint32_t kHeroWorkContributors = 12, kHeroWorkPhases = 14;
+// One Archer range, three LOD ranges for each of six monster assets, and three water LODs.
+inline constexpr std::uint32_t kHeroWorkContributors = 1 + 6 * 3 + 3, kHeroWorkPhases = 14;
 inline constexpr std::uint64_t kHeroWorkRowBytes = 136;
 inline constexpr std::uint64_t kHeroWorkStatisticsOffset = 16, kHeroWorkOcclusionOffset = 128;
 inline constexpr std::uint32_t kHeroWorkShaderMagic = 0x31574848u, kHeroWorkShaderVersion = 1;

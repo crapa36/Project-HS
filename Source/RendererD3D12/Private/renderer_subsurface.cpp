@@ -302,7 +302,7 @@ Result SubsurfaceSystem::RegisterFrame(RenderGraphBuilder &graph, const Subsurfa
         !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return SssFailure(ErrorCode::InvalidArgument, "Subsurface active extent or completed frame slot is invalid.");
     if (!FitsDepth(inputs.depth, active) || !FitsGuide(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) ||
-        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32G32_UINT) ||
+        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
         !FitsGuide(inputs.diffuse, active, kColorFormat) || !FitsGuide(inputs.hdr, active, kColorFormat) ||
         !FitsParameters(inputs.material_parameters))
         return SssFailure(ErrorCode::InvalidArgument, "Subsurface guide resource, version, format or active extent is invalid.");
@@ -318,7 +318,7 @@ Result SubsurfaceSystem::RegisterFrame(RenderGraphBuilder &graph, const Subsurfa
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
     storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
     storage->Srv(inputs.frame_slot, 1, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
-    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 3, inputs.diffuse.resource, kColorFormat);
     storage->Srv(inputs.frame_slot, 4, inputs.hdr.resource, kColorFormat);
     storage->Srv(inputs.frame_slot, 5, storage->horizontal.resource.Get(), kColorFormat);

@@ -11,7 +11,8 @@
 
 namespace hs::app
 {
-std::shared_ptr<const StaticRenderScene> WorldTransportScene(const SelectedGeneration &generation)
+std::shared_ptr<const StaticRenderScene> WorldTransportScene(
+    const SelectedGeneration &generation, std::uint64_t seed)
 {
     std::filesystem::path rules_path;
     const auto required = generation.Require("game-data/simulation-rules", rules_path);
@@ -22,7 +23,7 @@ std::shared_ptr<const StaticRenderScene> WorldTransportScene(const SelectedGener
     if (rules.arena_obstacle_count > rules.arena_obstacles.size())
         throw std::runtime_error("simulation rules contain an invalid obstacle count");
     auto layout = BuildEnvironmentLayout(rules.arena_half_extent, rules.arena_boundary,
-        std::span(rules.arena_obstacles).first(rules.arena_obstacle_count), 0);
+        std::span(rules.arena_obstacles).first(rules.arena_obstacle_count), seed);
     if (layout.eligible_static_members.empty())
         throw std::runtime_error("production arena has no HLOD eligible static members");
     auto scene = std::make_unique<StaticRenderSceneStorage>();

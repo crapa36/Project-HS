@@ -162,7 +162,7 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
         !Fits(input.base, input.render_active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
         !Fits(input.normal, input.render_active, DXGI_FORMAT_R16G16_SNORM) ||
         !Fits(input.material, input.render_active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
-        !Fits(input.metadata, input.render_active, DXGI_FORMAT_R32G32_UINT) || !input.depth.resource ||
+        !Fits(input.metadata, input.render_active, DXGI_FORMAT_R32_UINT) || !input.depth.resource ||
         !Buffer(input.commands) || !Buffer(input.parameters) || !input.parameter_slot_count ||
         input.command_byte_offset % 4u != 0)
         return Failure(ErrorCode::InvalidArgument, "Decal registration requires prepared capacity, a waited frame bank, main descriptors and valid Surface/command guides.");

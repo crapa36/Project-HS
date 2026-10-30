@@ -339,7 +339,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return GuideFailure(ErrorCode::InvalidArgument, "Invalid active reconstruction extent or completed frame slot.");
     if (!FitsDepth(inputs.depth, active) || !FitsTexture(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
-        !FitsTexture(inputs.metadata, active, DXGI_FORMAT_R32G32_UINT) ||
+        !FitsTexture(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
         !FitsTexture(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
         !FitsTexture(inputs.composite_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
         !FitsTexture(inputs.opaque_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
@@ -373,7 +373,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
     storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
     storage->Srv(inputs.frame_slot, 1, inputs.motion.resource, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 3, inputs.surface_history.resource, DXGI_FORMAT_R32G32_FLOAT);
     storage->Srv(inputs.frame_slot, 4, inputs.composite_hdr.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Srv(inputs.frame_slot, 5, inputs.opaque_hdr.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);

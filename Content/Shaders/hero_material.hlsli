@@ -31,7 +31,14 @@ uint2 HsHeroBindingOrdinals(uint mesh, uint slot)
 
 bool HsHeroOpaqueOrdinalValid(uint ordinal)
 {
-    return ordinal < HsHeroMaterialCount && ordinal != 5u;
+    // The CPU-validated binding table selects the opaque domain through .x.
+    return ordinal < HsHeroMaterialCount;
+}
+
+bool HsHeroTranslucentOrdinalValid(uint ordinal)
+{
+    // The CPU-validated binding table selects the translucent domain through .y.
+    return ordinal < HsHeroMaterialCount;
 }
 
 uint HsHeroOrdinal(uint material_id)

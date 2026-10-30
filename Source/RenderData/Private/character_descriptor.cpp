@@ -194,18 +194,9 @@ void ValidateCharacterDescriptor(const CharacterDescriptor &value, std::span<con
         auto &seen = binding.domain == HeroMaterialDomain::Opaque ? opaque : translucent;
         Require(binding.domain <= HeroMaterialDomain::Translucent && !seen[binding.slot], "duplicate character material domain");
         seen[binding.slot] = true;
-        Require((binding.domain == HeroMaterialDomain::Translucent) == (kHeroMaterialNames[binding.hero_ordinal] == "slime_body"),
-                "character Hero ordinal/domain mismatch");
     }
-    for (std::size_t slot=0;slot<value.material_count;++slot) Require(opaque[slot], "missing opaque FBX material slot");
-    for (const auto &binding:value.material_bindings)
-    {
-        if (binding.domain == HeroMaterialDomain::Translucent)
-            Require(std::ranges::any_of(value.material_bindings,[&](const auto &other) { return other.slot == binding.slot &&
-                other.domain == HeroMaterialDomain::Opaque && kHeroMaterialNames[other.hero_ordinal] == "slime_features"; }),
-                "jelly body lacks opaque feature binding");
-        else if (kHeroMaterialNames[binding.hero_ordinal] == "slime_features") Require(translucent[binding.slot], "jelly feature lacks body binding");
-    }
+    for (std::size_t slot=0;slot<value.material_count;++slot)
+        Require(opaque[slot] || translucent[slot], "missing character material slot binding");
     const bool monster = value.deformation_abi != 0;
     Require(monster ? !value.transforms.byte_count : !value.final_matrices.byte_count, "mixed character sample representations");
     const auto rows = Rows(monster ? value.final_matrices : value.transforms,bulk,monster ? 64u : 40u);

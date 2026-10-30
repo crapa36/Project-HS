@@ -635,8 +635,12 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     std::ranges::sort(wanted_buffers);
     wanted_buffers.erase(std::unique(wanted_buffers.begin(),wanted_buffers.end()),wanted_buffers.end());
     std::size_t invalidations{};
+    auto wanted_key=wanted_static.begin();
     for(const auto &[key,instance]:s->static_instances)
-        if(!std::binary_search(wanted_static.begin(),wanted_static.end(),key))++invalidations;
+    {
+        while(wanted_key!=wanted_static.end()&&*wanted_key<key)++wanted_key;
+        if(wanted_key==wanted_static.end()||key<*wanted_key)++invalidations;
+    }
     for(const auto &instance:in.instances)
     {
         if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)continue;
@@ -668,9 +672,11 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         {if(auto result=Sdk("ffxBrixelizerUnregisterBuffers",ffxBrixelizerUnregisterBuffers(s->sdf.get(),&buffer.id,1));!result)return mutation_failure(result);
             it=s->registered_buffers.erase(it);}else ++it;
     }
+    wanted_key=wanted_static.begin();
     for(auto it=s->static_instances.begin();it!=s->static_instances.end();)
     {
-        if(!std::binary_search(wanted_static.begin(),wanted_static.end(),it->first))
+        while(wanted_key!=wanted_static.end()&&*wanted_key<it->first)++wanted_key;
+        if(wanted_key==wanted_static.end()||it->first<*wanted_key)
         {if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&it->second.native_id,1));!result)return mutation_failure(result);
             it=s->static_instances.erase(it);}else ++it;
     }
@@ -890,7 +896,7 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         return Fail(ErrorCode::InvalidArgument,"Brixelizer fixed extent/reset/camera/closure contract is invalid; drained recreation is required on discontinuities.");
     const auto size=s->extent;
     if(!(Guide(graph,in.depth,size,DXGI_FORMAT_R32_TYPELESS)||Guide(graph,in.depth,size,DXGI_FORMAT_D32_FLOAT)||Guide(graph,in.depth,size,DXGI_FORMAT_R32_FLOAT))||
-        !Guide(graph,in.normal,size,DXGI_FORMAT_R16G16_SNORM)||!Guide(graph,in.metadata,size,DXGI_FORMAT_R32G32_UINT)||
+        !Guide(graph,in.normal,size,DXGI_FORMAT_R16G16_SNORM)||!Guide(graph,in.metadata,size,DXGI_FORMAT_R32_UINT)||
         !Guide(graph,in.motion,size,DXGI_FORMAT_R16G16_FLOAT)||!Guide(graph,in.base,size,DXGI_FORMAT_R8G8B8A8_UNORM)||
         !Guide(graph,in.material,size,DXGI_FORMAT_R8G8B8A8_UNORM)||!Guide(graph,in.cache_injection,size,DXGI_FORMAT_R16G16B16A16_FLOAT)||
         !Guide(graph,in.fallback_diffuse,size,DXGI_FORMAT_R16G16B16A16_FLOAT)||!Guide(graph,in.environment_specular,size,DXGI_FORMAT_R16G16B16A16_FLOAT)||
@@ -959,7 +965,7 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
     if(p.capture)
     {p.capture->lighting_reads=std::move(lighting_reads);p.capture->lighting_guides=guide_versions;
      p.capture->environment_cube=in.environment_cube.version;p.capture->sidecar_count=in.sidecar_plane_count;}
-    constexpr DXGI_FORMAT guide_formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R32G32_UINT,DXGI_FORMAT_R16G16_FLOAT,
+    constexpr DXGI_FORMAT guide_formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_SNORM,DXGI_FORMAT_R32_UINT,DXGI_FORMAT_R16G16_FLOAT,
         DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32G32B32A32_UINT,DXGI_FORMAT_R32G32B32A32_UINT,
         DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT,DXGI_FORMAT_R16G16B16A16_FLOAT};
     constants.render_size={float(size.width),float(size.height),1.0f/float(size.width),1.0f/float(size.height)};

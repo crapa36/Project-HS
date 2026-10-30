@@ -16,6 +16,13 @@ function(hs_release_verify_copy source staged)
 endfunction()
 hs_release_verify_copy("${_hs_release_source_exe}" "${_hs_release_stage}/ProjectHS.exe")
 hs_release_verify_copy("${_hs_release_source_pack}" "${_hs_release_stage}/Content/content.hsp")
+include("${CMAKE_CURRENT_LIST_DIR}/pe_shipping_image.cmake")
+hs_pe_read_shipping_image("${_hs_release_stage}/ProjectHS.exe" _hs_expected_header _hs_expected_size)
+file(READ "${_hs_release_stage}/Content/content.hsp" _hs_staged_header HEX LIMIT 64)
+file(SIZE "${_hs_release_stage}/Content/content.hsp" _hs_staged_size)
+if(NOT _hs_staged_header STREQUAL _hs_expected_header OR NOT _hs_staged_size EQUAL _hs_expected_size)
+    message(FATAL_ERROR "Staged Release executable/content pair differs from the linked image; stage retained at ${_hs_release_stage}")
+endif()
 
 # An empty destination is parked first. The final rename never replaces a directory.
 hs_release_directory_state("${_hs_release_target}" target_state)

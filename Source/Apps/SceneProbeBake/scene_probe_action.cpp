@@ -4,6 +4,7 @@
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/cooked_format.hpp>
+#include <hs/render_data/scene_probe_revision.hpp>
 #include <hs/render_data/scene_probe.hpp>
 
 
@@ -85,7 +86,7 @@ int ProduceSceneProbe(int argc,char **argv)
         const auto probe_count=static_cast<std::uint32_t>(layout.probes.size());
 
         ap::ActionSpec spec; spec.action_id=kAction; spec.namespace_path=kNamespace;
-        spec.recipe_id="project-hs.render.scene-probes/native-four-payload"; spec.recipe_version=1;
+        spec.recipe_id="project-hs.render.scene-probes/native-four-payload"; spec.recipe_version=3;
         // The bake layout is an explicit byte input. Its logical product id is
         // also the final baked product id, so it must not be represented as
         // an upstream product of this Action.
@@ -115,7 +116,9 @@ int ProduceSceneProbe(int argc,char **argv)
             }
         }
         std::set<std::string> closure; std::vector<std::string> pending;
-        for(const auto &[id,_]:generation.product_paths) pending.push_back(id);
+        pending.insert(pending.end(),layout.dependencies.begin(),layout.dependencies.end());
+        for(const auto &[id,_]:generation.product_paths)
+            if(rd::IsLocalProbeMaterialRevisionProduct(id)) pending.push_back(id);
         while(!pending.empty())
         {
             auto id=std::move(pending.back()); pending.pop_back(); if(!closure.insert(id).second) continue;

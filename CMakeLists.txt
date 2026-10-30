@@ -40,7 +40,11 @@ option(HS_WITH_DIRECTSTORAGE "Build the pinned native DirectStorage 1.3.0 asset 
 option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
 option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
 
-if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "Release")
+if(CMAKE_CONFIGURATION_TYPES)
+    message(FATAL_ERROR "Project HS supports single-config generators only (use the Ninja presets in CMakePresets.json).")
+endif()
+string(TOUPPER "${CMAKE_BUILD_TYPE}" HS_BUILD_TYPE_UPPER)
+if(HS_BUILD_TYPE_UPPER STREQUAL "RELEASE")
     set(HS_SINGLE_CONFIG_RELEASE ON)
 endif()
 if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS AND HS_SINGLE_CONFIG_RELEASE)
@@ -628,9 +632,11 @@ set(HS_HZB_REGION_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/hzb_region
 set(HS_GEOMETRY_SHADER_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/geometry.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/geometry_records.hlsli"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/surface_layout.hlsli")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/surface_layout.hlsli"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/surface_metadata.hlsli")
 set(HS_VISIBILITY_SHADER_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_buffer.hlsl"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_classification.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_records.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/triangle_sample.hlsli")
 set(HS_MATERIAL_SURFACE_LIBRARY
@@ -1262,7 +1268,7 @@ target_link_libraries(hs_render_runtime_shader PRIVATE
     hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
 target_compile_definitions(hs_render_runtime_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_render_runtime_shader)
-foreach(family IN ITEMS project geometry visibility static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion reconstruction-guides sdk-presentation hdr-post light-list scene-geometry virtual-shadow volumetrics scene-hlod local-probe-bake)
+foreach(family IN ITEMS project geometry visibility visibility-classification static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion adaptive-gtao reconstruction-guides sdk-presentation hdr-post light-list scene-geometry virtual-shadow volumetrics scene-hlod local-probe-bake)
     if(family STREQUAL "project")
         set(family_source project_hs.hlsl)
     elseif(family STREQUAL "visibility")
@@ -1365,8 +1371,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_gtao.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ambient_occlusion.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
@@ -1389,7 +1393,7 @@ hs_add_asset_action(
 list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BSDF_SHADER_RESULT}")
 # Intrusive developer PS variants are not part of Release/shipping products.
 # Current content generations use the repository's single-config Ninja trees.
-if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+if(NOT HS_SINGLE_CONFIG_RELEASE)
     set(HS_HERO_WORK_SHADER_RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/hero-work/result.json")
 hs_add_asset_action(
     NAME hs_render_hero_work
@@ -1410,8 +1414,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_gtao.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ambient_occlusion.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
@@ -1615,12 +1617,10 @@ foreach(name IN LISTS HS_HERO_MATERIAL_NAMES)
         NAME "hs_render_material_shader_${name}" BUILDER hs_render_material_shader
         RESULT "${hero_result}"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${name}/result.d"
-        STATIC_INPUTS ${HS_DEFERRED_MATERIAL_INPUTS} ${HS_MATERIAL_SURFACE_LIBRARY}
+        STATIC_INPUTS
+            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Materials/${name}.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/hero_material.hlsli"
-            "${HS_SHADER_SOURCE}" "${HS_GPU_SCENE_TABLES_SOURCE}" "${HS_GEOMETRY_SHADER_SOURCE}"
-            ${HS_VISIBILITY_SHADER_SOURCE} ${HS_DXC_TOOL_INPUTS}
-        UPSTREAM_RESULTS ${hero_texture_results}
+            "${HS_BSDF_SHADER_RESULT}"
         ARGS --name "${name}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}")
     hs_add_asset_action(
@@ -1687,7 +1687,23 @@ set(HS_CHARACTER_MODES archer slime-melee slime-ranged slime-suicide slime-proje
     boss-5m boss-10m boss-final)
 set(HS_CHARACTER_STEMS archer enemy_melee enemy_ranged enemy_suicide enemy_gel_projectile
     boss_5m boss_10m boss_final)
+set(HS_HERO_BINDINGS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Materials/hero_bindings.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HS_HERO_BINDINGS_SOURCE}")
+file(READ "${HS_HERO_BINDINGS_SOURCE}" HS_HERO_BINDINGS_JSON)
 foreach(mode IN LISTS HS_CHARACTER_MODES ITEMS monster-materials)
+    set(character_material_results)
+    if(NOT mode STREQUAL "monster-materials")
+        list(FIND HS_CHARACTER_MODES "${mode}" character_index)
+        list(GET HS_CHARACTER_STEMS ${character_index} character_stem)
+        string(JSON binding_count LENGTH "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}")
+        math(EXPR binding_last "${binding_count} - 1")
+        foreach(binding_index RANGE 0 ${binding_last})
+            string(JSON material_name GET "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}" ${binding_index} material)
+            list(APPEND character_material_results
+                "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${material_name}/result.json")
+        endforeach()
+        list(REMOVE_DUPLICATES character_material_results)
+    endif()
     if(mode STREQUAL "archer")
         set(action_inputs
             "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx")
@@ -1724,8 +1740,8 @@ foreach(mode IN LISTS HS_CHARACTER_MODES ITEMS monster-materials)
         BUILDER hs_character_content
         RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/character/${mode}/result.json"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/character/${mode}/result.d"
-        STATIC_INPUTS ${action_inputs}
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Materials/hero_bindings.json"
+        STATIC_INPUTS ${action_inputs} ${character_material_results}
+            "${HS_HERO_BINDINGS_SOURCE}"
         ARGS "--${mode}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}")
     list(APPEND HS_CHARACTER_ACTION_RESULTS
@@ -3021,15 +3037,8 @@ if(HS_BUILD_TESTS)
     )
     set_tests_properties(experiment.timeline PROPERTIES TIMEOUT 30)
     endif()
-    get_property(HS_SHADER_HOT_RELOAD_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-    if(HS_SHADER_HOT_RELOAD_MULTI_CONFIG OR NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    if(NOT HS_SINGLE_CONFIG_RELEASE)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
-        # Single-config CTest presets need no -C; only multi-config tests need
-        # a runtime configuration filter to exclude Release.
-        set(HS_SHADER_HOT_RELOAD_CONFIGURATIONS)
-        if(HS_SHADER_HOT_RELOAD_MULTI_CONFIG)
-            set(HS_SHADER_HOT_RELOAD_CONFIGURATIONS CONFIGURATIONS Debug RelWithDebInfo MinSizeRel)
-        endif()
         add_test(
             NAME rendering.shader-hot-reload
             COMMAND
@@ -3041,7 +3050,6 @@ if(HS_BUILD_TESTS)
                 -GenerationVerifier "$<TARGET_FILE:hs_generation>"
                 -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/shader-hot-reload"
                 -GenerationPointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json"
-            ${HS_SHADER_HOT_RELOAD_CONFIGURATIONS}
             BUILD_DEPENDS hs_content_generation
         )
         set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 300

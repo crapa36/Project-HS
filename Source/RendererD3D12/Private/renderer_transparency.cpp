@@ -26,7 +26,8 @@ constexpr DXGI_FORMAT kColor = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr std::array<DXGI_FORMAT, 6> kGuideFormats{
     DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
     kColor, DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R16G16_FLOAT};
-static_assert(1 + kGuideFormats.size() <= D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+constexpr std::array<std::uint32_t, 4> kCompositeGuideIndices{1, 2, 3, 5};
+static_assert(1 + kCompositeGuideIndices.size() <= D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
 constexpr std::array<std::string_view, 5> kPixelProducts{
     "render/shader/hero_peel_front_ps.dxil", "render/shader/hero_peel_exit_ps.dxil",
     "render/shader/hero_oit_tail_ps.dxil", "render/shader/hero_transparent_guide_ps.dxil",
@@ -171,8 +172,10 @@ struct HeroTransparencyTargets
             Srv(exit[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 9 + index));
         }
         Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 14));
-        for (std::uint32_t index = 0; index < 5; ++index)
+        Srv(front[0].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 15));
+        for (std::uint32_t index = 1; index < 4; ++index)
             Srv(guides[index].resource.Get(), kGuideFormats[index], Cpu(slot, phase, 15 + index));
+        Srv(identity[0].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 19));
         Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 20));
         Srv(guides[5].resource.Get(), kGuideFormats[5], Cpu(slot, phase, 21));
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
@@ -290,9 +293,12 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R32_TYPELESS,
                 D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, next->exit[layer]); !created) return created;
     }
-    for (std::uint32_t index = 0; index < next->guides.size(); ++index)
+    for (std::uint32_t index = 1; index < next->guides.size(); ++index)
+    {
+        if (index == 4) continue;
         if (auto created = CreateTexture(allocator, capacity, kGuideFormats[index],
                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, next->guides[index]); !created) return created;
+    }
     for (auto &color : next->color)
         if (auto created = CreateTexture(allocator, capacity, kColor,
                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, color); !created) return created;
@@ -373,12 +379,12 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         else if (index == 3)
         {
-            // The nearest composite emits its original surface guides in the same draw.
-            pipeline.NumRenderTargets = 1 + static_cast<UINT>(kGuideFormats.size());
+            // Reuse peeled depth/identity; emit only motion, history, class and transport.
+            pipeline.NumRenderTargets = 1 + static_cast<UINT>(kCompositeGuideIndices.size());
             pipeline.RTVFormats[0] = kColor;
-            for (std::uint32_t target = 0; target < kGuideFormats.size(); ++target)
+            for (std::uint32_t target = 0; target < kCompositeGuideIndices.size(); ++target)
             {
-                pipeline.RTVFormats[1 + target] = kGuideFormats[target];
+                pipeline.RTVFormats[1 + target] = kGuideFormats[kCompositeGuideIndices[target]];
                 pipeline.BlendState.RenderTarget[1 + target].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             }
             pipeline.BlendState.IndependentBlendEnable = TRUE;
@@ -425,11 +431,14 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         device->CreateDepthStencilView(next->front[layer].resource.Get(), &read_only, next->Dsv(8 + layer));
         device->CreateRenderTargetView(next->identity[layer].resource.Get(), nullptr, next->Rtv(layer));
     }
-    for (std::uint32_t index = 0; index < next->guides.size(); ++index)
+    next->Srv(next->front[0].resource.Get(), DXGI_FORMAT_R32_FLOAT, next->Export(0));
+    for (std::uint32_t index = 1; index < next->guides.size(); ++index)
     {
+        if (index == 4) continue;
         device->CreateRenderTargetView(next->guides[index].resource.Get(), nullptr, next->Rtv(4 + index));
         next->Srv(next->guides[index].resource.Get(), kGuideFormats[index], next->Export(index));
     }
+    next->Srv(next->identity[0].resource.Get(), DXGI_FORMAT_R32G32_UINT, next->Export(4));
     next->Srv(next->overflow.resource.Get(), DXGI_FORMAT_R32_UINT, next->Export(6));
     for (std::uint32_t index = 0; index < next->color.size(); ++index)
     {
@@ -622,8 +631,11 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         for (auto *resource : {&storage->front[layer], &storage->identity[layer],
                 &storage->exit[layer]})
             if (auto certified = certify(*resource); !certified) return certified;
-    for (auto &resource : storage->guides)
-        if (auto certified = certify(resource); !certified) return certified;
+    for (std::uint32_t index = 0; index < storage->guides.size(); ++index)
+    {
+        if (index == 0 || index == 4) continue;
+        if (auto certified = certify(storage->guides[index]); !certified) return certified;
+    }
     for (auto &resource : storage->color)
         if (auto certified = certify(resource); !certified) return certified;
     if (auto certified = certify(storage->overflow); !certified) return certified;
@@ -676,7 +688,9 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
     auto &guides = pending.guides;
     for (std::uint32_t index = 0; index < guides.size(); ++index)
     {
-        guides[index] = import(storage->guides[index], "Hero.NearestFrontGuide",
+        if (index == 0) guides[index] = pending.front[0];
+        else if (index == 4) guides[index] = pending.identity[0];
+        else guides[index] = import(storage->guides[index], "Hero.NearestFrontGuide",
             retained ? retained->guides[index] : TextureHandle{});
         if (layout) layout->guides[index] = guides[index].resource;
     }
@@ -874,18 +888,17 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             commands->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     });
     pending.overflow = overflow;
-    outputs.depth = guides[0]; outputs.motion = guides[1]; outputs.history = guides[2];
-    outputs.classification = guides[3]; outputs.metadata = guides[4]; outputs.transport = guides[5]; outputs.overflow = overflow;
-    outputs.depth_resource = storage->guides[0].resource.Get(); outputs.motion_resource = storage->guides[1].resource.Get();
+    outputs.depth = pending.front[0]; outputs.motion = guides[1]; outputs.history = guides[2];
+    outputs.classification = guides[3]; outputs.metadata = pending.identity[0]; outputs.transport = guides[5]; outputs.overflow = overflow;
+    outputs.depth_resource = storage->front[0].resource.Get(); outputs.motion_resource = storage->guides[1].resource.Get();
     outputs.history_resource = storage->guides[2].resource.Get(); outputs.classification_resource = storage->guides[3].resource.Get();
-    outputs.metadata_resource = storage->guides[4].resource.Get(); outputs.transport_resource = storage->guides[5].resource.Get();
+    outputs.metadata_resource = storage->identity[0].resource.Get(); outputs.transport_resource = storage->guides[5].resource.Get();
     outputs.overflow_resource = storage->overflow.resource.Get();
     outputs.depth_srv = storage->Export(0); outputs.motion_srv = storage->Export(1); outputs.history_srv = storage->Export(2);
     outputs.classification_srv = storage->Export(3); outputs.metadata_srv = storage->Export(4);
     outputs.transport_srv = storage->Export(5); outputs.overflow_srv = storage->Export(6);
     if (layout)
     {
-        layout->guide_versions = guides;
         layout->overflow_version = overflow;
         layout->accumulation_version = outputs.accumulation;
         layout->revealage_version = outputs.revealage;
@@ -1045,11 +1058,11 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
         if (layer == 0)
         {
             if (!retained) compose.Read(pending.overflow, Access::ShaderRead);
-            for (auto &version : pending.guides)
-                version = retained ? ResourceVersion{version.resource, 1}
-                    : compose.Write(version, Access::RenderTarget);
-            outputs.depth = pending.guides[0]; outputs.motion = pending.guides[1]; outputs.history = pending.guides[2];
-            outputs.classification = pending.guides[3]; outputs.metadata = pending.guides[4]; outputs.transport = pending.guides[5];
+            for (const auto index : kCompositeGuideIndices)
+                pending.guides[index] = retained ? ResourceVersion{pending.guides[index].resource, 1}
+                    : compose.Write(pending.guides[index], Access::RenderTarget);
+            outputs.depth = pending.front[0]; outputs.motion = pending.guides[1]; outputs.history = pending.guides[2];
+            outputs.classification = pending.guides[3]; outputs.metadata = pending.identity[0]; outputs.transport = pending.guides[5];
         }
 #if defined(HS_DEVELOPMENT_TOOLS)
         if (storage->work)
@@ -1068,11 +1081,12 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
             const auto depth = storage->Dsv(8 + layer);
             if (layer == 0)
             {
-                std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 7> targets{rtv};
+                std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 1 + kCompositeGuideIndices.size()> targets{rtv};
                 constexpr float zero[]{0, 0, 0, 0};
-                for (std::uint32_t index = 0; index < storage->guides.size(); ++index)
+                for (std::uint32_t index = 0; index < kCompositeGuideIndices.size(); ++index)
                 {
-                    targets[1 + index] = storage->Rtv(4 + index);
+                    const auto guideIndex = kCompositeGuideIndices[index];
+                    targets[1 + index] = storage->Rtv(4 + guideIndex);
                     commands->ClearRenderTargetView(targets[1 + index], zero, 0, nullptr);
                 }
                 commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, &depth);
@@ -1095,7 +1109,6 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
     }
     if (layout)
     {
-        layout->guide_versions = pending.guides;
         layout->corrected_version = outputs.corrected;
     }
     pending.composed = true;

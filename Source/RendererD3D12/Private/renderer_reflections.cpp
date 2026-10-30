@@ -350,7 +350,7 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection active extent or completed frame slot.");
     if (!FitsDepth(inputs.depth, active) || !FitsTexture(inputs.base, active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
-        !FitsTexture(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) || !FitsTexture(inputs.metadata, active, DXGI_FORMAT_R32G32_UINT) ||
+        !FitsTexture(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) || !FitsTexture(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
         !FitsTexture(inputs.material, active, DXGI_FORMAT_R8G8B8A8_UNORM) || !FitsTexture(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
         !FitsTexture(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
         !FitsTexture(inputs.opaque_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
@@ -403,7 +403,7 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
     storage->Srv(inputs.frame_slot, 1, inputs.base.resource, DXGI_FORMAT_R8G8B8A8_UNORM);
     storage->Srv(inputs.frame_slot, 2, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
-    storage->Srv(inputs.frame_slot, 3, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 3, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 4, inputs.material.resource, DXGI_FORMAT_R8G8B8A8_UNORM);
     storage->Srv(inputs.frame_slot, 5, inputs.motion.resource, DXGI_FORMAT_R16G16_FLOAT);
     storage->Srv(inputs.frame_slot, 6, inputs.surface_history.resource, DXGI_FORMAT_R32G32_FLOAT);

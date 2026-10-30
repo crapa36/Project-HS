@@ -81,6 +81,44 @@ void AddCharacterInputs(ap::ActionSpec &spec, const fs::path &source_root,
     }
 }
 
+std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterialDomains(
+    const fs::path &build_root, std::string_view stem, const ap::Json &authoring,
+    ap::ActionSpec &spec)
+{
+    const auto &rules = authoring.at("characters").at(stem);
+    Require(rules.is_array(), "character material rules must be an array");
+    std::vector<std::uint32_t> ordinals;
+    for (const auto &rule : rules)
+    {
+        Require(rule.is_object() && rule.contains("material") && rule.at("material").is_string(),
+            "character rule must select one material identity");
+        const auto name = rule.at("material").get<std::string>();
+        const auto found = std::ranges::find(hs::render_data::kHeroMaterialNames, name);
+        Require(found != hs::render_data::kHeroMaterialNames.end(), "unknown selected Hero material " + name);
+        ordinals.push_back(static_cast<std::uint32_t>(found - hs::render_data::kHeroMaterialNames.begin()));
+    }
+    std::ranges::sort(ordinals);
+    ordinals.erase(std::unique(ordinals.begin(), ordinals.end()), ordinals.end());
+    std::vector<hs::content::CharacterMaterialDomainSelection> result;
+    result.reserve(ordinals.size());
+    for (const auto ordinal : ordinals)
+    {
+        const auto name = hs::render_data::kHeroMaterialNames[ordinal];
+        const std::string namespace_path = "render/shader/" + std::string(name);
+        const ap::ActionResultSnapshot producer(build_root, namespace_path);
+        Require(producer.ActionId() == "render.shader." + std::string(name),
+            "Hero material producer identity mismatch for " + std::string(name));
+        const auto material_id = "render/material/" + std::string(name) + "/material.rpkg";
+        ap::UpstreamProduct upstream;
+        const auto bytes = producer.ReadProductBytes(material_id, upstream);
+        const auto package = hs::render_data::ReadHeroMaterialPackage(
+            std::as_bytes(std::span(bytes.data(), bytes.size())), name);
+        result.push_back({ordinal, package.domain});
+        spec.upstream.push_back(std::move(upstream));
+    }
+    return result;
+}
+
 std::vector<std::string> ProductNames(const std::string &output_name,
                                       std::size_t material_count, bool named_animations,
                                       std::size_t reduced_lods = 0)
@@ -221,10 +259,12 @@ void Produce(std::string_view mode, const fs::path &source_root,
     spec.action_id = "character." + std::string(mode);
     spec.recipe_id = "project-hs.character." + std::string(mode) + "." +
         hs::content::CharacterTextureCookRecipeIdentity();
-    spec.recipe_version = 6;
+    spec.recipe_version = 7;
     spec.namespace_path = "character/" + std::string(mode);
 
     hs::content::CharacterAssetSource character_source;
+    ap::Json material_authoring;
+    std::vector<hs::content::CharacterMaterialDomainSelection> material_domains;
     if (monster_materials)
     {
         const auto textures = source_root / "ContentSource/Textures/Monsters/PBR";
@@ -237,9 +277,14 @@ void Produce(std::string_view mode, const fs::path &source_root,
         character_source = hs::content::CharacterAssetSources(source_root)
             [static_cast<std::size_t>(found - modes.begin())];
         AddCharacterInputs(spec, source_root, character_source);
-        AddInput(spec, source_root, source_root / "ContentSource/Materials/hero_bindings.json");
+        const auto authoring_path = source_root / "ContentSource/Materials/hero_bindings.json";
+        AddInput(spec, source_root, authoring_path);
+        material_authoring = ap::Json::parse(ap::ReadBytes(authoring_path));
+        material_domains = ReadCharacterMaterialDomains(build_root, character_source.output_name,
+            material_authoring, spec);
     }
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+    std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);
 
     if (IsCurrent(build_root, spec, monster_materials ? nullptr : &character_source))
     {
@@ -268,11 +313,10 @@ void Produce(std::string_view mode, const fs::path &source_root,
                 throw std::runtime_error(error_message);
             if (!hs::content::WriteCharacterTextures(stage, character, character_source, error_message))
                 throw std::runtime_error(error_message);
-            const auto material_authoring = ap::Json::parse(ap::ReadBytes(
-                source_root / "ContentSource/Materials/hero_bindings.json"));
             const auto materials = hs::content::PrepareCharacterMaterialSelections(
                 character, character_source.output_name, material_authoring);
-            final_products = hs::content::BuildCharacterProducts(character, character_source.output_name, materials);
+            final_products = hs::content::BuildCharacterProducts(character, character_source.output_name,
+                materials, material_domains);
             for (const auto &product : final_products)
                 ap::WriteBytes(stage / product.filename, product.bytes);
             names = ProductNames(character_source.output_name, character.materials.size(),

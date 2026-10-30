@@ -11,18 +11,29 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
         const auto count = asset == 0 ? archer_material_count : monster_assets[asset - 1].material_count;
         const auto &bindings = asset == 0 ? archer_material_bindings : monster_assets[asset - 1].material_bindings;
         const auto first = static_cast<std::uint32_t>(slots.size());
-        hero_binding_ranges[asset] = {first, count, 0, 0};
+        std::uint32_t opaque_binding_count{};
+        std::uint32_t translucent_binding_count{};
         slots.resize(slots.size() + count, {UINT32_MAX, UINT32_MAX});
         for (const auto &binding : bindings)
         {
             if (binding.slot >= count || binding.hero_ordinal >= kHeroMaterialNames.size())
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid native hero material binding.");
             auto &slot = slots[first + binding.slot];
-            (binding.domain == render_data::HeroMaterialDomain::Opaque ? slot.x : slot.y) = binding.hero_ordinal;
+            if (binding.domain == render_data::HeroMaterialDomain::Opaque)
+            {
+                slot.x = binding.hero_ordinal;
+                ++opaque_binding_count;
+            }
+            else
+            {
+                slot.y = binding.hero_ordinal;
+                ++translucent_binding_count;
+            }
         }
         for (std::uint32_t slot = first; slot < slots.size(); ++slot)
-            if (slots[slot].x == UINT32_MAX)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character slot has no opaque hero material.");
+            if (slots[slot].x == UINT32_MAX && slots[slot].y == UINT32_MAX)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character slot has no hero material binding.");
+        hero_binding_ranges[asset] = {first, count, opaque_binding_count, translucent_binding_count};
     }
     if (slots.empty())
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Native hero material table is empty.");

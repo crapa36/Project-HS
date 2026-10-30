@@ -4,69 +4,65 @@
     "archer": [
       {
         "diffuse": "FemaleFitA_Body_diffuse.png",
-        "opaque": "archer_skin"
+        "material": "archer_skin"
       },
       {
         "diffuse": "Erika_Archer_Clothes_diffuse.png",
-        "opaque": "archer_cloth"
+        "material": "archer_cloth"
       },
       {
         "diffuse": "FemaleFitA_eyelash_diffuse.png",
-        "opaque": "archer_cutout"
+        "material": "archer_cutout"
       },
       {
         "diffuse": "Bow_DIFF.jpg",
-        "opaque": "archer_equipment"
+        "material": "archer_equipment"
       },
       {
         "diffuse": "Arrow_DIFF.png",
-        "opaque": "archer_equipment"
+        "material": "archer_equipment"
       }
     ],
     "enemy_melee": [
       {
         "diffuse": "SlimeMelee_BaseColor.png",
-        "opaque": "slime_features",
-        "translucent": "slime_body"
+        "material": "slime_features"
       }
     ],
     "enemy_ranged": [
       {
         "diffuse": "SlimeRanged_BaseColor.png",
-        "opaque": "slime_features",
-        "translucent": "slime_body"
+        "material": "slime_features"
       }
     ],
     "enemy_suicide": [
       {
         "diffuse": "SlimeSuicide_BaseColor.png",
-        "opaque": "slime_features",
-        "translucent": "slime_body"
+        "material": "slime_features"
       }
     ],
     "enemy_gel_projectile": [
       {
         "diffuse": "SlimeGelProjectile_BaseColor.png",
-        "opaque": "slime_features",
-        "translucent": "slime_body"
+        "material": "slime_features"
       }
     ],
     "boss_5m": [
       {
         "name": "DefaultPBR_MAT",
-        "opaque": "monster_pbr"
+        "material": "monster_pbr"
       }
     ],
     "boss_10m": [
       {
         "name": "DefaultPBR_MAT",
-        "opaque": "monster_pbr"
+        "material": "monster_pbr"
       }
     ],
     "boss_final": [
       {
         "name": "DefaultPBR_MAT",
-        "opaque": "monster_pbr"
+        "material": "monster_pbr"
       }
     ]
   }

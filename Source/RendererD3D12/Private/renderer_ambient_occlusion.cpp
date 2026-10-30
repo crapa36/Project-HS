@@ -218,13 +218,13 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     if (aoEnabled)
     {
         if (auto supported = CheckUavFormat(device, DXGI_FORMAT_R32G32B32A32_FLOAT); !supported) return supported;
-        if (auto supported = CheckUavFormat(device, DXGI_FORMAT_R32G32_UINT); !supported) return supported;
+        if (auto supported = CheckUavFormat(device, DXGI_FORMAT_R32_UINT); !supported) return supported;
         if (auto created = CreateTexture(allocator, next->ao_capacity, DXGI_FORMAT_R32G32B32A32_FLOAT, next->raw); !created) return created;
         if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R16_FLOAT, next->resolved); !created) return created;
         for (std::uint32_t index = 0; index < 2; ++index)
         {
             if (auto created = CreateTexture(allocator, next->ao_capacity, DXGI_FORMAT_R32G32B32A32_FLOAT, next->history[index]); !created) return created;
-            if (auto created = CreateTexture(allocator, next->ao_capacity, DXGI_FORMAT_R32G32_UINT, next->metadata_history[index]); !created) return created;
+            if (auto created = CreateTexture(allocator, next->ao_capacity, DXGI_FORMAT_R32_UINT, next->metadata_history[index]); !created) return created;
         }
     }
     if (contactEnabled)
@@ -380,7 +380,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return AoFailure(ErrorCode::InvalidArgument, "AO active extent or completed frame slot is invalid.");
     if (!FitsDepth(inputs.depth, active) || !FitsGuide(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) ||
-        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32G32_UINT) ||
+        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
         (storage->ao_enabled && (!FitsGuide(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
                                 !FitsGuide(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT))))
         return AoFailure(ErrorCode::InvalidArgument, "AO guide resource, version, format or active extent is invalid.");
@@ -412,18 +412,18 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
     storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
     storage->Srv(inputs.frame_slot, 1, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
-    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 3, storage->ao_enabled ? inputs.motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
     storage->Srv(inputs.frame_slot, 4, storage->ao_enabled ? inputs.surface_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT);
     storage->Srv(inputs.frame_slot, 5, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Srv(inputs.frame_slot, 6, historyValid ? storage->history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 8, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 2, storage->resolved.resource.Get(), DXGI_FORMAT_R16_FLOAT);
     storage->Uav(inputs.frame_slot, 3, storage->contact.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-    storage->Uav(inputs.frame_slot, 4, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32_UINT);
+    storage->Uav(inputs.frame_slot, 4, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32_UINT);
     if(storage->adaptive_compute)
     {
         storage->Srv(inputs.frame_slot,kDescriptorCount,inputs.adaptive_density.resource,DXGI_FORMAT_R8_UINT);

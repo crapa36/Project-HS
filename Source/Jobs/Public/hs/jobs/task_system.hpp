@@ -26,6 +26,7 @@ class TaskGroup
     // Preparation may throw before admission. Rejected backend submission
     // returns false and records failure; accepted work completes once.
     [[nodiscard]] bool Submit(std::move_only_function<void(std::stop_token)> task);
+    // Internal preparation/submission failure is recorded; Wait joins admitted chunks.
     void ParallelFor(std::size_t count, std::size_t grain,
                      std::move_only_function<void(std::size_t begin, std::size_t end)> task);
     // Seals admission and joins work. Do not wait on the current task's group

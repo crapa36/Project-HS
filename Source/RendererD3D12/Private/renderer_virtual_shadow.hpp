@@ -63,6 +63,9 @@ struct VirtualShadowDrawGroup
 {
     std::uint64_t binding_key{};
     VirtualShadowFrontend frontend{VirtualShadowFrontend::Indexed};
+    std::uint32_t index_count{}, first_index{};
+    std::int32_t base_vertex{};
+    std::uint32_t meshlet_count{};
 };
 struct VirtualShadowCaster
 {
@@ -71,8 +74,6 @@ struct VirtualShadowCaster
     std::uint64_t current_cut_revision{}, previous_cut_revision{};
     std::uint32_t instance_index{}, instance_generation{}, previous_generation{};
     std::uint32_t source_ref{}, geometry_record{}, draw_group{};
-    std::uint32_t index_count{}, first_index{}, meshlet_count{};
-    std::int32_t base_vertex{};
     bool present{true}, previous_present{};
     bool immutable_source{}, previous_immutable_source{};
     bool skin{}, wind{}, animated_alpha{}, baked_source{};
@@ -162,6 +163,7 @@ struct VirtualShadowDrawBatch
     VirtualShadowDrawGroup group;
     std::uint32_t group_index{}, layer{}, maximum_commands{};
     std::uint64_t argument_offset{}, count_offset{};
+    bool indexed_instanced{};
 };
 struct VirtualShadowOutputs
 {
@@ -204,7 +206,9 @@ struct VirtualShadowInputs
     // Called once per bank after GPU indirect tile clear. Rebind the main root,
     // table32 suffix and native resources; preserve the supplied full-bank DSV,
     // viewport/scissor. Execute each batch using main-root signatures:
-    // root6 DWORD0 + DRAW_INDEXED (24B) / DISPATCH_MESH (16B), count at count_offset.
+    // root6 DWORD0 + DRAW_INDEXED (24B) / DISPATCH_MESH (16B). Indexed VSM
+    // batches are group-instanced (one argument, no count buffer); mesh and
+    // local-shadow batches retain per-record commands and their count buffer.
     std::function<Result(RenderPassContext &, const VirtualShadowOutputs &,
         std::span<const VirtualShadowDrawBatch>)> draw;
     std::function<void(PassBuilder &)> declare_material_sampling;

@@ -1,5 +1,7 @@
 // Cosine-weighted horizon AO in view space; guide/history sampling is restricted
 // to the active rectangle, independently of texture allocation capacity.
+#include "surface_metadata.hlsli"
+
 cbuffer AmbientOcclusionConstants : register(b0, space12)
 {
     row_major float4x4 AoInverseProjection;
@@ -20,18 +22,18 @@ cbuffer AmbientOcclusionConstants : register(b0, space12)
 
 Texture2D<float> AoDepth : register(t0, space12);
 Texture2D<float2> AoNormal : register(t1, space12);
-Texture2D<uint2> AoMetadata : register(t2, space12);
+Texture2D<uint> AoMetadata : register(t2, space12);
 Texture2D<float2> AoMotion : register(t3, space12);
 Texture2D<float2> AoSurfaceHistory : register(t4, space12);
 Texture2D<float4> AoRaw : register(t5, space12);
 Texture2D<float4> AoPrevious : register(t6, space12);
-Texture2D<uint2> AoPreviousMetadata : register(t7, space12);
+Texture2D<uint> AoPreviousMetadata : register(t7, space12);
 Texture2D<float4> AoTemporal : register(t8, space12);
 RWTexture2D<float4> AoRawOutput : register(u0, space12);
 RWTexture2D<float4> AoHistoryOutput : register(u1, space12);
 RWTexture2D<float> AoResolvedOutput : register(u2, space12);
 RWTexture2D<float> AoContactOutput : register(u3, space12);
-RWTexture2D<uint2> AoMetadataOutput : register(u4, space12);
+RWTexture2D<uint> AoMetadataOutput : register(u4, space12);
 
 static const float AoPi = 3.14159265358979323846;
 
@@ -78,7 +80,7 @@ struct AoGuide
     int2 pixel;
     float3 position;
     float3 normal;
-    uint2 material;
+    uint material;
     bool valid;
 };
 AoGuide AoLoadGuide(int2 pixel)
@@ -87,7 +89,7 @@ AoGuide AoLoadGuide(int2 pixel)
     g.pixel = AoClampPixel(pixel, AoRenderSize.xy);
     float depth = AoDepth.Load(int3(g.pixel, 0));
     g.material = AoMetadata.Load(int3(g.pixel, 0));
-    g.valid = depth > 0.0 && g.material.x != 0;
+    g.valid = depth > 0.0 && (g.material & HsSurfaceMetadataMaterialMask) != 0u;
     if (g.valid)
     {
         g.position = AoViewPosition(g.pixel, depth);
@@ -99,9 +101,9 @@ AoGuide AoLoadGuide(int2 pixel)
 bool AoLoadHorizonPosition(int2 pixel, out float3 position)
 {
     float depth = AoDepth.Load(int3(pixel, 0));
-    uint2 material = AoMetadata.Load(int3(pixel, 0));
+    uint material = AoMetadata.Load(int3(pixel, 0));
     position = 0.0;
-    if (depth <= 0.0 || material.x == 0) return false;
+    if (depth <= 0.0 || (material & HsSurfaceMetadataMaterialMask) == 0u) return false;
     position = AoViewPosition(pixel, depth);
     return all(isfinite(position)) && position.z > 0.0;
 }
@@ -201,9 +203,9 @@ float AoPreviousViewDepth(float deviceDepth)
     float denominator = deviceDepth * p.y - p.x;
     return abs(denominator) > 1e-8 ? (p.z - deviceDepth * p.w) / denominator : 0.0;
 }
-bool AoHistoryCompatible(float4 history, uint2 material, float expectedDepth, AoGuide g)
+bool AoHistoryCompatible(float4 history, uint material, float expectedDepth, AoGuide g)
 {
-    return history.y > 0.0 && expectedDepth > 0.0 && all(material == g.material) &&
+    return history.y > 0.0 && expectedDepth > 0.0 && material == g.material &&
         abs(history.y - expectedDepth) <= max(0.01, expectedDepth * AoFilterParameters.x) &&
         dot(AoDecodeNormal(history.zw), g.normal) >= AoFilterParameters.y;
 }
@@ -233,7 +235,7 @@ void GTAOTemporalCS(uint3 dispatch : SV_DispatchThreadID)
             int2 p = first + int2(x, y);
             if (any(p < 0) || any(p >= int2(AoHistorySize.xy))) continue;
             float4 history = AoPrevious.Load(int3(p, 0));
-            uint2 material = AoPreviousMetadata.Load(int3(p, 0));
+            uint material = AoPreviousMetadata.Load(int3(p, 0));
             if (!AoHistoryCompatible(history, material, expectedDepth, g)) continue;
             float weight = (x == 0 ? 1.0 - fraction.x : fraction.x) *
                            (y == 0 ? 1.0 - fraction.y : fraction.y);
@@ -255,7 +257,7 @@ void GTAOTemporalCS(uint3 dispatch : SV_DispatchThreadID)
         }
     }
     AoHistoryOutput[pixel] = float4(result, current.yzw);
-    AoMetadataOutput[pixel] = g.valid ? g.material : uint2(0, 0);
+    AoMetadataOutput[pixel] = g.valid ? g.material : 0u;
 }
 
 [numthreads(8, 8, 1)]

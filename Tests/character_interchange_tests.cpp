@@ -228,10 +228,11 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     ir.vertices.insert(ir.vertices.end(), first_triangle.begin(), first_triangle.end());
     Json authoring{{"version", 1}, {"characters", Json::object()}};
     authoring["characters"]["archer"] = Json::array({
-        Json{{"name", "body"}, {"opaque", "archer_skin"}}});
+        Json{{"name", "body"}, {"material", "archer_skin"}}});
     const auto selections = cc::PrepareCharacterMaterialSelections(ir, "archer", authoring);
-    const auto products = cc::BuildCharacterProducts(ir, "archer", selections);
-    const auto again = cc::BuildCharacterProducts(ir, "archer", selections);
+    const std::array material_domains{cc::CharacterMaterialDomainSelection{0, rd::HeroMaterialDomain::Opaque}};
+    const auto products = cc::BuildCharacterProducts(ir, "archer", selections, material_domains);
+    const auto again = cc::BuildCharacterProducts(ir, "archer", selections, material_domains);
     Check(products.size() == 3 && again.size() == products.size(), "direct product set has a legacy exchange or fabricated LOD");
     for (std::size_t i = 0; i < products.size(); ++i)
         Check(products[i].logical_id == again[i].logical_id && products[i].bytes == again[i].bytes &&
@@ -281,23 +282,25 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     };
     auto invalid = ir;
     invalid.vertices[0].bone_indices[3] = static_cast<std::uint16_t>(invalid.bone_count);
-    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections); }, "zero-weight invalid bone lane reached final products");
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); }, "zero-weight invalid bone lane reached final products");
     invalid = ir; invalid.vertices[0].reserved = 1;
     invalid.vertices[0].position[0] = std::numeric_limits<float>::quiet_NaN();
-    try { (void)cc::BuildCharacterProducts(invalid, "archer", selections); Check(false, "invalid reserved reached final products"); }
+    try { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); Check(false, "invalid reserved reached final products"); }
     catch (const std::exception &error) {
         Check(std::string_view(error.what()).find("material/reserved") != std::string_view::npos,
             "source reserved/finite diagnostic order changed");
     }
     invalid = ir; invalid.vertices[0].bone_weights[0] = 0.995f;
-    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections); }, "generic weight tolerance substituted for strict character binding");
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); }, "generic weight tolerance substituted for strict character binding");
     auto ambiguous = authoring;
     ambiguous["characters"]["archer"].push_back(ambiguous["characters"]["archer"][0]);
     reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", ambiguous); }, "ambiguous material selection accepted");
     auto unknown = authoring; unknown["characters"]["archer"][0]["name"] = "absent";
     reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", unknown); }, "unknown material selection accepted");
-    auto jelly = authoring; jelly["characters"]["archer"][0]["opaque"] = "slime_features";
-    reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", jelly); }, "missing transparent jelly pair accepted");
+    auto jelly = authoring; jelly["characters"]["archer"][0]["material"] = "slime_features";
+    const auto opaque_slime_features = cc::PrepareCharacterMaterialSelections(ir, "archer", jelly);
+    Check(opaque_slime_features.size() == 1 && opaque_slime_features[0].hero_ordinal == 4,
+        "standalone opaque slime feature binding rejected");
 
     // A current native Archer product has 11 authored clips; the schema1 import
     // above retains 21/rate0. Exercise the actual image-link cross-binding gate
@@ -307,14 +310,14 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     native.animation_extension.clips.resize(11);
     native.animation_extension.transforms.resize(44);
     native.animation_extension.sockets.clear();
-    auto linked = cc::BuildCharacterProducts(native, "archer", selections);
+    auto linked = cc::BuildCharacterProducts(native, "archer", selections, material_domains);
     // Opaque hero packages require the complete native four-program contract,
     // even when this fixture exercises only character dependency bindings.
     const std::array programs{
-        rd::MaterialProgramSource{"render/shader/archer_skin_scene.dxil", rd::MaterialProgramKind::HeroScenePS},
-        rd::MaterialProgramSource{"render/shader/archer_skin_visibility.dxil", rd::MaterialProgramKind::HeroVisibilityPS},
-        rd::MaterialProgramSource{"render/shader/archer_skin_resolve.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
-        rd::MaterialProgramSource{"render/shader/archer_skin_shadow.dxil", rd::MaterialProgramKind::HeroShadowPS}};
+        rd::MaterialProgramSource{"render/shader/hero_scene_ps.dxil", rd::MaterialProgramKind::HeroScenePS},
+        rd::MaterialProgramSource{"render/shader/hero_visibility_ps.dxil", rd::MaterialProgramKind::HeroVisibilityPS},
+        rd::MaterialProgramSource{"render/shader/hero_resolve_cs.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
+        rd::MaterialProgramSource{"render/shader/hero_shadow_ps.dxil", rd::MaterialProgramKind::HeroShadowPS}};
     linked.push_back({"render/material/archer_skin/material.rpkg", "material.rpkg", {},
         rd::BuildHeroMaterialPackage("archer_skin", {}, {1, 0}, programs)});
     for (const auto *semantic : {"diffuse", "normal"})

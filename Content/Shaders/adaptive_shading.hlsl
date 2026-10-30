@@ -1,3 +1,5 @@
+#include "surface_metadata.hlsli"
+
 cbuffer AdaptiveShadingConstants : register(b0,space33)
 {
     uint4 AdExtent;
@@ -8,7 +10,7 @@ Texture2D<float> AdDepth : register(t0,space33);
 Texture2D<float2> AdNormal : register(t1,space33);
 Texture2D<float4> AdBase : register(t2,space33);
 Texture2D<float4> AdMaterial : register(t3,space33);
-Texture2D<uint2> AdMetadata : register(t4,space33);
+Texture2D<uint> AdMetadata : register(t4,space33);
 Texture2D<float2> AdMotion : register(t5,space33);
 Texture2D<uint> AdDensity : register(t6,space33);
 StructuredBuffer<uint2> AdMaterialPolicy : register(t7,space33);
@@ -43,7 +45,7 @@ AdGuide AdLoad(int2 pixel)
     AdGuide g=(AdGuide)0;
     if(any(pixel<0)||any(pixel>=int2(AdExtent.xy)))return g;
     const float hardware=AdDepth.Load(int3(pixel,0));g.depth=AdLinearDepth(hardware);
-    g.key=AdMetadata.Load(int3(pixel,0));g.normal=AdDecodeNormal(AdNormal.Load(int3(pixel,0)));
+    g.key=HsUnpackSurfaceMetadata(AdMetadata.Load(int3(pixel,0)));g.normal=AdDecodeNormal(AdNormal.Load(int3(pixel,0)));
     g.base=AdBase.Load(int3(pixel,0));g.material=AdMaterial.Load(int3(pixel,0));
     const float2 motion=AdMotion.Load(int3(pixel,0))*float2(AdExtent.xy);
     g.valid=hardware>0.0&&hardware<=1.0&&g.depth>0.0&&isfinite(g.depth)&&all(isfinite(g.normal))&&

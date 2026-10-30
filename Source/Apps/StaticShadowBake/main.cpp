@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 #include <memory>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -47,6 +48,11 @@ void BakeStaticShadowGeneration(const hs::SelectedGeneration &generation,
 
 int main(int argc, char **argv)
 {
-    return hs::render_test::ProduceStaticShadow(argc, argv, hs::app::WorldTransportScene,
+    return hs::render_test::ProduceStaticShadow(argc, argv,
+        [](const hs::SelectedGeneration &generation) {
+            // Static shadow archives must use the same default scene seed as gameplay.
+            constexpr std::uint64_t kDefaultGameplaySeed = 1;
+            return hs::app::WorldTransportScene(generation, kDefaultGameplaySeed);
+        },
         BakeStaticShadowGeneration);
 }

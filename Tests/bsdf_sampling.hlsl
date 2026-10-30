@@ -282,7 +282,7 @@ float HsProbeLocalBlendError(uint case_index)
 }
 
 static const uint HsProbeLegacyCaseCount = 7u;
-static const uint HsProbeCoatedCaseCount = 32u;
+static const uint HsProbeCoatedCaseCount = 72u;
 static const uint HsProbeFresnelCaseCount = 14u;
 static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount + HsProbeFresnelCaseCount;
 static const uint HsProbeCoatedReferenceSamples = 65536u;
@@ -298,6 +298,12 @@ float HsProbeLutCenter(float value)
 {
     const uint cell = min(uint(value * 128.0), 127u);
     return (float(cell) + 0.5) / 128.0;
+}
+
+float HsProbeRoughnessCenter(float value)
+{
+    const uint cell = min(uint(saturate(value) * 256.0), 255u);
+    return (float(cell) + 0.5) / 256.0;
 }
 
 HsProbeCoatedCase HsProbeMakeCoatedCase(uint index)
@@ -319,16 +325,34 @@ HsProbeCoatedCase HsProbeMakeCoatedCase(uint index)
     if (index < 24u)
         return value;
 
-    // Exercise metal mixtures, IOR-derived F0, partial solid budgets, and TIR override.
-    const uint edge = index - 24u;
-    value.no_v = HsProbeLutCenter(edge % 3u == 0u ? 0.02 : edge % 3u == 1u ? 0.5 : 0.95);
-    value.surface.roughness = HsProbeLutCenter(roughness_targets[(edge + 1u) % 4u]);
-    value.surface.coat_roughness = HsProbeLutCenter(roughness_targets[(edge + 2u) % 4u]);
-    value.surface.metallic = edge == 7u ? 1.0 : edge % 2u == 0u ? 0.35 : 0.85;
-    value.surface.solid_transmission_weight = edge < 2u ? 0.0 : edge < 4u ? 0.5 : 1.0;
-    value.surface.ior = edge % 2u == 0u ? 1.333 : 1.5;
-    value.surface.coat_weight = edge % 2u == 0u ? 0.38 : 1.0;
-    value.fresnel_override = edge >= 2u ? 1.0 : -1.0;
+    if (index < 32u)
+    {
+        // Exercise metal mixtures, IOR-derived F0, partial solid budgets, and TIR override.
+        const uint edge = index - 24u;
+        value.no_v = HsProbeLutCenter(edge % 3u == 0u ? 0.02 : edge % 3u == 1u ? 0.5 : 0.95);
+        value.surface.roughness = HsProbeLutCenter(roughness_targets[(edge + 1u) % 4u]);
+        value.surface.coat_roughness = HsProbeLutCenter(roughness_targets[(edge + 2u) % 4u]);
+        value.surface.metallic = edge == 7u ? 1.0 : edge % 2u == 0u ? 0.35 : 0.85;
+        value.surface.solid_transmission_weight = edge < 2u ? 0.0 : edge < 4u ? 0.5 : 1.0;
+        value.surface.ior = edge % 2u == 0u ? 1.333 : 1.5;
+        value.surface.coat_weight = edge % 2u == 0u ? 0.38 : 1.0;
+        value.fresnel_override = edge >= 2u ? 1.0 : -1.0;
+        return value;
+    }
+
+    // Exercise the new grazing range across roughness/coat roughness and F0 extremes.
+    const uint grazing_case = index - 32u;
+    const uint grazing_index = grazing_case / 8u;
+    const uint grazing_roughness_index = (grazing_case / 2u) % 4u;
+    const float grazing_no_v[5] = {0.001, 0.002, 0.004, 0.008, 0.012};
+    value.no_v = grazing_no_v[grazing_index];
+    value.surface.roughness = HsProbeRoughnessCenter(roughness_targets[grazing_roughness_index]);
+    value.surface.coat_roughness = HsProbeRoughnessCenter(roughness_targets[(grazing_roughness_index + 1u) % 4u]);
+    value.surface.metallic = ((grazing_index + grazing_roughness_index) & 1u) != 0u ? 1.0 : 0.0;
+    value.surface.ior = ((grazing_index + grazing_roughness_index) & 1u) != 0u ? 1.333 : 1.5;
+    value.surface.solid_transmission_weight = 0.0;
+    value.surface.coat_weight = (grazing_case & 1u) == 0u ? 0.38 : 1.0;
+    value.fresnel_override = -1.0;
     return value;
 }
 
@@ -446,8 +470,8 @@ float HsProbeCoatedEligibilityError()
 {
     HsSurfaceClosure surface = HsMaterialMakeSurfaceClosure(float3(.5,.3,.2),float3(0,0,1),.5,0,1,1);
     surface.coat_weight=.4;
-    float error = HsBsdfCanUseCoatedIbl(surface,1.0/64.0) ? 0.0 : 1.0;
-    error = max(error,HsBsdfCanUseCoatedIbl(surface,1.0/64.0-1e-5) ? 1.0 : 0.0);
+    float error = HsBsdfCanUseCoatedIbl(surface,1.0/1024.0) ? 0.0 : 1.0;
+    error = max(error,HsBsdfCanUseCoatedIbl(surface,1.0/1024.0-1e-5) ? 1.0 : 0.0);
     surface.coat_weight=0.0; error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
     surface.coat_weight=.4; surface.anisotropy=.01; error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
     surface.anisotropy=0; surface.sheen_weight=.5; surface.sheen_color=.5;
@@ -481,9 +505,10 @@ float4 HsProbeCoatedIbl(uint case_index)
     const HsProbeCoatedCase test_case=HsProbeMakeCoatedCase(case_index);
     const float no_v=test_case.no_v;
     const float roughness=test_case.surface.roughness;
-    const float4 base_dfg=EnvironmentBrdfLut.SampleLevel(ProbeBrdfClamp,float2(no_v,roughness),0);
+    const float lut_no_v=sqrt(saturate(no_v));
+    const float4 base_dfg=EnvironmentBrdfLut.SampleLevel(ProbeBrdfClamp,float2(lut_no_v,roughness),0);
     const float2 coat_dfg=EnvironmentBrdfLut.SampleLevel(ProbeBrdfClamp,
-        float2(no_v,test_case.surface.coat_roughness),0).xy;
+        float2(lut_no_v,test_case.surface.coat_roughness),0).xy;
     float3 diffuse_factor,base_specular; float coat_specular;
     HsBsdfCoatedIblFactors(test_case.surface,no_v,base_dfg,coat_dfg,
         test_case.fresnel_override,diffuse_factor,base_specular,coat_specular);

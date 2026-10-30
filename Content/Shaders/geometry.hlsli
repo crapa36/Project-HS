@@ -61,7 +61,8 @@ void EmitGeometryMesh(uint3 group_id, uint thread_id, bool shadow,
         const uint unique_vertex = GeometryBuffers[NonUniformResourceIndex(descriptors + 3u)].Load(
             (first_ref + thread_id) * 4u);
         const SceneInput input = LoadGeometryVertex(descriptors, unique_vertex);
-        SceneOutput output = EvaluateSceneVertex(input, visible, unique_vertex, (record.Flags & 1u) != 0u, !shadow);
+        SceneOutput output = EvaluateSceneVertex(input, visible, unique_vertex,
+            (record.Flags & 1u) != 0u, !shadow, PassValue);
         if (shadow)
             output.Position = cached_shadow ? HsShadowProject(output.WorldPosition, PassValue)
                 : mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[(PassValue & 3u) - 1u]);

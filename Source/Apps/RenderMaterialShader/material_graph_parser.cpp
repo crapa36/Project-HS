@@ -1074,20 +1074,32 @@ bool IsMaskedEnvironmentMaterial(std::string_view name)
     return name.starts_with("leaf_") || name.starts_with("grass_");
 }
 
-static rd::MaterialGraphKind AuthoredMaterialKind(std::string_view name)
+static rd::MaterialGraphKind AuthoredMaterialKind(std::string_view name, const Json &root)
 {
     Require(IsAuthoredMaterialName(name), "unknown material name");
-    return name == "slime_body" ? rd::MaterialGraphKind::Translucent :
-        IsHeroMaterialName(name) && name != "monster_pbr" ? rd::MaterialGraphKind::Masked :
-        name == "terrain" ? rd::MaterialGraphKind::Terrain :
-        IsMaskedEnvironmentMaterial(name) ? rd::MaterialGraphKind::Masked
-        : rd::MaterialGraphKind::Opaque;
+    if (name == "terrain") return rd::MaterialGraphKind::Terrain;
+    if (IsMaskedEnvironmentMaterial(name)) return rd::MaterialGraphKind::Masked;
+    if (!IsHeroMaterialName(name)) return rd::MaterialGraphKind::Opaque;
+
+    const auto domain = root.at("domain").get<std::string>();
+    const auto alpha_mode = root.at("render_flags").at("alpha_mode").get<std::string>();
+    if (domain == "translucent")
+    {
+        Require(alpha_mode == "blend", "translucent Hero domain requires blend render flags");
+        return rd::MaterialGraphKind::Translucent;
+    }
+    Require(domain == "surface", "Hero material domain must be surface or translucent");
+    if (alpha_mode == "mask") return rd::MaterialGraphKind::Masked;
+    Require(alpha_mode == "opaque", "surface Hero domain requires opaque or mask render flags");
+    return rd::MaterialGraphKind::Opaque;
 }
 
 rd::MaterialGraph ParseEnvironmentMaterialGraph(std::string_view name,
                                               std::string_view json_text)
 {
-    return ParseMaterialGraph(name, json_text, AuthoredMaterialKind(name));
+    const auto root = Json::parse(json_text);
+    const auto kind = AuthoredMaterialKind(name, root);
+    return ParseMaterialGraphRoot(name, root, kind, root.at("version") == 2);
 }
 
 rd::MaterialGraph ParseRock0MaterialGraph(std::string_view json_text)
@@ -1108,7 +1120,7 @@ rd::MaterialGraph ParseTerrainMaterialGraph(std::string_view json_text)
 MaterialDefinition ParseMaterialDefinition(std::string_view name, std::string_view json_text)
 {
     const auto root = Json::parse(json_text);
-    const auto kind = AuthoredMaterialKind(name);
+    const auto kind = AuthoredMaterialKind(name, root);
     const bool legacy = root.at("version") == 2;
     auto graph = ParseMaterialGraphRoot(name, root, kind, legacy);
     const auto material_from_graph = [&](const rd::MaterialGraph &source) {

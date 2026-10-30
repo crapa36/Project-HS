@@ -5,6 +5,7 @@
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
 #include <hs/core/sha256.hpp>
+#include <hs/render_data/scene_probe_revision.hpp>
 
 #include <algorithm>
 #include <array>
@@ -579,6 +580,24 @@ void CheckPackAssetReads(bool native)
             hs::render_data::IsRendererMaterialRevisionProduct(shader_id) &&
             !hs::render_data::IsRendererMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
             "material revision predicate changed domains");
+        Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
+            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_capture_source_base_vs.dxil") &&
+            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_capture.dxil") &&
+            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_shadow.dxil") &&
+            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_sh_cs.dxil") &&
+            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_ggx_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/gtao_horizon_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/adaptive_gtao_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/unrelated_probe_capture.dxil"),
+            "local-probe shader revision scope included an unrelated shader or missed a capture product");
+        Check(hs::render_data::IsLocalProbeMaterialRevisionProduct(source_id) &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/texture/environment/sky.rtex") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/environment.rgeo") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("environment/default_probe.spkg") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_probe_capture.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/gtao_horizon_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
+            "local-probe material revision scope changed nonshader coverage or admitted unrelated shaders");
     }
 
     hs::ResidencyManager residency;

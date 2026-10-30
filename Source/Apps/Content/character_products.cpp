@@ -306,10 +306,9 @@ std::vector<CharacterMaterialSelection> PrepareCharacterMaterialSelections(
         for (const auto &rule : rules)
         {
             Require(rule.is_object() && (rule.contains("name") != rule.contains("diffuse")) &&
-                rule.contains("opaque") && (rule.size() == 2 ||
-                (rule.size() == 3 && rule.contains("translucent"))), "invalid material identity rule");
+                rule.contains("material") && rule.size() == 2, "invalid material identity rule");
             const auto key = rule.contains("name") ? "name" : "diffuse";
-            Require(rule.at(key).is_string() && rule.at("opaque").is_string(), "material identity must be a string");
+            Require(rule.at(key).is_string() && rule.at("material").is_string(), "material identity must be a string");
             const auto matches = rule.at(key) == (rule.contains("name") ? material.name : material.diffuse.filename().string());
             if (!matches) continue;
             Require(selected == nullptr, "ambiguous material identity for slot " + std::to_string(slot));
@@ -317,24 +316,16 @@ std::vector<CharacterMaterialSelection> PrepareCharacterMaterialSelections(
         }
         Require(selected != nullptr, "unknown FBX material slot " + std::to_string(slot) +
             " name=" + material.name + " diffuse=" + material.diffuse.filename().string());
-        const auto opaque = selected->at("opaque").get<std::string>();
-        const auto opaque_ordinal = HeroOrdinal(opaque);
-        Require(opaque != "slime_body", "opaque binding is not an authored opaque hero material");
-        result.push_back({static_cast<std::uint16_t>(slot), opaque_ordinal, rd::HeroMaterialDomain::Opaque});
-        if (selected->contains("translucent"))
-        {
-            Require(selected->at("translucent") == "slime_body" && opaque == "slime_features",
-                "transparent jelly must have a matching opaque feature material");
-            result.push_back({static_cast<std::uint16_t>(slot), HeroOrdinal("slime_body"), rd::HeroMaterialDomain::Translucent});
-        }
-        else Require(opaque != "slime_features", "jelly feature material is missing its transparent body");
+        const auto material_name = selected->at("material").get<std::string>();
+        result.push_back({static_cast<std::uint16_t>(slot), HeroOrdinal(material_name)});
     }
     return result;
 }
 
 std::vector<CharacterProduct> BuildCharacterProducts(
     const CharacterIR &character, std::string_view stem_view,
-    std::span<const CharacterMaterialSelection> materials)
+    std::span<const CharacterMaterialSelection> materials,
+    std::span<const CharacterMaterialDomainSelection> material_domains)
 {
     const std::string stem(stem_view);
     Require(!stem.empty() && std::ranges::all_of(stem, [](unsigned char c) {
@@ -432,9 +423,12 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     for (const auto &binding : materials)
     {
         const auto id = "render/material/" + std::string(rd::kHeroMaterialNames[binding.hero_ordinal]) + "/material.rpkg";
+        const auto domain = std::ranges::find(material_domains, binding.hero_ordinal,
+            &CharacterMaterialDomainSelection::hero_ordinal);
+        Require(domain != material_domains.end(), "character material domain was not derived from its upstream package");
         bindings.push_back({binding.slot,
             static_cast<std::uint16_t>(std::ranges::find(dependencies, id) - dependencies.begin()),
-            binding.hero_ordinal, binding.domain});
+            binding.hero_ordinal, domain->domain});
     }
     (void)rd::EncodeCharacterMaterialBindings(bindings, dependencies, character.material_count);
 

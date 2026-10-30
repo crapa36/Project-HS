@@ -152,7 +152,7 @@ constexpr std::uint32_t kMonsterPbrDescriptorCount = 5;
 constexpr std::uint32_t kEnvironmentTextureCount = 20;
 constexpr std::uint32_t kEnvironmentDescriptorCount = 22;
 constexpr std::array<DXGI_FORMAT, kPostTextureDescriptorCount> kPostTextureSrvFormats{
-    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32G32_UINT,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32_UINT,
     DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16_FLOAT,
     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -405,6 +405,7 @@ struct GeometryPageGpu
     std::uint32_t generation{1};
     render_data::GeometryMetadata metadata;
     std::vector<render_data::GeometrySubmesh> submeshes;
+    std::vector<std::uint64_t> brixelizer_submesh_keys;
 
     void Reset() noexcept
     {
@@ -417,6 +418,7 @@ struct GeometryPageGpu
         generation = 1;
         metadata = {};
         submeshes.clear();
+        brixelizer_submesh_keys.clear();
         source_asset = {}; source_product.clear(); source_digest = {};
     }
 };

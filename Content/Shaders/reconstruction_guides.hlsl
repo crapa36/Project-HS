@@ -1,3 +1,5 @@
+#include "surface_metadata.hlsli"
+
 cbuffer ReconstructionGuidesConstants : register(b0, space13)
 {
     row_major float4x4 GuideInverseUnjitteredViewProjection;
@@ -11,7 +13,7 @@ cbuffer ReconstructionGuidesConstants : register(b0, space13)
 };
 Texture2D<float> GuideDepth : register(t0, space13);
 Texture2D<float2> GuideNativeMotion : register(t1, space13);
-Texture2D<uint2> GuideMetadata : register(t2, space13);
+Texture2D<uint> GuideMetadata : register(t2, space13);
 Texture2D<float2> GuideSurfaceHistory : register(t3, space13);
 Texture2D<float4> GuideComposite : register(t4, space13);
 Texture2D<float4> GuideOpaque : register(t5, space13);
@@ -67,7 +69,8 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
     float2 unjitteredUv = rasterUv - GuideJitterUv.xy;
     float currentDepth;
     bool transparent = GuideSelectTransparent(pixel, GuideDepth.Load(int3(pixel, 0)), currentDepth);
-    bool surface = transparent || (currentDepth > 0.0 && GuideMetadata.Load(int3(pixel, 0)).x != 0);
+    bool surface = transparent || (currentDepth > 0.0 &&
+        (GuideMetadata.Load(int3(pixel, 0)) & HsSurfaceMetadataMaterialMask) != 0u);
     float2 motion = transparent ? GuideTransparentMotion.Load(int3(pixel, 0))
         : surface ? GuideNativeMotion.Load(int3(pixel, 0)) : float2(0.0, 0.0);
     bool motionValid = all(isfinite(motion));
@@ -91,7 +94,8 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
     float coverage = 1.0 - saturate(GuideRevealage.Load(int3(maskPixel, 0)));
     float maskDepth;
     bool maskTransparent = GuideSelectTransparent(maskPixel, GuideDepth.Load(int3(maskPixel, 0)), maskDepth);
-    bool maskSurface = maskTransparent || (maskDepth > 0.0 && GuideMetadata.Load(int3(maskPixel, 0)).x != 0);
+    bool maskSurface = maskTransparent || (maskDepth > 0.0 &&
+        (GuideMetadata.Load(int3(maskPixel, 0)) & HsSurfaceMetadataMaterialMask) != 0u);
     float confidence = maskTransparent ? saturate(GuideTransparentHistory.Load(int3(maskPixel, 0)).y)
         : maskSurface ? saturate(GuideSurfaceHistory.Load(int3(maskPixel, 0)).y) : 1.0;
     float2 maskMotion = maskTransparent ? GuideTransparentMotion.Load(int3(maskPixel, 0))

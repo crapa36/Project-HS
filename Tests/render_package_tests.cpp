@@ -7,6 +7,7 @@
 #include "../Source/RendererD3D12/Private/renderer_instance_order.hpp"
 #include "../Source/RendererD3D12/Private/renderer_monster_lod.hpp"
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/surface_layout.hpp>
 #include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/character_package.hpp>
@@ -495,12 +496,12 @@ void TestMaterialDescriptors()
             !rd::IsMaterialDescriptorProduct("render/rock_0_lod1.rpkg") && !rd::IsMaterialDescriptorProduct("render/crate_intact.rpkg"),
             "material descriptor selection included geometry-only products");
 
-    for (const std::string name : {"archer_skin", "monster_pbr"})
+    for (const std::string name : {"archer_skin", "monster_pbr", "slime_body"})
     {
         const auto id="render/material/"+name+"/material.rpkg";
         const auto parameter_id=rd::MaterialParametersProduct(id);
-        std::array<std::string,4> ids{"render/shader/"+name+"_scene.dxil", "render/shader/"+name+"_visibility.dxil",
-            "render/shader/"+name+"_resolve.dxil", "render/shader/"+name+"_shadow.dxil"};
+        std::array<std::string,4> ids{"render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
+            "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil"};
         const std::array hero_programs{rd::MaterialProgramSource{ids[0],rd::MaterialProgramKind::HeroScenePS},
             rd::MaterialProgramSource{ids[1],rd::MaterialProgramKind::HeroVisibilityPS},
             rd::MaterialProgramSource{ids[2],rd::MaterialProgramKind::HeroSurfaceResolveCS},rd::MaterialProgramSource{ids[3],rd::MaterialProgramKind::HeroShadowPS}};
@@ -517,6 +518,13 @@ void TestMaterialDescriptors()
                 descriptor.value.domain==hero.domain && descriptor.programs.size()==hero.programs.size() && descriptor.textures.empty(),
                 "Hero descriptor changed domain or claimed fixed adapter texture ownership");
     }
+    const std::array translucent_program{rd::MaterialProgramSource{
+        "render/shader/hero_translucent_ps.dxil", rd::MaterialProgramKind::HeroTranslucentPS}};
+    const auto translucent_package = rd::BuildHeroMaterialPackage("slime_body", parameters,
+        {257u, 0u}, translucent_program);
+    Require(rd::ReadHeroMaterialPackage(translucent_package, "slime_body").domain ==
+        rd::HeroMaterialDomain::Translucent,
+        "Hero package domain was inferred from material name instead of surface/program contract");
     const std::string decal_id="render/material/decal_fracture/material.rpkg";
     const auto compile_decal = [&](std::span<const rd::MaterialParameterDefinition> defaults) {
         const auto bytes=rd::BuildDecalMaterialPackage("decal_fracture",defaults,"render/texture/vfx_fracture_decal_array.rpkg",
@@ -1913,6 +1921,35 @@ void TestSurfaceClosure()
             "legacy flat outputs did not lower to the shared surface root");
 }
 
+void TestSurfaceMetadataCodec()
+{
+    constexpr std::array<std::array<std::uint32_t, 3>, 7> cases{{
+        {0x0000ffffu, 0x0000ffffu, 0u},
+        {0x13000016u, 0x30000016u, 3u},
+        {0x20123456u, 0x00123456u, 65539u},
+        {0x32000007u, 0x20000007u, 7u},
+        {0x41000000u, 0x10000000u, 5u},
+        {0x51000001u, 0x10000001u, 1285u},
+        {0x61000002u, 0x10000002u, 1541u},
+    }};
+    for (const auto &[packed, expected_material, expected_flags] : cases)
+    {
+        const auto decoded = rd::DecodeSurfaceMetadata(packed);
+        Require(decoded.material == expected_material && decoded.flags == expected_flags,
+                "surface metadata tuple decode changed");
+    }
+    const auto page_255_material_65535 = rd::DecodeSurfaceMetadata(0x02ffffffu);
+    Require(page_255_material_65535.material == 0x20ffffffu &&
+            page_255_material_65535.flags == 0u,
+            "page/material namespace boundary was not restored");
+    const auto zero_material = rd::DecodeSurfaceMetadata(0x10000000u);
+    Require(zero_material.material == 0u && zero_material.flags == 3u,
+            "zero material with nonzero surface flags was lost");
+    const auto reserved = rd::DecodeSurfaceMetadata(0xf2000007u);
+    Require(reserved.material == 0x20000007u && reserved.flags == 0u,
+            "reserved or unsupported metadata tuple changed decode");
+}
+
 void TestMaterialTextureBindingsAndContexts()
 {
     namespace mc = hs::material_content;
@@ -2556,6 +2593,15 @@ void TestCharacterPackage()
             decoded_bindings[0].dependency_index == 1 && decoded_bindings[0].hero_ordinal == 0 &&
             decoded_bindings[0].domain == rd::HeroMaterialDomain::Opaque,
             "production character material binding roundtrip");
+    const std::array translucent_character_dependencies{
+        std::string("render/material/slime_body/material.rpkg")};
+    const std::array translucent_character_binding{rd::CharacterMaterialBinding{
+        0, 0, 5, rd::HeroMaterialDomain::Translucent}};
+    const auto translucent_bindings = rd::EncodeCharacterMaterialBindings(
+        translucent_character_binding, translucent_character_dependencies, 1);
+    Require(rd::DecodeCharacterMaterialBindings(translucent_bindings,
+        translucent_character_dependencies, 1)[0].domain == rd::HeroMaterialDomain::Translucent,
+        "standalone translucent character slot was rejected");
     for(const auto&c:view.chunks)if(c.type!=rd::ChunkType::ExpandedVertices){auto found=std::ranges::find(production_view.chunks,c.type,&rd::ChunkView::type);Require(found!=production_view.chunks.end() && std::ranges::equal(found->bytes,c.bytes),"character skeleton scalar bytes changed");}
     Reject([&]{(void)rd::DecodeCharacterMetadataPackage(package,asset);},"production decoder accepted embedded package");
     Reject([&]{(void)rd::DecodeEmbeddedCharacterPackage(production,asset);},"embedded decoder accepted production package");
@@ -3493,6 +3539,7 @@ int main(int argc, char **argv)
         RunNamed("TestGroundDetailCatalogMapping", TestGroundDetailCatalogMapping);
         RunNamed("TestAuthoredEnvironmentMaterials", TestAuthoredEnvironmentMaterials);
         RunNamed("TestSurfaceClosure", TestSurfaceClosure);
+        RunNamed("TestSurfaceMetadataCodec", TestSurfaceMetadataCodec);
         RunNamed("TestAuthoredTerrainMaterial", TestAuthoredTerrainMaterial);
         RunNamed("TestMaterialTextureBindingsAndContexts", TestMaterialTextureBindingsAndContexts);
         RunNamed("TestLegacyMaterialContextLowering", TestLegacyMaterialContextLowering);

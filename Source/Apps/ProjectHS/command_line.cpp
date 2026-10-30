@@ -1,5 +1,7 @@
 #include "command_line.hpp"
 
+#include <hs/renderer/renderer.hpp>
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -13,6 +15,7 @@ ApplicationConfig ParseProjectHsArguments(
     std::span<const std::string_view> args)
 {
     ApplicationConfig config;
+    config.surface_frontend = SurfaceFrontend::VisibilityBuffer;
 #if defined(HS_ENABLE_VALIDATION)
     config.validation = true;
 #endif

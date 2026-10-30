@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 4.4)
-project(HsReleaseInstallFixture VERSION 1.0 LANGUAGES NONE)
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.exe" "fixture executable")
+project(HsReleaseInstallFixture VERSION 1.0 LANGUAGES CXX)
+add_executable(ProjectHS shipping_image.cpp)
+target_compile_features(ProjectHS PRIVATE cxx_std_17)
 install(SCRIPT "${HS_PROJECT_SOURCE}/cmake/install_release_begin.cmake"
     CONFIGURATIONS Release COMPONENT Runtime)
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Content"
     "${CMAKE_CURRENT_BINARY_DIR}/D3D12" "${CMAKE_CURRENT_BINARY_DIR}/Licenses")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/Content/content.hsp" "fixture pack")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/D3D12/D3D12Core.dll" "fixture native")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/Licenses/NotoSansKR-OFL.txt" "fixture license")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ThirdPartyNotices.txt" "fixture notices")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.exe" DESTINATION . COMPONENT Runtime)
+install(TARGETS ProjectHS RUNTIME DESTINATION . COMPONENT Runtime)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/Content/content.hsp" DESTINATION Content COMPONENT Runtime)
 if(NOT HS_FIXTURE_OMIT_NATIVE)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/D3D12/D3D12Core.dll" DESTINATION D3D12 COMPONENT Runtime)
@@ -24,7 +24,7 @@ if(HS_FIXTURE_INTERRUPT)
     install(CODE [[message(FATAL_ERROR "simulated interruption before publication")]]
         CONFIGURATIONS Release COMPONENT Runtime)
 endif()
-install(CODE "set(_hs_release_source_exe \"${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.exe\")\nset(_hs_release_source_pack \"${CMAKE_CURRENT_BINARY_DIR}/Content/content.hsp\")"
+install(CODE "set(_hs_release_source_exe \"$<TARGET_FILE:ProjectHS>\")\nset(_hs_release_source_pack \"${CMAKE_CURRENT_BINARY_DIR}/Content/content.hsp\")"
     CONFIGURATIONS Release COMPONENT Runtime)
 install(SCRIPT "${HS_PROJECT_SOURCE}/cmake/install_release_finish.cmake"
     CONFIGURATIONS Release COMPONENT Runtime)

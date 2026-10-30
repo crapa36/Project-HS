@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "renderer_brixelizer_scene.hpp"
 
 #include <cstring>
 #include <limits>
@@ -125,6 +126,9 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     if (!GeometryPageLayout(sizes, upload_offsets, upload_size))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Geometry page GPU buffer size exceeds its ABI.");
     GeometryPageGpu next;
+    next.brixelizer_submesh_keys.reserve(submeshes.size());
+    for (std::size_t part = 0; part < submeshes.size(); ++part)
+        next.brixelizer_submesh_keys.push_back(BrixelizerSubmeshKey(std::uint64_t(page_slot) + 1, part));
     next.source_asset = page_asset;
     next.source_digest = source_digest;
     if (preparation) next.source_product = std::move(preparation->source_product);

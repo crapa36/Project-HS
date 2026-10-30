@@ -2841,21 +2841,16 @@
       "then": {
         "if": {
           "properties": {
-            "id": {
-              "const": "slime_body"
+            "domain": {
+              "const": "translucent"
             }
-          }
+          },
+          "required": ["domain"]
         },
         "then": {
           "properties": {
-            "domain": {
-              "const": "translucent"
-            },
             "render_flags": {
               "properties": {
-                "two_sided": {
-                  "const": true
-                },
                 "alpha_mode": {
                   "const": "blend"
                 }
@@ -2864,43 +2859,14 @@
           }
         },
         "else": {
-          "if": {
-            "properties": {
-              "id": {
-                "const": "monster_pbr"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "domain": {
-                "const": "surface"
-              },
-              "render_flags": {
-                "properties": {
-                  "two_sided": {
-                    "const": false
-                  },
-                  "alpha_mode": {
-                    "const": "opaque"
-                  }
-                }
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "domain": {
-                "const": "surface"
-              },
-              "render_flags": {
-                "properties": {
-                  "two_sided": {
-                    "const": false
-                  },
-                  "alpha_mode": {
-                    "const": "mask"
-                  }
+          "properties": {
+            "domain": {
+              "const": "surface"
+            },
+            "render_flags": {
+              "properties": {
+                "alpha_mode": {
+                  "enum": ["opaque", "mask"]
                 }
               }
             }

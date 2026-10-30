@@ -3,6 +3,7 @@
 #include "../Source/Runtime/Private/startup_graphics_settings.hpp"
 
 #include <hs/runtime/save_store.hpp>
+#include <hs/renderer/renderer.hpp>
 
 #include <cstdio>
 #include <initializer_list>
@@ -281,6 +282,8 @@ int main()
 {
     try
     {
+        Check(Parse({}).surface_frontend == hs::SurfaceFrontend::VisibilityBuffer,
+              "game defaults to the visibility surface frontend");
         Check(!Parse({}).capture_diagnostics, "detailed diagnostics disabled by default");
         Check(Parse({"--capture-diagnostics"}).capture_diagnostics, "explicit capture diagnostics");
         TestSmokeUsesProcessDefaults();

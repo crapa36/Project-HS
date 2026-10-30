@@ -102,7 +102,9 @@ void BakeSceneProbe(const hs::SelectedGeneration &generation, const std::filesys
 
     std::filesystem::path scene_hlod_path;
     Require(generation.Require(config.scene_hlod_product_id, scene_hlod_path));
-    const auto world_scene = hs::app::WorldTransportScene(generation);
+    // Match ApplicationConfig and SimulationConfig's default gameplay seed.
+    constexpr std::uint64_t kDefaultGameplaySeed = 1;
+    const auto world_scene = hs::app::WorldTransportScene(generation, kDefaultGameplaySeed);
     if (!world_scene) throw std::runtime_error("Scene probe world transport scene is empty");
     BakeWindow window;
     window.Create();

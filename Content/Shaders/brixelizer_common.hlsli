@@ -9,7 +9,7 @@ cbuffer BrixelizerConstants : register(b0,space31)
 };
 Texture2D<float> BrixDepth : register(t0,space31);
 Texture2D<float2> BrixNormal : register(t1,space31);
-Texture2D<uint2> BrixMetadata : register(t2,space31);
+Texture2D<uint> BrixMetadata : register(t2,space31);
 Texture2D<float2> BrixMotion : register(t3,space31);
 Texture2D<float4> BrixBase : register(t4,space31);
 Texture2D<float4> BrixMaterial : register(t5,space31);
@@ -36,11 +36,12 @@ HsSurfaceClosure BrixClosure(uint2 p)
 {
     uint4 p0=BrixFrameInfo.z>0u?BrixSidecar0.Load(int3(p,0)):0u;
     uint4 p1=BrixFrameInfo.z>1u?BrixSidecar1.Load(int3(p,0)):0u;
-    return HsReflectionDecodeClosure(BrixMetadata.Load(int3(p,0)),BrixBase.Load(int3(p,0)),
+    return HsReflectionDecodeClosure(HsUnpackSurfaceMetadata(BrixMetadata.Load(int3(p,0))),BrixBase.Load(int3(p,0)),
         BrixNormal.Load(int3(p,0)),BrixMaterial.Load(int3(p,0)),p0,p1,p);
 }
 bool BrixSurfaceValid(uint2 p)
-{return BrixDepth.Load(int3(p,0))>0.0 && BrixMetadata.Load(int3(p,0)).x!=0u;}
+{return BrixDepth.Load(int3(p,0))>0.0 &&
+    (BrixMetadata.Load(int3(p,0)) & HsSurfaceMetadataMaterialMask)!=0u;}
 float3 BrixRelativePosition(uint2 p)
 {
     float2 uv=(float2(p)+0.5)*BrixRenderSize.zw;
@@ -56,7 +57,8 @@ bool HsBrixelizerMaterialFactors(HsSurfaceClosure c,float3 view,out float3 diffu
     if(c.unlit||c.coat_weight!=0.0||c.anisotropy!=0.0||c.sheen_weight!=0.0||
         c.transmission_weight!=0.0||c.solid_transmission_weight!=0.0)return false;
     diffuse=c.base_color*(1.0-saturate(c.metallic));
-    float2 ab=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(saturate(dot(c.normal,view)),saturate(c.roughness)),0).xy;
+    float no_v=saturate(dot(c.normal,view));
+    float2 ab=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(sqrt(no_v),saturate(c.roughness)),0).xy;
     specular=HsBsdfF0(c)*ab.x+ab.y;
     return all(isfinite(diffuse))&&all(isfinite(specular));
 }

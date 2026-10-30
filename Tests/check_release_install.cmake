@@ -18,15 +18,31 @@ get_filename_component(repo "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(fixture "${CMAKE_CURRENT_LIST_DIR}/release_install_fixture")
 set(binary "${work_root}/fixture-build")
 
-function(configure_fixture omit_native corrupt_copy interrupt)
+function(configure_fixture omit_native corrupt_copy interrupt mismatch_pair)
     execute_process(COMMAND "${CMAKE_COMMAND}" -S "${fixture}" -B "${binary}"
         -G "${HS_TEST_GENERATOR}" "-DCMAKE_MAKE_PROGRAM=${HS_TEST_MAKE_PROGRAM}"
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
         "-DHS_PROJECT_SOURCE=${repo}" "-DHS_FIXTURE_OMIT_NATIVE=${omit_native}"
         "-DHS_FIXTURE_CORRUPT_COPY=${corrupt_copy}" "-DHS_FIXTURE_INTERRUPT=${interrupt}"
+        "-DHS_FIXTURE_MISMATCH_PAIR=${mismatch_pair}"
         RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
     if(NOT result STREQUAL "0")
         message(FATAL_ERROR "Fixture configure failed: ${output}${error}")
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" --build "${binary}" --config Release
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "Fixture build failed: ${output}${error}")
+    endif()
+    set(pack_mode match)
+    if(mismatch_pair)
+        set(pack_mode mismatch)
+    endif()
+    execute_process(COMMAND "${binary}/ProjectHS.exe" --write-pack
+        "${binary}/Content/content.hsp" "${pack_mode}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "Fixture pack generation failed: ${output}${error}")
     endif()
 endfunction()
 
@@ -49,7 +65,7 @@ function(expect_install name result_kind expected_text)
     endif()
 endfunction()
 
-configure_fixture(OFF OFF OFF)
+configure_fixture(OFF OFF OFF OFF)
 
 file(MAKE_DIRECTORY "${work_root}/occupied")
 file(WRITE "${work_root}/occupied/sentinel.txt" "old")
@@ -96,19 +112,25 @@ if(NOT result STREQUAL "0" OR NOT EXISTS "${work_root}/destdir/fixture-target/Pr
     message(FATAL_ERROR "DESTDIR Release install failed: ${output}${error}")
 endif()
 
-configure_fixture(ON OFF OFF)
+configure_fixture(ON OFF OFF OFF)
 expect_install(missing-native fail "Incomplete staged Release: D3D12/D3D12Core.dll")
 if(EXISTS "${work_root}/missing-native" OR NOT EXISTS "${work_root}/.missing-native.staging")
     message(FATAL_ERROR "Missing native file touched the destination or lost the staged set")
 endif()
 
-configure_fixture(OFF ON OFF)
+configure_fixture(OFF ON OFF OFF)
 expect_install(bad-copy fail "Staged Release copy differs from built source")
 if(EXISTS "${work_root}/bad-copy" OR NOT EXISTS "${work_root}/.bad-copy.staging")
     message(FATAL_ERROR "Copy integrity failure published or lost the staged set")
 endif()
 
-configure_fixture(OFF OFF ON)
+configure_fixture(OFF OFF OFF ON)
+expect_install(mismatched-pair fail "Staged Release executable/content pair differs from the linked image")
+if(EXISTS "${work_root}/mismatched-pair" OR NOT EXISTS "${work_root}/.mismatched-pair.staging/ProjectHS.exe")
+    message(FATAL_ERROR "Intact but mismatched Release pair was published or staging was lost")
+endif()
+
+configure_fixture(OFF OFF ON OFF)
 file(MAKE_DIRECTORY "${work_root}/interrupted")
 expect_install(interrupted fail "simulated interruption before publication")
 if(EXISTS "${work_root}/interrupted/ProjectHS.exe" OR
@@ -117,7 +139,7 @@ if(EXISTS "${work_root}/interrupted/ProjectHS.exe" OR
 endif()
 expect_install(interrupted fail "Interrupted Release install left a sibling stage")
 
-configure_fixture(OFF OFF OFF)
+configure_fixture(OFF OFF OFF OFF)
 get_filename_component(cmake_bin "${CMAKE_COMMAND}" DIRECTORY)
 set(cpack "${cmake_bin}/cpack${CMAKE_EXECUTABLE_SUFFIX}")
 file(MAKE_DIRECTORY "${work_root}/package")

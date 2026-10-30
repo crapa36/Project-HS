@@ -23,8 +23,7 @@ struct Caster
 {
     float4 current_bounds, previous_bounds;
     uint4 draw; // instance, generation, source ref, canonical geometry record
-    uint4 indexed; // group, index count, first index, signed base vertex
-    uint4 properties; // flags, meshlet count, frontend, next changed static caster
+    uint4 properties; // flags, draw group, reserved, next changed static caster
 };
 struct Receiver { float4 minimum, maximum; };
 struct DrawRecord
@@ -39,8 +38,9 @@ StructuredBuffer<Receiver> Receivers : register(t3, space21);
 StructuredBuffer<PageEntry> ClearPageTable : register(t4, space21);
 RWStructuredBuffer<PageEntry> PageTable : register(u0, space21);
 ByteAddressBuffer BakedPages : register(t5, space21);
-// Per-frame {first command, capacity}; CPU and ExecuteIndirect use this same
-// prefix partition of the unchanged fixed command allocation.
+// Per-frame {first, capacity, index count, first index, base vertex,
+// meshlet count, frontend, reserved}; each 32-byte segment repeats its group's
+// immutable draw template.
 ByteAddressBuffer CommandSegments : register(t6, space21);
 RWStructuredBuffer<PageEntry> Residents : register(u1, space21);
 RWByteAddressBuffer Requests : register(u2, space21);
@@ -50,6 +50,7 @@ RWByteAddressBuffer MeshCommands : register(u5, space21);
 RWByteAddressBuffer CommandCounts : register(u6, space21);
 RWByteAddressBuffer ClearCommands : register(u7, space21);
 RWByteAddressBuffer PageDrawCounts : register(u8, space21);
+groupshared uint AdmissionPageCounts[32];
 
 // flags: requested1, static redraw2, dynamic redraw4, overflow8, published16,
 // resident static valid32. A table entry is never published before both draws.
@@ -180,6 +181,21 @@ void InitCS(uint3 tid : SV_DispatchThreadID)
         Requests.Store(id * 4u, guaranteed && id >= coarse_word ? 0xffffffffu : 0u);
     }
     if (id < Frame.w + 2u) CommandCounts.Store(id * 4u, 0u);
+    if (id < Frame.w)
+    {
+        const uint segment_offset = id * 32u;
+        const uint first = CommandSegments.Load(segment_offset);
+        const uint capacity = CommandSegments.Load(segment_offset + 4u);
+        if (capacity != 0u && CommandSegments.Load(segment_offset + 24u) == 0u)
+        {
+            const uint offset = first * 24u;
+            IndexedCommands.Store4(offset, uint4(0x80000000u | first,
+                CommandSegments.Load(segment_offset + 8u), 0u,
+                CommandSegments.Load(segment_offset + 12u)));
+            IndexedCommands.Store2(offset + 16u,
+                uint2(CommandSegments.Load(segment_offset + 16u), 0u));
+        }
+    }
     if (id < Counts.z)
     {
         // One page thread clears its complete row without enlarging dispatch X.
@@ -339,23 +355,13 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
             page.flags = 1u | 4u;
             if ((Residents[physical].flags & 32u) == 0u) page.flags |= 2u;
             PageTable[entry] = page;
-            for (uint layer = 0; layer < 2; ++layer)
-            {
-                if (layer == 0u && (page.flags & 2u) == 0u) continue;
-                const uint count_offset = (Frame.w + layer) * 4u;
-                const uint slot = CommandCounts.Load(count_offset);
-                CommandCounts.Store(count_offset, slot + 1u);
-                const uint offset = (layer * Counts.w + slot) * 20u;
-                ClearCommands.Store(offset, entry);
-                ClearCommands.Store4(offset + 4u, uint4(3u, 1u, 0u, 0u));
-            }
         }
     }
 }
 bool DrawCandidate(PageEntry page, Caster caster, float3 light, out uint layer, out uint segment)
 {
     layer = (caster.properties.x & 4u) != 0u ? 0u : 1u;
-    segment = layer * (Frame.w / 2u) + caster.indexed.x;
+    segment = layer * (Frame.w / 2u) + caster.properties.y;
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u ||
         (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
     if(layer==0u && (caster.properties.x & 64u)!=0u && BakedPageOffset(page)!=0xffffffffu) return false;
@@ -366,6 +372,9 @@ void CullPageCaster(uint entry, Caster caster, float3 light)
     const PageEntry page = PageTable[entry];
     // Reject the whole page before running its candidate predicate.
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u) return;
+    // Admission has completed in a prior dispatch. Do not repeat caster/page
+    // overlap tests for a page that cannot be drawn or published this frame.
+    if (ClearEntry != 0u && (page.flags & 8u) != 0u) return;
     uint layer, segment;
     if (!DrawCandidate(page, caster, light, layer, segment)) return;
     if (ClearEntry == 0u)
@@ -379,28 +388,29 @@ void CullPageCaster(uint entry, Caster caster, float3 light)
     if ((page.flags & 8u) != 0u) return;
     uint slot;
     CommandCounts.InterlockedAdd(segment * 4u, 1u, slot);
-    const uint2 layout=CommandSegments.Load2(segment*8u);
-    if (slot >= layout.y || layout.x >= Options.z || slot >= Options.z-layout.x)
+    const uint segment_offset = segment * 32u;
+    const uint first = CommandSegments.Load(segment_offset);
+    const uint capacity = CommandSegments.Load(segment_offset + 4u);
+    if (slot >= capacity || first >= Options.z || slot >= Options.z - first)
     {
         // Unreachable when the shared candidate predicate matches the counts.
         uint ignored;
         InterlockedOr(PageTable[entry].flags, 8u, ignored);
         return;
     }
-    const uint record_index = layout.x + slot;
+    const uint record_index = first + slot;
     DrawRecord record;
     record.geometry_record = caster.draw.w; record.source_ref = caster.draw.z;
     record.instance_index = caster.draw.x; record.instance_generation = caster.draw.y;
-    record.page_entry = entry; record.layer = layer; record.draw_group = caster.indexed.x; record.reserved = 0;
+    record.page_entry = entry; record.layer = layer; record.draw_group = caster.properties.y; record.reserved = 0;
     DrawRecords[record_index] = record;
-    if (caster.properties.z == 0u)
+    if (CommandSegments.Load(segment_offset + 24u) == 0u)
     {
-        const uint offset = record_index * 24u;
-        IndexedCommands.Store4(offset, uint4(0x80000000u | record_index, caster.indexed.y, 1u, caster.indexed.z));
-        IndexedCommands.Store2(offset + 16u, uint2(caster.indexed.w, 0u));
+        uint ignored;
+        IndexedCommands.InterlockedMax(first * 24u + 8u, slot + 1u, ignored);
     }
     else MeshCommands.Store4(record_index * 16u,
-        uint4(0x80000000u | record_index, caster.properties.y, 1u, 1u));
+        uint4(0x80000000u | record_index, CommandSegments.Load(segment_offset + 20u), 1u, 1u));
 }
 void CullCasterCandidates(uint caster_index)
 {
@@ -438,13 +448,30 @@ void CullCasterCandidates(uint caster_index)
     }
 }
 [numthreads(64, 1, 1)]
-void CullCS(uint3 tid : SV_DispatchThreadID)
+void CullCS(uint3 tid : SV_DispatchThreadID, uint3 group_id : SV_GroupID,
+            uint group_index : SV_GroupIndex)
 {
     // The existing b1 root constant selects fine count/admission/scatter (0..2)
     // or current-root initialization/emission (3..4).
     if (ClearEntry == 3u)
     {
-        if (tid.x < Frame.w / 2u) CommandCounts.Store((RootOptions.w + tid.x) * 4u, 0u);
+        if (tid.x < Frame.w / 2u)
+        {
+            CommandCounts.Store((RootOptions.w + tid.x) * 4u, 0u);
+            const uint segment_offset = (Frame.w + tid.x) * 32u;
+            const uint first = CommandSegments.Load(segment_offset);
+            const uint capacity = CommandSegments.Load(segment_offset + 4u);
+            if (capacity != 0u && CommandSegments.Load(segment_offset + 24u) == 0u)
+            {
+                const uint root_first = Options.z + first;
+                const uint offset = root_first * 24u;
+                IndexedCommands.Store4(offset, uint4(0x80000000u | root_first,
+                    CommandSegments.Load(segment_offset + 8u), 0u,
+                    CommandSegments.Load(segment_offset + 12u)));
+                IndexedCommands.Store2(offset + 16u,
+                    uint2(CommandSegments.Load(segment_offset + 16u), 0u));
+            }
+        }
         if (tid.x == 0u)
         {
             PageEntry root = {0, 0, 3u, 0xffffffffu, Identity.w, 16u, 0u, 0u};
@@ -459,64 +486,100 @@ void CullCS(uint3 tid : SV_DispatchThreadID)
         // Identical to IsCompleteBakedStaticCaster: wind/skin/animated alpha
         // never carry static bit 4, so they remain fresh root contributors.
         if ((caster.properties.x & 1u) == 0u || (caster.properties.x & 68u) == 68u) return;
-        const uint group = caster.indexed.x;
+        const uint group = caster.properties.y;
         if (group >= Frame.w / 2u)
         {
             uint ignored; InterlockedOr(PageTable[Counts.z].flags, 8u, ignored);
             return;
         }
-        const uint2 layout = CommandSegments.Load2((Frame.w + group) * 8u);
+        const uint segment_offset = (Frame.w + group) * 32u;
+        const uint first = CommandSegments.Load(segment_offset);
+        const uint capacity = CommandSegments.Load(segment_offset + 4u);
         uint slot;
         CommandCounts.InterlockedAdd((RootOptions.w + group) * 4u, 1u, slot);
-        if (slot >= layout.y || layout.x >= Counts.x || slot >= Counts.x - layout.x)
+        if (slot >= capacity || first >= Counts.x || slot >= Counts.x - first)
         {
             uint ignored; InterlockedOr(PageTable[Counts.z].flags, 8u, ignored);
             return;
         }
-        // Fixed caster slots keep draw-record identity independent of atomic
-        // order; commands retain the CPU's per-frontend group partition.
-        const uint record_index = Options.z + tid.x;
-        const uint command_index = Options.z + layout.x + slot;
+        // Root records are compact within the shared cross-frontend group prefix.
+        const uint record_index = Options.z + first + slot;
         DrawRecord record;
         record.geometry_record = caster.draw.w; record.source_ref = caster.draw.z;
         record.instance_index = caster.draw.x; record.instance_generation = caster.draw.y;
         record.page_entry = Counts.z; record.layer = 2u; record.draw_group = group; record.reserved = 0u;
         DrawRecords[record_index] = record;
-        if (caster.properties.z == 0u)
+        if (CommandSegments.Load(segment_offset + 24u) == 0u)
         {
-            const uint offset = command_index * 24u;
-            IndexedCommands.Store4(offset, uint4(0x80000000u | record_index, caster.indexed.y, 1u, caster.indexed.z));
-            IndexedCommands.Store2(offset + 16u, uint2(caster.indexed.w, 0u));
+            uint ignored;
+            IndexedCommands.InterlockedMax((Options.z + first) * 24u + 8u, slot + 1u, ignored);
         }
-        else MeshCommands.Store4(command_index * 16u,
-            uint4(0x80000000u | record_index, caster.properties.y, 1u, 1u));
+        else MeshCommands.Store4(record_index * 16u,
+            uint4(0x80000000u | record_index, CommandSegments.Load(segment_offset + 20u), 1u, 1u));
         return;
     }
     if (ClearEntry == 1u)
     {
-        const uint segment = tid.x;
+        // One group owns one segment. Load requested counts cooperatively, then
+        // retain the exact ascending-entry greedy admission decision on lane 0.
+        const uint segment = group_id.x;
         if (segment >= Frame.w) return;
-        uint remaining = CommandSegments.Load2(segment*8u).y;
+        uint remaining = CommandSegments.Load2(segment * 32u).y;
         for (uint rank = 0u; rank < Frame.z; ++rank)
         {
             const uint word=RequestWord(rank);
-            uint mask = Requests.Load(word * 4u);
-            while (mask != 0u)
+            const uint request_mask = Requests.Load(word * 4u);
+            if (group_index < 32u)
             {
-                const uint entry = PopRequestedEntry(word, mask);
-                if (entry >= Counts.z) continue;
-                const uint count = PageDrawCounts.Load(PageDrawCountOffset(entry, segment));
-                if (count > remaining)
-                {
-                    uint ignored;
-                    InterlockedOr(PageTable[entry].flags, 8u, ignored);
-                }
-                else remaining -= count;
+                const uint entry = word * 32u + group_index;
+                AdmissionPageCounts[group_index] = entry < Counts.z &&
+                    (request_mask & (1u << group_index)) != 0u
+                    ? PageDrawCounts.Load(PageDrawCountOffset(entry, segment)) : 0u;
             }
+            GroupMemoryBarrierWithGroupSync();
+            if (group_index == 0u)
+            {
+                uint mask = request_mask;
+                while (mask != 0u)
+                {
+                    const uint entry = PopRequestedEntry(word, mask);
+                    if (entry >= Counts.z) continue;
+                    const uint count = AdmissionPageCounts[entry & 31u];
+                    if (count > remaining)
+                    {
+                        uint ignored;
+                        InterlockedOr(PageTable[entry].flags, 8u, ignored);
+                    }
+                    else remaining -= count;
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
         }
         // Never read peer-written flags while reserving: every segment's page
         // decisions depend only on its counts and ascending entry order.
         return;
+    }
+    if (ClearEntry == 2u && tid.x < Counts.z)
+    {
+        const uint entry = tid.x;
+        const PageEntry page = PageTable[entry];
+        // Clear accepted pages even when they have no caster draws so stale
+        // texels from prior occupants cannot survive. Rejected pages are left
+        // untouched and remain unpublished.
+        if (page.physical != 0xffffffffu && (page.flags & 1u) != 0u &&
+            (page.flags & 8u) == 0u)
+        {
+            for (uint layer = 0u; layer < 2u; ++layer)
+            {
+                if (layer == 0u && (page.flags & 2u) == 0u) continue;
+                uint ignored;
+                const uint count_offset = (Frame.w + layer) * 4u;
+                CommandCounts.InterlockedAdd(count_offset, 1u, ignored);
+                const uint offset = (layer * Counts.w + ignored) * 20u;
+                ClearCommands.Store(offset, entry);
+                ClearCommands.Store4(offset + 4u, uint4(3u, 1u, 0u, 0u));
+            }
+        }
     }
     if (tid.x < Counts.x) CullCasterCandidates(tid.x);
 }

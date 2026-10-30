@@ -9,6 +9,11 @@ struct CharacterMaterialSelection
 {
     std::uint16_t slot{};
     std::uint32_t hero_ordinal{};
+};
+
+struct CharacterMaterialDomainSelection
+{
+    std::uint32_t hero_ordinal{};
     render_data::HeroMaterialDomain domain{};
 };
 
@@ -20,8 +25,8 @@ struct CharacterProduct
     std::vector<std::byte> bytes;
 };
 
-// Resolve authoring rules once against the imported material slots. No JSON
-// binding sidecar is written for another producer to parse again.
+// Resolve only material identity against imported slots. The selected package's
+// cooked domain is supplied separately to BuildCharacterProducts.
 [[nodiscard]] std::vector<CharacterMaterialSelection> PrepareCharacterMaterialSelections(
     const CharacterIR &character, std::string_view stem,
     const nlohmann::json &authoring);
@@ -31,7 +36,8 @@ struct CharacterProduct
 // published only after interval-wide pose and appearance error qualification.
 [[nodiscard]] std::vector<CharacterProduct> BuildCharacterProducts(
     const CharacterIR &character, std::string_view stem,
-    std::span<const CharacterMaterialSelection> materials);
+    std::span<const CharacterMaterialSelection> materials,
+    std::span<const CharacterMaterialDomainSelection> material_domains);
 
 [[nodiscard]] render_data::MonsterCharacterData CookMonsterCharacterData(
     const CharacterIR &character, const render_data::GeometryData &geometry,

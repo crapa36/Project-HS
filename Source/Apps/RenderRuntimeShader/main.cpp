@@ -112,6 +112,9 @@ constexpr std::array kVisibilityPrograms{
     ProgramOutput{"surface_resolve_cs.dxil", L"SurfaceResolveCS", L"cs_6_0"},
     ProgramOutput{"raster_records_cs.dxil", L"BuildRasterRecordsCS", L"cs_6_0"},
     ProgramOutput{"visibility_clear_cs.dxil", L"ClearVisibilityCS", L"cs_6_0"},
+};
+
+constexpr std::array kVisibilityClassificationPrograms{
     ProgramOutput{"visibility_count_cs.dxil", L"ClassifyCountCS", L"cs_6_0"},
     ProgramOutput{"visibility_prefix_cs.dxil", L"ClassifyPrefixCS", L"cs_6_0"},
     ProgramOutput{"visibility_scatter_cs.dxil", L"ClassifyScatterCS", L"cs_6_0"},
@@ -151,6 +154,8 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"gtao_temporal_cs.dxil", L"GTAOTemporalCS", L"cs_6_0"},
         ProgramOutput{"gtao_bilateral_cs.dxil", L"GTAOBilateralCS", L"cs_6_0"},
         ProgramOutput{"contact_shadow_cs.dxil", L"ContactShadowCS", L"cs_6_0"}};
+    static constexpr std::array adaptive_gtao_programs{
+        ProgramOutput{"adaptive_gtao_cs.dxil", L"AdaptiveGtaoCS", L"cs_6_0"}};
     static constexpr std::array reconstruction_programs{
         ProgramOutput{"reconstruction_guides_cs.dxil", L"ReconstructionGuidesCS", L"cs_6_0"},
         ProgramOutput{"reconstruction_pre_exposure_cs.dxil", L"PreExposeReconstructionCS", L"cs_6_0"}};
@@ -199,12 +204,14 @@ std::span<const ShaderFamily> ShaderFamilies()
         ShaderFamily{"project", "Content/Shaders/project_hs.hlsl", kProjectPrograms},
         ShaderFamily{"geometry", "Content/Shaders/geometry.hlsl", kGeometryPrograms},
         ShaderFamily{"visibility", "Content/Shaders/visibility_buffer.hlsl", kVisibilityPrograms},
+        ShaderFamily{"visibility-classification", "Content/Shaders/visibility_classification.hlsl", kVisibilityClassificationPrograms},
         ShaderFamily{"static-visibility", "Content/Shaders/static_visibility.hlsl", kStaticVisibilityPrograms},
         ShaderFamily{"depth-pyramid", "Content/Shaders/depth_pyramid.hlsl", kDepthPyramidPrograms},
         ShaderFamily{"skin-cache", "Content/Shaders/skin_cache.hlsl", kSkinCachePrograms},
         ShaderFamily{"exposure", "Content/Shaders/exposure.hlsl", kExposurePrograms},
         ShaderFamily{"cluster-refinement", "Content/Shaders/cluster_refinement.hlsl", kClusterRefinementPrograms},
         ShaderFamily{"ambient-occlusion", "Content/Shaders/ambient_occlusion.hlsl", ambient_programs},
+        ShaderFamily{"adaptive-gtao", "Content/Shaders/adaptive_gtao.hlsl", adaptive_gtao_programs},
         ShaderFamily{"reconstruction-guides", "Content/Shaders/reconstruction_guides.hlsl", reconstruction_programs},
         ShaderFamily{"sdk-presentation", "Content/Shaders/sdk_presentation.hlsl", presentation_programs},
         ShaderFamily{"hdr-post", "Content/Shaders/hdr_post.hlsl", hdr_post_programs},

@@ -94,8 +94,8 @@ D3D12_RESOURCE_DESC PreintegrateDescription()
 {
     D3D12_RESOURCE_DESC description{};
     description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    description.Width = 128;
-    description.Height = 128;
+    description.Width = 256;
+    description.Height = 256;
     description.DepthOrArraySize = 1;
     description.MipLevels = 1;
     description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -106,7 +106,7 @@ D3D12_RESOURCE_DESC PreintegrateDescription()
 }
 
 constexpr UINT kLegacyCaseCount = 7;
-constexpr UINT kCoatedCaseCount = 32;
+constexpr UINT kCoatedCaseCount = 72;
 constexpr UINT kFresnelCaseCount = 14;
 constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount + kFresnelCaseCount;
 
@@ -233,13 +233,13 @@ std::uint32_t ReadLe32(const std::vector<std::byte> &bytes, std::size_t offset)
 void CheckCoatedDfgDds(const std::vector<std::byte> &first)
 {
     constexpr std::size_t header_size = 148;
-    constexpr std::size_t texel_count = 128u * 128u;
+    constexpr std::size_t texel_count = 256u * 256u;
     constexpr std::size_t payload_size = texel_count * 8u;
     Check(first.size() == header_size + payload_size, "coated DFG DDS byte count changed");
     Check(ReadLe32(first, 0) == 0x20534444u && ReadLe32(first, 4) == 124u,
           "coated DFG DDS magic or legacy header size is invalid");
-    Check(ReadLe32(first, 8) == 0x100fu && ReadLe32(first, 12) == 128u &&
-          ReadLe32(first, 16) == 128u && ReadLe32(first, 20) == 1024u &&
+    Check(ReadLe32(first, 8) == 0x100fu && ReadLe32(first, 12) == 256u &&
+          ReadLe32(first, 16) == 256u && ReadLe32(first, 20) == 2048u &&
           ReadLe32(first, 24) == 0u && ReadLe32(first, 28) == 1u,
           "coated DFG DDS extent or pitch is invalid");
     Check(ReadLe32(first, 76) == 32u && ReadLe32(first, 80) == 4u &&
@@ -502,16 +502,16 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
     // still compiled above as an independent build/PSO oracle, but does not produce
     // the texture exercised by the probes below.
     constexpr std::size_t dds_payload_offset = 148;
-    constexpr UINT texture_row_bytes = 128u * 8u;
+    constexpr UINT texture_row_bytes = 256u * 8u;
     Check(cooked_dfg.size() >= dds_payload_offset +
-          static_cast<std::size_t>(texture_row_bytes) * 128u,
+          static_cast<std::size_t>(texture_row_bytes) * 256u,
           "cooked DFG payload is shorter than the texture extent");
     D3D12_RANGE no_upload_reads{0, 0};
     void *upload_mapping{};
     Hr(resources.preintegrate_upload->Map(0, &no_upload_reads, &upload_mapping),
        "map cooked preintegration upload buffer");
     auto *upload_bytes = static_cast<std::byte *>(upload_mapping);
-    for (UINT y = 0; y < 128; ++y)
+    for (UINT y = 0; y < 256; ++y)
         std::memcpy(upload_bytes + resources.preintegrate_footprint.Offset +
                         static_cast<std::size_t>(y) *
                             resources.preintegrate_footprint.Footprint.RowPitch,
@@ -571,12 +571,12 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
     const auto *preintegrate_bytes = static_cast<const std::byte *>(preintegrate_mapping);
     float smooth_normal = 0.0f;
     float rough_normal = 0.0f;
-    for (UINT y = 0; y < 128; ++y)
+    for (UINT y = 0; y < 256; ++y)
     {
         const auto *row = reinterpret_cast<const std::uint16_t *>(
             preintegrate_bytes + resources.preintegrate_footprint.Offset +
             y * resources.preintegrate_footprint.Footprint.RowPitch);
-        for (UINT x = 0; x < 128; ++x)
+        for (UINT x = 0; x < 256; ++x)
         {
             const float a = HalfToFloat(row[x * 4]);
             const float b = HalfToFloat(row[x * 4 + 1]);
@@ -589,8 +589,8 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
             Check(c <= a + 1e-4f && d <= b + 1e-4f,
                   "coated preintegration moment exceeds its matching base moment");
             Check(a + b <= 1.04f, "preintegration coefficient exceeds energy bound");
-            if (x == 127 && y == 0) smooth_normal = a + b;
-            if (x == 127 && y == 127) rough_normal = a + b;
+            if (x == 255 && y == 0) smooth_normal = a + b;
+            if (x == 255 && y == 255) rough_normal = a + b;
         }
     }
     resources.preintegrate_readback->Unmap(0, nullptr);

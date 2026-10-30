@@ -10,7 +10,7 @@ void BrixelizerGiResolveCS(uint3 dispatch : SV_DispatchThreadID)
     bool supported=false;
     // SurfaceLayout thin-sheet covers masked leaves/grass. Hero catalog ordinal2
     // is authored archer_cutout (alpha_mode=mask), without coverage triangles.
-    uint2 metadata=BrixMetadata.Load(int3(p,0));
+    uint2 metadata=HsUnpackSurfaceMetadata(BrixMetadata.Load(int3(p,0)));
     bool domainSupported=(metadata.y&HsSurfaceFlagThinSheet)==0u&&HsHeroOrdinal(metadata.x)!=2u;
     if(BrixSurfaceValid(p)&&domainSupported)
     {HsSurfaceClosure c=BrixClosure(p);float3 relative=BrixRelativePosition(p);

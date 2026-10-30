@@ -8,7 +8,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
                                                   AllocationResource &lut,
                                                   std::vector<AllocationResource> *upload_batch)
 {
-    constexpr UINT extent = 128;
+    constexpr UINT extent = 256;
     constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     RendererAssetSource path;
     if (auto resolved = ResolveRendererAsset(lut_config, "render/lighting/coated_ggx_dfg.dds", path);

@@ -1,5 +1,6 @@
 // MaterialIR decal domain, binding ABI1. The root-table suffix uses space36;
 // it shares the renderer root signature without adding root parameters or MRTs.
+#include "surface_metadata.hlsli"
 #include "material_surface.hlsli"
 
 cbuffer DecalConstants : register(b0, space36)
@@ -12,7 +13,7 @@ cbuffer DecalConstants : register(b0, space36)
     uint4 DecalParameterBases;
 };
 Texture2D<float> DecalDepth : register(t0, space36);
-Texture2D<uint2> DecalMetadata : register(t1, space36);
+Texture2D<uint> DecalMetadata : register(t1, space36);
 Texture2D<float4> DecalBase : register(t2, space36);
 Texture2D<float2> DecalNormal : register(t3, space36);
 Texture2D<float4> DecalMaterial : register(t4, space36);
@@ -144,7 +145,8 @@ void DecalSurfaceCS(uint3 dispatch : SV_DispatchThreadID)
     float3 normal = HsDecalDecodeNormal(packed_normal), emission = 0.0;
     const float ground_facing = smoothstep(0.45, 0.8, normal.y);
     const float depth = DecalDepth.Load(int3(pixel, 0));
-    const uint2 metadata = DecalMetadata.Load(int3(pixel, 0));
+    const uint packed_metadata = DecalMetadata.Load(int3(pixel, 0));
+    const uint2 metadata = HsUnpackSurfaceMetadata(packed_metadata);
     bool modified = false;
     if (depth > 0.0 && metadata.x != 0u)
     {
@@ -155,9 +157,9 @@ void DecalSurfaceCS(uint3 dispatch : SV_DispatchThreadID)
         const uint2 px = uint2(min(pixel.x + 1u, uint(DecalRenderSize.x) - 1u), pixel.y);
         const uint2 py = uint2(pixel.x, min(pixel.y + 1u, uint(DecalRenderSize.y) - 1u));
         const float depth_x = DecalDepth.Load(int3(px, 0)), depth_y = DecalDepth.Load(int3(py, 0));
-        const float2 world_dx = depth_x > 0.0 && all(DecalMetadata.Load(int3(px, 0)) == metadata)
+        const float2 world_dx = depth_x > 0.0 && DecalMetadata.Load(int3(px, 0)) == packed_metadata
             ? (HsDecalWorld(px, depth_x) - world).xz : 0.0;
-        const float2 world_dy = depth_y > 0.0 && all(DecalMetadata.Load(int3(py, 0)) == metadata)
+        const float2 world_dy = depth_y > 0.0 && DecalMetadata.Load(int3(py, 0)) == packed_metadata
             ? (HsDecalWorld(py, depth_y) - world).xz : 0.0;
         [loop] for (uint index = 0u; index < DecalInfo.x; ++index)
         {

@@ -7,6 +7,7 @@
 
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/lighting_probe.hpp>
+#include <hs/render_data/scene_probe_revision.hpp>
 #include <hs/render_data/static_shadow.hpp>
 #include <hs/render_data/static_shadow_archive.hpp>
 #include <hs/render_data/texture_package.hpp>
@@ -93,17 +94,44 @@ class Identity
     void Vector(const DirectX::XMFLOAT4 &v) { Float(v.x); Float(v.y); Float(v.z); Float(v.w); }
     void Text(std::string_view value)
     { Integer(value.size()); hash_.Add(std::as_bytes(std::span(value.data(),value.size()))); }
+    void Bytes(std::span<const std::byte> value)
+    { Integer(value.size()); hash_.Add(value); }
     std::string Finish() { return "sha256:" + Hex(hash_.Finish()); }
   private:
     hs::Sha256Stream hash_;
 };
-std::array<std::byte,32> CaptureTextureIdentity(std::span<const LocalProbeTextureFact> facts)
+std::array<std::byte,32> CaptureBindingIdentity(std::span<const LocalProbeTextureFact> facts,
+    std::span<const LocalProbePageRevision> page_revisions,
+    std::span<const LocalProbeCapturePage> pages)
 {
     std::vector<const LocalProbeTextureFact *> sorted; sorted.reserve(facts.size());
     for(const auto &fact:facts) sorted.push_back(&fact);
     std::ranges::sort(sorted,{},[](const auto *fact){return fact->logical_id;});
-    Identity identity; identity.Text("local-probe.sampled-texture-bindings.v1");
+    Identity identity; identity.Text("local-probe.native-capture-bindings.v2");
     for(const auto *fact:sorted) { identity.Text(fact->logical_id); identity.Integer(fact->sampled_mip,4); }
+    const auto page_count=page_revisions.empty()?pages.size():page_revisions.size();
+    identity.Integer(page_count);
+    const auto append_page=[&](std::size_t index,std::uint32_t page_slot,
+        const std::array<std::byte,32> &source_digest,std::uint32_t index_count,
+        const render_data::GeometryBounds &bounds)
+    {
+        identity.Integer(index,4); identity.Integer(page_slot,4); identity.Bytes(source_digest);
+        identity.Integer(index_count,4);
+        for(float value:bounds.minimum) identity.Float(value);
+        for(float value:bounds.maximum) identity.Float(value);
+        for(float value:bounds.sphere) identity.Float(value);
+    };
+    if(!page_revisions.empty())
+        for(std::size_t index=0;index<page_revisions.size();++index)
+        {
+            const auto &page=page_revisions[index];
+            append_page(index,page.page_slot,page.source_digest,page.index_count,page.bounds);
+        }
+    else for(std::size_t index=0;index<pages.size();++index)
+        {
+            const auto &page=pages[index];
+            append_page(index,page.page_slot,page.source_digest,page.index_count,page.bounds);
+        }
     const auto digest=identity.Finish(); std::array<std::byte,32> result{};
     const auto digit=[](char c)->unsigned { return c<='9'?unsigned(c-'0'):unsigned(c-'a'+10); };
     for(std::size_t i=0;i<result.size();++i)
@@ -733,15 +761,16 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         if(config.packed_content)
         {
             for(const auto &source:config.packed_source_revisions)
-                if(rd::IsRendererMaterialRevisionProduct(source.product_id))
+                if(rd::IsLocalProbeMaterialRevisionProduct(source.product_id))
                     capture->material_products.emplace(source.product_id, "sha256:"+Hex(source.digest));
             for(const auto &entry:config.packed_revision_bulks)
-                if(rd::IsRendererMaterialRevisionProduct(entry.product_id))
+                if(rd::IsLocalProbeMaterialRevisionProduct(entry.product_id))
                     capture->material_products.emplace(entry.product_id,
                         "sha256:"+Hex(config.packed_bulks[entry.bulk_index].range.expected_digest));
         }
         else for(const auto &[id,digest]:config.product_digests)
-            if(rd::IsRendererMaterialRevisionProduct(id)) capture->material_products.emplace(id,digest);
+            if(rd::IsLocalProbeMaterialRevisionProduct(id))
+                capture->material_products.emplace(id,digest);
         capture->material_products["scene-probe/semantic-inputs"]=capture->input_identity;
         if(package.payload!=rd::SceneProbePayload::Baked)
             if(auto pipelines=PrepareCapturePipelines(capture,config,pipeline_cache,true);!pipelines) return pipelines;
@@ -832,19 +861,27 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             !SamePageRevisions(capture->revision_pages,page_facts);
         if(material_inputs_changed)
         {
-            Identity material; material.Text("local-probe.actual-material-state.v2");
-            material.Integer(in.material_parameter_revision); material.Integer(in.pipeline_revision);
+            Identity material; material.Text("local-probe.actual-material-state.v4");
+            // pipeline_revision is a renderer-wide refresh trigger. Keep it in
+            // material_inputs_changed above, but let the scoped product digests
+            // below determine whether probe capture semantics actually changed.
+            material.Integer(in.material_parameter_revision);
             for(const auto &page:page_facts)
             {
                 Require(page.generation&&page.index_count,"Capture geometry is not an actual complete page");
                 Require(std::ranges::any_of(page.source_digest,[](std::byte value) { return value!=std::byte{}; }),
                     "Capture geometry is missing its decoded source digest");
-                material.Text(Hex(page.source_digest)); material.Integer(page.index_count,4);
                 ValidateBounds(page.bounds);
-                for(float value:page.bounds.minimum) material.Float(value);
-                for(float value:page.bounds.maximum) material.Float(value);
-                for(float value:page.bounds.sphere) material.Float(value);
             }
+            // Authored page payloads, including every LOD, are already covered
+            // by the scoped immutable Generation product digests. Keep the
+            // internal procedural cube in the semantic identity because it has
+            // no catalog product and is generated by renderer code.
+            const auto &procedural=page_facts.back();
+            material.Bytes(procedural.source_digest); material.Integer(procedural.index_count,4);
+            for(float value:procedural.bounds.minimum) material.Float(value);
+            for(float value:procedural.bounds.maximum) material.Float(value);
+            for(float value:procedural.bounds.sphere) material.Float(value);
             // Static capture evaluates surface lighting, never screen-space refraction (w).
             material.Float(quality.x); material.Float(quality.y); material.Float(quality.z);
             capture->material_revision_identity=material.Finish();
@@ -887,7 +924,18 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         if(shadow_inputs_changed)
         {
             auto shadow_key=capture->light_identity_prefix;
+            shadow_key.Text("local-probe.static-shadow-view-cache.v2");
             shadow_key.Text(capture->layout_identity); shadow_key.Text(material_identity);
+            shadow_key.Integer(page_facts.size());
+            for(std::size_t index=0;index<page_facts.size();++index)
+            {
+                const auto &page=page_facts[index];
+                shadow_key.Integer(index,4); shadow_key.Integer(page.page_slot,4);
+                shadow_key.Bytes(page.source_digest); shadow_key.Integer(page.index_count,4);
+                for(float value:page.bounds.minimum) shadow_key.Float(value);
+                for(float value:page.bounds.maximum) shadow_key.Float(value);
+                for(float value:page.bounds.sphere) shadow_key.Float(value);
+            }
             const auto shadow_identity=shadow_key.Finish();
             if(capture->shadow_identity!=shadow_identity)
             {
@@ -898,11 +946,9 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             }
             auto lights=capture->light_identity_prefix;
             const auto &shadow=capture->revision_shadow;
-            lights.Text("local-probe.pure-static-directional-shadow.v1"); lights.Integer(kShadowEdge,4);
+            lights.Text("local-probe.pure-static-directional-shadow-policy.v2"); lights.Integer(kShadowEdge,4);
             lights.Integer(shadow.enabled,1); lights.Integer(shadow.light_id); lights.Integer(shadow.light_generation,4);
             lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
-            if(shadow.enabled)
-                for(const auto &row:shadow.view.view_projection.m) for(float value:row) lights.Float(value);
             capture->light_revision_identity=lights.Finish();
         }
         // Generation products are immutable; fold them again only when actual native inputs change.
@@ -945,7 +991,7 @@ Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameI
     plan.capture_identity_valid=in.texture_facts_valid;
     if(plan.capture_identity_valid)
     {
-        plan.capture_identity=CaptureTextureIdentity(in.texture_facts);
+        plan.capture_identity=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages);
         plan.capture_sources_ready=CaptureTexturesReady(in.texture_facts);
     }
     if(!impl_->capture)return Result::Success();
@@ -954,7 +1000,8 @@ Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameI
     if(auto qualified=CurrentRevisions(in,plan.revisions);!qualified)return qualified;
     if(in.max_cube_views>6)return Failure("Capture cube-view budget exceeds six");
     plan.shadow=impl_->capture->revision_shadow.enabled;
-    plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed);
+    plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed)&&
+        (!in.texture_facts_valid||plan.capture_sources_ready);
     return Result::Success();
 }
 Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
@@ -1007,7 +1054,7 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
         plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
         plan.capture_identity_valid!=in.texture_facts_valid||
-        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureTextureIdentity(in.texture_facts)||
+        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages)||
             plan.capture_sources_ready!=CaptureTexturesReady(in.texture_facts)))||
         plan.max_cube_views!=in.max_cube_views||layout.scene_reads.size()!=in.scene_reads.size()||
         layout.shadow_sampling!=(plan.shadow&&bool(in.declare_shadow_sampling)))return false;
@@ -1050,7 +1097,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
         plan.capture_identity_valid!=in.texture_facts_valid||
-        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureTextureIdentity(in.texture_facts)||
+        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages)||
             plan.capture_sources_ready!=CaptureTexturesReady(in.texture_facts)))||
         plan.max_cube_views!=in.max_cube_views)
         return Failure("Local-probe frame record input changed before graph registration");

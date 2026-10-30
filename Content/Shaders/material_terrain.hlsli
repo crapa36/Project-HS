@@ -153,19 +153,16 @@ HsMaterialTerrainResult TerrainLayer(
     SamplerState environment_wrap, SamplerState linear_clamp,
     float3 world,float3 worldDx,float3 worldDy,uint layer,uint seed,float2 warp,
     float3 viewTs,float distanceToEye,
-    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot)
+    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
+    HsTextureGradState gaussian_state,HsTextureGradState surface_state,
+    HsTextureGradState normal_state,HsTextureGradState detail_state,
+    HsTextureGradState height_state)
 {
     float tile=TerrainTileSize(layer);
     float2 uv=world.xz/tile,dx=worldDx.xz/tile,dy=worldDy.xz/tile;
-    const HsTextureGradState gaussian_state=HsTexturePrepareGrad(gaussian_slot);
-    const HsTextureGradState surface_state=HsTexturePrepareGrad(surface_slot);
-    const HsTextureGradState normal_state=HsTexturePrepareGrad(normal_slot);
     const float2 detail_fade=TerrainDetailFadeRange();
     const bool detail_enabled=distanceToEye<detail_fade.y;
     const float detail_weight=1-smoothstep(detail_fade.x,detail_fade.y,distanceToEye);
-    HsTextureGradState detail_state=(HsTextureGradState)0;
-    if(detail_enabled) detail_state=HsTexturePrepareGrad(detail_slot);
-    const HsTextureGradState height_state=HsTexturePrepareGrad(height_slot);
     const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,viewTs,distanceToEye,HS_MATERIAL_POM_STEPS);
 
     float2 p=(world.xz+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
@@ -301,10 +298,16 @@ HsMaterialTerrainResult EnvTerrain(
     float total=0;
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
     const float3 viewTs=normalize(viewDirection).xzy;
+    const HsTextureGradState gaussian_state=HsTexturePrepareGrad(gaussian_slot);
+    const HsTextureGradState surface_state=HsTexturePrepareGrad(surface_slot);
+    const HsTextureGradState normal_state=HsTexturePrepareGrad(normal_slot);
+    const HsTextureGradState height_state=HsTexturePrepareGrad(height_slot);
+    HsTextureGradState detail_state=(HsTextureGradState)0;
+    if(distanceToEye<TerrainDetailFadeRange().y) detail_state=HsTexturePrepareGrad(detail_slot);
     [loop] for(uint layer=0;layer<4;++layer)
     {
         if(w[layer]<=0) continue;
-        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewTs,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot);
+        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewTs,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
         float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)));
         m.base_color+=n.base_color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight;
         m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight;

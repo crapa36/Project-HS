@@ -35,9 +35,16 @@ GeometryDrawRecord LoadGeometryDrawRecord(uint id)
     return record;
 }
 
+uint GeometryShadowPass(uint local_instance)
+{
+    // Indexed VSM commands store a tagged record base and use StartInstanceLocation 0.
+    // Mesh/local shadow draws remain one record per command and keep their original pass.
+    return HsVirtualShadowIsDraw(PassValue) ? PassValue + local_instance : PassValue;
+}
+
 uint GeometryVisibleInstance(uint local_instance)
 {
-    if (HsShadowIsDraw(PassValue)) return HsShadowLoadDraw(PassValue).source_ref;
+    if (HsShadowIsDraw(PassValue)) return HsShadowLoadDraw(GeometryShadowPass(local_instance)).source_ref;
     // SV_InstanceID excludes native StartInstanceLocation. Geometry draws
     // address their structured instance/ref range explicitly in both frontends.
     return PassValue >= 4u

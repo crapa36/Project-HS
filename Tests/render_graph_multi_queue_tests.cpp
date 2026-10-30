@@ -212,18 +212,39 @@ void RunBakedProbePreparation(Fixture &fixture)
     Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "probe export pool");
     const hs::LocalProbeInputs inputs{scene, description.revisions, {}, {}, {}, 0};
     hs::LocalProbeOutputs output;
-    Check(service.Register(graph, inputs, output).Succeeded(), "register baked probe upload");
+    auto initially_unqualified=inputs;
+    ++initially_unqualified.revisions.material;
+    initially_unqualified.capture_identity_valid=true;
+    initially_unqualified.capture_sources_ready=false;
+    initially_unqualified.capture_identity[0]=std::byte{1};
+    Check(service.Register(graph, initially_unqualified, output).Succeeded(), "register baked probe upload while capture sources are unready");
     Check(graph.Prepare(pool).Succeeded(), "prepare baked probe upload");
     Check(graph.PassCount() == 1 && graph.CompiledPassName(0) == "LocalProbePackageUpload",
-        "compatible baked SPB1 upload must not register native capture or filter passes");
+        "unqualified baked SPB1 upload must not register native capture or filter passes");
     hs::CompletionSet completion;
     fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit baked probe upload");
-    Check(service.CompleteSubmission(graph, completion, true, scene, description.revisions).Succeeded(),
+    Check(service.CompleteSubmission(graph, completion, true, scene, initially_unqualified.revisions).Succeeded(),
         "complete baked probe upload submission");
     Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe upload");
+    graph.Reset();
+    auto late_match=inputs;
+    late_match.completed=fixture.executor.Completed();
+    late_match.capture_identity_valid=true;
+    late_match.capture_sources_ready=false;
+    late_match.capture_identity[0]=std::byte{2};
+    Check(!service.NativeCaptureRequired(scene, late_match.revisions, late_match.completed),
+        "matching baked revisions must remain sampleable after an earlier provisional mismatch");
+    Check(service.Register(graph, late_match, output).Succeeded()&&output.enabled,
+        "late matching baked revisions did not adopt preserved package payload");
+    Check(graph.Prepare(pool).Succeeded()&&graph.PassCount()==0,
+        "late baked adoption with unready sources or changed capture identity scheduled native work");
+    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit late baked adoption");
+    Check(service.CompleteSubmission(graph, completion, true, scene, late_match.revisions).Succeeded(),
+        "complete late baked adoption");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait late baked adoption");
     std::vector<std::byte> exported;
     Check(service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported).Succeeded(),
-        "completed current probe can export before another frame publishes its sample bindings");
+        "late-adopted baked package could not be exported after its completed reader fence");
     Check(exported == bytes, "native four-payload readback changed the baked package");
     graph.Reset();
     auto published_inputs = inputs;
@@ -1947,25 +1968,29 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     struct CasterInput
     {
         std::array<float, 4> current_bounds{}, previous_bounds{};
-        std::array<UINT, 4> draw{}, indexed{}, properties{};
+        std::array<UINT, 4> draw{}, properties{};
     };
-    static_assert(sizeof(CasterInput) == 80);
-    struct Segment { UINT first{}, capacity{}; };
+    static_assert(sizeof(CasterInput) == 64);
+    struct Segment
+    {
+        UINT first{}, capacity{}, index_count{}, start_index{};
+        std::int32_t base_vertex{};
+        UINT meshlet_count{}, frontend{}, reserved{};
+    };
+    static_assert(sizeof(Segment) == 32);
     struct Case
     {
         const char *name{};
         UINT group_count{}, max_groups{}, fine_entries{}, fine_capacity{};
         std::vector<CasterInput> casters;
         std::vector<Segment> segments;
-        std::vector<bool> mesh_frontends;
     };
     const auto make_caster = [](UINT id, UINT group, bool mesh, UINT flags) {
         CasterInput value{};
         value.current_bounds = {float(id), float(id + 1), float(id + 2), 1.0f};
         value.previous_bounds = value.current_bounds;
         value.draw = {100u + id, 200u + id, 300u + id, 400u + id};
-        value.indexed = {group, 20u + id, 3u + id, UINT(-2)};
-        value.properties = {flags, 5u + id, mesh ? 1u : 0u, 0u};
+        value.properties = {flags, group, mesh ? 1u : 0u, 0u};
         return value;
     };
     Case complete{"complete-mixed-boundary", 2, 3, 5, 4, {
@@ -1976,10 +2001,12 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         make_caster(4, 1, true, 1u),    // animated alpha
         make_caster(5, 1, true, 0u),    // absent
         make_caster(6, 0, false, 1u)},  // dynamic
-        {{1, 3}, {0, 2}}, {false, true}};
+         {{0, 3, 36u, 20u, -2, 0u, 0u, 0u},
+          {3, 2, 0u, 0u, 0, 7u, 1u, 0u}}};
     Case overflow{"capacity-and-group-overflow", 1, 3, 1, 2, {
-        make_caster(0, 0, false, 1u), make_caster(1, 1, true, 1u)}, {{0, 0}}, {false}};
-    Case empty{"empty-caster-set", 0, 3, 2, 4, {}, {}, {}};
+        make_caster(0, 0, false, 1u), make_caster(1, 1, true, 1u)}, {{0, 0, 36u, 0u, 0, 0u, 0u, 0u}}};
+    Case empty{"empty-caster-set-with-indexed-group", 1, 3, 2, 4, {},
+        {{0, 1, 12u, 0u, 0, 0u, 0u, 0u}}};
     std::array<Case, 3> cases{std::move(complete), std::move(overflow), std::move(empty)};
     constexpr UINT sentinel = 0xdedededeu;
 
@@ -2020,7 +2047,10 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     Hr(compiled->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&code), nullptr), "read production shadow DXIL");
 
     constexpr std::array<UINT, 7> uav_registers{0u, 2u, 3u, 4u, 5u, 6u, 8u};
-    std::array<D3D12_ROOT_PARAMETER1, 12> parameters{};
+    // CullCS keeps all runtime-selected phases in one entry point. Cover the
+    // complete production binding set even though this oracle dispatches only
+    // root phases 3 and 4.
+    std::array<D3D12_ROOT_PARAMETER1, 16> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     parameters[0].Descriptor = {0u, 21u, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -2050,6 +2080,33 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     count_range.OffsetInDescriptorsFromTableStart = 0u;
     parameters[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[10].DescriptorTable = {1u, &count_range};
+    D3D12_DESCRIPTOR_RANGE1 receiver_texture_range{};
+    receiver_texture_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    receiver_texture_range.NumDescriptors = 2u;
+    receiver_texture_range.BaseShaderRegister = 0u;
+    receiver_texture_range.RegisterSpace = 21u;
+    receiver_texture_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
+    receiver_texture_range.OffsetInDescriptorsFromTableStart = 0u;
+    parameters[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[12].DescriptorTable = {1u, &receiver_texture_range};
+    D3D12_DESCRIPTOR_RANGE1 clear_input_range = receiver_texture_range;
+    clear_input_range.NumDescriptors = 2u;
+    clear_input_range.BaseShaderRegister = 3u;
+    parameters[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[13].DescriptorTable = {1u, &clear_input_range};
+    D3D12_DESCRIPTOR_RANGE1 residents_range{};
+    residents_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    residents_range.NumDescriptors = 1u;
+    residents_range.BaseShaderRegister = 1u;
+    residents_range.RegisterSpace = 21u;
+    residents_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    residents_range.OffsetInDescriptorsFromTableStart = 0u;
+    parameters[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[14].DescriptorTable = {1u, &residents_range};
+    D3D12_DESCRIPTOR_RANGE1 clear_commands_range = residents_range;
+    clear_commands_range.BaseShaderRegister = 7u;
+    parameters[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[15].DescriptorTable = {1u, &clear_commands_range};
     for (auto &parameter : parameters) parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
     root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -2063,11 +2120,55 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         IID_PPV_ARGS(&root)), "create production virtual shadow CullCS root");
     D3D12_DESCRIPTOR_HEAP_DESC count_heap_description{};
     count_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    count_heap_description.NumDescriptors = 2u;
+    count_heap_description.NumDescriptors = 8u;
     count_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> count_heap;
     Hr(fixture.device->CreateDescriptorHeap(&count_heap_description, IID_PPV_ARGS(&count_heap)),
         "create bounded CullCS root-counter descriptor heap");
+    const auto descriptor_stride = fixture.device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const auto make_null_srv = [&](UINT slot, DXGI_FORMAT format, UINT structure_stride) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = format;
+        view.ViewDimension = structure_stride ? D3D12_SRV_DIMENSION_BUFFER : D3D12_SRV_DIMENSION_TEXTURE2D;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (structure_stride)
+        {
+            view.Buffer.NumElements = 1u;
+            view.Buffer.StructureByteStride = structure_stride;
+        }
+        else
+        {
+            view.Texture2D.MipLevels = 1u;
+        }
+        auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
+        cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
+        fixture.device->CreateShaderResourceView(nullptr, &view, cpu);
+    };
+    make_null_srv(2u, DXGI_FORMAT_R32_FLOAT, 0u); // ReceiverDepth, t0
+    make_null_srv(3u, DXGI_FORMAT_R32G32_FLOAT, 0u); // ReceiverNormal, t1
+    make_null_srv(4u, DXGI_FORMAT_UNKNOWN, sizeof(float) * 8u); // Receivers, t3
+    make_null_srv(5u, DXGI_FORMAT_UNKNOWN, sizeof(hs::GpuShadowPageEntry)); // ClearPageTable, t4
+    const auto make_null_uav = [&](UINT slot, DXGI_FORMAT format, UINT structure_stride) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+        view.Format = format;
+        view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        if (structure_stride)
+        {
+            view.Buffer.NumElements = 1u;
+            view.Buffer.StructureByteStride = structure_stride;
+        }
+        else
+        {
+            view.Buffer.NumElements = 1u;
+            view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        }
+        auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
+        cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
+        fixture.device->CreateUnorderedAccessView(nullptr, nullptr, &view, cpu);
+    };
+    make_null_uav(6u, DXGI_FORMAT_UNKNOWN, sizeof(hs::GpuShadowPageEntry)); // Residents, u1
+    make_null_uav(7u, DXGI_FORMAT_R32_TYPELESS, 0u); // ClearCommands, u7
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_description{};
     pipeline_description.pRootSignature = root.Get();
     pipeline_description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
@@ -2093,7 +2194,11 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     for (const auto &test : cases)
     {
         Check(test.segments.size() == test.group_count, "root segment fixture matches actual groups");
-        const UINT command_words = test.fine_capacity + static_cast<UINT>(test.casters.size());
+        UINT root_command_end{};
+        for (const auto &segment : test.segments)
+            root_command_end = std::max(root_command_end, segment.first + segment.capacity);
+        const UINT command_words = test.fine_capacity +
+            std::max(static_cast<UINT>(test.casters.size()), root_command_end);
         const UINT root_counter_base = test.max_groups * 2u + 2u;
         hs::VirtualShadowConstants constants{};
         constants.counts = {static_cast<UINT>(test.casters.size()), 0u, test.fine_entries, 0u};
@@ -2108,13 +2213,20 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         const UINT caster_bytes = static_cast<UINT>(test.casters.size() * sizeof(CasterInput));
         auto caster_upload = create_upload(test.casters.empty() ? nullptr : test.casters.data(), caster_bytes,
             "create CullCS caster input");
-        const UINT segment_count = (constants.frame.w + test.group_count) * 2u;
+        const UINT segment_count = (constants.frame.w + test.group_count) * 8u;
         std::vector<UINT> segments(segment_count, sentinel);
         for (UINT group = 0; group < test.group_count; ++group)
         {
-            const UINT word = (constants.frame.w + group) * 2u;
-            segments[word] = test.segments[group].first;
-            segments[word + 1u] = test.segments[group].capacity;
+            const UINT word = (constants.frame.w + group) * 8u;
+            const auto &segment = test.segments[group];
+            segments[word] = segment.first;
+            segments[word + 1u] = segment.capacity;
+            segments[word + 2u] = segment.index_count;
+            segments[word + 3u] = segment.start_index;
+            segments[word + 4u] = static_cast<UINT>(segment.base_vertex);
+            segments[word + 5u] = segment.meshlet_count;
+            segments[word + 6u] = segment.frontend;
+            segments[word + 7u] = segment.reserved;
         }
         auto segment_upload = create_upload(segments.empty() ? nullptr : segments.data(),
             static_cast<UINT>(segments.size() * sizeof(UINT)), "create CullCS segment input");
@@ -2188,8 +2300,6 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             counts_view.Buffer.NumElements = counter_words;
             counts_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
             const UINT descriptor_index = phase == 3u ? 0u : 1u;
-            const auto descriptor_stride = fixture.device->GetDescriptorHandleIncrementSize(
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             auto cpu_counts_handle = count_heap->GetCPUDescriptorHandleForHeapStart();
             cpu_counts_handle.ptr += static_cast<SIZE_T>(descriptor_index) * descriptor_stride;
             auto gpu_counts_handle = count_heap->GetGPUDescriptorHandleForHeapStart();
@@ -2211,6 +2321,15 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             list->SetComputeRootUnorderedAccessView(9u, static_cast<ID3D12Resource *>(context.Resolve(mesh_handle))->GetGPUVirtualAddress());
             list->SetComputeRootDescriptorTable(10u, gpu_counts_handle);
             list->SetComputeRootUnorderedAccessView(11u, static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
+            auto input_table = count_heap->GetGPUDescriptorHandleForHeapStart();
+            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
+            list->SetComputeRootDescriptorTable(12u, input_table);
+            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
+            list->SetComputeRootDescriptorTable(13u, input_table);
+            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
+            list->SetComputeRootDescriptorTable(14u, input_table);
+            input_table.ptr += descriptor_stride;
+            list->SetComputeRootDescriptorTable(15u, input_table);
         };
         auto initialize = graph.AddPass(361u, "CullCS phase 3 root initialize", hs::QueueHint::Compute);
         initialize.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
@@ -2269,30 +2388,30 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         std::vector<UINT> expected_counts(counter_words, sentinel);
         std::vector<std::array<UINT, 8>> expected_records(command_words);
         for (auto &record : expected_records) record.fill(sentinel);
-        std::vector<std::vector<std::array<UINT, 6>>> expected_indexed(test.group_count);
         std::vector<std::vector<std::array<UINT, 4>>> expected_mesh(test.group_count);
         std::vector<UINT> group_attempts(test.group_count);
+        std::vector<UINT> group_successes(test.group_count);
         bool expected_overflow{};
         for (UINT caster_id = 0; caster_id < test.casters.size(); ++caster_id)
         {
             const auto &caster = test.casters[caster_id];
             const UINT flags = caster.properties[0];
             if ((flags & 1u) == 0u || (flags & 68u) == 68u) continue;
-            const UINT group = caster.indexed[0];
+            const UINT group = caster.properties[1];
             if (group >= test.group_count) { expected_overflow = true; continue; }
             const UINT slot = group_attempts[group]++;
             const auto layout = test.segments[group];
             if (slot >= layout.capacity || layout.first >= test.casters.size() ||
                 slot >= test.casters.size() - layout.first)
             { expected_overflow = true; continue; }
-            const UINT record_index = test.fine_capacity + caster_id;
+            const UINT record_index = test.fine_capacity + layout.first + slot;
             expected_records[record_index] = {caster.draw[3], caster.draw[2], caster.draw[0], caster.draw[1],
                 page_index, 2u, group, 0u};
             const UINT command_pass = 0x80000000u | record_index;
-            if (caster.properties[2] == 0u)
-                expected_indexed[group].push_back({command_pass, caster.indexed[1], 1u, caster.indexed[2], caster.indexed[3], 0u});
+            if (test.segments[group].frontend == 0u)
+                ++group_successes[group]; // The indexed group header counts these compact records.
             else
-                expected_mesh[group].push_back({command_pass, caster.properties[1], 1u, 1u});
+                expected_mesh[group].push_back({command_pass, test.segments[group].meshlet_count, 1u, 1u});
         }
         for (UINT group = 0; group < test.group_count; ++group)
             expected_counts[root_counter_base + group] = group_attempts[group];
@@ -2326,7 +2445,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         for (UINT group = 0; group < test.group_count; ++group)
         {
             const auto layout = test.segments[group];
-            const bool mesh_frontend = test.mesh_frontends[group];
+            const bool mesh_frontend = layout.frontend != 0u;
             if (mesh_frontend)
             {
                 auto &expected = expected_mesh[group];
@@ -2354,28 +2473,20 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             }
             else
             {
-                auto &expected = expected_indexed[group];
-                const UINT actual_count = static_cast<UINT>(expected.size());
-                std::vector<std::array<UINT, 6>> actual;
-                for (UINT slot = 0; slot < actual_count; ++slot)
+                if (layout.capacity != 0u)
                 {
-                    std::array<UINT, 6> command{};
-                    std::memcpy(command.data(), result + indexed_read + (test.fine_capacity + layout.first + slot) * 24u, 24u);
-                    actual.push_back(command);
+                    const UINT offset = (test.fine_capacity + layout.first) * 6u;
+                    expected_indexed_words[offset + 0u] = 0x80000000u | (test.fine_capacity + layout.first);
+                    expected_indexed_words[offset + 1u] = layout.index_count;
+                    expected_indexed_words[offset + 2u] = group_successes[group];
+                    expected_indexed_words[offset + 3u] = layout.start_index;
+                    expected_indexed_words[offset + 4u] = static_cast<UINT>(layout.base_vertex);
+                    expected_indexed_words[offset + 5u] = 0u;
+                    const auto *actual = reinterpret_cast<const UINT *>(result + indexed_read) + offset;
+                    Check(std::equal(expected_indexed_words.begin() + offset,
+                        expected_indexed_words.begin() + offset + 6u, actual),
+                        "production CullCS indexed group header/count differs from CPU reference");
                 }
-                auto sorted_actual = actual; auto sorted_expected = expected;
-                std::ranges::sort(sorted_actual); std::ranges::sort(sorted_expected);
-                Check(sorted_actual == sorted_expected, "production CullCS indexed command set differs from CPU reference");
-                for (UINT slot = actual_count; slot < layout.capacity; ++slot)
-                {
-                    const UINT offset = (test.fine_capacity + layout.first + slot) * 4u;
-                    for (UINT word = 0; word < 6u; ++word)
-                        Check(reinterpret_cast<const UINT *>(result + indexed_read)[offset + word] == sentinel,
-                            "production CullCS indexed overflow wrote beyond its segment");
-                }
-                for (UINT slot = 0; slot < actual_count; ++slot)
-                    std::copy(actual[slot].begin(), actual[slot].end(), expected_indexed_words.begin() +
-                        (test.fine_capacity + layout.first + slot) * 6u);
             }
         }
         compare_words(indexed_read, expected_indexed_words, "production CullCS changed indexed fine prefix or bytes outside root segments");

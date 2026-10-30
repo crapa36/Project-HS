@@ -14,6 +14,7 @@
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_sidecar.hpp>
+#include <hs/render_data/surface_layout.hpp>
 
 #include <Windows.h>
 
@@ -70,7 +71,7 @@ void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_r
 {
     hs::shader_content::AddRenderBindingInputs(spec.inputs, source_root);
     // These common includes affect named material, hero and deferred shaders.
-    for(const auto *relative:{"Content/Shaders/render_binding_contract.hlsli", "Content/Shaders/local_probe_sampling.hlsli",
+    for(const auto *relative:{"Content/Shaders/surface_metadata.hlsli", "Content/Shaders/render_binding_contract.hlsli", "Content/Shaders/local_probe_sampling.hlsli",
         "Content/Shaders/shadow_data.hlsli","Content/Shaders/local_shadow.hlsli",
         "Content/Shaders/volumetric_sampling.hlsli",
         "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli",
@@ -131,6 +132,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
         throw std::runtime_error("hs_render_material_shader: DXC compilation failed for " +
             output.filename().string() + ": " +
             hs::shader_content::ReadDxcDiagnostics(diagnostics));
+    fs::remove(diagnostics);
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
@@ -144,7 +146,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     ap::ActionSpec spec;
     spec.action_id = "render.shader.bsdf-preintegrate";
     spec.recipe_id = "project-hs.render.bsdf-preintegrate";
-    spec.recipe_version = 11;
+    spec.recipe_version = 12;
     spec.namespace_path = "render/shader/bsdf-preintegrate";
     if (hero_work)
     {
@@ -185,8 +187,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                  "Content/Shaders/screen_reflections.hlsl",
                                  "Content/Shaders/vfx_screen_overlay.hlsl",
                                  "Content/Shaders/adaptive_shading.hlsl",
-                                 "Content/Shaders/adaptive_gtao.hlsl",
-                                 "Content/Shaders/ambient_occlusion.hlsl",
                                  "Content/Shaders/project_hs.hlsl",
                                 "Content/Shaders/environment.hlsli",
                                 "Content/Shaders/probe_ibl.hlsli",
@@ -238,8 +238,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingClassifyCS", L"cs_6_0"},
         ProgramOutput{"render/shader/adaptive_shading_rate_cs.dxil", "adaptive_shading_rate_cs.dxil",
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingRateCS", L"cs_6_0"},
-        ProgramOutput{"render/shader/adaptive_gtao_cs.dxil", "adaptive_gtao_cs.dxil",
-                      "Content/Shaders/adaptive_gtao.hlsl", L"AdaptiveGtaoCS", L"cs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_vs.dxil", "hero_transparency_vs.dxil",
                       "Content/Shaders/project_hs.hlsl", L"SceneVS", L"vs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_current_vs.dxil", "hero_transparency_current_vs.dxil",
@@ -266,6 +264,16 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             program.filename.insert(program.filename.size() - 5, "_hero_work");
         }
     }
+    if (!hero_work)
+    {
+        for (const auto &program : std::array{
+            ProgramOutput{"render/shader/hero_scene_ps.dxil", "hero_scene_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroScenePS", L"ps_6_0"},
+            ProgramOutput{"render/shader/hero_visibility_ps.dxil", "hero_visibility_ps.dxil", "Content/Shaders/visibility_buffer.hlsl", L"HeroVisibilityPS", L"ps_6_0"},
+            ProgramOutput{"render/shader/hero_resolve_cs.dxil", "hero_resolve_cs.dxil", "Content/Shaders/visibility_buffer.hlsl", L"HeroSurfaceResolveCS", L"cs_6_0"},
+            ProgramOutput{"render/shader/hero_shadow_ps.dxil", "hero_shadow_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroShadowPS", L"ps_6_0"},
+            ProgramOutput{"render/shader/hero_translucent_ps.dxil", "hero_translucent_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroTranslucentPS", L"ps_6_0"}})
+            outputs.push_back(program);
+    }
     if (with_brixelizer)
     {
         outputs.push_back({"render/shader/brixelizer_guides_cs.dxil", "brixelizer_guides_cs.dxil", "Content/Shaders/brixelizer_guides.hlsl", L"BrixelizerGuidesCS", L"cs_6_6"});
@@ -283,7 +291,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ap::UpstreamProduct ignored;
             if (result.ActionKeyValue() == ap::ActionKey(spec) &&
                 result.ActionId() == spec.action_id &&
-                result.ProductCount() == outputs.size() + static_cast<std::size_t>(!hero_work))
+                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!hero_work))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
@@ -293,7 +301,10 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                 if (!hero_work)
                 {
                     valid &= result.ReadProductBytes("render/lighting/coated_ggx_dfg.dds", ignored).size() ==
-                        148u + 128u * 128u * 8u;
+                        148u + 256u * 256u * 8u;
+                    const auto abi = result.ReadProductBytes(rd::SurfaceLayout::abi_product, ignored);
+                    valid &= abi.size() == 4 && static_cast<unsigned char>(abi[0]) == rd::SurfaceLayout::version &&
+                        abi[1] == 0 && abi[2] == 0 && abi[3] == 0;
                 }
                 if (valid)
                 {
@@ -332,6 +343,13 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ap::WriteBytes(output, std::span<const std::byte>(dfg.data(), dfg.size()));
             products.push_back(ap::HashProduct("render/lighting/coated_ggx_dfg.dds",
                 output.filename().string(), output));
+            const std::array<std::byte, 4> abi{
+                std::byte(rd::SurfaceLayout::version & 0xffu), std::byte((rd::SurfaceLayout::version >> 8u) & 0xffu),
+                std::byte((rd::SurfaceLayout::version >> 16u) & 0xffu), std::byte((rd::SurfaceLayout::version >> 24u) & 0xffu)};
+            const auto abi_path = stage / "surface_layout.abi";
+            ap::WriteBytes(abi_path, abi);
+            products.push_back(ap::HashProduct(std::string(rd::SurfaceLayout::abi_product),
+                abi_path.filename().string(), abi_path));
         }
         fs::remove(include_path);
         fs::remove(hero_include_path);
@@ -486,7 +504,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
         generated += "    case " + std::to_string(ordinal) + "u: return HsDecalEvaluate_" + std::to_string(ordinal) + "(ctx);\n";
     generated += "    default: return HsMaterialMakeSurfaceClosure(ctx.sampled_base_color, ctx.normal, ctx.sampled_roughness, 0.0, 1.0, 0.0);\n    }\n}\n";
     for (const auto *relative : {"Schemas/decal_material_graph.schema.json", "Schemas/material_graph.schema.json", "Content/Shaders/decal_surface.hlsl",
-        "Content/Shaders/material_surface.hlsli", "Content/Shaders/material_parameters.hlsli",
+        "Content/Shaders/material_surface.hlsli", "Content/Shaders/material_parameters.hlsli", "Content/Shaders/surface_metadata.hlsli",
         "Content/Shaders/render_binding_contract.hlsli"})
         spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
     spec.inputs.push_back(ap::HashInput("tool/dxc.exe", dxc));
@@ -551,84 +569,57 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
 }
 
 void ProduceHero(std::string_view name, const fs::path &source_root,
-                 const fs::path &build_root, const fs::path &dxc)
+                 const fs::path &build_root)
 {
-    Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(), "all paths must be absolute");
+    Require(source_root.is_absolute() && build_root.is_absolute(), "all paths must be absolute");
     ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
-    ap::RequireRegularFile(dxc);
     PreparedMaterialInputs materials(source_root);
     const auto &prepared = materials.Get(name).prepared;
     const auto &graph = prepared.Graph();
     const auto reflection = rd::AnalyzeClosure(prepared);
     const auto namespace_path = "render/shader/" + std::string(name);
     const auto material_id = "render/material/" + std::string(name) + "/material.rpkg";
-    std::vector<ProgramOutput> outputs;
-    std::vector<rd::MaterialProgramKind> kinds;
-    if (graph.kind == rd::MaterialGraphKind::Translucent || graph.kind == rd::MaterialGraphKind::HeroRefractive)
-    {
-        outputs.push_back({namespace_path + "_translucent.dxil", std::string(name) + "_translucent.dxil",
-            "Content/Shaders/project_hs.hlsl", L"HeroTranslucentPS", L"ps_6_0"});
-        kinds.push_back(rd::MaterialProgramKind::HeroTranslucentPS);
-    }
-    else
-    {
-        outputs = {
-            {namespace_path + "_scene.dxil", std::string(name) + "_scene.dxil", "Content/Shaders/project_hs.hlsl", L"HeroScenePS", L"ps_6_0"},
-            {namespace_path + "_visibility.dxil", std::string(name) + "_visibility.dxil", "Content/Shaders/visibility_buffer.hlsl", L"HeroVisibilityPS", L"ps_6_0"},
-            {namespace_path + "_resolve.dxil", std::string(name) + "_resolve.dxil", "Content/Shaders/visibility_buffer.hlsl", L"HeroSurfaceResolveCS", L"cs_6_0"},
-            {namespace_path + "_shadow.dxil", std::string(name) + "_shadow.dxil", "Content/Shaders/project_hs.hlsl", L"HeroShadowPS", L"ps_6_0"}};
-        kinds = {rd::MaterialProgramKind::HeroScenePS, rd::MaterialProgramKind::HeroVisibilityPS,
-                 rd::MaterialProgramKind::HeroSurfaceResolveCS, rd::MaterialProgramKind::HeroShadowPS};
-    }
+    const bool translucent = graph.kind == rd::MaterialGraphKind::Translucent ||
+        graph.kind == rd::MaterialGraphKind::HeroRefractive;
     ap::ActionSpec spec;
     spec.action_id = "render.shader." + std::string(name);
-    spec.recipe_id = "project-hs.render.material-shader";
-    spec.recipe_version = 10;
+    spec.recipe_id = "project-hs.render.hero-material-interface";
+    spec.recipe_version = 1;
     spec.namespace_path = namespace_path;
-    const auto generated = HeroContextInclude(spec, source_root, materials);
-    const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
-    const auto layout_bytes = rd::EncodeMaterialParameterLayout(graph.parameters);
-    spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/parameter-layout",
-        source_root / ("ContentSource/Materials/" + std::string(name) + ".json"), layout_bytes));
-    for (const auto *relative : {"Schemas/material_graph.schema.json", "Content/Shaders/project_hs.hlsl",
-        "Content/Shaders/visibility_buffer.hlsl", "Content/Shaders/environment.hlsli", "Content/Shaders/material_surface.hlsli",
-        "Content/Shaders/hero_material.hlsli", "Content/Shaders/material_sidecar.hlsli", "Content/Shaders/material_parameters.hlsli",
-        "Content/Shaders/probe_ibl.hlsli",
-        "Content/Shaders/light_list.hlsli",
-        "Content/Shaders/local_shadow.hlsli",
-        "Content/Shaders/ltc_area.hlsli",
-        "Content/Shaders/deferred_surface.hlsli", "Content/Shaders/temporal_reconstruction.hlsli", "Content/Shaders/display_transform.hlsli",
-        "Content/Shaders/bsdf_metallic_roughness.hlsli", "Content/Shaders/bsdf_layers.hlsli", "Content/Shaders/gpu_scene_tables.hlsli",
-        "Content/Shaders/geometry.hlsli", "Content/Shaders/geometry_records.hlsli", "Content/Shaders/surface_layout.hlsli",
-        "Content/Shaders/visibility_records.hlsli", "Content/Shaders/triangle_sample.hlsli", "Content/Shaders/vfx_ribbon.hlsli"})
-        spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
-    AddSharedRendererShaderInputs(spec,source_root);
-    spec.inputs.push_back(ap::HashInput("tool/dxc.exe", dxc));
-    for (const auto *library : {"dxcompiler.dll", "dxil.dll"})
-        spec.inputs.push_back(ap::HashInput(std::string("tool/") + library, dxc.parent_path() / library));
-    std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+    const ap::ActionResultSnapshot shaders(build_root, "render/shader/bsdf-preintegrate");
+    std::vector<rd::MaterialProgramSource> programs;
+    for (const auto &[id, kind] : std::array{
+        std::pair{"render/shader/hero_scene_ps.dxil", rd::MaterialProgramKind::HeroScenePS},
+        std::pair{"render/shader/hero_visibility_ps.dxil", rd::MaterialProgramKind::HeroVisibilityPS},
+        std::pair{"render/shader/hero_resolve_cs.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
+        std::pair{"render/shader/hero_shadow_ps.dxil", rd::MaterialProgramKind::HeroShadowPS},
+        std::pair{"render/shader/hero_translucent_ps.dxil", rd::MaterialProgramKind::HeroTranslucentPS}})
+    {
+        if ((kind == rd::MaterialProgramKind::HeroTranslucentPS) != translucent) continue;
+        ap::UpstreamProduct upstream;
+        Require(ValidDxilBytes(shaders.ReadProductBytes(id, upstream)), "Shared Hero program is not DXIL");
+        spec.upstream.push_back(std::move(upstream));
+        programs.push_back({id, kind});
+    }
+    const auto package = rd::BuildHeroMaterialPackage(name, graph.parameters,
+        {reflection.capability_mask, reflection.varying_mask}, programs);
+    const auto decoded = rd::ReadHeroMaterialPackage(package, name);
+    spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/package-interface",
+        source_root / ("ContentSource/Materials/" + std::string(name) + ".json"), package));
     const auto result_path = build_root / "Actions" / namespace_path / "result.json";
     if (fs::exists(result_path) && fs::exists(result_path.parent_path() / "result.d"))
     {
         try
         {
-            const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+            const ap::ActionResultSnapshot result(build_root, namespace_path);
             if (result.ActionId() == spec.action_id && result.ActionKeyValue() == ap::ActionKey(spec) &&
-                result.ProductCount() == outputs.size() + 1)
+                result.ProductCount() == 1)
             {
-                bool valid = true;
-                for (const auto &program : outputs)
-                {
-                    ap::UpstreamProduct ignored;
-                    valid &= ValidDxilBytes(result.ReadProductBytes(program.id, ignored));
-                }
                 ap::UpstreamProduct ignored;
-                const auto contents = result.ReadProductBytes(material_id, ignored);
-                const auto material = rd::ReadHeroMaterialPackage(std::as_bytes(std::span(contents.data(), contents.size())), name);
-                valid = valid && material.surface == rd::MaterialSurfaceLayout{reflection.capability_mask, reflection.varying_mask} &&
-                    material.parameter_layout_hash == rd::MaterialParameterLayoutHash(graph.parameters);
-                if (valid) { ap::TouchActionResult(result_path); return; }
+                const auto bytes = result.ReadProductBytes(material_id, ignored);
+                if (std::ranges::equal(std::as_bytes(std::span(bytes.data(), bytes.size())), package))
+                { ap::TouchActionResult(result_path); return; }
             }
         }
         catch (const std::exception &) { /* Rebuild invalid current output. */ }
@@ -636,34 +627,12 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     const auto stage = ap::CreateStage(build_root / "Actions" / namespace_path);
     try
     {
-        const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
-        const auto include_path = stage / "hero_materials.generated.hlsli";
-        ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
-        std::vector<ap::Product> products;
-        std::vector<rd::MaterialProgramSource> programs;
-        for (std::size_t i = 0; i < outputs.size(); ++i)
-        {
-            const auto &program = outputs[i];
-            const auto output = stage / program.filename;
-            RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
-                program.entry, program.profile, L"-DHS_GENERATED_HERO_MATERIAL=1", sidecar_layout.plane_count);
-            Require(ValidDxil(output), "DXC did not produce a DXIL container");
-            products.push_back(ap::HashProduct(program.id, program.filename, output));
-            programs.push_back({program.id, kinds[i]});
-        }
-        const auto package = rd::BuildHeroMaterialPackage(name, graph.parameters,
-            {reflection.capability_mask, reflection.varying_mask}, programs);
-        const auto decoded = rd::ReadHeroMaterialPackage(package, name);
         const auto output = stage / "material.rpkg";
         ap::WriteBytes(output, package);
         auto product = ap::HashProduct(material_id, "material.rpkg", output);
         product.dependencies = decoded.dependencies;
-        products.push_back(std::move(product));
-        fs::remove(include_path);
-        ap::RemoveStage(source_snapshot);
-        ap::Publish(build_root, spec, stage, std::move(products));
+        ap::Publish(build_root, spec, stage, {std::move(product)});
     }
-    catch (const hs::shader_content::DxcStageInUseError &) { throw; }
     catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
     ap::RemoveStage(stage);
     std::cout << spec.action_id << " published\n";
@@ -676,7 +645,7 @@ void Produce(std::string_view name, const fs::path &source_root,
             "unsupported material name");
     if (hs::material_content::IsHeroMaterialName(name))
     {
-        ProduceHero(name, source_root, build_root, dxc);
+        ProduceHero(name, source_root, build_root);
         return;
     }
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
@@ -782,6 +751,7 @@ void Produce(std::string_view name, const fs::path &source_root,
                                  "Content/Shaders/geometry_records.hlsli",
                                  "Content/Shaders/surface_layout.hlsli",
                                  "Content/Shaders/visibility_buffer.hlsl",
+                                 "Content/Shaders/visibility_classification.hlsli",
                                  "Content/Shaders/visibility_records.hlsli",
                                   "Content/Shaders/triangle_sample.hlsli",
                                   "Content/Shaders/vfx_ribbon.hlsli"})

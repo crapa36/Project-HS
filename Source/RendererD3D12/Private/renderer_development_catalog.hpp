@@ -2,6 +2,7 @@
 
 #include <hs/renderer/renderer.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/surface_layout.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "checked_binary_read.hpp"
@@ -416,6 +417,7 @@ public:
             if (id.ends_with(".spkg")) return F::SceneProbe;
             if (id == "vfx/vfx_mesh_atlas.hsbin") return F::VfxMeshAtlas;
             if (id.ends_with(".dxil")) return F::ShaderDxil;
+            if (id == render_data::SurfaceLayout::abi_product) return F::SurfaceLayoutAbi;
             throw std::runtime_error("Unsupported developer renderer product format: " + std::string(id));
         };
         for (const auto &[asset, id] : products)

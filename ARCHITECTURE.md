@@ -140,6 +140,19 @@ producer links the full pinned SDK shader tables and emits immutable binding
 metadata. Runtime links that metadata and reads DXIL from selected content;
 The SDK license uses the source namespace, outside GPU resources; existing Action
 receipts own producer provenance without a duplicate content product.
+Resident whole-LOD geometry pages own their stable SDF submesh keys. Native scene
+expansion consumes those keys in authored submesh order; frame-scoped resources,
+versions, deformation and instance transforms remain current-frame inputs.
+Visibility pixel classification is a separate runtime shader family. Count,
+prefix and scatter share variant decoding with material resolve through a small
+include; classification-only edits do not invalidate authored material shaders.
+Adaptive GTAO is produced by its own runtime shader family while preserving the
+`render/shader/adaptive_gtao_cs.dxil` product. Its include closure tracks the shared
+AO implementation, independently of the BSDF-preintegrate and Hero-work actions;
+the base ambient-occlusion runtime family remains unchanged.
+The ProjectHS app selects Visibility by default; experiments and native tools keep
+their explicit renderer configuration. Visibility's typed texture stores are
+required by the backend's existing Direct3D feature level 12.0 baseline.
 
 Presentation's immutable UiFrame owns both draw models and their displayed
 interaction facts. The exchange retains that owner with the current packet;
@@ -177,7 +190,11 @@ native renderer dependencies and the font license remain required.
 The linker atomically replaces Content/content.hsp before updating its generated
 compile input. These two files are not a transaction: Runtime rejects an interrupted
 pair by matching the compiled 64-byte header and file extent. An already opened
-owner retains its original file. Core's move-only ShippedContentOwner owns the
+owner retains its original file. The Release installer reads that same compiled
+header from the executable's read-only
+`.hsimage` PE section and compares the staged pack header/extent before publishing;
+it does not run a development CLI or infer compatibility from copy hashes.
+Core's move-only ShippedContentOwner owns the
 read handle and bounded offset reads, optionally checking a supplied SHA256 during
 that same read; it has no catalog, format, generation or renderer knowledge. This cutover
 currently covers PresentationCatalog, SimulationRules, AudioImage and VfxImage. AudioContent
@@ -271,6 +288,19 @@ Surface diagnostics use the successfully submitted view's current Surface packet
 decal-owned base/normal/material exports when active, original GBuffer otherwise.
 The feature owns those resources and publishes their actual graph access/completion;
 capture retains its expected format/state checks and waits for GPU completion.
+Opaque GBuffer and AO metadata use one R32_UINT that preserves
+the current producers' 24-bit material payload, namespace nibble and six flag
+tuples. Hero identities and mixed temporal keys remain RG32_UINT. Pipeline
+admission requires the selected generation's surface_layout.abi; developer raw
+captures decode metadata to the existing logical material/flags pair. Peeled
+layer-zero depth/identity supply reconstruction guides without duplicate targets.
+  Surface ABI 5 also pairs VSM page admission with one group per draw segment:
+counts load cooperatively, while one lane preserves ordered budget decisions.
+Only admitted pages generate depth clears, including pages with no caster draws.
+  Indexed shadow groups use one indirect instanced command with contiguous private
+  DrawRecords; VS resolves base plus instance and carries that record to PS clipping.
+  Group templates live in existing 32-byte segment metadata, while per-caster GPU
+  data is 64 bytes. Mesh and local-shadow draws retain per-record commands.
   Raw flash, ballistic, mote and compatibility output plans expose fanout before sampling. Required storage is reserved
 first; decoration spends only the remaining shared capacity across prepared,
 retained and visible destinations. Empty retained queues transfer ownership by swap.
@@ -485,6 +515,10 @@ prepared bank snapshot into the destination heap. Feature preparation/admission
 uses the target view; main lighting status and per-view geometry/HLOD history do
 not read a parallel Impl service mirror. Hero retirement drains samples, resets
 completed native work, then folds statistics once.
+Volumetric compute owns a single root table with 41 descriptors, including its
+27 local bindings and the light/shadow inputs it actually consumes. Its compact
+descriptor bank belongs to the waited submission slot; raster consumers keep
+their existing scene bindings. GPU completion and resource leases govern reuse.
 UI targets/bitmap state are per view; upload buffers grow and reuse capacity in
 the waited submission slot. Pending cached bitmaps recopy into that shared scratch.
 Instance identity, retained surfaces, union-consumer monster LOD and stable draw
@@ -643,6 +677,10 @@ HS_BUILD_CONTENT_TOOLS=OFF
 It builds Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, and their low-level tests without AssetManifest, RenderData, ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex, or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`.
 
 ## Windows verification
+
+Supported builds use single-config generators, as the Ninja presets do. Configure
+rejects multi-config generators so Release cannot expose developer targets whose
+implementations are excluded from the shipping configuration.
 
 Named Debug executable builds compile/link against existing content; they do not
 recook the full generation. Build `hs_content_generation` explicitly when content

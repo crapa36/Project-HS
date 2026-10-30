@@ -22,7 +22,7 @@ StructuredBuffer<StaticDrawRef> HsClusterRefs : register(t13, space7);
 RWByteAddressBuffer HsRasterRecordsWrite : register(u0, space7);
 RWTexture2D<float4> HsSurfaceBaseWrite : register(u1, space7);
 RWTexture2D<float2> HsSurfaceNormalWrite : register(u2, space7);
-RWTexture2D<uint2> HsSurfaceMetaWrite : register(u3, space7);
+RWTexture2D<uint> HsSurfaceMetaWrite : register(u3, space7);
 RWTexture2D<float4> HsSurfaceMaterialWrite : register(u4, space7);
 RWTexture2D<float2> HsSurfaceMotionWrite : register(u5, space7);
 RWTexture2D<float2> HsSurfaceHistoryWrite : register(u6, space7);
@@ -35,6 +35,29 @@ RWTexture2D<uint4> HsSurfaceSidecar0Write : register(u12, space7);
 RWTexture2D<uint4> HsSurfaceSidecar1Write : register(u13, space7);
 
 #include "visibility_records.hlsli"
+
+StaticDrawRef HsLoadRasterRef(uint source, uint index)
+{
+    StaticDrawRef draw = (StaticDrawRef)0;
+    if (source == 1u)
+        draw = HsStaticVisibleRefs[index];
+    else if (source == 2u)
+        draw = HsDynamicVisibleRefs[index];
+    else if (source == 3u)
+        draw = HsStaticRetestRefs[index];
+    else if (source == 4u)
+        draw = HsStaticInputRefs[index];
+    else if (source == 5u)
+        draw = HsDynamicInputRefs[index];
+    else if (source == 6u)
+        draw = HsClusterRefs[index];
+    return draw;
+}
+
+bool HsRasterSourceIsStatic(uint source)
+{
+    return source == 1u || source == 3u || source == 4u || source == 6u;
+}
 
 HsRasterRange HsLoadRasterRange(uint rangeIndex)
 {
@@ -207,102 +230,7 @@ HsVisibilityOutput HeroVisibilityPS(SceneOutput input, bool front : SV_IsFrontFa
 }
 #endif
 
-bool HsVisibilityPixelInBounds(uint2 pixel)
-{
-    return pixel.x < (uint)ScreenSize.x && pixel.y < (uint)ScreenSize.y;
-}
-
-bool HsClassifiedVariant(uint2 visibility, HsRasterRecord record, out uint variant)
-{
-    variant = HsRasterVariant(record);
-    const GeometryDrawRecord geometry = LoadGeometryDrawRecord(record.geometryRecordId);
-    if ((geometry.Flags & 16u) != 0u || HsHeroAssetIndex(geometry.MeshId) == HsHeroInvalidOrdinal)
-        return variant < HsHeroVisibilityVariantBegin;
-    // Archer's FBX slots share one draw. Classify each canonical primitive by
-    // its provoking vertex instead of a draw-wide material/variant guess.
-    if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||
-        record.pageGeneration != geometry.GeometryGeneration ||
-        visibility.y < geometry.FirstIndex / 3u ||
-        visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u)
-        return false;
-    const uint descriptors = 1u + geometry.PageSlot * 4u;
-    const uint vertex = GeometryBuffers[NonUniformResourceIndex(descriptors + 1u)].Load(visibility.y * 12u);
-    const uint slot = LoadGeometryVertex(descriptors, vertex).Material;
-    const uint ordinal = HsHeroBindingOrdinals(geometry.MeshId, slot).x;
-    if (!HsHeroOpaqueOrdinalValid(ordinal)) return false;
-    variant = HsHeroVisibilityVariantBegin + ordinal;
-    return true;
-}
-
-bool HsLoadClassifiedPixel(uint2 pixel, out HsRasterRecord record,
-                           out uint variant)
-{
-    record = (HsRasterRecord)0;
-    variant = 0u;
-    if (!HsVisibilityPixelInBounds(pixel))
-        return false;
-    const uint2 visibility = HsVisibility[pixel];
-    if (!HsRasterIdValid(visibility.x) || visibility.y == HsVisibilityInvalid)
-        return false;
-    record = HsLoadRasterRecord(HsRasterRecords, visibility.x);
-    if (!HsRasterRecordDomainValid(record))
-        return false;
-    return HsClassifiedVariant(visibility, record, variant);
-}
-
-[numthreads(8, 8, 1)]
-void ClassifyCountCS(uint3 dispatchId : SV_DispatchThreadID)
-{
-    HsRasterRecord record;
-    uint variant;
-    if (!HsLoadClassifiedPixel(dispatchId.xy, record, variant))
-        return;
-    uint ignored;
-    HsVariantCountsWrite.InterlockedAdd(variant * 4u, 1u, ignored);
-}
-
-[numthreads(1, 1, 1)]
-void ClassifyPrefixCS(uint3 dispatchId : SV_DispatchThreadID)
-{
-    if (dispatchId.x != 0u || dispatchId.y != 0u || dispatchId.z != 0u)
-        return;
-    uint offset = 0u;
-    [unroll]
-    for (uint variant = 0u; variant < HsVisibilityVariantCount; ++variant)
-    {
-        const uint count = HsVariantCountsWrite.Load(variant * 4u);
-        HsVariantCountsWrite.Store((HsVisibilityOffsetBase + variant) * 4u,
-                                   offset);
-        HsVariantCountsWrite.Store((HsVisibilityCursorBase + variant) * 4u,
-                                   0u);
-        const uint groups = (count + 63u) / 64u;
-        const uint groupX = min(groups, 65535u);
-        const uint groupY = (groups + 65534u) / 65535u;
-        HsDispatchArgsWrite.Store3(variant * 12u,
-                                   uint3(groupX, groupY, 1u));
-        offset += count;
-    }
-}
-
-[numthreads(8, 8, 1)]
-void ClassifyScatterCS(uint3 dispatchId : SV_DispatchThreadID)
-{
-    HsRasterRecord record;
-    uint variant;
-    if (!HsLoadClassifiedPixel(dispatchId.xy, record, variant))
-        return;
-    uint local;
-    HsVariantCountsWrite.InterlockedAdd(
-        (HsVisibilityCursorBase + variant) * 4u, 1u, local);
-    const uint offset = HsVariantCountsWrite.Load(
-        (HsVisibilityOffsetBase + variant) * 4u);
-    const uint destination = offset + local;
-    const uint capacity = (uint)ScreenSize.x * (uint)ScreenSize.y;
-    if (destination >= capacity)
-        return;
-    HsClassifiedPixelsWrite.Store(destination * 4u,
-                                  dispatchId.x + dispatchId.y * (uint)ScreenSize.x);
-}
+#include "visibility_classification.hlsli"
 
 HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
                                             GeometryDrawRecord geometry,
@@ -496,12 +424,14 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
     if (!HsRasterIdValid(visibility.x) || visibility.y == HsVisibilityInvalid)
         return;
     const HsRasterRecord record = HsLoadRasterRecord(HsRasterRecords, visibility.x);
-    uint classified_variant;
-    if (!HsRasterRecordDomainValid(record) ||
-        !HsClassifiedVariant(visibility, record, classified_variant) || classified_variant != variant)
+    if (!HsRasterRecordDomainValid(record))
         return;
     const GeometryDrawRecord geometry =
         LoadGeometryDrawRecord(record.geometryRecordId);
+    uint classified_variant;
+    if (!HsClassifiedVariant(visibility, record, geometry, classified_variant) ||
+        classified_variant != variant)
+        return;
     if (geometry.PageSlot >= HsGeometryPageCapacity || visibility.y < geometry.FirstIndex / 3u ||
         visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u ||
         !HsRasterRefIndexValid(geometry, record))

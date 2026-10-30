@@ -54,11 +54,14 @@ void DomainsAndCounts(){
  SoftwareSceneGeometry geometry{};geometry.stable_key=1;geometry.generation=1;geometry.current_revision=7;geometry.index_count=9;
  SoftwareSceneInstance instance{};instance.generation=1;instance.material_id=9;
  std::array<render_data::GeometrySubmesh,3> parts{{{0,3,0,0,0},{3,3,0,0,1},{6,3,0,0,2}}};
+ std::array<std::uint64_t,3> submesh_keys{BrixelizerSubmeshKey(geometry.stable_key,0),
+  BrixelizerSubmeshKey(geometry.stable_key,1),BrixelizerSubmeshKey(geometry.stable_key,2)};
+ Check(submesh_keys[0]!=0&&submesh_keys[1]!=0&&submesh_keys[2]!=0,"precomputed submesh key is zero");
  std::array<render_data::MaterialSurfaceLayout,7> layouts{};
  for(auto n:{0u,1u,3u})for(auto mode:{0u,1u,2u}){
   BrixelizerGeometryLookup lookup;std::vector<SoftwareSceneGeometry> gs;std::vector<BrixelizerSceneInstance> is;
   const bool masked=mode==0,transmissive=mode==2;
-  Check(bool(AppendBrixelizerLeaf(geometry,instance,std::span(parts).first(n),{},layouts,thin,masked,transmissive,{},{},3,lookup,gs,is)),"legacy excluded expansion failed");
+  Check(bool(AppendBrixelizerLeaf(geometry,instance,std::span(parts).first(n),std::span(submesh_keys).first(n),{},layouts,thin,masked,transmissive,{},{},3,lookup,gs,is)),"legacy excluded expansion failed");
   std::uint32_t compact=0;Check(bool(AddBrixelizerExcludedCount(compact,n)),"compact count failed");
   Check(compact==is.size()&&gs.empty(),"compact count differs from original expansion");
   for(auto& x:is)Check(x.domain==ClassifyBrixelizerDomain(thin,masked,transmissive)&&x.geometry_index==UINT32_MAX,"excluded domain parity");
@@ -69,11 +72,20 @@ void DomainsAndCounts(){
  // Mixed hero pages stay expanded: opaque, authored cutout and transmission.
  std::array<render_data::CharacterMaterialBinding,3> bindings{{{0,0,0,render_data::HeroMaterialDomain::Opaque},{1,0,2,render_data::HeroMaterialDomain::Opaque},{2,0,5,render_data::HeroMaterialDomain::Translucent}}};
  BrixelizerGeometryLookup lookup;std::vector<SoftwareSceneGeometry> gs;std::vector<BrixelizerSceneInstance> is;
- Check(bool(AppendBrixelizerLeaf(geometry,instance,parts,bindings,layouts,0,false,false,{},{},3,lookup,gs,is)),"mixed hero expansion");
- Check(gs.size()==1&&is.size()==3&&is[0].domain==D::Opaque&&is[1].domain==D::UnsupportedMasked&&is[2].domain==D::Translucent,"mixed hero domain/range changed");
+ Check(bool(AppendBrixelizerLeaf(geometry,instance,parts,submesh_keys,bindings,layouts,0,false,false,{},{},3,lookup,gs,is)),"mixed hero expansion");
+ Check(gs.size()==1&&gs[0].stable_key==submesh_keys[0]&&is.size()==3&&is[0].domain==D::Opaque&&is[1].domain==D::UnsupportedMasked&&is[2].domain==D::Translucent,"mixed hero domain/range/key changed");
  Check(gs[0].index_count==3&&gs[0].index_byte_offset==0,"opaque range changed");
- auto missing=std::span(bindings).first(2);gs.clear();is.clear();BrixelizerGeometryLookup missingLookup;
- Check(!AppendBrixelizerLeaf(geometry,instance,parts,missing,layouts,0,false,false,{},{},3,missingLookup,gs,is),"missing hero binding accepted");
+ auto second=instance;second.stable_gpu_scene_slot=1;
+ Check(bool(AppendBrixelizerLeaf(geometry,second,parts,submesh_keys,bindings,layouts,0,false,false,{},{},3,lookup,gs,is)),"second same-mesh instance failed");
+ Check(gs.size()==1&&is.size()==6&&is[0].geometry_index==0&&is[3].geometry_index==0,"same mesh instances did not reuse keyed geometry");
+ auto missing=std::span(bindings).first(2);BrixelizerGeometryLookup missingLookup;
+ std::vector<SoftwareSceneGeometry> missing_geometries;std::vector<BrixelizerSceneInstance> missing_instances;
+ Check(!AppendBrixelizerLeaf(geometry,instance,parts,submesh_keys,missing,layouts,0,false,false,{},{},3,missingLookup,missing_geometries,missing_instances),"missing hero binding accepted");
+ BrixelizerGeometryLookup mismatchLookup;std::vector<SoftwareSceneGeometry> mismatch_geometries;std::vector<BrixelizerSceneInstance> mismatch_instances;
+ Check(!AppendBrixelizerLeaf(geometry,instance,parts,std::span(submesh_keys).first(2),bindings,layouts,0,false,false,{},{},3,mismatchLookup,mismatch_geometries,mismatch_instances),"mismatched submesh keys accepted");
+ auto zero_keys=submesh_keys;zero_keys[1]=0;BrixelizerGeometryLookup zeroKeyLookup;
+ std::vector<SoftwareSceneGeometry> zero_geometries;std::vector<BrixelizerSceneInstance> zero_instances;
+ Check(!AppendBrixelizerLeaf(geometry,instance,parts,zero_keys,bindings,layouts,0,false,false,{},{},3,zeroKeyLookup,zero_geometries,zero_instances),"zero submesh key accepted");
 }
 }
 int main()try{Validation();DomainsAndCounts();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}

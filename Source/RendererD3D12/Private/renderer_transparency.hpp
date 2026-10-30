@@ -1,5 +1,6 @@
 #pragma once
 
+#include "renderer_hero_work_math.hpp"
 #include "render_graph.hpp"
 #include "view_state.hpp"
 #include <hs/core/graphics_settings.hpp>
@@ -85,7 +86,7 @@ struct HeroTransparencyOutputs
 };
 struct HeroWorkRetainedLayout
 {
-    static constexpr std::size_t kMaxContributors = 12;
+    static constexpr std::size_t kMaxContributors = kHeroWorkContributors;
     std::uint32_t contributor_count{}, argument_copy_pass{};
     BufferHandle zero_upload{}, arguments_readback{};
     std::array<ResourceVersion, kMaxContributors> argument_versions{};
@@ -110,7 +111,6 @@ struct HeroTransparencyLayout
     std::array<std::uint32_t, kHeroTransparencyMaxLayers> front_pass{}, exit_pass{},
         copy_pass{}, composite_pass{};
     std::uint32_t overflow_clear_pass{}, tail_pass{};
-    std::array<ResourceVersion, 6> guide_versions{};
     ResourceVersion overflow_version{}, accumulation_version{}, revealage_version{}, corrected_version{};
     HeroWorkRetainedLayout work{};
 };
@@ -144,7 +144,7 @@ class HeroTransparencySystem
     // Call after the existing distortion/OIT composite has produced background.
     // Initializes both targets from the active background, then copies the
     // qualified write rectangle for later layers before replacing fronts.
-    // The final nearest-front draw also produces all six reconstruction guides.
+    // The final draw emits four guides; depth/identity reuse the peeled front.
     [[nodiscard]] Result RegisterComposition(RenderGraphBuilder &, HeroTransparencyGuide background,
         HeroTransparencyOutputs &, HeroTransparencyLayout *layout = nullptr);
     [[nodiscard]] Result BindRetainedComposition(RenderGraphBuilder &, HeroTransparencyGuide background,

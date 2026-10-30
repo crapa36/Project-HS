@@ -312,42 +312,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     }
     enhanced = supports_enhanced && configuration.barrier_mode != BarrierMode::Legacy;
 
-    if (configuration.surface_frontend == SurfaceFrontend::VisibilityBuffer)
-    {
-        struct FormatRequirement
-        {
-            DXGI_FORMAT format;
-            std::string_view name;
-        };
-        constexpr FormatRequirement formats[] = {
-            {DXGI_FORMAT_R8G8B8A8_UNORM, "DXGI_FORMAT_R8G8B8A8_UNORM"},
-            {DXGI_FORMAT_R16G16_SNORM, "DXGI_FORMAT_R16G16_SNORM"},
-            {DXGI_FORMAT_R16G16_FLOAT, "DXGI_FORMAT_R16G16_FLOAT"},
-            {DXGI_FORMAT_R32G32_UINT, "DXGI_FORMAT_R32G32_UINT"},
-            {DXGI_FORMAT_R32G32_FLOAT, "DXGI_FORMAT_R32G32_FLOAT"},
-            {DXGI_FORMAT_R8_UINT, "DXGI_FORMAT_R8_UINT"},
-        };
-        constexpr auto required_support1 = static_cast<D3D12_FORMAT_SUPPORT1>(
-            D3D12_FORMAT_SUPPORT1_TEXTURE2D |
-            D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW);
-        constexpr auto required_support2 = D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE;
-        for (const auto &requirement : formats)
-        {
-            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{requirement.format};
-            if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support,
-                                                   sizeof(support))) ||
-                (support.Support1 & required_support1) != required_support1 ||
-                (support.Support2 & required_support2) != required_support2)
-            {
-                return Result::Failure(
-                    ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    std::format("VisibilityBuffer requires {} with TEXTURE2D, "
-                                "TYPED_UNORDERED_ACCESS_VIEW, and UAV_TYPED_STORE support.",
-                                requirement.name));
-            }
-        }
-    }
-
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
     D3D12_FEATURE_DATA_SHADER_MODEL shader_model{D3D_SHADER_MODEL_6_5};
     ComPtr<ID3D12Device2> mesh_device;

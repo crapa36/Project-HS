@@ -590,15 +590,19 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         plan.published=false;
         if(s->capture_completion.IsSatisfiedBy(in.completed))
         {
-            const bool initial=!plan.scene;
             plan.scene=in.scene;plan.revisions=in.revisions;
             plan.capture_first=0;plan.bake_submitted=false;
-            if(initial&&s->package_baked&&s->description.revisions==in.revisions)
+            if(s->package_baked&&!s->capture_ready&&s->description.revisions==in.revisions)
                 plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
         }
     }
     const bool package_sample_ready=s->package_baked&&!s->capture_ready&&s->description.revisions==in.revisions&&
         plan.capture_first==s->probes.size()*6&&!plan.bake_submitted;
+    if(package_sample_ready&&s->uploaded&&s->completion.IsSatisfiedBy(in.completed)&&
+        s->capture_completion.IsSatisfiedBy(in.completed))
+    {
+        plan.published=true;plan.bake_submitted=true;plan.finished_bake=true;
+    }
     if(in.capture_identity_valid&&in.scene&&!package_sample_ready&&plan.scene==in.scene&&plan.revisions==in.revisions&&
         plan.capture_identity!=in.capture_identity&&s->capture_completion.IsSatisfiedBy(in.completed))
     {
@@ -728,7 +732,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         layout->published=plan.published&&plan.current;
         layout->finished_bake=plan.finished_bake;
         layout->scene_reads.assign(in.scene_reads.begin(),in.scene_reads.end());}
-    Impl::Pending pending;pending.graph=&graph;pending.storage=s;
+    Impl::Pending pending;pending.graph=&graph;pending.storage=s;pending.finished_bake=plan.finished_bake;
     pending.scene=plan.scene;pending.revisions=plan.revisions;
     pending.captured_views=plan.capture_first;pending.capture_identity=plan.capture_identity;pending.upload=plan.upload;
     for(auto *resource:{&s->disabled_records,&s->raw,&s->ggx,&s->sh,&s->distance,
@@ -905,10 +909,12 @@ bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticR
     const auto &s=impl_->storage;
     if(!s || !s->usable || !scene) return false;
     if(!s->capture_ready && !s->completion.IsSatisfiedBy(completed)) return false;
+    if(s->package_baked&&!s->capture_ready&&s->description.revisions==revisions)
+        return false;
     if(s->scene!=scene || s->revisions!=revisions)
     {
         if(!s->capture_completion.IsSatisfiedBy(completed)) return false;
-        return !(!s->scene && s->package_baked && s->description.revisions==revisions);
+        return true;
     }
     return !s->published && !s->bake_submitted && s->captured_views<s->probes.size()*6;
 }
