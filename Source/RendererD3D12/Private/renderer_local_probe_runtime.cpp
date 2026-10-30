@@ -20,6 +20,20 @@
 
 namespace hs
 {
+Result D3D12Renderer::Impl::CreateStaticShadowBakeGeometry()
+{
+    auto &frame = frames[0];
+    auto result = frame.allocator->Reset();
+    if (FAILED(result)) return HResultFailure("Reset static shadow geometry allocator", result);
+    result = command_list->Reset(frame.allocator.Get(), nullptr);
+    if (FAILED(result)) return HResultFailure("Reset static shadow geometry commands", result);
+    std::vector<AllocationResource> uploads;
+    if (auto created = CreateProceduralGeometry(command_list.Get(), uploads); !created) return created;
+    result = command_list->Close();
+    if (FAILED(result)) return HResultFailure("Close static shadow geometry upload", result);
+    return SubmitResidentUtilityUpload(command_list.Get(), frame.allocator.Get(), uploads);
+}
+
 namespace
 {
 using Microsoft::WRL::ComPtr;
@@ -1149,7 +1163,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
             Native(device->CreateDescriptorHeap(&dsv,IID_PPV_ARGS(&frame->shadow_dsv)),"Create private static capture shadow DSV heap");
             D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format=DXGI_FORMAT_D32_FLOAT; view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
             device->CreateDepthStencilView(frame->shadow_map.resource.Get(),&view,frame->shadow_dsv->GetCPUDescriptorHandleForHeapStart());
-            frame->shadow_map.resource->SetName(L"LocalProbe.PureStaticDirectionalCaptureShadow");
+            HS_RENDERER_SET_DEBUG_NAME(frame->shadow_map.resource.Get(), L"LocalProbe.PureStaticDirectionalCaptureShadow");
         }
         D3D12_RESOURCE_DESC buffer{}; buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; buffer.Width=UINT64(kConstantBankCount)*kConstantsStride;
         buffer.Height=1; buffer.DepthOrArraySize=1; buffer.MipLevels=1; buffer.SampleDesc.Count=1; buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1291,12 +1305,24 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
     const std::function<Result(const rd::StaticShadowArchiveDescription &)> &begin,
     const std::function<Result(std::uint32_t,std::int32_t,std::int32_t,std::span<const float>)> &page_sink)
 {
+    if (!impl_->initialized)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Static shadow bake requires an initialized healthy renderer.");
+    if (!scene || scene->instances.empty() || !begin || !page_sink)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+            "Static shadow bake requires a nonempty scene and both archive callbacks.");
+    return BakeStaticShadowPagesPrepared(scene, light, begin, page_sink);
+}
+
+Result D3D12Renderer::BakeStaticShadowPagesPrepared(
+    const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
+    const std::function<Result(const rd::StaticShadowArchiveDescription &)> &begin,
+    const std::function<Result(std::uint32_t,std::int32_t,std::int32_t,std::span<const float>)> &page_sink)
+{
     std::uint32_t edge=32*rd::kStaticShadowPageInner+2*rd::kStaticShadowPageGuard;
     try
     {
-        Require(impl_->initialized && !impl_->frame_submission_faulted && scene && !scene->instances.empty(),
-            "Static shadow bake requires an initialized healthy renderer and a nonempty immutable scene");
-        Require(begin && page_sink,"Paged static shadow bake requires begin and page callbacks");
+        Require(!impl_->frame_submission_faulted, "Static shadow bake renderer submission state is faulted");
         Require(scene->instances.size()<=kLocalProbeSourceCapacity,"Static shadow source count exceeds native capture ABI");
         if(auto drained=impl_->WaitForGpu();!drained) return drained;
         impl_->pending_static_shadow_bake.reset();
@@ -1322,6 +1348,7 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
             barrier.Transition={resource,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,before,after}; list->ResourceBarrier(1,&barrier);
         };
         std::array<bool,rd::kAuthoredMaterialNames.size()> materials{};
+        decltype(materials) opacity_materials{};
         bool procedural_two_sided=false;
         for(const auto &source:scene->instances)
         {
@@ -1333,6 +1360,9 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
                 (!source.material_id.value || source.material_id.value==canonical.material_id.value),
                 "Static shadow bake does not support noncanonical geometry or material overrides");
             materials[material]=true;
+            // Match CaptureStaticShadowPS/HsSceneCovered's authored-opacity branch.
+            opacity_materials[material] = opacity_materials[material] ||
+                source.mesh==RenderMesh::TreeCanopy || source.mesh==RenderMesh::Grass;
             if(!rd::IsEnvironmentMesh(source.mesh)) procedural_two_sided=true;
         }
         Require(std::any_of(materials.begin(),materials.end(),[](bool used) { return used; }),
@@ -1455,7 +1485,25 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
         for(std::size_t material=0;material<materials.size();++material) if(materials[material])
             for(UINT slot=0;slot<rd::kMaterialTextureSlots;++slot)
             {
-                const auto &id=impl_->environment_material_bindings[material].product_ids[slot]; if(id.empty()) continue;
+                const auto &id=impl_->environment_material_bindings[material].product_ids[slot];
+                if(id.empty() || !opacity_materials[material])
+                {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC unused{};
+                    unused.Format=DXGI_FORMAT_BC7_UNORM_SRGB;
+                    if(!id.empty())
+                    {
+                        const auto texture=FindRendererTexture(impl_->config,MakeAssetId(id));
+                        Require(texture && texture.value<impl_->config.packed_textures.size(),
+                            "Static shadow material texture lacks its admitted descriptor");
+                        unused.Format=static_cast<DXGI_FORMAT>(impl_->config.packed_textures[texture.value].description.format);
+                    }
+                    unused.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    unused.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    unused.Texture2DArray.MipLevels=unused.Texture2DArray.ArraySize=1;
+                    device->CreateShaderResourceView(nullptr,&unused,descriptor(kMaterialTextureDescriptorOffset+
+                        static_cast<UINT>(material)*rd::kMaterialTextureSlots+slot));
+                    continue;
+                }
                 auto found=uploaded_textures.find(id);
                 ID3D12Resource *texture{};
                 if(found!=uploaded_textures.end()) texture=found->second;

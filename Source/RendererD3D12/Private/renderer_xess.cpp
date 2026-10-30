@@ -63,8 +63,13 @@ bool FitsRect(const D3D12_RESOURCE_DESC &description, XessRect rect)
 
 void XessLog(const char *message, xess_logging_level_t level)
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (message) std::fprintf(stderr, "hs.xess.sdk level=%u message=%s\n",
                               static_cast<unsigned>(level), message);
+#else
+    static_cast<void>(message);
+    static_cast<void>(level);
+#endif
 }
 #endif
 } // namespace
@@ -99,7 +104,6 @@ struct XessReconstruction::Impl
     float motion_scale[2]{};
     bool force_reset{true};
     // decltype uses the official pinned SDK ABI; no local shadow structs or enums.
-    decltype(&xessGetVersion) get_version{};
     decltype(&xessD3D12CreateContext) create_context{};
     decltype(&xessD3D12BuildPipelines) build_pipelines{};
     decltype(&xessD3D12Init) initialize{};
@@ -147,7 +151,9 @@ XessReconstruction::~XessReconstruction()
     // while an SDK context still exists is not safe recovery.
     if (auto reset = ResetAfterCompletion(); !reset)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.xess.shutdown error=%s\n", std::string(reset.Message()).c_str());
+#endif
         static_cast<void>(impl_.release());
     }
 }
@@ -180,8 +186,7 @@ Result XessReconstruction::ProbeDevice(ID3D12Device *device)
             " (Win32 " + std::to_string(load_error) + ").";
         return XessFailure(ErrorCode::TaskFailed, impl_->failure_reason);
     }
-    if (!impl_->Load(impl_->get_version, "xessGetVersion") ||
-        !impl_->Load(impl_->create_context, "xessD3D12CreateContext") ||
+    if (!impl_->Load(impl_->create_context, "xessD3D12CreateContext") ||
         !impl_->Load(impl_->build_pipelines, "xessD3D12BuildPipelines") ||
         !impl_->Load(impl_->initialize, "xessD3D12Init") ||
         !impl_->Load(impl_->execute, "xessD3D12Execute") ||
@@ -208,12 +213,6 @@ Result XessReconstruction::ProbeDevice(ID3D12Device *device)
     if (result < XESS_RESULT_SUCCESS) return impl_->Fail("xessIsOptimalDriver", result);
     if (result == XESS_RESULT_WARNING_OLD_DRIVER)
         impl_->driver_warning = "XeSS-SR reports an older driver; the supported path remains enabled.";
-    xess_version_t version{};
-    result = impl_->get_version(&version);
-    if (result < XESS_RESULT_SUCCESS) return impl_->Fail("xessGetVersion", result);
-    std::fprintf(stderr, "hs.xess.runtime version=%u.%u.%u\n",
-                 static_cast<unsigned>(version.major), static_cast<unsigned>(version.minor),
-                 static_cast<unsigned>(version.patch));
     impl_->availability = ReconstructionAvailability::Available;
     impl_->failure_reason.clear();
     return Result::Success();

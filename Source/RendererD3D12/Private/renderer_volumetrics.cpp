@@ -28,6 +28,65 @@ Result Fail(ErrorCode code,std::string message)
 {return Result::Failure(code,"hs_renderer_volumetrics",std::move(message));}
 Result Native(std::string_view operation,HRESULT hr)
 {return Fail(ErrorCode::TaskFailed,std::string(operation)+" failed (HRESULT "+std::to_string(std::int32_t(hr))+").");}
+Result CreateVolumetricRootSignature(ID3D12Device *device,RendererPipelineCache *cache,
+    ComPtr<ID3D12RootSignature> &root)
+{
+    D3D12_DESCRIPTOR_RANGE1 ranges[9]{};
+    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_CBV,1,0,24,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,0};
+    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,14,0,24,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,1};
+    ranges[2]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,9,0,24,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,15};
+    ranges[3]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,14,24,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,24};
+    ranges[4]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,1,3,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        kVolumetricGradientOffset};
+    ranges[5]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,19,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        kVolumetricLightOffset};
+    ranges[6]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,21,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        kVolumetricShadowOffset};
+    ranges[7]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,5,21,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        kVolumetricShadowRootOffset};
+    ranges[8]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,27,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+        kVolumetricLocalShadowOffset};
+    D3D12_ROOT_PARAMETER1 parameter{};
+    parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameter.DescriptorTable={static_cast<UINT>(std::size(ranges)),ranges};
+    parameter.ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
+    samplers[0].Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplers[0].AddressU=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressV=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[0].ComparisonFunc=D3D12_COMPARISON_FUNC_NEVER;
+    samplers[0].MaxLOD=D3D12_FLOAT32_MAX;
+    samplers[0].ShaderRegister=0;
+    samplers[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_ALL;
+    samplers[1]=samplers[0];
+    samplers[1].AddressU=D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[1].AddressV=D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[1].AddressW=D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[1].ShaderRegister=2;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC description{};
+    description.Version=D3D_ROOT_SIGNATURE_VERSION_1_1;
+    description.Desc_1_1={1,&parameter,static_cast<UINT>(std::size(samplers)),samplers,D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ComPtr<ID3DBlob> serialized,errors;
+    auto result=D3D12SerializeVersionedRootSignature(&description,&serialized,&errors);
+    if(FAILED(result))return Native("Serialize volumetric root signature",result);
+    result=device->CreateRootSignature(0,serialized->GetBufferPointer(),serialized->GetBufferSize(),IID_PPV_ARGS(&root));
+    if(FAILED(result))return Native("Create volumetric root signature",result);
+    if(cache)
+        if(auto registered=cache->RegisterRootSignature(root.Get(),
+            {static_cast<const std::byte *>(serialized->GetBufferPointer()),serialized->GetBufferSize()});!registered)
+            return registered;
+    return Result::Success();
+}
 bool Extent(ViewExtent extent)
 {return extent.width&&extent.height&&extent.width<=D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION&&extent.height<=D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;}
 struct Budget { UINT stride{},slices{},area_samples{}; };
@@ -376,7 +435,7 @@ std::uint64_t VolumetricCandidate::AllocatedBytes()const noexcept
 {return storage_?storage_->Bytes():0;}
 std::uint64_t VolumetricSystem::AllocatedBytes()const noexcept
 {return impl_->storage?impl_->storage->Bytes():0;}
-Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
+Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
     GraphicsOptionalQuality quality,const render_data::QualityProfile &profile,ViewExtent capacity,UINT frames,UINT maxVolumes,const SceneShaderReader &reader,
     VolumetricCandidate &candidate,RendererPipelineCache *cache,bool heroEnabled)const
 {
@@ -384,12 +443,13 @@ Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
     if(!Extent(capacity)||!frames||frames>UINT_MAX/kVolumetricDescriptorCount||
        (enabled&&UINT64(maxVolumes)>UINT64(SIZE_MAX)/(UINT64(frames)*sizeof(VolumetricVolume)))||
        (enabled&&heroEnabled&&UINT64(maxVolumes)>UINT64(SIZE_MAX)/(UINT64(frames)*sizeof(VolumetricHeroVolume)))||
-       (enabled&&(!budget.stride||!device||!allocator||!root||!reader||!maxVolumes)))
+       (enabled&&(!budget.stride||!device||!allocator||!reader||!maxVolumes)))
         return Fail(ErrorCode::InvalidArgument,"Invalid volumetric quality, capacity, completed frame-slot count, volume capacity or native preparation inputs.");
     auto s=std::make_shared<VolumetricStorage>();s->enabled=enabled;s->render_capacity=capacity;s->slots.resize(frames);
     s->budget=budget;s->max_volumes=maxVolumes;s->hero_enabled=enabled&&heroEnabled;
     if(!enabled){candidate.storage_=std::move(s);return Result::Success();}
-    s->device=device;s->allocator=allocator;s->root=root;s->froxel_capacity=FroxelExtent(capacity,budget.stride);
+    s->device=device;s->allocator=allocator;s->froxel_capacity=FroxelExtent(capacity,budget.stride);
+    if(auto root_result=CreateVolumetricRootSignature(device,cache,s->root);!root_result)return root_result;
     if(s->froxel_capacity.width>D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION||s->froxel_capacity.height>D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION)
         return Fail(ErrorCode::InvalidArgument,"Volumetric froxel capacity exceeds native Texture3D dimensions.");
     for(const auto format:{kSignal,kScalar,kHdr})
@@ -426,7 +486,7 @@ Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
     {
         std::vector<std::byte> code;if(auto result=reader(kProducts[i],code);!result)return result;
         if(code.empty())return Fail(ErrorCode::TaskFailed,"Volumetric shader product is empty: "+std::string(kProducts[i]));
-        D3D12_COMPUTE_PIPELINE_STATE_DESC p{};p.pRootSignature=root;p.CS={code.data(),code.size()};
+        D3D12_COMPUTE_PIPELINE_STATE_DESC p{};p.pRootSignature=s->root.Get();p.CS={code.data(),code.size()};
         hr=cache?cache->CreateCompute(&p,IID_PPV_ARGS(&s->pipelines[i])):device->CreateComputePipelineState(&p,IID_PPV_ARGS(&s->pipelines[i]));
         if(FAILED(hr))return Native("Create volumetric PSO "+std::string(kProducts[i]),hr);
     }
@@ -434,7 +494,7 @@ Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
     {
         std::vector<std::byte> code;if(auto result=reader("render/shader/volumetric_hero_density_cs.dxil",code);!result)return result;
         if(code.empty())return Fail(ErrorCode::InvalidArgument,"Volumetric hero density shader product is empty.");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};pso.pRootSignature=root;pso.CS={code.data(),code.size()};
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};pso.pRootSignature=s->root.Get();pso.CS={code.data(),code.size()};
         const auto heroHr=cache?cache->CreateCompute(&pso,IID_PPV_ARGS(&s->hero_pipeline)):
             device->CreateComputePipelineState(&pso,IID_PPV_ARGS(&s->hero_pipeline));
         if(FAILED(heroHr))return Native("Create native volumetric hero density PSO",heroHr);

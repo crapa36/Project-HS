@@ -135,7 +135,6 @@ void Produce(std::string_view mode, const fs::path &build_root)
     if (Current(build_root, spec, textures))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);

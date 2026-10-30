@@ -453,7 +453,9 @@ FsrSession::~FsrSession()
     // destructor. If omitted, retain the native contexts, DLLs and GPU owners.
     if (impl_)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.fsr.shutdown error=ShutdownAfterCompletion was not completed; retaining SDK owners.\n");
+#endif
         static_cast<void>(impl_.release());
     }
 }

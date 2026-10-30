@@ -1,5 +1,9 @@
 #include "renderer_impl.hpp"
 
+#ifndef HS_WITH_STREAMLINE
+#define HS_WITH_STREAMLINE 0
+#endif
+
 namespace hs
 {
 namespace
@@ -13,6 +17,7 @@ bool Contains(ViewExtent value, ViewExtent minimum, ViewExtent maximum)
 
 Result D3D12Renderer::Impl::InitializeReconstructionSessionsBeforeDevice()
 {
+#if HS_WITH_STREAMLINE
     // All three integrated features are selectable during this device's lifetime.
     // slInit cannot add a feature after DXGI/device creation. Bootstrap plugins
     // once; SR evaluation contexts and FG/latency activation remain lazy.
@@ -21,7 +26,16 @@ Result D3D12Renderer::Impl::InitializeReconstructionSessionsBeforeDevice()
     // Selection reads the concrete failure for fallback; missing SDKs do not
     // prevent InternalTAAU or an unrelated native provider from initializing.
     if (auto initialized = streamline_session->InitializeBeforeDevice(features); !initialized)
+    {
+#if defined(HS_DEVELOPMENT_TOOLS)
         OutputDebugStringA((std::string(initialized.Message()) + "\n").c_str());
+#endif
+    }
+#else
+    // Keep the compiled-out adapter instance for capability/failure queries,
+    // but do not schedule an SDK initialization that cannot exist in this build.
+    if (!streamline_session) streamline_session = std::make_unique<StreamlineSession>();
+#endif
     return Result::Success();
 }
 
@@ -29,7 +43,11 @@ Result D3D12Renderer::Impl::BindReconstructionSessionsToDevice()
 {
     if (streamline_session && streamline_session->Initialized())
         if (auto bound = streamline_session->BindDevice(device.Get()); !bound)
+        {
+#if defined(HS_DEVELOPMENT_TOOLS)
             OutputDebugStringA((std::string(bound.Message()) + "\n").c_str());
+#endif
+        }
     return Result::Success();
 }
 
@@ -77,7 +95,11 @@ Result D3D12Renderer::Impl::PrepareReconstructionProvider(
         {
             fsr_session = std::make_unique<FsrSession>();
             if (auto initialized = fsr_session->Initialize(device.Get()); !initialized)
+            {
+#if defined(HS_DEVELOPMENT_TOOLS)
                 OutputDebugStringA((std::string(initialized.Message()) + "\n").c_str());
+#endif
+            }
         }
         auto prepared = std::make_unique<ReconstructionProvider>();
         auto result = prepared->Prepare(selected, device.Get(), streamline_session.get(), fsr_session.get(), request->quality, output);

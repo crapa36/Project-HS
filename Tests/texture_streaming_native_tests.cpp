@@ -127,12 +127,12 @@ class TextureStreamFixture
   public:
     TextureStreamFixture(ID3D12Device *device, D3D12MA::Allocator *allocator,
                          hs::RenderGraphQueueExecutor &executor, bool reserved_candidate = false,
-                         bool prepare_sibling = false)
+                         bool prepare_sibling = false, std::uint32_t software_width = 4)
         : device_(device), allocator_(allocator), executor_(executor)
     {
         description_ = reserved_candidate
             ? hs::render_data::TextureDescription{256, 256, 1, std::bit_width(256u), hs::render_data::kTextureFormatRgba8}
-            : hs::render_data::TextureDescription{4, 4096, 4, std::bit_width(4096u), hs::render_data::kTextureFormatRgba8};
+            : hs::render_data::TextureDescription{software_width, 4096, 4, std::bit_width(4096u), hs::render_data::kTextureFormatRgba8};
         const auto subresources = static_cast<std::size_t>(description_.array_size) * description_.mip_count;
         payload_.reserve(static_cast<std::size_t>(description_.array_size) * description_.width *
             description_.height * 4u * 2u);
@@ -223,6 +223,15 @@ class TextureStreamFixture
     }
 
     hs::TextureStreamId Id() const noexcept { return id_; }
+    const hs::render_data::TextureDescription &Description() const noexcept { return description_; }
+    std::uint64_t NativeAllocationBytes(std::uint32_t first_mip) const
+    {
+        const auto description = TextureDescription(description_, first_mip);
+        const auto info = device_->GetResourceAllocationInfo(0, 1, &description);
+        Check(info.SizeInBytes && info.SizeInBytes != UINT64_MAX,
+              "query fixture native texture allocation bytes");
+        return info.SizeInBytes;
+    }
     hs::TextureStreamId AddSibling()
     {
         Check(sibling_prepared_ && !sibling_id_, "register prepared sibling texture only once");
@@ -803,6 +812,50 @@ void RunSharedHostBudgetTextureStreamingNative(ID3D12Device *device,
         "restored-budget refinement drains source reads and shared host holds");
     fixture.Drain();
 }
+
+void RunCombinedConfiguredBudgetTextureStreamingNative(ID3D12Device *device,
+    D3D12MA::Allocator *allocator, hs::RenderGraphQueueExecutor &executor)
+{
+    TextureStreamFixture fixture(device, allocator, executor, false, true, 16u);
+    const auto first = fixture.Id();
+    const auto second = fixture.AddSibling();
+    const auto &description = fixture.Description();
+    const auto fallback_mip = std::min(4u, description.mip_count - 1u);
+    constexpr std::uint64_t mib = 1024u * 1024u;
+    const auto fallback_bytes = fixture.NativeAllocationBytes(fallback_mip);
+    const auto full_bytes = fixture.NativeAllocationBytes(0u);
+    Check(full_bytes >= mib, "combined-budget fixture full texture exceeds one MiB");
+    const auto budget_for_one = 2u * fallback_bytes + full_bytes;
+    Check(budget_for_one <= UINT64_MAX - (mib - 1u), "one-texture native budget expression fits");
+    const auto cap_mib = static_cast<std::uint32_t>((budget_for_one + mib - 1u) / mib);
+    Check(fixture.Streaming().Configure(hs::GraphicsQuality::Low, 0u, cap_mib).Succeeded(),
+          "configure cap that admits either full mip target but not their pair");
+
+    const auto first_host_fit = fixture.Streaming().RequiredSourceMipFitsMaximumHostBudget(first, 0u);
+    const auto second_host_fit = fixture.Streaming().RequiredSourceMipFitsMaximumHostBudget(second, 0u);
+    Check(first_host_fit && *first_host_fit && second_host_fit && *second_host_fit,
+          "each mip-zero authenticated source independently fits the host staging ceiling");
+    const std::array first_requirement{hs::TextureStreamMipRequirement{first, 0u}};
+    const std::array second_requirement{hs::TextureStreamMipRequirement{second, 0u}};
+    const std::array both_requirements{first_requirement[0], second_requirement[0]};
+    const auto first_fits = fixture.Streaming().RequiredMipSetFitsConfiguredBudget(first_requirement);
+    const auto second_fits = fixture.Streaming().RequiredMipSetFitsConfiguredBudget(second_requirement);
+    const auto both_fit = fixture.Streaming().RequiredMipSetFitsConfiguredBudget(both_requirements);
+    Check(first_fits && *first_fits && second_fits && *second_fits,
+          "either individual mip-zero target fits beside the other owner's mandatory tail");
+    Check(both_fit && !*both_fit,
+          "combined mip-zero targets exceed the configured native texture budget");
+
+    const auto budget_for_pair = 2u * fallback_bytes + 2u * full_bytes;
+    Check(budget_for_pair <= UINT64_MAX - (mib - 1u), "paired native budget expression fits");
+    const auto pair_cap_mib = static_cast<std::uint32_t>((budget_for_pair + mib - 1u) / mib);
+    Check(fixture.Streaming().Configure(hs::GraphicsQuality::Low, 0u, pair_cap_mib).Succeeded(),
+          "raise configured cap to admit the paired target set");
+    const auto raised_pair_fit = fixture.Streaming().RequiredMipSetFitsConfiguredBudget(both_requirements);
+    Check(raised_pair_fit && *raised_pair_fit,
+          "raising the configured cap admits both mip-zero targets");
+    fixture.Drain();
+}
 } // namespace
 
 void RunTextureStreamingSingleNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
@@ -865,6 +918,7 @@ void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocat
 {
     RunTextureStreamingSingleNative(device, allocator, executor);
     RunSharedHostBudgetTextureStreamingNative(device, allocator, executor);
+    RunCombinedConfiguredBudgetTextureStreamingNative(device, allocator, executor);
 }
 
 void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,

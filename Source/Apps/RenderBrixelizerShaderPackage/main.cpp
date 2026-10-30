@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <sstream>
 #include <iostream>
 #include <map>
 #include <set>
@@ -99,10 +100,9 @@ std::uint16_t NoiseHalf(float value)
     return static_cast<std::uint16_t>(((exponent - 112u) << 10) | ((bits & 0x007fffffu) >> 13));
 }
 
-void ProduceNoise(const fs::path &stage, std::vector<ap::Product> &products, ap::Json &provenance)
+void ProduceNoise(const fs::path &stage, std::vector<ap::Product> &products)
 {
-    const std::array dependencies{std::string("render/native/brixelizer/LICENSE.txt")};
-    provenance["noise"] = ap::Json::array();
+    const std::array dependencies{std::string("source/brixelizer/LICENSE.txt")};
     for (int sample = 0; sample < 16; ++sample)
     {
         Bytes payload(128 * 128 * 8);
@@ -127,9 +127,6 @@ void ProduceNoise(const fs::path &stage, std::vector<ap::Product> &products, ap:
         ap::WriteBytes(stage / filename, package);
         auto product = ap::HashProduct(id, filename, stage / filename);
         product.dependencies.assign(dependencies.begin(), dependencies.end());
-        provenance["noise"].push_back({{"logical_id", id}, {"digest", product.digest},
-            {"size", product.size}, {"sample_index", sample}, {"sample_dimensions", {0, 1}},
-            {"width", 128}, {"height", 128}, {"format", rd::kTextureFormatRgba16Float}});
         products.push_back(std::move(product));
     }
 }
@@ -155,7 +152,7 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
     ap::ActionSpec spec;
     spec.action_id = "render.shader.brixelizer";
     spec.recipe_id = "project-hs.render.brixelizer-native-dxil";
-    spec.recipe_version = 2;
+    spec.recipe_version = 4;
     spec.namespace_path = "render/shader/brixelizer";
     const auto addInput = [&](std::string id, const fs::path &path, std::string expected = {})
     {
@@ -213,7 +210,7 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
     // Every permutation's actual digest participates in the Action recipe.
     std::map<std::string, Bytes> shaders;
     const auto enumerationSource = source / "Source/RendererD3D12/Private/renderer_brixelizer_shaders.cpp";
-    const bool enumerated = hs::brixelizer_native::EnumerateShaders(
+    const bool enumerated = hs::brixelizer_native::EnumerateShaderBlobs(
         [&](std::string_view id, std::span<const std::byte> bytes)
         {
             RequireShaderId(id);
@@ -233,12 +230,7 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
     try
     {
         std::vector<ap::Product> products;
-        products.reserve(shaders.size() + 18);
-        ap::Json provenance{{"schema_version", 1}, {"kind", "native_pipeline_raw_dxil"},
-            {"sdk", "FidelityFX Brixelizer"}, {"sdk_lock", pinned},
-            {"shader_count", shaders.size()}, {"inputs", ap::Json::array()}, {"pipelines", ap::Json::array()}};
-        for (const auto &input : spec.inputs)
-            provenance["inputs"].push_back({{"logical_id", input.logical_id}, {"digest", input.digest}});
+        products.reserve(shaders.size() + 17);
         for (const auto &[id, bytes] : shaders)
         {
             const auto digest = ap::Sha256Bytes(std::as_bytes(std::span(id)));
@@ -246,8 +238,7 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
             const auto filename = digest.substr(7) + ".dxil";
             ap::WriteBytes(stage / filename, bytes);
             auto product = ap::HashProduct(id, filename, stage / filename);
-            product.dependencies.push_back("render/native/brixelizer/LICENSE.txt");
-            provenance["pipelines"].push_back({{"logical_id", id}, {"digest", product.digest}, {"size", product.size}});
+            product.dependencies.push_back("source/brixelizer/LICENSE.txt");
             products.push_back(std::move(product));
         }
         const auto license = std::find_if(physicalInputs.begin(), physicalInputs.end(),
@@ -255,11 +246,8 @@ void Produce(const fs::path &source, const fs::path &build, const fs::path &sdk,
         Require(license != physicalInputs.end(), "SDK license provenance absent");
         const auto copied = ap::CopyAndHashInput(license->logical_id, license->path, stage / "LICENSE.txt");
         Require(copied.digest == license->digest, "SDK license changed during publication");
-        products.push_back(ap::HashProduct("render/native/brixelizer/LICENSE.txt", "LICENSE.txt", stage / "LICENSE.txt"));
-        ProduceNoise(stage, products, provenance);
-        const auto text = provenance.dump(2) + "\n";
-        ap::WriteBytes(stage / "provenance.json", std::as_bytes(std::span(text)));
-        products.push_back(ap::HashProduct("render/native/brixelizer/provenance.json", "provenance.json", stage / "provenance.json"));
+        products.push_back(ap::HashProduct("source/brixelizer/LICENSE.txt", "LICENSE.txt", stage / "LICENSE.txt"));
+        ProduceNoise(stage, products);
         for (const auto &input : physicalInputs)
             Require(ap::Sha256File(input.path) == input.digest, "producer input changed before publication");
         ap::Publish(build, spec, stage, std::move(products));
@@ -275,6 +263,17 @@ int wmain(int argc, wchar_t **argv)
     fs::path source, build, sdk, pin;
     try
     {
+        constexpr std::wstring_view metadata_prefix=L"--emit-metadata=";
+        if(argc==2 && std::wstring_view(argv[1]).starts_with(metadata_prefix))
+        {
+            const fs::path output(std::wstring_view(argv[1]).substr(metadata_prefix.size()));
+            Require(output.is_absolute(), "metadata output path must be absolute");
+            std::ostringstream text;
+            Require(hs::brixelizer_native::EmitShaderMetadataCpp(text) && text.good(),
+                "cannot emit SDK shader binding metadata source");
+            ap::AtomicWriteIfDifferent(output,text.str());
+            return 0;
+        }
         for (int index = 1; index < argc; ++index)
         {
             const std::wstring_view argument(argv[index]);

@@ -56,7 +56,7 @@ bool HsBrixelizerMaterialFactors(HsSurfaceClosure c,float3 view,out float3 diffu
     if(c.unlit||c.coat_weight!=0.0||c.anisotropy!=0.0||c.sheen_weight!=0.0||
         c.transmission_weight!=0.0||c.solid_transmission_weight!=0.0)return false;
     diffuse=c.base_color*(1.0-saturate(c.metallic));
-    float2 ab=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(saturate(dot(c.normal,view)),saturate(c.roughness)),0);
+    float2 ab=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(saturate(dot(c.normal,view)),saturate(c.roughness)),0).xy;
     specular=HsBsdfF0(c)*ab.x+ab.y;
     return all(isfinite(diffuse))&&all(isfinite(specular));
 }

@@ -58,7 +58,12 @@ bool FiniteMatrix(const DirectX::XMFLOAT4X4 &matrix)
 }
 void FgLog(const char *message, xefg_swapchain_logging_level_t level, void *)
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (message) std::fprintf(stderr, "hs.xess_fg.sdk level=%u message=%s\n", static_cast<unsigned>(level), message);
+#else
+    static_cast<void>(message);
+    static_cast<void>(level);
+#endif
 }
 #endif
 } // namespace
@@ -155,7 +160,9 @@ struct XessFrameGeneration::Impl
     {
         if (native < XEFG_SWAPCHAIN_RESULT_SUCCESS) return Fail(operation, native);
         if (native > XEFG_SWAPCHAIN_RESULT_SUCCESS)
+#if defined(HS_DEVELOPMENT_TOOLS)
             std::fprintf(stderr, "hs.xess_fg.warning operation=%s native_result=%d\n", operation, static_cast<int>(native));
+#endif
         return Result::Success();
     }
     bool SameDevice(ID3D12DeviceChild *child) const
@@ -189,7 +196,9 @@ XessFrameGeneration::~XessFrameGeneration()
 {
     if (auto reset = ResetAfterCompletion(false); !reset)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.xess_fg.shutdown error=%s\n", std::string(reset.Message()).c_str());
+#endif
         static_cast<void>(impl_.release());
     }
 }
@@ -414,9 +423,6 @@ Result XessFrameGeneration::InitializeFromDescription(ID3D12Device *device, ID3D
     impl_->initialized = true;
     impl_->availability = ReconstructionAvailability::Available;
     impl_->failure_reason.clear();
-    std::fprintf(stderr, "hs.xess_fg.runtime version=%u.%u.%u maximum_generated=%u initialized_maximum=%u\n",
-        static_cast<unsigned>(version.major), static_cast<unsigned>(version.minor), static_cast<unsigned>(version.patch), impl_->properties.maximum_generated_frames,
-        impl_->properties.initialized_maximum_generated_frames);
     return Result::Success();
 #endif
 }

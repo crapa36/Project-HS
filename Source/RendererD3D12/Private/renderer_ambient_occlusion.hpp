@@ -74,9 +74,9 @@ struct AmbientOcclusionLayout
     ViewExtent render_capacity{},ao_capacity{};
     QueueHint queue{};
     std::array<ResourceVersion, 6> guides{};
-    std::array<TextureHandle, 8> textures{};
-    std::array<std::uint32_t, 5> passes{};
-    ResourceVersion sparse, raw, history_output, metadata, resolved, contact_output;
+    std::array<TextureHandle, 7> textures{};
+    std::array<std::uint32_t, 4> passes{};
+    ResourceVersion raw, history_output, metadata, resolved, contact_output;
 };
 
 struct AmbientOcclusionTargets;

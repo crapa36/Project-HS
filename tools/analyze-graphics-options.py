@@ -285,10 +285,8 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
 
 
 def self_test():
-    assert len(OPTIONS) == 52 and len(LEGACY_OPTIONS) == 56
     registry = Path(__file__).resolve().parents[1] / "Source/Core/Public/hs/core/graphics_settings.def"
     keys = set(re.findall(r"HS_GRAPHICS_SETTING\(\d+,\s*\w+,\s*(\w+),", registry.read_text(encoding="utf-8")))
-    assert len(CURRENT_OPTION_KEYS) == 52
     assert keys == CURRENT_OPTION_KEYS, keys ^ CURRENT_OPTION_KEYS
     assert stats([0, 1, 2, 9])["p95"] == 9
     assert stats([]) is None

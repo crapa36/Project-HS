@@ -291,7 +291,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
                 ap::UpstreamProduct ignored; fs::path path;
                 (void)ap::ReadActionResult(buildRoot,kNamespace,kProduct,ignored,path); const auto existing=ap::ReadBytes(path);
                 (void)rd::ReadLtcLutPackage(std::as_bytes(std::span(existing.data(),existing.size())),hs::MakeAssetId(kProduct));
-                ap::TouchActionResult(resultPath); std::cout<<spec.action_id<<" current\n"; return;
+                ap::TouchActionResult(resultPath); return;
             }
         }
         catch(const std::exception &) { /* Invalid current product is rebuilt by its normal action. */ }

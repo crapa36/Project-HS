@@ -163,8 +163,8 @@ Result PrepareCaptureResources(const std::shared_ptr<LocalProbeStorage> &s,const
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,layers,s->mip_count,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->ggx);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,layers,1,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET),s->distance);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(s->probes.size()*9*16,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->sh);!r) return r;
-        s->raw.resource->SetName(L"LocalProbe.SceneLinearRawCubeArray"); s->ggx.resource->SetName(L"LocalProbe.GgxCubeArray");
-        s->distance.resource->SetName(L"LocalProbe.FirstHitWorldDistance"); s->sh.resource->SetName(L"LocalProbe.CosineSh9");
+        HS_RENDERER_SET_DEBUG_NAME(s->raw.resource.Get(), L"LocalProbe.SceneLinearRawCubeArray"); HS_RENDERER_SET_DEBUG_NAME(s->ggx.resource.Get(), L"LocalProbe.GgxCubeArray");
+        HS_RENDERER_SET_DEBUG_NAME(s->distance.resource.Get(), L"LocalProbe.FirstHitWorldDistance"); HS_RENDERER_SET_DEBUG_NAME(s->sh.resource.Get(), L"LocalProbe.CosineSh9");
         D3D12_SHADER_RESOURCE_VIEW_DESC cube{}; cube.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
         cube.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY; cube.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         cube.TextureCubeArray.NumCubes=static_cast<UINT>(s->probes.size()); cube.TextureCubeArray.MipLevels=1;
@@ -340,8 +340,8 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
         bufferView(s->disabled_records.resource.Get(),1,kLocalProbeGpuRecordStride,s->Export(9));
         if(!s->package_baked)
             if(auto ready=PrepareCaptureResources(s,reader);!ready) return ready;
-        s->raw.resource->SetName(L"LocalProbe.SceneLinearRawCubeArray"); s->ggx.resource->SetName(L"LocalProbe.GgxCubeArray");
-        s->distance.resource->SetName(L"LocalProbe.FirstHitWorldDistance"); s->sh.resource->SetName(L"LocalProbe.CosineSh9");
+        HS_RENDERER_SET_DEBUG_NAME(s->raw.resource.Get(), L"LocalProbe.SceneLinearRawCubeArray"); HS_RENDERER_SET_DEBUG_NAME(s->ggx.resource.Get(), L"LocalProbe.GgxCubeArray");
+        HS_RENDERER_SET_DEBUG_NAME(s->distance.resource.Get(), L"LocalProbe.FirstHitWorldDistance"); HS_RENDERER_SET_DEBUG_NAME(s->sh.resource.Get(), L"LocalProbe.CosineSh9");
         for(auto *r:{&s->raw,&s->ggx,&s->sh,&s->distance,&s->records,&s->disabled_records,&s->depth,&s->upload,&s->constants}) if(r->allocation) s->bytes+=r->allocation->GetSize();
         candidate.storage_=std::move(s); return Result::Success();
     }

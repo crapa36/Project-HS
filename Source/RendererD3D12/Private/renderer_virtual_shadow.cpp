@@ -719,6 +719,8 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
     {
         if(auto result=Allocate(*t,t->root_static,BankDescription(profile.baked->root_static_extent));!result)return result;
         if(auto result=Allocate(*t,t->root_dynamic,BankDescription(profile.baked->root_static_extent));!result)return result;
+        HS_RENDERER_SET_DEBUG_NAME(t->root_static.resource.Get(), L"VirtualShadow.FixedRootStaticDepth");
+        HS_RENDERER_SET_DEBUG_NAME(t->root_dynamic.resource.Get(), L"VirtualShadow.FixedRootDynamicDepth");
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT rows{}; UINT64 row_size{},upload_bytes{};
         const auto description=t->root_static.resource->GetDesc();
         device->GetCopyableFootprints(&description,0,1,0,&footprint,&rows,&row_size,&upload_bytes);
@@ -742,10 +744,8 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
     if (auto result = Allocate(*t, t->residents, Buffer(UINT64(profile.physical_pages)*32, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)); !result) return result;
     if (auto result = Allocate(*t, t->static_bank, BankDescription(t->extent)); !result) return result;
     if (auto result = Allocate(*t, t->dynamic_bank, BankDescription(t->extent)); !result) return result;
-    t->static_bank.resource->SetName(L"VirtualShadow.StaticDepth");
-    t->dynamic_bank.resource->SetName(L"VirtualShadow.DynamicDepth");
-    if(t->root_static.resource)t->root_static.resource->SetName(L"VirtualShadow.FixedRootStaticDepth");
-    if(t->root_dynamic.resource)t->root_dynamic.resource->SetName(L"VirtualShadow.FixedRootDynamicDepth");
+    HS_RENDERER_SET_DEBUG_NAME(t->static_bank.resource.Get(), L"VirtualShadow.StaticDepth");
+    HS_RENDERER_SET_DEBUG_NAME(t->dynamic_bank.resource.Get(), L"VirtualShadow.DynamicDepth");
     if (t->static_bank.allocation->GetSize() > profile.cache_budget_bytes / 2 ||
         t->dynamic_bank.allocation->GetSize() > profile.cache_budget_bytes - t->static_bank.allocation->GetSize())
         return Invalid("Actual native shadow depth banks exceed the authored cache capacity.");
@@ -1029,9 +1029,9 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
         constants.root_options={1u,root_ready?1u:0u,in.baked_static?1u:0u,0u};
     }
     const auto root_coverage=[&]() {
-        constexpr auto known_domains=ShadowReceiverCamera|ShadowReceiverWorld|ShadowReceiverSoftwareGi;
+        constexpr auto known_domains=ShadowReceiverCamera|ShadowReceiverWorld;
         if(!t->root_static.resource || !t->root_dynamic.resource || !in.baked_static ||
-            constants.root_options.y==0u || (in.required_receiver_domains&ShadowReceiverSoftwareGi) ||
+            constants.root_options.y==0u ||
             !(in.required_receiver_domains&ShadowReceiverCamera) ||
             (in.required_receiver_domains&~known_domains) ||
             (in.required_receiver_domains&~in.closed_receiver_domains) ||

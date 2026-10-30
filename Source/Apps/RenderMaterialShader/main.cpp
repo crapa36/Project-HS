@@ -238,10 +238,8 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingClassifyCS", L"cs_6_0"},
         ProgramOutput{"render/shader/adaptive_shading_rate_cs.dxil", "adaptive_shading_rate_cs.dxil",
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingRateCS", L"cs_6_0"},
-        ProgramOutput{"render/shader/adaptive_gtao_horizon_cs.dxil", "adaptive_gtao_horizon_cs.dxil",
-                      "Content/Shaders/adaptive_gtao.hlsl", L"AdaptiveGtaoHorizonCS", L"cs_6_0"},
-        ProgramOutput{"render/shader/adaptive_gtao_resolve_cs.dxil", "adaptive_gtao_resolve_cs.dxil",
-                      "Content/Shaders/adaptive_gtao.hlsl", L"AdaptiveGtaoResolveCS", L"cs_6_0"},
+        ProgramOutput{"render/shader/adaptive_gtao_cs.dxil", "adaptive_gtao_cs.dxil",
+                      "Content/Shaders/adaptive_gtao.hlsl", L"AdaptiveGtaoCS", L"cs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_vs.dxil", "hero_transparency_vs.dxil",
                       "Content/Shaders/project_hs.hlsl", L"SceneVS", L"vs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_current_vs.dxil", "hero_transparency_current_vs.dxil",
@@ -300,7 +298,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                 if (valid)
                 {
                     ap::TouchActionResult(result_path);
-                    std::cout << spec.action_id << " current\n";
                     return;
                 }
             }
@@ -411,7 +408,6 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
                     std::ranges::equal(decoded, parameters))
                 {
                     ap::TouchActionResult(result_path);
-                    std::cout << spec.action_id << " current\n";
                     return;
                 }
             }
@@ -517,7 +513,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
                     valid = valid && material.receivers == graphs[ordinal].decal_receivers &&
                         material.parameter_layout_hash == rd::MaterialParameterLayoutHash(graphs[ordinal].parameters);
                 }
-                if (valid) { ap::TouchActionResult(result_path); std::cout << spec.action_id << " current\n"; return; }
+                if (valid) { ap::TouchActionResult(result_path); return; }
             }
         }
         catch (const std::exception &) { /* Rebuild invalid current output. */ }
@@ -632,7 +628,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
                 const auto material = rd::ReadHeroMaterialPackage(std::as_bytes(std::span(contents.data(), contents.size())), name);
                 valid = valid && material.surface == rd::MaterialSurfaceLayout{reflection.capability_mask, reflection.varying_mask} &&
                     material.parameter_layout_hash == rd::MaterialParameterLayoutHash(graph.parameters);
-                if (valid) { ap::TouchActionResult(result_path); std::cout << spec.action_id << " current\n"; return; }
+                if (valid) { ap::TouchActionResult(result_path); return; }
             }
         }
         catch (const std::exception &) { /* Rebuild invalid current output. */ }
@@ -819,7 +815,6 @@ void Produce(std::string_view name, const fs::path &source_root,
                 if (valid)
                 {
                     ap::TouchActionResult(result_path);
-                    std::cout << spec.action_id << " current\n";
                     return;
                 }
             }

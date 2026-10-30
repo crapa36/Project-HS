@@ -326,9 +326,9 @@ void TestVirtualShadowGuarantees()
     facts.required_receiver_domains=facts.closed_receiver_domains=hs::ShadowReceiverWorld;
     Require(camera_check(facts,{}).reason==Reason::ReceiverDomainIncomplete,
             "world-only proof cannot silently omit the mandatory camera surface domain");
-    facts=CompleteFacts();facts.required_receiver_domains|=hs::ShadowReceiverSoftwareGi;
+    facts=CompleteFacts();facts.required_receiver_domains|=1u<<31;
     Require(camera_check(facts,{}).reason==Reason::ReceiverDomainIncomplete,
-            "unknown off-camera software GI queries retain actual CSM");
+            "unknown receiver domains cannot authorize omission");
     facts=CompleteFacts();
     std::array surfaces{hs::ShadowSurfaceReceiver{{-1,-1,-1,0},{1,1,1,1}}};
     Require(!camera_check(facts,{{},surfaces,{}}).csm_required,

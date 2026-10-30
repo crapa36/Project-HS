@@ -118,6 +118,7 @@ AoGuide AoGuideForSample(uint2 aoPixel)
         [unroll] for (int y = 0; y < 2; ++y)
         [unroll] for (int x = 0; x < 2; ++x)
         {
+            if (x == 0 && y == 0) continue;
             AoGuide candidate = AoLoadGuide(first + int2(x, y));
             if (candidate.valid && (!selected.valid || candidate.position.z < selected.position.z))
                 selected = candidate;

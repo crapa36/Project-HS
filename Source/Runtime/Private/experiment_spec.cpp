@@ -122,12 +122,12 @@ void ValidateConfigOverrides(const Json &value)
         "width",         "height",              "frame_cap",      "render_scale_percent",
         "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
         "capture_hero_work", "capture_hero_work_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
-        "pom_quality", "geometry_frontend"};
+        "pom_quality", "volumetric_quality", "geometry_frontend", "smoke_render_lockstep"};
     CheckKeys(value, "config_overrides", allowed, std::array<std::string_view, 0>{});
 
     constexpr std::array boolean_fields{
         "warp", "validation", "gpu_validation", "vsync", "bloom", "outline",
-        "resize_test", "borderless", "capture_hero_work", "capture_gpu_timings"};
+        "resize_test", "borderless", "capture_hero_work", "capture_gpu_timings", "smoke_render_lockstep"};
     for (const auto field : boolean_fields)
     {
         if (value.contains(field))
@@ -194,6 +194,12 @@ void ValidateConfigOverrides(const Json &value)
         const auto quality = String(value.at("pom_quality"), "config_overrides.pom_quality");
         if (!ParseGraphicsEnumToken<GraphicsOptionalQuality>(quality))
             Invalid("config_overrides.pom_quality", "must be off, low, medium, high, or ultra");
+    }
+    if (value.contains("volumetric_quality"))
+    {
+        const auto quality = String(value.at("volumetric_quality"), "config_overrides.volumetric_quality");
+        if (!ParseGraphicsEnumToken<GraphicsOptionalQuality>(quality))
+            Invalid("config_overrides.volumetric_quality", "must be off, low, medium, high, or ultra");
     }
     if (value.contains("geometry_frontend"))
     {
@@ -674,6 +680,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("borderless", config.borderless);
         boolean("capture_hero_work", config.capture_hero_work);
         boolean("capture_gpu_timings", config.capture_gpu_timings);
+        boolean("smoke_render_lockstep", config.smoke_render_lockstep);
         if (overrides.contains("graphics_preset"))
         {
             const auto preset = overrides.at("graphics_preset").get<std::string>();
@@ -689,6 +696,13 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
                 String(overrides.at("pom_quality"), "config_overrides.pom_quality"));
             if (!quality) Invalid("config_overrides.pom_quality", "must be off, low, medium, high, or ultra");
             config.pom_quality = *quality;
+        }
+        if (overrides.contains("volumetric_quality"))
+        {
+            const auto quality = ParseGraphicsEnumToken<GraphicsOptionalQuality>(
+                String(overrides.at("volumetric_quality"), "config_overrides.volumetric_quality"));
+            if (!quality) Invalid("config_overrides.volumetric_quality", "must be off, low, medium, high, or ultra");
+            config.volumetric_quality = *quality;
         }
         if (overrides.contains("geometry_frontend"))
         {

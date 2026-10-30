@@ -375,6 +375,7 @@ Result D3D12Renderer::Impl::PrepareLightingAuxiliaries(std::array<AllocationReso
 Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
+    if (auto descriptors = CreateSharedDescriptorHeaps(); !descriptors) return descriptors;
     owner.transient_textures_common = enhanced;
     owner.targets.gbuffer_base.Reset();
     owner.targets.gbuffer_normal.Reset();
@@ -548,30 +549,6 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
         device->CreateRenderTargetView(owner.targets.gbuffer_surface_history.resource.Get(), &view, rtv);
     }
 
-    if (!srv_heap)
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC description{};
-        description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        description.NumDescriptors = kTextureDescriptorCount * kFrameCount;
-        description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&srv_heap));
-        if (FAILED(result))
-        {
-            return HResultFailure("Create SRV heap", result);
-        }
-        srv_stride =
-            device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    }
-    if (!srv_cpu_heap)
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC description{};
-        description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        description.NumDescriptors = kTextureDescriptorCount * kFrameCount;
-        const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&srv_cpu_heap));
-        if (FAILED(result)) return HResultFailure("Create canonical CPU descriptor heap", result);
-        InitializeCanonicalDescriptors(srv_cpu_heap.Get());
-    }
-
     if (auto created = CreateVisibilityTargets(owner); !created) return created;
     for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
     {
@@ -580,25 +557,22 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
         const auto write_post_table = [&](std::uint32_t offset) {
             auto srv = srv_start;
             srv.ptr += (frame_offset + offset) * srv_stride;
-            const auto create_srv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {
+            const auto resources = std::array<ID3D12Resource *, kPostTextureDescriptorCount>{
+                owner.targets.gbuffer_base.resource.Get(), owner.targets.gbuffer_normal.resource.Get(),
+                owner.targets.gbuffer_metadata.resource.Get(), owner.targets.shadow.resource.Get(),
+                owner.targets.hdr_color.resource.Get(), owner.targets.oit_accumulation.resource.Get(),
+                owner.targets.oit_revealage.resource.Get(), owner.targets.post_a.resource.Get(),
+                owner.targets.post_b.resource.Get(), owner.ui.textures[frame_index].resource.Get()};
+            for (std::size_t index = 0; index < resources.size(); ++index)
+            {
                 D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-                view.Format = format;
+                view.Format = kPostTextureSrvFormats[index];
                 view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                 view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 view.Texture2D.MipLevels = 1;
-                device->CreateShaderResourceView(resource, &view, srv);
+                device->CreateShaderResourceView(resources[index], &view, srv);
                 srv.ptr += srv_stride;
-            };
-             create_srv(owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-            create_srv(owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
-            create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
-            create_srv(owner.targets.shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-            create_srv(owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-            create_srv(owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-            create_srv(owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(owner.ui.textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+            }
         };
         write_post_table(0);
         write_post_table(kToneMapInputDescriptorOffset);
@@ -642,6 +616,63 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
         WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index,
                              owner.exposure_read_index, 1u - owner.exposure_read_index, 0);
     return Result::Success();
+}
+
+Result D3D12Renderer::Impl::CreateSharedDescriptorHeaps()
+{
+    const bool publish_frame_banks = !srv_heap || !srv_cpu_heap;
+    if (!srv_heap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC description{};
+        description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        description.NumDescriptors = kTextureDescriptorCount * kFrameCount;
+        description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&srv_heap));
+        if (FAILED(result)) return HResultFailure("Create SRV heap", result);
+    }
+    if (!srv_cpu_heap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC description{};
+        description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        description.NumDescriptors = kTextureDescriptorCount * kFrameCount;
+        const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&srv_cpu_heap));
+        if (FAILED(result)) return HResultFailure("Create canonical CPU descriptor heap", result);
+        InitializeCanonicalDescriptors(srv_cpu_heap.Get());
+    }
+    srv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    if (!sampler_heap)
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC description{};
+        description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        description.NumDescriptors = 2 * kFrameCount;
+        description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&sampler_heap));
+        if (FAILED(result)) return HResultFailure("Create view sampler heap", result);
+        sampler_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    }
+
+    if (publish_frame_banks)
+        for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+            PublishFrameDescriptors(frame);
+    return Result::Success();
+}
+
+void D3D12Renderer::Impl::InitializeFrameSamplerDescriptors(std::uint32_t frame) noexcept
+{
+    auto sampler = sampler_heap->GetCPUDescriptorHandleForHeapStart();
+    sampler.ptr += static_cast<SIZE_T>(frame) * 2 * sampler_stride;
+    D3D12_SAMPLER_DESC sampling{};
+    sampling.Filter = D3D12_FILTER_ANISOTROPIC;
+    sampling.AddressU = sampling.AddressV = sampling.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampling.MaxAnisotropy = config.anisotropic_filtering;
+    sampling.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sampling.MaxLOD = D3D12_FLOAT32_MAX;
+    device->CreateSampler(&sampling, sampler);
+    sampler.ptr += sampler_stride;
+    sampling.AddressU = sampling.AddressV = sampling.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sampling.MaxLOD = 5.0f;
+    device->CreateSampler(&sampling, sampler);
 }
 
 Result D3D12Renderer::Impl::CreateDepthAndShadow(OwnedView &owner)
@@ -1724,9 +1755,14 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = texture.resource.Get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = kAllShaderRead;
+        barrier.Transition.StateAfter = enhanced ? D3D12_RESOURCE_STATE_COMMON : kAllShaderRead;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         command_list->ResourceBarrier(1, &barrier);
+        // Immutable descriptor tables can bind before the first graph pass.
+        if (enhanced)
+            TransitionTexture(texture.resource.Get(), D3D12_RESOURCE_STATE_COMMON, kAllShaderRead,
+                D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        texture.graph_access = Access::AllShaderRead;
         return Result::Success();
     };
 
@@ -1755,6 +1791,8 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                                           "enemy_ranged_normal_0",
                                           "enemy_suicide_normal_0"},
                                          1024, 1024, 11); !uploaded) return uploaded;
+    HS_RENDERER_SET_DEBUG_NAME(family_diffuse.resource.Get(), L"MonsterFamily.Diffuse");
+    HS_RENDERER_SET_DEBUG_NAME(family_normal.resource.Get(), L"MonsterFamily.Normal");
     if (auto uploaded = upload_packaged(archer_normal, archer_normal_names,
                                          kCharacterTextureSize, kCharacterTextureSize, 12);
         !uploaded) return uploaded;

@@ -482,6 +482,7 @@ struct GameSimulation::SimulationWorld
     bool selection_waiting_for_release{};
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
+#ifdef HS_DEVELOPMENT_TOOLS
     mutable SimulationTimingDiagnostics timings;
     class TimingScope
     {
@@ -518,6 +519,14 @@ struct GameSimulation::SimulationWorld
         timings.captured = config.capture_timings;
         timings.empty_scope_calibration = calibration;
     }
+#else
+    class TimingScope
+    {
+      public:
+        void Finish() noexcept {}
+    };
+    [[nodiscard]] TimingScope Measure(SimulationTimingId) const noexcept { return {}; }
+#endif
     Float2 TimedNavigationWaypoint(NavigationGrid &grid, Float2 from, Float2 target) const
     {
         auto timing = Measure(SimulationTimingId::NavigationQuery);

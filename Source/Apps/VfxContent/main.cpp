@@ -13,7 +13,6 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
-#include <iostream>
 #include <limits>
 #include <ranges>
 #include <set>
@@ -272,7 +271,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
     if (Current(build_root, action, expected))
     {
         ap::TouchActionResult(build_root / "Actions" / action.namespace_path / "result.json");
-        std::cout << "vfx." << mode << " current action_key=" << ap::ActionKey(action) << '\n';
         return;
     }
 
@@ -330,7 +328,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
                        "vfx_mesh_atlas.hsbin");
         }
         ap::Publish(build_root, action, stage, std::move(products));
-        std::cout << "vfx." << mode << " action_key=" << ap::ActionKey(action) << '\n';
     }
     catch (...)
     {

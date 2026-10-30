@@ -799,12 +799,14 @@ Json DiagnosticsReceipt(const hs::RendererDiagnosticsSnapshot &diagnostics)
             {"multiplier_source", "native_presentation_status_not_displayed_cadence"}}}};
 }
 
-Json WorldTransportReceipt(const std::map<std::uint64_t, hs::GpuPassTimings> &history)
+Json WorldTransportReceipt(const std::map<std::uint64_t, hs::GpuPassTimings> &history,
+                           const hs::RendererSceneProbeBakeStatus &probe_status)
 {
-    constexpr std::array<std::pair<std::uint32_t, std::string_view>, 22> expected{{
+    constexpr std::array<std::pair<std::uint32_t, std::string_view>, 24> expected{{
         {170, "VolumetricDensity"}, {171, "VolumetricLighting"},
         {172, "VolumetricTemporal"}, {173, "VolumetricSpatial"},
         {174, "VolumetricIntegrate"}, {175, "VolumetricResolve"},
+        {70, "SSRTrace"}, {71, "SSRTemporal"},
         {180, "LocalProbeStaticCubeCapture"}, {181, "LocalProbeStaticCubeCapture"},
         {182, "LocalProbeStaticCubeCapture"}, {183, "LocalProbeStaticCubeCapture"},
         {184, "LocalProbeStaticCubeCapture"}, {185, "LocalProbeStaticCubeCapture"},
@@ -848,6 +850,10 @@ Json WorldTransportReceipt(const std::map<std::uint64_t, hs::GpuPassTimings> &hi
             {"name", std::string(name)}, {"present", present},
             {"observed", std::move(observed)}});
     }
+    // This fixture changes the lights, so it must complete native recapture.
+    output["local_probe"] = {{"sample_ready", probe_status.capture_complete},
+        {"capture_sources_ready", probe_status.sources_ready}};
+    complete &= probe_status.capture_complete;
     output["layout_accepted"] = hlod_complete;
     output["required_passes_complete"] = complete;
     return output;
@@ -1355,9 +1361,15 @@ int main(int argc, char **argv)
         {
             std::ofstream output(artifacts / "result.json");
             output << receipt.dump(2) << '\n';
-            if (!output) exit_code = 1;
+            if (!output)
+            {
+                std::cerr << "Could not write render result: " << artifacts / "result.json" << '\n';
+                return 1;
+            }
         }
-        std::cout << receipt.dump() << '\n';
+        if (exit_code != 0)
+            std::cerr << receipt.value("error_code", failure_code) << ": "
+                      << receipt.value("error", std::string{}) << '\n';
         return exit_code;
     };
     try
@@ -1664,7 +1676,7 @@ int main(int argc, char **argv)
         }
         if (world_transport_probe)
         {
-            if (!frames_explicit) frames = 7;
+            if (!frames_explicit) frames = 32;
             if (frames < 7) throw std::runtime_error("--world-transport-probe requires at least 7 frames");
             config.ao_mode = hs::GraphicsAoMode::GTAO;
             config.gi_mode = hs::GraphicsGiMode::Probe;
@@ -1972,23 +1984,55 @@ int main(int argc, char **argv)
                 Require(hs::VerifySelectedGenerationProducts(material_reload_generation));
             });
         }
+        hs::LightView static_shadow_sun;
+        if (static_shadow_bake_probe)
+        {
+            static_shadow_sun.direction = hs::kEnvironmentSunDirection;
+            static_shadow_sun.quantity = 50000.0f;
+            static_shadow_sun.color = {1.0f, .94f, .86f};
+            static_shadow_sun.stable_id = 0x535342414b450001ull;
+            static_shadow_sun.shadow_flags = hs::kLightShadowRequested;
+        }
+        if (static_shadow_bake_only)
+        {
+            receipt["validation_requested"] = {{"debug_layer", config.validation},
+                {"gpu_based_validation", config.gpu_validation}};
+            failure_code = "HS_RENDER_STATIC_SHADOW_BAKE_FAILED";
+            measure("static_shadow_bake", [&] {
+                receipt["static_shadow_bake"] = StaticShadowArchiveProbe(
+                    [&](const auto &scene, const auto &light, const auto &begin, const auto &page_sink) {
+                        return hs::D3D12Renderer::BakeStaticShadowPages(config, scene, light, begin, page_sink);
+                    }, world_scene, static_shadow_sun);
+            });
+            receipt["static_shadow_bake"]["bake_only"] = true;
+            receipt["static_shadow_bake"]["subsequent_render_frames"] = 0;
+            receipt["frames"] = 0;
+            // The one-shot API returns success only after owner shutdown and a
+            // zero native validation error count. Keep that separate from whether
+            // validation was requested or GPU-based validation was enabled.
+            receipt["validation_errors"] = 0;
+            receipt["timings_ms"] = std::move(timings);
+            receipt["execution_valid"] = true;
+            receipt["error_code"] = "";
+            exit_code = 0;
+            return write_receipt();
+        }
         TestWindow window;
         failure_code = "HS_RENDER_WINDOW_FAILED";
         measure("window", [&] { window.Create(config.width, config.height); });
         config.window = window.handle;
         hs::TaskSystem recording_workers(4);
-        auto recording_group = std::make_unique<hs::TaskGroup>();
+        auto recording_group = recording_workers.CreateTaskGroup();
         config.task_executor.submit = [&](std::function<void()> record) {
-            const bool accepted = recording_workers.Submit(*recording_group,
-                "Render fixture recording",
+            const bool accepted = recording_group.Submit(
                 [record = std::move(record)](std::stop_token) { record(); });
             return accepted ? hs::Result::Success() :
                 hs::Result::Failure(hs::ErrorCode::TaskFailed, "hs_render_test_runner",
                                     "Could not submit recording task.");
         };
         config.task_executor.join = [&] {
-            auto joined = recording_workers.Wait(*recording_group);
-            recording_group = std::make_unique<hs::TaskGroup>();
+            auto joined = recording_group.Wait();
+            recording_group = recording_workers.CreateTaskGroup();
             return joined;
         };
         std::vector<hs::render_data::RendererBulkDescriptor> packed_directory;
@@ -2241,33 +2285,16 @@ int main(int argc, char **argv)
         });
         config.font_bytes = {};
         std::vector<std::byte>().swap(startup_font);
-        hs::LightView static_shadow_sun;
         if (static_shadow_bake_probe)
         {
-            static_shadow_sun.direction = hs::kEnvironmentSunDirection;
-            static_shadow_sun.quantity = 50000.0f;
-            static_shadow_sun.color = {1.0f, .94f, .86f};
-            static_shadow_sun.stable_id = 0x535342414b450001ull;
-            static_shadow_sun.shadow_flags = hs::kLightShadowRequested;
             failure_code = "HS_RENDER_STATIC_SHADOW_BAKE_FAILED";
             measure("static_shadow_bake", [&] {
-                receipt["static_shadow_bake"] = StaticShadowArchiveProbe(renderer, world_scene, static_shadow_sun);
+                receipt["static_shadow_bake"] = StaticShadowArchiveProbe(
+                    [&](const auto &scene, const auto &light, const auto &begin, const auto &page_sink) {
+                        return renderer.BakeStaticShadowPages(scene, light, begin, page_sink);
+                    }, world_scene, static_shadow_sun);
             });
             receipt["static_shadow_bake"]["bake_only"] = static_shadow_bake_only;
-            if (static_shadow_bake_only)
-            {
-                receipt["static_shadow_bake"]["subsequent_render_frames"] = 0;
-                receipt["frames"] = 0;
-                failure_code = "HS_RENDER_SHUTDOWN_FAILED";
-                measure("shutdown", [&] { Require(renderer.Shutdown()); });
-                const auto errors = renderer.ValidationErrorCount();
-                receipt["validation_errors"] = errors;
-                receipt["timings_ms"] = std::move(timings);
-                receipt["execution_valid"] = errors == 0;
-                receipt["error_code"] = errors == 0 ? "" : "HS_RENDER_VALIDATION_FAILED";
-                exit_code = errors == 0 ? 0 : 1;
-                return write_receipt();
-            }
         }
         hs::GraphicsSettings switch_settings;
         bool switch_sr{}, switch_fg{};
@@ -3226,7 +3253,8 @@ int main(int argc, char **argv)
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = entity_surface_probe || !vfx_composition_probe.empty()};
+                    .wait_for_streaming = entity_surface_probe || world_transport_probe ||
+                        !vfx_composition_probe.empty()};
                 if (provider_switch_probe)
                 {
                     std::uint64_t input_token{};
@@ -3821,7 +3849,9 @@ int main(int argc, char **argv)
                 // Stop once every texture quality transition and every demanded
                 // geometry request has published and reclaimed its old backing.
                 // The larger frame count remains only the failure bound.
-                if (residency_streaming_complete()) break;
+                if (residency_streaming_complete() ||
+                    (world_transport_probe && frame >= 7 &&
+                        renderer.GetSceneProbeBakeStatus().capture_complete)) break;
             }
         });
         if (grid_floor_probe)
@@ -4017,8 +4047,29 @@ int main(int argc, char **argv)
         if (world_transport_probe)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_PASSES_FAILED";
-            const auto observed = WorldTransportReceipt(world_gpu_history);
+            const auto observed = WorldTransportReceipt(world_gpu_history,
+                renderer.GetSceneProbeBakeStatus());
             receipt["world_transport"].update(observed);
+            receipt["world_transport"]["immutable_scene_frames"] = rendered_frame_count;
+            receipt["world_transport"]["frame_bound"] = frames;
+            if (!observed["local_probe"]["sample_ready"].get<bool>())
+            {
+                Json capture_textures = Json::array();
+                for (const auto &[logical_id, path] : generation.product_paths)
+                {
+                    static_cast<void>(path);
+                    if (!logical_id.starts_with("render/texture/environment_")) continue;
+                    const auto status = renderer.GetTextureStreamingStatus(logical_id);
+                    if (!status.registered) continue;
+                    capture_textures.push_back({{"logical_id", logical_id},
+                        {"pending", status.pending}, {"publication_complete", status.publication_complete},
+                        {"requests", status.requests}, {"uploads", status.uploads},
+                        {"publications", status.publications}, {"actual_resident_mip", status.actual_resident_mip},
+                        {"effective_desired_mip", status.effective_desired_mip},
+                        {"target_mip", status.target_mip}});
+                }
+                receipt["world_transport"]["capture_texture_streaming"] = std::move(capture_textures);
+            }
             const auto hlod_stats = Json::parse(std::ifstream(artifacts / "hlod_stats.json"));
             receipt["world_transport"]["hlod_admission"] = hlod_stats;
             if (!hlod_stats.at("matching_scene").get<bool>() ||
@@ -4030,7 +4081,7 @@ int main(int argc, char **argv)
                 throw std::runtime_error("HLOD shared-pool admission or complete-leaf fallback contract failed");
             if (!observed["required_passes_complete"].get<bool>())
                 throw std::runtime_error(
-                    "world transport did not execute every volumetric, native local-cube/filter and accepted-layout HLOD pass in completed GPU history");
+                    "world transport did not complete volumetrics, SSR, local-probe sample readiness and accepted-layout HLOD in GPU history");
         }
         if (software_gi_probe)
         {
@@ -4173,7 +4224,7 @@ int main(int argc, char **argv)
         const auto validation_status = ValidationStatusReceipt(renderer.ValidationStatus());
         receipt["validation_errors"] = validation_errors;
         receipt["validation_status"] = validation_status;
-        receipt["frames"] = residency_streaming_probe ? rendered_frame_count : frames;
+        receipt["frames"] = residency_streaming_probe || world_transport_probe ? rendered_frame_count : frames;
         if (static_shadow_bake_probe) receipt["static_shadow_bake"]["subsequent_render_frames"] = frames;
         receipt["static_scene_upload_count"] = frame_result.static_scene_upload_count;
         receipt["enhanced_barriers"] = renderer.UsesEnhancedBarriers();

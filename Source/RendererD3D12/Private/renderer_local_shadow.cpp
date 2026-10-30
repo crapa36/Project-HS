@@ -357,7 +357,7 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     D3D12_RESOURCE_DESC bank{};bank.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;bank.Width=s->extent.width;bank.Height=s->extent.height;
     bank.DepthOrArraySize=1;bank.MipLevels=1;bank.Format=DXGI_FORMAT_R32_TYPELESS;bank.SampleDesc.Count=1;bank.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     if(auto r=Allocate(*s,s->static_bank,bank);!r)return r;if(auto r=Allocate(*s,s->dynamic_bank,bank);!r)return r;
-    s->static_bank.resource->SetName(L"LocalShadow.StaticBank");s->dynamic_bank.resource->SetName(L"LocalShadow.DynamicBank");
+    HS_RENDERER_SET_DEBUG_NAME(s->static_bank.resource.Get(), L"LocalShadow.StaticBank"); HS_RENDERER_SET_DEBUG_NAME(s->dynamic_bank.resource.Get(), L"LocalShadow.DynamicBank");
     for(auto &f:s->frames)
     {
         if(auto r=Allocate(*s,f.upload,Buffer(s->upload_bytes),true);!r)return r;

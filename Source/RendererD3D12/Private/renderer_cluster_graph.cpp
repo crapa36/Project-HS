@@ -21,7 +21,7 @@ void DispatchCluster(ID3D12GraphicsCommandList *list, std::uint32_t elements)
 
 template<class F> void VisitClusterVersions(ClusterFrameGraph &state,F &&visit)
 {
-    for(auto *buffer:{&state.groups,&state.children,&state.clusters,&state.pages,&state.refs})
+    for(auto *buffer:{&state.groups,&state.children,&state.clusters,&state.representation_pages,&state.pages,&state.refs})
         visit(buffer->version);
     for(auto &page:state.geometry) visit(page.buffer.version);
     for(auto &cut:state.cuts)
@@ -133,6 +133,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         state.groups = import(runtime.groups, "ClusterGroups");
         state.children = import(runtime.children, "ClusterChildren");
         state.clusters = import(runtime.clusters, "ClusterRecords");
+        state.representation_pages = import(runtime.representation_pages, "ClusterRepresentationPages");
         state.pages = import(native.pages, "ClusterResidency");
         for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
         {
@@ -248,7 +249,8 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 {
                     auto target = runtime.descriptors->GetCPUDescriptorHandleForHeapStart();
                     target.ptr += static_cast<SIZE_T>(((frame_slot * kClusterRuntimeCatalogs + ordinal) *
-                        kClusterOcclusionPhases + phase) * kClusterCutBankStride + 28u) * srv_stride;
+                        kClusterOcclusionPhases + phase) * kClusterCutBankStride +
+                        kClusterCutDescriptorCount - 1u) * srv_stride;
                     if (auto *hlod_view = ActiveHlodView(); hlod_view && hlod_view->frames[frame_slot].registered)
                         device->CopyDescriptorsSimple(1, target, hlod_view->frames[frame_slot].outputs.srvs[0],
                             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -275,7 +277,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             handle.ptr += static_cast<UINT64>((frame_slot * kClusterRuntimeCatalogs + ordinal) *
                 kClusterOcclusionPhases * kClusterCutBankStride) * srv_stride;
             list->SetComputeRootDescriptorTable(2, handle);
-            handle.ptr += static_cast<UINT64>(28u) * srv_stride;
+            handle.ptr += static_cast<UINT64>(kClusterCutDescriptorCount - 1u) * srv_stride;
             list->SetComputeRootDescriptorTable(4, handle);
         };
         const auto read_tables = [&](PassBuilder &pass) {
@@ -285,6 +287,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             pass.Read(state.groups.version, Access::ComputeRead);
             pass.Read(state.children.version, Access::ComputeRead);
             pass.Read(state.clusters.version, Access::ComputeRead);
+            pass.Read(state.representation_pages.version, Access::ComputeRead);
             std::vector<ResourceHandle> declared;
             const auto read_once = [&](ResourceVersion version) {
                 const auto found = std::ranges::find_if(declared, [&](const auto &resource) {
@@ -316,11 +319,6 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             for (auto &cut : state.cuts)
                 if (cut.active)
                 {
-                    // ConstantsValid queries these UAV dimensions, without reading
-                    // prior bytes. Their actual writers are Prefix or Emit below.
-                    for (auto *buffer : {&cut.offsets, &cut.block_sums, &cut.block_offsets,
-                        &cut.draw_commands, &cut.mesh_commands})
-                        count->Read(buffer->version, Access::UnorderedRead);
                     for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
                         &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
                         buffer->version = count->Write(buffer->version, Access::UnorderedWrite);

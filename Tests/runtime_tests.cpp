@@ -45,6 +45,7 @@
 #include <array>
 #include <algorithm>
 #include <tuple>
+#include <utility>
 #include <charconv>
 #include <cstdint>
 #include <cmath>
@@ -246,12 +247,13 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
               hs::ApplyExperimentOverrides(loaded, diagnostic) && diagnostic.diagnostic_enemy_count == 200 && diagnostic.capture_diagnostics,
           "diagnostic enemy population round trips and applies as a number");
     Check(hs::ApplicationConfig{}.capture_gpu_timings, "existing diagnostic captures retain GPU timings by default");
-    source.config_overrides_json = R"({"diagnostic_enemy_count":200,"capture_gpu_timings":false})";
+    source.config_overrides_json = R"({"diagnostic_enemy_count":200,"capture_gpu_timings":false,"smoke_render_lockstep":true})";
     hs::ApplicationConfig cpu_capture;
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
               hs::ApplyExperimentOverrides(loaded, cpu_capture) && cpu_capture.capture_diagnostics &&
-              cpu_capture.diagnostic_enemy_count == 200 && !cpu_capture.capture_gpu_timings,
-          "CPU cadence capture can omit GPU queries without changing the enemy fixture");
+              cpu_capture.diagnostic_enemy_count == 200 && !cpu_capture.capture_gpu_timings &&
+              cpu_capture.smoke_render_lockstep,
+          "experiment lockstep override round trips through validation and application");
     source.config_overrides_json = R"({"capture_gpu_timings":"false"})";
     Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
           "GPU timing capture rejects a nonboolean override");
@@ -311,32 +313,37 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
               explicit_graphics.shadow_resolution_explicit && explicit_graphics.particle_percentage_explicit &&
               explicit_graphics.borderless_explicit && explicit_graphics.bloom_explicit && explicit_graphics.outline_explicit,
           "experiment preset preserves explicit field precedence metadata");
-    source.config_overrides_json = R"({"graphics_preset":"ultra","pom_quality":"off","geometry_frontend":"indexed"})";
+    source.config_overrides_json = R"({"graphics_preset":"ultra","pom_quality":"off","volumetric_quality":"off","geometry_frontend":"indexed"})";
     hs::ApplicationConfig ablation;
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
               hs::ApplyExperimentOverrides(loaded, ablation) && ablation.graphics_preset == hs::GraphicsPreset::Ultra &&
               ablation.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation.volumetric_quality == hs::GraphicsOptionalQuality::Off &&
               ablation.geometry_frontend == hs::GeometryFrontend::Indexed,
-          "experiment preset retains explicit POM and geometry overrides");
+          "experiment preset retains explicit POM, volumetric and geometry overrides");
     hs::SettingsDocument ablation_document;
     (void)hs::PrepareStartupGraphicsSettings(ablation_document, ablation);
     Check(ablation_document.graphics.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation_document.graphics.volumetric_quality == hs::GraphicsOptionalQuality::Off &&
               ablation_document.graphics.material_quality == hs::GraphicsQuality::Ultra &&
               ablation_document.graphics.geometry_quality == hs::GraphicsQuality::Ultra,
-          "individual POM override preserves the other preset quality settings at startup");
+          "individual quality overrides preserve the other Ultra preset settings at startup");
     for (const auto invalid : {R"({"pom_quality":true})", R"({"pom_quality":"fast"})",
+                               R"({"volumetric_quality":true})", R"({"volumetric_quality":"fast"})",
                                R"({"geometry_frontend":1})", R"({"geometry_frontend":"fast"})"})
     {
         source.config_overrides_json = invalid;
         Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
-              "invalid POM/geometry override rejected by input boundary");
-        Check(!hs::ApplyExperimentOverrides(source, ablation), "invalid direct POM/geometry override rejected");
+              "invalid POM/volumetric/geometry override rejected by input boundary");
+        Check(!hs::ApplyExperimentOverrides(source, ablation), "invalid direct quality/frontend override rejected");
     }
     source.config_overrides_json = "{}";
     hs::ApplicationConfig unspecified;
-    Check(hs::ApplyExperimentOverrides(source, unspecified) && !unspecified.pom_quality && !unspecified.geometry_frontend,
-          "missing POM/geometry overrides preserve defaults");
+    Check(hs::ApplyExperimentOverrides(source, unspecified) && !unspecified.pom_quality &&
+              !unspecified.volumetric_quality && !unspecified.geometry_frontend,
+          "missing quality/frontend overrides preserve defaults");
     Check(hs::ApplyExperimentOverrides(source, ablation) && ablation.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation.volumetric_quality == hs::GraphicsOptionalQuality::Off &&
               ablation.geometry_frontend == hs::GeometryFrontend::Indexed,
           "missing overrides preserve existing explicit choices");
     hs::ApplicationConfig hero;
@@ -2260,11 +2267,11 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
     newer->selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer->session);
     auto first = exchange.TryBeginWrite();
     Check(first.has_value(), "first UI publication slot");
-    exchange.Publish(*first, 10, nullptr, older);
+    std::move(*first).Publish( 10, nullptr, older);
     auto rendered = consumer.AcquireLatest();
     auto second = exchange.TryBeginWrite();
     Check(second.has_value(), "new UI can publish while old UI is rendered");
-    exchange.Publish(*second, 11, nullptr, newer);
+    std::move(*second).Publish( 11, nullptr, newer);
     Check(rendered.ui_frame == older && rendered.current.ui.data() == draw_content->models.data(),
           "draw span and interaction facts retain the same immutable UI owner");
     Check(packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {1920, 1080}),

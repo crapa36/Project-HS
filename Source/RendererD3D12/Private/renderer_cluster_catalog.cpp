@@ -188,7 +188,16 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
             record.flags = hierarchy_.error_domain == rd::GeometryHierarchyErrorDomain::ReferencePose ? kClusterGroupReferencePose : 0;
             record.material_selector = group.material_selector; record.sphere = group.bounds.sphere;
             record.minimum_error = {group.bounds.minimum[0], group.bounds.minimum[1], group.bounds.minimum[2], group.geometric_error};
-            record.maximum_reserved = {group.bounds.maximum[0], group.bounds.maximum[1], group.bounds.maximum[2], 0};
+            record.representation_pages[0] = static_cast<std::uint32_t>(prepared.representation_pages.size());
+            for (std::uint32_t offset = 0; offset < group.cluster_count; ++offset)
+                prepared.representation_pages.push_back(page_base + hierarchy_.clusters[group.first_cluster + offset].page_index);
+            auto first = prepared.representation_pages.begin() + record.representation_pages[0];
+            auto last = prepared.representation_pages.end();
+            std::sort(first, last);
+            last = std::unique(first, last);
+            prepared.representation_pages.erase(last, prepared.representation_pages.end());
+            record.representation_pages[1] = static_cast<std::uint32_t>(prepared.representation_pages.size()) -
+                record.representation_pages[0];
             record.catalog_index = catalog_ordinal; record.generation = generation_tag; record.ancestor_steps = depths[id];
             prepared.groups.push_back(record);
             for (std::uint32_t offset = 0; offset < group.cluster_count; ++offset)

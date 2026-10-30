@@ -998,6 +998,17 @@ void BuildVfxTypedFrameInputs(
         result.events.push_back(std::move(input));
     }
 
+    // The delivery action and its authored head size belong to the immutable
+    // image. Resolve this route once even when several scheduled owners use it.
+    struct ArrowRainFacts
+    {
+        const VfxEffectRecord *effect{};
+        float head_radius{};
+        Tick window_ticks{};
+    };
+    std::optional<ArrowRainFacts> arrow_rain_facts;
+    bool arrow_rain_recipe_resolved = false;
+
     for (unsigned endpoint = 0; endpoint < (interpolation < 1.0f ? 2u : 1u); ++endpoint)
     for (const auto &source_visual : endpoint == 0 ? current : previous)
     {
@@ -1071,15 +1082,24 @@ void BuildVfxTypedFrameInputs(
         }
         if (visual.kind == PersistentVfxKind::ScheduledAreaDelivery)
         {
-            const auto *lookup = FindLookup(image, kArrowRainIncomingEffect);
-            const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-            const auto head_radius = effect ? DeliveryHeadRadius(cooked, *effect) :
-                std::optional<float>{};
-            if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
-                effect->payload_kind != kProjectilePayload ||
-                !std::isfinite(effect->seconds) || effect->seconds <= 0 || effect->seconds > 60 ||
-                !head_radius || !UpgradeBindingContains(cooked, Hash64("skill.arrow_rain"), 1,
-                                                       effect->handle) ||
+            if (!arrow_rain_recipe_resolved)
+            {
+                arrow_rain_recipe_resolved = true;
+                const auto *lookup = FindLookup(image, kArrowRainIncomingEffect);
+                const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
+                if (effect && effect->input_mode == 1 && effect->timing_kind == 0 &&
+                    effect->payload_kind == kProjectilePayload &&
+                    std::isfinite(effect->seconds) && effect->seconds > 0 &&
+                    effect->seconds <= 60)
+                {
+                    const auto head_radius = DeliveryHeadRadius(cooked, *effect);
+                    if (head_radius && UpgradeBindingContains(cooked,
+                            Hash64("skill.arrow_rain"), 1, effect->handle))
+                        arrow_rain_facts = ArrowRainFacts{effect, *head_radius,
+                            static_cast<Tick>(std::ceil(static_cast<double>(effect->seconds) * 60.0))};
+                }
+            }
+            if (!arrow_rain_facts ||
                 visual.effect_asset.value != kArrowRainIncomingEffect ||
                 visual.skill != kArrowRainSkill || visual.source_upgrade != 0 ||
                 visual.stable_id == 0 || visual.projectile_owner_id == 0 || visual.cast_id == 0 ||
@@ -1089,11 +1109,12 @@ void BuildVfxTypedFrameInputs(
                 Diagnose(result, kArrowRainIncomingEffect);
                 continue;
             }
+            const auto &effect = *arrow_rain_facts->effect;
+            const auto head_radius = arrow_rain_facts->head_radius;
             // Gameplay supplies only its admitted schedule and landing circle.
             // The cooked visual recipe owns the final approach window; absence
             // of the real pending action ends every owner-follow output.
-            const auto window_ticks = static_cast<Tick>(
-                std::ceil(static_cast<double>(effect->seconds) * 60.0));
+            const auto window_ticks = arrow_rain_facts->window_ticks;
             const auto started = std::max(visual.active_tick,
                 visual.expires > window_ticks ? visual.expires - window_ticks : Tick{});
             if (display_tick < started || display_tick >= visual.expires) continue;
@@ -1111,18 +1132,18 @@ void BuildVfxTypedFrameInputs(
             VfxPersistentInput input;
             input.quality = quality;
             input.stable_id = visual.stable_id;
-            input.effect_handle = effect->handle;
+            input.effect_handle = effect.handle;
             input.current_transform = Transform(position, 0);
             input.previous_transform = Transform(previous_position, 0);
             input.elapsed_seconds = static_cast<float>(display_tick - started) / 60.0f;
             input.elapsed_ticks = display_tick - started;
-            input.normalized_age = std::clamp(input.elapsed_seconds / effect->seconds, 0.0f, 1.0f);
-            input.stable_seed = PersistentSeed(visual.projectile_owner_id, effect->handle);
+            input.normalized_age = std::clamp(input.elapsed_seconds / effect.seconds, 0.0f, 1.0f);
+            input.stable_seed = PersistentSeed(visual.projectile_owner_id, effect.handle);
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
             // This is an authored delivery head size, not the damage radius.
             // The full landing Circle remains on the schedule/secondary area.
             input.payload = VfxProjectilePayload{velocity,
-                {*head_radius, *head_radius, *head_radius}, *head_radius,
+                {head_radius, head_radius, head_radius}, head_radius,
                 input.normalized_age, 0};
             result.persistent.push_back(std::move(input));
             continue;

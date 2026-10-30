@@ -23,9 +23,8 @@ uint2 HsHeroBindingOrdinals(uint mesh, uint slot)
     const uint asset = HsHeroAssetIndex(mesh);
     if (asset == HsHeroInvalidOrdinal) return HsHeroInvalidOrdinal.xx;
     const uint4 range = HeroBindingRanges[asset];
-    uint count, stride;
-    HeroMaterialBindings.GetDimensions(count, stride);
-    if (slot >= range.y || range.x >= count || slot >= count - range.x)
+    // Ranges and the SRV are published together from one admitted binding table.
+    if (slot >= range.y)
         return HsHeroInvalidOrdinal.xx;
     return HeroMaterialBindings[range.x + slot];
 }

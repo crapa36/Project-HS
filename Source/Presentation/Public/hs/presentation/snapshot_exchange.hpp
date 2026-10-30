@@ -20,8 +20,24 @@ class RenderSnapshotExchange
   public:
     struct WriteSlot
     {
-        std::size_t index{};
-        RenderSnapshotStorage *storage{};
+        WriteSlot(const WriteSlot &) = delete;
+        WriteSlot &operator=(const WriteSlot &) = delete;
+        WriteSlot(WriteSlot &&other) noexcept;
+        WriteSlot &operator=(WriteSlot &&other) noexcept;
+        ~WriteSlot();
+
+        [[nodiscard]] RenderSnapshotStorage &Storage() const noexcept;
+        // One producer publishes increasing sequences. The exchange outlives its write lease.
+        void Publish(Sequence publish_sequence, const RenderSnapshot *previous_sample = nullptr,
+                     std::shared_ptr<const UiFrame> ui_frame = {}) &&;
+        void Abandon() && noexcept;
+
+      private:
+        WriteSlot(RenderSnapshotExchange *exchange, std::size_t index) noexcept
+            : exchange_(exchange), index_(index) {}
+        RenderSnapshotExchange *exchange_{};
+        std::size_t index_{};
+        friend class RenderSnapshotExchange;
     };
 
     struct ReadPair : RenderSnapshotPair
@@ -54,12 +70,6 @@ class RenderSnapshotExchange
     // Preserves slot arrays for CopyRetainedDynamicFrom; the caller still updates
     // the current sample before Publish. Normal writers receive cleared storage.
     [[nodiscard]] std::optional<WriteSlot> TryBeginRetainedWrite() noexcept;
-    // One producer supplies increasing publication sequences independently of
-    // simulation ticks. Reset/wrap requires a new exchange and consumer.
-    void Publish(WriteSlot slot, Sequence publish_sequence,
-                 const RenderSnapshot *previous_sample = nullptr,
-                 std::shared_ptr<const UiFrame> ui_frame = {});
-    void Abandon(WriteSlot slot) noexcept;
     [[nodiscard]] std::uint64_t DroppedPublishes() const noexcept;
 
   private:
@@ -91,6 +101,10 @@ class RenderSnapshotExchange
 
     [[nodiscard]] std::optional<std::size_t> AcquireNewestReady() noexcept;
     [[nodiscard]] std::optional<WriteSlot> AcquireWriteSlot(bool retained) noexcept;
+    void PublishSlot(std::size_t index, Sequence publish_sequence,
+                     const RenderSnapshot *previous_sample,
+                     std::shared_ptr<const UiFrame> ui_frame);
+    void AbandonSlot(std::size_t index) noexcept;
     void ReleaseRead(std::optional<std::size_t> &index) noexcept;
 
     std::array<Slot, 3> slots_;

@@ -17,6 +17,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+#define HS_RENDERER_SET_DEBUG_NAME(resource, name) (resource)->SetName(name)
+#else
+#define HS_RENDERER_SET_DEBUG_NAME(resource, name) ((void)0)
+#endif
+
 namespace hs
 {
 
@@ -152,6 +158,9 @@ struct FrameContext
     std::uint64_t submitted_frame_id{};
     std::uint64_t constants_submission_id{};
     std::uint32_t submitted_view_id{};
+    std::uint64_t auto_fg_cadence_submit_qpc{}, auto_fg_cadence_qpc_frequency{};
+    std::uint64_t auto_fg_cadence_sequence{};
+    bool auto_fg_cadence_pending{}, auto_fg_cadence_validation{}, auto_fg_cadence_gpu_validation{};
     GpuFrameTimingKind timing_kind{GpuFrameTimingKind::Unavailable};
     std::uint64_t timing_generation{}, timing_resize_epoch{};
     std::uint64_t timing_source_sequence{}, timing_quality_generation{}, timing_provider_generation{};

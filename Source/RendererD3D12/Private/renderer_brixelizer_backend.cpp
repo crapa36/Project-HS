@@ -1,24 +1,35 @@
-// Deliberately the ONE compilation of the verified 1.1.4 DX12 backend source.
-// Its private layout is used in this same TU, rather than mirrored across an
-// invented ABI. CMake supplies only the verified pinned backend source path.
+// The DX12 backend's one direct assignment of ffxGetPermutationBlobByIndex is
+// redirected to a fail-closed stub. RequireSelectedShaderProducts installs the
+// generated metadata + selected-Generation callback before context creation.
+#include <FidelityFX/host/ffx_interface.h>
+#include <cstdint>
+extern "C" FfxErrorCode ffxGetPermutationBlobByIndexUnavailable(FfxEffect,FfxPass,FfxBindStage,std::uint32_t,FfxShaderBlob *)
+{return FFX_ERROR_BACKEND_API_ERROR;}
+#define ffxGetPermutationBlobByIndex ffxGetPermutationBlobByIndexUnavailable
 #include <ffx_dx12.cpp>
+#undef ffxGetPermutationBlobByIndex
 #define FFX_CPU
 #include <FidelityFX/gpu/ffx_core.h>
 #include <FidelityFX/host/ffx_brixelizer_raw.h>
 #include <ffx_brixelizer_raw_private.h>
 #include "renderer_brixelizer_backend.hpp"
 #include "renderer_brixelizer_shaders.hpp"
+#include "renderer_brixelizer_shader_metadata.hpp"
+#include <hs/core/sha256.hpp>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <format>
 #include <string>
+#include <type_traits>
 
 namespace hs::brixelizer_native
 {
 namespace
 {
 using Microsoft::WRL::ComPtr;
+static_assert(std::is_trivially_copyable_v<FfxShaderBlob>);
 thread_local const ShaderReader *shader_reader{};
 thread_local std::vector<std::byte> selected_blob;
 thread_local BackendSlots *active_slots{};
@@ -30,11 +41,18 @@ FfxErrorCode SelectedBlob(FfxEffect effect,FfxPass pass,FfxBindStage stage,std::
 {
     if(!out) return FFX_ERROR_INVALID_POINTER;
     if(!shader_reader) {out->data=nullptr;return FFX_ERROR_INVALID_POINTER;}
-    auto error=ffxGetPermutationBlobByIndex(effect,pass,stage,permutation,out);
-    if(error!=FFX_OK) return error;
+    if(stage!=FFX_BIND_COMPUTE_SHADER_STAGE) {out->data=nullptr;return FFX_ERROR_BACKEND_API_ERROR;}
+    std::array<std::byte,32> expected_digest{};
+    const auto *metadata=detail::FindShaderMetadata(effect,pass,permutation,expected_digest);
+    if(!metadata) {out->data=nullptr;return FFX_ERROR_BACKEND_API_ERROR;}
     selected_blob.clear();
-    if(!(*shader_reader)(ShaderProduct(effect,pass,permutation),selected_blob) || selected_blob.size()!=out->size ||
-        std::memcmp(selected_blob.data(),out->data,out->size)!=0) {out->data=nullptr;return FFX_ERROR_BACKEND_API_ERROR;}
+    const auto id="render/native/brixelizer/"+std::to_string(effect)+"/"+
+        std::to_string(pass)+"/"+std::to_string(permutation)+".dxil";
+    if(!(*shader_reader)(id,selected_blob) || selected_blob.size()!=metadata->size ||
+        hs::Sha256(selected_blob)!=expected_digest) {out->data=nullptr;return FFX_ERROR_BACKEND_API_ERROR;}
+    // FfxShaderBlob has const binding counts, so copy the generated immutable
+    // template as a trivially-copyable SDK value, then attach its owned DXIL.
+    std::memcpy(out,metadata,sizeof(*out));
     out->data=reinterpret_cast<const std::uint8_t *>(selected_blob.data());
     return FFX_OK;
 }

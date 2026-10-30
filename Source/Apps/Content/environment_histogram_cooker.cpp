@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -312,7 +311,6 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
     Check(histogram.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT,kLutWidth,16,kLayers,1),"Allocate histogram LUT array");
     std::array<LayerData,kLayers> data;
     for (size_t layer=0;layer<kLayers;++layer) {
-        std::cout<<"Cook terrain histogram slice "<<layer<<"\n";
         data[layer]=CookLayer(paths[layer],layer,gaussian,histogram);
     }
     if (device)

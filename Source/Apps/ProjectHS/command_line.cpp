@@ -21,6 +21,7 @@ ApplicationConfig ParseProjectHsArguments(
 #endif
     for (const std::string_view argument : args)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (argument == "--smoke")
         {
             config.smoke = true;
@@ -32,7 +33,9 @@ ApplicationConfig ParseProjectHsArguments(
         {
             config.smoke_render_lockstep = true;
         }
-        else if (argument == "--warp")
+#endif
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (argument == "--warp")
         {
             config.warp = true;
         }
@@ -45,7 +48,8 @@ ApplicationConfig ParseProjectHsArguments(
             config.validation = true;
             config.gpu_validation = true;
         }
-        else if (argument == "--no-vsync")
+#endif
+        if (argument == "--no-vsync")
         {
             config.vsync_explicit = true;
             config.vsync = false;
@@ -60,6 +64,7 @@ ApplicationConfig ParseProjectHsArguments(
             config.borderless_explicit = true;
             config.borderless = true;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument == "--environment-preview")
         {
             config.environment_preview = true;
@@ -68,10 +73,12 @@ ApplicationConfig ParseProjectHsArguments(
         {
             config.character_preview = true;
         }
+#endif
         else if (argument == "--mute")
         {
             config.mute_audio = true;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument.starts_with("--monster-preview="))
         {
             const auto value = argument.substr(18);
@@ -203,7 +210,9 @@ ApplicationConfig ParseProjectHsArguments(
                                 config.skill_vfx_aim.y);
             }
         }
-        else if (argument == "--record-playtest")
+#endif
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (argument == "--record-playtest")
         {
             config.record_playtest = true;
         }
@@ -227,6 +236,7 @@ ApplicationConfig ParseProjectHsArguments(
             config.replay_compare = true;
             config.record_playtest = true;
         }
+#endif
         else if (argument == "--no-bloom")
         {
             config.bloom_explicit = true;
@@ -242,10 +252,13 @@ ApplicationConfig ParseProjectHsArguments(
             config.generation_pointer =
                 std::filesystem::path(argument.substr(std::string_view{"--generation="}.size()));
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument == "--resize-test")
         {
             config.resize_test = true;
         }
+#endif
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument == "--barriers=legacy")
         {
             config.barrier_mode = BarrierMode::Legacy;
@@ -254,6 +267,7 @@ ApplicationConfig ParseProjectHsArguments(
         {
             config.barrier_mode = BarrierMode::Enhanced;
         }
+#endif
         else if (argument.starts_with("--camera-zoom="))
         {
             const auto value = argument.substr(std::string_view{"--camera-zoom="}.size());
@@ -263,6 +277,7 @@ ApplicationConfig ParseProjectHsArguments(
                 zoom >= 15 && zoom <= 120)
                 config.camera_zoom_percent = zoom;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument.starts_with("--ticks="))
         {
             const auto value = argument.substr(8);
@@ -273,6 +288,7 @@ ApplicationConfig ParseProjectHsArguments(
             const auto value = argument.substr(7);
             std::from_chars(value.data(), value.data() + value.size(), config.seed);
         }
+#endif
         else if (argument.starts_with("--frame-cap="))
         {
             const auto value = argument.substr(12);
@@ -309,6 +325,7 @@ ApplicationConfig ParseProjectHsArguments(
                             config.particle_percentage);
             config.particle_percentage = config.particle_percentage <= 50 ? 50u : 100u;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument == "--capture-diagnostics")
         {
             config.capture_diagnostics = true;
@@ -317,6 +334,7 @@ ApplicationConfig ParseProjectHsArguments(
         {
             config.artifact_directory = argument.substr(12);
         }
+#endif
         else if (argument.starts_with("--resolution="))
         {
             const auto value = argument.substr(13);

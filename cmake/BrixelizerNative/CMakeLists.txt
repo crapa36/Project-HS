@@ -89,18 +89,28 @@ add_library(hs_brixelizer_shader_tables STATIC ${brix_shared}
     "${brix_sdk}/src/backends/shared/blob_accessors/ffx_brixelizergi_shaderblobs.cpp"
     "${brix_private}/renderer_brixelizer_shaders.cpp")
 add_dependencies(hs_brixelizer_shader_tables hs_brixelizer_permutations)
+target_link_libraries(hs_brixelizer_shader_tables PRIVATE hs_core)
 target_compile_definitions(hs_brixelizer_shader_tables PRIVATE FFX_BRIXELIZER FFX_BRIXELIZER_GI NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(hs_brixelizer_shader_tables PRIVATE
     "${brix_sdk}/include" "${brix_sdk}/src/components" "${brix_sdk}/src/backends/shared"
     "${brix_sdk}/src/shared" "${FFX_PASS_SHADER_OUTPUT_PATH}")
 target_include_directories(hs_brixelizer_shader_tables PUBLIC "${CMAKE_SOURCE_DIR}/Source/RendererD3D12/Public")
-add_library(hs_brixelizer_native STATIC ${brix_host} "${brix_private}/renderer_brixelizer_backend.cpp")
+add_library(hs_brixelizer_native STATIC ${brix_host}
+    "${brix_sdk}/src/shared/ffx_assert.cpp"
+    "${brix_sdk}/src/shared/ffx_object_management.cpp"
+    "${brix_sdk}/src/shared/ffx_breadcrumbs_list.cpp"
+    "${brix_private}/renderer_brixelizer_backend.cpp")
+set(HS_BRIXELIZER_METADATA_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/renderer_brixelizer_shader_metadata.cpp")
+set_source_files_properties("${HS_BRIXELIZER_METADATA_CPP}" PROPERTIES GENERATED TRUE)
+target_sources(hs_brixelizer_native PRIVATE "${HS_BRIXELIZER_METADATA_CPP}")
 target_include_directories(hs_brixelizer_native PRIVATE
+    "${brix_private}"
+    "${CMAKE_SOURCE_DIR}/Source/RendererD3D12/Public"
     "${brix_sdk}/include" "${brix_sdk}/libs" "${brix_sdk}/src/components"
     "${brix_sdk}/src/shared" "${brix_sdk}/src/backends/shared" "${brix_sdk}/src/backends/dx12")
 target_include_directories(hs_brixelizer_native PRIVATE "${brix_sdk}/src/components/brixelizer")
 target_compile_definitions(hs_brixelizer_native PRIVATE FFX_BRIXELIZER FFX_BRIXELIZER_GI NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
-target_link_libraries(hs_brixelizer_native PRIVATE hs_core hs_brixelizer_shader_tables d3d12 dxgi)
+target_link_libraries(hs_brixelizer_native PRIVATE hs_core d3d12 dxgi)
 if(MSVC)
     target_compile_options(hs_brixelizer_native PRIVATE /wd4201 /wd4244 /wd4267)
     target_compile_options(hs_brixelizer_shader_tables PRIVATE /wd4201 /wd4244 /wd4267)
@@ -108,3 +118,23 @@ endif()
 # Consumers get no transitive FidelityFX include root. Set these includes only
 # on renderer_brixelizer_gi.cpp (not renderer target, FSR or provider TUs).
 set(HS_BRIXELIZER_PRIVATE_INCLUDE "${brix_sdk}/include" CACHE INTERNAL "Brixelizer TU-only headers")
+set(HS_BRIXELIZER_NATIVE_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE INTERNAL "Brixelizer native target binary directory")
+
+# Called by top-level CMake after the blob-table producer target exists. The
+# producer compiles against the official full SDK tables, then emits only
+# binding metadata into the native target; runtime no longer links those blobs.
+function(hs_brixelizer_attach_shader_metadata producer_target)
+    set(metadata_dir "${HS_BRIXELIZER_NATIVE_BINARY_DIR}/generated")
+    set(metadata_cpp "${metadata_dir}/renderer_brixelizer_shader_metadata.cpp")
+    set(metadata_stamp "${metadata_dir}/renderer_brixelizer_shader_metadata.stamp")
+    add_custom_command(OUTPUT "${metadata_stamp}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${metadata_dir}"
+        COMMAND "$<TARGET_FILE:${producer_target}>" "--emit-metadata=${metadata_cpp}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${metadata_stamp}"
+        BYPRODUCTS "${metadata_cpp}"
+        DEPENDS ${producer_target}
+        VERBATIM)
+    add_custom_target(hs_brixelizer_shader_metadata DEPENDS "${metadata_stamp}")
+    add_dependencies(hs_brixelizer_shader_metadata ${producer_target})
+    add_dependencies(hs_brixelizer_native hs_brixelizer_shader_metadata)
+endfunction()

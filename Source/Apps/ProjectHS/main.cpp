@@ -30,8 +30,6 @@ int main(int argc, char **argv)
         return 1;
     }
 #ifdef HS_DEVELOPMENT_TOOLS
-    std::cout << "runtime tick=" << run.final_tick << " checksum=" << run.checksum
-              << " frames=" << run.rendered_frames << '\n';
     if (!run.playtest_directory.empty())
         std::cout << "playtest=" << run.playtest_directory.string() << '\n';
 #endif

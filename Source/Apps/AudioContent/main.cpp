@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <iostream>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -205,7 +204,6 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
     if (Current(build_root, spec, action_key))
     {
         ap::TouchActionResult(actions / "result.json");
-        std::cout << "audio current files=" << waves.size() + 4 << '\n';
         return;
     }
     const auto stage = ap::CreateStage(actions);
@@ -236,16 +234,8 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
         products.push_back(ap::HashProduct("audio/release-cpp", "release_audio.cpp", stage / "release_audio.cpp"));
         products.push_back(ap::HashProduct("audio/release-pcm", "release_audio.pcm", stage / "release_audio.pcm"));
         products.push_back(ap::HashProduct("audio/release-identity", "release_audio.identity", stage / "release_audio.identity"));
-        std::cout << "shipping-audio PCM preload_samples=" << release.preload_samples
-                  << " preload_bytes=" << release.preload_bytes
-                  << " transition_samples=" << release.transition_samples
-                  << " transition_bytes=" << release.transition_bytes
-                  << " total_bytes=" << release.pcm.size() << '\n';
         std::ranges::sort(products, {}, &ap::Product::logical_id);
-        const auto product_set_id = ap::ProductSetId(products);
         ap::Publish(build_root, spec, stage, std::move(products));
-        std::cout << "audio action_key=" << action_key << " product_set_id="
-                  << product_set_id << " files=" << waves.size() + 4 << '\n';
     }
     catch (...)
     {

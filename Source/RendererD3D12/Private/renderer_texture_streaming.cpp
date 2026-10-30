@@ -496,7 +496,8 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
             existing.fallback_first_mip != registration.fallback_first_mip ||
             existing.fallback_allocation_bytes != registration.fallback_allocation_bytes ||
             existing.fallback_graph_access != registration.fallback_graph_access ||
-            existing.pinned != registration.pinned)
+            existing.pinned != registration.pinned ||
+            existing.opacity_sampling != registration.opacity_sampling)
             return Failure("Texture aliases disagree with the actual selected product owner.");
         id.value = static_cast<std::uint32_t>(index + 1); return Result::Success();
     }
@@ -1782,7 +1783,8 @@ TextureStreamView RendererTextureStreaming::View(TextureStreamId id) const noexc
         resident_mip = std::max(resident_mip, texture.pending->target_mip);
     auto completion = texture.last_use; completion.Merge(texture.publication);
     return {resource, texture.registration.description, texture.first_mip, resident_mip,
-        texture.revision, completion, texture.active_access, texture.reserved_published};
+        texture.revision, completion, texture.active_access, texture.reserved_published,
+        texture.registration.opacity_sampling};
 }
 bool RendererTextureStreaming::HardwareBacked(TextureStreamId id) const noexcept
 {
@@ -1804,7 +1806,8 @@ bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
             entry.sampled_version.ordinal!=(pending&&!entry.separate_target?1u:0u)||
             !Same(entry.description,view.logical_description)||
             entry.first_mip!=view.first_mip||entry.resident_min_mip!=view.resident_min_mip||
-            entry.access!=view.access||entry.pending!=pending)return false;
+            entry.access!=view.access||entry.pending!=pending||
+            entry.opacity_sampling!=view.opacity_sampling)return false;
         if(pending)
         {
             if(entry.separate_target!=(batch->resource.Get()!=view.resource)||
@@ -1854,6 +1857,7 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
     for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
         auto &texture = impl_->textures[index]; const auto view = View({static_cast<std::uint32_t>(index + 1u)});
+        if (layout) layout->entries[index].opacity_sampling = view.opacity_sampling;
         const NativeResourceContract *sampled_contract{};
         if(texture.reserved.Get()==view.resource&&view.resource)
         {
@@ -1969,7 +1973,7 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
         bindings.push_back({{static_cast<std::uint32_t>(index + 1u)}, version,
             texture.registration.logical_id,view.resident_min_mip,required_mip,texture.desired_mip,
             !texture.pending&&texture.desired_mip<=required_mip&&
-                view.resident_min_mip<=required_mip});
+                view.resident_min_mip<=required_mip,view.opacity_sampling});
     }
     return Result::Success();
 }
@@ -2134,5 +2138,39 @@ std::optional<bool> RendererTextureStreaming::RequiredSourceMipFitsMaximumHostBu
         }
     return TextureHostFootprintFitsBudget(metadata_bytes, payload_bytes,
         kMaximumHostStagingBudgetBytes);
+}
+std::optional<bool> RendererTextureStreaming::RequiredMipSetFitsConfiguredBudget(
+    std::span<const TextureStreamMipRequirement> requirements) const noexcept
+{
+    if (requirements.empty()) return true;
+    bool ready = true;
+    for (const auto requirement : requirements)
+    {
+        if (!requirement.texture || requirement.texture.value > impl_->textures.size()) return std::nullopt;
+        const auto &texture = impl_->textures[requirement.texture.value - 1];
+        if (requirement.mip > texture.tail_mip) return std::nullopt;
+        const auto view = View(requirement.texture);
+        ready = ready && !texture.pending && texture.desired_mip <= requirement.mip &&
+            view.resource && view.resident_min_mip <= requirement.mip;
+    }
+    if (ready || !impl_->budget) return true;
+
+    // The registered minimum includes every pinned fallback and every
+    // unpinned fallback plus its coarse streamed tail. Add only the detail
+    // above each required capture tail; no transient adapter-pressure facts
+    // participate in this intrinsic configured-cap check.
+    auto required_bytes = impl_->MinimumBudget();
+    if (required_bytes == UINT64_MAX) return std::nullopt;
+    for (const auto requirement : requirements)
+    {
+        const auto &texture = impl_->textures[requirement.texture.value - 1];
+        if (texture.registration.pinned) continue;
+        const auto target_cost = impl_->Cost(texture, requirement.mip);
+        const auto tail_cost = impl_->Cost(texture, texture.tail_mip);
+        if (target_cost == UINT64_MAX || tail_cost == UINT64_MAX || target_cost < tail_cost ||
+            !TextureAccumulateBudgetBytes(required_bytes, target_cost - tail_cost))
+            return std::nullopt;
+    }
+    return required_bytes <= impl_->budget;
 }
 } // namespace hs

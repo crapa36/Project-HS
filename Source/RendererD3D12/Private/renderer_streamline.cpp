@@ -48,7 +48,12 @@ std::atomic<long> gStreamlinePresentError{};
 
 void StreamlineLog(sl::LogType type, const char *message)
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (message) std::fprintf(stderr, "hs.streamline.sdk type=%u message=%s\n", static_cast<unsigned>(type), message);
+#else
+    static_cast<void>(type);
+    static_cast<void>(message);
+#endif
 }
 void StreamlineAPIError(const sl::APIError &error)
 {
@@ -448,14 +453,18 @@ StreamlineSession::~StreamlineSession()
     {
         // Teardown cannot unload proxy/plugin code or release resources while
         // SDK work remains. Report the missing drain and retain the one session.
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.streamline.shutdown error=%s\n", std::string(result.Message()).c_str());
+#endif
         static_cast<void>(impl_.release());
     }
     else if (impl_)
     {
         // The session cannot inspect all external proxy references. Explicit
         // UnloadAfterProxyRelease is the renderer's proof that they are gone.
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.streamline.shutdown error=UnloadAfterProxyRelease was not called; proxy DLL remains loaded\n");
+#endif
         static_cast<void>(impl_.release());
     }
 }
@@ -524,7 +533,6 @@ Result StreamlineSession::InitializeBeforeDevice(StreamlineFeatures requested)
     const auto result = state.initialize(preferences, sl::kSDKVersion);
     if (result != sl::Result::eOk) return state.FailAll(NativeFailure("slInit", result));
     state.started = true;
-    std::fprintf(stderr, "hs.streamline.runtime version=2.14.1 commit=2122257e0fce486f91b385aa63b9a09b0a34b363 ota=off\n");
     return Result::Success();
 }
 

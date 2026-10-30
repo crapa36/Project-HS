@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace hs
 {
@@ -15,6 +16,7 @@ Result HResultFailure(std::string_view operation, HRESULT result)
                                        static_cast<std::uint32_t>(result)));
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 namespace
 {
 RendererDiagnosticsPercentiles Percentiles(std::span<double> values)
@@ -138,6 +140,7 @@ RendererDiagnosticsMeasurementSet Measurements(std::span<const RendererDiagnosti
     return output;
 }
 } // namespace
+#endif
 
 std::uint64_t RendererDiagnosticsCounter() noexcept
 {
@@ -146,6 +149,7 @@ std::uint64_t RendererDiagnosticsCounter() noexcept
         ? static_cast<std::uint64_t>(counter.QuadPart) : 0;
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 void RendererDiagnosticsRecorder::RecordRenderedFrame(std::uint64_t id, std::uint64_t submit,
     std::uint64_t present_begin, std::uint64_t present_end, const RendererQueueStats &queues,
     const RendererDiagnosticsMemory &memory, bool validation, bool gpu_validation,
@@ -367,7 +371,9 @@ RendererDiagnosticsSnapshot RendererDiagnosticsRecorder::Snapshot() const
     }
     return output;
 }
+#endif
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
 {
     RendererDiagnosticsMemory output;
@@ -447,9 +453,11 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
     }
     return output;
 }
+#endif
 
 RendererDiagnosticsSnapshot D3D12Renderer::GetDiagnostics() const
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_) return {};
     // Refresh completed slots on a copy so capture can include the final frames
     // after a GPU wait without mutating the recorder through this const API.
@@ -464,6 +472,9 @@ RendererDiagnosticsSnapshot D3D12Renderer::GetDiagnostics() const
     output.presentation = GetPresentationStatus();
     output.reconstruction = GetReconstructionStatus();
     return output;
+#else
+    return {};
+#endif
 }
 
 Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operation)
@@ -485,7 +496,8 @@ Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operati
 
 void D3D12Renderer::Impl::CountValidationErrors()
 {
-    if (!config.validation || !device)
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if ((!config.validation && !config.gpu_validation) || !device)
     {
         return;
     }
@@ -495,7 +507,9 @@ void D3D12Renderer::Impl::CountValidationErrors()
         return;
     }
     const auto count = info_queue->GetNumStoredMessages();
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::ofstream log(config.artifact_directory / "d3d12_validation.log", std::ios::app);
+#endif
     for (std::uint64_t index = 0; index < count; ++index)
     {
         SIZE_T size{};
@@ -507,15 +521,19 @@ void D3D12Renderer::Impl::CountValidationErrors()
              message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION))
         {
             ++validation_errors;
+#if defined(HS_DEVELOPMENT_TOOLS)
             log << "id=" << message->ID << " severity=" << message->Severity << ' '
                 << message->pDescription << '\n';
+#endif
         }
     }
     info_queue->ClearStoredMessages();
+#endif
 }
 
 void D3D12Renderer::Impl::WriteDred(HRESULT reason) const
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::error_code error;
     std::filesystem::create_directories(config.artifact_directory, error);
     std::ofstream stream(config.artifact_directory / "dred.txt", std::ios::trunc);
@@ -542,13 +560,27 @@ void D3D12Renderer::Impl::WriteDred(HRESULT reason) const
                 return name;
             };
             // Retain the failure position and its nearby PIX contexts instead of
-            // reporting only that a breadcrumb list exists. Bound failure output.
-            const auto *node = breadcrumbs.pHeadAutoBreadcrumbNode;
-            std::uint32_t node_index{};
-            for (; node && node_index < 128; node = node->pNext, ++node_index)
+            // reporting only that a breadcrumb list exists. Prioritize active work
+            // while keeping the number of detailed nodes bounded.
+            std::size_t in_progress_count{}, pending_count{}, completed_count{};
+            std::size_t total_nodes{};
+            for (auto *node = breadcrumbs.pHeadAutoBreadcrumbNode; node; node = node->pNext)
             {
                 const auto completed = node->pLastBreadcrumbValue
                     ? std::min(*node->pLastBreadcrumbValue, node->BreadcrumbCount) : 0u;
+                if (completed > 0 && completed < node->BreadcrumbCount) ++in_progress_count;
+                else if (completed == 0 && completed < node->BreadcrumbCount) ++pending_count;
+                else ++completed_count;
+                ++total_nodes;
+            }
+            constexpr std::size_t max_emitted_nodes = 128;
+            stream << "breadcrumb_nodes_total=" << total_nodes
+                   << " in_progress=" << in_progress_count
+                   << " pending=" << pending_count
+                   << " completed=" << completed_count
+                   << " emitted=" << std::min(total_nodes, max_emitted_nodes) << '\n';
+            const auto emit_node = [&](const auto *node, std::size_t node_index,
+                                       std::uint32_t completed) {
                 stream << "node=" << node_index << " list=" << node->pCommandList
                        << " queue=" << node->pCommandQueue << " list_name="
                        << debug_name(node->pCommandListDebugNameA, node->pCommandListDebugNameW)
@@ -571,14 +603,34 @@ void D3D12Renderer::Impl::WriteDred(HRESULT reason) const
                                << debug_name(nullptr, entry.pContextString) << '\n';
                         ++emitted;
                     }
+            };
+            std::size_t emitted_nodes{};
+            for (std::uint32_t priority = 0; priority < 3 && emitted_nodes < max_emitted_nodes; ++priority)
+            {
+                std::size_t node_index{};
+                for (auto *node = breadcrumbs.pHeadAutoBreadcrumbNode;
+                     node && emitted_nodes < max_emitted_nodes;
+                     node = node->pNext, ++node_index)
+                {
+                    const auto completed = node->pLastBreadcrumbValue
+                        ? std::min(*node->pLastBreadcrumbValue, node->BreadcrumbCount) : 0u;
+                    const auto node_priority = completed > 0 && completed < node->BreadcrumbCount ? 0u
+                        : completed == 0 && completed < node->BreadcrumbCount ? 1u : 2u;
+                    if (node_priority != priority) continue;
+                    emit_node(node, node_index, completed);
+                    ++emitted_nodes;
+                }
             }
-            if (node) stream << "breadcrumb_nodes_truncated=1\n";
+            if (emitted_nodes < total_nodes) stream << "breadcrumb_nodes_truncated=1\n";
         }
         if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&page_fault)))
         {
             stream << "page_fault_va=" << page_fault.PageFaultVA << '\n';
         }
     }
+#else
+    static_cast<void>(reason);
+#endif
 }
 
 

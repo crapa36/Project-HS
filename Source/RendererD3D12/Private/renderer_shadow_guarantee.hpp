@@ -50,7 +50,7 @@ struct VirtualShadowGuarantee
 };
 enum ShadowReceiverDomain : std::uint32_t
 {
-    ShadowReceiverCamera = 1u, ShadowReceiverWorld = 2u, ShadowReceiverSoftwareGi = 4u,
+    ShadowReceiverCamera = 1u, ShadowReceiverWorld = 2u,
 };
 struct ShadowSurfaceReceiver { Float4 minimum{},maximum{}; };
 struct ShadowSurfaceReceiverRange
@@ -412,7 +412,7 @@ template <typename Casters, typename Receivers>
     const auto deny = [&](VirtualShadowCsmReason reason) { result.reason = reason; return result; };
     if (!f.compatible_bake) return deny(VirtualShadowCsmReason::NoCompatibleBake);
     if (!f.seed_available) return deny(VirtualShadowCsmReason::SeedUnavailable);
-    constexpr auto known=ShadowReceiverCamera|ShadowReceiverWorld|ShadowReceiverSoftwareGi;
+    constexpr auto known=ShadowReceiverCamera|ShadowReceiverWorld;
     if(!(f.required_receiver_domains&ShadowReceiverCamera) || (f.required_receiver_domains&~known) ||
        (f.closed_receiver_domains&f.required_receiver_domains)!=f.required_receiver_domains)
         return deny(VirtualShadowCsmReason::ReceiverDomainIncomplete);

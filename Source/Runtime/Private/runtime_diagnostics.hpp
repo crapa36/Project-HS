@@ -41,6 +41,7 @@ struct VfxWorkspaceSample
     }
 };
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 class VfxWorkspacePeak
 {
   public:
@@ -58,7 +59,9 @@ class VfxWorkspacePeak
     VfxWorkspaceSample sample_{};
     bool observed_{};
 };
+#endif
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 // A null clock leaves ordinary play free of diagnostic clock reads.
 class DiagnosticScope
 {
@@ -257,4 +260,43 @@ class DiagnosticLog
     std::size_t used_{};
     std::uint64_t records_{}, dropped_{}, bytes_{};
 };
+#else
+class DiagnosticScope
+{
+  public:
+    DiagnosticScope(DiagnosticSample &, DiagnosticClock) noexcept {}
+    void Stop() noexcept {}
+};
+
+inline std::string CsvField(std::string_view) { return {}; }
+template <typename T> inline void AppendCsvValue(std::string &, T) {}
+template <typename... Values> inline void AppendCsvValues(std::string &, const Values &...) {}
+inline void AppendCsvText(std::string &, std::string_view) {}
+
+class PerformanceLogState
+{
+  public:
+    static constexpr std::uint64_t ElapsedTicks(std::uint64_t, std::uint64_t) noexcept { return 0; }
+    std::uint64_t FrameInterval(std::uint64_t) noexcept { return 0; }
+    bool AcceptGpuFrame(std::uint64_t, bool, bool) noexcept { return false; }
+    [[nodiscard]] std::uint64_t GpuFrames() const noexcept { return 0; }
+    [[nodiscard]] std::uint64_t LastGpuFrame() const noexcept { return 0; }
+    [[nodiscard]] bool GpuFrameCoverageComplete(std::uint64_t) const noexcept { return true; }
+};
+
+class DiagnosticLog
+{
+  public:
+    DiagnosticLog(std::ostream &, bool, std::string_view = {}, DiagnosticClock = nullptr) {}
+    void Append(std::string_view) {}
+    bool Flush() { return true; }
+    bool Finish() { return true; }
+    bool Complete() const noexcept { return true; }
+    bool Failed() const noexcept { return false; }
+    std::uint64_t Records() const noexcept { return 0; }
+    std::uint64_t Dropped() const noexcept { return 0; }
+    DiagnosticSample Io() const noexcept { return {}; }
+    std::uint64_t Bytes() const noexcept { return 0; }
+};
+#endif
 }

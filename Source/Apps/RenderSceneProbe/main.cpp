@@ -263,7 +263,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
             {
                 ap::UpstreamProduct ignored; fs::path path;
                 current.ReadProduct(kProduct,ignored,path);
-                ap::TouchActionResult(resultPath); std::cout<<spec.action_id<<" current\n"; return;
+                ap::TouchActionResult(resultPath); return;
             }
         }
         catch(const std::exception &) { /* Invalid current immutable product is rebuilt by the normal Action. */ }

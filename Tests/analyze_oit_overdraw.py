@@ -211,7 +211,6 @@ if __name__ == "__main__":
     parser.add_argument("--runner", type=Path)
     parser.add_argument("--generation", type=Path)
     args = parser.parse_args()
-    selfcheck()
     if bool(args.runner) != bool(args.generation) or (args.runner and not args.directory):
         parser.error("--runner and --generation require each other and an artifact directory")
     if args.runner:
@@ -234,4 +233,5 @@ if __name__ == "__main__":
         if args.require_finite and not args.camera_basis and not result["precision_regression_passed"]:
             raise SystemExit(1)
     else:
+        selfcheck()
         print("OIT analyzer selfcheck PASS")

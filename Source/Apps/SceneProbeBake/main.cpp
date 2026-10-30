@@ -108,16 +108,16 @@ void BakeSceneProbe(const hs::SelectedGeneration &generation, const std::filesys
     window.Create();
     config.window = window.handle;
     hs::TaskSystem recording_workers(4);
-    auto recording_group = std::make_unique<hs::TaskGroup>();
+    auto recording_group = recording_workers.CreateTaskGroup();
     config.task_executor.submit = [&](std::function<void()> record) {
-        const bool accepted = recording_workers.Submit(*recording_group, "Render fixture recording",
+        const bool accepted = recording_group.Submit(
             [record = std::move(record)](std::stop_token) { record(); });
         return accepted ? hs::Result::Success() :
             hs::Result::Failure(hs::ErrorCode::TaskFailed, "hs_scene_probe_bake", "Could not submit recording task.");
     };
     config.task_executor.join = [&] {
-        auto joined = recording_workers.Wait(*recording_group);
-        recording_group = std::make_unique<hs::TaskGroup>();
+        auto joined = recording_group.Wait();
+        recording_group = recording_workers.CreateTaskGroup();
         return joined;
     };
     auto startup_font = ReadDeveloperFont();

@@ -179,9 +179,9 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
         device->CreateShaderResourceView(storage->irradiance.resource.Get(),&view,storage->Srv(2));
         storage->options={std::cos(package.description.orientation_y_radians),std::sin(package.description.orientation_y_radians),
             float(package.prefiltered.description.mip_count-1),1.0f};
-        storage->radiance.resource->SetName(L"LightingProbeRawRadiance");
-        storage->prefiltered.resource->SetName(L"LightingProbeGgxPrefilter");
-        storage->irradiance.resource->SetName(L"LightingProbeCosineSh9");
+        HS_RENDERER_SET_DEBUG_NAME(storage->radiance.resource.Get(), L"LightingProbeRawRadiance");
+        HS_RENDERER_SET_DEBUG_NAME(storage->prefiltered.resource.Get(), L"LightingProbeGgxPrefilter");
+        HS_RENDERER_SET_DEBUG_NAME(storage->irradiance.resource.Get(), L"LightingProbeCosineSh9");
         for(const auto *resource:{&storage->radiance,&storage->prefiltered,&storage->irradiance,&storage->upload})
             storage->bytes+=resource->allocation->GetSize();
         candidate.storage_=std::move(storage); return Result::Success();

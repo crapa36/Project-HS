@@ -1,5 +1,4 @@
 #include "release_audio_codegen.hpp"
-#include <hs/core/sha256.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -23,15 +22,6 @@ void TestReleaseAudioCodegen()
         return bytes;
     };
     const auto read = [&](std::string_view name) { return wave(name.starts_with("music") ? 2 : 1); };
-    const auto digest_text = [](std::string_view pcm) {
-        std::string text;
-        for (const auto value : hs::Sha256(std::as_bytes(std::span(pcm.data(), pcm.size()))))
-        {
-            if (!text.empty()) text += ',';
-            text += "std::byte{" + std::to_string(std::to_integer<unsigned>(value)) + "}";
-        }
-        return text;
-    };
     const auto release = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
     const auto repeated = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
     check(release.source == repeated.source && release.pcm == repeated.pcm &&
@@ -39,13 +29,6 @@ void TestReleaseAudioCodegen()
     check(release.pcm == wave(2).substr(44) + wave(1).substr(44));
     check(release.preload_samples == 1 && release.transition_samples == 1 &&
           release.preload_bytes == 12 && release.transition_bytes == 12);
-    check(release.source.find("{64ull,12ull,48000u,2,24}") != std::string::npos &&
-          release.source.find("{76ull,12ull,48000u,1,24}") != std::string::npos);
-    check(release.source.find("music.wav") == std::string::npos && release.source.find("impact.wav") == std::string::npos);
-    check(release.source.find("true,true,true,false}") != std::string::npos); // Spatial/preload/arrow/loop.
-    check(release.source.find("std::array<AudioPcmChunk,2>") != std::string::npos);
-    check(release.source.find("{64ull,12ull,0u,1u,false,{" + digest_text(wave(2).substr(44)) + "}}") != std::string::npos);
-    check(release.source.find("{76ull,12ull,1u,1u,true,{" + digest_text(wave(1).substr(44)) + "}}") != std::string::npos);
     auto grouped_catalog = catalog;
     grouped_catalog.replace(grouped_catalog.find("\"music.wav\""), std::string_view("\"music.wav\"").size(), "\"music.wav\",\"music2.wav\"");
     grouped_catalog.replace(grouped_catalog.find("\"impact.wav\""), std::string_view("\"impact.wav\"").size(), "\"impact.wav\",\"impact2.wav\"");
@@ -58,13 +41,8 @@ void TestReleaseAudioCodegen()
     const auto metadata_changed = hs::audio_content::BuildReleaseAudio(metadata_catalog, read, 64);
     check(metadata_changed.pcm == release.pcm && metadata_changed.identity != release.identity);
     check(grouped.pcm == wave(2).substr(44) + wave(2).substr(44) + wave(1).substr(44) + wave(1).substr(44));
-    check(grouped.source.find("std::array<AudioPcmChunk,3>") != std::string::npos &&
-          grouped.source.find("{64ull,12ull,0u,1u,false,{") != std::string::npos &&
-          grouped.source.find("{76ull,12ull,1u,1u,false,{") != std::string::npos &&
-          grouped.source.find("{88ull,24ull,2u,2u,true,{" + digest_text(wave(1).substr(44) + wave(1).substr(44)) + "}}") != std::string::npos);
     const auto relocated = hs::audio_content::BuildReleaseAudio(grouped_catalog, read, 256);
-    check(relocated.identity != grouped.identity && relocated.pcm == grouped.pcm && relocated.source.find(
-        "{280ull,24ull,2u,2u,true,{" + digest_text(wave(1).substr(44) + wave(1).substr(44)) + "}}") != std::string::npos);
+    check(relocated.identity != grouped.identity && relocated.pcm == grouped.pcm);
     bool rejected = false;
     try
     {

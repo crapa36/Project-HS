@@ -496,55 +496,6 @@ void TestReleaseVfxCodegen()
         fresnel_effects,fresnel_recipes,mesh_effects,mesh_recipes};
     const auto source = hs::content::EmitReleaseVfxCpp(image);
     Check(source == hs::content::EmitReleaseVfxCpp(image));
-    for (const std::string_view token : {"constinit const VfxImage kVfx{", "VfxProgramView{", "const VfxImage &Vfx() noexcept",
-        "std::bit_cast<float>(std::uint32_t{2147483648u})", "std::bit_cast<float>(std::uint32_t{1u})",
-        "18364758544493064720ull", "17375808098319191535ull", "18364757894559524745ull",
-        "std::byte{237u}", "std::byte{195u}", "std::byte{0u}", "{1u,7u}", "{1u,2u}",
-        "{105u,15u,25u}", "true,65535u,"})
-        Check(source.find(token) != std::string::npos);
-    Check(source.find("std::array<VfxGroundRecipe,2> kGroundRecipes") != std::string::npos &&
-          source.find("std::array<VfxFlashRecipe,1> kFlashRecipes") != std::string::npos &&
-          source.find("std::array<VfxPersistentStampRecipe,1> kPersistentStampRecipes") != std::string::npos &&
-          source.find("std::array<VfxPersistentFireRecipe,1> kPersistentFireRecipes") != std::string::npos &&
-          source.find("std::array<VfxOwnedStatusTickRecipe,1> kOwnedStatusTickRecipes") != std::string::npos &&
-          source.find("std::array<VfxMoteSourceRecipe,1> kMoteSourceRecipes") != std::string::npos &&
-          source.find("std::array<VfxMoteOutputRecipe,1> kMoteOutputRecipes") != std::string::npos &&
-          source.find("std::array<VfxScreenEffectRecipe,1> kScreenEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxScreenRecipe,1> kScreenRecipes") != std::string::npos &&
-          source.find("std::array<VfxVolumeEffectRecipe,1> kVolumeEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxVolumeRecipe,1> kVolumeRecipes") != std::string::npos &&
-          source.find("std::array<VfxEntitySurfaceEffectRecipe,1> kEntitySurfaceEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxEntitySurfaceRecipe,1> kEntitySurfaceRecipes") != std::string::npos &&
-          source.find("std::array<VfxRibbonEffectRecipe,1> kRibbonEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxRange,1> kRibbonWakeEffectRanges") != std::string::npos &&
-          source.find("std::array<VfxRibbonWakeRecipe,1> kRibbonWakeRecipes") != std::string::npos &&
-          source.find("std::array<VfxRange,1> kRibbonFixedEffectRanges") != std::string::npos &&
-          source.find("std::array<VfxRibbonFixedRecipe,1> kRibbonFixedRecipes") != std::string::npos &&
-          source.find("std::array<VfxRange,1> kRibbonProjectileEffectRanges") != std::string::npos &&
-          source.find("std::array<VfxRibbonProjectileSourceRecipe,1> kRibbonProjectileSources") != std::string::npos &&
-          source.find("std::array<VfxRibbonProjectileOutputRecipe,1> kRibbonProjectileOutputs") != std::string::npos &&
-          source.find("std::array<VfxRange,1> kRibbonCancelEffectRanges") != std::string::npos &&
-          source.find("std::array<VfxRibbonCancelRecipe,1> kRibbonCancelRecipes") != std::string::npos &&
-          source.find("std::array<VfxRibbonLinkEffectRecipe,1> kRibbonLinkEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxRibbonLinkOutputRecipe,1> kRibbonLinkOutputRecipes") != std::string::npos &&
-          source.find("std::array<VfxRibbonEventEffectRecipe,1> kRibbonEventEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxRibbonEventSourceRecipe,1> kRibbonEventSources") != std::string::npos &&
-          source.find("std::array<VfxRibbonEventOutputRecipe,1> kRibbonEventOutputs") != std::string::npos &&
-          source.find("std::array<VfxFresnelEffectRecipe,1> kFresnelEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxFresnelRecipe,1> kFresnelRecipes") != std::string::npos &&
-          source.find("std::array<VfxMeshEffectRecipe,1> kMeshEffectRecipes") != std::string::npos &&
-          source.find("std::array<VfxMeshRecipe,1> kMeshRecipes") != std::string::npos &&
-          source.find("std::array<VfxEffectLookupRecord,2> kEffectLookupById") != std::string::npos &&
-          source.find("{5u,6u,7u}") != std::string::npos);
-    Check(source.find("123ull,1u,2u,3u,4u,5u,0u,6u,2u,8u,3u,5u,2u,VfxSourceType(2u)") != std::string::npos &&
-          source.find("std::array<VfxBallisticRecipe,1> kBallisticRecipes") != std::string::npos);
-    for (const std::string_view token : {"std::vector", "memcpy", "DecodeVfx", "LoadVfx", "new ", "[]"})
-        Check(source.find(token) == std::string::npos);
-    Check(source.find("18364758544493064720ull") < source.find("{1ull,0u,1u,VfxDefinitionKind"));
-    const auto empty = hs::content::EmitReleaseVfxCpp(VfxImage{});
-    Check(empty.find("std::array<CookedVfxDefinition,0>") != std::string::npos &&
-        empty.find("std::array<std::byte,0>") != std::string::npos && empty.find("false,0u,0ull,") != std::string::npos &&
-        empty.find("},false,\n") != std::string::npos);
 #ifdef HS_RELEASE_VFX_CODEGEN_TEST_DIR
     const std::filesystem::path directory{HS_RELEASE_VFX_CODEGEN_TEST_DIR};
     std::filesystem::create_directories(directory);

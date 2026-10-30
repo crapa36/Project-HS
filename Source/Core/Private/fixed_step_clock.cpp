@@ -27,37 +27,16 @@ FixedStepClock::AdvanceResult FixedStepClock::Advance(Clock::time_point now)
         static_cast<std::uint32_t>(std::min<std::uint64_t>(available_ticks, kMaxCatchUpTicks));
     accumulator_ -= kFixedStep * tick_count;
 
-    bool diagnostic_due = false;
-    if (accumulator_ >= kDebtThreshold)
-    {
-        if (!debt_started_at_)
-        {
-            debt_started_at_ = now;
-        }
-        else if (!debt_reported_ && now - *debt_started_at_ >= kDebtReportDelay)
-        {
-            debt_reported_ = true;
-            diagnostic_due = true;
-        }
-    }
-    else
-    {
-        debt_started_at_.reset();
-        debt_reported_ = false;
-    }
-
     const auto first_boundary = tick_count
         ? now - accumulator_ - kFixedStep * (tick_count - 1)
         : Clock::time_point{};
-    return {tick_count, accumulator_, diagnostic_due, first_boundary};
+    return {tick_count, accumulator_, first_boundary};
 }
 
 void FixedStepClock::Realign(Clock::time_point now) noexcept
 {
     last_time_ = now;
-    debt_started_at_.reset();
     accumulator_ = Duration::zero();
-    debt_reported_ = false;
 }
 
 } // namespace hs

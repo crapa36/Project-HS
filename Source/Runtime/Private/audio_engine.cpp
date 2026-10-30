@@ -267,6 +267,7 @@ struct AudioEngine::Impl
     {
         if (reader_failure_reported) return;
         reader_failure_reported = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
         char diagnostic[768]{};
         const auto subsystem_size = static_cast<int>(std::min(subsystem.size(), std::size_t{64}));
         const auto message_size = static_cast<int>(std::min(message.size(), std::size_t{512}));
@@ -288,6 +289,12 @@ struct AudioEngine::Impl
         std::fwrite(diagnostic, 1, bytes, stderr);
         std::fflush(stderr);
         OutputDebugStringA(diagnostic);
+#else
+        (void)sample_index;
+        (void)code;
+        (void)subsystem;
+        (void)message;
+#endif
     }
     void RunReader() noexcept
     {
@@ -910,7 +917,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
         candidate.voice = nullptr; candidate.completion = nullptr;
     }
     selected->cue = cue.id; selected->bus = cue.bus; selected->priority = cue.priority;
-    selected->sample = sample; selected->position = event.position; selected->spatial = cue.spatial;
+    selected->sample = sample; selected->position = event.position; selected->spatial = !spatial_matrix.empty();
     selected->arrow_impact_family = cue.arrow_impact_family; selected->event_sequence = event.sequence;
     selected->aggregation_count = 1; selected->started_ms = now; selected->serial = ++impl_->voice_serial;
     selected->queued = true; selected->releasing = false; selected->session_id = event.session_id;
@@ -1000,8 +1007,7 @@ void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noe
     impl_->listener.OrientTop = next_top;
     for (auto &active : impl_->active_voices)
     {
-        if (!active.voice || !active.queued || !active.spatial || !active.sample ||
-            active.sample->format.nChannels != 1)
+        if (!active.voice || !active.queued || !active.spatial || !active.sample)
             continue;
         const auto matrix = impl_->SpatialMatrix(active.position, active.priority);
         const auto target_bus = active.bus == AudioBus::Sfx ? impl_->sfx_bus :

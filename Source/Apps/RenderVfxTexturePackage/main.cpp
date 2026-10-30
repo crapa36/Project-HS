@@ -189,7 +189,6 @@ void ProduceVolume(const fs::path &build_root, const TextureSpec &texture)
     if (CurrentVolume(build_root, spec, description, source_id, product_id))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
 
@@ -254,7 +253,6 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     if (Current(build_root, spec, description, source_id, product_id))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
 

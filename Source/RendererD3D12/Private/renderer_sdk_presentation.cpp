@@ -100,7 +100,9 @@ SdkPresentation::~SdkPresentation()
     {
         // An omitted teardown cannot prove that an SDK's internal queues or
         // callbacks stopped. Keep native code/leases alive rather than infer it.
+#if defined(HS_DEVELOPMENT_TOOLS)
         OutputDebugStringW(L"SDK presentation requires explicit GPU-completed teardown; preserving native owners.\n");
+#endif
         static_cast<void>(impl_.release());
     }
 }

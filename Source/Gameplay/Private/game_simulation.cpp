@@ -167,12 +167,14 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
     impl_->telemetry->balance_observer.Reset(config.capture_detailed_balance, config.capture_hit_rates);
     if (config.capture_hit_rates)
         impl_->telemetry->balance_observer.player_hit_casts.reserve(256);
+#ifdef HS_DEVELOPMENT_TOOLS
     impl_->timings = {};
     if (config.capture_timings)
         for (std::size_t sample = 0; sample < 64; ++sample)
         {
             SimulationWorld::TimingScope empty_scope(&impl_->timings.empty_scope_calibration);
         }
+#endif
     impl_->rules = rules;
     impl_->RebuildNavigation();
     impl_->session_phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
@@ -191,7 +193,9 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
         return {};
     }
     SimulationWorld::MutationScope mutation(*impl_);
+#ifdef HS_DEVELOPMENT_TOOLS
     impl_->ResetTimings();
+#endif
     auto tick_timing = impl_->Measure(SimulationTimingId::Tick);
     auto input_timing = impl_->Measure(SimulationTimingId::Input);
     impl_->current_input = input;
@@ -210,18 +214,24 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
         impl_->actors->player.buffered_skill_slot = 0xFF;
         impl_->observation.small_facts_dirty |= world_changed;
         impl_->UpdateChecksum();
+#ifdef HS_DEVELOPMENT_TOOLS
         impl_->timings.tick = impl_->tick;
         impl_->timings.completed = impl_->config.capture_timings;
+#endif
         return {impl_->tick, impl_->checksum, impl_->session_phase, world_changed};
     }
     (void)fixed_delta;
     impl_->observation.small_facts_dirty = true;
     NextSimulationSequence(impl_->tick);
+#ifdef HS_DEVELOPMENT_TOOLS
     impl_->timings.tick = impl_->tick;
+#endif
     impl_->PruneVisualLinks();
     impl_->RunPipeline();
+#ifdef HS_DEVELOPMENT_TOOLS
     impl_->timings.tick = impl_->tick;
     impl_->timings.completed = impl_->config.capture_timings;
+#endif
     return {impl_->tick, impl_->checksum, impl_->session_phase, true};
 }
 
@@ -293,6 +303,11 @@ SessionProbe GameSimulation::SimulationWorld::BuildSessionProbe() const
 
 Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
 {
+#ifndef HS_DEVELOPMENT_TOOLS
+    (void)command;
+    return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
+                           "Debug commands are unavailable in this build.");
+#else
     SimulationWorld::MutationScope mutation(*impl_);
     if (!impl_->initialized)
     {
@@ -431,6 +446,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
     }
     impl_->UpdateChecksum();
     return Result::Success();
+#endif
 }
 
 Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
@@ -462,13 +478,21 @@ SimulationObservation GameSimulation::GetObservation() const
 SimulationDiagnostics GameSimulation::GetDiagnostics() const
 {
     auto read = BorrowTickReadView();
+#ifdef HS_DEVELOPMENT_TOOLS
     return {impl_->Metrics(), impl_->timings};
+#else
+    return {impl_->Metrics(), {}};
+#endif
 }
 
 SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
 {
+#ifdef HS_DEVELOPMENT_TOOLS
     impl_->RequireOwnerThread();
     return impl_->timings;
+#else
+    return {};
+#endif
 }
 
 void GameSimulation::ApplyUiAction(const UiAction &action)

@@ -151,6 +151,47 @@ constexpr std::uint32_t kCharacterDescriptorCount = 3;
 constexpr std::uint32_t kMonsterPbrDescriptorCount = 5;
 constexpr std::uint32_t kEnvironmentTextureCount = 20;
 constexpr std::uint32_t kEnvironmentDescriptorCount = 22;
+constexpr std::array<DXGI_FORMAT, kPostTextureDescriptorCount> kPostTextureSrvFormats{
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32G32_UINT,
+    DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16_FLOAT,
+    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT_B8G8R8A8_UNORM};
+constexpr std::array<D3D12_SRV_DIMENSION, kCharacterDescriptorCount> kCharacterSrvDimensions{
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY};
+constexpr std::array<DXGI_FORMAT, kCharacterDescriptorCount> kCharacterSrvFormats{
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UNORM};
+constexpr std::array<D3D12_SRV_DIMENSION, kMonsterPbrDescriptorCount> kMonsterPbrSrvDimensions{
+    D3D12_SRV_DIMENSION_TEXTURE2D, D3D12_SRV_DIMENSION_TEXTURE2D,
+    D3D12_SRV_DIMENSION_TEXTURE2D, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY};
+constexpr std::array<DXGI_FORMAT, kMonsterPbrDescriptorCount> kMonsterPbrSrvFormats{
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_UNORM};
+constexpr std::array<D3D12_SRV_DIMENSION, kEnvironmentDescriptorCount> kEnvironmentSrvDimensions{
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2D,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+    D3D12_SRV_DIMENSION_TEXTURE2D, D3D12_SRV_DIMENSION_TEXTURE2D};
+constexpr std::array<DXGI_FORMAT, kEnvironmentDescriptorCount> kEnvironmentSrvFormats{
+    DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC5_UNORM,
+    DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT_BC7_UNORM_SRGB, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC5_UNORM,
+    DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC7_UNORM_SRGB, DXGI_FORMAT_BC5_UNORM,
+    DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC7_UNORM_SRGB,
+    DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_BC7_UNORM_SRGB,
+    DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_R32G32B32A32_FLOAT,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_FLOAT};
 constexpr std::uint32_t kVfxGradientDescriptorCount = 1;
 constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kBaseTextureDescriptorCount =
@@ -202,9 +243,17 @@ constexpr std::uint32_t kHeroTransparencyDescriptorOffset = kDecalSurfaceDescrip
 constexpr std::uint32_t kSceneFrameTableCount = kHeroTransparencyDescriptorOffset - kTemporalTextureDescriptorOffset;
 constexpr std::uint32_t kSceneGeometryTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
 constexpr std::uint32_t kVolumetricFrameTableOffset = kSceneGeometryTableOffset + kSceneFrameTableCount;
-constexpr std::uint32_t kBrixelizerFrameTableOffset = kVolumetricFrameTableOffset + kSceneFrameTableCount;
+constexpr std::uint32_t kBrixelizerFrameTableOffset = kVolumetricFrameTableOffset + kVolumetricFrameDescriptorCount;
 constexpr std::uint32_t kViewSkinDescriptorOffset = kBrixelizerFrameTableOffset + 4 * kSceneFrameTableCount;
 constexpr std::uint32_t kTextureDescriptorCount = kViewSkinDescriptorOffset + 4;
+struct VolumetricFrameInputCopy { std::uint32_t target, source, count; };
+constexpr std::array kVolumetricFrameInputCopies{
+    VolumetricFrameInputCopy{kVolumetricGradientOffset, kPostTextureDescriptorCount + kCharacterDescriptorCount +
+        kMonsterPbrDescriptorCount + kEnvironmentDescriptorCount, 1},
+    VolumetricFrameInputCopy{kVolumetricLightOffset, kLightListDescriptorOffset, 3},
+    VolumetricFrameInputCopy{kVolumetricShadowOffset, kVirtualShadowDescriptorOffset, 4},
+    VolumetricFrameInputCopy{kVolumetricShadowRootOffset, kVirtualShadowDescriptorOffset + 5, 2},
+    VolumetricFrameInputCopy{kVolumetricLocalShadowOffset, kLocalShadowDescriptorOffset, 4}};
 constexpr std::uint32_t kArcherGeometryPage =
     static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount);
 constexpr std::uint32_t kMonsterGeometryPage = kArcherGeometryPage + 1;
@@ -1162,7 +1211,9 @@ struct D3D12Renderer::Impl
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
     [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &);
     [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &);
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
+#endif
     [[nodiscard]] Result RefreshBudgetObservations();
     [[nodiscard]] ResidencySegment ResidencySegmentForHeap(D3D12_HEAP_TYPE type) const noexcept;
     [[nodiscard]] bool ResidencySegmentForAllocation(
@@ -1375,6 +1426,8 @@ struct D3D12Renderer::Impl
         }
     };
     [[nodiscard]] Result CreateDevice(const RendererConfig &configuration, OwnedView &view);
+    [[nodiscard]] Result CreateRootSignature();
+    [[nodiscard]] Result CreateStaticShadowBakeGeometry();
     [[nodiscard]] Result CreateSwapChainAndTargets(OwnedView &view);
     [[nodiscard]] Result CreateDepthAndShadow(OwnedView &view);
     [[nodiscard]] Result CreatePostProcessTargets(OwnedView &view);
@@ -1409,6 +1462,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreatePipeline(const RendererConfig &pipeline_config);
     [[nodiscard]] Result SelectTextureFeedbackShaders(const RendererConfig &, RendererConfig &) const;
     void InitializeCanonicalDescriptors(ID3D12DescriptorHeap *) const noexcept;
+    [[nodiscard]] Result CreateSharedDescriptorHeaps();
+    void InitializeFrameSamplerDescriptors(std::uint32_t frame) noexcept;
     void PublishFrameDescriptors(std::uint32_t frame_slot) const noexcept;
     [[nodiscard]] Result CreateClusterPipelines(const RendererConfig &pipeline_config);
     [[nodiscard]] Result PrepareReconstructionProvider(const RendererReconstructionRequest *,
@@ -1452,13 +1507,15 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreateCharacterTextures();
     [[nodiscard]] Result UploadVfxNoiseVolume(std::vector<AllocationResource> &uploads);
     [[nodiscard]] Result CreateEnvironmentTextures();
+    enum class MaterialPreparationScope : std::uint8_t { Resident, StaticEnvironment };
     [[nodiscard]] Result PrepareMaterialParameters(const RendererConfig &candidate,
-                                                   bool require_compatible_layout);
+        bool require_compatible_layout, MaterialPreparationScope scope = MaterialPreparationScope::Resident);
     void CommitMaterialParameters() noexcept;
     [[nodiscard]] Result PrepareDecalMaterialParameters(const RendererConfig &, bool require_compatible_layout,
         std::vector<render_data::MaterialParameterSlot> &slots);
     void CommitDecalMaterialParameters() noexcept;
-    [[nodiscard]] Result LoadMaterialSurfaceProfile(const RendererConfig &candidate);
+    [[nodiscard]] Result LoadMaterialSurfaceProfile(const RendererConfig &candidate,
+        MaterialPreparationScope scope = MaterialPreparationScope::Resident);
     [[nodiscard]] Result PrepareMaterialSidecars(std::array<AllocationResource, 2> &targets,
                                                std::uint32_t width, std::uint32_t height);
     [[nodiscard]] DXGI_FORMAT MaterialSidecarFormat(std::size_t plane) const noexcept;
@@ -1467,7 +1524,10 @@ struct D3D12Renderer::Impl
                                                 AllocationResource &lut,
                                                 std::vector<AllocationResource> *upload_batch = nullptr);
     void WriteEnvironmentBrdfLutDescriptors();
+    enum class EnvironmentMaterialResidency : std::uint8_t { RuntimeFallback, CaptureOnly };
     [[nodiscard]] Result CreateEnvironmentMeshes();
+    [[nodiscard]] Result CreateEnvironmentMeshes(std::span<const std::uint32_t> selected_page_indices,
+        EnvironmentMaterialResidency residency);
     [[nodiscard]] Result CreateClusterResources(std::uint32_t generation_tag);
     [[nodiscard]] Result CreateClusterViewResources(ClusterViewRuntime &);
     void ResetClusterViewResources(ClusterViewRuntime &) noexcept;
@@ -1729,7 +1789,9 @@ struct D3D12Renderer::Impl
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     PersistentGpuSceneSlots dynamic_scene_slots;
     SkinCache skin_cache;
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::ofstream dynamic_instance_upload_log;
+#endif
     std::array<ComPtr<ID3D12Resource>, kFrameCount> back_buffers;
     // DXGI owns these swapchain surfaces independently of application placed heaps.
     // Identities are borrowed from the matching back_buffers entry and rebuilt on acquisition.
@@ -1875,7 +1937,15 @@ struct D3D12Renderer::Impl
     std::vector<std::unique_ptr<OwnedView>> unresolved_view_candidates;
     ViewId active_view_id{kMainRenderViewId};
     bool auto_fg_cadence_suppressed{};
+    bool auto_fg_cadence_tracking{};
     std::uint64_t auto_fg_cadence_sample_id{};
+    struct AutoFgCadenceSample
+    {
+        std::uint64_t sequence{}, frame_id{}, submit_qpc{}, qpc_frequency{};
+        bool validation{}, gpu_validation{};
+    };
+    std::array<AutoFgCadenceSample, kRendererDiagnosticsFrameCapacity> auto_fg_cadence_samples{};
+    std::uint64_t auto_fg_cadence_sequence{}, auto_fg_cadence_completed_sequence{};
     RenderViewRole active_view_role{RenderViewRole::Main};
     const RenderViewInput *explicit_view{};
     const RenderFrameInput *explicit_frame{};
@@ -1942,7 +2012,9 @@ struct D3D12Renderer::Impl
     bool last_applied_graphics_request_available{};
     std::uint64_t graphics_settings_generation_high_watermark{};
     SettingsApplyResult graphics_settings_status;
+#if defined(HS_DEVELOPMENT_TOOLS)
     RendererDiagnosticsRecorder diagnostics;
+#endif
     GpuPassTimings completed_gpu_timings;
     struct SourceTimingHistory
     {
@@ -1950,12 +2022,14 @@ struct D3D12Renderer::Impl
         DynamicResolutionSample qualified;
     };
     mutable std::unordered_map<std::uint32_t, SourceTimingHistory> timing_previous_source_endpoints;
+#if defined(HS_DEVELOPMENT_TOOLS)
     // Capture-only pending completion snapshots. Both frame count and pass count are bounded.
     mutable std::vector<GpuPassTimings> pending_gpu_timings;
     mutable std::size_t pending_gpu_timing_passes{};
     mutable bool gpu_timing_stream_overflowed{};
     std::vector<RendererHeroWorkSample> hero_work_pending;
     RendererHeroWorkStatus hero_work_retired;
+#endif
     [[nodiscard]] Result RetireHeroTransparency(HeroTransparencySystem &);
     ComPtr<IWICImagingFactory> ui_wic_factory;
     ComPtr<ID2D1Factory> ui_d2d_factory;

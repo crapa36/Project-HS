@@ -70,12 +70,11 @@ float3 TerrainParallaxFootprint(float2 dx, float2 dy, uint layer,
 
 float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment_wrap,
     float2 uv, float2 dx, float2 dy, uint layer, float2 ray, float pomWeight,
-    uint steps, uint refinementSteps, uint height_slot)
+    uint steps, uint refinementSteps, uint height_slot, HsTextureGradState height_state)
 {
     // Disabled/subpixel POM performs no height lookup. Authored height remains
     // sampled separately for material layer blending.
     [branch] if(pomWeight<=0) return uv;
-    const HsTextureGradState height_state = HsTexturePrepareGrad(height_slot);
     float depth=0,previous=0; float2 start=uv;
     [loop] for(uint j=0;j<steps;++j)
     {
@@ -96,26 +95,28 @@ HsMaterialTerrainResult TerrainSample(
     Texture2DArray<float4> normal, Texture2DArray<float4> detail,
     Texture2DArray<float4> height, SamplerState environment_wrap,
     float2 baseUv, float2 baseDx, float2 baseDy, uint layer, uint seed,
-    float3 parallax, float distanceToEye,
-    uint gaussian_slot, uint surface_slot, uint normal_slot, uint detail_slot, uint height_slot)
+    float3 parallax, bool detail_enabled, float detail_weight,
+    uint gaussian_slot, uint surface_slot, uint normal_slot, uint detail_slot, uint height_slot,
+    HsTextureGradState gaussian_state, HsTextureGradState surface_state,
+    HsTextureGradState normal_state, HsTextureGradState detail_state,
+    HsTextureGradState height_state)
 {
     uint rotation=TerrainHash(seed)&3; float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
     float2 uv=TerrainRotate(baseUv,rotation)+offset, dx=TerrainRotate(baseDx,rotation),dy=TerrainRotate(baseDy,rotation);
     uv=TerrainParallaxUv(height,environment_wrap,uv,dx,dy,layer,TerrainRotate(parallax.xy,rotation),parallax.z,
-        HS_MATERIAL_POM_STEPS,HS_MATERIAL_POM_REFINEMENT_STEPS,height_slot);
+        HS_MATERIAL_POM_STEPS,HS_MATERIAL_POM_REFINEMENT_STEPS,height_slot,height_state);
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
-    m.base_color=HsTextureSampleGrad(gaussian,gaussian_slot,environment_wrap,float3(uv,layer),dx,dy).rgb;
-    float2 ra=HsTextureSampleGrad(surface,surface_slot,environment_wrap,float3(uv,layer),dx,dy).rg; m.roughness=ra.x;m.ao=ra.y;
-    float3 n=TerrainDecode(HsTextureSampleGrad(normal,normal_slot,environment_wrap,float3(uv,layer),dx,dy).rg);
-    const float2 detail_fade=TerrainDetailFadeRange();
+    m.base_color=HsTextureSampleGradPrepared(gaussian,gaussian_slot,environment_wrap,float3(uv,layer),dx,dy,gaussian_state).rgb;
+    float2 ra=HsTextureSampleGradPrepared(surface,surface_slot,environment_wrap,float3(uv,layer),dx,dy,surface_state).rg; m.roughness=ra.x;m.ao=ra.y;
+    float3 n=TerrainDecode(HsTextureSampleGradPrepared(normal,normal_slot,environment_wrap,float3(uv,layer),dx,dy,normal_state).rg);
     float3 d=float3(0,0,1);
-    if(distanceToEye<detail_fade.y)
+    if(detail_enabled)
     {
-        d=TerrainDecode(HsTextureSampleGrad(detail,detail_slot,environment_wrap,float3(uv,layer),dx,dy).rg);
-        d=normalize(lerp(float3(0,0,1),d,1-smoothstep(detail_fade.x,detail_fade.y,distanceToEye)));
+        d=TerrainDecode(HsTextureSampleGradPrepared(detail,detail_slot,environment_wrap,float3(uv,layer),dx,dy,detail_state).rg);
+        d=normalize(lerp(float3(0,0,1),d,detail_weight));
     }
     n.xy=TerrainRotate(n.xy,(4-rotation)&3);d.xy=TerrainRotate(d.xy,(4-rotation)&3);m.normal=n;m.detail=d;
-    m.height=HsTextureSampleGrad(height,height_slot,environment_wrap,float3(uv,layer),dx,dy).r;return m;
+    m.height=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(uv,layer),dx,dy,height_state).r;return m;
 }
 
 float3 TerrainGrassPalette(float3 color,float coverage)
@@ -151,22 +152,30 @@ HsMaterialTerrainResult TerrainLayer(
     Texture2DArray<float4> height, Texture2DArray<float4> histogram,
     SamplerState environment_wrap, SamplerState linear_clamp,
     float3 world,float3 worldDx,float3 worldDy,uint layer,uint seed,float2 warp,
-    float3 viewDirection,float distanceToEye,
+    float3 viewTs,float distanceToEye,
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot)
 {
     float tile=TerrainTileSize(layer);
     float2 uv=world.xz/tile,dx=worldDx.xz/tile,dy=worldDy.xz/tile;
-    float3 ts=normalize(viewDirection).xzy;
-    const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,ts,distanceToEye,HS_MATERIAL_POM_STEPS);
+    const HsTextureGradState gaussian_state=HsTexturePrepareGrad(gaussian_slot);
+    const HsTextureGradState surface_state=HsTexturePrepareGrad(surface_slot);
+    const HsTextureGradState normal_state=HsTexturePrepareGrad(normal_slot);
+    const float2 detail_fade=TerrainDetailFadeRange();
+    const bool detail_enabled=distanceToEye<detail_fade.y;
+    const float detail_weight=1-smoothstep(detail_fade.x,detail_fade.y,distanceToEye);
+    HsTextureGradState detail_state=(HsTextureGradState)0;
+    if(detail_enabled) detail_state=HsTexturePrepareGrad(detail_slot);
+    const HsTextureGradState height_state=HsTexturePrepareGrad(height_slot);
+    const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,viewTs,distanceToEye,HS_MATERIAL_POM_STEPS);
 
     float2 p=(world.xz+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
     float2 a=i,b=i+float2(1,0),c=i+float2(0,1);
     float3 w=float3(1-f.x-f.y,f.x,f.y);
     if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);w=float3(f.x+f.y-1,1-f.x,1-f.y);}
     w=w*w*(3-2*w);w/=max(w.x+w.y+w.z,1e-5);
-    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(a,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
-    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(b,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
-    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(c,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
+    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(a,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(b,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(c,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     float3 gaussian_value=0.5+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-0.5)*rsqrt(dot(w,w));
     float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*2048*2048,1e-8));
     // Decode with the mip actually available to the Gaussian sample, including streaming fallback.
@@ -291,10 +300,11 @@ HsMaterialTerrainResult EnvTerrain(
     if(mesh==20) w=float4(1,0,0,0);
     float total=0;
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
+    const float3 viewTs=normalize(viewDirection).xzy;
     [loop] for(uint layer=0;layer<4;++layer)
     {
         if(w[layer]<=0) continue;
-        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewDirection,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot);
+        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewTs,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot);
         float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)));
         m.base_color+=n.base_color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight;
         m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight;

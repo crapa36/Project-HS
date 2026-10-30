@@ -16,6 +16,18 @@ namespace hs
 {
 Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
 {
+    std::array<std::uint32_t,
+        kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount> page_indices{};
+    for (std::size_t index = 0; index < page_indices.size(); ++index)
+        page_indices[index] = static_cast<std::uint32_t>(index);
+    if (auto loaded = CreateEnvironmentMeshes(page_indices,
+        EnvironmentMaterialResidency::RuntimeFallback); !loaded) return loaded;
+    return PrepareEnvironmentGeometryStreaming();
+}
+
+Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
+    std::span<const std::uint32_t> selected_page_indices, EnvironmentMaterialResidency material_residency)
+{
     static_assert(sizeof(Vertex) == 76 &&
                   offsetof(Vertex, position) == 0 &&
                   offsetof(Vertex, normal) == 12 &&
@@ -31,6 +43,37 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
     if (FAILED(result)) return HResultFailure("Reset mesh upload list", result);
     std::vector<AllocationResource> uploads;
     std::array<bool, kAuthoredMaterialNames.size()> material_bindings_initialized{};
+    const auto validate_capture_binding = [&](const render_data::MaterialTextureDefinition &binding,
+        std::uint32_t layer, render_data::TextureHandle compiled_texture) -> Result {
+        if (!config.development_catalog || !RendererIsAdmittedRuntimeProduct(config, binding.product_id))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Capture material texture is absent from the admitted Generation: " + binding.product_id);
+        if (compiled_texture && (compiled_texture.value >= config.packed_textures.size() ||
+            config.packed_textures[compiled_texture.value].asset_id.value != MakeAssetId(binding.product_id).value))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Capture material texture handle differs from its admitted product: " + binding.product_id);
+        try
+        {
+            const auto descriptor = config.development_catalog->ProveTexture(MakeAssetId(binding.product_id));
+            if (descriptor.dimension != render_data::TextureDimension::Texture2DArray)
+                throw std::runtime_error("capture material texture is not a 2D array");
+            for (const auto dependency : descriptor.dependencies)
+            {
+                if (!config.development_catalog->Contains(dependency))
+                    throw std::runtime_error("capture material texture dependency is absent");
+                if (!RendererIsSourceRevision(config, dependency) &&
+                    !config.development_catalog->HasRuntimeProduct(dependency))
+                    throw std::runtime_error("capture material texture dependency is not a runtime product");
+            }
+            render_data::ValidateMaterialTexturePackage(binding, descriptor.description, layer);
+        }
+        catch (const std::exception &error)
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Invalid capture material texture " + binding.product_id + ": " + error.what());
+        }
+        return Result::Success();
+    };
     const auto load_compiled_material = [&](std::uint32_t ordinal, std::uint32_t layer,
         render_data::RockMaterial &material, EnvironmentMaterialBindingsGpu &bindings) -> Result {
         const std::string name(kAuthoredMaterialNames[ordinal]);
@@ -50,15 +93,20 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         {
             const render_data::MaterialTextureDefinition definition{"slot_" + std::to_string(texture.slot),
                 std::string(texture.product_id), texture.dimension, texture.semantic};
-            if (auto loaded = LoadEnvironmentMaterialTexture(definition, layer, uploads, bindings.texture_indices[texture.slot], texture.texture); !loaded)
-                return loaded;
+            if (material_residency == EnvironmentMaterialResidency::CaptureOnly)
+            {
+                if (auto checked = validate_capture_binding(definition, layer, texture.texture); !checked) return checked;
+            }
+            else if (auto loaded = LoadEnvironmentMaterialTexture(definition, layer, uploads,
+                bindings.texture_indices[texture.slot], texture.texture); !loaded) return loaded;
             bindings.product_ids[texture.slot] = texture.product_id;
             material.textures[texture.slot] = texture.product_id;
         }
         return Result::Success();
     };
-    for (std::size_t index = 0; index < environment_meshes.size(); ++index)
+    for (const auto selected_index : selected_page_indices)
     {
+        const auto index = static_cast<std::size_t>(selected_index);
         const std::string mesh_name = std::string(kEnvironmentMaterialNames[index/3]) +
             (index%3 == 0 ? std::string{} : "_lod" + std::to_string(index%3));
         const auto geometry_ordinal = static_cast<std::uint32_t>(index / 3);
@@ -214,8 +262,12 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                             throw std::runtime_error("material metadata and typed texture binding disagree");
                         const render_data::MaterialTextureDefinition definition{
                             "slot_" + std::to_string(slot), texture_id, binding.dimension, binding.semantic};
-                        if (auto loaded = LoadEnvironmentMaterialTexture(definition, required_layer, uploads,
-                                selected_bindings.texture_indices[slot]); !loaded) return loaded;
+                        if (material_residency == EnvironmentMaterialResidency::CaptureOnly)
+                        {
+                            if (auto checked = validate_capture_binding(definition, required_layer, {}); !checked) return checked;
+                        }
+                        else if (auto loaded = LoadEnvironmentMaterialTexture(definition, required_layer, uploads,
+                            selected_bindings.texture_indices[slot]); !loaded) return loaded;
                         selected_bindings.product_ids[slot] = texture_id;
                     }
                 }
@@ -231,9 +283,28 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 material_bindings_initialized[material_ordinal] = true;
             }
             // Every geometry selector must fit, including later meshes sharing this material.
-            for (const auto texture_index : material_bindings.texture_indices)
+            for (std::size_t slot = 0; slot < material_bindings.texture_indices.size(); ++slot)
             {
-                if (texture_index == UINT32_MAX) continue;
+                const auto texture_index = material_bindings.texture_indices[slot];
+                if (texture_index == UINT32_MAX)
+                {
+                    if (material_residency != EnvironmentMaterialResidency::CaptureOnly ||
+                        material_bindings.product_ids[slot].empty()) continue;
+                    try
+                    {
+                        const auto description = config.development_catalog->ProveTexture(
+                            MakeAssetId(material_bindings.product_ids[slot])).description;
+                        if (required_layer >= description.array_size)
+                            throw std::runtime_error("selector exceeds admitted texture array");
+                    }
+                    catch (const std::exception &error)
+                    {
+                        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                            "Invalid capture geometry selector for " + material_bindings.product_ids[slot] +
+                                ": " + error.what());
+                    }
+                    continue;
+                }
                 const auto &description = texture_index < kEnvironmentTextureCount
                     ? environment_texture_descriptions[texture_index]
                     : environment_material_textures.at(texture_index - kEnvironmentTextureCount).description;
@@ -306,12 +377,13 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
     if (FAILED(result)) return HResultFailure("Close mesh upload", result);
     if (auto waited = SubmitResidentUtilityUpload(command_list.Get(), frames[0].allocator.Get(), uploads); !waited)
         return waited;
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-    {
-        PublishEnvironmentMaterialTextures(frame);
-        WriteGeometryPageDescriptors(frame);
-    }
-    return PrepareEnvironmentGeometryStreaming();
+    if (material_residency == EnvironmentMaterialResidency::RuntimeFallback)
+        for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+        {
+            PublishEnvironmentMaterialTextures(frame);
+            WriteGeometryPageDescriptors(frame);
+        }
+    return Result::Success();
 }
 
 Result D3D12Renderer::Impl::PrepareEnvironmentGeometryStreaming()

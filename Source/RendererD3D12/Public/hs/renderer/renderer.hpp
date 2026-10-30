@@ -791,6 +791,12 @@ class D3D12Renderer
     // First publication policy: describe all three levels, bake only coarse level 2.
     // Bounded GPU chunks; top-down guarded tiles arrive synchronously after completion.
     // Use coordinates, not emission order, to index tiles; each span lasts only for its callback.
+    // Offline one-shot owner. This prepares only native static-shadow capture
+    // resources; it does not expose a partially initialized gameplay renderer.
+    [[nodiscard]] static Result BakeStaticShadowPages(const RendererConfig &configuration,
+        const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
+        const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
+        const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
     [[nodiscard]] Result BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
         const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
@@ -841,6 +847,11 @@ class D3D12Renderer
     [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics() const;
 
   private:
+    [[nodiscard]] Result InitializeStaticShadowBake(const RendererConfig &configuration);
+    [[nodiscard]] Result BakeStaticShadowPagesPrepared(
+        const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
+        const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
+        const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
     [[nodiscard]] Result CapturePng(const std::filesystem::path &path);
     [[nodiscard]] Result CaptureSurfaceDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result CaptureGeometryDiagnostics(const std::filesystem::path &path);

@@ -32,6 +32,7 @@ struct FeedbackOwner
     std::uint64_t readback_bytes{};
     D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
+    bool opacity_sampling{true};
 };
 struct FeedbackFrame
 {
@@ -75,6 +76,7 @@ struct RendererTextureFeedback::Impl
     Result MakeOwner(FeedbackOwner &owner, TextureStreamView view, ResidencyManager &residency)
     {
         owner.target = view.resource; owner.mip_count = view.logical_description.mip_count;
+        owner.opacity_sampling = view.opacity_sampling;
         const auto target = view.resource->GetDesc();
         const auto region_width = std::min(16u, std::bit_floor(static_cast<UINT>(target.Width) / 2u));
         const auto region_height = std::min(16u, std::bit_floor(target.Height / 2u));
@@ -368,7 +370,7 @@ Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
             return FeedbackFailure("Sampler feedback retained map import changed.");
         const auto written=retained?retained->owners[index].cleared:
             pass.Write(graph.Version(handle),Access::UnorderedWrite);
-        bindings.push_back({owner.id,written});
+        bindings.push_back({owner.id,written,owner.opacity_sampling});
         if(layout)layout->owners.push_back({owner.id,handle,written,{},
             owner.width,owner.height,owner.slices,owner.mip_count});
     }
@@ -418,9 +420,12 @@ Result RendererTextureFeedback::BindRetainedMetadata(RenderGraphBuilder &graph,
     out=layout.metadata_version;
     return Result::Success();
 }
-void RendererTextureFeedback::DeclareSampling(PassBuilder &pass, std::vector<TextureFeedbackGraphBinding> &bindings)
+void RendererTextureFeedback::DeclareSampling(PassBuilder &pass, std::vector<TextureFeedbackGraphBinding> &bindings,
+    bool opacity_only)
 {
-    for (auto &binding : bindings) binding.feedback = pass.ReadWrite(binding.feedback, Access::UnorderedWrite);
+    for (auto &binding : bindings)
+        if (!opacity_only || binding.opacity_sampling)
+            binding.feedback = pass.ReadWrite(binding.feedback, Access::UnorderedWrite);
 }
 Result RendererTextureFeedback::AddDecodePass(RenderGraphBuilder &graph, std::uint32_t slot,
     std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding> bindings,

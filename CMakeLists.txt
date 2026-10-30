@@ -208,7 +208,8 @@ add_library(
 )
 target_include_directories(hs_jobs PUBLIC Source/Jobs/Public)
 target_link_libraries(hs_jobs PUBLIC hs_core PRIVATE Taskflow::Taskflow)
-target_compile_definitions(hs_jobs PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(hs_jobs PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+    $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
 hs_configure_target(hs_jobs)
 
 add_library(hs_game_domain STATIC Source/GameDomain/Private/game_read_model.cpp)
@@ -259,6 +260,7 @@ add_library(
 )
 target_include_directories(hs_gameplay PUBLIC Source/Gameplay/Public)
 target_link_libraries(hs_gameplay PUBLIC hs_core hs_game_domain hs_game_rules)
+target_compile_definitions(hs_gameplay PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
 if(MSVC)
     target_compile_options(hs_gameplay PRIVATE /fp:strict)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -491,12 +493,12 @@ add_library(
 if(NOT HS_SINGLE_CONFIG_RELEASE)
     target_sources(
         hs_renderer_d3d12 PRIVATE
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui.cpp>
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_draw.cpp>
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_tables.cpp>
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_widgets.cpp>
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp>
-        $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/imgui.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/imgui_draw.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/imgui_tables.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/imgui_widgets.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp>
+        $<$<NOT:$<CONFIG:Release>>:${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp>
     )
     target_include_directories(
         hs_renderer_d3d12 PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends"
@@ -519,12 +521,15 @@ include(cmake/DirectStorageSdk.cmake)
 hs_configure_directstorage_sdk(hs_renderer_d3d12)
 if(HS_WITH_BRIXELIZER)
     target_link_libraries(hs_renderer_d3d12 PRIVATE hs_brixelizer_native)
-    target_compile_definitions(hs_renderer_d3d12 PRIVATE HS_WITH_BRIXELIZER=1)
+    set_property(SOURCE
+        Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
+        Source/RendererD3D12/Private/renderer_lighting.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS HS_WITH_BRIXELIZER=1)
     set_property(SOURCE Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
         APPEND PROPERTY INCLUDE_DIRECTORIES "${HS_BRIXELIZER_PRIVATE_INCLUDE}")
 endif()
 target_compile_definitions(
-    hs_renderer_d3d12 PRIVATE $<$<CONFIG:Debug>:HS_DEVELOPMENT_TOOLS=1>
+    hs_renderer_d3d12 PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
 if(HS_ENABLE_VALIDATION)
     target_compile_definitions(hs_renderer_d3d12 PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX=1>)
@@ -547,8 +552,6 @@ add_library(
     Source/Runtime/Private/application.cpp
     Source/Runtime/Private/shipping_content.cpp
     Source/Runtime/Private/audio_engine.cpp
-    Source/Runtime/Private/experiment_spec.cpp
-    Source/Runtime/Private/playtest_recording.cpp
     Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/vfx_catalog.cpp
     Source/Runtime/Private/vfx_typed_frame_adapter.cpp
@@ -570,6 +573,8 @@ add_library(
 )
 target_sources(
     hs_runtime PRIVATE
+    $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/experiment_spec.cpp>
+    $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/playtest_recording.cpp>
 )
 target_link_libraries(
     hs_runtime
@@ -707,6 +712,7 @@ if(MSVC)
 endif()
 add_dependencies(ProjectHS hs_runtime_assets)
 
+if(NOT HS_SINGLE_CONFIG_RELEASE)
 add_executable(hs_experiment Source/Apps/Experiment/main.cpp)
 target_link_libraries(
     hs_experiment PRIVATE hs_runtime hs_gameplay hs_game_rules_io hs_presentation hs_asset_manifest nlohmann_json::nlohmann_json dbghelp
@@ -720,6 +726,7 @@ if(MSVC)
     target_sources(hs_experiment PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
 endif()
 add_dependencies(hs_experiment hs_runtime_assets)
+endif()
 
 add_executable(hs_render_test_runner
     Source/Apps/RenderTestRunner/main.cpp
@@ -756,7 +763,7 @@ if(HS_BUILD_CONTENT_TOOLS)
     if(MSVC)
         target_sources(hs_static_shadow_bake PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
     endif()
-    add_dependencies(hs_static_shadow_bake hs_runtime_assets)
+    add_dependencies(hs_static_shadow_bake hs_runtime_native_assets)
 endif()
 hs_configure_target(hs_render_test_runner)
 add_dependencies(hs_render_test_runner hs_runtime_assets)
@@ -1285,12 +1292,12 @@ if(HS_WITH_BRIXELIZER)
     add_executable(hs_render_brixelizer_shader
         Source/Apps/RenderBrixelizerShaderPackage/main.cpp
         ContentSource/Textures/BrixelizerNoise/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp
-        Source/Apps/AssetPipeline/action.cpp)
-target_link_libraries(hs_render_brixelizer_shader PRIVATE hs_asset_pipeline)
+    )
     target_link_libraries(hs_render_brixelizer_shader PRIVATE
-        hs_core hs_render_data hs_brixelizer_shader_tables nlohmann_json::nlohmann_json bcrypt)
+        hs_asset_pipeline hs_core hs_render_data hs_brixelizer_shader_tables nlohmann_json::nlohmann_json bcrypt)
     target_compile_definitions(hs_render_brixelizer_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     hs_configure_target(hs_render_brixelizer_shader)
+    hs_brixelizer_attach_shader_metadata(hs_render_brixelizer_shader)
     set(HS_BRIXELIZER_SHADER_RESULT
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/brixelizer/result.json")
     get_filename_component(HS_BRIXELIZER_CACHE_ROOT "${HS_BRIXELIZER_SDK_ROOT}" DIRECTORY)
@@ -2094,7 +2101,6 @@ if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
     endif()
     hs_configure_target(hs_shipping_content)
     target_link_libraries(ProjectHS PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
-    target_link_libraries(hs_experiment PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
 endif()
 
 if(HS_BUILD_TESTS)
@@ -2169,12 +2175,14 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_ui_command_admission_tests)
     add_test(NAME runtime.ui-command-admission COMMAND hs_ui_command_admission_tests)
     add_executable(hs_runtime_diagnostics_tests Tests/runtime_diagnostics_tests.cpp)
+    target_compile_definitions(hs_runtime_diagnostics_tests PRIVATE HS_DEVELOPMENT_TOOLS=1)
     hs_configure_target(hs_runtime_diagnostics_tests)
     add_test(NAME runtime.diagnostics-bounds COMMAND hs_runtime_diagnostics_tests)
     add_executable(hs_project_hs_arguments_tests
         Tests/project_hs_arguments_tests.cpp
         Source/Apps/ProjectHS/command_line.cpp)
     target_link_libraries(hs_project_hs_arguments_tests PRIVATE hs_runtime_contracts)
+    target_compile_definitions(hs_project_hs_arguments_tests PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
     hs_configure_target(hs_project_hs_arguments_tests)
     add_test(NAME runtime.arguments COMMAND hs_project_hs_arguments_tests)
 
@@ -2307,11 +2315,15 @@ if(HS_BUILD_TESTS)
     )
     add_executable(hs_gameplay_internal_tests Tests/gameplay_internal_tests.cpp)
     target_link_libraries(hs_gameplay_internal_tests PRIVATE hs_gameplay)
+    target_compile_definitions(hs_gameplay_internal_tests PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
     target_include_directories(hs_gameplay_internal_tests PRIVATE Source/Gameplay/Private)
     hs_configure_target(hs_gameplay_internal_tests)
     add_test(NAME simulation.internal-invariants COMMAND hs_gameplay_internal_tests)
     add_executable(hs_navigation_tests Tests/gameplay_navigation_tests.cpp)
     target_link_libraries(hs_navigation_tests PRIVATE hs_game_domain)
+    target_compile_options(hs_navigation_tests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
     target_include_directories(hs_navigation_tests PRIVATE Source/Gameplay/Private)
     hs_configure_target(hs_navigation_tests)
     add_test(NAME simulation.navigation COMMAND hs_navigation_tests)
@@ -2656,6 +2668,7 @@ if(HS_BUILD_TESTS)
         set_tests_properties(rendering.material-parameter-reload PROPERTIES
             TIMEOUT 600 RESOURCE_LOCK projecths_d3d12)
     endif()
+    if(TARGET hs_experiment)
     add_test(
         NAME experiment.offscreen
         COMMAND
@@ -2665,6 +2678,8 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS hs_content_generation
     )
     set_tests_properties(experiment.offscreen PROPERTIES TIMEOUT 120)
+    set_tests_properties(experiment.offscreen PROPERTIES RESOURCE_LOCK projecths_d3d12)
+    endif()
     # These tests create D3D12 devices. Keep GPU captures serialized while
     # independent CPU validation runs alongside them under parallel CTest.
     set_tests_properties(
@@ -2672,7 +2687,6 @@ if(HS_BUILD_TESTS)
         rendering.skin-cache-gpu
         rendering.dynamic-lod-skin-growth
         rendering.residency-streaming-gpu
-        experiment.offscreen
         PROPERTIES RESOURCE_LOCK projecths_d3d12)
     endif()
 
@@ -2897,7 +2911,7 @@ if(HS_BUILD_TESTS)
         $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_audio_io>>
         $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_vfx_io>>)
     target_link_libraries(hs_runtime_tests PRIVATE hs_runtime hs_asset_manifest hs_presentation hs_presentation_io hs_game_rules_io hs_vfx_image_io)
-    target_compile_definitions(hs_runtime_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(hs_runtime_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
     add_dependencies(hs_runtime_tests hs_runtime_assets)
     target_include_directories(hs_runtime_tests PRIVATE
         Source/Runtime/Private
@@ -2987,6 +3001,7 @@ if(HS_BUILD_TESTS)
             endif()
         endif()
     endif()
+    if(TARGET hs_experiment)
     add_test(
         NAME experiment.simulation
         COMMAND
@@ -3005,6 +3020,7 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_COMBAT_TEST_GENERATION_TARGET}
     )
     set_tests_properties(experiment.timeline PROPERTIES TIMEOUT 30)
+    endif()
     get_property(HS_SHADER_HOT_RELOAD_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     if(HS_SHADER_HOT_RELOAD_MULTI_CONFIG OR NOT CMAKE_BUILD_TYPE STREQUAL "Release")
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -3101,6 +3117,13 @@ configure_file(cmake/install_selected_generation.cmake.in
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_selected_generation.cmake"
     COMPONENT Runtime)
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)
+if(HS_WITH_BRIXELIZER)
+    install(FILES ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt
+        DESTINATION Licenses RENAME Brixelizer-LICENSE.txt COMPONENT Runtime)
+endif()
+install(CODE
+    "set(_hs_release_source_exe \"$<TARGET_FILE:ProjectHS>\")\nset(_hs_release_source_pack \"${CMAKE_CURRENT_BINARY_DIR}/${HS_SHIPPING_PACK_RELATIVE_PATH}\")"
+    CONFIGURATIONS Release COMPONENT Runtime)
 install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_release_finish.cmake"
     CONFIGURATIONS Release COMPONENT Runtime)
 

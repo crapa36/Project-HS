@@ -33,7 +33,7 @@ class ShaderReadScope
   private:
     const ShaderReader *previous_{};
 };
-// Installs the selected-Generation blob callback. The pinned native table owns
-// all reflection/binding metadata; selected bytes must equal its actual DXIL.
+// Installs the selected-Generation callback. Generated SDK metadata remains
+// native; product bytes must match its exact size and SHA-256.
 void RequireSelectedShaderProducts(FfxInterface &) noexcept;
 } // namespace hs::brixelizer_native

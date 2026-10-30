@@ -577,7 +577,6 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
             if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
             {
                 ap::TouchActionResult(result_path);
-                std::cout << spec.action_id << " current\n";
                 return;
             }
         }
@@ -595,7 +594,6 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
                 if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
                 {
                     ap::TouchActionResult(result_path);
-                    std::cout << spec.action_id << " current\n";
                     ap::RemoveStage(stage);
                     return;
                 }

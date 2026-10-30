@@ -329,7 +329,6 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
                 texture.product_id);
         upstream_products.Verify(shader_namespace, shader_id);
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
 
@@ -674,7 +673,6 @@ void Produce(std::string_view name, const fs::path &source_root,
         for (const auto &source : upstream_sources)
             upstream_products.Verify(source.name_space, source.product_id);
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
 

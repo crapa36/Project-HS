@@ -18,12 +18,12 @@ get_filename_component(repo "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(fixture "${CMAKE_CURRENT_LIST_DIR}/release_install_fixture")
 set(binary "${work_root}/fixture-build")
 
-function(configure_fixture omit_native fail_verify interrupt)
+function(configure_fixture omit_native corrupt_copy interrupt)
     execute_process(COMMAND "${CMAKE_COMMAND}" -S "${fixture}" -B "${binary}"
         -G "${HS_TEST_GENERATOR}" "-DCMAKE_MAKE_PROGRAM=${HS_TEST_MAKE_PROGRAM}"
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
         "-DHS_PROJECT_SOURCE=${repo}" "-DHS_FIXTURE_OMIT_NATIVE=${omit_native}"
-        "-DHS_FIXTURE_FAIL_VERIFY=${fail_verify}" "-DHS_FIXTURE_INTERRUPT=${interrupt}"
+        "-DHS_FIXTURE_CORRUPT_COPY=${corrupt_copy}" "-DHS_FIXTURE_INTERRUPT=${interrupt}"
         RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
     if(NOT result STREQUAL "0")
         message(FATAL_ERROR "Fixture configure failed: ${output}${error}")
@@ -50,11 +50,6 @@ function(expect_install name result_kind expected_text)
 endfunction()
 
 configure_fixture(OFF OFF OFF)
-execute_process(COMMAND "${CMAKE_COMMAND}" --build "${binary}" --config Release --target ProjectHS
-    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-if(NOT result STREQUAL "0")
-    message(FATAL_ERROR "Fixture verifier build failed: ${output}${error}")
-endif()
 
 file(MAKE_DIRECTORY "${work_root}/occupied")
 file(WRITE "${work_root}/occupied/sentinel.txt" "old")
@@ -68,7 +63,7 @@ expect_install(hidden-occupied fail "not missing or empty")
 
 expect_install(success pass "")
 foreach(required IN ITEMS ProjectHS.exe Content/content.hsp D3D12/D3D12Core.dll
-        WinPixEventRuntime.dll Licenses/NotoSansKR-OFL.txt ThirdPartyNotices.txt)
+        Licenses/NotoSansKR-OFL.txt ThirdPartyNotices.txt)
     if(NOT EXISTS "${work_root}/success/${required}")
         message(FATAL_ERROR "Published Release is incomplete: ${required}")
     endif()
@@ -108,9 +103,9 @@ if(EXISTS "${work_root}/missing-native" OR NOT EXISTS "${work_root}/.missing-nat
 endif()
 
 configure_fixture(OFF ON OFF)
-expect_install(bad-verifier fail "Staged Release content verification failed")
-if(EXISTS "${work_root}/bad-verifier" OR NOT EXISTS "${work_root}/.bad-verifier.staging")
-    message(FATAL_ERROR "Failed verifier published or lost the staged set")
+expect_install(bad-copy fail "Staged Release copy differs from built source")
+if(EXISTS "${work_root}/bad-copy" OR NOT EXISTS "${work_root}/.bad-copy.staging")
+    message(FATAL_ERROR "Copy integrity failure published or lost the staged set")
 endif()
 
 configure_fixture(OFF OFF ON)

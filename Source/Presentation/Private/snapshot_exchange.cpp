@@ -2,9 +2,51 @@
 #include <hs/presentation/projector.hpp>
 
 #include <limits>
+#include <utility>
 
 namespace hs
 {
+
+RenderSnapshotExchange::WriteSlot::WriteSlot(WriteSlot &&other) noexcept
+    : exchange_(std::exchange(other.exchange_, nullptr)), index_(other.index_)
+{
+}
+
+RenderSnapshotExchange::WriteSlot &RenderSnapshotExchange::WriteSlot::operator=(WriteSlot &&other) noexcept
+{
+    if (this != &other)
+    {
+        std::move(*this).Abandon();
+        exchange_ = std::exchange(other.exchange_, nullptr);
+        index_ = other.index_;
+    }
+    return *this;
+}
+
+RenderSnapshotExchange::WriteSlot::~WriteSlot()
+{
+    std::move(*this).Abandon();
+}
+
+RenderSnapshotStorage &RenderSnapshotExchange::WriteSlot::Storage() const noexcept
+{
+    return exchange_->slots_[index_].storage;
+}
+
+void RenderSnapshotExchange::WriteSlot::Publish(Sequence publish_sequence,
+    const RenderSnapshot *previous_sample, std::shared_ptr<const UiFrame> ui_frame) &&
+{
+    if (!exchange_) return;
+    exchange_->PublishSlot(index_, publish_sequence, previous_sample, std::move(ui_frame));
+    exchange_ = nullptr;
+}
+
+void RenderSnapshotExchange::WriteSlot::Abandon() && noexcept
+{
+    if (!exchange_) return;
+    auto *exchange = std::exchange(exchange_, nullptr);
+    exchange->AbandonSlot(index_);
+}
 
 RenderSnapshotExchange::RenderSnapshotExchange(std::size_t instance_capacity,
                                                std::size_t pose_capacity,
@@ -37,7 +79,7 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::Acquire
             if (!retained) slots_[index].storage.Clear();
             slots_[index].retained_write = retained;
             slots_[index].ui_frame.reset();
-            return WriteSlot{index, &slots_[index].storage};
+            return WriteSlot(this, index);
         }
     }
 
@@ -65,7 +107,7 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::Acquire
             if (!retained) slots_[*oldest].storage.Clear();
             slots_[*oldest].retained_write = retained;
             slots_[*oldest].ui_frame.reset();
-            return WriteSlot{*oldest, &slots_[*oldest].storage};
+            return WriteSlot(this, *oldest);
         }
     }
 
@@ -73,11 +115,11 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::Acquire
     return std::nullopt;
 }
 
-void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
-                                     const RenderSnapshot *previous_sample,
-                                     std::shared_ptr<const UiFrame> ui_frame)
+void RenderSnapshotExchange::PublishSlot(std::size_t index, Sequence publish_sequence,
+                                         const RenderSnapshot *previous_sample,
+                                         std::shared_ptr<const UiFrame> ui_frame)
 {
-    auto &packet = slots_[slot.index];
+    auto &packet = slots_[index];
     const auto &current = packet.storage.header;
     packet.has_previous = previous_sample &&
         previous_sample->header.session_id == current.session_id &&
@@ -90,14 +132,14 @@ void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
     }
     else packet.previous.Clear();
     packet.ui_frame = std::move(ui_frame);
-    slots_[slot.index].publish_sequence.store(publish_sequence, std::memory_order_relaxed);
-    slots_[slot.index].state.store(SlotState::Ready, std::memory_order_release);
+    slots_[index].publish_sequence.store(publish_sequence, std::memory_order_relaxed);
+    slots_[index].state.store(SlotState::Ready, std::memory_order_release);
 }
 
-void RenderSnapshotExchange::Abandon(WriteSlot slot) noexcept
+void RenderSnapshotExchange::AbandonSlot(std::size_t index) noexcept
 {
-    slots_[slot.index].ui_frame.reset();
-    slots_[slot.index].state.store(SlotState::Free, std::memory_order_release);
+    slots_[index].ui_frame.reset();
+    slots_[index].state.store(SlotState::Free, std::memory_order_release);
 }
 
 std::uint64_t RenderSnapshotExchange::DroppedPublishes() const noexcept

@@ -72,16 +72,6 @@ Result D3D12Renderer::Impl::PrepareViewTargets(OptionTargets &targets,
 
 Result D3D12Renderer::Impl::PrepareExposureResources(OwnedView &owner)
 {
-    if (!sampler_heap)
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC heap{};
-        heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-        heap.NumDescriptors = 2 * kFrameCount;
-        heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        const auto created = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&sampler_heap));
-        if (FAILED(created)) return HResultFailure("Create view sampler heap", created);
-        sampler_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-    }
     // Build the complete initial set before publishing it. Resizes replace view
     // textures only, preserving these buffers and the adaptation read index.
     std::array<AllocationResource, 2> values;
@@ -311,20 +301,8 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
     device->CreateConstantBufferView(exposure_cb_gpu_address ? &cbv : nullptr, descriptor);
     // Keep the native table's ambient views at offsets 11/12.
     descriptor.ptr += 2u * srv_stride;
-    auto sampler = sampler_heap->GetCPUDescriptorHandleForHeapStart();
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
-    sampler.ptr += static_cast<SIZE_T>(frame) * 2 * sampler_stride;
-    D3D12_SAMPLER_DESC sampling{};
-    sampling.Filter = D3D12_FILTER_ANISOTROPIC;
-    sampling.AddressU = sampling.AddressV = sampling.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    sampling.MaxAnisotropy = config.anisotropic_filtering;
-    sampling.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    sampling.MaxLOD = D3D12_FLOAT32_MAX;
-    device->CreateSampler(&sampling, sampler);
-    sampler.ptr += sampler_stride;
-    sampling.AddressU = sampling.AddressV = sampling.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    sampling.MaxLOD = 5.0f;
-    device->CreateSampler(&sampling, sampler);
+    InitializeFrameSamplerDescriptors(frame);
 }
 } // namespace hs

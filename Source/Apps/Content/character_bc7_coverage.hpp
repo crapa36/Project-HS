@@ -99,7 +99,7 @@ inline void FitColor(const CharacterBc7Texels &source,Colors &endpoints,std::arr
 } // namespace character_bc7_detail
 
 [[nodiscard]] inline bool EncodeCharacterBc7CoverageBlock(const CharacterBc7Texels &source,
-    CharacterAlphaPolicy policy,const CharacterBc7Block &original,CharacterBc7Block &output,bool &rgb_retained)
+    CharacterAlphaPolicy policy,const CharacterBc7Block &original,CharacterBc7Block &output)
 {
     using namespace character_bc7_detail;
     if(!(policy.cutoff>0 && policy.cutoff<=1)) return false;
@@ -136,7 +136,7 @@ inline void FitColor(const CharacterBc7Texels &source,Colors &endpoints,std::arr
     }
     if(alpha_indices[0]>=2)
     { std::swap(minimum,maximum);for(auto &index:alpha_indices) index=3-index; }
-    rgb_retained=(original[0]&0x3fu)==0x20u && (original[0]>>6u)==0;
+    const bool rgb_retained=(original[0]&0x3fu)==0x20u && (original[0]>>6u)==0;
     if(rgb_retained) output=original;
     else
     {

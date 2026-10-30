@@ -22,13 +22,13 @@ namespace hs
 namespace renderer_detail { struct GeometryPageGpu; }
 inline constexpr std::uint32_t kClusterRuntimeFrames = 3;
 inline constexpr std::uint32_t kClusterRuntimeCatalogs = static_cast<std::uint32_t>(render_data::kEnvironmentMaterialNames.size());
-inline constexpr std::uint32_t kClusterCutSrvCount = 10;
+inline constexpr std::uint32_t kClusterCutSrvCount = 11;
 inline constexpr std::uint32_t kClusterCutUavCount = 18;
-inline constexpr std::uint32_t kClusterCutDescriptorCount = 29;
+inline constexpr std::uint32_t kClusterCutDescriptorCount = 30;
 inline constexpr std::uint32_t kClusterCutClearOffset = kClusterCutDescriptorCount;
 inline constexpr std::uint32_t kClusterCutBankStride = kClusterCutClearOffset + kClusterCutUavCount;
 inline constexpr std::uint32_t kClusterOcclusionPhases = 2;
-inline constexpr std::uint32_t kClusterConstantStride = 768; // 576 bytes, CBV aligned
+inline constexpr std::uint32_t kClusterConstantStride = 768; // 688 bytes, CBV aligned
 inline constexpr std::uint32_t kClusterOcclusionConstantStride = 256;
 
 // b1/space6. Both matrices retain FrameConstants' column-major upload layout
@@ -154,8 +154,8 @@ struct ClusterViewRuntime
 // ownership and streaming remain common to all views.
 struct ClusterRuntimeState : ClusterViewRuntime
 {
-    AllocationResource groups, children, clusters, history_zero;
-    std::array<ResidencyTicket, 4> tables_residency;
+    AllocationResource groups, children, clusters, representation_pages, history_zero;
+    std::array<ResidencyTicket, 5> tables_residency;
     ClusterGpuTables cpu;
     std::array<ClusterCatalogRange, kClusterRuntimeCatalogs> catalogs;
     std::vector<ClusterPageStream> streams;
@@ -179,9 +179,10 @@ struct ClusterRuntimeState : ClusterViewRuntime
 // SubmitClusterCutReadback carries the graph's COPY completion, and
 // MarkClusterFrameUse carries ALL queue uses of snapshots/records/cut refs.
 // A frame may be rewritten/grown only after its previous completion finishes.
-// Each of two phase shader tables contains 10 SRVs followed by 18 UAVs and one
+// Each of two phase shader tables contains 11 SRVs followed by 18 UAVs and one
 // HLOD leaf export SRV for root4; each bank appends 18 raw clear UAVs outside
-// the shader ABI. t9 is that phase's HZB. t5/t6/t7/t8 are previous
+// the shader ABI. t9 is that phase's HZB; t10 is the immutable representation
+// page list. t5/t6/t7/t8 are previous
 // membership/generations/pages/status; u12/u13 are current membership/generations.
 // History is keyed by persistent instance slot and catalog-local cluster ID,
 // qualified within its owning view by immediate successful frame and view,

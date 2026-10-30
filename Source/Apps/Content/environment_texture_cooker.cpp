@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <list>
 #include <map>
 #include <set>
@@ -375,9 +374,7 @@ void CookEnvironmentTextures(const std::filesystem::path& source,const std::file
     DecodedImageCache decoded;
     std::filesystem::create_directories(asset_pipeline::NativeFilePath(output));
     for(const auto& group:groups) for(const auto& role:Roles(group)) {
-        std::cout<<"Environment "<<group.name<<" "<<role<<": cooking"<<std::endl;
         CookRole(source,output,group,role,device,decoded);
-        std::cout<<"Environment "<<group.name<<" "<<role<<": complete"<<std::endl;
     }
 }
 }

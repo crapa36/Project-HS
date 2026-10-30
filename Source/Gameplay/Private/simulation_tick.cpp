@@ -577,6 +577,7 @@ void GameSimulation::SimulationWorld::RunPipeline()
     for (const auto phase_id : gameplay_detail::kSimulationPipeline)
     {
         pipeline_phase = phase_id;
+#ifdef HS_DEVELOPMENT_TOOLS
         static constexpr std::array timing_ids{
             SimulationTimingId::SessionTimer, SimulationTimingId::Spawn, SimulationTimingId::SpawnBarrier,
             SimulationTimingId::AiIntent, SimulationTimingId::CastAttack, SimulationTimingId::AbilitySpawnBarrier,
@@ -585,6 +586,7 @@ void GameSimulation::SimulationWorld::RunPipeline()
             SimulationTimingId::CleanupBarrier, SimulationTimingId::GameplayHash};
         static_assert(timing_ids.size() == kSimulationPipeline.size());
         auto phase_timing = Measure(timing_ids[static_cast<std::size_t>(phase_id)]);
+#endif
         switch (phase_id)
         {
         case SimulationPhaseId::SessionTimer: SessionTimerPhase(); break;

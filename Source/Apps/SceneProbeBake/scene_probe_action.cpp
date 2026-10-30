@@ -133,7 +133,7 @@ int ProduceSceneProbe(int argc,char **argv)
             pending.insert(pending.end(),dependencies.begin(),dependencies.end());
         }
         std::ranges::sort(spec.inputs,{},&ap::Input::logical_id); std::ranges::sort(spec.upstream,{},&ap::UpstreamProduct::logical_id);
-        if(Current(build,spec,layout.dependencies)) { ap::TouchActionResult(build/"Actions"/kNamespace/"result.json"); std::cout<<kAction<<" current\n"; return 0; }
+        if(Current(build,spec,layout.dependencies)) { ap::TouchActionResult(build/"Actions"/kNamespace/"result.json"); return 0; }
         const auto stage=ap::CreateStage(build/"Actions"/kNamespace);
         try
         {

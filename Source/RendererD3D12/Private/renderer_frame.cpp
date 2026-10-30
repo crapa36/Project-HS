@@ -20,8 +20,10 @@
 #include <bit>
 #include <cassert>
 #include <cfloat>
+#include <cstddef>
 #include <limits>
 #include <iterator>
+#include <memory_resource>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -178,6 +180,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                              VfxEntitySurfaceInputs typed_entity_surfaces)
 {
     RendererCpuTimings cpu_timings;
+#if defined(HS_DEVELOPMENT_TOOLS)
     auto cpu_stage_start = std::chrono::steady_clock::now();
     const auto measure_stage = [&] {
         const auto end = std::chrono::steady_clock::now();
@@ -194,6 +197,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - begin).count());
     };
+#else
+    const auto measure_stage = [] { return std::uint64_t{}; };
+    const auto capture_clock = [] { return std::chrono::steady_clock::time_point{}; };
+    const auto capture_elapsed = [](std::chrono::steady_clock::time_point) { return std::uint64_t{}; };
+#endif
     const bool presented_view = impl_->active_view_role == RenderViewRole::Main;
     const auto &view_input = *impl_->explicit_view;
     const auto near_plane = view_input.near_plane;
@@ -235,15 +243,30 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     const bool use_visibility =
         impl_->config.surface_frontend == SurfaceFrontend::VisibilityBuffer;
     constexpr UINT kDefaultSceneDrawMaterial = 0u;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (impl_->config.capture_timing_stream)
         cpu_timings.frame_slot_wait_begin_qpc = RendererDiagnosticsCounter();
+#endif
     if (auto result = impl_->WaitForFrame(frame); !result)
     {
         return result;
     }
+    if (frame.auto_fg_cadence_pending)
+    {
+        const auto sequence = frame.auto_fg_cadence_sequence;
+        impl_->auto_fg_cadence_samples[sequence % impl_->auto_fg_cadence_samples.size()] = {
+            sequence, frame.submitted_frame_id, frame.auto_fg_cadence_submit_qpc,
+            frame.auto_fg_cadence_qpc_frequency, frame.auto_fg_cadence_validation,
+            frame.auto_fg_cadence_gpu_validation};
+        impl_->auto_fg_cadence_completed_sequence =
+            std::max(impl_->auto_fg_cadence_completed_sequence, sequence);
+        frame.auto_fg_cadence_pending = false;
+    }
     impl_->WriteOptionTargetDescriptors(owned_view, frame_slot);
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (impl_->config.capture_timing_stream)
         cpu_timings.frame_slot_wait_end_qpc = RendererDiagnosticsCounter();
+#endif
     if (presented_view && impl_->sdk_presentation.LatencyOwner() != SdkLatencyOwner::None && impl_->native_input_phase != 3)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Native latency rendering requires acknowledged input sampling and simulation for this frame token.");
@@ -258,7 +281,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     const auto cpu_recording_start = std::chrono::steady_clock::now();
     if (auto completed = impl_->ReadFrameGpuTimings(frame); completed.valid)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         impl_->diagnostics.RecordCompleted(completed);
+#endif
         if (completed.view_id == impl_->active_view_id.value)
         {
             if (completed.completed_frame_id > owned_view.completed_gpu_timings.completed_frame_id)
@@ -617,10 +642,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                                 ? impl_->config.preview_camera_yaw
                             : impl_->config.character_preview ? impl_->preview_yaw
                                                               : snapshot.camera.yaw_degrees;
-    const auto camera_pitch = impl_->config.preview_camera_override
-                                  ? impl_->config.preview_camera_pitch
-                              : impl_->config.character_preview ? impl_->preview_pitch
-                                                                : snapshot.camera.pitch_degrees;
     const auto camera_distance = impl_->config.preview_camera_override
                                      ? impl_->config.preview_camera_distance
                                  : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
@@ -629,13 +650,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                                  : impl_->config.character_preview ? impl_->preview_distance
                                      : snapshot.camera.distance;
 #else
-    // Command-line captures also run in the validation build without the Debug UI.
     const auto camera_yaw = impl_->config.preview_camera_override
                                 ? impl_->config.preview_camera_yaw
                                 : snapshot.camera.yaw_degrees;
-    const auto camera_pitch = impl_->config.preview_camera_override
-                                  ? impl_->config.preview_camera_pitch
-                                  : snapshot.camera.pitch_degrees;
     const auto camera_distance = impl_->config.preview_camera_override
                                      ? impl_->config.preview_camera_distance
                                      : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
@@ -2997,24 +3014,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     sdk_camera.reversed_depth = true;
     if (!presented_view || !impl_->native_input_phase)
         owned_view.sdk_frame_identity = {impl_->active_render_package_id, impl_->active_render_package_id, impl_->active_native_viewport_id};
-    if (owned_view.frame_number == 0)
-    {
-        DirectX::XMFLOAT3 projected_origin{};
-        DirectX::XMFLOAT3 projected_forward{};
-        DirectX::XMStoreFloat3(
-            &projected_origin,
-            DirectX::XMVector3TransformCoord(DirectX::XMVectorZero(), view * projection));
-        DirectX::XMStoreFloat3(
-            &projected_forward,
-            DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(0, 0, 20, 1),
-                                             view * projection));
-        std::ofstream camera_log(impl_->config.artifact_directory / "camera.json",
-                                 std::ios::trunc);
-        camera_log << std::format(
-            "{{\"origin\":[{},{},{}],\"forward\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}\n",
-            projected_origin.x, projected_origin.y, projected_origin.z, projected_forward.x,
-            projected_forward.y, projected_forward.z, camera_yaw, camera_pitch);
-    }
     DirectX::XMStoreFloat4(&constants->camera_time, eye);
     constants->camera_time.w =
         static_cast<float>(snapshot.header.simulation_time.count()) / 1'000'000'000.0f;
@@ -4128,7 +4127,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     std::vector<DynamicSceneCopyRegion> dynamic_scene_copy_regions;
     const auto dynamic_instance_base =
         dynamic_scene.resource->GetGPUVirtualAddress();
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::size_t dynamic_instance_upload_bytes{};
+#endif
     std::size_t dynamic_scene_staging_bytes{};
     const auto persistent_instances = impl_->dynamic_scene_slots.Instances();
     const auto persistent_metadata = impl_->dynamic_scene_slots.Metadata();
@@ -4697,11 +4698,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         inputs.view_id = impl_->active_view_id;
         inputs.required_receiver_domains=ShadowReceiverCamera;
         inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;
-        // These actual world/froxel enclosures are deliberately not clipped to
-        // raster surfaces. Software GI has no bounded CPU world-query contract.
+        // Brixelizer's sun-shadow cache seed uses these same GBuffer surfaces.
+        // Only actual world/froxel queries add receiver bounds beyond the camera.
         if(!typed_volumes.empty()||owned_view.volumetrics.AllocatedBytes()!=0)
         { inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld; }
-        if(active_features.software_gi_enabled) inputs.required_receiver_domains|=ShadowReceiverSoftwareGi;
         DirectX::XMStoreFloat4x4(&inputs.receiver_view_projection,clip_matrix);
         inputs.surface_receivers={static_shadow_batch->surface_receivers,dynamic_surface_receivers,
             static_shadow_batch->surface_aggregate?std::span<const ShadowSurfaceReceiver>(&*static_shadow_batch->surface_aggregate,1):
@@ -4752,6 +4752,18 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     for (std::size_t cascade = 0; cascade + 1 < active_view_count; ++cascade)
         make_demand_planes(cascade + 1, DirectX::XMMatrixTranspose(
             DirectX::XMLoadFloat4x4(&constants->shadow_view_projection[cascade])));
+    std::array<std::array<float, 4>, 6> demand_plane_lengths{};
+    for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+        for (std::size_t plane = 0; plane < 6; ++plane)
+        {
+            const auto &p = demand_planes[consumer][plane];
+            const float length = std::sqrt((p.x * p.x + p.y * p.y) + p.z * p.z);
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+                !std::isfinite(p.w) || !std::isfinite(length))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                    "Cluster refinement requires finite active frustum planes.");
+            demand_plane_lengths[plane][consumer] = length;
+        }
     for (std::size_t ordinal = 0; ordinal < cluster_inputs.size(); ++ordinal)
     {
         auto &cut = cluster_inputs[ordinal].constants;
@@ -4771,6 +4783,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             {
                 const auto &p = demand_planes[consumer][plane];
                 cut.frustum_planes[consumer][plane] = {p.x, p.y, p.z, p.w};
+                cut.frustum_plane_lengths[plane][consumer] = demand_plane_lengths[plane][consumer];
             }
     }
     if (auto *hlod_view = impl_->ActiveHlodView(); hlod_view && hlod_view->frames[frame_slot].enabled)
@@ -5036,7 +5049,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 dynamic_scene_copy_regions.push_back(
                     {destination_base + range.begin * stride,
                      range.count * stride, staging_offset});
+#if defined(HS_DEVELOPMENT_TOOLS)
                 dynamic_instance_upload_bytes += range.count * stride;
+#endif
             }
         };
     const auto &header = dynamic_scene_layout.header;
@@ -5404,12 +5419,18 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     }
     const auto hero_composition_rect = hero_bounds_complete && !hero_all_outside ? hero_rect : full_hero_rect;
     // Explicit work capture retains its diagnostic phases even for an empty raster domain.
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const bool capture_hero_work = impl_->config.capture_hero_work;
+#else
+    constexpr bool capture_hero_work = false;
+#endif
     const bool have_hero_contributors = hero_candidate_count != 0 &&
-        (!hero_all_outside || impl_->config.capture_hero_work);
+        (!hero_all_outside || capture_hero_work);
     const bool hero_occupancy_topology = have_hero_contributors && hero_candidate_count <= 2 &&
-        !impl_->config.capture_hero_work;
+        !capture_hero_work;
     std::uint32_t hero_work_source_mask{};
-    if (impl_->config.capture_hero_work && have_hero_contributors)
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (capture_hero_work && have_hero_contributors)
     {
         for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
             if (asset < 3 || (asset >= 6 && (asset - 6) / 2 < 3))
@@ -5420,6 +5441,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 if (static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second)
                     hero_work_source_mask |= 1u << (lod + 9);
     }
+#endif
     const bool composite_gradient_read = flash_add_count || ground_add_count ||
         std::ranges::any_of(ribbon_outputs, [](const GpuRibbonOutput &output) {
             return (output.metadata[3] & 1u) == 0;
@@ -5516,7 +5538,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (auto prepared = owned_view.local_shadows.PrepareFrameRecordData(
                 local_shadow_input, local_shadow_plan); !prepared) return prepared;
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     const bool full_timing_capture = impl_->config.capture_timing_stream && impl_->config.capture_gpu_timings;
+#else
+    constexpr bool full_timing_capture = false;
+#endif
     const bool output_dependency_interval = presented_view && dynamic_resolution_active && !full_timing_capture;
     const bool source_output_ready = full_timing_capture ||
         (presented_view && impl_->sdk_presentation.IsEnabled());
@@ -5530,7 +5556,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         upload_static_scene, upload_static_refs, upload_dynamic_scene, upload_environment_stream,
         upload_environment_geometry, separate_previous_instance_scene,
         !frame.geometry_draw_records_cpu.empty(),
-        have_hero_contributors, hero_occupancy_topology, impl_->config.capture_hero_work,
+        have_hero_contributors, hero_occupancy_topology, capture_hero_work,
         composite_gradient_read,
         owned_view.dynamic_lod_states.initialized,
         impl_->static_gpu_scene && impl_->static_gpu_scene->lod_states.initialized,
@@ -5935,13 +5961,128 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         }
         return true;
     };
+    LocalProbeRuntimeFrameInputs local_probe_inputs;
+    LocalProbeRuntimeFramePlan local_probe_plan;
+    bool local_probe_revision_preflight{};
+    const bool capture_source = impl_->local_probes.AllocatedBytes() != 0 &&
+        static_scene && impl_->static_gpu_scene;
+    local_probe_inputs.config = &impl_->config;
+    local_probe_inputs.pipeline_cache = &impl_->pipeline_cache;
+    local_probe_inputs.scene = static_scene;
+    local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
+    local_probe_inputs.static_instance_generation = impl_->static_gpu_scene
+        ? impl_->static_gpu_scene->instance_generation : 0;
+    local_probe_inputs.material_parameter_revision = impl_->material_parameter_revision;
+    local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
+    local_probe_inputs.foliage_density = foliage_density;
+    local_probe_inputs.frame_constants = constants;
+    local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
+    if (has_static_authored_material_draw)
+        local_probe_inputs.declare_material_sampling = [](PassBuilder &) {};
+    if (has_static_masked_material_draw)
+        local_probe_inputs.declare_shadow_sampling = [](PassBuilder &) {};
+    std::array<LocalProbePageRevision, kEnvironmentMaterialNames.size() + 1> page_revisions;
+    if (capture_source)
+    {
+        for (std::size_t material = 0; material < page_revisions.size(); ++material)
+        {
+            const auto &page = material == kEnvironmentMaterialNames.size()
+                ? impl_->procedural_geometry : *bucket_pages[material * 3];
+            page_revisions[material] = {page.page_slot,page.generation,page.index_count,
+                page.source_digest,page.metadata.bounds};
+        }
+        local_probe_inputs.page_revisions = page_revisions;
+        if (auto prepared = impl_->local_probes.PrepareFrameDecisionData(
+                local_probe_inputs, local_probe_plan); !prepared) return prepared;
+        local_probe_revision_preflight = true;
+    }
+    const bool previous_view_valid = owned_view.temporal_history_valid || owned_view.hzb_history_valid;
+    const bool volumetric_reset_history = !previous_view_valid || new_session;
+    VolumetricCamera retained_volumetric_camera;
+    retained_volumetric_camera.inverse_view_projection = camera_relative_inverse_view_projection;
+    DirectX::XMStoreFloat4x4(&retained_volumetric_camera.view_projection,
+        DirectX::XMMatrixInverse(nullptr,
+            DirectX::XMLoadFloat4x4(&retained_volumetric_camera.inverse_view_projection)));
+    DirectX::XMStoreFloat4x4(&retained_volumetric_camera.world_to_view,
+        DirectX::XMMatrixTranslationFromVector(eye) * view);
+    retained_volumetric_camera.origin = lod_eye;
+    retained_volumetric_camera.near_plane = near_plane;
+    retained_volumetric_camera.far_plane = far_plane;
+    const auto retained_volumetric_previous_camera = owned_view.previous_volumetric_camera.near_plane > 0
+        ? owned_view.previous_volumetric_camera : retained_volumetric_camera;
+    VolumetricRevisions retained_volumetric_revisions{};
+    auto projected_volumetric_inputs = VolumetricInputs{};
+    const bool projected_volumetric_shadows = primary_sun &&
+        owned_view.virtual_shadows.AllocatedBytes() != 0;
+    if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
+    {
+        retained_volumetric_revisions.scene = local_probe_plan.revisions.static_layout;
+        retained_volumetric_revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
+        retained_volumetric_revisions.light = local_probe_plan.revisions.light;
+        const auto mix_volumetric_revision = [](std::uint64_t &hash, std::uint64_t value) {
+            hash = (hash ^ value) * 1099511628211ull;
+        };
+        for (const auto &source : frame_lights)
+        {
+            mix_volumetric_revision(retained_volumetric_revisions.light, source.stable_id);
+            mix_volumetric_revision(retained_volumetric_revisions.light, source.generation);
+            mix_volumetric_revision(retained_volumetric_revisions.light, source.revision);
+            for (const auto value : {source.direction.x, source.direction.y, source.direction.z,
+                    source.color.x, source.color.y, source.color.z, source.position.x, source.position.y,
+                    source.position.z, source.quantity, source.range, source.shape.x, source.shape.y,
+                    source.emitter_radius, source.inner_cone_radians, source.outer_cone_radians,
+                    source.area_tangent.x, source.area_tangent.y, source.area_tangent.z})
+                mix_volumetric_revision(retained_volumetric_revisions.light, std::bit_cast<UINT>(value));
+            mix_volumetric_revision(retained_volumetric_revisions.light, static_cast<UINT>(source.type));
+            mix_volumetric_revision(retained_volumetric_revisions.light, static_cast<UINT>(source.unit));
+            mix_volumetric_revision(retained_volumetric_revisions.light, source.shadow_flags);
+        }
+        retained_volumetric_revisions.volume = impl_->volumetric_revision;
+        projected_volumetric_inputs.hero_blue_noise.resource = impl_->vfx_stbn_scalar.resource.Get();
+        projected_volumetric_inputs.hero_gradient.resource = impl_->vfx_gradient.resource.Get();
+        projected_volumetric_inputs.hero_noise_volume.resource = impl_->vfx_noise_volume.resource.Get();
+        projected_volumetric_inputs.volumes = impl_->volumetric_media;
+        if (impl_->config.vfx_quality == VfxQuality::High)
+            projected_volumetric_inputs.hero_volumes = typed_volumes;
+        projected_volumetric_inputs.frame_slot = frame_slot;
+        projected_volumetric_inputs.frame_index = owned_view.frame_number;
+        projected_volumetric_inputs.reset_history = volumetric_reset_history;
+        projected_volumetric_inputs.revisions = retained_volumetric_revisions;
+        projected_volumetric_inputs.camera = retained_volumetric_camera;
+        projected_volumetric_inputs.previous_camera = retained_volumetric_previous_camera;
+        if (primary_sun && csm_required) projected_volumetric_inputs.compact_shadow.identity.w = 1;
+    }
+    const auto matches_volumetric_layout = [&](const FrameGraphLayout &saved) {
+        const auto &v = saved.volumetrics.input_versions;
+        auto projected = projected_volumetric_inputs;
+        projected.depth.version = v[0]; projected.hdr.version = v[1];
+        projected.lights.lights = v[2]; projected.lights.ranges = v[3];
+        projected.lights.inline_indices = v[4]; projected.lights.spill_indices = v[5];
+        projected.shadows.metadata = v[6]; projected.shadows.page_table = v[7];
+        projected.shadows.static_bank = v[8]; projected.shadows.dynamic_bank = v[9];
+        projected.shadows.draw_records = v[10]; projected.shadows.root_static = v[11];
+        projected.shadows.root_dynamic = v[12];
+        projected.local_shadows.metadata = v[13]; projected.local_shadows.records = v[14];
+        projected.local_shadows.static_bank = v[15]; projected.local_shadows.dynamic_bank = v[16];
+        projected.local_shadows.draw_records = v[17];
+        projected.compact_shadow.atlas.version = v[18];
+        projected.hero_blue_noise.version = v[19];
+        projected.hero_gradient.version = v[20];
+        projected.hero_noise_volume.version = v[21];
+        return owned_view.volumetrics.MatchesProjectedLayout(projected, saved.volumetrics,
+            projected_volumetric_shadows, local_shadow_planned,
+            projected_volumetric_shadows && shadow_plan.constants.root_options.x != 0u,
+            projected_volumetric_shadows && shadow_plan.constants.root_options.w != 0u &&
+                shadow_plan.constants.root_options.x != 0u);
+    };
     FrameGraphLayout *source_candidate{};
     for (auto &saved : impl_->graph_layouts)
     {
         if (!saved.handle || !saved.certified_imports || saved.early != early_key ||
             saved.geometry_page_slots != geometry_page_slots ||
-            saved.software_scene_page_slots != software_scene_page_slots ||
-            !matches_direct_shapes(saved.direct_import_shapes) ||
+            saved.software_scene_page_slots != software_scene_page_slots)
+            continue;
+        if (!matches_direct_shapes(saved.direct_import_shapes) ||
             (software_scene_jobs.empty()
                 ? saved.scene_geometry.valid && saved.scene_geometry.record.record_count != 0
                 : !saved.scene_geometry.valid ||
@@ -5950,13 +6091,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         (scene_shape.deformed_position_bytes != 0) ||
                     saved.scene_geometry.record.import_widths != scene_shape.import_widths) ||
             !impl_->texture_streaming.MatchesLayout(1000, saved.texture_streaming) ||
-            !impl_->texture_feedback.MatchesLayout(frame_slot, 1200, 1201,
-                saved.texture_feedback) ||
+            !impl_->texture_feedback.MatchesLayout(frame_slot, 1200, 1201, saved.texture_feedback) ||
             !owned_view.light_list.MatchesLayout(saved.light_list) ||
             !impl_->ltc_lut.MatchesLayout(saved.ltc) ||
             !impl_->lighting_probe.MatchesLayout(saved.probe) ||
             !impl_->MatchesClusterGraphLayout(cluster_record, saved.cluster) ||
-            !matches_target_shapes(saved)) continue;
+            !matches_target_shapes(saved))
+            continue;
         if (primary_sun && owned_view.virtual_shadows.AllocatedBytes() != 0)
         {
             inputs.depth = saved.virtual_shadows.depth;
@@ -5966,19 +6107,34 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                              std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
             inputs.declare_material_sampling = [](PassBuilder &) {};
             if (!owned_view.virtual_shadows.MatchesLayout(inputs, shadow_plan,
-                    saved.virtual_shadows)) continue;
+                    saved.virtual_shadows))
+            {
+                continue;
+            }
         }
-        else if (saved.virtual_shadows.target_generation) continue;
+        else if (saved.virtual_shadows.target_generation)
+        {
+            continue;
+        }
         if (local_shadow_planned)
         {
             local_shadow_input.native_reads = saved.local_shadows.native_reads;
             if (!owned_view.local_shadows.MatchesLayout(local_shadow_input, local_shadow_plan,
-                    saved.local_shadows)) continue;
+                    saved.local_shadows))
+            {
+                continue;
+            }
         }
-        else if (saved.local_shadows.storage_generation) continue;
+        else if (saved.local_shadows.storage_generation)
+        {
+            continue;
+        }
         if (have_hero_contributors)
         {
-            if (!saved.hero.target_generation) continue;
+            if (!saved.hero.target_generation)
+            {
+                continue;
+            }
             HeroTransparencyInputs hero_match;
             hero_match.opaque_depth.version = saved.hero.inputs[0];
             hero_match.hdr.version = saved.hero.inputs[1];
@@ -5987,6 +6143,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             hero_match.use_occupancy_queries = hero_occupancy_topology;
             hero_match.peel_reads = std::span<const HeroTransparencySceneRead>(saved.hero.peel_reads);
             hero_match.scene_reads = std::span<const HeroTransparencySceneRead>(saved.hero.scene_reads);
+#if defined(HS_DEVELOPMENT_TOOLS)
             std::array<HeroWorkContributorInput, HeroWorkRetainedLayout::kMaxContributors> work{};
             std::size_t work_count{};
             for (std::uint32_t bit = 0; bit < 12; ++bit)
@@ -5996,10 +6153,28 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     ++work_count;
                 }
             hero_match.work_contributors = std::span<const HeroWorkContributorInput>(work.data(), work_count);
+#endif
             if (!owned_view.hero_transparency.MatchesLayout(hero_match,
-                    HeroTransparencyGuide{saved.hero.background, nullptr}, saved.hero)) continue;
+                    HeroTransparencyGuide{saved.hero.background, nullptr}, saved.hero))
+            {
+                continue;
+            }
         }
-        else if (saved.hero.target_generation) continue;
+        else if (saved.hero.target_generation)
+        {
+            continue;
+        }
+        if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
+        {
+            if (!matches_volumetric_layout(saved))
+            {
+                continue;
+            }
+        }
+        else if (saved.volumetrics.storage_generation)
+        {
+            continue;
+        }
         if (!source_candidate || saved.last_used > source_candidate->last_used)
             source_candidate = &saved;
     }
@@ -6011,7 +6186,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             source_candidate ? source_candidate->hlod.selection.guides[2] : ResourceVersion{},
             hlod_record); !prepared) return prepared;
     if (source_candidate && !impl_->MatchesHlodFrameLayout(hlod_record, source_candidate->hlod))
+    {
         source_candidate = nullptr;
+    }
     std::vector<SoftwareSceneGeometry> brixelizer_geometries;
     std::vector<BrixelizerSceneInstance> brixelizer_instances;
     BrixelizerGeometryLookup brixelizer_geometry_lookup;
@@ -6119,12 +6296,18 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         const auto &reads = source_candidate->brixelizer.record.geometry_reads;
         const auto &saved_keys = source_candidate->brixelizer_leaf_keys;
         if (reads.size() != saved_keys.size() * 2u)
+        {
             source_candidate = nullptr;
+        }
         else
             for (std::size_t leaf = 0; leaf < brixelizer_geometries.size(); ++leaf)
             {
                 const auto found = std::ranges::find(saved_keys, brixelizer_leaf_key(leaf));
-                if (found == saved_keys.end()) { source_candidate = nullptr; break; }
+                if (found == saved_keys.end())
+                {
+                    source_candidate = nullptr;
+                    break;
+                }
                 const auto old_leaf = static_cast<std::size_t>(found - saved_keys.begin());
                 brixelizer_geometries[leaf].vertex_version = reads[old_leaf * 2u].version;
                 brixelizer_geometries[leaf].index_version = reads[old_leaf * 2u + 1u].version;
@@ -6144,7 +6327,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (auto prepared = owned_view.brixelizer_gi.PrepareFrameRecordData(native_scene, brixelizer_record); !prepared)
             return prepared;
         if (source_candidate && !MatchesBrixelizerGraphLayout(
-                brixelizer_record, source_candidate->brixelizer)) source_candidate = nullptr;
+                brixelizer_record, source_candidate->brixelizer))
+        {
+            source_candidate = nullptr;
+        }
     }
     struct PreparedGiGuard
     {
@@ -6153,52 +6339,22 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     } prepared_gi_guard{active_features.software_gi_enabled ? &owned_view.brixelizer_gi : nullptr};
     std::optional<std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1>> capture_pages;
     std::vector<LocalProbeSceneRead> capture_reads;
-    LocalProbeRuntimeFrameInputs local_probe_inputs;
-    LocalProbeRuntimeFramePlan local_probe_plan;
     bool local_probe_prepared{};
-    bool local_probe_revision_preflight{};
-    const bool capture_source = impl_->local_probes.AllocatedBytes() != 0 &&
-        static_scene && impl_->static_gpu_scene;
-    local_probe_inputs.config = &impl_->config;
-    local_probe_inputs.pipeline_cache = &impl_->pipeline_cache;
-    local_probe_inputs.scene = static_scene;
-    local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
-    local_probe_inputs.static_instance_generation = impl_->static_gpu_scene
-        ? impl_->static_gpu_scene->instance_generation : 0;
-    local_probe_inputs.material_parameter_revision = impl_->material_parameter_revision;
-    local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
-    local_probe_inputs.foliage_density = foliage_density;
-    local_probe_inputs.frame_constants = constants;
-    local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
-    if (has_static_authored_material_draw)
-        local_probe_inputs.declare_material_sampling = [](PassBuilder &) {};
-    if (has_static_masked_material_draw)
-        local_probe_inputs.declare_shadow_sampling = [](PassBuilder &) {};
-    std::array<LocalProbePageRevision, kEnvironmentMaterialNames.size() + 1> page_revisions;
-    if (capture_source)
-    {
-        for (std::size_t material = 0; material < page_revisions.size(); ++material)
-        {
-            const auto &page = material == kEnvironmentMaterialNames.size()
-                ? impl_->procedural_geometry : *bucket_pages[material * 3];
-            page_revisions[material] = {page.page_slot,page.generation,page.index_count,
-                page.source_digest,page.metadata.bounds};
-        }
-        local_probe_inputs.page_revisions = page_revisions;
-        if (auto prepared = impl_->local_probes.PrepareFrameDecisionData(
-                local_probe_inputs, local_probe_plan); !prepared) return prepared;
-        local_probe_revision_preflight = true;
-    }
     // Capture texture residency is not final until streaming bindings are assembled;
     // avoid restoring a capture layout whose face count was planned from no mip facts.
     if(source_candidate&&(local_probe_plan.capture||
-        impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed)))source_candidate=nullptr;
+        impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed)))
+    {
+        source_candidate=nullptr;
+    }
     if (source_candidate)
     {
         // The freshly computed revision decision is authoritative. A layout can
         // only be reused when its capture topology matches today's decision.
         if (source_candidate->local_probe.capture != local_probe_plan.capture)
+        {
             source_candidate = nullptr;
+        }
     }
     if (source_candidate)
     {
@@ -6220,7 +6376,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             if (source_candidate->local_shadows.storage_generation) expected_reads += 5u;
         }
         if (source_candidate->local_probe.scene_reads.size() != expected_reads)
+        {
             source_candidate = nullptr;
+        }
         else
         {
             local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
@@ -6231,7 +6389,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 capture_pages.emplace();
                 const auto &saved_reads = source_candidate->local_probe.shadow_reads;
                 if (saved_reads.size() < expected_reads + 2u + capture_pages->size())
+                {
                     source_candidate = nullptr;
+                }
                 else
                 {
                     local_probe_inputs.static_version = saved_reads[expected_reads + 1u].version;
@@ -6260,7 +6420,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                                     return value != std::byte{};
                                 });
                         }))
+                    {
                         source_candidate = nullptr;
+                    }
                 }
                 local_probe_inputs.pages = *capture_pages;
             }
@@ -6270,81 +6432,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         local_probe_inputs, local_probe_plan); !prepared) return prepared;
                 local_probe_prepared = true;
                 if (!impl_->local_probes.MatchesLayout(local_probe_inputs,
-                        local_probe_plan, source_candidate->local_probe)) source_candidate = nullptr;
+                        local_probe_plan, source_candidate->local_probe))
+                {
+                    source_candidate = nullptr;
+                }
             }
         }
     }
-    VolumetricCamera retained_volumetric_camera;
-    VolumetricRevisions retained_volumetric_revisions;
-    if (source_candidate && impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
-    {
-        const auto &saved = *source_candidate;
-        const auto &v = saved.volumetrics.input_versions;
-        VolumetricInputs projected;
-        projected.depth.version = v[0]; projected.hdr.version = v[1];
-        projected.lights.lights = v[2]; projected.lights.ranges = v[3];
-        projected.lights.inline_indices = v[4]; projected.lights.spill_indices = v[5];
-        projected.shadows.metadata = v[6]; projected.shadows.page_table = v[7];
-        projected.shadows.static_bank = v[8]; projected.shadows.dynamic_bank = v[9];
-        projected.shadows.draw_records = v[10]; projected.shadows.root_static = v[11];
-        projected.shadows.root_dynamic = v[12];
-        projected.local_shadows.metadata = v[13]; projected.local_shadows.records = v[14];
-        projected.local_shadows.static_bank = v[15]; projected.local_shadows.dynamic_bank = v[16];
-        projected.local_shadows.draw_records = v[17];
-        projected.compact_shadow.atlas.version = v[18];
-        projected.hero_blue_noise = {v[19], impl_->vfx_stbn_scalar.resource.Get()};
-        projected.hero_gradient = {v[20], impl_->vfx_gradient.resource.Get()};
-        projected.hero_noise_volume = {v[21], impl_->vfx_noise_volume.resource.Get()};
-        projected.volumes = impl_->volumetric_media;
-        if (impl_->config.vfx_quality == VfxQuality::High) projected.hero_volumes = typed_volumes;
-        projected.frame_slot = frame_slot;
-        projected.frame_index = owned_view.frame_number;
-        projected.reset_history = !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session;
-        projected.revisions.scene = local_probe_plan.revisions.static_layout;
-        projected.revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
-        projected.revisions.light = local_probe_plan.revisions.light;
-        const auto mix_revision = [](std::uint64_t &hash, std::uint64_t value) {
-            hash = (hash ^ value) * 1099511628211ull;
-        };
-        for (const auto &source : frame_lights)
-        {
-            mix_revision(projected.revisions.light, source.stable_id);
-            mix_revision(projected.revisions.light, source.generation);
-            mix_revision(projected.revisions.light, source.revision);
-            for (const auto value : {source.direction.x, source.direction.y, source.direction.z,
-                    source.color.x, source.color.y, source.color.z, source.position.x, source.position.y,
-                    source.position.z, source.quantity, source.range, source.shape.x, source.shape.y,
-                    source.emitter_radius, source.inner_cone_radians, source.outer_cone_radians,
-                    source.area_tangent.x, source.area_tangent.y, source.area_tangent.z})
-                mix_revision(projected.revisions.light, std::bit_cast<UINT>(value));
-            mix_revision(projected.revisions.light, static_cast<UINT>(source.type));
-            mix_revision(projected.revisions.light, static_cast<UINT>(source.unit));
-            mix_revision(projected.revisions.light, source.shadow_flags);
-        }
-        projected.revisions.volume = impl_->volumetric_revision;
-        projected.camera.inverse_view_projection = camera_relative_inverse_view_projection;
-        DirectX::XMStoreFloat4x4(&projected.camera.view_projection,
-            DirectX::XMMatrixInverse(nullptr,
-                DirectX::XMLoadFloat4x4(&projected.camera.inverse_view_projection)));
-        DirectX::XMStoreFloat4x4(&projected.camera.world_to_view,
-            DirectX::XMMatrixTranslationFromVector(eye) * view);
-        projected.camera.origin = lod_eye;
-        projected.camera.near_plane = near_plane;
-        projected.camera.far_plane = far_plane;
-        projected.previous_camera = owned_view.previous_volumetric_camera.near_plane > 0
-            ? owned_view.previous_volumetric_camera : projected.camera;
-        retained_volumetric_camera = projected.camera;
-        retained_volumetric_revisions = projected.revisions;
-        if (primary_sun && csm_required) projected.compact_shadow.identity.w = 1;
-        const bool virtual_shadow_present = primary_sun && owned_view.virtual_shadows.AllocatedBytes() != 0;
-        if (!owned_view.volumetrics.MatchesProjectedLayout(projected, saved.volumetrics,
-                virtual_shadow_present, local_shadow_planned,
-                virtual_shadow_present && saved.virtual_shadows.root_static_present,
-                virtual_shadow_present && saved.virtual_shadows.root_dynamic_present))
-            source_candidate = nullptr;
-    }
-    else if (source_candidate && source_candidate->volumetrics.storage_generation)
-        source_candidate = nullptr;
     // GetBuffer publishes a DXGI-owned swapchain surface. Its owner guarantees
     // that it is independent of application placed heaps; retain only value
     // metadata while back_buffers owns the COM lifetime.
@@ -6422,11 +6516,16 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         : impl_->texture_streaming.AddPendingPasses(impl_->graph, std::move(texture_copy_queue),
             1000, texture_bindings, &pending_graph_layout.texture_streaming);
     if (!streaming_result) return streaming_result;
-    std::unordered_map<ID3D12Resource *, ResourceHandle> canonical_textures;
+    alignas(std::max_align_t) std::array<std::byte, 16 * 1024> graph_resource_scratch;
+    std::pmr::monotonic_buffer_resource graph_resource_arena{
+        graph_resource_scratch.data(), graph_resource_scratch.size()};
+    std::pmr::unordered_map<ID3D12Resource *, ResourceHandle> canonical_textures{
+        &graph_resource_arena};
     for (const auto &binding : texture_bindings)
         canonical_textures.emplace(impl_->texture_streaming.View(binding.texture).resource, binding.sampled.resource);
     const bool capture_facts_needed=local_probe_plan.capture||
         impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed);
+    const bool strict_capture=capture_demand&&wait_for_streaming;
     if(capture_facts_needed)
     {
         if(auto materials=impl_->local_probes.PrepareCaptureMaterialOrdinals(static_scene,foliage_density);!materials)return materials;
@@ -6435,6 +6534,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         by_id.reserve(texture_bindings.size());
         for(const auto &binding:texture_bindings)by_id.emplace(binding.texture.value,&binding);
         std::unordered_set<std::uint32_t> seen;
+        std::vector<TextureStreamMipRequirement> capture_texture_requirements;
+        if(strict_capture)capture_texture_requirements.reserve(
+            capture_materials.size()*render_data::kMaterialTextureSlots);
         for(const auto material:capture_materials)
             for(std::uint32_t slot=0;slot<render_data::kMaterialTextureSlots;++slot)
             {
@@ -6446,15 +6548,21 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 const auto &binding=*found->second;
                 if(seen.insert(id.value).second)
                 {
-                    if(capture_demand)
+                    if(strict_capture)
                         if(const auto fits=impl_->texture_streaming.RequiredSourceMipFitsMaximumHostBudget(
                                 id,binding.required_mip);fits&&!*fits)
                             return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
                                 "Scene-probe required texture source mip exceeds the maximum host staging budget: "+
                                 std::string(binding.logical_id)+" (required mip "+std::to_string(binding.required_mip)+").");
+                    if(strict_capture)capture_texture_requirements.push_back({id,binding.required_mip});
                     local_probe_texture_facts.push_back({binding.logical_id,binding.resident_mip,binding.ready});
                 }
             }
+        if(strict_capture)
+            if(const auto fits=impl_->texture_streaming.RequiredMipSetFitsConfiguredBudget(
+                    capture_texture_requirements);fits&&!*fits)
+                return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
+                    "Scene-probe required material texture set exceeds the configured texture residency budget.");
     }
     local_probe_inputs.texture_facts=local_probe_texture_facts;
     local_probe_inputs.texture_facts_valid=capture_facts_needed;
@@ -6473,9 +6581,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             1200, feedback_bindings, &pending_graph_layout.texture_feedback);
     if (!clear_feedback) return clear_feedback;
     ResourceVersion entity_surface_noise_version, entity_surface_gradient_version, entity_surface_stbn_version;
+    enum class MaterialSampling { Surface, Opacity };
     const auto read_material_sampling = [&](PassBuilder &pass, bool feedback_writer,
+                                           MaterialSampling domain = MaterialSampling::Surface,
                                            Access sampling = Access::AllShaderRead) {
-        for (const auto &binding : texture_bindings) pass.Read(binding.sampled, sampling);
+        const bool opacity_only = domain == MaterialSampling::Opacity;
+        for (const auto &binding : texture_bindings)
+            if (!opacity_only || binding.opacity_sampling) pass.Read(binding.sampled, sampling);
         pass.Read(texture_metadata, sampling);
         if (entity_surface_noise_version.resource)
         {
@@ -6483,11 +6595,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             pass.Read(entity_surface_gradient_version, sampling);
             pass.Read(entity_surface_stbn_version, sampling);
         }
-        if (feedback_writer && !restored_graph) RendererTextureFeedback::DeclareSampling(pass, feedback_bindings);
+        if (feedback_writer && !restored_graph)
+            RendererTextureFeedback::DeclareSampling(pass, feedback_bindings, opacity_only);
     };
     // Keep deduplication local to this frame and indexed by the allocation
     // owner; do not rescan all prior imports on each declaration request.
-    std::unordered_map<AllocationResource *, ResourceHandle> imported_resources;
+    std::pmr::unordered_map<AllocationResource *, ResourceHandle> imported_resources{
+        &graph_resource_arena};
     imported_resources.reserve(128);
     std::size_t import_cursor{};
     bool import_binding_failed{};
@@ -7757,7 +7871,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         {
             layout.pass_index = impl_->graph.PassCount();
             shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
-            read_material_sampling(*shadow_pass, has_masked_material_draw);
+            read_material_sampling(*shadow_pass, has_masked_material_draw, MaterialSampling::Opacity);
             read_geometry_pages(*shadow_pass);
             for (const auto &read : csm_reads) shadow_pass->Read(read.version, read.access);
             shadow_version = shadow_pass->Write(shadow_version, Access::DepthWrite);
@@ -7894,7 +8008,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     {
         gbuffer_layout.pass_index = impl_->graph.PassCount();
         gbuffer_pass = impl_->graph.AddPass(4, kRenderPassNames[4], QueueHint::Direct);
-        read_material_sampling(*gbuffer_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
+        read_material_sampling(*gbuffer_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw,
+            use_visibility ? MaterialSampling::Opacity : MaterialSampling::Surface);
         impl_->ReadClusterFrame(*gbuffer_pass, cluster_graph, true);
         impl_->ReadHlodFrame(*gbuffer_pass, hlod_graph, true);
         gbuffer_pass->Read(geometry_records_version, Access::ShaderRead);
@@ -8091,7 +8206,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     {
         gbuffer_retest_layout.pass_index = impl_->graph.PassCount();
         gbuffer_retest_pass = impl_->graph.AddPass(20, kRenderPassNames[20], QueueHint::Direct);
-        read_material_sampling(*gbuffer_retest_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw);
+        read_material_sampling(*gbuffer_retest_pass, use_visibility ? has_masked_material_draw : has_authored_material_draw,
+            use_visibility ? MaterialSampling::Opacity : MaterialSampling::Surface);
         impl_->ReadClusterFrame(*gbuffer_retest_pass, cluster_graph, true, true);
         impl_->ReadHlodFrame(*gbuffer_retest_pass, hlod_graph, false);
         gbuffer_retest_pass->Read(geometry_records_version, Access::ShaderRead);
@@ -8309,7 +8425,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         {
             resolve_layout.pass_index = impl_->graph.PassCount();
             resolve = impl_->graph.AddPass(30, "SurfaceResolve", QueueHint::Compute);
-            read_material_sampling(*resolve, has_authored_material_draw, Access::ComputeRead);
+            read_material_sampling(*resolve, has_authored_material_draw, MaterialSampling::Surface, Access::ComputeRead);
             impl_->ReadClusterFrame(*resolve, cluster_graph, false);
             impl_->ReadHlodFrame(*resolve, hlod_graph, false);
             resolve->Read(visibility_ids_version, Access::ComputeRead);
@@ -8515,7 +8631,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         {
             reads.push_back({entry.version, Access::VertexShaderRead});
         }
-        inputs.declare_material_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, has_masked_material_draw); };
+        inputs.declare_material_sampling = [&](PassBuilder &pass) {
+            read_material_sampling(pass, has_masked_material_draw, MaterialSampling::Opacity);
+        };
         inputs.depth = depth_version; inputs.normal = gbuffer_normal_version;
         inputs.depth_resource = owned_view.targets.depth.resource.Get(); inputs.normal_resource = surface_normal_resource;
         inputs.native_reads = reads;
@@ -8677,7 +8795,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     if (has_static_authored_material_draw)
         local_probe_inputs.declare_material_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, true); };
     if (has_static_masked_material_draw)
-        local_probe_inputs.declare_shadow_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, true); };
+        local_probe_inputs.declare_shadow_sampling = [&](PassBuilder &pass) {
+            read_material_sampling(pass, true, MaterialSampling::Opacity);
+        };
     local_probe_inputs.frame_srv_heap = impl_->srv_cpu_heap;
     local_probe_inputs.sampler_heap = impl_->sampler_heap;
     local_probe_inputs.frame_srv_base = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
@@ -8954,7 +9074,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         return Result::Success();
     };
     AmbientOcclusionConstants ambient_constants;
-    const bool previous_view_valid = owned_view.temporal_history_valid || owned_view.hzb_history_valid;
     DirectX::XMStoreFloat4x4(&ambient_constants.world_to_view,
         DirectX::XMMatrixTranslationFromVector(eye) * view);
     DirectX::XMStoreFloat4x4(&ambient_constants.projection,
@@ -9318,20 +9437,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         opaque_hdr_srv = reflection_outputs.composed_srv;
     }
     VolumetricOutputs volumetric_outputs;
-    VolumetricCamera volumetric_camera;
+    const auto volumetric_camera = retained_volumetric_camera;
     const auto volumetric_raw_hdr = hdr_version;
     if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
     {
-        if (restored_graph) volumetric_camera = retained_volumetric_camera;
-        else
-        {
-            volumetric_camera.inverse_view_projection = camera_relative_inverse_view_projection;
-            DirectX::XMStoreFloat4x4(&volumetric_camera.view_projection, DirectX::XMMatrixInverse(nullptr,
-                DirectX::XMLoadFloat4x4(&volumetric_camera.inverse_view_projection)));
-            DirectX::XMStoreFloat4x4(&volumetric_camera.world_to_view, DirectX::XMMatrixTranslationFromVector(eye) * view);
-            volumetric_camera.origin = lod_eye; volumetric_camera.near_plane = near_plane;
-            volumetric_camera.far_plane = far_plane;
-        }
         VolumetricInputs inputs;
         inputs.depth = {depth_version, owned_view.targets.depth.resource.Get()}; inputs.hdr = {hdr_version, opaque_hdr_resource};
         inputs.lights = light_outputs; inputs.shadows = virtual_shadow_outputs; inputs.volumes = impl_->volumetric_media;
@@ -9347,30 +9456,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             inputs.hero_noise_volume = {impl_->graph.Version(noise_volume), impl_->vfx_noise_volume.resource.Get()};
         }
         inputs.camera = volumetric_camera;
-        inputs.previous_camera = owned_view.previous_volumetric_camera.near_plane > 0 ? owned_view.previous_volumetric_camera : volumetric_camera;
+        inputs.previous_camera = retained_volumetric_previous_camera;
         inputs.render_active = owned_view.state.render_active; inputs.frame_slot = frame_slot; inputs.frame_index = owned_view.frame_number;
-        inputs.completed = impl_->graph_queue_executor.Completed(); inputs.reset_history = !previous_view_valid || new_session;
-        if (restored_graph) inputs.revisions = retained_volumetric_revisions;
-        else
-        {
-        inputs.revisions.scene = pending_effects.probe_revisions.static_layout;
-        inputs.revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
-        inputs.revisions.light = pending_effects.probe_revisions.light;
-        const auto mix_revision = [](std::uint64_t &hash, std::uint64_t value) { hash = (hash ^ value) * 1099511628211ull; };
-        for (const auto &source : frame_lights)
-        {
-            mix_revision(inputs.revisions.light, source.stable_id); mix_revision(inputs.revisions.light, source.generation);
-            mix_revision(inputs.revisions.light, source.revision);
-            for (const auto value : {source.direction.x, source.direction.y, source.direction.z,
-                    source.color.x, source.color.y, source.color.z, source.position.x, source.position.y, source.position.z,
-                    source.quantity, source.range, source.shape.x, source.shape.y, source.emitter_radius,
-                    source.inner_cone_radians, source.outer_cone_radians, source.area_tangent.x, source.area_tangent.y, source.area_tangent.z})
-                mix_revision(inputs.revisions.light, std::bit_cast<UINT>(value));
-            mix_revision(inputs.revisions.light, static_cast<UINT>(source.type)); mix_revision(inputs.revisions.light, static_cast<UINT>(source.unit));
-            mix_revision(inputs.revisions.light, source.shadow_flags);
-        }
-        inputs.revisions.volume = impl_->volumetric_revision;
-        }
+        inputs.completed = impl_->graph_queue_executor.Completed(); inputs.reset_history = volumetric_reset_history;
+        inputs.revisions = retained_volumetric_revisions;
         if (primary_sun && csm_required)
         {
             inputs.compact_shadow.atlas = {shadow_version, owned_view.targets.shadow.resource.Get()};
@@ -9388,14 +9477,19 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid volumetric descriptor suffix.");
             auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             destination.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount + kVolumetricFrameTableOffset) * impl_->srv_stride;
-            auto source = local_probe_inputs.frame_srv_base; source.ptr += kTemporalTextureDescriptorOffset * impl_->srv_stride;
-            impl_->device->CopyDescriptorsSimple(kSceneFrameTableCount, destination, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            destination.ptr += (kVolumetricDescriptorOffset - kTemporalTextureDescriptorOffset) * impl_->srv_stride;
             impl_->device->CopyDescriptorsSimple(count, destination, suffix, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            const auto copy_range = [&](std::uint32_t target_offset, std::uint32_t source_offset, std::uint32_t length) {
+                auto target = destination; target.ptr += SIZE_T(target_offset) * impl_->srv_stride;
+                auto source = local_probe_inputs.frame_srv_base; source.ptr += SIZE_T(source_offset) * impl_->srv_stride;
+                impl_->device->CopyDescriptorsSimple(length, target, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            };
+            for (const auto &copy : kVolumetricFrameInputCopies)
+                copy_range(copy.target, copy.source, copy.count);
             auto table = texture_table; table.ptr += UINT64(kVolumetricFrameTableOffset) * impl_->srv_stride;
-            binder = [&, table](ID3D12GraphicsCommandList *list) -> Result {
-                bind_compute(list); list->SetComputeRootDescriptorTable(13, character_table);
-                list->SetComputeRootDescriptorTable(32, table); return Result::Success();
+            binder = [heap = impl_->srv_heap, table](ID3D12GraphicsCommandList *list) -> Result {
+                ID3D12DescriptorHeap *heaps[]{heap.Get()};
+                list->SetDescriptorHeaps(1, heaps);
+                list->SetComputeRootDescriptorTable(0, table); return Result::Success();
             };
             return Result::Success();
         };
@@ -9657,9 +9751,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     HeroTransparencyOutputs hero_outputs;
     HeroTransparencyInputs hero_inputs;
     std::vector<HeroTransparencySceneRead> hero_scene_reads, hero_peel_reads;
+#if defined(HS_DEVELOPMENT_TOOLS)
     struct HeroWorkBinding { std::size_t bucket{}; bool immutable{}; };
     std::vector<HeroWorkContributorInput> hero_work_contributors;
     std::vector<HeroWorkBinding> hero_work_bindings;
+#endif
     // All three water LOD ranges above refer to the same conservative source set.
     // Empty contributors export absent guides; downstream consumers select their opaque path.
     if (have_hero_contributors)
@@ -9677,7 +9773,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         for (const auto &page : geometry_pages) hero_peel_reads.push_back({page.version, Access::VertexShaderRead});
         if (impl_->family_diffuse.resource)
             hero_peel_reads.push_back({impl_->graph.Version(import_texture(
-                impl_->family_diffuse, Access::ShaderRead, "Hero.OpacityColor")), Access::ShaderRead});
+                impl_->family_diffuse, Access::AllShaderRead, "Hero.OpacityColor")), Access::AllShaderRead});
         hero_scene_reads = {
             {geometry_records_version, Access::ShaderRead}, {material_parameter_version, Access::ShaderRead},
             {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::ShaderRead},
@@ -9693,7 +9789,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         for (auto *texture : {&impl_->family_diffuse, &impl_->family_normal})
             if (texture->resource)
                 hero_scene_reads.push_back({impl_->graph.Version(import_texture(
-                    *texture, Access::ShaderRead, "Hero.MaterialTexture")), Access::ShaderRead});
+                    *texture, Access::AllShaderRead, "Hero.MaterialTexture")), Access::AllShaderRead});
         if (shadow_version.resource) hero_scene_reads.push_back({shadow_version, Access::ShaderRead});
         if (static_instances_buffer) hero_scene_reads.push_back({static_instances_version, Access::ShaderRead});
         if (static_refs_buffer) hero_scene_reads.push_back({static_refs_version, Access::ShaderRead});
@@ -9784,7 +9880,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 }
             }
         };
-        if (impl_->config.capture_hero_work)
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (capture_hero_work)
         {
             static_assert(kGeometryArgumentStride == 24);
             if (impl_->rendered_submission_count == UINT64_MAX)
@@ -9872,6 +9969,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 return {1,0,0}; // Hero/water records explicitly use the indexed SceneVS path.
             };
         }
+#endif
         const auto registered_hero = restored_graph
             ? owned_view.hero_transparency.BindRetainedLayers(impl_->graph, hero_inputs,
                 pending_graph_layout.hero, hero_outputs)
@@ -10737,7 +10835,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     owned_view.hdr_capture_valid = false;
     owned_view.hdr_capture_source.Reset();
     cpu_timings.descriptors_us = measure_stage();
+#if defined(HS_DEVELOPMENT_TOOLS)
     frame.timing_execute_begin_qpc = RendererDiagnosticsCounter();
+#endif
     if (auto graph_result = impl_->graph_queue_executor.Execute(
             impl_->graph, frame_slot,
             impl_->enhanced ? BarrierMode::Enhanced : BarrierMode::Legacy,
@@ -10848,7 +10948,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         scene.graph_queue = impl_->graph.FinalQueue(previous_instance_snapshot_buffer);
         scene.graph_completion.Merge(impl_->graph.ResourceCompletion(previous_instance_snapshot_buffer));
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     frame.timing_execute_end_qpc = RendererDiagnosticsCounter();
+#endif
     const auto completed_at_submit = impl_->graph_queue_executor.Completed();
     frame.timing_backlog_at_submit = frame.timing_prior_output_completion.direct &&
         frame.timing_prior_output_completion.direct > completed_at_submit.direct;
@@ -10861,12 +10963,18 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         surface.submitted_version = surface.bitmap_version;
         surface.copy_completion = impl_->graph.ResourceCompletion(ui);
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     cpu_stage_start = std::chrono::steady_clock::now();
+#endif
     const auto graph_cpu = impl_->graph_queue_executor.LastExecutionStats();
     cpu_timings.graph_plan_us = graph_cpu.cpu_plan_us;
     cpu_timings.graph_record_us = graph_cpu.cpu_record_us;
     cpu_timings.graph_submit_us = graph_cpu.cpu_submit_us;
+#if defined(HS_DEVELOPMENT_TOOLS)
     const auto submit_qpc = RendererDiagnosticsCounter();
+#else
+    const auto submit_qpc = impl_->auto_fg_cadence_tracking ? RendererDiagnosticsCounter() : 0;
+#endif
     // A submitted package identity is consumed even if a later auxiliary view
     // or post-submit service fails. Only rendered submissions advance it.
     impl_->render_package_id = impl_->active_render_package_id;
@@ -11038,9 +11146,14 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             submitted_completion); !committed) return committed;
     if (auto committed = impl_->CommitHlodFrameGraph(frame_slot, hlod_graph, submitted_completion); !committed) return committed;
     pending_hlod.completed = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
     frame.cpu_recording_ms = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - cpu_recording_start).count();
     frame.cpu_recording_ms_valid = std::isfinite(frame.cpu_recording_ms) && frame.cpu_recording_ms > 0;
+#else
+    frame.cpu_recording_ms = 0;
+    frame.cpu_recording_ms_valid = false;
+#endif
     if (use_visibility) owned_view.visibility_targets_initialized = true;
     owned_view.decal_surface_active = decal_surface_outputs.active;
     for (const auto &[resource, handle] : imported_resources)
@@ -11104,6 +11217,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     owned_view.exposure_read_index = exposure_write_index;
     owned_view.exposure_sample_time = now;
     if (initialize_temporal_targets) owned_view.temporal_targets_initialized = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (impl_->config.validation)
     {
         const auto skin_gpu_dispatches = static_cast<std::size_t>(std::ranges::count_if(
@@ -11137,6 +11251,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             << dynamic_visibility_ref_count << ','
             << (owned_view.hzb_history_valid ? 1 : 0) << '\n';
     }
+#endif
     if (static_scene && impl_->static_gpu_scene)
     {
         impl_->static_gpu_scene->last_completion =
@@ -11223,7 +11338,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     ++owned_view.frame_number;
     world_step_receipt.history_committed = true;
     cpu_timings.post_submit_us = measure_stage();
+#if defined(HS_DEVELOPMENT_TOOLS)
     const auto present_begin_qpc = presented_view ? RendererDiagnosticsCounter() : 0;
+#else
+    constexpr std::uint64_t present_begin_qpc = 0;
+#endif
     const auto presented = presented_view ? impl_->sdk_presentation.Present(impl_->swap_chain.Get(), owned_view.sdk_frame_identity,
         impl_->config.vsync ? 1 : 0, 0) : Result::Success();
     if (presented_view) impl_->native_input_phase = 0;
@@ -11233,13 +11352,26 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (FAILED(device_reason)) return impl_->CheckDevice(device_reason, "SDK Present");
         return presented;
     }
+    frame.auto_fg_cadence_pending = presented_view && impl_->auto_fg_cadence_tracking;
+    if (frame.auto_fg_cadence_pending)
+    {
+        LARGE_INTEGER frequency{};
+        frame.auto_fg_cadence_submit_qpc = submit_qpc;
+        frame.auto_fg_cadence_sequence = ++impl_->auto_fg_cadence_sequence;
+        frame.auto_fg_cadence_qpc_frequency = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0
+            ? static_cast<std::uint64_t>(frequency.QuadPart) : 0;
+        frame.auto_fg_cadence_validation = impl_->config.validation;
+        frame.auto_fg_cadence_gpu_validation = impl_->config.gpu_validation;
+    }
     if (presented_view)
         world_step_receipt.presented_ui_generation = impl_->explicit_frame->ui_packet_generation;
 
     cpu_timings.present_us = measure_stage();
+#if defined(HS_DEVELOPMENT_TOOLS)
     impl_->diagnostics.RecordRenderedFrame(frame.submitted_frame_id, submit_qpc, present_begin_qpc,
         presented_view ? RendererDiagnosticsCounter() : 0, LastQueueStats(), impl_->DiagnosticsMemory(),
         impl_->config.validation, impl_->config.gpu_validation, presented_view, impl_->active_view_id.value);
+#endif
     grass_history_attempt.succeeded = true;
     frame_result = {owned_view.frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)

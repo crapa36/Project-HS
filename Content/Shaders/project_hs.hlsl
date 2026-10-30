@@ -2367,24 +2367,20 @@ float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path,
 // measured front/back thickness and bounded multi-interface depth peeling are
 // separate transport paths, not implied by this screen-space lookup.
 float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
-    float2 pixel, bool front, float measured_path, bool layer_transport)
+    float2 pixel, float3 view, float3 normal, float3 transmitted,
+    float measured_path, bool layer_transport)
 {
 #ifdef HS_CAPTURE_HERO_WORK
     if(IndirectArguments.Load(28u)==2u) { HsHeroWorkAdd(27u); return 0.0; }
 #endif
-    const float3 view=normalize(CameraTime.xyz-world);
-    float3 normal=normalize(surface.normal);
-    if(dot(normal,view)<0.0) normal=-normal;
     surface.normal=normal;
     const float solid=saturate(surface.solid_transmission_weight);
-    const float eta=front ? 1.0/surface.ior : surface.ior;
-    const float3 transmitted=refract(-view,normal,eta);
     const bool total_internal=solid>0.0 && dot(transmitted,transmitted)==0.0;
     const float base_fresnel_override=total_internal ? 1.0 : -1.0;
     float3 diffuse,specular,ambient_specular,ambient_diffuse,local_diffuse,local_specular;
     EnvironmentLightingComponents(solid<1.0,surface,world,ShadowVisibility(world),base_fresnel_override,
         diffuse,specular,ambient_specular,ambient_diffuse);
-    HsDeferredLocalLightingComponents(surface,world,base_fresnel_override,true,local_diffuse,local_specular);
+    HsDeferredLocalLightingComponents(surface,world,base_fresnel_override,false,local_diffuse,local_specular);
     diffuse+=local_diffuse;
     specular+=local_specular;
     if(solid==0.0) return HsFogSurface(diffuse+specular+surface.emission,world,pixel);
@@ -2475,7 +2471,12 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
 
 float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world, float2 pixel, bool front)
 {
-    return HsHeroTranslucentLighting(surface,world,pixel,front,-1.0,false);
+    const float3 view=normalize(CameraTime.xyz-world);
+    float3 normal=normalize(surface.normal);
+    if(dot(normal,view)<0.0) normal=-normal;
+    const float eta=front ? 1.0/surface.ior : surface.ior;
+    const float3 transmitted=refract(-view,normal,eta);
+    return HsHeroTranslucentLighting(surface,world,pixel,view,normal,transmitted,-1.0,false);
 }
 
 HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGradients gradients)
@@ -2643,7 +2644,7 @@ float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surf
     const float3 geometric_normal=normalize(input.WorldNormal);
     float3 normal=normalize(surface.normal);
     if(dot(normal,view)<0.0) normal=-normal;
-    const float3 transmitted=refract(-view,normal,1.0/surface.ior);
+    const float3 transmitted=refract(-view,normal,front ? 1.0/surface.ior : surface.ior);
     const int3 pixel=int3(int2(input.Position.xy),0);
     const float exit_depth=HeroExitDepth[layer].Load(pixel);
     float path=-1.0;
@@ -2657,7 +2658,8 @@ float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surf
     }
     // The paired exit provides a measured local slab. Open geometry uses only
     // the authored metre-valued thickness; another instance can never supply it.
-    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,front,path,true);
+    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,
+        view,normal,transmitted,path,true);
     const float3 background=HeroLayerBackground.Load(pixel).rgb;
     return float4(lerp(background,color,saturate(surface.opacity)),1.0);
 }

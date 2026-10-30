@@ -207,8 +207,23 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
             range.worst_cut_records = WorstCut(tables, range.group_base, range.child_base);
             range.static_error = catalog.Hierarchy().error_domain == render_data::GeometryHierarchyErrorDomain::Static;
             next->cpu.max_ancestor_steps = std::max(next->cpu.max_ancestor_steps, tables.max_ancestor_steps);
+            const auto representation_page_base = next->cpu.representation_pages.size();
+            if (representation_page_base > UINT32_MAX ||
+                tables.representation_pages.size() > UINT32_MAX - representation_page_base)
+                return ClusterFailure("Cluster representation-page table exceeds32-bit addressing.");
+            for (auto &group : tables.groups)
+            {
+                const auto first = std::uint64_t(group.representation_pages[0]);
+                const auto count = std::uint64_t(group.representation_pages[1]);
+                if (first > tables.representation_pages.size() || count > tables.representation_pages.size() - first ||
+                    first + representation_page_base > UINT32_MAX)
+                    return ClusterFailure("Cluster representation-page range is invalid after catalog admission.");
+                group.representation_pages[0] += static_cast<std::uint32_t>(representation_page_base);
+            }
             next->cpu.groups.insert(next->cpu.groups.end(), tables.groups.begin(), tables.groups.end());
             next->cpu.children.insert(next->cpu.children.end(), tables.children.begin(), tables.children.end());
+            next->cpu.representation_pages.insert(next->cpu.representation_pages.end(),
+                tables.representation_pages.begin(), tables.representation_pages.end());
             next->cpu.clusters.insert(next->cpu.clusters.end(), tables.clusters.begin(), tables.clusters.end());
             next->cpu.pages.insert(next->cpu.pages.end(), tables.pages.begin(), tables.pages.end());
             for (std::uint32_t local = 0; local < range.page_count; ++local)
@@ -360,8 +375,9 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
     if (auto result = buffer(runtime.groups, runtime.tables_residency[0], std::as_bytes(std::span(runtime.cpu.groups))); !result) return result;
     if (auto result = buffer(runtime.children, runtime.tables_residency[1], std::as_bytes(std::span(runtime.cpu.children))); !result) return result;
     if (auto result = buffer(runtime.clusters, runtime.tables_residency[2], std::as_bytes(std::span(runtime.cpu.clusters))); !result) return result;
+    if (auto result = buffer(runtime.representation_pages, runtime.tables_residency[3], std::as_bytes(std::span(runtime.cpu.representation_pages))); !result) return result;
     const std::array<std::byte, sizeof(GpuClusterCutStatus)> history_zero{};
-    if (auto result = buffer(runtime.history_zero, runtime.tables_residency[3], history_zero); !result) return result;
+    if (auto result = buffer(runtime.history_zero, runtime.tables_residency[4], history_zero); !result) return result;
     if (auto result = CreateClusterViewResources(runtime); !result) return result;
     hr = list->Close();
     if (FAILED(hr)) return HResultFailure("Close cluster initialization list", hr);
@@ -743,6 +759,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         constants.frame_id_high = static_cast<std::uint32_t>(actual_frame_id >> 32u);
         constants.catalog_cluster_base = runtime.catalogs[ordinal].cluster_base;
         constants.catalog_cluster_count = cluster_count;
+        constants.representation_page_count = static_cast<std::uint32_t>(runtime.cpu.representation_pages.size());
         // Caller provides each catalog's nonoverlapping raster base after its
         // authored ranges, and reserves that complete interval before binding.
         if (constants.raster_record_base != UINT32_MAX && (!constants.raster_record_base ||
@@ -826,8 +843,8 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(OwnedView &owner, std::uint
             previous_cut ? &previous_cut->history_generations : &runtime.history_zero,
             previous ? &previous->pages : &native.pages,
             previous_cut ? &previous_cut->status : &runtime.history_zero,
-            &owner.targets.hzb_history[owner.hzb_read_index ^ phase]};
-        constexpr std::array<std::uint32_t, kClusterCutSrvCount> srv_strides{96, 4, 32, 32, 48, 4, 4, 32, 0, 4};
+            &owner.targets.hzb_history[owner.hzb_read_index ^ phase], &runtime.representation_pages};
+        constexpr std::array<std::uint32_t, kClusterCutSrvCount> srv_strides{96, 4, 32, 32, 48, 4, 4, 32, 0, 4, 4};
         for (std::size_t i = 0; i < srvs.size(); ++i)
         {
             // Tables/pages live with the view bank; candidates live with this cut.

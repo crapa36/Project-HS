@@ -1,15 +1,21 @@
 foreach(required IN ITEMS ProjectHS.exe Content/content.hsp D3D12/D3D12Core.dll
-        WinPixEventRuntime.dll Licenses/NotoSansKR-OFL.txt ThirdPartyNotices.txt)
+        Licenses/NotoSansKR-OFL.txt ThirdPartyNotices.txt)
     if(NOT EXISTS "${_hs_release_stage}/${required}")
         message(FATAL_ERROR "Incomplete staged Release: ${required}; stage retained at ${_hs_release_stage}")
     endif()
 endforeach()
-execute_process(COMMAND "${_hs_release_stage}/ProjectHS.exe" --verify-shipping-content
-    WORKING_DIRECTORY "${_hs_release_stage}"
-    RESULT_VARIABLE verify_result OUTPUT_VARIABLE verify_output ERROR_VARIABLE verify_error)
-if(NOT verify_result STREQUAL "0")
-    message(FATAL_ERROR "Staged Release content verification failed (${verify_result}): ${verify_error}${verify_output}; stage retained at ${_hs_release_stage}")
-endif()
+function(hs_release_verify_copy source staged)
+    if(NOT EXISTS "${source}" OR NOT EXISTS "${staged}")
+        message(FATAL_ERROR "Cannot verify staged Release copy: ${source} -> ${staged}; stage retained at ${_hs_release_stage}")
+    endif()
+    file(SHA256 "${source}" source_hash)
+    file(SHA256 "${staged}" staged_hash)
+    if(NOT source_hash STREQUAL staged_hash)
+        message(FATAL_ERROR "Staged Release copy differs from built source: ${staged}; stage retained at ${_hs_release_stage}")
+    endif()
+endfunction()
+hs_release_verify_copy("${_hs_release_source_exe}" "${_hs_release_stage}/ProjectHS.exe")
+hs_release_verify_copy("${_hs_release_source_pack}" "${_hs_release_stage}/Content/content.hsp")
 
 # An empty destination is parked first. The final rename never replaces a directory.
 hs_release_directory_state("${_hs_release_target}" target_state)

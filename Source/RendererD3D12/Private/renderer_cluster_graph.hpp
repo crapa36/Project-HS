@@ -32,7 +32,7 @@ struct ClusterGraphCut
 struct ClusterFrameGraph
 {
     std::uint32_t frame_slot{};
-    ClusterGraphBuffer groups, children, clusters, pages, refs;
+    ClusterGraphBuffer groups, children, clusters, representation_pages, pages, refs;
     std::vector<ClusterGraphPage> geometry;
     std::array<ClusterGraphCut, kClusterRuntimeCatalogs> cuts;
     std::vector<ClusterGraphBuffer> imports;

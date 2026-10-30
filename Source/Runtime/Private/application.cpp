@@ -54,7 +54,9 @@
 #include <hs/renderer/renderer.hpp>
 #include <hs/render_data/render_frame_input.hpp>
 #include <hs/runtime/audio_engine.hpp>
+#ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/runtime/playtest_recording.hpp>
+#endif
 #include <hs/runtime/save_store.hpp>
 #include <hs/runtime/settings_projection.hpp>
 
@@ -480,11 +482,17 @@ void SetThreadName(const wchar_t *name) noexcept
 
 void WriteText(const std::filesystem::path &path, std::string_view text)
 {
+#ifdef HS_DEVELOPMENT_TOOLS
     std::ofstream stream(path, std::ios::trunc);
     stream << text;
+#else
+    (void)path;
+    (void)text;
+#endif
 }
 
 
+#ifdef HS_DEVELOPMENT_TOOLS
 Result WriteRendererStartup(const std::filesystem::path &path, double initialize_us,
     std::uint64_t calls, bool succeeded, const RendererStartupTimings &timings,
     const RendererPsoCacheStats &cache)
@@ -533,6 +541,7 @@ Result WriteRendererStartup(const std::filesystem::path &path, double initialize
     return stream ? Result::Success() : Result::Failure(ErrorCode::InvalidState, "hs_runtime",
         "Could not write renderer initialization diagnostics.");
 }
+#endif
 
 
 PresentationEvent MakeAudioEvent(std::string_view cue, Sequence sequence) noexcept
@@ -545,6 +554,7 @@ PresentationEvent MakeAudioEvent(std::string_view cue, Sequence sequence) noexce
     return event;
 }
 
+#ifdef HS_DEVELOPMENT_TOOLS
 std::uint64_t ReadDiagnosticQpc() noexcept
 {
     LARGE_INTEGER value{};
@@ -569,7 +579,16 @@ void AppendTaskValues(std::string &row, std::span<const runtime_detail::Diagnost
     for (const auto &sample : samples)
         runtime_detail::AppendCsvValues(row, sample.ticks * microseconds, sample.calls);
 }
+#endif
 
+#ifndef HS_DEVELOPMENT_TOOLS
+constexpr std::array<std::string_view, 8> kMainTaskNames{};
+constexpr std::array<std::string_view, 13> kSimulationTaskNames{};
+std::string TaskColumns(std::span<const std::string_view>) { return {}; }
+void AppendTaskValues(std::string &, std::span<const runtime_detail::DiagnosticSample>, double) {}
+#endif
+
+#ifdef HS_DEVELOPMENT_TOOLS
 Result RefillDiagnosticEnemies(GameSimulation &simulation, std::uint32_t target,
                                std::uint64_t &spawn_index, std::uint32_t &added)
 {
@@ -595,16 +614,34 @@ Result RefillDiagnosticEnemies(GameSimulation &simulation, std::uint32_t target,
     added += deficit;
     return Result::Success();
 }
-
+#endif
 } // namespace
 
 ApplicationResult RunApplication(const ApplicationConfig &config)
 {
+#ifdef HS_DEVELOPMENT_TOOLS
     // Visible performance experiments use the same clock and interpolation as interactive play.
     const bool realtime = !config.smoke || config.visible;
     // Smoke, experiment, recording and replay consumers require complete diagnostic artifacts.
     const bool capture_diagnostics = config.capture_diagnostics || config.smoke ||
         config.record_playtest || config.replay_compare || !config.replay_directory.empty();
+    const bool validation_enabled = config.validation || config.gpu_validation;
+#else
+    constexpr bool realtime = true;
+    constexpr bool capture_diagnostics = false;
+    constexpr bool validation_enabled = false;
+    if (config.smoke || config.smoke_render_lockstep || config.capture_diagnostics ||
+        config.capture_hero_work || config.diagnostic_enemy_count || config.record_playtest ||
+        config.replay_compare || !config.replay_directory.empty() || config.resize_test ||
+        config.monster_preview_asset != 0xFFFFFFFFu || config.boss_vfx_capture != 0xFFFFFFFFu ||
+        config.boss_phase2_capture || config.slime_family_preview_count || config.environment_preview ||
+        config.character_preview || config.vfx_showcase || config.skill_vfx_capture != 0xFFFFFFFFu ||
+        config.preview_camera_override ||
+        !config.timeline_actions.empty() || !config.heartbeat_path.empty())
+        return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+            "Smoke, preview, replay, recording, and capture modes require a development executable.")};
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
     if (config.smoke_render_lockstep && !config.smoke)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Smoke render lockstep requires --smoke.")};
@@ -620,16 +657,23 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Hero work diagnostic mode requires its explicit capture flag.")};
     if (config.capture_hero_work && !config.capture_diagnostics)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Hero work capture requires explicit diagnostics.")};
-#if !defined(HS_DEVELOPMENT_TOOLS)
-    if (config.capture_hero_work)
-        return {Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Hero work capture requires a development executable.")};
 #endif
+#ifdef HS_DEVELOPMENT_TOOLS
     const runtime_detail::DiagnosticClock capture_clock = config.capture_diagnostics ? ReadDiagnosticQpc : nullptr;
     LARGE_INTEGER capture_frequency{};
     if (capture_clock && (!QueryPerformanceFrequency(&capture_frequency) || capture_frequency.QuadPart <= 0))
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Diagnostic clock calibration failed.")};
     const auto task_microseconds = capture_clock ? 1'000'000.0 / static_cast<double>(capture_frequency.QuadPart) : 0.0;
+#else
+    constexpr runtime_detail::DiagnosticClock capture_clock = nullptr;
+    LARGE_INTEGER capture_frequency{};
+    constexpr double task_microseconds = 0.0;
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
     std::array<runtime_detail::DiagnosticSample, kMainTaskNames.size()> main_work{};
+#else
+    std::array<runtime_detail::DiagnosticSample, 8> main_work{};
+#endif
     const auto executable_directory = CurrentExecutableDirectory();
     if (executable_directory.empty())
     {
@@ -688,7 +732,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         deployment_id += hex[byte >> 4]; deployment_id += hex[byte & 15];
     }
 #endif
+#ifdef HS_DEVELOPMENT_TOOLS
     const auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
+#endif
     VfxCatalog vfx_catalog;
 #ifdef HS_DEVELOPMENT_TOOLS
     if (auto loaded = VfxCatalog::Load(
@@ -698,6 +744,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #else
     vfx_catalog.Bind(shipping::Vfx());
 #endif
+#ifdef HS_DEVELOPMENT_TOOLS
     PlaytestReplay replay;
     const auto replaying = !config.replay_directory.empty();
     if (replaying)
@@ -718,6 +765,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                  simulation_rules_hash, content_hash}); !started)
             return {started};
     }
+#else
+    constexpr bool replaying = false;
+    const auto effective_seed = config.seed;
+#endif
     const auto settings_root = config.smoke
         ? std::optional<std::filesystem::path>(config.artifact_directory / "Profile")
         : std::nullopt;
@@ -745,7 +796,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Cannot create Main wake event.")};
     runtime_detail::DiagnosticScope audio_startup_scope(audio_startup, capture_clock);
     AudioEngine audio;
+#ifdef HS_DEVELOPMENT_TOOLS
     audio.SetCaptureTimings(config.capture_diagnostics);
+#else
+    audio.SetCaptureTimings(false);
+#endif
     audio.SetWakeCallback(runtime_detail::MainWake::NotifyOpaque, &main_wake);
 #ifdef HS_DEVELOPMENT_TOOLS
     if (auto initialized = audio.Initialize(settings, selected_generation.product_paths); !initialized)
@@ -908,7 +963,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         catch (const std::bad_alloc &)
         {
             ui_click_allocation_failed = true;
+#ifdef HS_DEVELOPMENT_TOOLS
             OutputDebugStringA("Settings click preview allocation failed; queued command and committed settings retained.\n");
+#endif
         }
     });
     std::uint32_t hover_target = 0;
@@ -977,6 +1034,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         window.StopInput();
     }
 
+#ifdef HS_DEVELOPMENT_TOOLS
     std::error_code filesystem_error;
     std::filesystem::create_directories(config.artifact_directory, filesystem_error);
     std::uint64_t sleep_probe_begin{}, sleep_probe_end{};
@@ -993,6 +1051,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             config.diagnostic_enemy_count, config.diagnostic_enemy_count != 0, config.diagnostic_enemy_count == 0,
             config.diagnostic_enemy_count == 0 && (config.smoke || config.record_playtest || !config.replay_directory.empty()),
             sleep_probe_begin, sleep_probe_end, (sleep_probe_end - sleep_probe_begin) * task_microseconds));
+#endif
 
     std::mutex result_mutex;
     Result thread_result = Result::Success();
@@ -1010,6 +1069,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     };
     const auto log_settings_save_failure = [&](const Result &failure) {
         settings_save_failed.store(true, std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
         const auto message = std::format("Settings save failed (code {}): {}\n",
                                          static_cast<unsigned>(failure.Code()),
                                          failure.Message());
@@ -1017,6 +1077,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::ofstream log(config.artifact_directory / "settings_save_errors.log",
                           std::ios::app);
         log << message;
+#else
+        (void)failure;
+#endif
     };
     bool settings_persistence_rollback_requested{};
     const auto save_committed_settings = [&] {
@@ -1039,7 +1102,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         {
             settings_save_failed.store(true, std::memory_order_release);
             settings_persistence_rollback_requested = true;
+#ifdef HS_DEVELOPMENT_TOOLS
             OutputDebugStringA("Settings save allocation failed; last persisted profile retained.\n");
+#endif
         }
     };
 
@@ -1049,7 +1114,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::jthread render_thread([&, render_ports, initial_renderer_settings, startup_graphics](std::stop_token) mutable {
         auto &channels = render_ports;
         SetThreadName(L"HS Render");
-        auto render_tasks = std::make_unique<TaskGroup>();
+        auto render_tasks = task_system.CreateTaskGroup();
 #ifdef HS_DEVELOPMENT_TOOLS
         auto render_generation = std::make_shared<const SelectedGeneration>(selected_generation);
 #else
@@ -1081,28 +1146,39 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.font_bytes = startup_font;
         renderer_config.display_output = initial_native_output;
         renderer_config.task_executor.submit = [&](std::function<void()> record) {
-            const bool accepted = task_system.Submit(*render_tasks,
-                "Render graph recording",
+            const bool accepted = render_tasks.Submit(
                 [record = std::move(record)](std::stop_token) { record(); });
             return accepted ? Result::Success() :
                 Result::Failure(ErrorCode::TaskFailed, "hs_runtime",
                                 "Could not submit render graph recording task.");
         };
         renderer_config.task_executor.join = [&] {
-            auto joined = task_system.Wait(*render_tasks);
-            render_tasks = std::make_unique<TaskGroup>();
+            auto joined = render_tasks.Wait();
+            render_tasks = task_system.CreateTaskGroup();
             return joined;
         };
         renderer_config.window = window.Handle();
+#ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.warp = config.warp;
-        renderer_config.validation = config.validation;
+        renderer_config.validation = validation_enabled;
         renderer_config.gpu_validation = config.gpu_validation;
+#else
+        renderer_config.warp = false;
+        renderer_config.validation = false;
+        renderer_config.gpu_validation = false;
+#endif
         if (config.surface_frontend) renderer_config.surface_frontend = *config.surface_frontend;
         if (config.geometry_frontend) renderer_config.geometry_frontend = *config.geometry_frontend;
+#ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.capture_timing_stream = config.capture_diagnostics;
         renderer_config.capture_gpu_timings = config.capture_gpu_timings;
         renderer_config.capture_hero_work = config.capture_hero_work;
         renderer_config.hero_work_mode = config.hero_work_mode;
+#else
+        renderer_config.capture_timing_stream = false;
+        renderer_config.capture_gpu_timings = false;
+        renderer_config.capture_hero_work = false;
+#endif
         renderer_config.frame_generation_allowed = false; // Startup/loading/menu are not gameplay frames.
         renderer_config.interpolate = realtime;
         renderer_config.character_preview = config.character_preview;
@@ -1130,8 +1206,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.mark_status_sprite = initial_sprite_bindings.mark_status_sprite;
         renderer_config.trap_sprite = initial_sprite_bindings.trap_sprite;
         renderer_config.fire_area_sprite = initial_sprite_bindings.fire_area_sprite;
+#ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.barrier_mode = config.barrier_mode;
+#else
+        renderer_config.barrier_mode = BarrierMode::Automatic;
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.artifact_directory = config.artifact_directory;
+#endif
 #ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.content_generation_id = render_generation->id;
         renderer_config.content_generation_lease = render_generation;
@@ -1156,11 +1238,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         runtime_detail::DiagnosticScope renderer_startup_scope(renderer_startup, capture_clock);
         if (initialized) initialized = renderer.Initialize(renderer_config);
         renderer_startup_scope.Stop();
+#ifdef HS_DEVELOPMENT_TOOLS
         if (capture_clock)
             if (auto written = WriteRendererStartup(config.artifact_directory / "renderer_startup.json",
                     renderer_startup.ticks * task_microseconds, renderer_startup.calls, initialized.Succeeded(),
                     renderer.GetStartupTimings(), renderer.GetPipelineCacheStats()); !written)
                 record_thread_failure(written);
+#endif
         renderer_config.font_bytes = {};
         std::vector<std::byte>().swap(startup_font);
         if (!initialized)
@@ -1202,6 +1286,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t graphics_config_revision{};
         std::string graphics_config_signature;
         bool graphics_capture_complete{true};
+#ifdef HS_DEVELOPMENT_TOOLS
         if (config.capture_diagnostics)
         {
             graphics_settings_file.open(config.artifact_directory / "graphics_settings.csv", std::ios::binary);
@@ -1211,13 +1296,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             graphics_settings_lines.emplace(graphics_settings_file, true,
                 "config_revision,settings_generation,pipeline_revision,setting_id,key,requested,effective,requested_available,native_effective,native_reason\n");
         }
+#endif
         bool execution_receipt_pending{true};
         const auto record_renderer_features = [&](std::uint64_t settings_generation) {
             execution_receipt_pending = true;
             try
             {
                 const auto receipt = RendererGraphicsReceipt(renderer, active_graphics, active_settings_generation,
-                    static_cast<HWND>(window.Handle()), config.validation || config.gpu_validation);
+                    static_cast<HWND>(window.Handle()), validation_enabled);
                 channels.renderer_graphics_ui.store(receipt, std::memory_order_release);
                 channels.NotifyMain();
                 if (graphics_settings_lines)
@@ -1285,7 +1371,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             catch (const std::bad_alloc &)
             {
+#ifdef HS_DEVELOPMENT_TOOLS
                 OutputDebugStringA("Graphics status receipt allocation failed; previous immutable receipt retained.\n");
+#endif
                 if (graphics_settings_lines)
                 {
                     graphics_capture_complete = false;
@@ -1410,6 +1498,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             charge(ribbon_inputs.LogicalCapacityBytes());
             return sample;
         };
+#ifdef HS_DEVELOPMENT_TOOLS
         runtime_detail::VfxWorkspacePeak vfx_workspace_sampled_peak;
         runtime_detail::VfxWorkspacePeak vfx_workspace_frame_peak;
         std::size_t vfx_activation_raw_rows{}, vfx_activation_typed_rows{}, vfx_activation_birth_rows{};
@@ -1418,6 +1507,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             vfx_workspace_sampled_peak.Observe(sample);
             vfx_workspace_frame_peak.Observe(sample);
         };
+#endif
         auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
         auto &pending_effect_lines = vfx_session.decoded.effect_lines;
         auto &active_vfx_flashes = vfx_session.decoded.flashes;
@@ -1431,6 +1521,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 vfx_session.native_batch.effect_lines, prepared_births.effect_lines));
             return held;
         };
+#ifdef HS_DEVELOPMENT_TOOLS
         const auto write_diagnostics_status = [&](std::string_view text) {
             std::ofstream status(config.artifact_directory / "diagnostics.json", std::ios::binary);
             status.write(text.data(), static_cast<std::streamsize>(text.size()));
@@ -1449,6 +1540,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             timeline_file.open(config.artifact_directory / "timeline.csv", std::ios::binary);
             gpu_file.open(config.artifact_directory / "gpu_passes.csv", std::ios::binary);
         }
+#else
+        const auto write_diagnostics_status = [](std::string_view) { return true; };
+        const bool status_started = true;
+        std::ofstream event_file, timeline_file, gpu_file;
+#endif
         runtime_detail::DiagnosticLog event_lines(event_file, capture_diagnostics, {}, capture_clock);
         runtime_detail::DiagnosticLog timeline_lines(timeline_file, capture_diagnostics,
             "frame,tick,cpu_us,memory_bytes,ecs_count,queue_depth\n", capture_clock);
@@ -1456,9 +1552,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             "frame,tick,pass,gpu_ns,queue,measured,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,cpu_qpc_frequency,completed_frame,view_id\n", capture_clock);
         std::ofstream performance_file, gpu_live_file;
         std::optional<runtime_detail::DiagnosticLog> performance_lines, gpu_live_lines;
+#ifdef HS_DEVELOPMENT_TOOLS
         runtime_detail::PerformanceLogState performance_state;
         bool performance_ready_published{};
         std::uint64_t performance_frequency{};
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         if (config.capture_diagnostics)
         {
             LARGE_INTEGER frequency{};
@@ -1477,7 +1576,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             gpu_live_lines.emplace(gpu_live_file, true,
                 "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated,source_frame_id,source_frame_sequence,quality_generation,provider_generation,is_generated_frame,clock_gpu_before,clock_cpu_before,clock_gpu_after,clock_cpu_after,clock_gpu_frequency,clock_cpu_frequency,clock_anchors_valid,source_ready_cadence_ms,output_dependency_span_ms,calibration_valid,calibration_drift,cadence_valid,span_valid,gpu_backlog_proven,cadence_gap,closure_span_gap,cadence_exclusions_valid,cpu_supply_gap,pacing_gap,closure_clock_valid,closure_gap_checked\n", capture_clock);
         }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         bool gpu_drain_succeeded{true};
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         std::string gpu_live_row;
 #if defined(HS_DEVELOPMENT_TOOLS)
         bool hero_drain_succeeded{true};
@@ -1488,7 +1591,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (hero_lines->Failed()) record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Could not initialize isolated Hero work capture."));
         }
 #endif
+#ifdef HS_DEVELOPMENT_TOOLS
         std::uint64_t invalid_gpu_frames{};
+#endif
         const auto append_gpu_capture = [&](const GpuPassTimings &gpu, std::uint64_t observed_frame, bool drained) {
             if (!gpu_live_lines || !config.capture_gpu_timings) return;
             if (!performance_state.AcceptGpuFrame(gpu.completed_frame_id, !gpu.passes.empty(), gpu.fence_completed)) return;
@@ -1585,6 +1690,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
             return Result::Success();
         };
+#else
+        const auto collect_gpu_capture = [](std::uint64_t, bool) { return Result::Success(); };
+#endif
         const auto drain_gpu_capture = [&]() -> Result {
             return collect_gpu_capture(channels.rendered_frames.load(std::memory_order_acquire), true);
         };
@@ -1636,15 +1744,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::size_t vfx_profile_ground_reserved_peak_gaps{}, vfx_profile_ribbon_reserved_peak_rows{}, vfx_profile_ribbon_reserved_peak_outputs{};
         std::size_t vfx_fire_admission_peak_bytes{};
         std::uint64_t typed_vfx_unsupported_inputs{};
+#ifdef HS_DEVELOPMENT_TOOLS
         bool captured{};
+#endif
         bool resized{};
         bool vfx_showcase_injected{};
         const auto log_resize_failure = [&](const Result &failure) {
+#ifdef HS_DEVELOPMENT_TOOLS
             const auto message = std::format("Recoverable display resize failed: {}\n",
                                              failure.Message());
             OutputDebugStringA(message.c_str());
             std::ofstream(config.artifact_directory / "resize_errors.log", std::ios::app)
                 << message;
+#else
+            (void)failure;
+#endif
         };
         auto next_frame = std::chrono::steady_clock::now();
         runtime_detail::DiagnosticSample previous_capture_log{};
@@ -1653,8 +1767,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         {
             std::array<runtime_detail::DiagnosticSample,
                 runtime_detail::kFramePerformanceTaskNames.size()> vfx_work{};
+#ifdef HS_DEVELOPMENT_TOOLS
             vfx_workspace_frame_peak = {};
             vfx_activation_raw_rows = vfx_activation_typed_rows = vfx_activation_birth_rows = 0;
+#endif
             const auto loop_start_qpc = performance_lines ? read_performance_qpc() : 0;
 #if defined(HS_DEVELOPMENT_TOOLS)
             const auto generation_now = std::chrono::steady_clock::now();
@@ -2831,6 +2947,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     std::rotate(prepared_births.particle_spawns.begin() + ballistic_first,
                         prepared_births.particle_spawns.begin() + ballistic_end,
                         prepared_births.particle_spawns.end());
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (performance_lines)
                 {
                     using namespace runtime_detail::vfx_retained_size;
@@ -2841,6 +2958,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         prepared_births.entity_surface_captures.size()));
                     sample_vfx_workspace();
                 }
+#endif
                 if (!vfx_session.CommitPreparedActivation(
                         prepared_births, prepared_profiles, !profile_additions.empty()))
                 {
@@ -3119,7 +3237,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 vfx_fire_budget_limited_frames += fire_budget_limited;
                 active_effects.Compact(vfx_session.decoded.entity_surface_captures);
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (performance_lines) sample_vfx_workspace();
+#endif
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
                 const std::array views{renderer.MainViewInput(InterpolateRenderCamera(snapshots, sample_alpha))};
@@ -3179,8 +3299,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto receipts = runtime_detail::AcceptRendererReceipts(frame,
                     channels.ui_packets, snapshots.ui_frame,
                     snapshots.current.header.session_id, vfx_session);
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (receipts.ui_receipt_rejected)
                     OutputDebugStringA("Presented UI receipt did not match the retained packet; prior accepted frame retained.\n");
+#endif
                 if (!rendered)
                 {
                     record_thread_failure(rendered);
@@ -3192,6 +3314,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         "Renderer completed VFX inputs without acknowledging the matching world step."));
                     break;
                 }
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (performance_lines)
                 {
                     const auto render_end_qpc = read_performance_qpc();
@@ -3235,6 +3358,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     capture_log_scope.Stop();
                     previous_capture_log = capture_log;
                 }
+#endif
 #if defined(HS_DEVELOPMENT_TOOLS)
                 if (generation_awaiting_frame)
                 {
@@ -3270,7 +3394,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         if (receipt && completed > telemetry_completed_frame)
                         {
                             auto updated = std::make_shared<GraphicsSettingsUiModel>(*receipt);
-                            UpdateGraphicsTelemetry(*updated, diagnostics, config.validation || config.gpu_validation);
+                            UpdateGraphicsTelemetry(*updated, diagnostics, validation_enabled);
                             channels.renderer_graphics_ui.store(std::move(updated), std::memory_order_release);
                             channels.NotifyMain();
                             telemetry_completed_frame = completed;
@@ -3278,7 +3402,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     catch (const std::bad_alloc &)
                     {
+#ifdef HS_DEVELOPMENT_TOOLS
                         OutputDebugStringA("Settings telemetry allocation failed; previous immutable receipt retained.\n");
+#endif
                     }
                 }
                 typed_vfx_events_received += frame.typed_vfx_event_count;
@@ -3304,13 +3430,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                        std::memory_order_release);
                 channels.devtools_capture_keyboard.store(frame.capture_keyboard,
                                                           std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (frame.debug_command != 0)
                 {
                     (void)channels.debug_commands.TryPush(
                         {static_cast<DebugCommandKind>(frame.debug_command - 1),
                          frame.debug_value, frame.debug_secondary, {}});
                 }
+#endif
                 last_tick = frame.rendered_tick;
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (capture_diagnostics)
                 {
                     gpu_live_row.clear();
@@ -3325,6 +3454,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     gpu_live_row += '\n';
                     timeline_lines.Append(gpu_live_row);
                 }
+#endif
                 if (active_frame_cap != 0 && realtime && !renderer.UsesNativeFrameLimiter())
                 {
                     next_frame += std::chrono::nanoseconds(
@@ -3343,6 +3473,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
 
+#ifdef HS_DEVELOPMENT_TOOLS
             // Completion can arrive after the terminal Render call. Capture
             // that frame without rendering the same snapshot a second time.
             if (config.smoke && snapshots.has_current && !captured &&
@@ -3400,6 +3531,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.stop_requested.store(true, std::memory_order_release);
                 native_input_frame.Cancel();
             }
+#endif
             if (channels.stop_requested.load(std::memory_order_acquire) &&
                 channels.simulation_done.load(std::memory_order_acquire) &&
                 channels.presentation_events.Size() == 0)
@@ -3409,6 +3541,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
 
         native_input_frame.Cancel();
+#ifdef HS_DEVELOPMENT_TOOLS
         const auto enhanced = renderer.UsesEnhancedBarriers();
         // Shutdown releases query readbacks; retain the last in-flight frames first.
         if (auto drained = drain_gpu_capture(); !drained) record_thread_failure(drained);
@@ -3418,10 +3551,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
         RendererLightingStatus::ShadowCacheStatus shadow_cache;
         if (capture_diagnostics) shadow_cache = renderer.GetLightingStatus().shadow_cache;
+#endif
         if (auto shutdown = renderer.Shutdown(); !shutdown)
         {
             record_thread_failure(shutdown);
         }
+#ifdef HS_DEVELOPMENT_TOOLS
         if (capture_diagnostics)
         {
             const auto cache_stats = renderer.GetPipelineCacheStats();
@@ -3591,6 +3726,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   shadow_cache.coarse_command_total, shadow_cache.command_capacity,
                                   typed_vfx_unsupported_inputs));
         }
+#endif
     });
 
     // Renderer initialization may call DXGI with this HWND from the render
@@ -3649,6 +3785,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         GameSimulation simulation;
         SettingsData projection_settings = initial_projection_settings;
         const bool capture_balance = config.record_playtest || config.capture_diagnostics || config.smoke || replaying;
+#ifdef HS_DEVELOPMENT_TOOLS
         if (auto initialized = simulation.Initialize(
                 {.seed = effective_seed, .automatic_choices = config.smoke,
                  .start_in_main_menu = !config.smoke,
@@ -3667,7 +3804,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             channels.simulation_done.store(true, std::memory_order_release);
             return;
         }
+#else
+        if (auto initialized = simulation.Initialize(
+                {.seed = config.seed, .automatic_choices = false, .start_in_main_menu = true,
+                 .capture_checksums = false, .capture_timings = false,
+                 .capture_detailed_balance = false, .capture_hit_rates = false},
+                simulation_rules);
+            !initialized)
+        {
+            record_thread_failure(initialized);
+            channels.simulation_done.store(true, std::memory_order_release);
+            return;
+        }
+#endif
 
+#ifdef HS_DEVELOPMENT_TOOLS
         const auto captured_skill =
             config.skill_vfx_capture < kCombatSkillCount
                 ? static_cast<SkillKind>(config.skill_vfx_capture)
@@ -3742,6 +3893,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 return;
             }
         }
+#else
+        constexpr auto captured_skill = SkillKind::Count;
+#endif
 
         std::ofstream simulation_tasks_file;
         std::optional<runtime_detail::DiagnosticLog> simulation_tasks;
@@ -3760,6 +3914,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             header += ",game_captured,game_completed,empty_scope_ns,empty_scope_calls,previous_log_us,previous_log_calls,log_io_us_total,log_io_calls_total,log_bytes_total\n";
             simulation_tasks.emplace(simulation_tasks_file, true, header, capture_clock);
         }
+#ifdef HS_DEVELOPMENT_TOOLS
         {
             runtime_detail::DiagnosticScope scope(initial_harness, config.diagnostic_enemy_count ? capture_clock : nullptr);
             if (auto filled = RefillDiagnosticEnemies(simulation, config.diagnostic_enemy_count, diagnostic_spawn_index, initial_added); !filled)
@@ -3769,6 +3924,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 return;
             }
         }
+#endif
         FixedStepClock clock;
         auto now = FixedStepClock::Clock::now();
         (void)clock.Advance(now);
@@ -3827,14 +3983,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             dynamic_current.header.dynamic_pair_revision = ++dynamic_pair_revision;
             has_dynamic_sample = true;
         }
+#ifdef HS_DEVELOPMENT_TOOLS
         std::vector<PresentationEvent> record_events;
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         std::size_t next_timeline_action{};
         std::size_t replay_frame_index{};
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         bool smoke_finished{};
+#else
+        constexpr bool smoke_finished = false;
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
         if (!config.heartbeat_path.empty())
         {
             WriteText(config.heartbeat_path, "{\"tick\":0,\"state\":\"running\"}\n");
         }
+#endif
 
         while (!channels.stop_requested.load(std::memory_order_acquire))
         {
@@ -3947,6 +4113,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
 
                 InputFrame input;
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (replaying)
                 {
                     if (replay_frame_index >= replay.frames.size())
@@ -3958,6 +4125,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     input = replay.frames[replay_frame_index].View();
                 }
                 else
+#endif
                 {
                     input.target_tick =
                         channels.completed_tick.load(std::memory_order_relaxed) + 1;
@@ -3966,6 +4134,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     input.ui_actions =
                         std::span(ui_action_storage.data(), ui_action_count);
                 }
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (captured_skill != SkillKind::Count && !replaying)
                 {
                     input.held.aim_world = {config.skill_vfx_aim.x, 0.0f,
@@ -3983,6 +4152,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (captured_skill == SkillKind::ChargedShot && input.target_tick == 65)
                         add_edge(GameAction::SkillQ, EdgeKind::Released);
                 }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (config.diagnostic_enemy_count)
                 {
                     const auto player = simulation.GetSessionProbe().player_position;
@@ -4005,6 +4176,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         input.ordered_edges = std::span(action_storage.data(), action_count);
                     }
                 }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (next_timeline_action < config.timeline_actions.size() &&
                     config.timeline_actions[next_timeline_action].target_tick < input.target_tick)
                 {
@@ -4027,6 +4200,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (config.boss_phase2_capture && config.smoke && !replaying &&
                     input.target_tick == 10)
                 {
@@ -4038,8 +4213,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
+#endif
                 if (channels.stop_requested.load(std::memory_order_acquire))
                     break;
+#ifdef HS_DEVELOPMENT_TOOLS
                 DebugCommand debug_command;
                 while (channels.debug_commands.TryPop(debug_command))
                 {
@@ -4050,10 +4227,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
+#endif
                 input_scope.Stop();
                 runtime_detail::DiagnosticScope tick_scope(simulation_work[2], capture_clock);
                 const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
                 tick_scope.Stop();
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (config.diagnostic_enemy_count)
                 {
                     runtime_detail::DiagnosticScope harness_scope(simulation_work[3], capture_clock);
@@ -4063,11 +4242,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
                 const bool final_smoke_frame =
                     config.smoke &&
                     (tick.tick >= config.maximum_ticks ||
                      tick.phase == SessionPhase::Victory ||
                      tick.phase == SessionPhase::Defeat);
+#else
+                constexpr bool final_smoke_frame = false;
+#endif
                 {
                     runtime_detail::DiagnosticScope observe_scope(simulation_work[4], capture_clock);
                     auto read_scope = simulation.BorrowTickReadView();
@@ -4090,6 +4274,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         captured_session = model.session_id;
                         captured_signals = model.domain_signals.size();
                     }
+#ifdef HS_DEVELOPMENT_TOOLS
                     runtime_detail::DiagnosticScope replay_scope(simulation_work[11], replaying ? capture_clock : nullptr);
                     channels.PublishSessionProbe(probe, model.session_id);
                     if (replaying && !config.replay_compare && tick.checksum !=
@@ -4102,6 +4287,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     if (replaying) ++replay_frame_index;
                     replay_scope.Stop();
+#else
+                    channels.PublishSessionProbe(probe, model.session_id);
+#endif
                     channels.camera_target_x.store(probe.player_position.x,
                                                    std::memory_order_release);
                     channels.camera_target_z.store(probe.player_position.y,
@@ -4131,18 +4319,28 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
                     try
                     {
+#ifdef HS_DEVELOPMENT_TOOLS
                         const bool recording = playtest_recorder.Active();
+#else
+                        constexpr bool recording = false;
+#endif
                         runtime_detail::DiagnosticScope fanout_scope(simulation_work[6], capture_clock);
                         channels.PublishAudioTick({model.session_id, probe.tick, tick.phase,
                             {probe.player_position.x, 0.0f, probe.player_position.y}});
+#ifdef HS_DEVELOPMENT_TOOLS
                         channels.ProjectDomainSignalsOnce(model.domain_signals, model.arena_half_extent,
                             capture_diagnostics, recording ? &record_events : nullptr);
+#else
+                        channels.ProjectDomainSignalsOnce(model.domain_signals, model.arena_half_extent,
+                            false, nullptr);
+#endif
                         if (const auto footstep = footstep_timeline.Advance(
                                 model, enemy_animations.PlayerMotionEpoch()))
                             channels.PublishAudioEvent(*footstep);
                         fanout_scope.Stop();
                         if (recording)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             runtime_detail::DiagnosticScope recording_scope(simulation_work[7], capture_clock);
                             const auto diagnostics = simulation.GetDiagnostics();
                             SimulationObservation recorded_probe;
@@ -4154,6 +4352,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 record_thread_failure(recorded);
                                 break;
                             }
+#endif
                         }
                     }
                     catch (const std::exception &failure)
@@ -4247,7 +4446,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             const auto input_rejected = channels.ui_input_rejected.load(std::memory_order_acquire);
                             try
                             {
-                                (void)slot->storage->CopyRetainedDynamicFrom(dynamic_current.View());
+                                (void)slot->Storage().CopyRetainedDynamicFrom(dynamic_current.View());
                                 CaptureUiProjectionFacts(model, presentation_catalog, ui_draw_state,
                                     projection_settings, static_cast<std::uint8_t>(modal_phase),
                                     pending_rebind, input_rejected, ui_projection_facts);
@@ -4261,7 +4460,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 if (!reuse_draw)
                                 {
                                     ProjectTickUi(model, presentation_catalog, ui_draw_state,
-                                        projection_settings, *slot->storage, pending_rebind, graphics_ui.get());
+                                        projection_settings, slot->Storage(), pending_rebind, graphics_ui.get());
                                     const auto page = ui_draw_state.page;
                                     if ((page == UiPage::MainMenuSettings || page == UiPage::PauseSettings) &&
                                         modal_phase != GraphicsUiPhase::Applied)
@@ -4277,20 +4476,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                 : modal_phase == GraphicsUiPhase::RestoringDisplay
                                                     ? "이전 화면 모드로 복원 중..."
                                                     : "화면 모드 적용 중...", {620, 440});
-                                        slot->storage->AddUi(backdrop);
-                                        slot->storage->AddUi(title);
+                                        slot->Storage().AddUi(backdrop);
+                                        slot->Storage().AddUi(title);
                                         if (modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation)
                                         {
-                                            slot->storage->AddUi(SettingsConfirmButton("유지", {650, 600}));
-                                            slot->storage->AddUi(SettingsConfirmButton("취소", {1010, 600}));
+                                            slot->Storage().AddUi(SettingsConfirmButton("유지", {650, 600}));
+                                            slot->Storage().AddUi(SettingsConfirmButton("취소", {1010, 600}));
                                         }
                                     }
                                     if (input_rejected)
-                                        slot->storage->AddUi(SettingsStatusText(
+                                        slot->Storage().AddUi(SettingsStatusText(
                                             "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
                                             {500, 1000}, 0xFF80C0FFu));
                                     auto content = std::make_shared<UiDrawContent>();
-                                    content->models = slot->storage->TakeUiModels();
+                                    content->models = slot->Storage().TakeUiModels();
                                     draw_content = std::move(content);
                                     draw_facts = std::make_shared<const std::vector<std::uint64_t>>(
                                         ui_projection_facts);
@@ -4311,7 +4510,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 project_scope.Stop();
                                 runtime_detail::DiagnosticScope publication_scope(simulation_work[10], capture_clock);
                                 const auto previous_sample = dynamic_previous.View();
-                                channels.snapshots.Publish(*slot, publish_sequence + 1,
+                                std::move(*slot).Publish(publish_sequence + 1,
                                     has_previous_dynamic_sample ? &previous_sample : nullptr, ui_frame);
                                 ++publish_sequence;
                                 prepared_ui = std::move(ui_frame);
@@ -4319,7 +4518,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             }
                             catch (const std::bad_alloc &)
                             {
-                                channels.snapshots.Abandon(*slot);
+                                std::move(*slot).Abandon();
                                 if (final_smoke_frame || config.smoke_render_lockstep)
                                 {
                                     record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -4329,7 +4528,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             }
                             catch (...)
                             {
-                                channels.snapshots.Abandon(*slot);
+                                std::move(*slot).Abandon();
                                 throw;
                             }
                         }
@@ -4353,6 +4552,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (channels.stop_requested.load(std::memory_order_acquire))
                         break;
                 }
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (!config.heartbeat_path.empty() && tick.tick % 60 == 0)
                 {
                     runtime_detail::DiagnosticScope heartbeat_scope(simulation_work[12], capture_clock);
@@ -4360,8 +4560,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                               std::format("{{\"tick\":{},\"state\":\"running\"}}\n",
                                           tick.tick));
                 }
+#endif
 
                 iteration_scope.Stop();
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (simulation_tasks)
                 {
                     const auto gameplay = simulation.GetTimingDiagnostics();
@@ -4386,6 +4588,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     log_scope.Stop();
                     previous_simulation_log = current_log;
                 }
+#endif
                 if (tick.phase == SessionPhase::QuitRequested)
                 {
                     channels.stop_requested.store(true, std::memory_order_release);
@@ -4394,18 +4597,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
 
                 // TickFixed does not advance a terminal gameplay clock.
+#ifdef HS_DEVELOPMENT_TOOLS
                 if (final_smoke_frame)
                 {
                     smoke_finished = true;
                     break;
                 }
+#endif
             }
 
             if (native_token) native_input_frame.Simulated(native_token, simulation_debt);
+#ifdef HS_DEVELOPMENT_TOOLS
             if (smoke_finished)
             {
                 break;
             }
+#endif
         }
         if (simulation_tasks)
         {
@@ -4423,12 +4630,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         {
             record_thread_failure(shutdown);
         }
+#ifdef HS_DEVELOPMENT_TOOLS
         if (!config.heartbeat_path.empty())
         {
             WriteText(config.heartbeat_path,
                       std::format("{{\"tick\":{},\"state\":\"finished\"}}\n",
                                   channels.completed_tick.load(std::memory_order_acquire)));
         }
+#endif
         native_input_frame.Cancel();
         channels.simulation_done.store(true, std::memory_order_release);
     });
@@ -4574,7 +4783,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         runtime_detail::DiagnosticScope ui_scope(main_work[4], capture_clock);
         if (ui_command_queue_full)
         {
+#ifdef HS_DEVELOPMENT_TOOLS
             OutputDebugStringA("UI command rejected: queue full. Retry with a new input.\n");
+#endif
             ui_command_queue_full = false;
         }
         audio.SetBackgroundMuted(GetForegroundWindow() != window.Handle());
@@ -4693,8 +4904,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         if (auto captured = capture_display_placement(); !captured)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             OutputDebugStringA(std::format("Display placement capture failed: {}\n",
                                                           captured.Message()).c_str());
+#endif
                             graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
                             presentation_settings_changed = true;
                             break;
@@ -4846,8 +5059,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         if (auto captured = capture_display_placement(); !captured)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             OutputDebugStringA(std::format("Display placement capture failed: {}\n",
                                                           captured.Message()).c_str());
+#endif
                             settings_commit.DiscardUnsentEdits();
                             graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
                             presentation_settings_changed = true;
@@ -4866,7 +5081,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         if (placed) placed = set_desired_client_extent();
                         if (!placed)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             OutputDebugStringA(std::format("Display placement failed: {}\n", placed.Message()).c_str());
+#endif
                             (void)rollback_window_placement();
                             settings_commit.DiscardUnsentEdits();
                             display_modal_phase.store(GraphicsUiPhase::Applied, std::memory_order_release);
@@ -4975,7 +5192,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             catch (const std::bad_alloc &)
             {
+#ifdef HS_DEVELOPMENT_TOOLS
                 OutputDebugStringA("Settings UI snapshot allocation failed; previous immutable model retained.\n");
+#endif
             }
             last_renderer_receipt = receipt;
             last_published_phase = phase;
@@ -5154,11 +5373,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     const auto rendered_frames = channels.rendered_frames.load(std::memory_order_acquire);
     const auto rendered_particles =
         channels.rendered_particles.load(std::memory_order_acquire);
+#ifdef HS_DEVELOPMENT_TOOLS
     auto valid =
         result && final_tick >= (config.smoke ? config.maximum_ticks : 0) && rendered_frames > 0 &&
         rendered_particles <= 10'000u &&
         channels.dropped_input_edges.load() == 0 &&
         channels.dropped_presentation_events.load() == 0;
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
     if (playtest_recorder.Active())
     {
         if (auto finished = playtest_recorder.Finish(valid); !finished)
@@ -5167,7 +5389,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             valid = false;
         }
     }
+#endif
 
+#ifdef HS_DEVELOPMENT_TOOLS
     if (capture_diagnostics)
     {
         WriteText(config.artifact_directory / "spec.json",
@@ -5192,13 +5416,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                               channels.dropped_presentation_events.load(),
                               vfx_catalog.PayloadHash()));
     }
+#endif
 
+#ifdef HS_DEVELOPMENT_TOOLS
     if (!valid && result)
     {
         result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                  "Runtime execution assertions failed.");
     }
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
     return {result, final_tick, checksum, rendered_frames, playtest_recorder.Directory()};
+#else
+    return {result, final_tick, checksum, rendered_frames, {}};
+#endif
 }
 
 } // namespace hs

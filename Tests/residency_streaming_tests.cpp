@@ -3,6 +3,7 @@
 #include "renderer_content.hpp"
 #include "streaming_manager.hpp"
 #include "renderer_texture_streaming.hpp"
+#include "renderer_texture_feedback.hpp"
 #include <hs/core/sha256.hpp>
 
 #include <algorithm>
@@ -25,6 +26,32 @@ namespace
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void CheckFeedbackSamplingDomains()
+{
+    hs::RenderGraphBuilder graph;
+    hs::TextureDesc description{};
+    description.width = description.height = 4;
+    description.format = DXGI_FORMAT_R8_UINT;
+    description.flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const auto alpha = graph.CreateTexture(description, "opacity feedback");
+    const auto opaque = graph.CreateTexture(description, "surface feedback");
+    auto clear = graph.AddPass(0, "clear feedback", hs::QueueHint::Direct);
+    std::vector<hs::TextureFeedbackGraphBinding> bindings{
+        {{1}, clear.Write(graph.Version(alpha), hs::Access::UnorderedWrite), true},
+        {{2}, clear.Write(graph.Version(opaque), hs::Access::UnorderedWrite), false}};
+    const auto initial = bindings;
+    auto shadow = graph.AddPass(1, "opacity sampling", hs::QueueHint::Direct);
+    hs::RendererTextureFeedback::DeclareSampling(shadow, bindings, true);
+    Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 1 &&
+        bindings[1].feedback == initial[1].feedback,
+        "opacity pass must preserve unrelated surface feedback ownership");
+    auto surface = graph.AddPass(2, "surface sampling", hs::QueueHint::Direct);
+    hs::RendererTextureFeedback::DeclareSampling(surface, bindings);
+    Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 2 &&
+        bindings[1].feedback.ordinal == initial[1].feedback.ordinal + 1,
+        "surface pass must retain both feedback outputs after opacity sampling");
 }
 
 void CheckSoftwareTransactionSupersession()
@@ -1003,6 +1030,7 @@ int main()
         Check(after_reset.value > cancelled.value && !streaming.BeginRead(geometry),
             "reset aliased an old asynchronous request identity");
         CheckSoftwareTransactionSupersession();
+        CheckFeedbackSamplingDomains();
         CheckAsyncAssetPreparation();
         CheckPackAssetReads(false);
         CheckPackAssetReads(true);

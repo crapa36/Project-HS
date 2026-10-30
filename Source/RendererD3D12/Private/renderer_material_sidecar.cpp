@@ -6,14 +6,17 @@
 
 namespace hs
 {
-Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(const RendererConfig &candidate)
+Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(
+    const RendererConfig &candidate, MaterialPreparationScope scope)
 {
     try
     {
         decltype(material_surface_layouts) layouts{};
         decltype(material_headers) headers{};
         std::uint32_t mask{};
-        for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
+        const auto material_count = scope == MaterialPreparationScope::StaticEnvironment
+            ? kAuthoredMaterialNames.size() : kResidentMaterialCount;
+        for (std::size_t ordinal = 0; ordinal < material_count; ++ordinal)
         {
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
             const std::string name(hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]

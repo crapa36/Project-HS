@@ -70,7 +70,7 @@ def main() -> None:
         normal_rel = manifest["terrain"]["layers"][0]["textures"]["normal"]
         base_path, normal_path = fixture_env / base_rel, fixture_env / normal_rel
 
-        first_log = run(args.producer, fixture, build)
+        run(args.producer, fixture, build)
         stamp_path = build / "Actions/environment/textures/family.stamp"
         depfile = (build / "Actions/environment/textures/family.d").read_text(encoding="utf-8")
         if not stamp_path.is_file() or depfile_path(base_path) not in depfile:
@@ -83,11 +83,10 @@ def main() -> None:
         assert_hashed_source(histogram_before, fixture, fixture_env / "project_hs_environment_materials_v9_LEAN.json")
         assert_hashed_source(histogram_before, fixture, base_path)
 
-        second_log = run(args.producer, fixture, build)
-        if "D3D11 hardware unavailable" in second_log or "D3D11 GPU compressor" in second_log:
-            raise RuntimeError("all-current family batch unnecessarily created a D3D11 compressor")
-        if "environment.texture.terrain.base_color current" not in second_log:
-            raise RuntimeError("all-current batch did not preserve current Action state")
+        run(args.producer, fixture, build)
+        if (action(build, "environment/textures/terrain/base_color") != role_before or
+                action(build, "environment/histogram") != histogram_before):
+            raise RuntimeError("unchanged family inputs changed their Action results")
 
         add_text_chunk(base_path, b"changed-source-snapshot")
         run(args.producer, fixture, build)

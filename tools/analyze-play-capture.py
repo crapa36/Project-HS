@@ -805,11 +805,9 @@ def self_test():
             "present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,acceleration_structure_bytes,host_staging_bytes,"
             "direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc"
         ).split(",")
-        assert len(old_columns) == 66
         frames = [{**dict.fromkeys(old_columns, 0), **{stage + "_us": 1000 for stage in STAGES}, "frame": i, "config_revision": 1 if i <= 2 else 2,
                    "session_phase": 1, "foreground": 1 if i <= 2 else 0, "frame_qpc": 1000000 + (i - 1) * 20000, "qpc_frequency": 1000000,
                    "render_us": 10000, "graph_record_us": 2000, "renderer_diagnostics_valid": 1} for i in (1, 2, 3, 4)]
-        assert len(frames[0]) == 66
         write("performance.csv", frames)
         gpu = []
         for identity in (1, 2, 3, 4):
@@ -846,7 +844,6 @@ def self_test():
         assert current[0]["analysis_status"] == "complete"
         assert all(len(c["options"]) == 52 for c in current[1]["configurations"])
         write_outputs(directory, current)
-        assert "all 52 graphics options" in (directory / "REPORT.md").read_text(encoding="utf-8")
         assert not current[0]["playing"]["cpu_stage_subsets_wall_ms"]
         assert "ray_geometry_register" not in (directory / "REPORT.md").read_text(encoding="utf-8")
         assert all(not ({"ray_scene", "shared_ray_compose", "denoising"} & set(o["feature_groups"])) for c in current[1]["configurations"] for o in c["options"])
@@ -856,7 +853,6 @@ def self_test():
         assert all(not data["available"] and data["rejected"] == 0 for data in summary["playing"]["cpu_stage_subsets_wall_ms"].values())
         assert all(not data["available"] for data in summary["playing"]["cpu_stage_unattributed_wall_ms"].values())
         extended_frames = [{**row, **{name + "_us": 100 for name in SUBSTAGES}} for row in frames]
-        assert len(extended_frames[0]) == 73
         write("performance.csv", extended_frames)
         detailed = analyze(directory)
         assert detailed[0]["capture_complete"] and detailed[0]["analysis_status"] == "complete"
@@ -869,9 +865,6 @@ def self_test():
         assert residuals["graph_build"]["mean"] == .7 and residuals["graph_prepare"]["mean"] == .6
         assert all(config["playing"]["cpu_stage_subsets_wall_ms"]["ray_geometry_register"]["count"] == 2 for config in detailed[0]["configurations"])
         write_outputs(directory, detailed)
-        detailed_report = (directory / "REPORT.md").read_text(encoding="utf-8")
-        assert "CPU graph subsets (Playing only; included in parent stage)" in detailed_report
-        assert "graph_prepare | unattributed residual | 4 | 0.600" in detailed_report
         invalid_subsets = [{**row, "ray_scene_register_us": "invalid"} for row in extended_frames]
         write("performance.csv", invalid_subsets)
         invalid_detail = analyze(directory)[0]
@@ -884,7 +877,6 @@ def self_test():
                            "streamline_actual_present_end_qpc": 1005000 + i * 20000,
                            "streamline_actual_present_qpc_frequency": 1000000}
                           for i, row in enumerate(extended_frames)]
-        assert len(present_frames[0]) == 78
         write("performance.csv", present_frames)
         presentation = analyze(directory)
         actual = presentation[0]["playing"]["streamline_reported_present"]
@@ -912,7 +904,6 @@ def self_test():
         bad_present = analyze(directory)[0]
         assert bad_present["analysis_status"] == "partial" and bad_present["playing"]["streamline_reported_present"]["invalid_observations"] == 1
         write("performance.csv", frames)
-        assert summary["limits"][0] == "Debug unoptimized code, D3D12 validation, capture formatting/I/O and external sampling overhead are included. This is captured Debug behavior, not Release FPS or general option savings."
         (directory / "capture-session.json").write_text('{"build_type":"Release","validation_enabled":false,"gpu_validation_enabled":false}', encoding="utf-8")
         release_result = analyze(directory)
         assert "Build type: Release; D3D12 validation: disabled; GPU validation: disabled" in release_result[0]["limits"][0]

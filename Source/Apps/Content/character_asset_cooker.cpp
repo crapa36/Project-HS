@@ -28,7 +28,6 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -261,9 +260,6 @@ void GatherModel(FbxScene &scene, CharacterIR &output,
         }
         if (arrow_only)
         {
-            std::cout << "content.archer_excluded_mesh node=" << node->GetName()
-                      << " material=Arrow_MAT control_points="
-                      << mesh->GetControlPointsCount() << '\n';
             return;
         }
         mesh_nodes.push_back(node);
@@ -869,10 +865,6 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
     for (const auto &bone : model_bones)
         inverse_bind.push_back(bone.global_bind.Inverse());
     std::vector<FbxAMatrix> skin_matrices(model_bones.size());
-    double minimum_support = std::numeric_limits<double>::max();
-    double maximum_support = std::numeric_limits<double>::lowest();
-    double minimum_correction = std::numeric_limits<double>::max();
-    double maximum_correction = std::numeric_limits<double>::lowest();
     std::vector<FbxAMatrix> current_globals(model_bones.size());
     std::vector<FbxAMatrix> target_globals(model_bones.size());
     std::vector<FbxAMatrix> corrected_globals(model_bones.size());
@@ -927,10 +919,6 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
             if (!std::isfinite(support_y))
                 throw std::runtime_error("Archer skinned support is non-finite");
             const auto correction = bind_floor - support_y;
-            minimum_support = std::min(minimum_support, support_y);
-            maximum_support = std::max(maximum_support, support_y);
-            minimum_correction = std::min(minimum_correction, correction);
-            maximum_correction = std::max(maximum_correction, correction);
             FbxAMatrix ground_correction;
             ground_correction.SetIdentity();
             ground_correction.SetT(FbxVector4(0.0, correction, 0.0));
@@ -1000,14 +988,6 @@ throw std::runtime_error(std::format(
             output.transforms.push_back(transform);
         }
     }
-    if (ground_archer)
-        std::cout << "content.archer_grounding clip=" << static_cast<int>(clip)
-                  << " support_vertices=" << support_vertices.size()
-                  << " bind_floor_m=" << bind_floor
-                  << " source_support_min_m=" << minimum_support
-                  << " source_support_max_m=" << maximum_support
-                  << " correction_min_m=" << minimum_correction
-                  << " correction_max_m=" << maximum_correction << '\n';
 }
 
 namespace
@@ -1056,13 +1036,10 @@ struct CharacterTextureSources
 };
 
 bool RepairCharacterNormalBlocks(const CharacterMip &reference,const DirectX::Image &wire,
-    const DirectX::Image &encoded,const DirectX::Image &decoded,const std::filesystem::path &path,std::size_t mip)
+    const DirectX::Image &encoded,const DirectX::Image &decoded)
 {
     constexpr std::array flags{DirectX::TEX_COMPRESS_BC7_USE_3SUBSETS,DirectX::TEX_COMPRESS_BC7_QUICK};
-    constexpr std::array names{"cpu-three-subsets","cpu-mode6"};
-    std::array<std::size_t,2> selected{},rejected{};
-    std::size_t failed{},unrepaired{},api_failures{},scored_texels{};
-    double maximum_before{},maximum_after{},rgba_before{},rgba_after{},alpha_before{},alpha_after{};
+    std::array<std::size_t,2> selected{};
     for(std::uint32_t by=0;by<reference.height;by+=4) for(std::uint32_t bx=0;bx<reference.width;bx+=4)
     {
         CharacterNormalBlock source{},original{};std::array<std::uint8_t,64> input_bytes{};
@@ -1078,12 +1055,10 @@ bool RepairCharacterNormalBlocks(const CharacterMip &reference,const DirectX::Im
             needs_repair|=!CharacterNormalDirectionsCompatible(source[index],original[index]);
         }
         if(!needs_repair) continue;
-        ++failed;
         DirectX::Image input{};input.width=input.height=4;input.format=DXGI_FORMAT_R8G8B8A8_UNORM;
         input.rowPitch=16;input.slicePitch=input_bytes.size();input.pixels=input_bytes.data();
         CharacterNormalBlockScore best;best.valid=false;std::array<std::uint8_t,16> best_bytes{};
         std::size_t backend=flags.size();
-        const auto before=ScoreCharacterNormalBlock(source,original);
         for(std::size_t candidate=0;candidate<flags.size();++candidate)
         {
             DirectX::ScratchImage compressed_candidate,decoded_candidate;
@@ -1094,10 +1069,6 @@ bool RepairCharacterNormalBlocks(const CharacterMip &reference,const DirectX::Im
             if(!bytes||bytes->format!=DXGI_FORMAT_BC7_UNORM||bytes->slicePitch!=16||!image||image->width!=4||image->height!=4||
                 image->format!=DXGI_FORMAT_R32G32B32A32_FLOAT||image->rowPitch<64)
             {
-                ++api_failures;++rejected[candidate];
-                std::cout<<"content.normal_block_candidate file="<<path.filename().string()<<" mip="<<mip
-                    <<" block_xy="<<bx/4<<','<<by/4<<" backend="<<names[candidate]
-                    <<" api_hresult="<<static_cast<std::int32_t>(result)<<" valid=0 reason=codec-api-or-layout\n";
                 continue;
             }
             CharacterNormalBlock actual{};
@@ -1105,33 +1076,14 @@ bool RepairCharacterNormalBlocks(const CharacterMip &reference,const DirectX::Im
                 std::copy_n(reinterpret_cast<const float *>(image->pixels+y*image->rowPitch)+x*4,4,actual[y*4+x].begin());
             auto score=ScoreCharacterNormalBlock(source,actual);
             const bool alpha_ok=CharacterNormalAlphaErrorNotWorse(source,original,actual);
-            if(failed<=8)
-                std::cout<<"content.normal_block_candidate file="<<path.filename().string()<<" mip="<<mip
-                    <<" block_xy="<<bx/4<<','<<by/4<<" backend="<<names[candidate]<<" valid="<<score.valid
-                    <<" invalid_texels="<<score.invalid_texels<<" alpha_error_not_worse="<<alpha_ok
-                    <<" maximum_angle_degrees="<<score.maximum_angle*(180.0/3.14159265358979323846)
-                    <<" rgba_squared="<<score.rgba_squared<<" alpha_max="<<score.maximum_alpha_error<<'\n';
-            if(!score.valid||!alpha_ok) { ++rejected[candidate];continue; }
+            if(!score.valid||!alpha_ok) continue;
             if(backend==flags.size()||PreferCharacterNormalBlock(score,best))
             { best=score;backend=candidate;std::memcpy(best_bytes.data(),bytes->pixels,best_bytes.size()); }
         }
-        if(backend==flags.size()) { ++unrepaired;continue; } // Keep the original exact QA failure.
+        if(backend==flags.size()) continue;
         std::memcpy(encoded.pixels+std::size_t(by/4)*encoded.rowPitch+(bx/4)*16,best_bytes.data(),best_bytes.size());
-        ++selected[backend];scored_texels+=16;
-        maximum_before=std::max(maximum_before,before.maximum_angle);maximum_after=std::max(maximum_after,best.maximum_angle);
-        rgba_before+=before.rgba_squared;rgba_after+=best.rgba_squared;
-        alpha_before=std::max(alpha_before,before.maximum_alpha_error);alpha_after=std::max(alpha_after,best.maximum_alpha_error);
+        ++selected[backend];
     }
-    std::cout<<"content.character_normal_block_repair file="<<path.filename().string()<<" mip="<<mip
-        <<" policy=local-cpu3subsets-mode6-angular-alpha-nonreg-v1 failed_blocks="<<failed
-        <<" selected_cpu_three_subsets="<<selected[0]<<" selected_cpu_mode6="<<selected[1]
-        <<" rejected_cpu_three_subsets="<<rejected[0]<<" rejected_cpu_mode6="<<rejected[1]
-        <<" unrepaired_blocks="<<unrepaired<<" codec_api_failures="<<api_failures<<" scored_texels_including_edge_padding="<<scored_texels
-        <<" loss_scope=selected_blocks_all16_edge_replicated"
-        <<" maximum_angle_before_degrees="<<maximum_before*(180.0/3.14159265358979323846)
-        <<" maximum_angle_after_degrees="<<maximum_after*(180.0/3.14159265358979323846)
-        <<" rgba_squared_before="<<rgba_before<<" rgba_squared_after="<<rgba_after
-        <<" alpha_max_before="<<alpha_before<<" alpha_max_after="<<alpha_after<<" optical_qualification=unapproved\n";
     return selected[0]+selected[1]!=0;
 }
 
@@ -1181,12 +1133,7 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
         auto mips = BuildCharacterMipChain(std::move(base), semantic, alpha);
         if (semantic == CharacterTextureSemantic::NormalRoughness)
         {
-            const auto normalized = CanonicalizeCharacterNormalBase(mips.front());
-            std::cout << "content.character_normal_canonicalization file=" << path.filename().string()
-                << " policy=unit-base-after-original-mips texels=" << normalized.texels
-                << " source_length_squared_min=" << normalized.minimum_length_squared
-                << " source_length_squared_max=" << normalized.maximum_length_squared
-                << " alpha_unchanged=1 lower_float_mips_unchanged=1 filtered_qualification=unapproved\n";
+            CanonicalizeCharacterNormalBase(mips.front());
         }
         const bool color = semantic == CharacterTextureSemantic::Color;
         const auto format = color ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
@@ -1230,7 +1177,7 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                 image->format != DXGI_FORMAT_R32G32B32A32_FLOAT || image->rowPitch < image->width * 4 * sizeof(float))
                 throw std::runtime_error("character BC7 initial QA extent mismatch");
             if(semantic==CharacterTextureSemantic::NormalRoughness &&
-                RepairCharacterNormalBlocks(mips[mip],*input.GetImage(mip,0,0),*block,*image,path,mip))
+                RepairCharacterNormalBlocks(mips[mip],*input.GetImage(mip,0,0),*block,*image))
             {
                 decoded.Release();
                 checked(DirectX::Decompress(*block,DXGI_FORMAT_R32G32B32A32_FLOAT,decoded),"decode repaired character normal full mip QA");
@@ -1239,25 +1186,21 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                     image->format!=DXGI_FORMAT_R32G32B32A32_FLOAT||image->rowPitch<image->width*4*sizeof(float))
                     throw std::runtime_error("character BC7 repaired normal QA extent mismatch");
             }
-            std::size_t repaired_blocks{}, rgb_retained_blocks{}, repair_texels{}, pre_repair_mismatches{}, wire_class_mismatches{};
-            double repair_rgb_squared_before{}, repair_rgb_squared_after{};
-            double repair_alpha_squared_before{}, repair_alpha_squared_after{}, repair_alpha_max_before{}, repair_alpha_max_after{};
+            std::size_t repaired_blocks{};
             if (alpha.cutoff > 0)
             {
                 // Preserve the semantic float mip's per-texel decision, including
                 // decisions changed by the intermediate R8 wire quantization.
                 const auto block_columns = (mips[mip].width + 3) / 4;
                 std::vector<std::uint8_t> repair(std::size_t(block_columns) * rows);
-                const auto *wire = input.GetImage(mip, 0, 0);
                 for (std::uint32_t y = 0; y < mips[mip].height; ++y)
                     for (std::uint32_t x = 0; x < mips[mip].width; ++x)
                     {
                         const auto &reference = mips[mip].pixels[std::size_t(y) * mips[mip].width + x];
                         const auto *pixel = reinterpret_cast<const float *>(image->pixels + y * image->rowPitch) + x * 4;
                         const bool wanted = reference[3] >= alpha.cutoff;
-                        wire_class_mismatches += (float(wire->pixels[y * wire->rowPitch + x * 4 + 3]) / 255.0f >= alpha.cutoff) != wanted;
                         if ((pixel[3] >= alpha.cutoff) != wanted)
-                        { repair[std::size_t(y / 4) * block_columns + x / 4] = 1; ++pre_repair_mismatches; }
+                            repair[std::size_t(y / 4) * block_columns + x / 4] = 1;
                     }
                 for (std::uint32_t by = 0; by < rows; ++by)
                     for (std::uint32_t bx = 0; bx < block_columns; ++bx)
@@ -1269,27 +1212,15 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                             const auto sx = std::min(bx * 4 + x, mips[mip].width - 1);
                             const auto sy = std::min(by * 4 + y, mips[mip].height - 1);
                             source_block[y * 4 + x] = mips[mip].pixels[std::size_t(sy) * mips[mip].width + sx];
-                            if (bx * 4 + x >= mips[mip].width || by * 4 + y >= mips[mip].height) continue;
-                            ++repair_texels;
-                            const auto *pixel = reinterpret_cast<const float *>(image->pixels + sy * image->rowPitch) + sx * 4;
-                            const double alpha_delta = double(pixel[3]) - source_block[y * 4 + x][3];
-                            repair_alpha_squared_before += alpha_delta * alpha_delta;
-                            repair_alpha_max_before = std::max(repair_alpha_max_before, std::abs(alpha_delta));
-                            for (std::size_t channel = 0; channel < 3; ++channel)
-                            {
-                                const double delta = pixel[channel] - CharacterSrgbToLinear(source_block[y * 4 + x][channel]);
-                                repair_rgb_squared_before += delta * delta;
-                            }
                         }
                         auto *destination = block->pixels + std::size_t(by) * block->rowPitch + bx * 16;
                         CharacterBc7Block original{}, replacement{};
                         std::memcpy(original.data(), destination, original.size());
-                        bool retained{};
-                        if (!EncodeCharacterBc7CoverageBlock(source_block, alpha, original, replacement, retained))
+                        if (!EncodeCharacterBc7CoverageBlock(source_block, alpha, original, replacement))
                             throw std::runtime_error("character BC7 cannot preserve this block's float cutoff and zero/body/opaque anchors: " +
                                 path.string() + " mip=" + std::to_string(mip) + " block=" + std::to_string(bx) + "," + std::to_string(by));
                         std::memcpy(destination, replacement.data(), replacement.size());
-                        ++repaired_blocks; rgb_retained_blocks += retained;
+                        ++repaired_blocks;
                     }
                 if (repaired_blocks)
                 {
@@ -1307,14 +1238,6 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                             if (!repair[std::size_t(y / 4) * block_columns + x / 4]) continue;
                             const auto &reference = mips[mip].pixels[std::size_t(y) * mips[mip].width + x];
                             const auto *pixel = reinterpret_cast<const float *>(image->pixels + y * image->rowPitch) + x * 4;
-                            const double alpha_delta = double(pixel[3]) - reference[3];
-                            repair_alpha_squared_after += alpha_delta * alpha_delta;
-                            repair_alpha_max_after = std::max(repair_alpha_max_after, std::abs(alpha_delta));
-                            for (std::size_t channel = 0; channel < 3; ++channel)
-                            {
-                                const double delta = pixel[channel] - CharacterSrgbToLinear(reference[channel]);
-                                repair_rgb_squared_after += delta * delta;
-                            }
                             const bool anchor = reference[3] == 0 || reference[3] == 1 || (alpha.preserve_translucent &&
                                 std::abs(reference[3] - 173.0f / 255.0f) < 1.e-7f);
                             if ((reference[3] >= alpha.cutoff) != (pixel[3] >= alpha.cutoff) ||
@@ -1327,12 +1250,8 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
             if (!image || image->width != mips[mip].width || image->height != mips[mip].height ||
                 image->format != DXGI_FORMAT_R32G32B32A32_FLOAT)
                 throw std::runtime_error("character BC7 QA extent mismatch");
-            std::array<double, 4> squared{};
-            std::array<double, 4> source_min{1, 1, 1, 1}, source_max{}, decoded_min{1, 1, 1, 1}, decoded_max{};
             std::size_t reference_covered{}, decoded_covered{};
             std::size_t coverage_mismatches{};
-            std::array<std::uint32_t, 4> mismatch_bounds{mips[mip].width, mips[mip].height, 0, 0};
-            double normal_angle_max{}, alpha_error_max{};
             for (std::uint32_t y = 0; y < image->height; ++y)
                 for (std::uint32_t x = 0; x < image->width; ++x)
                 {
@@ -1341,16 +1260,9 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                     for (std::size_t channel = 0; channel < 4; ++channel)
                     {
                         const auto actual = pixel[channel];
-                        const auto reference_value = color && channel < 3 ? CharacterSrgbToLinear(reference[channel]) : reference[channel];
-                        const auto difference = actual - reference_value;
-                        source_min[channel] = std::min(source_min[channel], reference_value);
-                        source_max[channel] = std::max(source_max[channel], reference_value);
-                        decoded_min[channel] = std::min(decoded_min[channel], double(actual));
-                        decoded_max[channel] = std::max(decoded_max[channel], double(actual));
-                        squared[channel] += difference * difference;
+                        const auto difference = actual - (color && channel < 3 ? CharacterSrgbToLinear(reference[channel]) : reference[channel]);
                         if (!std::isfinite(difference) || actual < 0 || actual > 1)
                             throw std::runtime_error("character BC7 decode contains an invalid channel");
-                        if (channel == 3) alpha_error_max = std::max(alpha_error_max, std::abs(difference));
                     }
                     if (semantic == CharacterTextureSemantic::NormalRoughness)
                     {
@@ -1379,8 +1291,6 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                                 << " dot=" << dot << " block_xy=" << x / 4 << ',' << y / 4;
                             throw std::runtime_error(details.str());
                         }
-                        const auto cosine = std::clamp(dot / std::sqrt(reference_length * actual_length), -1.0, 1.0);
-                        normal_angle_max = std::max(normal_angle_max, std::acos(cosine) * (180.0 / 3.14159265358979323846));
                     }
                     if (alpha.cutoff > 0)
                     {
@@ -1389,34 +1299,9 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                         if (before != after)
                         {
                             ++coverage_mismatches;
-                            mismatch_bounds[0] = std::min(mismatch_bounds[0], x); mismatch_bounds[1] = std::min(mismatch_bounds[1], y);
-                            mismatch_bounds[2] = std::max(mismatch_bounds[2], x); mismatch_bounds[3] = std::max(mismatch_bounds[3], y);
                         }
                     }
                 }
-            std::cout << "content.character_texture_qa file=" << path.filename().string() << " mip=" << mip
-                << " texels=" << mips[mip].pixels.size() << " blocks_bytes=" << block->slicePitch
-                << " rmse_rgba=";
-            for (auto value : squared) std::cout << std::sqrt(value / mips[mip].pixels.size()) << ',';
-            std::cout << " source_min_rgba="; for (auto value : source_min) std::cout << value << ',';
-            std::cout << " source_max_rgba="; for (auto value : source_max) std::cout << value << ',';
-            std::cout << " decoded_min_rgba="; for (auto value : decoded_min) std::cout << value << ',';
-            std::cout << " decoded_max_rgba="; for (auto value : decoded_max) std::cout << value << ',';
-            std::cout << " cutoff=" << alpha.cutoff << " reference_covered=" << reference_covered
-                << " decoded_covered=" << decoded_covered << " coverage_pixel_mismatches=" << coverage_mismatches
-                << " mismatch_bounds=" << mismatch_bounds[0] << ',' << mismatch_bounds[1] << ',' << mismatch_bounds[2] << ',' << mismatch_bounds[3]
-                << " normal_angle_max_degrees=" << normal_angle_max << " alpha_error_max=" << alpha_error_max << '\n';
-            if (alpha.cutoff > 0)
-                std::cout << "content.character_texture_repair file=" << path.filename().string() << " mip=" << mip
-                    << " wire_class_mismatches=" << wire_class_mismatches << " pre_repair_pixel_mismatches=" << pre_repair_mismatches
-                    << " repaired_blocks=" << repaired_blocks << " rgb_retained_blocks=" << rgb_retained_blocks
-                    << " rgb_refit_blocks=" << (repaired_blocks - rgb_retained_blocks) << " affected_texels=" << repair_texels
-                    << " affected_linear_rgb_rmse_before=" << (repair_texels ? std::sqrt(repair_rgb_squared_before / (repair_texels * 3)) : 0)
-                    << " affected_linear_rgb_rmse_after=" << (repair_texels ? std::sqrt(repair_rgb_squared_after / (repair_texels * 3)) : 0)
-                    << " affected_alpha_rmse_before=" << (repair_texels ? std::sqrt(repair_alpha_squared_before / repair_texels) : 0)
-                    << " affected_alpha_rmse_after=" << (repair_texels ? std::sqrt(repair_alpha_squared_after / repair_texels) : 0)
-                    << " affected_alpha_max_before=" << repair_alpha_max_before << " affected_alpha_max_after=" << repair_alpha_max_after
-                    << " optical_qualification=unapproved\n";
             if (alpha.cutoff > 0 && coverage_mismatches)
                 throw std::runtime_error("character BC7 changed the spatial cutoff mask after local repair: " + path.string() +
                     " mip=" + std::to_string(mip));
@@ -1595,11 +1480,6 @@ bool WriteCharacterTextures(const std::filesystem::path &output,
         const bool archer = source.output_name == "archer";
         const bool family = source.output_name.starts_with("enemy_");
         const auto size = archer ? 2048u : family ? 1024u : 1u;
-        std::cout << "content.material_source index=" << index << " name=" << material.name
-            << " diffuse=" << (material.diffuse.empty() ? std::string("fallback") : material.diffuse.string())
-            << " normal=" << (material.normal.empty() ? std::string("fallback") : material.normal.string())
-            << " vertex_uses=" << std::ranges::count_if(character.vertices, [&](const auto &vertex) { return vertex.material_index == index; })
-            << '\n';
         const CharacterAlphaPolicy coverage{archer ? 0.2f : family ? 0.98f : 0.0f, family};
         if (!WriteDds(*factory.Get(), sources, output / (source.output_name + "_diffuse_" + suffix),
                       material.diffuse, {255, 255, 255, 255}, error_message,
@@ -1610,12 +1490,6 @@ bool WriteCharacterTextures(const std::filesystem::path &output,
         {
             return false;
         }
-        std::cout << "content.material index=" << index << " name=" << material.name
-                  << " diffuse="
-                  << (material.diffuse.empty() ? "fallback" : material.diffuse.filename().string())
-                  << " normal="
-                  << (material.normal.empty() ? "fallback" : material.normal.filename().string())
-                  << '\n';
     }
     return true;
 }

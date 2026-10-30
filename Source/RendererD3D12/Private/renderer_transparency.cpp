@@ -1,7 +1,9 @@
 #include "renderer_transparency.hpp"
 #include "d3d12_resources.hpp"
 #include "renderer_pipeline_cache.hpp"
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include "renderer_hero_work.hpp"
+#endif
 
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
@@ -29,10 +31,12 @@ constexpr std::array<std::string_view, 5> kPixelProducts{
     "render/shader/hero_peel_front_ps.dxil", "render/shader/hero_peel_exit_ps.dxil",
     "render/shader/hero_oit_tail_ps.dxil", "render/shader/hero_transparent_guide_ps.dxil",
     "render/shader/hero_layer_composite_ps.dxil"};
+#if defined(HS_DEVELOPMENT_TOOLS)
 constexpr std::array<std::string_view, 5> kWorkPixelProducts{
     "render/shader/hero_peel_front_ps_hero_work.dxil", "render/shader/hero_peel_exit_ps_hero_work.dxil",
     "render/shader/hero_oit_tail_ps_hero_work.dxil", "render/shader/hero_transparent_guide_ps_hero_work.dxil",
     "render/shader/hero_layer_composite_ps_hero_work.dxil"};
+#endif
 
 Result Failure(ErrorCode code, std::string message)
 {
@@ -100,7 +104,9 @@ struct HeroTransparencyTargets
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
     std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::unique_ptr<HeroWorkCapture> work;
+#endif
     ComPtr<ID3D12DescriptorHeap> tables, rtv_heap, dsv_heap, exports;
     std::array<AllocationResource, 4> front, identity, exit;
     std::array<AllocationResource, 6> guides;
@@ -191,8 +197,10 @@ struct HeroTransparencySystem::Impl
 {
     std::uint64_t next_generation{};
     std::shared_ptr<HeroTransparencyTargets> targets;
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::vector<RendererHeroWorkSample> completed_work;
     RendererHeroWorkStatus retired_work;
+#endif
     struct Import { AllocationResource *allocation{}; ResourceHandle handle; };
     struct Pending
     {
@@ -230,12 +238,17 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     next->capacity = capacity; next->enabled = enabled; next->layer_count = layerCount;
     next->frame_slot_count = frameSlots; next->slot_completion.resize(frameSlots);
     if (!enabled) { candidate.targets_ = std::move(next); return Result::Success(); }
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (captureHeroWork)
     {
         next->work = std::make_unique<HeroWorkCapture>();
         if (auto prepared = next->work->Initialize(device, allocator, frameSlots, capacity, mode); !prepared) return prepared;
     }
     else
+#else
+    static_cast<void>(captureHeroWork);
+    static_cast<void>(mode);
+#endif
     {
         D3D12_QUERY_HEAP_DESC queries{};
         queries.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
@@ -302,7 +315,11 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     for (std::uint32_t index = 0; index < kPixelProducts.size(); ++index)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         const auto product = captureHeroWork ? kWorkPixelProducts[index] : kPixelProducts[index];
+#else
+        const auto product = kPixelProducts[index];
+#endif
         std::vector<std::byte> pixel;
         if (auto read = readShader(product, pixel); !read) return read;
         if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency pixel product is empty: " + std::string(product));
@@ -377,7 +394,9 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         const auto native = pipelineCache.CreateGraphics(&pipeline, IID_PPV_ARGS(&next->pipelines[index]));
         if (FAILED(native)) return NativeFailure("Create hero transparency pipeline " + std::string(product), native);
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (next->work) next->work->Pipeline(index, pipeline, phase_vertex, pixel, product);
+#endif
     }
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -441,7 +460,9 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     for (const auto &resource : next->exit) include(resource);
     for (const auto &resource : next->guides) include(resource);
     for (const auto &resource : next->color) include(resource);
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (next->work) next->bytes += next->work->Status().readback_bytes;
+#endif
     candidate.targets_ = std::move(next);
     return Result::Success();
 }
@@ -452,6 +473,7 @@ Result HeroTransparencySystem::Commit(HeroTransparencyCandidate &&candidate, con
     if (!candidate.targets_) return Failure(ErrorCode::InvalidArgument, "Hero transparency candidate was not prepared.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState, "Old hero transparency targets are still in GPU use.");
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
     if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
         return Failure(ErrorCode::InvalidState, "Old hero contributor queries are still in GPU use.");
@@ -469,6 +491,7 @@ Result HeroTransparencySystem::Commit(HeroTransparencyCandidate &&candidate, con
         impl_->retired_work.shader_clear_commands += previous.shader_clear_commands;
         impl_->retired_work.shader_copy_commands += previous.shader_copy_commands;
     }
+#endif
     if (impl_->next_generation == UINT64_MAX)
         return Failure(ErrorCode::InvalidState, "Hero transparency target generation is exhausted.");
     candidate.targets_->generation = ++impl_->next_generation;
@@ -506,6 +529,11 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             static_cast<std::uint32_t>(rect.bottom) > active.height))
         return Failure(ErrorCode::InvalidArgument, "Hero composition rectangle exceeds its active extent.");
     const bool use_occupancy = inputs.use_occupancy_queries && storage->occupancy_queries.Get();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const bool capture_work = static_cast<bool>(storage->work);
+#else
+    constexpr bool capture_work = false;
+#endif
     const auto same_version = [](ResourceVersion a, ResourceVersion b) {
         return a.resource.value == b.resource.value && a.resource.kind == b.resource.kind &&
             a.ordinal == b.ordinal;
@@ -524,7 +552,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         };
         if (retained->target_generation != storage->generation ||
             retained->layer_count != storage->layer_count ||
-            retained->capture_work != static_cast<bool>(storage->work) ||
+            retained->capture_work != capture_work ||
             retained->occupancy != use_occupancy ||
             !same_reads(inputs.peel_reads, retained->peel_reads) ||
             !same_reads(inputs.scene_reads, retained->scene_reads))
@@ -579,7 +607,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         *layout = {};
         layout->target_generation = storage->generation;
         layout->layer_count = storage->layer_count;
-        layout->capture_work = static_cast<bool>(storage->work);
+        layout->capture_work = capture_work;
         layout->inputs = {inputs.opaque_depth.version, inputs.hdr.version,
             inputs.accumulation.version, inputs.revealage.version};
         layout->peel_reads.assign(inputs.peel_reads.begin(), inputs.peel_reads.end());
@@ -603,6 +631,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
             if (auto certified = certify(storage->occupancy_results[inputs.frame_slot][layer]);
                 !certified) return certified;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (storage->work)
     {
         if (auto collected = storage->work->Collect(inputs.completed, impl_->completed_work); !collected) return collected;
@@ -611,6 +640,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             : storage->work->Begin(graph, inputs, layout ? &layout->work : nullptr);
         if (!begun) return begun;
     }
+#endif
     bool imports_valid = true;
     auto import = [&](AllocationResource &resource, std::string_view name, TextureHandle saved = {}) {
         const auto external = ExternalTexture{resource.resource.Get(), resource.graph_completion,
@@ -701,6 +731,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             : front.Write(pending.front[layer], Access::DepthWrite);
         pending.identity[layer] = retained ? ResourceVersion{pending.identity[layer].resource, 1}
             : front.Write(pending.identity[layer], Access::RenderTarget);
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (storage->work)
         {
             const auto bound = retained
@@ -710,6 +741,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             if (!retained) storage->work->DeclarePhase(graph, front, inputs.frame_slot, layer,
                 layout ? &layout->work : nullptr);
         }
+#endif
         front.SetExecute([storage, inputs, layer, use_occupancy](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             constexpr float clear[]{0, 0, 0, 0};
@@ -725,8 +757,11 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
                     commands->SetPredication(storage->occupancy_results[inputs.frame_slot][layer - 1].resource.Get(),
                         0, D3D12_PREDICATION_OP_EQUAL_ZERO);
             }
+#if defined(HS_DEVELOPMENT_TOOLS)
             if (storage->work) storage->work->Record(commands, storage->pipelines[0].Get(), inputs, HeroTransparencyPhase::Front, layer, layer, storage->Gpu(inputs, layer));
-            else inputs.draw(commands, storage->pipelines[0].Get(), HeroTransparencyPhase::Front, layer, storage->Gpu(inputs, layer));
+            else
+#endif
+                inputs.draw(commands, storage->pipelines[0].Get(), HeroTransparencyPhase::Front, layer, storage->Gpu(inputs, layer));
             if (use_occupancy)
             {
                 if (layer) commands->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
@@ -749,6 +784,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         }
         pending.exit[layer] = retained ? ResourceVersion{pending.exit[layer].resource, 1}
             : exit.Write(pending.exit[layer], Access::DepthWrite);
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (storage->work)
         {
             const auto bound = retained
@@ -758,6 +794,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             if (!retained) storage->work->DeclarePhase(graph, exit, inputs.frame_slot,
                 4 + layer, layout ? &layout->work : nullptr);
         }
+#endif
         exit.SetExecute([storage, inputs, layer, use_occupancy](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto depth = storage->Dsv(4 + layer);
@@ -766,8 +803,11 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             if (use_occupancy)
                 commands->SetPredication(storage->occupancy_results[inputs.frame_slot][layer].resource.Get(),
                     0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+#if defined(HS_DEVELOPMENT_TOOLS)
             if (storage->work) storage->work->Record(commands, storage->pipelines[1].Get(), inputs, HeroTransparencyPhase::Exit, layer, 4 + layer, storage->Gpu(inputs, 4 + layer));
-            else inputs.draw(commands, storage->pipelines[1].Get(), HeroTransparencyPhase::Exit, layer, storage->Gpu(inputs, 4 + layer));
+            else
+#endif
+                inputs.draw(commands, storage->pipelines[1].Get(), HeroTransparencyPhase::Exit, layer, storage->Gpu(inputs, 4 + layer));
             if (use_occupancy)
                 commands->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
         });
@@ -807,6 +847,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         : tail.ReadWrite(inputs.accumulation.version, Access::RenderTarget);
     outputs.revealage = retained ? retained->revealage_version
         : tail.ReadWrite(inputs.revealage.version, Access::RenderTarget);
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (storage->work)
     {
         const auto bound = retained
@@ -816,6 +857,7 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         if (!retained) storage->work->DeclarePhase(graph, tail, inputs.frame_slot,
             kTailPhase, layout ? &layout->work : nullptr);
     }
+#endif
     tail.SetExecute([storage, inputs, use_occupancy](RenderPassContext &context) {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         const D3D12_CPU_DESCRIPTOR_HANDLE targets[]{inputs.accumulation_rtv, inputs.revealage_rtv};
@@ -823,8 +865,11 @@ Result HeroTransparencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         if (use_occupancy)
             commands->SetPredication(storage->occupancy_results[inputs.frame_slot][0].resource.Get(),
                 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (storage->work) storage->work->Record(commands, storage->pipelines[2].Get(), inputs, HeroTransparencyPhase::Tail, 0, kTailPhase, storage->Gpu(inputs, kTailPhase));
-        else inputs.draw(commands, storage->pipelines[2].Get(), HeroTransparencyPhase::Tail, 0, storage->Gpu(inputs, kTailPhase));
+        else
+#endif
+            inputs.draw(commands, storage->pipelines[2].Get(), HeroTransparencyPhase::Tail, 0, storage->Gpu(inputs, kTailPhase));
         if (use_occupancy)
             commands->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     });
@@ -865,10 +910,15 @@ bool HeroTransparencySystem::MatchesLayout(const HeroTransparencyInputs &inputs,
     HeroTransparencyGuide background, const HeroTransparencyLayout &layout) const noexcept
 {
     const auto storage = impl_->targets;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const bool capture_work = storage && static_cast<bool>(storage->work);
+#else
+    constexpr bool capture_work = false;
+#endif
     if (!storage || !storage->enabled || !storage->usable ||
         !layout.target_generation || layout.target_generation != storage->generation ||
         layout.layer_count != storage->layer_count ||
-        layout.capture_work != static_cast<bool>(storage->work) ||
+        layout.capture_work != capture_work ||
         layout.occupancy != (inputs.use_occupancy_queries && storage->occupancy_queries.Get()))
         return false;
     const auto same = [](ResourceVersion a, ResourceVersion b) {
@@ -890,6 +940,7 @@ bool HeroTransparencySystem::MatchesLayout(const HeroTransparencyInputs &inputs,
     };
     if (!same_reads(inputs.peel_reads, layout.peel_reads) ||
         !same_reads(inputs.scene_reads, layout.scene_reads)) return false;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (storage->work)
     {
         if (inputs.work_contributors.size() != layout.work.contributor_count ||
@@ -898,6 +949,7 @@ bool HeroTransparencySystem::MatchesLayout(const HeroTransparencyInputs &inputs,
             if (!same(inputs.work_contributors[index].arguments,
                     layout.work.argument_versions[index])) return false;
     }
+#endif
     return true;
 }
 Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
@@ -911,9 +963,14 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
     auto storage = pending.targets;
     const auto inputs = pending.inputs;
     const bool use_occupancy = inputs.use_occupancy_queries && storage->occupancy_queries.Get();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const bool capture_work = static_cast<bool>(storage->work);
+#else
+    constexpr bool capture_work = false;
+#endif
     if (layout && (layout->target_generation != storage->generation ||
             layout->layer_count != storage->layer_count || layout->occupancy != use_occupancy ||
-            layout->capture_work != static_cast<bool>(storage->work)))
+            layout->capture_work != capture_work))
         return Failure(ErrorCode::InvalidState, "Hero composition layout variant changed.");
     if (retained)
     {
@@ -921,7 +978,7 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
         if (retained->target_generation != storage->generation ||
             retained->layer_count != storage->layer_count ||
             retained->occupancy != use_occupancy ||
-            retained->capture_work != static_cast<bool>(storage->work) ||
+            retained->capture_work != capture_work ||
             expected.resource.value != background.version.resource.value ||
             expected.resource.kind != background.version.resource.kind ||
             expected.ordinal != background.version.ordinal)
@@ -994,6 +1051,7 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
             outputs.depth = pending.guides[0]; outputs.motion = pending.guides[1]; outputs.history = pending.guides[2];
             outputs.classification = pending.guides[3]; outputs.metadata = pending.guides[4]; outputs.transport = pending.guides[5];
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (storage->work)
         {
             const auto bound = retained
@@ -1003,6 +1061,7 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
             if (!retained) storage->work->DeclarePhase(graph, compose, inputs.frame_slot,
                 phase, layout ? &layout->work : nullptr);
         }
+#endif
         compose.SetExecute([storage, inputs, layer, phase, target, use_occupancy](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto rtv = storage->Rtv(10 + target);
@@ -1023,8 +1082,11 @@ Result HeroTransparencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph
             if (use_occupancy)
                 commands->SetPredication(storage->occupancy_results[inputs.frame_slot][layer].resource.Get(),
                     0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+#if defined(HS_DEVELOPMENT_TOOLS)
             if (storage->work) storage->work->Record(commands, pipeline, inputs, HeroTransparencyPhase::Composite, layer, phase, storage->Gpu(inputs, phase));
-            else inputs.draw(commands, pipeline, HeroTransparencyPhase::Composite, layer, storage->Gpu(inputs, phase));
+            else
+#endif
+                inputs.draw(commands, pipeline, HeroTransparencyPhase::Composite, layer, storage->Gpu(inputs, phase));
             if (use_occupancy)
                 commands->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
         });
@@ -1063,7 +1125,9 @@ Result HeroTransparencySystem::CompleteSubmission(const RenderGraphBuilder &grap
         }
     }
     if (!success) storage->usable = false;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (storage->work) storage->work->Submitted(graph, pending.inputs.frame_slot, completion, success);
+#endif
     pending = {};
     return Result::Success();
 }
@@ -1072,11 +1136,16 @@ Result HeroTransparencySystem::ResetAfterCompletion(const CompletionSet &complet
     if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending hero transparency before reset.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed GPU uses.");
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
     if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
         return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed native contributor queries.");
-    impl_->targets.reset(); impl_->retired_work = {}; return Result::Success();
+    impl_->retired_work = {};
+#endif
+    impl_->targets.reset();
+    return Result::Success();
 }
+#if defined(HS_DEVELOPMENT_TOOLS)
 Result HeroTransparencySystem::ConsumeCompletedWork(const CompletionSet &completed, std::vector<RendererHeroWorkSample> &output)
 {
     if (impl_->targets && impl_->targets->work)
@@ -1109,4 +1178,9 @@ RendererHeroWorkStatus HeroTransparencySystem::WorkStatus() const
     status.shader_copy_commands += impl_->retired_work.shader_copy_commands;
     return status;
 }
+#else
+Result HeroTransparencySystem::ConsumeCompletedWork(const CompletionSet &, std::vector<RendererHeroWorkSample> &output)
+{ output.clear(); return Result::Success(); }
+RendererHeroWorkStatus HeroTransparencySystem::WorkStatus() const { return {}; }
+#endif
 } // namespace hs

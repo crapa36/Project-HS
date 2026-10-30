@@ -12,6 +12,7 @@ struct TextureFeedbackGraphBinding
 {
     TextureStreamId texture;
     ResourceVersion feedback;
+    bool opacity_sampling{true};
 };
 struct TextureFeedbackLayout
 {
@@ -55,7 +56,8 @@ class RendererTextureFeedback
     [[nodiscard]] Result BindRetainedClear(RenderGraphBuilder &, std::uint32_t frame,
         std::uint32_t pass_id, const TextureFeedbackLayout &,
         std::vector<TextureFeedbackGraphBinding> &);
-    static void DeclareSampling(PassBuilder &, std::vector<TextureFeedbackGraphBinding> &);
+    static void DeclareSampling(PassBuilder &, std::vector<TextureFeedbackGraphBinding> &,
+        bool opacity_only = false);
     [[nodiscard]] Result AddDecodePass(RenderGraphBuilder &, std::uint32_t frame,
         std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding>,
         TextureFeedbackLayout *layout = nullptr);

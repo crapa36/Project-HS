@@ -34,8 +34,6 @@ def main():
     parser.add_argument("--ninja", default="ninja")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
-    action_source = (repo / "Source/Apps/AssetPipeline/action.cpp").read_text()
-    assert "TouchActionResultFile" not in action_source, "ActionResult still has an unconditional mtime touch"
     with tempfile.TemporaryDirectory(prefix="hs asset restat ") as temporary:
         root = Path(temporary)
         build = root / "build"

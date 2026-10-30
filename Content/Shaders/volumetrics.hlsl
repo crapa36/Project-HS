@@ -276,7 +276,7 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
     const float3 world=VmFroxelWorld(p);
     const float3 view=normalize(VmRelativeAtDepth(uv,VmOriginNear.w)-VmRelativeAtDepth(uv,VmDepthRange.x));
     const float g=VmPhase.Load(int4(p,0)); float3 lighting=0.0;
-    HsLightQuery query=HsBeginLightQuery(world,HsLightAllMask,true); uint index;
+    HsLightQuery query=HsBeginLightQuery(world,HsLightAllMask,false); uint index;
     [loop] while(HsNextLight(query,index))
     {
         const HsGpuLightRecord light=HsLightRecords[index];
@@ -284,13 +284,19 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
         {
             float range_weight;
             if(!HsAreaLightVisible(light,world,range_weight)) continue;
+            float visibility=1.0;
+            bool visibility_ready=VmHeroInfo.z==0u;
             [loop] for(uint sample=0u;sample<VmFrameInfo.w;++sample)
             {
                 const float2 u=float2((float(sample)+VmRandom(p,sample,0u))/float(VmFrameInfo.w),VmRandom(p,sample,1u));
                 float3 direction; float pdf;
                 if(!HsAreaSampleDirection(light,world,u,direction,pdf)) continue;
+                if(!visibility_ready)
+                {
+                    visibility=HsLocalShadowVisibility(light,world,0.0.xxx);
+                    visibility_ready=true;
+                }
                 // Incoming propagation is -direction; outgoing is toward camera.
-                const float visibility=VmHeroInfo.z!=0u?HsLocalShadowVisibility(light,world,0.0.xxx):1.0;
                 lighting+=light.color_intensity.rgb*light.color_intensity.w*range_weight*
                     VmPhaseFunction(dot(-direction,view),g)*visibility/(pdf*float(VmFrameInfo.w));
             }
@@ -384,13 +390,20 @@ void VolumetricIntegrateCS(uint3 p:SV_DispatchThreadID)
     HsVolumetricTransport integrated=HsVolumetricIdentity();
     VmLuminanceOutput[uint3(p.xy,0)]=0.0; VmTransmittanceOutput[uint3(p.xy,0)]=1.0;
     const float2 uv=(float2(p.xy)+0.5)*VmFroxelSize.zw;
-    [loop] for(uint slice=0u;slice<VmCounts.y;++slice)
+    if(VmCounts.y!=0u)
     {
-        const float4 source=VmFilteredScattering.Load(int4(p.xy,slice,0));
-        integrated=VmCompose(integrated,VmIntegrateCoefficient(source,
-            VmSegmentMeters(uv,VmBoundaryDepth(float(slice)),VmBoundaryDepth(float(slice+1u)))));
-        VmLuminanceOutput[uint3(p.xy,slice+1u)]=float4(integrated.radiance,0.0);
-        VmTransmittanceOutput[uint3(p.xy,slice+1u)]=integrated.transmittance;
+        const VmRayMetric ray_metric=VmPrepareRayMetric(uv);
+        float near_depth=VmBoundaryDepth(0.0);
+        [loop] for(uint slice=0u;slice<VmCounts.y;++slice)
+        {
+            const float far_depth=VmBoundaryDepth(float(slice+1u));
+            const float4 source=VmFilteredScattering.Load(int4(p.xy,slice,0));
+            integrated=VmCompose(integrated,VmIntegrateCoefficient(source,
+                VmSegmentMeters(ray_metric,near_depth,far_depth)));
+            VmLuminanceOutput[uint3(p.xy,slice+1u)]=float4(integrated.radiance,0.0);
+            VmTransmittanceOutput[uint3(p.xy,slice+1u)]=integrated.transmittance;
+            near_depth=far_depth;
+        }
     }
 }
 [numthreads(8,8,1)]

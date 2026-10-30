@@ -28,6 +28,11 @@ struct TextureStreamId
     explicit operator bool() const noexcept { return value != 0; }
     friend bool operator==(TextureStreamId, TextureStreamId) = default;
 };
+struct TextureStreamMipRequirement
+{
+    TextureStreamId texture;
+    std::uint32_t mip{};
+};
 [[nodiscard]] constexpr std::uint32_t NextTextureTransactionTarget(std::uint32_t actual_mip,
     std::uint32_t desired_mip, bool reserved, bool reserved_published, std::uint32_t tail_mip) noexcept
 {
@@ -194,6 +199,7 @@ struct TextureStreamRegistration
     ResidencyTicket fallback_residency;
     Access fallback_graph_access{Access::Undefined};
     bool pinned{};
+    bool opacity_sampling{true};
     NativeResourceContract fallback_contract{};
 };
 struct TextureStreamView
@@ -205,6 +211,7 @@ struct TextureStreamView
     CompletionSet completion;
     Access access{Access::Undefined};
     bool reserved{};
+    bool opacity_sampling{true};
 };
 struct TextureStreamingGraphBinding
 {
@@ -213,6 +220,7 @@ struct TextureStreamingGraphBinding
     std::string_view logical_id;
     std::uint32_t resident_mip{}, required_mip{}, effective_desired_mip{};
     bool ready{};
+    bool opacity_sampling{true};
 };
 struct TextureStreamingLayout
 {
@@ -226,6 +234,7 @@ struct TextureStreamingLayout
         std::vector<std::uint32_t> mapped_mips, unmapped_mips;
         Access access{Access::Undefined};
         bool pending{}, separate_target{}, reserved{}, copy_upload{}, software_copy{};
+        bool opacity_sampling{true};
     };
     std::vector<Entry> entries;
     std::uint32_t first_pass_id{};
@@ -295,6 +304,11 @@ class RendererTextureStreaming
         const StreamingManager &, const CompletionSet &) const noexcept;
     [[nodiscard]] std::optional<bool> RequiredSourceMipFitsMaximumHostBudget(
         TextureStreamId, std::uint32_t required_mip) const noexcept;
+    // Requirements must contain one entry per distinct stream ID. Checks the
+    // configured hard cap against mandatory tails plus the requested mip set;
+    // transient DXGI pressure does not make an intrinsically feasible set fail.
+    [[nodiscard]] std::optional<bool> RequiredMipSetFitsConfiguredBudget(
+        std::span<const TextureStreamMipRequirement>) const noexcept;
   private:
     [[nodiscard]] Result AddPendingPassesImpl(RenderGraphBuilder &, ExternalQueueBinding,
         std::uint32_t, std::vector<TextureStreamingGraphBinding> &,

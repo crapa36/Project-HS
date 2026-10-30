@@ -211,7 +211,7 @@ function Invoke-ExplicitBuild {
         $script:HsDevBuildExitCode = 0
         return
     }
-    if (!$Json) {
+    if (!$Json -and $DryRun) {
         Write-Output "build dry_run=$($DryRun.IsPresent.ToString().ToLowerInvariant()) build_root=$BuildRoot"
         foreach ($resolution in $resolutions) {
             Write-Output "requested=$($resolution.requested) kind=$($resolution.kind) target=$($resolution.target)"

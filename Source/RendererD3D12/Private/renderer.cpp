@@ -10,6 +10,15 @@ namespace hs
 {
 namespace
 {
+struct EssentialBootstrapScope
+{
+    explicit EssentialBootstrapScope(bool &active) : active_(active) { active_ = true; }
+    EssentialBootstrapScope(const EssentialBootstrapScope &) = delete;
+    EssentialBootstrapScope &operator=(const EssentialBootstrapScope &) = delete;
+    ~EssentialBootstrapScope() { active_ = false; }
+    bool &active_;
+};
+
 template<class Options>
 Result ValidateNativeOptions(const Options &options)
 {
@@ -79,14 +88,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Renderer already initialized.");
     }
-    struct EssentialBootstrapScope
-    {
-        explicit EssentialBootstrapScope(bool &active) : active_(active) { active_ = true; }
-        EssentialBootstrapScope(const EssentialBootstrapScope &) = delete;
-        EssentialBootstrapScope &operator=(const EssentialBootstrapScope &) = delete;
-        ~EssentialBootstrapScope() { active_ = false; }
-        bool &active_;
-    };
     [[maybe_unused]] EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
     StartupCapture startup(impl_->startup_timings, config.capture_timing_stream);
     auto &main_view = *impl_->owned_views.try_emplace(
@@ -113,7 +114,11 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
                                "Renderer requires HWND.");
     }
     impl_->auto_fg_cadence_suppressed = false;
+    impl_->auto_fg_cadence_tracking = false;
     impl_->auto_fg_cadence_sample_id = 0;
+    impl_->auto_fg_cadence_samples = {};
+    impl_->auto_fg_cadence_sequence = 0;
+    impl_->auto_fg_cadence_completed_sequence = 0;
     if (auto loaded = MeasureStartupStep(RendererStartupStep::QualityProfiles, [&] { return impl_->LoadQualityProfiles(config); }); !loaded) return loaded;
     RendererConfig native_config = config;
     if (!native_config.packed_content)
@@ -366,6 +371,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
 #endif
     main_view.render_width = main_view.state.render_active.width;
     main_view.render_height = main_view.state.render_active.height;
+#if defined(HS_DEVELOPMENT_TOOLS)
     impl_->diagnostics = RendererDiagnosticsRecorder{};
     impl_->pending_gpu_timings.clear();
     impl_->pending_gpu_timing_passes = 0;
@@ -373,6 +379,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->hero_work_pending.clear();
     impl_->hero_work_retired = {};
     for (auto &frame : impl_->frames) frame.timing_stream_published_frame_id = 0;
+#endif
     impl_->rendered_submission_count = 0;
     impl_->render_package_id = impl_->active_render_package_id = 0;
     impl_->canonical_skin_current.reset();
@@ -413,6 +420,101 @@ void D3D12Renderer::HandleWindowMessage(const NativeWindowMessage &message) noex
 #else
     (void)message;
 #endif
+}
+
+Result D3D12Renderer::InitializeStaticShadowBake(const RendererConfig &configuration)
+{
+    if (configuration.content_generation_id.empty())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Static shadow bootstrap requires a selected Generation identity.");
+
+    RendererConfig native_config = configuration;
+    if (native_config.packed_content)
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererPack",
+                               "One-shot static shadow baking requires a loose SelectedGeneration.");
+    if (!native_config.packed_bulks.empty() || !native_config.packed_textures.empty() ||
+        !native_config.packed_geometry.empty() || !native_config.packed_materials.empty() ||
+        !native_config.packed_characters.empty() || !native_config.packed_animations.empty() ||
+        native_config.packed_vfx_mesh_atlas || !native_config.packed_source_revisions.empty() ||
+        !native_config.packed_revision_bulks.empty())
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererPack",
+                               "Catalog requires its opened pack owner.");
+    try
+    {
+        native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
+        native_config.development_catalog->Bind(native_config);
+    }
+    catch (const std::exception &error)
+    {
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
+    }
+    if (auto valid = ValidatePackedTextureCatalog(native_config); !valid) return valid;
+    if (auto valid = ValidatePackedGeometryCatalog(native_config); !valid) return valid;
+    if (auto valid = ValidatePackedMaterialCatalog(native_config); !valid) return valid;
+
+    EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
+
+    auto &main_view = *impl_->owned_views.try_emplace(
+        kMainRenderViewId.value, std::make_unique<Impl::OwnedView>()).first->second;
+    main_view.view_id = kMainRenderViewId;
+    main_view.role = RenderViewRole::Main;
+    if (auto created = impl_->CreateDevice(native_config, main_view); !created) return created;
+    impl_->resource_generation_id = native_config.content_generation_id;
+    impl_->resident_generation_lease = native_config.content_generation_lease;
+    impl_->resident_development_catalog = native_config.development_catalog;
+
+    if (auto descriptors = impl_->CreateSharedDescriptorHeaps(); !descriptors) return descriptors;
+    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+        impl_->InitializeFrameSamplerDescriptors(frame);
+
+    // Static depth capture needs the renderer's shared root ABI and the native
+    // geometry/material inputs, but has no color scene, post, swapchain, or UI work.
+    constexpr auto material_scope = Impl::MaterialPreparationScope::StaticEnvironment;
+    if (auto loaded = impl_->LoadMaterialSurfaceProfile(impl_->config, material_scope); !loaded) return loaded;
+    if (auto root = impl_->CreateRootSignature(); !root) return root;
+    if (auto geometry = impl_->CreateStaticShadowBakeGeometry(); !geometry) return geometry;
+    if (auto parameters = impl_->PrepareMaterialParameters(impl_->config, false, material_scope); !parameters) return parameters;
+    impl_->CommitMaterialParameters();
+    impl_->baked_generation_material_revision = impl_->material_parameter_revision;
+    std::array<std::uint32_t, kEnvironmentMaterialNames.size()> shadow_pages{};
+    constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
+    for (std::size_t ordinal = 0; ordinal < shadow_pages.size(); ++ordinal)
+        shadow_pages[ordinal] = static_cast<std::uint32_t>(ordinal) * lod_count + (lod_count - 1);
+    if (auto meshes = impl_->CreateEnvironmentMeshes(shadow_pages,
+        Impl::EnvironmentMaterialResidency::CaptureOnly); !meshes) return meshes;
+    if (auto waited = impl_->WaitForGpu(); !waited) return waited;
+    return Result::Success();
+}
+
+Result D3D12Renderer::BakeStaticShadowPages(const RendererConfig &configuration,
+    const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
+    const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
+    const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink)
+{
+    if (!scene || scene->instances.empty() || !begin || !page_sink)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Static shadow bake requires a nonempty scene and both archive callbacks.");
+    D3D12Renderer owner;
+    const auto finish = [&](Result primary) -> Result {
+        const auto cleanup = owner.Shutdown();
+        if (!cleanup)
+        {
+            std::string message;
+            if (!primary) message = std::string(primary.Message());
+            if (!message.empty()) message += "; ";
+            message += "cleanup failed: ";
+            message += std::string(cleanup.Message());
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", message);
+        }
+        if (!primary) return primary;
+        if (owner.ValidationErrorCount())
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Static shadow producer reported native validation errors.");
+        return Result::Success();
+    };
+    if (auto initialized = owner.InitializeStaticShadowBake(configuration); !initialized)
+        return finish(initialized);
+    return finish(owner.BakeStaticShadowPagesPrepared(scene, light, begin, page_sink));
 }
 
 Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
@@ -996,7 +1098,12 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (impl_->config.presentation_request.mode != feature_config.presentation_request.mode)
     {
         impl_->auto_fg_cadence_suppressed = false;
+        impl_->auto_fg_cadence_tracking = false;
         impl_->auto_fg_cadence_sample_id = 0;
+        impl_->auto_fg_cadence_samples = {};
+        impl_->auto_fg_cadence_sequence = 0;
+        impl_->auto_fg_cadence_completed_sequence = 0;
+        for (auto &frame : impl_->frames) frame.auto_fg_cadence_pending = false;
     }
     impl_->config = std::move(feature_config);
     owned_view.hdr_capture_valid = false;
@@ -1041,12 +1148,44 @@ Result D3D12Renderer::BeginInputFrame(std::uint64_t &identity)
     if (!impl_->initialized || impl_->native_input_phase)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Input requires an initialized renderer with no outstanding frame token.");
     auto &main_view = *impl_->owned_views.at(kMainRenderViewId.value);
-    if (impl_->config.frame_generation_allowed &&
+    const bool track_auto_fg_cadence = impl_->config.frame_generation_allowed &&
         impl_->config.presentation_request.mode == GraphicsFrameGenerationMode::Auto &&
-        impl_->quality_profiles && impl_->sdk_presentation.Status().availability == "available")
+        impl_->quality_profiles && impl_->sdk_presentation.Status().availability == "available";
+    if (!track_auto_fg_cadence && impl_->auto_fg_cadence_tracking)
+    {
+        impl_->auto_fg_cadence_samples = {};
+        impl_->auto_fg_cadence_sequence = 0;
+        impl_->auto_fg_cadence_completed_sequence = 0;
+        impl_->auto_fg_cadence_sample_id = 0;
+        for (auto &frame : impl_->frames) frame.auto_fg_cadence_pending = false;
+    }
+    impl_->auto_fg_cadence_tracking = track_auto_fg_cadence;
+    if (track_auto_fg_cadence)
     {
         const auto &policy = impl_->quality_profiles->auto_fg_cadence;
-        const auto cadence = impl_->diagnostics.RecentCompletedMainCadence(policy.minimum_samples);
+        CompletedRenderCadence cadence;
+        const D3D12Renderer::Impl::AutoFgCadenceSample *newer{};
+        double seconds{};
+        for (std::uint64_t offset = 0;
+             offset < impl_->auto_fg_cadence_samples.size() &&
+             offset < impl_->auto_fg_cadence_completed_sequence && cadence.intervals < policy.minimum_samples;
+             ++offset)
+        {
+            const auto sequence = impl_->auto_fg_cadence_completed_sequence - offset;
+            const auto &sample = impl_->auto_fg_cadence_samples[sequence % impl_->auto_fg_cadence_samples.size()];
+            if (sample.sequence != sequence || !sample.submit_qpc || !sample.qpc_frequency) break;
+            if (newer)
+            {
+                if (newer->qpc_frequency != sample.qpc_frequency || newer->submit_qpc <= sample.submit_qpc ||
+                    newer->validation != sample.validation || newer->gpu_validation != sample.gpu_validation) break;
+                seconds += static_cast<double>(newer->submit_qpc - sample.submit_qpc) /
+                    static_cast<double>(sample.qpc_frequency);
+                ++cadence.intervals;
+            }
+            else cadence.newest_frame_id = sample.frame_id;
+            newer = &sample;
+        }
+        if (seconds > 0.0) cadence.fps = static_cast<double>(cadence.intervals) / seconds;
         if (cadence.intervals >= policy.minimum_samples && cadence.newest_frame_id > impl_->auto_fg_cadence_sample_id)
         {
             impl_->auto_fg_cadence_sample_id = cadence.newest_frame_id;
@@ -1365,9 +1504,11 @@ Result D3D12Renderer::Shutdown()
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     if (auto saved = impl_->pipeline_cache.Flush(); !saved)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         const auto message = std::string("Optional PSO cache persistence failed: ") +
             std::string(saved.Message()) + "\n";
         OutputDebugStringA(message.c_str());
+#endif
     }
     impl_->pipeline_cache.Reset();
     impl_->ResetHlodResources();
@@ -1394,7 +1535,7 @@ Result D3D12Renderer::Shutdown()
     impl_->environment_brdf_init_device.Reset();
     impl_->graph_queue_executor.Clear();
     impl_->ResetEnvironmentStreaming();
-    if (impl_->initialized)
+    if (impl_->device)
     {
         impl_->CountValidationErrors();
     }
@@ -1540,7 +1681,9 @@ Result D3D12Renderer::Shutdown()
     for (auto &mesh : impl_->environment_meshes) mesh.Reset();
     impl_->static_gpu_scene.reset();
     impl_->retired_static_gpu_scenes.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     impl_->dynamic_instance_upload_log.close();
+#endif
     impl_->dynamic_scene_slots.Clear();
     impl_->sampler_heap.Reset();
     impl_->geometry_page_descriptor_banks = {};
@@ -1631,6 +1774,7 @@ const GpuPassTimings &D3D12Renderer::LastCompletedGpuPassTimings() const noexcep
     return found == impl_->owned_views.end() ? impl_->completed_gpu_timings : found->second->completed_gpu_timings;
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 namespace
 {
 void AddHeroWorkStatus(RendererHeroWorkStatus &into, const RendererHeroWorkStatus &from, bool allocations)
@@ -1653,9 +1797,11 @@ void AddHeroWorkStatus(RendererHeroWorkStatus &into, const RendererHeroWorkStatu
     }
 }
 }
+#endif
 Result D3D12Renderer::Impl::RetireHeroTransparency(HeroTransparencySystem &service)
 {
     const auto completed = graph_queue_executor.Completed();
+#if defined(HS_DEVELOPMENT_TOOLS)
     RendererHeroWorkStatus retired_status;
     if (config.capture_hero_work)
     {
@@ -1664,13 +1810,17 @@ Result D3D12Renderer::Impl::RetireHeroTransparency(HeroTransparencySystem &servi
         if (retired_status.pending_frames)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Cannot retire pending hero contributor native queries.");
     }
+#endif
     if (auto reset = service.ResetAfterCompletion(completed); !reset) return reset;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (config.capture_hero_work) AddHeroWorkStatus(hero_work_retired, retired_status, false);
+#endif
     return Result::Success();
 }
 Result D3D12Renderer::ConsumeCompletedHeroWork(std::vector<RendererHeroWorkSample> &output)
 {
     output.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_ || !impl_->config.capture_hero_work) return Result::Success();
     const auto completed = impl_->graph_queue_executor.Completed();
     output.swap(impl_->hero_work_pending);
@@ -1698,18 +1848,24 @@ Result D3D12Renderer::ConsumeCompletedHeroWork(std::vector<RendererHeroWorkSampl
         return std::tie(a.completed_frame, a.view_id, a.phase, a.layer, a.contributor) <
             std::tie(b.completed_frame, b.view_id, b.phase, b.layer, b.contributor);
     });
+#endif
     return Result::Success();
 }
 Result D3D12Renderer::DrainHeroWork(std::vector<RendererHeroWorkSample> &output)
 {
     output.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_ || !impl_->initialized || !impl_->config.capture_hero_work)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work drain requires an initialized capture_hero_work renderer.");
     if (auto waited = impl_->WaitForGpu(); !waited) return waited;
     return ConsumeCompletedHeroWork(output);
+#else
+    return Result::Success();
+#endif
 }
 RendererHeroWorkStatus D3D12Renderer::HeroWorkStatus() const
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_) return {};
     auto status = impl_->hero_work_retired; status.enabled = impl_->config.capture_hero_work;
     for (const auto &[id, view] : impl_->owned_views)
@@ -1724,10 +1880,14 @@ RendererHeroWorkStatus D3D12Renderer::HeroWorkStatus() const
             AddHeroWorkStatus(status, view->hero_transparency.WorkStatus(), true);
     }
     return status;
+#else
+    return {};
+#endif
 }
 Result D3D12Renderer::ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings> &output)
 {
     output.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::ranges::sort(impl_->pending_gpu_timings, [](const auto &left, const auto &right) {
         return left.completed_frame_id != right.completed_frame_id
             ? left.completed_frame_id < right.completed_frame_id : left.view_id < right.view_id;
@@ -1737,12 +1897,14 @@ Result D3D12Renderer::ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings>
     if (impl_->gpu_timing_stream_overflowed)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Completed GPU timing capture overflowed its 240-frame or 262144-pass pending limit.");
+#endif
     return Result::Success();
 }
 
 Result D3D12Renderer::DrainGpuPassTimings(std::vector<GpuPassTimings> &output)
 {
     output.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_->initialized || !impl_->config.capture_timing_stream)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "GPU timing drain requires an initialized capture_timing_stream renderer.");
@@ -1752,8 +1914,10 @@ Result D3D12Renderer::DrainGpuPassTimings(std::vector<GpuPassTimings> &output)
         if (!frame.timestamps_recorded) continue;
         auto timings = impl_->ReadFrameGpuTimings(frame);
         if (!timings.valid) continue;
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (!impl_->diagnostics.HasCompleted(timings.completed_frame_id, timings.view_id))
             impl_->diagnostics.RecordCompleted(timings);
+#endif
         if (timings.view_id == impl_->active_view_id.value)
         {
             if (timings.completed_frame_id > impl_->completed_gpu_timings.completed_frame_id)
@@ -1764,11 +1928,19 @@ Result D3D12Renderer::DrainGpuPassTimings(std::vector<GpuPassTimings> &output)
                 found->second->completed_gpu_timings = std::move(timings);
     }
     return ConsumeCompletedGpuPassTimings(output);
+#else
+    return Result::Success();
+#endif
 }
 
 const RendererDiagnosticsFrame &D3D12Renderer::LastRenderedFrameDiagnostics() const noexcept
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     return impl_->diagnostics.LastRenderedFrame();
+#else
+    static const RendererDiagnosticsFrame empty{};
+    return empty;
+#endif
 }
 
 RendererQueueStats D3D12Renderer::LastQueueStats() const noexcept

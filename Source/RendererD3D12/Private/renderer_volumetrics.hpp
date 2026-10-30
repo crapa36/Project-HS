@@ -10,11 +10,19 @@
 
 namespace hs
 {
-// Table32 suffix, space24: b0 at0, t0..13 at1..14, u0..8 at15..23,
+// Volume descriptor block, space24: b0 at0, t0..13 at1..14, u0..8 at15..23,
 // hero metadata t14 at24, actual STBN Texture2DArray t15 at25,
 // authored RGBA8 Texture3D t16 at26.
-// The frame-table builder supplies existing space19/21/27 light/shadow ranges.
 inline constexpr std::uint32_t kVolumetricDescriptorCount=27;
+// Compact per-frame table for the volume-owned root signature. The first 27
+// descriptors retain the suffix layout above; remaining entries are imported
+// frame inputs used by the volume shaders.
+inline constexpr std::uint32_t kVolumetricFrameDescriptorCount=41;
+inline constexpr std::uint32_t kVolumetricGradientOffset=27;
+inline constexpr std::uint32_t kVolumetricLightOffset=28;
+inline constexpr std::uint32_t kVolumetricShadowOffset=31;
+inline constexpr std::uint32_t kVolumetricShadowRootOffset=35;
+inline constexpr std::uint32_t kVolumetricLocalShadowOffset=37;
 // Pure authored-input admission, shared by frame preflight and graph registration.
 [[nodiscard]] Result ValidateVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows);
 enum class VolumetricShape : std::uint32_t { Global, Box, Sphere };
@@ -92,7 +100,7 @@ struct VolumetricInputs
     // Resident authored VFX STBN: exactly R8_UNORM, Texture2DArray 64x64x64,
     // one mip and one sample. Required/read/retained only with active heroes.
     VolumetricGuide hero_blue_noise;
-    // Existing t1/space3 binding, Texture2D RGBA16_FLOAT width256, one
+    // t1/space3 binding, Texture2D RGBA16_FLOAT width256, one
     // mip/layer/sample. Its actual row count validates every active output.
     VolumetricGuide hero_gradient;
     // Authored High-tier FBM source: exact RGBA8 64x64x64 Texture3D, one
@@ -105,7 +113,7 @@ struct VolumetricInputs
     CompletionSet completed;
     VolumetricRevisions revisions;
     bool reset_history{};
-    SceneFrameTableBuilder make_bindings; // Copies27 descriptors; retains frame/light/shadow table leases.
+    SceneFrameTableBuilder make_bindings; // Builds the compact volume table and retains input table leases.
 };
 struct VolumetricTexture
 {
@@ -155,7 +163,7 @@ class VolumetricSystem
     VolumetricSystem(const VolumetricSystem &)=delete;
     VolumetricSystem &operator=(const VolumetricSystem &)=delete;
     // Off performs no native allocations, shader reads, or PSO creation.
-    [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ID3D12RootSignature *,
+    [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,
         GraphicsOptionalQuality,const render_data::QualityProfile &,ViewExtent capacity,std::uint32_t frame_slots,std::uint32_t max_volumes,
         const SceneShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
         bool hero_enabled=false) const;

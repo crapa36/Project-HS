@@ -215,15 +215,18 @@ SsrGuide SsrLoadGuide(int2 pixel)
     g.valid = HsSurfaceValid(g.depth, g.metadata);
     if (g.valid)
     {
+        const uint model = HsSurfaceModel(g.metadata);
+        g.valid = model == HsSurfaceModelEnvironment ||
+            HsHeroOpaqueOrdinalValid(g.metadata.x - HsHeroMaterialIdBase);
+    }
+    if (g.valid)
+    {
+        HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(g.pixel));
         g.relative = SsrRelativePosition(g.pixel, g.depth);
         g.view_depth = mul(float4(g.relative, 0.0), SsrWorldToView).z;
-        HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(g.pixel));
         g.normal = normalize(closure.normal);
         g.roughness = SsrReflectionRoughness(closure);
-        // The cel surface has no authored indirect-specular term to replace.
-        g.valid = !closure.unlit && all(isfinite(g.relative)) && g.view_depth > 0.0 &&
-            (HsSurfaceModel(g.metadata) == HsSurfaceModelEnvironment ||
-             HsHeroOpaqueOrdinalValid(g.metadata.x - HsHeroMaterialIdBase));
+        g.valid = !closure.unlit && all(isfinite(g.relative)) && g.view_depth > 0.0;
     }
     return g;
 }
@@ -238,8 +241,10 @@ SsrGuide SsrGuideForTrace(uint2 tracePixel)
         [unroll] for (int y = 0; y < 2; ++y)
         [unroll] for (int x = 0; x < 2; ++x)
         {
+            if (x == 0 && y == 0) continue;
             SsrGuide candidate = SsrLoadGuide(first + int2(x, y));
-            if (candidate.valid && (!result.valid || candidate.depth > result.depth)) result = candidate;
+            if (candidate.valid && (!result.valid || candidate.depth > result.depth))
+                result = candidate;
         }
     }
     return result;
@@ -362,9 +367,11 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
         float ambient = SsrAmbientVisibilityEnabled != 0u ? SsrAmbientVisibility.Load(int3(g.pixel, 0)) : 1.0;
         float visibility = saturate(closure.ao * ambient);
         uint samples = max(SsrBudget.x, 1u);
+        const HsBsdfSamplingContext sampling = HsBsdfPrepareSampling(closure, view);
         [loop] for (uint sampleIndex = 0; sampleIndex < samples; ++sampleIndex)
         {
-            HsBsdfSampleResult sample = HsBsdfSample(closure, view, SsrRandom(dispatch.xy, sampleIndex, 0),
+            HsBsdfSampleResult sample = HsBsdfSamplePrepared(closure, view, sampling,
+                SsrRandom(dispatch.xy, sampleIndex, 0),
                 float2(SsrRandom(dispatch.xy, sampleIndex, 1), SsrRandom(dispatch.xy, sampleIndex, 2)));
             float cosine = dot(normalize(closure.normal), sample.wi);
             if (!sample.valid || sample.pdf <= 0.0 || cosine <= 0.0) continue;
@@ -427,12 +434,22 @@ void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
             [unroll] for (int x = -1; x <= 1; ++x)
             {
                 int2 p = clamp(int2(pixel) + int2(x, y), int2(0, 0), int2(SsrTraceSize.xy) - 1);
-                SsrGuide other = SsrGuideForTrace(uint2(p));
+                SsrGuide other;
+                float3 value;
+                if (all(uint2(p) == pixel))
+                {
+                    other = g;
+                    value = current.rgb;
+                }
+                else
+                {
+                    other = SsrGuideForTrace(uint2(p));
+                    value = SsrRawOutput[p].rgb;
+                }
                 if (!other.valid || any(other.metadata != g.metadata) ||
                     abs(other.view_depth - g.view_depth) > max(0.01, g.view_depth * SsrFilterParameters.x) ||
                     dot(other.normal, g.normal) < SsrFilterParameters.y ||
                     abs(other.roughness - g.roughness) > SsrFilterParameters.w) continue;
-                float3 value = SsrRawOutput[p].rgb;
                 lo = min(lo, value); hi = max(hi, value);
             }
             history /= weightSum; history.rgb = clamp(history.rgb, lo, hi);

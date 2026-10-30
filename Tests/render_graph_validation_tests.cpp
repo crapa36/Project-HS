@@ -3,14 +3,12 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
-#include <string_view>
 #include <utility>
 
 namespace
@@ -857,49 +855,12 @@ void ExplicitDagOrdering()
         }
 }
 
-void BenchmarkExplicitDags()
-{
-    for (bool dense : {false, true})
-        for (const std::uint32_t count : {256u, 1024u})
-        {
-            ExplicitDag graph(count, dense, 4099);
-            CompiledSchedule schedule;
-            const auto begin = std::chrono::steady_clock::now();
-            std::uint64_t digest = 14695981039346656037ull;
-            const auto add = [&](std::uint32_t value) { digest = (digest ^ value) * 1099511628211ull; };
-            for (unsigned repeat = 0; repeat < 20; ++repeat)
-            {
-                Check(Compile({}, graph.passes, schedule).Succeeded(), "benchmark DAG must compile");
-                for (auto index : schedule.execution_order) add(index);
-                for (const auto &queue : schedule.queue_orders)
-                {
-                    add(static_cast<std::uint32_t>(queue.size()));
-                    for (auto index : queue) add(index);
-                }
-                for (const auto &edge : schedule.cross_queue_dependencies)
-                {
-                    add(edge.producer); add(edge.consumer);
-                    add(static_cast<std::uint32_t>(edge.producer_queue));
-                    add(static_cast<std::uint32_t>(edge.consumer_queue));
-                }
-            }
-            const double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
-            std::printf("graph_bench passes=%u dense=%u iterations=20 ms=%.3f schedule_digest=%llu\n",
-                count, unsigned(dense), milliseconds, static_cast<unsigned long long>(digest));
-        }
-}
-
 } // namespace
 
-int main(int argc, char **argv)
+int main()
 {
     try
     {
-        if (argc == 2 && std::string_view(argv[1]) == "--benchmark-explicit-dags")
-        {
-            BenchmarkExplicitDags();
-            return 0;
-        }
         HeroProjectedCoverage(); ExplicitDagOrdering();
         BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
         QueueAccessPolicy(); PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();

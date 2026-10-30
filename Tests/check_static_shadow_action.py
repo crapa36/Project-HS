@@ -158,7 +158,7 @@ def check(args, log) -> None:
                    "--build-root", str(fixture), "--generation", str(pointer),
                    "--result-list", str(result_list)]
         hit = run_case(command, producer.parent, log, "cache-hit-without-native-prerequisites")
-        assert hit.returncode == 0 and hit.stdout.strip() == f"{ACTION} current", (hit.stdout, hit.stderr)
+        assert hit.returncode == 0, (hit.stdout, hit.stderr)
         assert cached_result.read_bytes() == original_result, "cache hit changed Action content"
         for logical_id, output in outputs.items():
             assert digest(output) == products[logical_id]["digest"], f"cache hit changed {logical_id}"

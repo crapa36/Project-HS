@@ -114,7 +114,6 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     {
         phase("current_hit");
         ap::TouchActionResult(build / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
     phase("current_miss");

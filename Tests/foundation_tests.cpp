@@ -111,10 +111,11 @@ void TestFixedStepClock()
 
     hs::FixedStepClock debt_clock;
     (void)debt_clock.Advance(start);
-    Check(!debt_clock.Advance(start + std::chrono::milliseconds(500)).debt_diagnostic_due,
-          "debt diagnostic delayed");
-    Check(debt_clock.Advance(start + std::chrono::milliseconds(3'500)).debt_diagnostic_due,
-          "debt diagnostic emitted");
+    const auto delayed = debt_clock.Advance(start + std::chrono::milliseconds(500));
+    Check(delayed.tick_count == hs::FixedStepClock::kMaxCatchUpTicks &&
+              delayed.debt == std::chrono::milliseconds(500) -
+                                  hs::FixedStepClock::kFixedStep * delayed.tick_count,
+          "long stalls retain debt without advancing extra simulation ticks");
 
     debt_clock.Realign(start + std::chrono::seconds(4));
     const auto realigned = debt_clock.Advance(start + std::chrono::seconds(4));
@@ -125,17 +126,17 @@ void TestFixedStepClock()
 std::uint64_t RunDeterministicJobs(std::size_t worker_count)
 {
     hs::TaskSystem tasks(worker_count);
-    hs::TaskGroup group;
+    auto group = tasks.CreateTaskGroup();
     std::vector<std::uint64_t> values(10'000);
 
-    tasks.ParallelFor(group, {"determinism"}, values.size(), 127,
+    group.ParallelFor(values.size(), 127,
                       [&values](std::size_t begin, std::size_t end) {
                           for (auto index = begin; index < end; ++index)
                           {
                               values[index] = index * 7 + 11;
                           }
                       });
-    Check(tasks.Wait(group).Succeeded(), "parallel wait");
+    Check(group.Wait().Succeeded(), "parallel wait");
 
     std::uint64_t checksum = 14695981039346656037ull;
     for (const auto value : values)
@@ -153,66 +154,66 @@ void TestTaskSystem()
     Check(inline_checksum == RunDeterministicJobs(4), "worker 0/4 checksum");
 
     hs::TaskSystem tasks(2);
-    hs::TaskGroup outer;
+    auto outer = tasks.CreateTaskGroup();
     std::atomic<std::uint32_t> nested_count{};
 
-    (void)tasks.Submit(outer, {"nested.outer"}, [&tasks, &nested_count](std::stop_token) {
-        hs::TaskGroup inner;
+    (void)outer.Submit([&nested_count, &tasks](std::stop_token) {
+        auto inner = tasks.CreateTaskGroup();
         for (std::uint32_t index = 0; index < 64; ++index)
         {
-            (void)tasks.Submit(inner, {"nested.inner"}, [&nested_count](std::stop_token) {
+            (void)inner.Submit([&nested_count](std::stop_token) {
                 nested_count.fetch_add(1, std::memory_order_relaxed);
             });
         }
-        const auto result = tasks.Wait(inner);
+        const auto result = inner.Wait();
         if (!result)
         {
             throw std::runtime_error(result.Message().data());
         }
     });
 
-    Check(tasks.Wait(outer).Succeeded(), "nested cooperative wait");
+    Check(outer.Wait().Succeeded(), "nested cooperative wait");
     Check(nested_count.load() == 64, "nested completion");
 
-    hs::TaskGroup failing;
-    (void)tasks.Submit(failing, {"expected.failure"},
+    auto failing = tasks.CreateTaskGroup();
+    (void)failing.Submit(
                        [](std::stop_token) { throw std::runtime_error("expected"); });
-    Check(tasks.Wait(failing).Code() == hs::ErrorCode::TaskFailed, "exception propagation");
+    Check(failing.Wait().Code() == hs::ErrorCode::TaskFailed, "exception propagation");
 
-    hs::TaskGroup cancelled;
+    auto cancelled = tasks.CreateTaskGroup();
     std::atomic<bool> ran{};
     cancelled.RequestCancel();
-    (void)tasks.Submit(cancelled, {"cancelled"}, [&ran](std::stop_token) { ran.store(true); });
-    Check(tasks.Wait(cancelled).Code() == hs::ErrorCode::Cancelled, "cancellation result");
+    (void)cancelled.Submit([&ran](std::stop_token) { ran.store(true); });
+    Check(cancelled.Wait().Code() == hs::ErrorCode::Cancelled, "cancellation result");
     Check(!ran.load(), "cancelled task skipped");
 
     for (const auto task_count : {100u, 1'000u, 10'000u})
     {
-        hs::TaskGroup submissions;
+        auto submissions = tasks.CreateTaskGroup();
         std::atomic<std::uint32_t> completed{};
         for (std::uint32_t index = 0; index < task_count; ++index)
         {
-            (void)tasks.Submit(submissions, {"submission-cost"},
+            (void)submissions.Submit(
                                [&completed](std::stop_token) {
                                    completed.fetch_add(1, std::memory_order_relaxed);
                                });
         }
-        Check(tasks.Wait(submissions).Succeeded(), "submission-size wait");
+        Check(submissions.Wait().Succeeded(), "submission-size wait");
         Check(completed.load() == task_count, "submission-size completion");
     }
 
     for (std::uint32_t round = 0; round < 64; ++round)
     {
         hs::TaskSystem lifecycle(2);
-        hs::TaskGroup group;
+        auto group = lifecycle.CreateTaskGroup();
         std::atomic<std::uint32_t> completed{};
         for (std::uint32_t index = 0; index < 128; ++index)
         {
-            (void)lifecycle.Submit(group, {"lifecycle"}, [&completed](std::stop_token) {
+            (void)group.Submit([&completed](std::stop_token) {
                 completed.fetch_add(1, std::memory_order_relaxed);
             });
         }
-        Check(lifecycle.Wait(group).Succeeded(), "lifecycle wait");
+        Check(group.Wait().Succeeded(), "lifecycle wait");
         Check(completed.load() == 128, "lifecycle completion");
     }
 }

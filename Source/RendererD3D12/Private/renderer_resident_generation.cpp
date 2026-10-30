@@ -359,7 +359,11 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         const auto completed = graph_queue_executor.Completed();
         const auto retain_on_failure = [&](Result retired, const char *diagnostic) {
             if (retired) return true;
+#if defined(HS_DEVELOPMENT_TOOLS)
             OutputDebugStringA(diagnostic);
+#else
+            static_cast<void>(diagnostic);
+#endif
             unresolved_resident_candidates.push_back(std::move(next));
             return false;
         };
@@ -375,7 +379,9 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     {
         if (adopted)
         {
+#if defined(HS_DEVELOPMENT_TOOLS)
             OutputDebugStringA("Adopted resident generation; old cleanup threw and was retained.\n");
+#endif
             if (next) unresolved_resident_candidates.push_back(std::move(next));
             return Result::Success();
         }

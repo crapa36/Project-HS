@@ -192,7 +192,6 @@ int ProduceStaticShadow(int argc, char **argv,
         if (Current(build, spec))
         {
             ap::TouchActionResult(build / "Actions" / kNamespace / "result.json");
-            std::cout << kAction << " current\n";
             return 0;
         }
         const auto layout = rd::StaticShadowLayoutDigest(*scene);

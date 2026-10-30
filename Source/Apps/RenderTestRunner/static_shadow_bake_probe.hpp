@@ -15,7 +15,8 @@
 #include <string>
 #include <vector>
 
-inline nlohmann::json StaticShadowArchiveProbe(hs::D3D12Renderer &renderer,
+template <typename Bake>
+inline nlohmann::json StaticShadowArchiveProbe(Bake &&bake,
     const std::shared_ptr<const hs::StaticRenderScene> &scene, const hs::LightView &sun)
 {
     namespace rd = hs::render_data;
@@ -33,7 +34,7 @@ inline nlohmann::json StaticShadowArchiveProbe(hs::D3D12Renderer &renderer,
     };
     const auto collect = [&](const std::shared_ptr<const hs::StaticRenderScene> &source) {
         Capture capture;
-        const auto result = renderer.BakeStaticShadowPages(source, sun, [&](const auto &description) {
+        const auto result = bake(source, sun, [&](const auto &description) {
             check(!capture.began, "Archive bake began more than once");
             capture.began = true; capture.description = description;
             const auto &level = description.levels[2];

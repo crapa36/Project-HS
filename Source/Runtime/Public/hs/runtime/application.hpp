@@ -64,6 +64,7 @@ struct ApplicationConfig
     std::optional<GraphicsPreset> graphics_preset;
     std::optional<SurfaceFrontend> surface_frontend;
     std::optional<GraphicsOptionalQuality> pom_quality;
+    std::optional<GraphicsOptionalQuality> volumetric_quality;
     std::optional<GeometryFrontend> geometry_frontend;
     bool record_playtest{};
     bool replay_compare{};

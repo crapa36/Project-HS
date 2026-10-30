@@ -244,7 +244,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
     if (IsCurrent(build_root, spec, monster_materials ? nullptr : &character_source))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
-        std::cout << spec.action_id << " current\n";
         return;
     }
 

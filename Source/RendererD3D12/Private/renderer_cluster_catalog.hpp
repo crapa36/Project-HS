@@ -33,7 +33,7 @@ struct alignas(16) GpuClusterGroup
     std::uint32_t cluster_count{}, material_partition{}, flags{}, material_selector{};
     std::array<float, 4> sphere{};
     std::array<float, 4> minimum_error{};
-    std::array<float, 4> maximum_reserved{};
+    std::array<std::uint32_t, 4> representation_pages{};
     std::uint32_t catalog_index{}, generation{}, ancestor_steps{}, next_subtree{UINT32_MAX};
 };
 struct alignas(16) GpuClusterRecord
@@ -71,22 +71,28 @@ struct alignas(16) GpuClusterRefinementConstants
     std::array<float, 4> projection_scale{}; // output pixels: perspective camera, three orthographic cascades
     std::array<float, 4> error_tolerance{};
     std::array<std::array<std::array<float, 4>, 6>, 4> frustum_planes{};
+    std::array<std::array<float, 4>, 6> frustum_plane_lengths{};
     std::uint32_t history_instance_capacity{}, history_words_per_instance{};
     std::uint32_t previous_history_instance_capacity{}, previous_history_valid{};
     std::uint32_t frame_id_low{}, frame_id_high{}, catalog_cluster_base{}, catalog_cluster_count{};
+    std::uint32_t representation_page_count{};
 };
 static_assert(sizeof(GpuClusterGroup) == 96);
 static_assert(sizeof(GpuClusterRecord) == 32);
 static_assert(sizeof(GpuClusterPage) == 32);
 static_assert(sizeof(GpuClusterCandidate) == 48);
 static_assert(sizeof(GpuClusterCutStatus) == 48);
-static_assert(sizeof(GpuClusterRefinementConstants) == 576);
+static_assert(sizeof(GpuClusterRefinementConstants) == 688);
 static_assert(offsetof(GpuClusterRefinementConstants, active_view_mask) == 60);
+static_assert(offsetof(GpuClusterGroup, representation_pages) == 64);
+static_assert(offsetof(GpuClusterRefinementConstants, frustum_plane_lengths) == 544);
+static_assert(offsetof(GpuClusterRefinementConstants, representation_page_count) == 672);
 
 struct ClusterGpuTables
 {
     std::vector<GpuClusterGroup> groups;
     std::vector<std::uint32_t> children;
+    std::vector<std::uint32_t> representation_pages;
     std::vector<GpuClusterRecord> clusters;
     std::vector<GpuClusterPage> pages;
     std::uint32_t max_ancestor_steps{};

@@ -27,6 +27,13 @@ Presentation, and RendererD3D12. Apps are executable entry points and compositio
 CombatSim consumes Gameplay's scoped public tick view for targeting. Its combat and
 progression loops do not depend on Presentation or construct render snapshots.
 
+TaskSystem creates its move-only TaskGroups. Submission, parallel ranges and waits
+act through the group and its creator; callers cannot submit a group to a foreign
+system. Each operation pins its shared work state across reentrant cancellation
+callbacks. The system outlives its groups, and accepted work is joined before a
+group is destroyed. Task labels are not retained or passed to the backend;
+failure publication keeps the first error and its fixed-size message.
+
 | Module | Responsibility | Allowed Project HS dependencies |
 |---|---|---|
 | Core | Foundation types and shared low-level contracts | none |
@@ -116,6 +123,9 @@ restarts with the same layout. Render packets share its read-only Core
 StaticRenderScene view; mutable scene storage is frozen before publication.
 Snapshot read pairs expose the publication sequence of each retained slot;
 tick/session values alone are not a publication identity.
+The exchange issues a move-only write lease with a private slot index. Publishing
+or abandoning acts on its originating exchange; an unfinished lease abandons on
+destruction. Callers cannot forge a slot or submit it to a different exchange.
 Runtime's explicit retained writes reuse a slot's dynamic arrays only for a known
 immutable (session, actual tick, dynamic revision) sample. Header/camera/scene/UI
 still refresh on publication, and previous/current remain independently owned.
@@ -124,6 +134,12 @@ boundaries invalidate reuse; no hash or pointer identity validates the arrays.
 Animation updates share the existing actual-dynamic invalidation used by projection.
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
+
+The optional Brixelizer integration keeps FidelityFX headers private. Its build
+producer links the full pinned SDK shader tables and emits immutable binding
+metadata. Runtime links that metadata and reads DXIL from selected content;
+The SDK license uses the source namespace, outside GPU resources; existing Action
+receipts own producer provenance without a duplicate content product.
 
 Presentation's immutable UiFrame owns both draw models and their displayed
 interaction facts. The exchange retains that owner with the current packet;
@@ -139,8 +155,16 @@ Release Runtime binds the content-linker's compiled const tables; developer
 Runtime retains the selected-Generation loaders. Simulation's canonical byte
 writer and C++ emitter share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
-The Release application entry points, ProjectHS and hs_experiment, link the
-compiled shipping content. The base Runtime target does not force that image's
+The Release ProjectHS entry point links the compiled shipping content;
+the experiment host is available only in development configurations.
+The offline static-shadow tool uses a one-shot bake entry that owns a private
+capture bootstrap and teardown. It creates the native device, shared root ABI,
+geometry/material/texture inputs and selected capture PSOs, without publishing a
+renderable view or creating a window, swapchain, post-processing, UI or font.
+It retains the admitted Generation/package dependencies until the capture data
+loader itself can consume a narrower set; dropping an unused color PSO alone
+does not change package dependency ownership.
+The base Runtime target does not force that image's
 full cook into unrelated consumers. CPU runtime integration tests use their
 selected Generation; a separate shipping test target owns compiled-table/image
 and packed-font checks. Both remain part of full verification.
@@ -325,7 +349,15 @@ RendererD3D12 is the single concrete platform backend. D3D12 types stay inside t
 RenderData owns the static light-space R32 page archive and its bounded index
 and lossless page decoders. RendererD3D12 exposes a synchronous offline depth bake using
 canonical environment geometry, full source texture mips and the existing material
-opacity shaders. It can run immediately after renderer initialization. Apps own
+opacity shaders. The one-shot offline entry owns its capture bootstrap and teardown;
+it creates no game window, font, swapchain, post targets, or general scene pipelines.
+It prepares terminal environment LOD pages without the runtime LOD streaming catalog.
+Capture-only material binding admission uses the selected catalog; private complete
+texture uploads supply only materials used by the depth shader's authored-opacity
+branch. Opaque materials bind typed null arrays without allocating textures.
+This path creates no global fallback textures or BRDF LUTs.
+Typed canonical descriptors are valid before any game-view resources are created.
+The initialized-renderer entry remains available for existing capture callers. Apps own
 file publication and Generation selection. When content tools are enabled, the
 dedicated Apps target `hs_static_shadow_bake` publishes the native bake through
 AssetPipeline. Its producer identity follows RendererD3D12 implementation changes;
@@ -532,9 +564,20 @@ explicit process fields then override that preset without persisting it.
 
 Apps parse arguments, select configuration, call a library/runtime entry point, and return process results. They must use public module APIs rather than another module's private implementation.
 
-Jobs submission takes a task name and returns admission success. TaskGroup owns
-cancellation and joining; unused per-task numeric handles and scheduling priority
-are not exposed.
+Release omits development recording/replay implementations, diagnostic CSV/log
+writers, simulation timing scopes and debug mutations. Developer command-line
+modes are compiled only in non-Release builds. Renderer development features,
+PIX markers, resource labels and debug-layer/DRED setup use the same non-Release
+boundary; no PIX or SDK debug-layer DLL is deployed for Release. Game-control
+timing for dynamic resolution and available automatic frame generation is
+separate from optional diagnostic recording. Auto-FG cadence is retained only
+while that policy is active, and accepts samples after submission completion.
+Installation verifies staged executable/pack copies outside the game process;
+normal startup still checks the compiled content identity against its opened pack.
+
+Jobs submission acts through a creator-bound TaskGroup and returns admission
+success. TaskGroup owns cancellation and joining; task labels, per-task numeric
+handles and scheduling priority are not exposed.
 
 Experiment children execute their validated spec directly. The parent retains
 process isolation and a watchdog; static timeline commands are not retransmitted

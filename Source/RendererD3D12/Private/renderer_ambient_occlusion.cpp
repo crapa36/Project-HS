@@ -18,10 +18,10 @@ namespace
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSrvCount = 9, kUavCount = 5, kDescriptorCount = 14;
 constexpr std::uint32_t kConstantStride = 512;
-constexpr std::array<std::string_view, 6> kShaderProducts{
+constexpr std::array<std::string_view, 5> kShaderProducts{
     "render/shader/gtao_horizon_cs.dxil", "render/shader/gtao_temporal_cs.dxil",
     "render/shader/gtao_bilateral_cs.dxil", "render/shader/contact_shadow_cs.dxil",
-    "render/shader/adaptive_gtao_horizon_cs.dxil", "render/shader/adaptive_gtao_resolve_cs.dxil"};
+    "render/shader/adaptive_gtao_cs.dxil"};
 
 Result AoFailure(ErrorCode code, std::string message)
 {
@@ -115,10 +115,10 @@ struct AmbientOcclusionTargets
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>, 6> pipelines;
+    std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12DescriptorHeap> export_descriptors;
-    AllocationResource constants, raw, resolved, contact, adaptive_sparse;
+    AllocationResource constants, raw, resolved, contact;
     std::array<AllocationResource, 2> history, metadata_history;
     std::byte *mapped{};
     ViewExtent render_capacity, ao_capacity, previous_active;
@@ -126,7 +126,7 @@ struct AmbientOcclusionTargets
     render_data::QualityProfile profile;
     bool ao_enabled{}, contact_enabled{}, history_valid{}, usable{true};
     bool adaptive_compute{},adaptive_applied{};
-    std::uint32_t descriptor_count{kDescriptorCount},descriptor_banks{1};
+    std::uint32_t descriptor_count{kDescriptorCount};
     std::uint32_t frame_slot_count{}, descriptor_stride{}, read_index{};
     std::vector<CompletionSet> slot_completion;
     CompletionSet completion;
@@ -136,31 +136,31 @@ struct AmbientOcclusionTargets
     {
         if (mapped && constants.resource) constants.resource->Unmap(0, nullptr);
     }
-    D3D12_CPU_DESCRIPTOR_HANDLE Cpu(std::uint32_t slot, std::uint32_t offset,std::uint32_t bank=0) const
+    D3D12_CPU_DESCRIPTOR_HANDLE Cpu(std::uint32_t slot, std::uint32_t offset) const
     {
         auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += static_cast<SIZE_T>((slot*descriptor_banks+bank)*descriptor_count + offset) * descriptor_stride;
+        handle.ptr += static_cast<SIZE_T>(slot*descriptor_count + offset) * descriptor_stride;
         return handle;
     }
-    D3D12_GPU_DESCRIPTOR_HANDLE Gpu(std::uint32_t slot, std::uint32_t offset,std::uint32_t bank=0) const
+    D3D12_GPU_DESCRIPTOR_HANDLE Gpu(std::uint32_t slot, std::uint32_t offset) const
     {
         auto handle = descriptors->GetGPUDescriptorHandleForHeapStart();
-        handle.ptr += static_cast<UINT64>((slot*descriptor_banks+bank)*descriptor_count + offset) * descriptor_stride;
+        handle.ptr += static_cast<UINT64>(slot*descriptor_count + offset) * descriptor_stride;
         return handle;
     }
-    void Srv(std::uint32_t slot, std::uint32_t offset, ID3D12Resource *resource, DXGI_FORMAT format,std::uint32_t bank=0)
+    void Srv(std::uint32_t slot, std::uint32_t offset, ID3D12Resource *resource, DXGI_FORMAT format)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
         view.Format = format; view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(resource, &view, Cpu(slot, offset,bank));
+        device->CreateShaderResourceView(resource, &view, Cpu(slot, offset));
     }
-    void Uav(std::uint32_t slot, std::uint32_t offset, ID3D12Resource *resource, DXGI_FORMAT format,std::uint32_t bank=0)
+    void Uav(std::uint32_t slot, std::uint32_t offset, ID3D12Resource *resource, DXGI_FORMAT format)
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
         view.Format = format; view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device->CreateUnorderedAccessView(resource, nullptr, &view, Cpu(slot, kSrvCount + offset,bank));
+        device->CreateUnorderedAccessView(resource, nullptr, &view, Cpu(slot, kSrvCount + offset));
     }
 };
 
@@ -205,9 +205,9 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     next->render_capacity = capacity; next->ao_capacity = AoExtent(capacity, profile);
     next->quality = quality; next->profile = profile; next->ao_enabled = aoEnabled; next->contact_enabled = contactEnabled;
     next->adaptive_compute=aoEnabled&&adaptiveCompute;
-    if(next->adaptive_compute){next->descriptor_count=kDescriptorCount+1;next->descriptor_banks=2;}
-    if(frameSlots>D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1/(next->descriptor_count*next->descriptor_banks))
-        return AoFailure(ErrorCode::InvalidArgument,"Adaptive AO descriptor frame banks exceed the native heap limit.");
+    if(next->adaptive_compute)next->descriptor_count=kDescriptorCount+1;
+    if(frameSlots>D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1/next->descriptor_count)
+        return AoFailure(ErrorCode::InvalidArgument,"Adaptive AO descriptors exceed the native heap limit.");
     next->frame_slot_count = frameSlots; next->slot_completion.resize(frameSlots);
     if (!aoEnabled && !contactEnabled)
     {
@@ -220,8 +220,6 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         if (auto supported = CheckUavFormat(device, DXGI_FORMAT_R32G32B32A32_FLOAT); !supported) return supported;
         if (auto supported = CheckUavFormat(device, DXGI_FORMAT_R32G32_UINT); !supported) return supported;
         if (auto created = CreateTexture(allocator, next->ao_capacity, DXGI_FORMAT_R32G32B32A32_FLOAT, next->raw); !created) return created;
-        if(next->adaptive_compute)
-            if(auto created=CreateTexture(allocator,next->ao_capacity,DXGI_FORMAT_R32G32B32A32_FLOAT,next->adaptive_sparse);!created)return created;
         if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R16_FLOAT, next->resolved); !created) return created;
         for (std::uint32_t index = 0; index < 2; ++index)
         {
@@ -274,7 +272,7 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     }
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = frameSlots * next->descriptor_count * next->descriptor_banks; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    heap.NumDescriptors = frameSlots * next->descriptor_count; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->descriptors));
     if (FAILED(native)) return NativeFailure("Create AO descriptors", native);
     next->descriptor_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
@@ -306,7 +304,7 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     auto includeBytes = [&](const AllocationResource &allocation) {
         if (allocation.allocation) next->bytes += allocation.allocation->GetSize();
     };
-    includeBytes(next->constants); includeBytes(next->raw); includeBytes(next->resolved); includeBytes(next->contact);includeBytes(next->adaptive_sparse);
+    includeBytes(next->constants); includeBytes(next->raw); includeBytes(next->resolved); includeBytes(next->contact);
     for (const auto &allocation : next->history) includeBytes(allocation);
     for (const auto &allocation : next->metadata_history) includeBytes(allocation);
     candidate.targets_ = std::move(next);
@@ -412,35 +410,23 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     constants.frame_info = {historyValid ? 1u : 0u, static_cast<std::uint32_t>(inputs.frame_index),
                             storage->ao_enabled ? 1u : 0u, storage->contact_enabled ? 1u : 0u};
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
-    const auto write_stage_descriptors = [&](std::uint32_t bank) {
-        // Create the original views in each waited stage bank. A shader-visible
-        // heap is never a legal CopyDescriptors source.
-        storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT, bank);
-        storage->Srv(inputs.frame_slot, 1, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM, bank);
-        storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT, bank);
-        storage->Srv(inputs.frame_slot, 3, storage->ao_enabled ? inputs.motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT, bank);
-        storage->Srv(inputs.frame_slot, 4, storage->ao_enabled ? inputs.surface_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT, bank);
-        storage->Srv(inputs.frame_slot, 5, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, bank);
-        storage->Srv(inputs.frame_slot, 6, historyValid ? storage->history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32B32A32_FLOAT, bank);
-        storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32_UINT, bank);
-        storage->Srv(inputs.frame_slot, 8, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, bank);
-        storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, bank);
-        storage->Uav(inputs.frame_slot, 1, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, bank);
-        storage->Uav(inputs.frame_slot, 2, storage->resolved.resource.Get(), DXGI_FORMAT_R16_FLOAT, bank);
-        storage->Uav(inputs.frame_slot, 3, storage->contact.resource.Get(), DXGI_FORMAT_R16_FLOAT, bank);
-        storage->Uav(inputs.frame_slot, 4, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32_UINT, bank);
-    };
-    write_stage_descriptors(0);
+    storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
+    storage->Srv(inputs.frame_slot, 1, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
+    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 3, storage->ao_enabled ? inputs.motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
+    storage->Srv(inputs.frame_slot, 4, storage->ao_enabled ? inputs.surface_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT);
+    storage->Srv(inputs.frame_slot, 5, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Srv(inputs.frame_slot, 6, historyValid ? storage->history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32_UINT);
+    storage->Srv(inputs.frame_slot, 8, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Uav(inputs.frame_slot, 1, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Uav(inputs.frame_slot, 2, storage->resolved.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+    storage->Uav(inputs.frame_slot, 3, storage->contact.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+    storage->Uav(inputs.frame_slot, 4, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32_UINT);
     if(storage->adaptive_compute)
     {
-        // Immutable stage tables: horizon writes sparse with dense t5 unused;
-        // resolve reads sparse t5 and writes dense u0; temporal reads dense t5.
-        // Never overwrite a queued horizon/resolve descriptor table on CPU.
-        write_stage_descriptors(1);
-        storage->Srv(inputs.frame_slot,5,storage->adaptive_sparse.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT,1);
-        storage->Uav(inputs.frame_slot,0,storage->adaptive_sparse.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT);
         storage->Srv(inputs.frame_slot,kDescriptorCount,inputs.adaptive_density.resource,DXGI_FORMAT_R8_UINT);
-        storage->Srv(inputs.frame_slot,kDescriptorCount,inputs.adaptive_density.resource,DXGI_FORMAT_R8_UINT,1);
     }
 
     Impl::Pending pending;
@@ -463,17 +449,17 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         pending.imports.push_back({&allocation, handle});
         return graph.Version(handle);
     };
-    auto execute = [storage, slot = inputs.frame_slot](std::uint32_t pipeline, ViewExtent extent,std::uint32_t bank=0) {
-        return [storage, slot, pipeline, extent,bank](RenderPassContext &context) {
+    auto execute = [storage, slot = inputs.frame_slot](std::uint32_t pipeline, ViewExtent extent) {
+        return [storage, slot, pipeline, extent](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()};
             commands->SetDescriptorHeaps(1, heaps);
             commands->SetComputeRootSignature(storage->root.Get());
             commands->SetPipelineState(storage->pipelines[pipeline].Get());
             commands->SetComputeRootConstantBufferView(0, storage->constants.resource->GetGPUVirtualAddress() + UINT64(slot) * kConstantStride);
-            commands->SetComputeRootDescriptorTable(1, storage->Gpu(slot, 0,bank));
-            commands->SetComputeRootDescriptorTable(2, storage->Gpu(slot, kSrvCount,bank));
-            if(storage->adaptive_compute)commands->SetComputeRootDescriptorTable(3,storage->Gpu(slot,kDescriptorCount,bank));
+            commands->SetComputeRootDescriptorTable(1, storage->Gpu(slot, 0));
+            commands->SetComputeRootDescriptorTable(2, storage->Gpu(slot, kSrvCount));
+            if (pipeline == 4) commands->SetComputeRootDescriptorTable(3, storage->Gpu(slot, kDescriptorCount));
             commands->Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
         };
     };
@@ -496,30 +482,21 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         auto history = import(storage->history[writeIndex], "AO.CurrentHistory");
         auto metadata = import(storage->metadata_history[writeIndex], "AO.CurrentMetadata");
         auto resolved = import(storage->resolved, "AO.Resolved");
-        auto sparse=storage->adaptive_compute?import(storage->adaptive_sparse,"AO.AdaptiveSparse"):ResourceVersion{};
         if (!binding_result) return binding_result;
         if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained texture binding failed.");
-        auto horizonBinding = pass_binding(0, 45, storage->adaptive_compute?"AdaptiveGTAOHorizon":"GTAOHorizon", inputs.queue);
-        if (!horizonBinding) return AoFailure(ErrorCode::InvalidState, "AO retained horizon pass is missing.");
+        auto horizonBinding = pass_binding(0, 45, storage->adaptive_compute?"AdaptiveGTAO":"GTAOHorizon", inputs.queue);
+        if (!horizonBinding) return AoFailure(ErrorCode::InvalidState, "AO horizon pass is missing.");
         auto &horizon = *horizonBinding;
         if (!retained) readGuides(horizon);
         if(storage->adaptive_compute)
         {
-            if (retained) sparse = retained->sparse;
-            else { horizon.Read(inputs.adaptive_density.version,Access::ComputeRead);sparse=horizon.Write(sparse,Access::UnorderedWrite); }
-            if (capture) capture->sparse = sparse;
-            horizon.SetExecute(execute(4,aoActive));
-            auto reconstructBinding = pass_binding(1,282,"AdaptiveGTAOCurrentGuideResolve",inputs.queue);
-            if (!reconstructBinding) return AoFailure(ErrorCode::InvalidState, "AO retained reconstruct pass is missing.");
-            auto &reconstruct = *reconstructBinding;
-            if (retained) raw = retained->raw;
-            else { readGuides(reconstruct);reconstruct.Read(inputs.adaptive_density.version,Access::ComputeRead);
-                reconstruct.Read(sparse,Access::ComputeRead);raw=reconstruct.Write(raw,Access::UnorderedWrite); }
-            reconstruct.SetExecute(execute(5,aoActive,1));outputs.adaptive_density_used=true;
+            if (!retained) { horizon.Read(inputs.adaptive_density.version,Access::ComputeRead); raw=horizon.Write(raw,Access::UnorderedWrite); }
+            else raw = retained->raw;
+            horizon.SetExecute(execute(4,aoActive)); outputs.adaptive_density_used=true;
         }
         else{raw=retained?retained->raw:horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
         if (capture) capture->raw = raw;
-        auto temporalBinding = pass_binding(2,46,"GTAOTemporal",inputs.queue);
+        auto temporalBinding = pass_binding(1,46,"GTAOTemporal",inputs.queue);
         if (!temporalBinding) return AoFailure(ErrorCode::InvalidState, "AO retained temporal pass is missing.");
         auto &temporal = *temporalBinding;
         if (retained) { history = retained->history_output; metadata = retained->metadata; }
@@ -538,7 +515,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         }
         if (capture) { capture->history_output = history; capture->metadata = metadata; }
         temporal.SetExecute(execute(1, aoActive));
-        auto bilateralBinding = pass_binding(3,47,"GTAOBilateral",inputs.queue);
+        auto bilateralBinding = pass_binding(2,47,"GTAOBilateral",inputs.queue);
         if (!bilateralBinding) return AoFailure(ErrorCode::InvalidState, "AO retained bilateral pass is missing.");
         auto &bilateral = *bilateralBinding;
         if (retained) resolved = retained->resolved;
@@ -561,7 +538,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         auto contact = import(storage->contact, "AO.ContactVisibility");
         if (!binding_result) return binding_result;
         if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained contact binding failed.");
-        auto contactBinding = pass_binding(4,48,"ContactShadows",QueueHint::Direct);
+        auto contactBinding = pass_binding(3,48,"ContactShadows",QueueHint::Direct);
         if (!contactBinding) return AoFailure(ErrorCode::InvalidState, "AO retained contact pass is missing.");
         auto &pass = *contactBinding;
         if (retained) contact = retained->contact_output;

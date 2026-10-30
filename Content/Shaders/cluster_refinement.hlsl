@@ -14,8 +14,10 @@ cbuffer ClusterRefinementConstants : register(b0, space6)
     float4 ProjectionScale;
     float4 ErrorTolerance;
     float4 FrustumPlanes[4][6];
+    float4 FrustumPlaneLengths[6];
     uint HistoryInstanceCapacity, HistoryWordsPerInstance, PreviousHistoryInstanceCapacity, PreviousHistoryValid;
     uint FrameIdLow, FrameIdHigh, CatalogClusterBase, CatalogClusterCount;
+    uint RepresentationPageCount;
 };
 
 cbuffer ClusterOcclusionConstants : register(b1, space6)
@@ -31,7 +33,7 @@ struct ClusterGroup
     uint ClusterCount, MaterialPartition, Flags, MaterialSelector;
     float4 Sphere;
     float4 MinimumError;
-    float4 MaximumReserved;
+    uint4 RepresentationPages; // first page-list entry, unique page count
     uint CatalogIndex, Generation, AncestorSteps, NextSubtree;
 };
 struct ClusterRecord
@@ -71,6 +73,7 @@ StructuredBuffer<uint> Children : register(t1, space6);
 StructuredBuffer<ClusterRecord> Clusters : register(t2, space6);
 StructuredBuffer<ClusterPage> Pages : register(t3, space6);
 StructuredBuffer<ClusterCandidate> Candidates : register(t4, space6);
+StructuredBuffer<uint> RepresentationPages : register(t10, space6);
 StructuredBuffer<uint> PreviousHistoryBits : register(t5, space6);
 StructuredBuffer<uint> PreviousHistoryGenerations : register(t6, space6);
 StructuredBuffer<ClusterPage> PreviousPages : register(t7, space6);
@@ -135,60 +138,6 @@ uint2 Sub64(uint2 a, uint2 b)
 {
     return uint2(a.x - b.x, a.y - b.y - (a.x < b.x ? 1u : 0u));
 }
-bool ConstantsValid()
-{
-    uint count, stride;
-    Groups.GetDimensions(count, stride);
-    bool valid = GroupCount <= count;
-    Clusters.GetDimensions(count, stride); valid = valid && ClusterCount <= count;
-    Children.GetDimensions(count, stride); valid = valid && ChildCount <= count;
-    Pages.GetDimensions(count, stride); valid = valid && PageCount <= count;
-    Candidates.GetDimensions(count, stride); valid = valid && CandidateCount <= count;
-    CutCounts.GetDimensions(count, stride);
-    valid = valid && CandidateCount <= count / 2u && Range(CandidateCount * 2u, OutputCapacity, count) &&
-        OutputCapacity >= CandidateCount;
-    CutOffsets.GetDimensions(count, stride); valid = valid && CandidateCount <= count;
-    BlockSums.GetDimensions(count, stride); valid = valid && PrefixBlockCount <= count;
-    BlockOffsets.GetDimensions(count, stride); valid = valid && PrefixBlockCount <= count;
-    PageDemand.GetDimensions(count, stride); valid = valid && PageCount <= count;
-    CutRefs.GetDimensions(count, stride); valid = valid && Range(ClusterRefBase, OutputCapacity, count);
-    RasterRecords.GetDimensions(count); valid = valid && (RasterRecordBase == Invalid ||
-        (RasterRecordBase > 0u && Range(RasterRecordBase, OutputCapacity, count / 32u)));
-    GeometryDrawRecords.GetDimensions(count);
-    valid = valid && GeometryDrawBase > 0u && GeometryDrawBase <= 0x3fffffffu &&
-        OutputCapacity <= 0x40000000u - GeometryDrawBase &&
-        GeometryDrawBase <= count / 64u && OutputCapacity <= count / 64u - GeometryDrawBase;
-    IndexedCommands.GetDimensions(count); valid = valid && OutputCapacity <= count / 96u;
-    MeshCommands.GetDimensions(count); valid = valid && OutputCapacity <= count / 64u;
-    CutStatus.GetDimensions(count); valid = valid && count >= 48u;
-    CommandCounts.GetDimensions(count); valid = valid && count >= 32u;
-    SelectedBounds.GetDimensions(count, stride); valid = valid && OutputCapacity <= count;
-    PreviousRejected.GetDimensions(count, stride); valid = valid && OutputCapacity <= count;
-    RetestIndexedCommands.GetDimensions(count); valid = valid && OutputCapacity <= count / 24u;
-    RetestMeshCommands.GetDimensions(count); valid = valid && OutputCapacity <= count / 16u;
-    HistoryBits.GetDimensions(count, stride);
-    valid = valid && HistoryWordsPerInstance != 0u && HistoryInstanceCapacity <= count / max(HistoryWordsPerInstance, 1u);
-    HistoryGenerations.GetDimensions(count, stride); valid = valid && HistoryInstanceCapacity <= count;
-    valid = valid && Range(CatalogClusterBase, CatalogClusterCount, ClusterCount) && CatalogClusterCount != 0u &&
-        HistoryWordsPerInstance == CatalogClusterCount / 32u + (CatalogClusterCount % 32u != 0u ? 1u : 0u) &&
-        PreviousHistoryValid <= 1u && (FrameIdLow != 0u || FrameIdHigh != 0u);
-    if (PreviousHistoryValid != 0u)
-    {
-        PreviousHistoryBits.GetDimensions(count, stride);
-        valid = valid && PreviousHistoryInstanceCapacity <= count / max(HistoryWordsPerInstance, 1u);
-        PreviousHistoryGenerations.GetDimensions(count, stride); valid = valid && PreviousHistoryInstanceCapacity <= count;
-        PreviousPages.GetDimensions(count, stride); valid = valid && PageCount <= count;
-        PreviousCutStatus.GetDimensions(count); valid = valid && count >= 48u;
-    }
-    valid = valid && CandidateCount != 0u && ContentGeneration != 0u && (ActiveViewMask & ~15u) == 0u && (GeometryFrontendFlags == 0u || GeometryFrontendFlags == 2u) &&
-        PrefixBlockCount == CandidateCount / 64u + (CandidateCount % 64u != 0u ? 1u : 0u) &&
-        all(isfinite(CameraOriginNear)) && CameraOriginNear.w > 0.0 &&
-        all(isfinite(ViewRight)) && all(isfinite(ViewUp)) && all(isfinite(ViewForward)) &&
-        all(isfinite(ProjectionScale)) && all(ProjectionScale >= 0.0) &&
-        all(isfinite(ErrorTolerance)) && all(ErrorTolerance > 0.0);
-    if (!valid) Fault(FailureCatalog);
-    return valid;
-}
 bool CandidateValid(ClusterCandidate candidate, out InstanceData instance)
 {
     instance = (InstanceData)0;
@@ -226,12 +175,10 @@ bool GroupValid(uint id, ClusterCandidate candidate, out ClusterGroup group)
     if (group.CatalogIndex != candidate.CatalogIndex || group.Generation != ContentGeneration ||
         (group.NextSubtree != Invalid && (group.NextSubtree < candidate.FirstGroup ||
             group.NextSubtree - candidate.FirstGroup >= candidate.GroupCount)) ||
-        (group.Flags & ~ReferencePose) != 0u ||
-        group.AncestorSteps == 0u || group.AncestorSteps > MaxAncestorSteps ||
         group.ClusterCount == 0u || !Range(group.FirstCluster, group.ClusterCount, ClusterCount) ||
-        !Range(group.FirstChild, group.ChildCount, ChildCount) ||
-        !all(isfinite(group.Sphere)) || group.Sphere.w < 0.0 ||
-        !isfinite(group.MinimumError.w) || group.MinimumError.w < 0.0)
+        group.RepresentationPages.y == 0u ||
+        !Range(group.RepresentationPages.x, group.RepresentationPages.y, RepresentationPageCount) ||
+        !Range(group.FirstChild, group.ChildCount, ChildCount))
     {
         Fault(FailureCatalog); return false;
     }
@@ -267,29 +214,24 @@ bool Resident(uint page_slot)
     }
     return page.Generation == ContentGeneration && page.Resident == 1u;
 }
-bool CompleteRepresentation(uint group_id, ClusterGroup group)
+bool CompleteRepresentation(ClusterGroup group)
 {
     bool complete = true;
-    for (uint offset = 0u; offset < group.ClusterCount; ++offset)
-    {
-        ClusterRecord cluster;
-        if (!ClusterValid(group.FirstCluster + offset, group_id, group, cluster)) return false;
-        complete = Resident(cluster.PageSlot) && complete;
-    }
+    for (uint offset = 0u; offset < group.RepresentationPages.y; ++offset)
+        complete = Resident(RepresentationPages[group.RepresentationPages.x + offset]) && complete;
     return complete;
 }
-bool DemandRepresentation(uint group_id, ClusterGroup group, float priority, bool check_residency)
+bool DemandRepresentation(ClusterGroup group, float priority, bool check_residency)
 {
     const uint encoded = asuint(max(priority, 1.0));
     bool complete = true;
-    for (uint offset = 0u; offset < group.ClusterCount; ++offset)
+    for (uint offset = 0u; offset < group.RepresentationPages.y; ++offset)
     {
-        ClusterRecord cluster;
-        if (!ClusterValid(group.FirstCluster + offset, group_id, group, cluster)) return false;
+        const uint page_slot = RepresentationPages[group.RepresentationPages.x + offset];
         uint ignored;
-        InterlockedMax(PageDemand[cluster.PageSlot], encoded, ignored);
+        InterlockedMax(PageDemand[page_slot], encoded, ignored);
         // Missing pages still need demand; inspect the complete representation.
-        if (check_residency) complete = Resident(cluster.PageSlot) && complete;
+        if (check_residency) complete = Resident(page_slot) && complete;
     }
     return complete;
 }
@@ -316,12 +258,17 @@ uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
     if (!all(isfinite(center)) || !isfinite(radius)) { Fault(FailureCatalog); priority = 0.0; return 0u; }
     uint mask = candidate.ViewMask;
     [unroll] for (uint view = 0u; view < 4u; ++view)
+    {
+        const uint view_bit = 1u << view;
+        if ((mask & view_bit) == 0u) continue;
         [unroll] for (uint plane = 0u; plane < 6u; ++plane)
-        {
-            const float4 boundary = FrustumPlanes[view][plane];
-            if (!all(isfinite(boundary))) { Fault(FailureCatalog); mask = 0u; }
-            if (dot(float4(center, 1.0), boundary) < -radius * length(boundary.xyz)) mask &= ~(1u << view);
-        }
+            if (dot(float4(center, 1.0), FrustumPlanes[view][plane]) <
+                -radius * FrustumPlaneLengths[plane][view])
+            {
+                mask &= ~view_bit;
+                break;
+            }
+    }
     priority = 0.0;
     if (mask == 0u) return mask;
     if ((group.Flags & ReferencePose) != 0u)
@@ -351,7 +298,7 @@ uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
     }
     return mask;
 }
-bool Refinement(uint group_id, ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
+bool Refinement(ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
                 out uint mask, out float priority, out bool desired)
 {
     mask = Projection(group, candidate, instance, priority);
@@ -362,12 +309,11 @@ bool Refinement(uint group_id, ClusterGroup group, ClusterCandidate candidate, I
     {
         const uint child_id = Children[group.FirstChild + offset];
         ClusterGroup child;
-        if (!GroupValid(child_id, candidate, child) || child.Parent != group_id ||
-            child.MaterialPartition != group.MaterialPartition || child.MaterialSelector != group.MaterialSelector)
+        if (!GroupValid(child_id, candidate, child))
         {
             Fault(FailureCatalog); return false;
         }
-        complete = CompleteRepresentation(child_id, child) && complete;
+        complete = CompleteRepresentation(child) && complete;
     }
     return complete;
 }
@@ -376,7 +322,6 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
 {
     const uint candidate_index = LinearThread(dispatch);
     if (candidate_index >= CandidateCount) return;
-    if (!ConstantsValid()) return;
     CutCounts[candidate_index] = uint2(0u, 0u);
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
@@ -393,7 +338,7 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
         ClusterGroup group;
         if (!GroupValid(id, candidate, group)) return;
         uint mask; float priority; bool desired;
-        const bool refined = Refinement(id, group, candidate, instance, mask, priority, desired);
+        const bool refined = Refinement(group, candidate, instance, mask, priority, desired);
         node = refined ? Children[group.FirstChild] : group.NextSubtree;
         if (mask == 0u) continue;
         if (desired)
@@ -401,10 +346,10 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
             {
                 const uint child_id = Children[group.FirstChild + child];
                 ClusterGroup child_group;
-                if (GroupValid(child_id, candidate, child_group)) DemandRepresentation(child_id, child_group, priority, false);
+                if (GroupValid(child_id, candidate, child_group)) DemandRepresentation(child_group, priority, false);
             }
         if (refined) continue;
-        if (!DemandRepresentation(id, group, priority, true)) { Fault(FailureMissingPage); continue; }
+        if (!DemandRepresentation(group, priority, true)) { Fault(FailureMissingPage); continue; }
         if ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u)
         {
             Fault(FailureErrorDomain); continue;
@@ -430,7 +375,6 @@ void PrefixCuts(uint3 dispatch : SV_DispatchThreadID, uint3 group_id : SV_GroupI
     const uint block_index = group_id.x + group_id.y * 65535u;
     if (PrefixStage == 0u)
     {
-        if (!ConstantsValid()) return; // Uniform before any group barriers.
         // All lanes participate in every barrier, including the final partial block.
         const uint2 count = thread_index < CandidateCount ? CutCounts[thread_index] : uint2(0u, 0u);
         scan_values[lane] = count;
@@ -450,7 +394,6 @@ void PrefixCuts(uint3 dispatch : SV_DispatchThreadID, uint3 group_id : SV_GroupI
     {
         if (thread_index != 0u) return;
         CommandCounts.Store4(0u, uint4(0u, 0u, 0u, 0u));
-        if (!ConstantsValid()) return;
         uint2 total = uint2(0u, 0u);
         for (uint block = 0u; block < PrefixBlockCount; ++block)
         {
@@ -471,7 +414,6 @@ void PrefixCuts(uint3 dispatch : SV_DispatchThreadID, uint3 group_id : SV_GroupI
     }
     if (PrefixStage == 2u)
     {
-        if (!ConstantsValid()) return;
         if (thread_index < CandidateCount)
             CutOffsets[thread_index] = Add64(CutOffsets[thread_index], BlockOffsets[thread_index / 64u]);
         if (CutStatus.Load(16u) != 0u && thread_index < OutputCapacity)
@@ -589,7 +531,7 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
         if (!GroupValid(id, candidate, group)) return;
         if (mask == 0u || (mask & ~candidate.ViewMask) != 0u || group.ClusterCount > expected.x - count)
         { Fault(FailureCatalog); return; }
-        if (!CompleteRepresentation(id, group) || ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u))
+        if (!CompleteRepresentation(group) || ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u))
         {
             Fault(FailureMissingPage | FailureErrorDomain); return;
         }

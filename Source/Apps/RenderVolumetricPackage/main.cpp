@@ -72,7 +72,7 @@ void Produce(const fs::path &source, const fs::path &build)
                 (void)ap::ReadActionResult(build, spec.namespace_path, kId, ignored, path);
                 const auto current = ap::ReadBytes(path);
                 if (std::ranges::equal(std::as_bytes(std::span(current.data(), current.size())), bytes))
-                { ap::TouchActionResult(result_path); std::cout << spec.action_id << " current\n"; return; }
+                { ap::TouchActionResult(result_path); return; }
             }
         }
         catch (const std::exception &) { }

@@ -465,8 +465,8 @@ private:
         if (!rows.empty())
         {
             const auto error_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
-            hs::TaskGroup tasks;
-            tasks_.ParallelFor(tasks, {"scene HLOD geometric error"}, rows.size(), 1,
+            auto tasks = tasks_.CreateTaskGroup();
+            tasks.ParallelFor(rows.size(), 1,
                 [&rows, error_budget = options_.error_refinement_budget,
                  error_checks = options_.error_checks](std::size_t begin, std::size_t end) {
                     for (std::size_t index = begin; index < end; ++index)
@@ -483,7 +483,7 @@ private:
                         }
                     }
                 });
-            const auto wait = tasks_.Wait(tasks);
+            const auto wait = tasks.Wait();
             if (profile_.enabled) profile_.error_wall_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - error_start).count();
             Require(wait.Succeeded(), "geometric error worker failure");
         }

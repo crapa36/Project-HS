@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <limits>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -29,21 +28,14 @@ struct CharacterAlphaPolicy
     bool preserve_translucent{};
 };
 
-struct CharacterNormalBaseStats
-{
-    std::size_t texels{};
-    double minimum_length_squared{std::numeric_limits<double>::infinity()}, maximum_length_squared{};
-};
-
 // Apply only to mip0 AFTER building the original normal mip chain. Current
 // shaders normalize TBN*N, so removing positive source magnitude preserves the
 // point-sampled direction. It does change bilinear weights and mip0/1 blends;
 // that filtering difference requires separate optical qualification.
-inline CharacterNormalBaseStats CanonicalizeCharacterNormalBase(CharacterMip &base)
+inline void CanonicalizeCharacterNormalBase(CharacterMip &base)
 {
     if (!base.width || !base.height || std::uint64_t(base.width) * base.height != base.pixels.size())
         throw std::runtime_error("character normal: invalid canonicalization layout");
-    CharacterNormalBaseStats stats;
     for (auto &pixel : base.pixels)
     {
         std::array<double, 3> normal{};
@@ -58,14 +50,10 @@ inline CharacterNormalBaseStats CanonicalizeCharacterNormalBase(CharacterMip &ba
         }
         if (!(length_squared > 0))
             throw std::runtime_error("character normal: zero source direction cannot be canonicalized");
-        stats.minimum_length_squared = std::min(stats.minimum_length_squared, length_squared);
-        stats.maximum_length_squared = std::max(stats.maximum_length_squared, length_squared);
         const double inverse_length = 1.0 / std::sqrt(length_squared);
         for (std::size_t channel = 0; channel < 3; ++channel)
             pixel[channel] = static_cast<float>(normal[channel] * inverse_length * 0.5 + 0.5);
-        ++stats.texels; // Alpha/roughness is deliberately untouched.
     }
-    return stats;
 }
 
 [[nodiscard]] inline CharacterMip CharacterConstantSlice(std::uint32_t width, std::uint32_t height,

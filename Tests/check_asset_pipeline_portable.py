@@ -446,12 +446,11 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
             os.utime(actions, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
             stamp = actions.stat().st_mtime_ns
             output = run(*producer, success=success)
-            assert 'shipping-audio PCM' not in output, output
             assert actions.stat().st_mtime_ns == stamp, 'forced hit or rejected cache created a stage'
             assert not list(actions.glob('.stage-*'))
             return output
 
-        assert f'audio current files={expected_count}' in without_preparation()
+        without_preparation()
         assert action_path.read_bytes() == result_bytes and action_path.stat().st_mtime_ns == result_stamp
         assert all((build / item['locator']).read_bytes() == published[item['logical_id']]
                    for item in action['products'])
@@ -464,8 +463,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
             damaged[-1] ^= 1
             path.write_bytes(damaged)
             try:
-                output = run(*producer)
-                assert 'shipping-audio PCM' in output, output
+                run(*producer)
                 assert action_path.read_bytes() == result_bytes
                 assert all((build / item['locator']).read_bytes() == published[item['logical_id']]
                            for item in action['products']), 'repair exposed a partial ProductSet'
@@ -497,7 +495,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
             catalog.write_bytes(original_catalog)
         # A verified product hit cannot hide missing native completion metadata.
         (actions / 'result.d').unlink()
-        assert 'shipping-audio PCM' in run(*producer)
+        run(*producer)
         assert (actions / 'result.d').is_file() and action_path.read_bytes() == result_bytes
         build_now()  # Settle Ninja's discovered input timestamps after the direct invocations.
         baseline = (action_path.read_bytes(), action_path.stat().st_mtime_ns,
@@ -537,8 +535,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         assert receipt_count() == before_producer_change + 1
         time.sleep(1.1)
         (audio / 'wave_000.wav').write_bytes(wave(1))
-        changed_output = build_now()
-        assert 'audio current' not in changed_output and 'shipping-audio PCM' in changed_output
+        build_now()
         verify()
         assert json.loads(action_path.read_text())['product_set_id'] != action['product_set_id']
         previous_result = action_path.read_bytes()
@@ -593,8 +590,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
             quarantine_root = build / 'CorruptProducts/audio'
             previous_quarantines = {entry.name for entry in quarantine_root.iterdir()} \
                 if quarantine_root.exists() else set()
-            repaired = run(*producer)
-            assert 'shipping-audio PCM' in repaired, repaired
+            run(*producer)
             assert action_path.read_bytes() == selected and pointer_path.read_bytes() == previous_pointer
             assert product.is_file() and product.read_bytes() == current_products[item['logical_id']]
             quarantined = [p for p in quarantine_root.iterdir()

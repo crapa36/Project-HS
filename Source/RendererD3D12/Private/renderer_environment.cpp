@@ -55,7 +55,7 @@ render_data::TextureDescriptorStorage TextureStreamingDescriptor(
 } // namespace
 
 Result D3D12Renderer::Impl::PrepareMaterialParameters(
-    const RendererConfig &candidate, bool require_compatible_layout)
+    const RendererConfig &candidate, bool require_compatible_layout, MaterialPreparationScope scope)
 {
     if (material_parameter_upload_pending)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -65,7 +65,9 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
     std::vector<render_data::MaterialParameterSlot> slots;
     try
     {
-        for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
+        const auto material_count = scope == MaterialPreparationScope::StaticEnvironment
+            ? kAuthoredMaterialNames.size() : kResidentMaterialCount;
+        for (std::size_t ordinal = 0; ordinal < material_count; ++ordinal)
         {
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
             const auto name = hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]
@@ -117,15 +119,19 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                     "Material parameter reload changes the resident layout: " + id);
             for (const auto &definition : definitions) slots.push_back({definition.default_words});
         }
-        if (auto prepared = PrepareDecalMaterialParameters(candidate, require_compatible_layout, slots); !prepared)
-            return prepared;
+        if (scope == MaterialPreparationScope::Resident)
+            if (auto prepared = PrepareDecalMaterialParameters(candidate, require_compatible_layout, slots); !prepared)
+                return prepared;
     }
     catch (const std::exception &error)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Invalid material parameter package: " + std::string(error.what()));
     }
-    if (slots.empty() || slots.size() > 64 * (kResidentMaterialCount + render_data::kDecalMaterialNames.size()))
+    const auto max_slot_count = scope == MaterialPreparationScope::StaticEnvironment
+        ? 64 * kAuthoredMaterialNames.size()
+        : 64 * (kResidentMaterialCount + render_data::kDecalMaterialNames.size());
+    if (slots.empty() || slots.size() > max_slot_count)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Invalid material parameter slot count.");
     material_parameter_candidate_slot_count = static_cast<std::uint32_t>(slots.size());
@@ -692,6 +698,15 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
         registration.fallback_first_mip = description.mip_count - fallback.resource->GetDesc().MipLevels;
         registration.fallback_allocation_bytes = fallback.allocation->GetSize();
         registration.fallback_residency = existing_ticket; registration.pinned = description.mip_count == 1;
+        registration.opacity_sampling = false;
+        for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
+            if (environment_material_variants[material] == render_data::EnvironmentMaterialVariant::MaskedTwoSided &&
+                std::ranges::find(environment_material_bindings[material].product_ids, id) !=
+                    environment_material_bindings[material].product_ids.end())
+            {
+                registration.opacity_sampling = true;
+                break;
+            }
         return texture_streaming.Register(std::move(registration), residency, stream_id);
     };
     for (std::uint32_t index = 0; index < kEnvironmentTextureCount; ++index)

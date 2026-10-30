@@ -1,4 +1,5 @@
 #include "renderer_hero_work.hpp"
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include "d3d12_resources.hpp"
 #include <hs/core/sha256.hpp>
 
@@ -632,3 +633,32 @@ RendererHeroWorkStatus HeroWorkCapture::Status() const
     return status;
 }
 } // namespace hs
+#else
+namespace hs
+{
+struct HeroWorkCapture::Impl {};
+HeroWorkCapture::HeroWorkCapture() = default;
+HeroWorkCapture::~HeroWorkCapture() = default;
+Result HeroWorkCapture::Initialize(ID3D12Device *, D3D12MA::Allocator *, std::uint32_t, ViewExtent, HeroWorkDiagnosticMode)
+{ return Result::Success(); }
+void HeroWorkCapture::Pipeline(std::uint32_t, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &,
+    std::span<const std::byte>, std::span<const std::byte>, std::string_view) {}
+Result HeroWorkCapture::Begin(RenderGraphBuilder &, const HeroTransparencyInputs &, HeroWorkRetainedLayout *)
+{ return Result::Success(); }
+void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &, PassBuilder &, std::uint32_t, std::uint32_t,
+    HeroWorkRetainedLayout *) {}
+Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &, const HeroTransparencyInputs &,
+    const HeroWorkRetainedLayout &)
+{ return Result::Success(); }
+Result HeroWorkCapture::BindRetainedPhase(RenderGraphBuilder &, std::uint32_t, std::uint32_t,
+    const HeroWorkRetainedLayout &)
+{ return Result::Success(); }
+void HeroWorkCapture::Record(ID3D12GraphicsCommandList *, ID3D12PipelineState *,
+    const HeroTransparencyInputs &, HeroTransparencyPhase, std::uint32_t, std::uint32_t,
+    D3D12_GPU_DESCRIPTOR_HANDLE) {}
+void HeroWorkCapture::Submitted(const RenderGraphBuilder &, std::uint32_t, const CompletionSet &, bool) {}
+Result HeroWorkCapture::Collect(const CompletionSet &, std::vector<RendererHeroWorkSample> &output)
+{ output.clear(); return Result::Success(); }
+RendererHeroWorkStatus HeroWorkCapture::Status() const { return {}; }
+} // namespace hs
+#endif

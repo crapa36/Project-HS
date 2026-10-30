@@ -34,7 +34,12 @@ bool ValidIdentity(const SdkFrameIdentity &identity)
 }
 void XellLog(const char *message, xell_logging_level_t level)
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (message) std::fprintf(stderr, "hs.xell.sdk level=%u message=%s\n", static_cast<unsigned>(level), message);
+#else
+    static_cast<void>(message);
+    static_cast<void>(level);
+#endif
 }
 #endif
 } // namespace
@@ -118,7 +123,9 @@ XellLatency::~XellLatency()
     // retain native owners rather than unload code that can still be executing.
     if (auto reset = ResetAfterCompletion(false); !reset)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::fprintf(stderr, "hs.xell.shutdown error=%s\n", std::string(reset.Message()).c_str());
+#endif
         static_cast<void>(new std::shared_ptr<Impl>(std::move(impl_)));
     }
 }
@@ -184,8 +191,6 @@ Result XellLatency::Initialize(ID3D12Device *device)
     impl_->initialized = true;
     impl_->availability = ReconstructionAvailability::Available;
     impl_->failure_reason.clear();
-    std::fprintf(stderr, "hs.xell.runtime version=%u.%u.%u requires_fg=%u\n", static_cast<unsigned>(impl_->version.major),
-        static_cast<unsigned>(impl_->version.minor), static_cast<unsigned>(impl_->version.patch), static_cast<unsigned>(impl_->requires_fg));
     return Result::Success();
 #endif
 }

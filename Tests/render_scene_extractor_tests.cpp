@@ -28,15 +28,15 @@ void TestSnapshotExchange()
     {
         auto slot = exchange.TryBeginWrite();
         Check(slot.has_value(), "snapshot write slot");
-        slot->storage->header.tick = sequence;
-        slot->storage->AddInstance(
+        slot->Storage().header.tick = sequence;
+        slot->Storage().AddInstance(
             {{static_cast<float>(sequence), 0, 0}, 0, {}, 0xFFFFFFFFu, hs::RenderMesh::Enemy});
-        slot->storage->AddInstance(
+        slot->Storage().AddInstance(
             {{static_cast<float>(sequence), 0, 1}, 0, {}, 0xFFFFFFFFu, hs::RenderMesh::Pickup});
-        Check(slot->storage->View().instances.size() == 2,
+        Check(slot->Storage().View().instances.size() == 2,
               "snapshot grows beyond its initial reserve");
         const auto previous_view = previous.View();
-        exchange.Publish(*slot, sequence, sequence > 1 ? &previous_view : nullptr);
+        std::move(*slot).Publish( sequence, sequence > 1 ? &previous_view : nullptr);
         const auto pair = consumer.AcquireLatest();
         Check(pair.has_current && pair.current.header.tick == sequence &&
                   pair.current_publication_sequence == sequence,
@@ -84,6 +84,7 @@ void TestRetainedSnapshotExchange()
     const auto previous_sample = previous_source.View();
     std::array<const hs::RenderInstance *, 3> current_arrays{};
     std::array<const hs::RenderInstance *, 3> previous_arrays{};
+    std::array<const hs::RenderSnapshotStorage *, 3> slot_storages{};
     std::array<bool, 3> slot_seen{};
 
     for (hs::Sequence publication = 1; publication <= 4; ++publication)
@@ -96,14 +97,26 @@ void TestRetainedSnapshotExchange()
         const auto current_sample = current_source.View();
         auto slot = exchange.TryBeginRetainedWrite();
         Check(slot.has_value(), "retained snapshot writer slot");
-        Check(slot->index < slot_seen.size(), "retained writer returned a known slot");
-        const auto slot_index = slot->index;
-        const bool copied = slot->storage->CopyRetainedDynamicFrom(current_sample);
+        const auto *storage = &slot->Storage();
+        std::size_t slot_index = slot_storages.size();
+        for (std::size_t candidate = 0; candidate < slot_storages.size(); ++candidate)
+        {
+            if (slot_storages[candidate] == storage)
+            {
+                slot_index = candidate;
+                break;
+            }
+            if (!slot_storages[candidate] && slot_index == slot_storages.size())
+                slot_index = candidate;
+        }
+        Check(slot_index < slot_storages.size(), "retained writer returned known storage");
+        slot_storages[slot_index] = storage;
+        const bool copied = slot->Storage().CopyRetainedDynamicFrom(current_sample);
         const bool first_use = !slot_seen[slot_index];
         Check(copied == first_use,
             "retained slot must copy once, then reuse the same immutable dynamic sample");
-        slot->storage->AddUi({});
-        exchange.Publish(*slot, publication, &previous_sample);
+        slot->Storage().AddUi({});
+        std::move(*slot).Publish( publication, &previous_sample);
         const auto pair = consumer.AcquireLatest();
         Check(pair.has_current && pair.has_previous && pair.current.header.tick == 12 &&
             pair.previous.header.tick == 11 && pair.current.header.checksum == publication &&
@@ -130,13 +143,13 @@ void TestRetainedSnapshotExchange()
     {
         auto raw_slot = raw_exchange.TryBeginWrite();
         Check(raw_slot.has_value(), "raw snapshot writer slot");
-        raw_slot->storage->AddInstance({});
-        raw_exchange.Publish(*raw_slot, publication);
+        raw_slot->Storage().AddInstance({});
+        std::move(*raw_slot).Publish( publication);
     }
     auto raw_slot = raw_exchange.TryBeginWrite();
-    Check(raw_slot.has_value() && raw_slot->storage->View().instances.empty(),
+    Check(raw_slot.has_value() && raw_slot->Storage().View().instances.empty(),
         "ordinary TryBeginWrite must continue clearing reused storage");
-    raw_exchange.Abandon(*raw_slot);
+    std::move(*raw_slot).Abandon();
 }
 
 void TestSnapshotExchangeQueuedPublications()
@@ -146,10 +159,10 @@ void TestSnapshotExchangeQueuedPublications()
     const auto publish = [&](hs::Sequence sequence, hs::Tick tick) {
         auto slot = exchange.TryBeginWrite();
         Check(slot.has_value(), "queued snapshot write slot");
-        slot->storage->header.tick = tick;
+        slot->Storage().header.tick = tick;
         hs::RenderSnapshot previous;
         previous.header.tick = tick > 0 ? tick - 1 : 0;
-        exchange.Publish(*slot, sequence, tick > 0 ? &previous : nullptr);
+        std::move(*slot).Publish( sequence, tick > 0 ? &previous : nullptr);
     };
     for (hs::Sequence sequence = 1; sequence <= 3; ++sequence) publish(sequence, sequence);
     for (int read = 0; read < 4; ++read)
@@ -172,10 +185,11 @@ void TestSnapshotExchangeQueuedPublications()
         Check(pair.current.header.tick == 0 && !pair.has_previous,
               "equal and stale publications preserve the retained packet");
     }
-    const auto abandoned = exchange.TryBeginWrite();
-    Check(abandoned.has_value(), "abandoned snapshot slot");
-    abandoned->storage->header.tick = 99;
-    exchange.Abandon(*abandoned);
+    {
+        auto abandoned = exchange.TryBeginWrite();
+        Check(abandoned.has_value(), "abandoned snapshot slot");
+        abandoned->Storage().header.tick = 99;
+    }
     publish(5, 1);
     pair = consumer.AcquireLatest();
     Check(pair.current.header.tick == 1 && pair.previous.header.tick == 0,
@@ -186,10 +200,10 @@ void TestSnapshotExchangeQueuedPublications()
     const auto maximum = std::numeric_limits<hs::Sequence>::max();
     for (hs::Sequence sequence = maximum - 3;; ++sequence)
     {
-        const auto slot = overwritten.TryBeginWrite();
+        auto slot = overwritten.TryBeginWrite();
         Check(slot.has_value(), "oldest ready snapshot can be overwritten");
-        slot->storage->header.tick = sequence;
-        overwritten.Publish(*slot, sequence);
+        slot->Storage().header.tick = sequence;
+        std::move(*slot).Publish( sequence);
         if (sequence == maximum) break;
     }
     for (int read = 0; read < 4; ++read)
@@ -200,15 +214,15 @@ void TestSnapshotExchangeQueuedPublications()
     hs::RenderSnapshotExchange::Consumer maximum_consumer(maximum_ready);
     for (hs::Sequence sequence = maximum - 2;; ++sequence)
     {
-        const auto slot = maximum_ready.TryBeginWrite();
+        auto slot = maximum_ready.TryBeginWrite();
         Check(slot.has_value(), "maximum ready sequence fixture");
-        maximum_ready.Publish(*slot, sequence);
+        std::move(*slot).Publish( sequence);
         if (sequence == maximum) break;
         (void)maximum_consumer.AcquireLatest();
     }
-    const auto replace_maximum = maximum_ready.TryBeginWrite();
+    auto replace_maximum = maximum_ready.TryBeginWrite();
     Check(replace_maximum.has_value(), "UINT64_MAX ready slot is still an overwrite candidate");
-    maximum_ready.Abandon(*replace_maximum);
+    std::move(*replace_maximum).Abandon();
 }
 
 void TestSnapshotExchangeConcurrentOwnership()
@@ -229,13 +243,13 @@ void TestSnapshotExchangeConcurrentOwnership()
                 slot = exchange.TryBeginWrite();
             }
             if (!slot) return;
-            slot->storage->header.tick = sequence;
-            slot->storage->AddInstance({{static_cast<float>(sequence), 0, 0}, 0, {},
+            slot->Storage().header.tick = sequence;
+            slot->Storage().AddInstance({{static_cast<float>(sequence), 0, 0}, 0, {},
                                         0xFFFFFFFFu, hs::RenderMesh::Enemy});
             const auto previous_view = previous.View();
             // Copy the new producer state before publishing can release its slot.
-            next.CopyDynamicFrom(slot->storage->View());
-            exchange.Publish(*slot, sequence, sequence > 1 ? &previous_view : nullptr);
+            next.CopyDynamicFrom(slot->Storage().View());
+            std::move(*slot).Publish( sequence, sequence > 1 ? &previous_view : nullptr);
             previous.CopyDynamicFrom(next.View());
             if ((sequence & 7u) == 0) std::this_thread::yield();
         }

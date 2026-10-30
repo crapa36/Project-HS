@@ -52,7 +52,7 @@ struct HsLightGrid
     uint4 grid;
     uint4 limits;
 };
-HsLightGrid HsLoadLightGrid()
+HsLightGrid HsLoadLightGrid(uint4 dimensions, uint4 limits)
 {
     HsLightGrid grid;
     // CPU stores transposed DirectX matrices for column-major CBVs. A raw SRV
@@ -63,8 +63,8 @@ HsLightGrid HsLoadLightGrid()
         asfloat(HsLightRanges.Load4(80u)), asfloat(HsLightRanges.Load4(96u)), asfloat(HsLightRanges.Load4(112u))));
     grid.camera_origin_near = asfloat(HsLightRanges.Load4(192u));
     grid.extent_far_log = asfloat(HsLightRanges.Load4(208u));
-    grid.grid = HsLightRanges.Load4(224u);
-    grid.limits = HsLightRanges.Load4(240u);
+    grid.grid = dimensions;
+    grid.limits = limits;
     return grid;
 }
 
@@ -80,13 +80,25 @@ struct HsLightQuery
 };
 HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_query)
 {
-    const HsLightGrid grid = HsLoadLightGrid();
+    const uint4 dimensions = HsLightRanges.Load4(224u);
+    const uint4 limits = HsLightRanges.Load4(240u);
     HsLightQuery query = (HsLightQuery)0;
     query.mask = type_mask;
-    query.directional_count = grid.grid.w;
-    query.light_count = grid.limits.x;
+    query.directional_count = dimensions.w;
+    query.light_count = limits.x;
     query.world_query = force_world_query;
     if ((type_mask & HsLightLocalMask) == 0u) return query;
+    if (query.world_query)
+    {
+        query.local_cursor = query.directional_count;
+        return query;
+    }
+    if (query.light_count == query.directional_count)
+    {
+        query.local_cursor = HsLightMaskWords;
+        return query;
+    }
+    const HsLightGrid grid = HsLoadLightGrid(dimensions, limits);
     const float3 view = mul(float4(world - grid.camera_origin_near.xyz, 1.0), grid.world_to_view).xyz;
     const float4 clip = mul(float4(view, 1.0), grid.projection);
     if (!all(isfinite(view)) || !all(isfinite(clip)) || clip.w <= 0.0 ||

@@ -126,7 +126,7 @@ Result LtcLutSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
         view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.Texture2D.MipLevels=1;
         for(std::uint32_t i=0;i<2;++i) device->CreateShaderResourceView(storage->textures[i].resource.Get(),&view,storage->Srv(i));
-        storage->textures[0].resource->SetName(L"LtcInverseMatrix"); storage->textures[1].resource->SetName(L"LtcAmplitude");
+        HS_RENDERER_SET_DEBUG_NAME(storage->textures[0].resource.Get(), L"LtcInverseMatrix"); HS_RENDERER_SET_DEBUG_NAME(storage->textures[1].resource.Get(), L"LtcAmplitude");
         storage->bytes=storage->upload.allocation->GetSize();
         for(const auto &resource:storage->textures) storage->bytes+=resource.allocation->GetSize();
         candidate.storage_=std::move(storage); return Result::Success();

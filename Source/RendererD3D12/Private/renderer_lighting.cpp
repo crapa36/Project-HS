@@ -52,7 +52,7 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
         catch (const std::exception &error)
         { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
     }
-    return owner.volumetrics.Prepare(device.Get(), allocator, root_signature.Get(),
+    return owner.volumetrics.Prepare(device.Get(), allocator,
         candidate_config.volumetric_quality, QualityProfileFor(candidate_config.volumetric_quality == GraphicsOptionalQuality::Off
             ? GraphicsQuality::Low : static_cast<GraphicsQuality>(static_cast<unsigned>(candidate_config.volumetric_quality) - 1u)), capacity, kFrameCount, 256,
         [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
@@ -86,7 +86,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
         {
             static const auto products = [] {
                 std::vector<std::string> ids;
-                if (!brixelizer_native::EnumerateShaders([&](std::string_view id,std::span<const std::byte>) {
+                  if (!brixelizer_native::EnumerateShaderProducts([&](std::string_view id) {
                         ids.emplace_back(id);return true;
                     })) ids.clear();
                 for(UINT noise=0;noise<16;++noise)ids.push_back("render/texture/brixelizer_noise_"+std::to_string(noise)+".rpkg");
@@ -105,8 +105,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
         (request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_rate_cs.dxil"));
     available.adaptive_compute_consumer = available.adaptive_compute_consumer &&
         (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
-        (request.product_paths.contains("render/shader/adaptive_gtao_horizon_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_horizon_cs.dxil")) &&
-        (request.product_paths.contains("render/shader/adaptive_gtao_resolve_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_resolve_cs.dxil"));
+        (request.product_paths.contains("render/shader/adaptive_gtao_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_cs.dxil"));
     return ResolveRendererFeatures({request.ao_mode,
         request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
 }

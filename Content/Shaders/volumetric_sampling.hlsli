@@ -36,9 +36,20 @@ float3 VmRelativeAtDepth(float2 uv,float view_depth)
     const float zb=mul(float4(b.xyz,0.0),VmWorldToView).z;
     return a.xyz+(b.xyz-a.xyz)*((view_depth-za)/(zb-za));
 }
-float VmSegmentMeters(float2 uv,float near_depth,float far_depth)
+struct VmRayMetric { float meters_per_view_depth; };
+VmRayMetric VmPrepareRayMetric(float2 uv)
 {
-    return length(VmRelativeAtDepth(uv,far_depth)-VmRelativeAtDepth(uv,near_depth));
+    const float2 ndc=uv*float2(2.0,-2.0)+float2(-1.0,1.0);
+    float4 a=mul(float4(ndc,1.0,1.0),VmInverseViewProjection);
+    float4 b=mul(float4(ndc,0.5,1.0),VmInverseViewProjection);
+    a.xyz/=a.w; b.xyz/=b.w;
+    const float za=mul(float4(a.xyz,0.0),VmWorldToView).z;
+    const float zb=mul(float4(b.xyz,0.0),VmWorldToView).z;
+    VmRayMetric metric; metric.meters_per_view_depth=length(b.xyz-a.xyz)/abs(zb-za); return metric;
+}
+float VmSegmentMeters(VmRayMetric metric,float near_depth,float far_depth)
+{
+    return abs(far_depth-near_depth)*metric.meters_per_view_depth;
 }
 // Stable Beer-Lambert integral, including the zero-extinction limit. A short
 // series avoids cancellation of 1-exp(-tau) for optically thin intervals.
@@ -73,9 +84,10 @@ HsVolumetricTransport VmColumnTransport(int2 column,float depth)
         // Integrate the actual partial physical interval; interpolating L/T
         // linearly in logarithmic texture Z produces incorrect optical depths.
         const float2 column_uv=(float2(column)+0.5)*VmFroxelSize.zw;
+        const VmRayMetric ray_metric=VmPrepareRayMetric(column_uv);
         const float4 source=VmFilteredScattering.Load(int4(column,lower,0));
         result=VmCompose(result,VmIntegrateCoefficient(source,
-            VmSegmentMeters(column_uv,VmBoundaryDepth(float(lower)),min(depth,VmDepthRange.x))));
+            VmSegmentMeters(ray_metric,VmBoundaryDepth(float(lower)),min(depth,VmDepthRange.x))));
     }
     return result;
 }
@@ -116,12 +128,16 @@ HsVolumetricTransport VmColumnInterval(int2 column,float near_depth,float far_de
     if(last<=first) return result;
     const uint first_slice=min((uint)floor(log2(first/VmOriginNear.w)*float(VmCounts.y)/VmDepthRange.y),VmCounts.y-1u);
     const float2 column_uv=(float2(column)+0.5)*VmFroxelSize.zw;
+    const VmRayMetric ray_metric=VmPrepareRayMetric(column_uv);
+    float slice_start=VmBoundaryDepth(float(first_slice));
     [loop] for(uint slice=first_slice;slice<VmCounts.y;++slice)
     {
-        const float start=max(first,VmBoundaryDepth(float(slice)));
-        const float end=min(last,VmBoundaryDepth(float(slice+1u)));
+        const float start=max(first,slice_start);
+        const float slice_end=VmBoundaryDepth(float(slice+1u));
+        const float end=min(last,slice_end);
         if(end>start) result=VmCompose(result,VmIntegrateCoefficient(VmFilteredScattering.Load(int4(column,slice,0)),
-            VmSegmentMeters(column_uv,start,end)));
+            VmSegmentMeters(ray_metric,start,end)));
+        slice_start=slice_end;
         if(end>=last) break;
     }
     return result;

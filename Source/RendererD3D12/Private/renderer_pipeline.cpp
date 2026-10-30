@@ -52,19 +52,8 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
     if (request.packed_content) selected.selected_texture_feedback = true;
     return Result::Success();
 }
-Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
+Result D3D12Renderer::Impl::CreateRootSignature()
 {
-    pipeline_cache.ClearShaderOwners();
-    struct ShaderOwnerScope
-    {
-        RendererPipelineCache &cache;
-        ~ShaderOwnerScope() { cache.ClearShaderOwners(); }
-    } shader_owner_scope{pipeline_cache};
-    RendererConfig pipeline_config;
-    if (auto selected = SelectTextureFeedbackShaders(request, pipeline_config); !selected) return selected;
-    mesh_pipeline_pairs.clear();
-    virtual_shadow_indexed_pipelines.clear();
-    virtual_shadow_mesh_pipelines.clear();
     D3D12_DESCRIPTOR_RANGE1 texture_range{};
     texture_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     texture_range.NumDescriptors = kPostTextureDescriptorCount;
@@ -482,6 +471,24 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (auto registered = pipeline_cache.RegisterRootSignature(root_signature.Get(),
             {static_cast<const std::byte *>(root_blob->GetBufferPointer()), root_blob->GetBufferSize()});
         !registered) return registered;
+    return Result::Success();
+}
+
+Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
+{
+    pipeline_cache.ClearShaderOwners();
+    struct ShaderOwnerScope
+    {
+        RendererPipelineCache &cache;
+        ~ShaderOwnerScope() { cache.ClearShaderOwners(); }
+    } shader_owner_scope{pipeline_cache};
+    RendererConfig pipeline_config;
+    if (auto selected = SelectTextureFeedbackShaders(request, pipeline_config); !selected) return selected;
+    mesh_pipeline_pairs.clear();
+    virtual_shadow_indexed_pipelines.clear();
+    virtual_shadow_mesh_pipelines.clear();
+    if (auto root = CreateRootSignature(); !root) return root;
+    HRESULT result{S_OK};
 
     const auto register_shader_owner = [&](std::string_view logical_id,
         const std::vector<std::byte> &bytes,bool bytes_already_verified) -> Result {

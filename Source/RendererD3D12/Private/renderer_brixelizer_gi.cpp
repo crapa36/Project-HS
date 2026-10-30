@@ -97,6 +97,9 @@ struct BrixelizerStorage
         std::vector<ComPtr<ID3D12Resource>> resources;
         std::array<SceneShaderBinder,kStages> binders;
         SceneShaderBinder restore;
+#if HS_WITH_BRIXELIZER
+        std::shared_ptr<FfxBrixelizerBakedUpdateDescription> baked_update;
+#endif
     };
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
@@ -140,6 +143,8 @@ struct BrixelizerStorage
         bool retired{};
     };
     std::map<BufferKey,RegisteredBuffer> registered_buffers;
+    std::vector<BufferKey> wanted_buffer_keys;
+    std::vector<std::uint8_t> validated_geometry_flags;
     using InstanceKey=std::tuple<std::uint32_t,std::uint32_t,std::uint64_t>;
     struct StaticInstance
     {
@@ -148,6 +153,7 @@ struct BrixelizerStorage
         SoftwareSceneGeometry geometry{};
     };
     std::map<InstanceKey,StaticInstance> static_instances;
+    std::vector<InstanceKey> wanted_static_keys;
     std::vector<std::uint32_t> static_invalidation_masks;
 #endif
     ~BrixelizerStorage()
@@ -453,6 +459,7 @@ Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allo
     if(!support.supported)return Fail(ErrorCode::InvalidState,std::string(support.reason));
     auto s=std::make_shared<BrixelizerStorage>();s->device=device;s->allocator=allocator;s->root=root;s->extent=extent;
     s->settings=settings;s->slots.resize(frame_slots);s->shader_reader=reader;s->texture_catalog=texture_catalog;s->status.compiled=true;s->status.enabled=true;
+    for(auto &slot:s->slots)slot.baked_update=std::make_shared_for_overwrite<FfxBrixelizerBakedUpdateDescription>();
     if(ffxBrixelizerGetEffectVersion()!=FFX_SDK_MAKE_VERSION(1,0,0)||ffxBrixelizerGIGetEffectVersion()!=FFX_SDK_MAKE_VERSION(1,0,1))
         return Fail(ErrorCode::InvalidState,"Linked Brixelizer effect versions do not match the pinned SDK1.1.4 contract.");
     const auto backend_bytes=ffxGetScratchMemorySizeDX12(2);
@@ -464,7 +471,8 @@ Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allo
     FfxBrixelizerRawContext *raw_context{};
     if(auto result=Sdk("ffxBrixelizerGetRawContext",ffxBrixelizerGetRawContext(s->sdf.get(),&raw_context));!result)return result;
     if(auto result=brixelizer_native::CreateSlots(s->backend,raw_context,frame_slots,s->backend_slots);!result)return result;
-    s->status.cpu_bytes=backend_bytes+sizeof(FfxBrixelizerContext)+sizeof(FfxBrixelizerGIContext)+sizeof(FfxBrixelizerBakedUpdateDescription);
+    s->status.cpu_bytes=backend_bytes+sizeof(FfxBrixelizerContext)+sizeof(FfxBrixelizerGIContext)+
+        s->slots.size()*sizeof(FfxBrixelizerBakedUpdateDescription);
     s->status.physical_cascades=settings.logical_cascades*3;
     if(auto result=Texture(device,allocator,{FFX_BRIXELIZER_STATIC_CONFIG_SDF_ATLAS_SIZE,FFX_BRIXELIZER_STATIC_CONFIG_SDF_ATLAS_SIZE},
         DXGI_FORMAT_R8_UNORM,s->atlas,FFX_BRIXELIZER_STATIC_CONFIG_SDF_ATLAS_SIZE);!result)return result;
@@ -585,8 +593,12 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         in.geometries.size()>UINT32_MAX||in.instances.size()>UINT32_MAX)
         return Fail(ErrorCode::InvalidArgument,"Brixelizer scene requires a completed frame slot, monotonic frame and backed owners.");
     // Validate every input before mutating SDK CPU identity and invalidations.
-    std::set<BrixelizerStorage::InstanceKey> wanted_static;
-    std::set<BrixelizerStorage::BufferKey> wanted_buffers;
+    auto &wanted_static=s->wanted_static_keys;
+    wanted_static.clear();wanted_static.reserve(in.instances.size());
+    auto &wanted_buffers=s->wanted_buffer_keys;
+    wanted_buffers.clear();wanted_buffers.reserve(in.geometries.size()*2u);
+    auto &validated_geometries=s->validated_geometry_flags;
+    validated_geometries.assign(in.geometries.size(),0);
     BrixelizerStatus counts=s->status;counts.static_instances=counts.dynamic_instances=0;
     counts.unsupported_masked=in.excluded_masked_count;counts.unsupported_thin=in.excluded_thin_count;
     counts.excluded_translucent=in.excluded_translucent_count;
@@ -602,16 +614,29 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
             !Finite(instance.bounds_min)||!Finite(instance.bounds_max)||instance.bounds_min.x>instance.bounds_max.x||
             instance.bounds_min.y>instance.bounds_max.y||instance.bounds_min.z>instance.bounds_max.z)
             return Fail(ErrorCode::InvalidArgument,"Invalid Brixelizer scene instance identity, world transform or conservative bounds.");
-        const auto &g=in.geometries[instance.geometry_index];if(auto result=ValidateGeometry(nullptr,g);!result)return result;
+        const auto &g=in.geometries[instance.geometry_index];
+        if (!validated_geometries[instance.geometry_index])
+        {
+            if (auto result=ValidateGeometry(nullptr,g);!result)return result;
+            validated_geometries[instance.geometry_index] = 1;
+            wanted_buffers.push_back({g.vertices,g.generation});wanted_buffers.push_back({g.indices,g.generation});
+        }
         if(!g.opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)
             return Fail(ErrorCode::InvalidArgument,"Masked/thin leaves need authored coverage triangles or an explicit unsupported domain.");
         const BrixelizerStorage::InstanceKey key{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
-        if(!g.dynamic&&!wanted_static.insert(key).second)return Fail(ErrorCode::InvalidArgument,"Duplicate static Brixelizer identity.");
-        wanted_buffers.insert({g.vertices,g.generation});wanted_buffers.insert({g.indices,g.generation});
+        if(!g.dynamic)wanted_static.push_back(key);
         if(g.dynamic)++counts.dynamic_instances;else ++counts.static_instances;
     }
+    // Sorted reusable keys retain the same tuple/pair ordering without one
+    // separately allocated tree node per current scene key.
+    std::ranges::sort(wanted_static);
+    if(std::adjacent_find(wanted_static.begin(),wanted_static.end())!=wanted_static.end())
+        return Fail(ErrorCode::InvalidArgument,"Duplicate static Brixelizer identity.");
+    std::ranges::sort(wanted_buffers);
+    wanted_buffers.erase(std::unique(wanted_buffers.begin(),wanted_buffers.end()),wanted_buffers.end());
     std::size_t invalidations{};
-    for(const auto &[key,instance]:s->static_instances)if(!wanted_static.contains(key))++invalidations;
+    for(const auto &[key,instance]:s->static_instances)
+        if(!std::binary_search(wanted_static.begin(),wanted_static.end(),key))++invalidations;
     for(const auto &instance:in.instances)
     {
         if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)continue;
@@ -637,14 +662,15 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     for(auto it=s->registered_buffers.begin();it!=s->registered_buffers.end();)
     {
         auto &buffer=it->second;
-        if(wanted_buffers.contains(it->first)){buffer.retired=false;buffer.pending_cascades=0;}
+        if(std::binary_search(wanted_buffers.begin(),wanted_buffers.end(),it->first))
+        {buffer.retired=false;buffer.pending_cascades=0;}
         if(buffer.retired&&!buffer.pending_cascades&&buffer.completion.IsSatisfiedBy(in.completed))
         {if(auto result=Sdk("ffxBrixelizerUnregisterBuffers",ffxBrixelizerUnregisterBuffers(s->sdf.get(),&buffer.id,1));!result)return mutation_failure(result);
             it=s->registered_buffers.erase(it);}else ++it;
     }
     for(auto it=s->static_instances.begin();it!=s->static_instances.end();)
     {
-        if(!wanted_static.contains(it->first))
+        if(!std::binary_search(wanted_static.begin(),wanted_static.end(),it->first))
         {if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&it->second.native_id,1));!result)return mutation_failure(result);
             it=s->static_instances.erase(it);}else ++it;
     }
@@ -662,15 +688,16 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         if(!g.dynamic)s->static_instances.emplace(key,BrixelizerStorage::StaticInstance{id,instance,g});
     }
     for(auto &[key,buffer]:s->registered_buffers)
-        if(!wanted_buffers.contains(key)&&!buffer.retired)
+        if(!std::binary_search(wanted_buffers.begin(),wanted_buffers.end(),key)&&!buffer.retired)
         {buffer.retired=true;buffer.pending_cascades=(1u<<s->settings.logical_cascades)-1u;buffer.completion=s->completion;}
     s->status=std::move(counts);
     FfxBrixelizerUpdateDescription update{};update.resources=SdfResources(*s,FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     update.frameIndex=std::uint32_t(in.frame_index);update.sdfCenter[0]=in.sdf_center.x;update.sdfCenter[1]=in.sdf_center.y;update.sdfCenter[2]=in.sdf_center.z;
     update.maxReferences=s->settings.max_references;update.triangleSwapSize=s->settings.triangle_swap_bytes;update.maxBricksPerBake=s->settings.max_bricks_per_bake;
-    // Pinned BakeUpdate clears the entire descriptor before writing any field.
-    // Avoid value-zeroing the same 8 MiB allocation immediately beforehand.
-    std::size_t scratch_bytes{};update.outScratchBufferSize=&scratch_bytes;p.baked=std::make_shared_for_overwrite<FfxBrixelizerBakedUpdateDescription>();
+    // Retained callbacks keep their object; the SDK clears an exclusive one.
+    std::size_t scratch_bytes{};update.outScratchBufferSize=&scratch_bytes;
+    p.baked=slot.baked_update.use_count()==1?slot.baked_update:
+        std::make_shared_for_overwrite<FfxBrixelizerBakedUpdateDescription>();
     if(auto result=Sdk("ffxBrixelizerBakeUpdate",ffxBrixelizerBakeUpdate(s->sdf.get(),&update,p.baked.get()));!result)return mutation_failure(result);
     if(scratch_bytes>Bytes(s->scratch))
     {
@@ -719,11 +746,6 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
         return Fail(ErrorCode::InvalidState,"Brixelizer graph layout changed after current SDK preparation.");
     if(capture)
     {
-        p.record.geometry_reads.clear();
-        for(const auto &geometry:in.geometries)
-        {p.record.geometry_reads.push_back({geometry.vertex_version,Access::ComputeRead});
-         p.record.geometry_reads.push_back({geometry.index_version,Access::ComputeRead});}
-        p.record.unique_geometry_reads=UniqueGeometryReads(p.record.geometry_reads);
         *capture={};capture->record=p.record;
     }
     p.capture=capture;p.retained=retained;
@@ -735,7 +757,6 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     if(!pass)return Fail(ErrorCode::InvalidState,"Brixelizer SDF pass does not match retained plan.");
     if(retained){p.sdf_versions=retained->sdf_versions;p.sdf_read_versions=retained->sdf_read_versions;}
     std::size_t sdf_index{};
-    std::set<std::tuple<std::uint32_t,ResourceKind,std::uint32_t>> geometry_reads;
     std::vector<ExternalResourceAccess> native_accesses;
     const auto add_native_access = [&](ResourceHandle resource, Access access) -> Result {
         if (!resource) return Result::Success();
@@ -751,20 +772,10 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
         native_accesses.push_back({resource, access, access});
         return Result::Success();
     };
-    for(const auto &g:in.geometries)
+    for(const auto &read:p.record.unique_geometry_reads)
     {
-        if(g.vertex_version.resource && geometry_reads.emplace(g.vertex_version.resource.value,
-                g.vertex_version.resource.kind,g.vertex_version.ordinal).second)
-        {
-            if(!retained)pass->Read(g.vertex_version,Access::ComputeRead);
-            if(auto result=add_native_access(g.vertex_version.resource,Access::ComputeRead);!result)return result;
-        }
-        if(g.index_version.resource && geometry_reads.emplace(g.index_version.resource.value,
-                g.index_version.resource.kind,g.index_version.ordinal).second)
-        {
-            if(!retained)pass->Read(g.index_version,Access::ComputeRead);
-            if(auto result=add_native_access(g.index_version.resource,Access::ComputeRead);!result)return result;
-        }
+        if(!retained)pass->Read(read.version,read.access);
+        if(auto result=add_native_access(read.version.resource,read.access);!result)return result;
     }
     const auto add_sdf = [&](const Allocation &allocation, bool read_by_gi) -> Result {
         const auto imported=impl_->Import(graph,allocation,"BrixelizerSdfBacking");
@@ -797,21 +808,22 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     pass->SetExecuteOnOwner([s,baked=p.baked,slot_index=p.slot,scratch=s->scratch,
         native_accesses=std::move(native_accesses)](RenderPassContext &ctx)->Result
     {
+        Result batch=Result::Success();
         const auto execute_native = [&]() -> Result {
             if(auto result=brixelizer_native::BeginFrame(*s->backend_slots,slot_index);!result)return result;
             if(auto result=brixelizer_native::BeginBatch(*s->backend_slots);!result)return result;
             const auto error=ffxBrixelizerUpdate(s->sdf.get(),baked.get(),Resource(scratch->resource.Get(),FFX_RESOURCE_STATE_UNORDERED_ACCESS,4),
                 ffxGetCommandListDX12(static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList())));
-            const auto batch=brixelizer_native::BatchResult(*s->backend_slots);
+            batch=brixelizer_native::BatchResult(*s->backend_slots);
             brixelizer_native::EndBatch(*s->backend_slots);
-            auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());cmd->SetComputeRootSignature(s->root.Get());
-            const auto restored=s->slots[slot_index].restore?s->slots[slot_index].restore(cmd):Result::Success();
-            if(error!=FFX_OK||!batch||!restored){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
-            if(error!=FFX_OK)return Sdk("ffxBrixelizerUpdate",error);if(!batch)return batch;return restored;
+            static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList())->SetComputeRootSignature(s->root.Get());
+            if(error!=FFX_OK)return Sdk("ffxBrixelizerUpdate",error);return batch;
         };
         const auto result=ctx.RecordLegacyResourceCommands(native_accesses,execute_native);
-        if(!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
-        return result;
+        auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
+        const auto restored=s->slots[slot_index].restore?s->slots[slot_index].restore(cmd):Result::Success();
+        if(!result||!batch||!restored){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
+        if(!result)return result;if(!batch)return batch;return restored;
     });
     out={p.sdf_versions.front(),counts.static_instances+counts.dynamic_instances};return Result::Success();
 #endif
@@ -1083,22 +1095,23 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         {desc.cascadeAABBTrees[i]=resources.cascadeResources[i].aabbTree;desc.cascadeBrickMaps[i]=resources.cascadeResources[i].brickMap;}
         desc.outputDiffuseGI=Resource(s->screens[RawDiffuse]->resource.Get(),FFX_RESOURCE_STATE_UNORDERED_ACCESS);
         desc.outputSpecularGI=Resource(s->screens[RawSpecular]->resource.Get(),FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        Result batch=Result::Success();
         const auto execute_native = [&]() -> Result {
             if(auto result=Sdk("ffxBrixelizerGetRawContext",ffxBrixelizerGetRawContext(s->sdf.get(),&desc.brixelizerContext));!result)return result;
             if(auto result=brixelizer_native::BeginBatch(*s->backend_slots);!result)return result;
             auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             const auto error=ffxBrixelizerGIContextDispatch(s->gi.get(),&desc,ffxGetCommandListDX12(cmd));
-            const auto batch=brixelizer_native::BatchResult(*s->backend_slots);
+            batch=brixelizer_native::BatchResult(*s->backend_slots);
             brixelizer_native::EndBatch(*s->backend_slots);
-            // Native kernels replace descriptor heaps, root signature and PSO.
-            // Restore renderer heaps/root/tables even when native recording failed.
-            cmd->SetComputeRootSignature(s->root.Get());const auto restored=restore(cmd);
-            if(error!=FFX_OK||!batch||!restored){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
-            if(error!=FFX_OK)return Sdk("ffxBrixelizerGIContextDispatch",error);if(!batch)return batch;return restored;
+            cmd->SetComputeRootSignature(s->root.Get());
+            if(error!=FFX_OK)return Sdk("ffxBrixelizerGIContextDispatch",error);return batch;
         };
         const auto result=ctx.RecordLegacyResourceCommands(native_accesses,execute_native);
-        if(!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
-        return result;
+        // Restore only after the legacy/enhanced handoff has finished so the
+        // static renderer tables are not rebound before the handoff barriers.
+        const auto restored=restore(static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList()));
+        if(!result||!batch||!restored){s->usable=false;s->status.faulted=true;s->status.native_ready=false;}
+        if(!result)return result;if(!batch)return batch;return restored;
     });
     auto resolve=impl_->Pass(graph,6,263,"BrixelizerMaterialResolve");
     if(!resolve)return Fail(ErrorCode::InvalidState,"Brixelizer material resolve pass does not match retained plan.");

@@ -934,50 +934,9 @@ void TestHitIndexCleanup()
     Check(records.size() == 1, "empty rebuild accepts full-width identifiers");
 }
 
-template <typename Index>
-std::pair<double, std::uint64_t> BenchmarkHitIndex(bool combined_lookup)
-{
-    using Key = std::pair<std::uint64_t, std::uint64_t>;
-    const auto start = std::chrono::steady_clock::now();
-    std::uint64_t checksum{};
-    for (unsigned pass = 0; pass < 12; ++pass)
-    {
-        Index index;
-        if constexpr (requires { index.reserve(1024); }) index.reserve(1024);
-        std::vector<std::pair<Key, std::uint8_t>> records;
-        records.reserve(1024);
-        for (std::uint64_t operation = 0; operation < 65536; ++operation)
-        {
-            const auto value = (operation * 4051) % 16384;
-            const Key key{value / 64, (value % 64) * 65537};
-            std::size_t row;
-            bool inserted;
-            if (combined_lookup)
-            {
-                const auto result = index.try_emplace(key, records.size());
-                row = result.first->second; inserted = result.second;
-            }
-            else
-            {
-                const auto found = index.find(key);
-                inserted = found == index.end();
-                row = inserted ? records.size() : found->second;
-                if (inserted) index.emplace(key, row);
-            }
-            if (inserted) records.push_back({key, 0});
-            ++records[row].second;
-        }
-        std::erase_if(records, [](const auto &record) { return record.first.first < 128; });
-        index.clear();
-        for (std::size_t row = 0; row < records.size(); ++row) index.emplace(records[row].first, row);
-        for (const auto &[key, count] : records)
-            checksum += key.first + key.second + count + index.find(key)->second;
-    }
-    return {std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), checksum};
-}
 }
 
-int main(int argc, char **argv)
+int main()
 {
 #ifdef _MSC_VER
     _set_error_mode(_OUT_TO_STDERR);
@@ -986,15 +945,6 @@ int main(int argc, char **argv)
     using namespace hs::gameplay_detail;
     try
     {
-        if (argc == 2 && std::string_view(argv[1]) == "--benchmark-hit-index")
-        {
-            const auto old = BenchmarkHitIndex<std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t>>(false);
-            const auto current = BenchmarkHitIndex<hs::CombatState::HitIndex>(true);
-            Check(old.second == current.second, "hit index benchmark preserves checksum");
-            std::cout << "hit_index_tree_ms=" << old.first << " hit_index_hash_ms=" << current.first
-                      << " workload_checksum=" << current.second << '\n';
-            return 0;
-        }
         TestActorColumnStorage();
         TestSmallFactsIgnoreNoOpMutation();
         TestSimulationIdentityExhaustion();

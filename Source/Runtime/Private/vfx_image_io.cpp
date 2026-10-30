@@ -3106,7 +3106,6 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     loaded.has_typed_wavefront = std::ranges::any_of(cooked_program.effect_lookup, [](const auto &effect) {
         return effect.effect_id == MakeAssetId("particle.boss.shockwave.wavefront").value;
     });
-    std::uint32_t mapped{}, unmapped{};
     for (const auto &definition : loaded.definitions)
     {
         const auto lookup = std::find_if(cooked_program.effect_lookup.begin(), cooked_program.effect_lookup.end(),
@@ -3146,12 +3145,9 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
                     }
                 }
             }
-            if (selected && !ambiguous) { loaded.authored_mesh_indices[ei] = selected; ++mapped; }
-            else ++unmapped;
+            if (selected && !ambiguous) loaded.authored_mesh_indices[ei] = selected;
         }
     }
-    std::clog << "vfx.authored_mesh mapped_emitters=" << mapped << " unmapped_emitters=" << unmapped
-              << " policy=primitive_compatible_unique_shape motion=legacy\n";
     loaded.sprite_count = header.sprite_count;
     loaded.payload_hash = header.payload_hash;
     loaded.has_required_sprite_bindings = true;

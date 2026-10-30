@@ -121,15 +121,18 @@ float2 PageAxisBounds(int key, float side, float guard)
     const float lower = float(key) * side - guard;
     return float2(lower, lower + side + 2.0 * guard);
 }
-bool SphereOverlaps(float4 sphere, PageEntry page)
+bool SphereOverlapsLight(float4 sphere, PageEntry page, float3 light)
 {
-    const float3 light = LightPosition(sphere.xyz);
     const float guard = Clipmaps[page.level].y * 2.0;
     const float2 x = PageAxisBounds(page.x, Clipmaps[page.level].x, guard);
     const float2 y = PageAxisBounds(page.y, Clipmaps[page.level].x, guard);
     return sphere.w >= 0.0 && light.x + sphere.w >= x.x && light.y + sphere.w >= y.x &&
         light.x - sphere.w <= x.y && light.y - sphere.w <= y.y && light.z + sphere.w >= Depth.x &&
         light.z - sphere.w <= Depth.x + Depth.w;
+}
+bool SphereOverlaps(float4 sphere, PageEntry page)
+{
+    return SphereOverlapsLight(sphere, page, LightPosition(sphere.xyz));
 }
 // Binary searches use the same inclusive float boundaries as SphereOverlaps.
 bool CandidateAxisRange(float minimum, float maximum, int origin, int side, float page_side,
@@ -349,23 +352,22 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
         }
     }
 }
-bool DrawCandidate(PageEntry page, Caster caster, out uint layer, out uint segment)
+bool DrawCandidate(PageEntry page, Caster caster, float3 light, out uint layer, out uint segment)
 {
     layer = (caster.properties.x & 4u) != 0u ? 0u : 1u;
     segment = layer * (Frame.w / 2u) + caster.indexed.x;
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u ||
         (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
     if(layer==0u && (caster.properties.x & 64u)!=0u && BakedPageOffset(page)!=0xffffffffu) return false;
-    return SphereOverlaps(caster.current_bounds, page);
+    return SphereOverlapsLight(caster.current_bounds, page, light);
 }
-void CullPageCaster(uint entry, uint caster_index)
+void CullPageCaster(uint entry, Caster caster, float3 light)
 {
     const PageEntry page = PageTable[entry];
-    // Reject the whole page before fetching its per-caster data.
+    // Reject the whole page before running its candidate predicate.
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u) return;
-    const Caster caster = Casters[caster_index];
     uint layer, segment;
-    if (!DrawCandidate(page, caster, layer, segment)) return;
+    if (!DrawCandidate(page, caster, light, layer, segment)) return;
     if (ClearEntry == 0u)
     {
         uint ignored;
@@ -429,7 +431,7 @@ void CullCasterCandidates(uint caster_index)
                 while (mask != 0u)
                 {
                     const uint entry = PopRequestedEntry(word, mask);
-                    if (entry < Counts.z) CullPageCaster(entry, caster_index);
+                    if (entry < Counts.z) CullPageCaster(entry, caster, light);
                 }
             }
         }

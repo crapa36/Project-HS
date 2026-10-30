@@ -129,6 +129,7 @@ struct Arguments
         static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
         nullptr, nullptr, nullptr);
     CloseHandle(file);
+    if (written != TRUE) DeleteFileW(path.c_str());
     return written == TRUE;
 }
 

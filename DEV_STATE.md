@@ -1,10 +1,9 @@
 # DEV_STATE
 
 AI implementation continuity only. Current base:
-a7739b0 (Harden runtime, renderer, and content workflows), committed externally
-while the analysis was in progress. The saved61-file native source receipt still
-matches byte-for-byte. Current branch: codex/engine-health-20261029; source edits
-are uncommitted, no push. Preserve the user's main/commit.
+ed75a66 (Harden runtime and renderer workflows), committed externally while
+Release exclusion work was in progress. Current branch: main. Preserve the user's
+commits and dirty files; no agent commit/push. Use main unless isolation is needed.
 The dirty worktree is authoritative. Preserve unrelated changes and
 .codex-remote-attachments/. No new commit/push/worktree is requested.
 
@@ -12,8 +11,24 @@ The dirty worktree is authoritative. Preserve unrelated changes and
 
 Goal ACTIVE: finish accepted reviews/directives and Debug /Od/assertions/checked
 iterators,1080pUltra100%,200enemies,60FPS. Not achieved.
-Latest priority: analyze tests, Desloppify findings/scores and GPU pass timings,
-fix justified issues, then continue directives. The foreground Debug200 run in
+Latest priority: continue measured core bottleneck improvements with tests, plus
+the module-wide review of unnecessary checks/dependencies and invalid states.
+Do not simply remove guards or add managers/checkers. Keep actual data/ABI/
+lifetime contracts, actionable failures, requested profiling and game control.
+Current work: Build/frontend-qualification-20261030/RESULTS.ko.md.
+P0: prior SDK-OFF 200-enemy DEVICE_HUNG reproduced on Visibility and Compact,
+also with GPU timings OFF; CBV-volatile trial failed and was reverted. After
+immutable texture state fixes the same SDK-OFF Compact control now passes three
+consecutive1800tick runs. This is improvement evidence, not proof of complete
+intermittent-hang resolution. DRED's active volume dispatch is not root cause.
+Accepted earlier report: Build/further-optimization-20261030/RESULTS.ko.md.
+Earlier GPU/module pass: Build/additional-gpu-20261029/CONTINUATION.md.
+Earlier logging/test cleanup: Build/test-prune-20261029/RESULTS.ko.md.
+Release exclusion evidence is a prior source checkpoint and does not qualify
+subsequent edits. Latest Debug200 timing is recorded below from actual foreground flags;
+it does not qualify fullUltra GI or60FPS.
+Prior test/Desloppify/GPU analysis remains valid only for its recorded source.
+The foreground Debug200 run in
 Build/foreground-200-20261029/ completes1800ticks/799frames, exit0. Selected
 foreground587frames/19.791s average29.609FPS,1%low27.108FPS (slowest6 intervals).
 Actual GI is Probe fallback, not fullUltra GI; target60FPS remains unmet.
@@ -35,6 +50,298 @@ Linux execution is removed by user request: Windows-only CI and presets.
 Keep Windows low-level/portable checks; no Linux qualification remains required.
 
 ## Current implementation
+
+- Current qualification: pinned SDK-OFF Debug1080pUltra200 control fails on
+  Visibility (57frames in repeated OFF runs), Compact/Enhanced (183frames),
+  GPU timing OFF (128frames) and CBV-volatile trial (133frames). The flag trial
+  is reverted. Compact/Legacy passes one1800tick/721frame run, not a resolution.
+  Validation+GBV existing lockstep600ticks/600frames passes validation0 and
+  light1/decal4 coverage. The GBV child process and explicit shutdown completed;
+  neither validation-ON success nor timing OFF failure resolves OFF stability.
+  Failure-only DRED now emits active/pending before completed nodes, capped128,
+  with complete counts and no new allocation. Experiment spec exposes the
+  existing lockstep switch; existing runtime.integration passes1/1.
+  After fixes, pinned SDK-OFF Compact control15D728DD...B7E77 passes3/3 runs,
+  each1800ticks with actual light1/decal4, zero unsupported/dropped VFX. Full
+  own-frame GPU coverage is complete; utility sampler was not launched for these
+  controls, so analysis is partial and GPU utilization/critical path unavailable.
+  verify-core passes19/19 and final Release SDK-OFF renderer library builds.
+
+- Optional Brixelizer SDK1.1.4 is prepared/verified; msvc-debug cache is now ON.
+  Full shader tables link only into the build producer; runtime links generated
+  immutable bindings/size/SHA and reads selected Generation DXIL. All732 entries
+  and7binding groups compare equal to official tables; invalid5keys rejected;
+  repeat emission is byte-identical/mtime-stable. No runtime binary catalog or
+  generic manager added. Runner link excludes full tables; current exe27231744B.
+  Source define scoped to2TUs, producer action.cpp duplication removed. PDB error
+  was restricted worker execution; actual host /Zi build passes. Removed temporary
+  /Z7 workaround, preserving Debug flags (existing frame.cpp /Od+/Ob2 retained).
+  SDK RGBA LUT sample reads.xy. License uses source/brixelizer, not GPU resources;
+  optional install carries authoritative MIT license. Removed duplicate provenance
+  product: existing Action receipt already owns all inputs/products. All749retained
+  IDs/digests/sizes/dependencies unchanged, metadataF1CC3B...A11281 unchanged. This
+  also avoids producer-only provenance entering semantic image identity.
+  Initial10629 SDK-ON validation errors were traced to packaged immutable character
+  arrays left in legacy SRV state and repeated Hero ShaderRead/GI AllShaderRead
+  transitions. Upload now uses legacyCOPY_DEST→COMMON→enhancedSHADER_RESOURCE before
+  static bindings, retainingAllShaderRead at all family consumers. Existing texture
+  helper no longer treats COMMON/PRESENT's shared zero as never-accessed; real copy
+  work remains synchronized. SDK restore bindings follow the external handoff.
+  Actual SDF/GI/material/cache fixture passes21frames validation0; GBV also passes
+  21frames/explicit shutdown/terminal exit0 in255.29s. No barrier/descriptor guards
+  or static flags were weakened. Final SDK-ON ProjectHS/experiment/runner build;
+  cache ON, current runtime-full56189af3...9411, old control pointers preserved.
+  FullUltra200 SDK-ON baseline completes1800ticks/610frames, validation0. Stable
+  graph_resources CPU15.866ms and CSM GPU6.488ms identify the next bottlenecks.
+  CPU candidate reuses per-slot8,397,504B baked-update descriptions while exclusively
+  owned (borrowed owners get a fallback), reusable flat wanted-key vectors and
+  once-per-geometry validation/key collection. SDK-required full clear is retained;
+  persistent CPU capacity increases by three descriptions, not a memory saving.
+  Camera-GBuffer GI seed uses the camera receiver guarantee; its prior unmatched
+  SoftwareGI receiver bit forced CSM despite complete baked coverage. Actual
+  froxel/world receivers and all guarantee/readiness checks remain. Existing CPU
+  render-package/feature/Brix-input tests3/3 and native21frame validation0 pass.
+  The combined candidate then fails DEVICE_HUNG after238frames (last render tick720)
+  in native-ultra-after-cpu-csm. DRED active VolumetricDensity is not root-cause proof.
+  Do not publish failed-run FPS or qualify the candidate. Existing experiment config
+  can now override volumetric quality alone for isolation; runtime.integration1/1
+  passes. Volume-OFF-only isolation3/3 completes1800ticks (763/762/756frames).
+  FullUltra candidate retry fails267frames, and Legacy barriers also fail
+  (native-ultra-candidate-legacy-1). Thus Enhanced barriers alone are not the
+  explanation; do not switch defaults as a workaround. All failed captures remain
+  partial (missing GPU tail); complete OFF captures are partial only for unavailable
+  whole-device NVIDIA samples. Full-quality qualification remains. Latest60FPS is
+  unproven. Completed SDK-OFF
+  GBVraw72files/1249818712B removed; evidence retained.
+  CPU candidate native GI fixture also passes21frames/GBV0/terminal exit0 in254.45s
+  (sdk/native-gi-cpu-csm-gbv). Subsequent geometry-read cleanup reuses the prepared
+  unique tokens for cold capture and pass declarations, removing duplicate vector
+  reconstruction and std::set; graph-aware validation/access-conflict checks remain.
+  Normal candidate exe/PDB are pinned before a temporary full-GPU-drain isolation
+  binary. Serial isolation3/3 completes1800ticks; this is not performance proof or
+  root-cause proof. Diagnostic drain was removed immediately after linking; frame
+  source hash exactly restored and all normal apps rebuilt. No final per-frame wait.
+  Failure reproduced under local CDB with normal source; alive7.74GB process dump
+  is preserved with matching private PDB in native-ultra-alive-dump-3. Strict symbol
+  reload (LOAD_ANYTHING disabled) confirms current mapped3CBVs each have1volume,
+  96slices,240x135froxels and sequential frame307/308/309. This excludes an observed
+  CPU count overwrite, not a GPU descriptor/lifetime fault. No definitive cause yet.
+  Terrain view normalization moves before the active-layer loop; cooked actualDXIL
+  has one dot/rsqrt before loop header. Per-layer POM/samples/quality unchanged.
+  Native final-declarations fixture passes validation0/exit0 after this cook and
+  duplicate geometry-read cleanup; currentruntime-full8a785e6b...c4e111. Final
+  normal Debug apps and ReleaseSDK-OFF renderer build pass. FullUltra200 final
+  terrain replay fails267CPUframes/264GPUframes, so the current candidate remains
+  unqualified for stability/FPS. No speculative synchronization/flag changes kept.
+  Old/current actual terrain DXIL confirm dot/rsqrt moves from active-layer loop
+  to preheader; not merely a source edit. P0 next: actual GPU table/dispatch and
+  inter-frame use, not CPU constant count corruption or Enhanced-only behavior.
+  Complete baseline has149scheduled pass rows,116measured; unmeasured stay N/A.
+  Preserved valid dump7743787037B and matching symbols; removed6empty dumps and
+  invalid relocated pointer. CDB and diagnostic replay processes are gone.
+
+- Follow-up queue isolation uses a pinned temporary binary only. Before volume
+  registration, waiting prior frame Direct completion passes1800ticks/499frames;
+  Compute completion passes1800ticks/626frames; Copy-only fails233frames. No
+  wait code/environment switch remains in production source. This narrows overlap,
+  not a proven faulty resource. Source audit found no un-fenced off-graph writer.
+  A proposed unchanged-static lookup cache passed native but measured no resource-
+  preparation improvement (13.358–13.453ms before vs13.414ms after in volume-OFF
+  component scope), so both added scratch vectors/scan/fast-path were removed.
+  Preserve prior pooled-baked/flat-key/prepared-unique-read changes.
+  Volume compute now owns one root table with41descriptors rather than cloning
+ 1392scene entries plus27volume entries and inheriting global bind_compute/root37.
+  CBV stays a bounded descriptor with originalflags; SRV/UAV flags/fences/graph
+  declarations unchanged. Sources:27volume,1gradient,3light,6VSM,4local-shadow.
+  Existing canonical-null initialization separates compact volume from full
+  geometry/Brix banks; Brix/view-skin offsets follow actual compact capacity.
+  Debug apps, ReleaseSDK-OFF renderer and CPU4/4 pass. Actual native21frame fixture
+  validation0/exit0 passes; GBV reportsvalidation0 but terminal process pending.
+  Current native fixture waits streaming perframe; it cannot qualify OFF overlap.
+  Exact same-generation captures have max4/255channel difference; existing
+  same-root repeats also vary by4/255, not a bit-identical oracle. Normal fullUltra
+  stress of this new root remains to execute. Do not claim P0 fixed or60FPS.
+
+- Prior measured core bottleneck batch: frontend cache history eligibility is
+  checked before newest-candidate selection, using the same once-prepared camera,
+  reset and revisions as actual volumetric registration. MatchesProjectedLayout,
+  BindRetained, final native contract/alias/fence checks remain. Capacity8 unchanged.
+  Two frame import maps share16KiB stack-local PMR with ordinary upstream growth.
+  Terrain shares exact per-layer detail fade across3samples; half-resolution AO
+  skips duplicate first-guide read while preserving invalid-guide fields.
+  Reciprocal AO experiment was reverted; no quality/sample reduction. Off-volume
+  revision hashing stays skipped. Temporary rejection counters/writer removed.
+  Final Debug app/experiment/runner and Release renderer lib compile; AO realGPU+
+  GBV18cases/1812pairs bit-identical; world-transport21frames and owned-view3packages/
+  9submissions pass validation0. Actual ProjectHS smoke180ticks/2frames passes0errors.
+  Final200 native playback1800ticks/821frames passes, no device removal, assertions
+  true, validation0, complete own-frame GPU coverage821/821. Stable Main/config2
+  before/after602foreground frames each: frontend343->537hits; graph build mean
+  3.803->3.215ms; FPS30.101->30.121,1%low23.129->23.125,p9537.033->36.719ms,
+  p9941.929->42.282ms. No meaningful total-FPS gain;60FPS unmet. Final GBuffer7.726ms,
+  AO3.321ms,Hero1082.834ms; pass totals must not be added across overlapping queues.
+  True graph compile misses still cost about7ms; no unsupported cache-size change.
+  GPU utilization summary partial:1PDH counter error, whole-device NVIDIA CSV absent;
+  frame/pass timing coverage itself complete. Actual GI remains Probe fallback.
+  Measured candidate8ef1da725f86f6e11a2414b0e169bc6843369c4cfae0fd991b4dd2039f6601c0;
+  current runtime-full0d2c60c658e3db3f6b6f87065d1fad2f15b598c7de802a4ffb4202328b31b165.
+  All2903logical IDs/digests/sizes equal across these scopes;9shader+1baked-probe
+  products differ from987426 baseline. Official selected-generation composition only.
+  FullUltraGI/full-rendererGBVteardown/Release repack remain unqualified. One-shot
+  raw view payloads859805096B removed; receipts/images/metadata/timing CSV retained.
+
+- Further engine-comparison report R01–R11 has been read and dispositioned.
+  Hero/froxel queries use the existing complete3D light mask, retaining invalid/
+  off-frustum full scans and stable light order. Header-only fast paths skip
+  grid matrices/cells for zero locals, forced-world and directional-only queries;
+  actual DXIL confirms the zero-local branch precedes matrix loads. Volumetric
+  area shadows evaluate once at the first valid direction sample; column ray
+  metric and adjacent exact exp2 boundaries are shared. Actual RTX4080+GBV
+  baseline/candidate production-header numeric probe passes360cases, nonfinite0,
+  errors0; max relative transport delta7.08337e-7, not bitwise/pixel parity.
+  SSR reuses first footprint read, prepared BSDF sampling and Temporal center/
+  clamped guides. Full-closure forwarding across candidates was rejected after
+  DXIL buffer loads42->85; final minimal-guide variant has Trace42->38buffer,
+  36->31texture and Temporal200->160buffer,320->260texture loads. These are
+  compiled static-work observations, not frame-time or FPS improvements.
+  Masked material bindings form a conservative registered opacity texture union;
+  shadow/visibility passes declare only that domain and matching feedback writes.
+  Surface/resolve/probe-color retains all bindings; shared masked aliases stay.
+  Conditional material specialization, uncooked skin partial reduction, terrain/
+  foliage bake and SSR sparse list were reviewed against current owners and
+  quality/total-cost requirements; no unsupported new system was added.
+  Arrow Rain immutable route/radius/window now resolves once per adapter call
+  across current/previous endpoints. Ground suppresses legacy before generation;
+  the older generate/cancel TODO is stale. Existing T13 pre-ACK reservations and
+  separate native/Present receipts remain. Environment snapshot/cook bytes A3
+  already match in both batch and single-role paths; no duplicate fix was needed.
+  Strict probe capture now rejects an intrinsically impossible required mip set
+  against the configured native cap, independently of transient DXGI pressure;
+  only explicit wait_for_streaming capture fails intrinsically impossible admission;
+  ordinary asynchronous fallback remains. Existing real two-owner native allocation case and
+  WARP/GBV queue suite pass27.77s. CPU VFX/streaming/Runtime9/9 pass8.77s.
+  Debug app/tools/selected checks compile106.43s; Release renderer/Runtime libs
+  compile70.78s. Static bake narrows preparation to16authored material profiles/
+  parameters, skipping7Hero and decal work. Existing one-shot GBV120page fixture
+  passes5.01s, validation0, all16output metrics identical to the prior checkpoint.
+  Prior accepted content generation succeeds930.05s and selected
+  987426872b50f1a160170fe54959731392d4aecac3005d1b39bf16ba23beb754.
+  Compared with the preserved177948 baseline,2903products have64shader changes
+  and one recooked local_probes.spkg; do not call whole-image A/B shader-only.
+  Before/after light-list6 and Hero8frames pass validation0. All24light-list
+  HDR/depth/metadata raw resources are byte-identical; Hero204sample counter
+  totals match. These1280x720 fixtures are functional, not target performance.
+  World transport changes lights and needs native recapture. Source diagnosis
+  shows all22environment owners at software chunk4 (3uploads/4requests), target1,
+  resident fallback4 at frame7; private candidates publish only after final chunk.
+  This is insufficient fixture duration, not evidence of deadlock. Existing
+  streaming wait is enabled; native24face/SH/GGX completes in frames17-20.
+  Simplified fixture keeps required native work and SSRTrace/Temporal, uses32
+  as the failure bound and exits at actual readiness. Final default passes at
+  frame21, sample/source ready=true, validation0. No extra renderer retry loop.
+  Failure-only existing-API mip diagnostics remain actionable; no per-frame log.
+  Final strict-capture scope and runner changes compile in Debug/Release.
+  FullUltra GI, full-renderer GBV teardown and Release repack remain unqualified.
+  Current foreground component timing is superseded by the core batch above.
+
+- New GPU report A01/A02/A03/A05/A06/A07 implemented in source; A04 adjacent
+  sample skipping was evaluated and not adopted without real-scene net benefit
+  (extra comparisons/branches). AO fuses horizon/resolve and removes sparse
+  resource/pass, preserving compatibility fallback. Final production/probe
+  sources match;18 real GPU/GBV cases1812texel pairs are bit-identical to the
+  original two-pass path. Cluster moves immutable checks to admitted catalog/
+  frame setup, prepares original plane lengths, and uses unique representation
+  page ranges. Selected35hierarchies:13140clusters->7597page references,30388B.
+  Global catalog page offsets are rebased and checked on merge. Terrain/VSM/
+  Hero reduce actual DXIL work; this is not a whole-frame/FPS result.
+  Feature/native graph checks pass, then the first cluster integration exposed
+  a prior Release-strip debug-name regression: optional VSM roots were named
+  without being allocated. CDB+matchingPDB locate VirtualShadowSystem::Prepare
+  line747; names now occur only in their successful construction branch.
+  The corrected14frame visibility/cluster fixture passes with validation0 in
+  Build/additional-gpu-20261029/cluster-fixed/; old Artifacts/cluster-retest
+  receipts are stale and must not be reused. No other optional-name guard loss
+  was found. The CDB dump creation failed due its command-path quoting; stack
+  and source-symbol lookup, not a nonexistent dump, establish the cause.
+  WriteSlot now owns exchange+privateindex, is noncopyable/move-safe, publishes
+  through its owner and abandons via RAII. Existing scene-sample/Runtime tests
+  pass; OFF/OFF scene-sample passes. TaskSystem creates move-only, creator-bound
+  groups; foreign-system submission and retained task-label strings are removed.
+  Runtime/render runner/probe bake keep groups directly, removing the extra heap
+  wrapper per creation/join. Work state remains pinned across reentrant cancellation.
+  Audio stores actual mono spatial eligibility on successful voice admission;
+  listener changes retain voice/sample lifetime checks without rechecking format.
+  Per-instance SoftwareGI geometry validation
+  is deduplicated per referenced geometry for frame preparation; graph binding
+  validation remains. Hero's immutable admitted buffer/range pair no longer
+  queries its dimensions per pixel; dynamic material-slot rejection remains.
+  Current one-shot static-shadow bake API privately prepares capture resources
+  and selected PSOs, without game view/swapchain/post/UI/font/window creation.
+  It loads35terminal LOD2 pages instead of105metadata selections/70resident
+  LOD1+LOD2 payloads, and skips the global20environment fallback textures,
+  BRDF LUT, texture-streaming setup and reduced material fallback uploads.
+  Capture-only bindings are admitted against real catalog descriptors; private
+  full-chain uploads provide only authored opacity inputs (canopy, and grass if
+  ever statically admitted). Opaque material slots use typed null arrays and
+  create no texture resources. Actual production index/page digests are identical
+  across this last tightening. Canonical null SRVs now carry
+  their shader ABI types independently of live view initialization. Existing GBV
+  static-bake fixture passes:120pages, validation0, all recorded output metrics
+  equal to the full-loader checkpoint, repeat/guards/wind exclusion preserved.
+  Current Debug game and affected tools are relinked; Debug+Release libraries
+  compile. verify-core19/19 remains valid for unchanged low-level source; latest
+  Runtime integration passes and actual Hero8frame execution passes validation0,
+  204samples and unchanged workload counters (not pixel/FPS equivalence).
+  At that prior checkpoint, official static-shadow/probe products were refreshed
+  and runtime-full selected177948c4347129e9eacacbb997eb216d32dd5ec9fe240ecbb2e0030ac68658fb.
+  Loose-generation material/parameter catalog closure still remains; scene-probe
+  bake still drives full rendering. Do not remove those dependency keys until
+  actual input ownership is narrowed. Broader dependency/check review is not a
+  declaration that every function has been read or all directives are complete.
+  See CONTINUATION.md for active builds, exact evidence and next steps.
+
+- Logging/test cleanup: removed producer current/action-key banners, cooker
+  per-slice/QA summaries and their log-only computations, SDK startup version
+  banners, the unused camera dump and ordinary game success summaries. Keep
+  real producer publish/touch operations and actionable errors. Adapter/driver/
+  DRED configuration files and the driver-version query now require explicit
+  validation or timing capture. The native runner retains result.json and short
+  stderr failures instead of duplicating its entire receipt on stdout.
+  Deleted the unregistered AO before/after source+runner and two benchmark-only
+  modes. Removed generated-source temporary-name/format assertions, success-log
+  assertions and self-created fixture count/prose checks; retained compiled VFX
+  round trips, numeric/ABI/identity/repair/restat and native lifetime checks.
+  Navigation's assert checks were disabled by NDEBUG in RelWithDebInfo; its
+  existing target now undefines NDEBUG rather than silently passing.
+  Tracked Tests source files present124->122 (excluding Python caches and the
+  verifier deleted in the preceding batch), CTests113->113; no new test file.
+  Debug producers/Runtime/renderer/runner/app build succeeds, six selected CPU
+  contracts pass cumulatively, navigation passes with /UNDEBUG, and existing
+  hs_dev/graphics/play/OIT checks pass. The compiled-VFX retry restored missing
+  MSVC INCLUDE; analyzer retries used writable workspace TEMP. These environment
+  failures remain in the evidence. Native owned-view3packages/9submissions pass,
+  validation0, before the final console-only/device-diagnostic gating edits;
+  those subsequent edits compile. No full recook, Release repack, optional-SDK
+  build, foreground/FPS comparison or full-renderer GBV rerun in this batch.
+  Modified heavy producer scripts received syntax checks only, not new native
+  producer scenario qualification. See the batch report for exact limits.
+
+- Release exclusion checkpoint: Build/release-strip-20261029/RESULTS.md and
+  package-result.json, before the logging/test cleanup above. Release/Debug
+  builds pass at that checkpoint; installed/ZIP five files
+  match SHA256. EXE8,551,936bytes vs9,341,952 before (8.46% code-size reduction,
+  not an FPS result). Selected20 diagnostic/test strings and PE imports PIX,
+  D3D12GetDebugInterface/OutputDebugString are absent. No game process launched.
+  Runtime replay/record implementations, smoke/preview injection, optional logs,
+  VFX peak capture, renderer recorder/pending diagnostic data, HeroWork native
+  instrumentation and debug names are compile-excluded. Release's experiment
+  host is absent. Preserve controller-only DRS/activeAutoFG timing and native
+  lifetime contracts. Runtime-only Release cache uses the previously qualified
+  identical CPP/pack pair; no cook input changed. Core2 checks, existing Debug5
+  checks (including WARP/GBV graph51.63s), and install transaction fixture pass.
+  Later development-guard-only changes rebuilt successfully; unchanged broad
+  checks were not repeated. Audit any remaining observation counters by actual
+  consumers before removal; full optional-SDK/foreground qualification remains.
 
 - Current analysis: Build/health-review-20261029/RESULTS.ko.md. Exact foreground
   GPU pass means: GBuffer7.160ms, GTAOHorizon3.465ms, HeroComposite#1082.825ms;
@@ -210,7 +517,8 @@ Keep Windows low-level/portable checks; no Linux qualification remains required.
   it prepares fixtures before injecting exactly one commit operation, then verifies
   rollback and a reserved nonallocating retry. The16 Ground admission boundary rows
   now run in the existing no-cook legacy test; cooked Ground keeps actual product
-  integration. Explicitly invoked actual AO DXIL comparison remains; no new framework.
+  integration. The expired unregistered AO DXIL comparison was subsequently
+  removed in the logging/test cleanup; production GPU checks remain.
   OFF/OFF19 and portable39 passed cumulatively (only the repaired failure-injection
   leaf was repeated). Logs: slimming-core-console/slimming-failure-leaf-console,
   slimming-portable-tests/slimming-portable-failure-test.
