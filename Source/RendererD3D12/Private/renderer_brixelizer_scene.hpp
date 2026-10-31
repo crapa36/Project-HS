@@ -7,11 +7,67 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
 namespace hs
 {
+// Ordered borrowed ranges keep immutable instance rows owned by their scene
+// section while frame-local rows remain in the waited frame slot.
+[[nodiscard]] inline bool AccumulateBrixelizerSceneInstanceCount(
+    std::uint32_t current,std::size_t additional,std::uint32_t &total) noexcept
+{
+    if(additional>std::numeric_limits<std::uint32_t>::max()-current)return false;
+    total=current+static_cast<std::uint32_t>(additional);
+    return true;
+}
+[[nodiscard]] inline Result CountBrixelizerSceneInstanceRanges(
+    std::span<const BrixelizerSceneInstanceRange> ranges,std::uint32_t &instance_count,
+    std::uint32_t &immutable_instance_count)
+{
+    instance_count=immutable_instance_count=0;
+    for(const auto &range:ranges)
+    {
+        std::uint32_t total{};
+        if(!AccumulateBrixelizerSceneInstanceCount(instance_count,range.instances.size(),total))
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
+                "Brixelizer total instance count exceeds native addressing.");
+        instance_count=total;
+        if(range.immutable)
+        {
+            if(!AccumulateBrixelizerSceneInstanceCount(immutable_instance_count,range.instances.size(),total))
+                return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
+                    "Brixelizer immutable instance count exceeds native addressing.");
+            immutable_instance_count=total;
+        }
+    }
+    return Result::Success();
+}
+
+// Production and CPU-fixture traversal share borrowed-span order and logical
+// row numbering. The caller validates the total before visiting.
+template<class Visitor>
+[[nodiscard]] Result ForEachBrixelizerSceneInstance(
+    std::span<const BrixelizerSceneInstanceRange> ranges,bool skip_immutable,Visitor &&visitor)
+{
+    std::uint32_t logical_index{};
+    for(const auto &range:ranges)
+    {
+        if(skip_immutable&&range.immutable)
+        {
+            logical_index+=static_cast<std::uint32_t>(range.instances.size());
+            continue;
+        }
+        for(const auto &instance:range.instances)
+        {
+            if(auto result=visitor(instance,logical_index,range.immutable);!result)return result;
+            ++logical_index;
+        }
+    }
+    return Result::Success();
+}
+
 [[nodiscard]] std::uint64_t BrixelizerSubmeshKey(std::uint64_t source_key, std::size_t part);
 
 // A frame-local geometry identity. The stable key alone is insufficient for

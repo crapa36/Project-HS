@@ -387,7 +387,11 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
     ctx.d_stable_world_dx = gradients.stableDx;
     ctx.d_stable_world_dy = gradients.stableDy;
     ctx.layer = input.Material;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    const bool foliage = false;
+#else
     const bool foliage = input.Mesh == 17 || input.Mesh == 19;
+#endif
     ctx.shading_normal = normalize(foliage && !front ? -input.WorldNormal : input.WorldNormal);
     ctx.tangent = input.WorldTangent;
     ctx.normal = float3(0, 0, 1);
@@ -404,6 +408,7 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
     ctx.sampled_roughness = 1;
     ctx.sampled_alpha = 1;
     ctx.sampled_ao = 1;
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     if (foliage)
     {
         const float4 rect = input.Mesh == 19 ? GrassRects[input.Material] : LeafRects[input.Material];
@@ -413,6 +418,7 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
         ctx.d_uv_dy = card_dy * scale;
         ctx.layer = input.Mesh == 19 ? GrassPages[input.Material] : LeafPages[input.Material];
     }
+#endif
 #ifndef HS_GENERATED_ENVIRONMENT_MATERIAL
     if (input.Mesh == 16 || input.Mesh == 18)
     {
@@ -459,6 +465,11 @@ float4 UnpackColor(uint packed)
 
 float3 ShapePlaceholder(float3 position, uint mesh)
 {
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    if (mesh == 9u) position.y *= 0.1;
+    else if (mesh == 20u) position.y *= 0.035;
+    return position;
+#else
     // Runtime-only primitives: boxes, tapered boxes, wedges, and planes.
     if (mesh == 2) // ranged enemy: narrow column
     {
@@ -513,6 +524,7 @@ float3 ShapePlaceholder(float3 position, uint mesh)
         position.y *= 0.035;
     }
     return position;
+#endif
 }
 
 #include "grass_deformation.hlsli"
@@ -524,7 +536,11 @@ float3 InstanceWorldPosition(InstanceData instance, float3 position)
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
     const uint mesh = instance.Mesh & 255;
     const bool authored = (instance.Mesh & 0x10000) != 0;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    float3 local = (authored ? position : ShapePlaceholder(position, mesh)) * instance.Scale.xyz;
+#else
     float3 local = ((authored || mesh == 16 || mesh == 17 || mesh == 19) ? position : ShapePlaceholder(position, mesh)) * instance.Scale.xyz;
+#endif
     float3 rotated = float3(
         local.x * cosine_yaw + local.z * sine_yaw,
         local.y,
@@ -554,13 +570,24 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
 {
     const InstanceData instance = context.instance;
     const StaticDrawRef draw = context.draw;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    const bool cached_skin = false;
+    const bool cached_skin_history = false;
+#else
     const bool cached_skin = context.cachedSkin;
     const bool cached_skin_history = evaluate_history && context.cachedSkinHistory;
+#endif
     const uint skin_slot = context.skinSlot;
     const uint mesh = instance.Mesh & 0xff;
-    uint environment_seed = (mesh == 9 || mesh == 20 || mesh == 22) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    const uint environment_seed = asuint(instance.Padding);
+#else
+    const uint environment_seed = (mesh == 9 || mesh == 20 || mesh == 22) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
+#endif
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     uint environment_entry;
     EnvironmentVertex(input, instance, vertex_id, environment_seed, environment_entry);
+#endif
     float3 local_position = input.Position;
     float3 local_normal = input.Normal;
     float3 local_tangent = input.Tangent.xyz;
@@ -579,7 +606,11 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     const float3 grass_local = local_position -
         float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0);
     float3 world = stable_world;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    const bool wind_deformed = false;
+#else
     const bool wind_deformed = HsEnvironmentWind(instance.Mesh);
+#endif
     HsGrassDeformation grass_deformation = (HsGrassDeformation)0;
     if (wind_deformed)
     {
@@ -596,12 +627,17 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     // A retained static lease keeps the same native instance/vertex coordinates.
     const bool previous_static_instance = evaluate_history && previous_static_grass &&
         PreviousGrassState.z > 0.5 && SurfaceViewOrigin.w > 0.5;
-    bool previous_instance_basis = previous_static_instance;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    const bool previous_dynamic_grass = false;
+    const bool grass_history = false;
+#else
     const bool previous_dynamic_grass = context.gpuSceneRefs && context.geometryValid &&
         (context.geometry.Flags & 8u) != 0u && (draw.MeshFlags & 0x200000u) != 0u;
     const bool grass_history = evaluate_history && wind_deformed &&
         PreviousGrassState.z > 0.5 && SurfaceViewOrigin.w > 0.5 &&
         (previous_static_grass || previous_dynamic_grass);
+#endif
+    bool previous_instance_basis = previous_static_instance;
     if (grass_history)
     {
         const float3 previous_stable = previous_dynamic_grass
@@ -649,7 +685,11 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.Mesh = mesh;
     output.Uv = input.Uv;
     output.WorldTangent = float4(tangent, tangent_handedness);
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    output.Material = mesh == 22u ? (input.Uv.y >= 100.0 ? 1u : 0u) : input.Material;
+#else
     output.Material = mesh==22u ? (input.Uv.y>=100.0?1u:0u) : (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
+#endif
     const bool environment = mesh == 9 || mesh == 20 || ((mesh >= 16 && mesh <= 19) || mesh == 21 || mesh == 22);
     const uint model = environment ? HsSurfaceModelEnvironment :
         (mesh >= 10 && mesh <= 12 ? HsSurfaceModelJelly : HsSurfaceModelCel);
@@ -1131,6 +1171,7 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
     }
     float3 world_normal = normalize(input.WorldNormal);
     float roughness = 0.3;
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     if (input.Mesh == 0 || (input.Mesh >= 10 && input.Mesh <= 12))
     {
         const bool family = input.Mesh >= 10;
@@ -1152,13 +1193,16 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
         world_normal = normalize(tangent * tangent_normal.x +
             bitangent * tangent_normal.y + world_normal * tangent_normal.z);
     }
+#endif
     output.Material.r = roughness;
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     if (input.Mesh >= 13 && input.Mesh <= 15)
     {
         float3 ram;
         output.BaseColor = float4(SampleMonsterPbr(input.Uv, gradients, ram), 1.0);
         output.Material = float4(ram.r, ram.b, ram.g, 0.0);
     }
+#endif
     if ((LodClock.w & 1u) != 0 && (input.Mesh == 9 || input.Mesh == 20))
     {
         const float2 position = input.EnvironmentStableWorld.xz;
@@ -1170,7 +1214,11 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
         world_normal = float3(0.0, 1.0, 0.0);
         output.Material = float4(1.0, 0.0, 1.0, 0.0);
     }
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    else
+#else
     else if (input.Mesh == 9 || input.Mesh == 20 || ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
+#endif
     {
         const HsMaterialContext material_context =
             EnvironmentMaterialContext(input, front, gradients, materialWord);
@@ -1184,8 +1232,10 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
 #else
         HsSurfaceClosure surface = HsMaterialEvaluateSurface(material_context);
 #endif
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
         if (input.Mesh == 19u)
             surface.base_color *= MeadowDryGrassGain(input.EnvironmentStableWorld.xz);
+#endif
         {
             m.color = surface.base_color;
             m.roughness = surface.roughness;

@@ -1248,17 +1248,41 @@ struct D3D12Renderer::Impl
         struct SoftwareSceneBase
         {
             std::size_t source_index{};
-            GpuInstance draw{};
             std::uint32_t page_slot{};
-            std::uint32_t material_ordinal{UINT32_MAX};
-            std::uint32_t flags{};
             BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
             DirectX::XMFLOAT4X4 world{};
             float yaw_sine{}, yaw_cosine{};
         };
         struct SoftwareSceneCache
         {
-            std::vector<SoftwareSceneBase> rows;
+            struct PageShape
+            {
+                std::uint32_t page_slot{},generation{},vertex_count{},index_count{},submesh_count{};
+                ID3D12Resource *resource{};
+                D3D12MA::Allocation *allocation{};
+                std::array<std::uint64_t,4> offsets{};
+                std::array<std::byte,32> source_digest{};
+            };
+            struct Rows
+            {
+                std::shared_ptr<const StaticRenderScene> source;
+                std::vector<SoftwareSceneBase> bases;
+                SceneGeometryStaticSection section;
+                std::vector<PageShape> page_shapes;
+            };
+            struct NativeRows
+            {
+                struct Run { std::size_t job_begin{},job_count{},instance_begin{},instance_count{}; };
+                std::shared_ptr<const Rows> source;
+                std::shared_ptr<const void> generation_owner;
+                std::vector<SoftwareSceneGeometry> geometries;
+                std::vector<BrixelizerSceneInstance> instances;
+                std::vector<std::size_t> leaf_jobs;
+                std::vector<Run> runs;
+                std::uint64_t material_revision{};
+            };
+            std::shared_ptr<const Rows> rows;
+            std::shared_ptr<const NativeRows> native_rows;
             std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_layouts{};
             std::array<render_data::EnvironmentMaterialVariant, kAuthoredMaterialNames.size()> material_variants{};
             float foliage_density{};

@@ -1,11 +1,13 @@
 #include "renderer_scene_geometry.hpp"
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/geometry_package.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include "d3d12_resources.hpp"
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -65,6 +67,36 @@ Result ValidateSceneGeometryRecord(const SceneGeometryRecord &g, const SceneDraw
         return Fail(ErrorCode::InvalidArgument,"Scene geometry source range exceeds ByteAddressBuffer addressing.");
     return Result::Success();
 }
+bool FoldStaticBuiltinTerrainShape(SceneGeometryRecord &geometry,SceneDrawInstance &instance) noexcept
+{
+    if((geometry.flags&(SceneGeometryBuiltin|SceneGeometryDeformed))!=
+            (SceneGeometryBuiltin|SceneGeometryDeformed)||
+        (geometry.mesh_id!=static_cast<std::uint32_t>(RenderMesh::Ground)&&
+         geometry.mesh_id!=static_cast<std::uint32_t>(RenderMesh::DirtPatch)))
+        return false;
+    const float factor=geometry.mesh_id==static_cast<std::uint32_t>(RenderMesh::Ground)?0.1f:0.035f;
+    const float scaled_y=instance.scale.y*factor;
+    if(!std::isfinite(instance.scale.y)||instance.scale.y<=0.0f||!std::isfinite(scaled_y)||
+        scaled_y<std::numeric_limits<float>::min())
+        return false;
+    instance.scale.y=scaled_y;
+    geometry.flags&=~SceneGeometryDeformed;
+    return true;
+}
+Result AppendSceneGeometryStaticRow(SceneGeometryStaticSection &section,
+    const SceneGeometryRecord &geometry,const SceneDrawInstance &instance)
+{
+    if(auto result=ValidateSceneGeometryRecord(geometry,instance);!result)return result;
+    if(section.geometries.size()>=UINT_MAX)
+        return Fail(ErrorCode::InvalidArgument,"Scene static geometry section exceeds logical row addressing.");
+    const auto row=static_cast<std::uint32_t>(section.geometries.size());
+    const auto rank=(geometry.flags&SceneGeometryDeformed)
+        ?static_cast<std::uint32_t>(section.deformation_rows.size()):UINT32_MAX;
+    section.geometries.push_back(geometry);section.instances.push_back(instance);
+    section.deformation_rank_by_row.push_back(rank);
+    if(rank!=UINT32_MAX)section.deformation_rows.push_back(row);
+    return Result::Success();
+}
 Result PrepareSceneGeometryRows(std::span<SceneGeometryRecord> records,
     std::span<const SceneDrawInstance> draws,std::vector<std::uint32_t> &deformation_rows,
     std::uint64_t &deformed_position_bytes)
@@ -89,6 +121,31 @@ Result PrepareSceneGeometryRows(std::span<SceneGeometryRecord> records,
         return Fail(ErrorCode::InvalidArgument,"Scene deformed positions exceed ByteAddressBuffer addressing.");
     return Result::Success();
 }
+Result PrepareSceneGeometrySections(std::span<SceneGeometryRecord> current,
+    std::span<const SceneDrawInstance> current_instances,const SceneGeometryStaticSection &immutable,
+    std::vector<std::uint32_t> &deformation_rows,std::vector<std::uint32_t> &static_position_offsets,
+    std::uint64_t &deformed_position_bytes)
+{
+    if(auto result=PrepareSceneGeometryRows(current,current_instances,deformation_rows,deformed_position_bytes);!result)
+        return result;
+    if(current.size()>UINT_MAX||immutable.geometries.size()!=immutable.instances.size()||
+        immutable.geometries.size()!=immutable.deformation_rank_by_row.size()||
+        immutable.geometries.size()>UINT_MAX-current.size())
+        return Fail(ErrorCode::InvalidArgument,"Scene static geometry section shape exceeds logical row addressing.");
+    static_position_offsets.clear();static_position_offsets.reserve(immutable.deformation_rows.size());
+    for(const auto row:immutable.deformation_rows)
+    {
+        if(row>=immutable.geometries.size()||deformed_position_bytes>UINT_MAX)
+            return Fail(ErrorCode::InvalidArgument,"Scene static deformation row exceeds logical or byte addressing.");
+        static_position_offsets.push_back(static_cast<std::uint32_t>(deformed_position_bytes));
+        deformed_position_bytes+=std::uint64_t(immutable.geometries[row].vertex_count)*12;
+    }
+    if(deformed_position_bytes>UINT_MAX)
+        return Fail(ErrorCode::InvalidArgument,"Scene deformed positions exceed ByteAddressBuffer addressing.");
+    for(const auto row:immutable.deformation_rows)
+        deformation_rows.push_back(static_cast<std::uint32_t>(current.size()+row));
+    return Result::Success();
+}
 
 struct SceneGeometryStorage
 {
@@ -99,6 +156,8 @@ struct SceneGeometryStorage
         std::vector<SceneGeometryRecord> prepared_records;
         std::vector<SceneDrawInstance> prepared_instances;
         std::vector<std::uint32_t> deformation_rows;
+        std::vector<std::uint32_t> static_position_offsets;
+        std::shared_ptr<const SceneGeometryStaticSection> static_section;
         SceneGeometryRecordData prepared_record_data;
         bool prepared_active{};
         CompletionSet completion;
@@ -144,7 +203,8 @@ SceneGeometryPreparedFrame::SceneGeometryPreparedFrame(SceneGeometryPreparedFram
 SceneGeometryPreparedFrame &SceneGeometryPreparedFrame::operator=(SceneGeometryPreparedFrame &&other) noexcept
 {
     if(this!=&other){Release();storage_=std::move(other.storage_);owner_=std::move(other.owner_);
-        frame_slot_=other.frame_slot_;active_=std::exchange(other.active_,false);}return *this;
+        frame_slot_=other.frame_slot_;
+        active_=std::exchange(other.active_,false);}return *this;
 }
 SceneGeometryPreparedFrame::~SceneGeometryPreparedFrame(){Release();}
 void SceneGeometryPreparedFrame::Release() noexcept
@@ -154,16 +214,42 @@ void SceneGeometryPreparedFrame::Release() noexcept
         auto &slot=storage_->slots[frame_slot_];
         if(slot.prepared_active)
         {slot.prepared_records.clear();slot.prepared_instances.clear();slot.deformation_rows.clear();
+         slot.static_position_offsets.clear();slot.static_section.reset();
          slot.prepared_record_data={};slot.prepared_active=false;}
     }
     active_=false;owner_.reset();storage_.reset();
 }
-std::span<const SceneGeometryRecord> SceneGeometryPreparedFrame::Geometries() const noexcept
-{return active_&&storage_&&frame_slot_<storage_->slots.size()&&storage_->slots[frame_slot_].prepared_active
-    ?std::span<const SceneGeometryRecord>{storage_->slots[frame_slot_].prepared_records}:std::span<const SceneGeometryRecord>{};}
-std::span<const SceneDrawInstance> SceneGeometryPreparedFrame::Instances() const noexcept
-{return active_&&storage_&&frame_slot_<storage_->slots.size()&&storage_->slots[frame_slot_].prepared_active
-    ?std::span<const SceneDrawInstance>{storage_->slots[frame_slot_].prepared_instances}:std::span<const SceneDrawInstance>{};}
+std::size_t SceneGeometryPreparedFrame::GeometryCount() const noexcept
+{return storage_&&frame_slot_<storage_->slots.size()&&storage_->slots[frame_slot_].prepared_active
+    ?storage_->slots[frame_slot_].prepared_records.size()+
+        (storage_->slots[frame_slot_].static_section?storage_->slots[frame_slot_].static_section->geometries.size():0):0;}
+const SceneGeometryRecord &SceneGeometryPreparedFrame::GeometryAt(std::size_t index,
+    SceneGeometryRecord &scratch) const noexcept
+{
+    assert(storage_&&frame_slot_<storage_->slots.size());
+    const auto &slot=storage_->slots[frame_slot_];assert(slot.prepared_active);
+    if(index<slot.prepared_records.size())return slot.prepared_records[index];
+    index-=slot.prepared_records.size();assert(slot.static_section&&index<slot.static_section->geometries.size());
+    const auto &geometry=slot.static_section->geometries[index];
+    assert(index<slot.static_section->deformation_rank_by_row.size());
+    const auto rank=slot.static_section->deformation_rank_by_row[index];
+    if(geometry.flags&SceneGeometryDeformed)
+    {
+        assert(rank<slot.static_position_offsets.size());
+        scratch=geometry;scratch.position_byte_offset=slot.static_position_offsets[rank];return scratch;
+    }
+    assert(rank==UINT32_MAX);
+    return geometry;
+}
+const SceneDrawInstance &SceneGeometryPreparedFrame::InstanceAt(std::size_t index) const noexcept
+{
+    assert(storage_&&frame_slot_<storage_->slots.size());
+    const auto &slot=storage_->slots[frame_slot_];assert(slot.prepared_active);
+    if(index<slot.prepared_instances.size())return slot.prepared_instances[index];
+    index-=slot.prepared_instances.size();
+    assert(slot.static_section&&index<slot.static_section->instances.size());
+    return slot.static_section->instances[index];
+}
 ID3D12Resource *SceneGeometryPreparedFrame::PositionResource() const noexcept
 {return active_&&storage_&&frame_slot_<storage_->slots.size()&&storage_->slots[frame_slot_].prepared_active&&
     storage_->slots[frame_slot_].prepared_record_data.deformed_position_bytes
@@ -224,30 +310,40 @@ bool MatchesSceneGeometryGraphLayout(const SceneGeometryRecordData &current,
         current.reads == layout.record.reads;
 }
 Result SceneGeometrySystem::PrepareFrame(std::vector<SceneGeometryRecord> &&geometries,
-    std::vector<SceneDrawInstance> &&instances,std::uint32_t frame_slot,const CompletionSet &completed,
+    std::vector<SceneDrawInstance> &&instances,
+    std::shared_ptr<const SceneGeometryStaticSection> static_section,
+    std::uint32_t frame_slot,const CompletionSet &completed,
     SceneGeometryPreparedFrame &prepared)
 {
     prepared=SceneGeometryPreparedFrame{};auto s=impl_->storage;
     if(!s)return Fail(ErrorCode::InvalidState,"Scene geometry service has not been committed.");
-    if(!s->enabled)return geometries.empty()&&instances.empty()?Result::Success():
+    if(!s->enabled)return geometries.empty()&&instances.empty()&&
+        (!static_section||static_section->geometries.empty())?Result::Success():
         Fail(ErrorCode::InvalidState,"Disabled scene geometry service cannot prepare frame records.");
     if(!s->usable||impl_->pending.graph||frame_slot>=s->slots.size()||
         !s->slots[frame_slot].completion.IsSatisfiedBy(completed)||
-        geometries.size()!=instances.size()||geometries.size()>UINT_MAX/sizeof(SceneGeometryRecord))
+        geometries.size()!=instances.size()||geometries.size()>UINT_MAX/sizeof(SceneGeometryRecord)||
+        (static_section&&(static_section->geometries.size()!=static_section->instances.size()||
+            static_section->geometries.size()>UINT_MAX-geometries.size())))
         return Fail(ErrorCode::InvalidArgument,"Scene geometry preview frame slot or draw count is invalid.");
     auto &slot=s->slots[frame_slot];
     if(slot.prepared_active)return Fail(ErrorCode::InvalidState,"Scene geometry frame slot already has an active preparation.");
     slot.prepared_records=std::move(geometries);slot.prepared_instances=std::move(instances);
+    slot.static_section=std::move(static_section);
     slot.prepared_record_data={};
     slot.prepared_active=true;
     SceneGeometryPreparedFrame attempt{s,{},frame_slot};
     auto &records=slot.prepared_records;
     auto &draws=slot.prepared_instances;
     slot.prepared_record_data.frame_slot=frame_slot;
-    slot.prepared_record_data.record_count=records.size();
+    slot.prepared_record_data.record_count=records.size()+
+        (slot.static_section?slot.static_section->geometries.size():0);
     slot.deformation_rows.clear();
     std::uint64_t bytes{};
-    if(auto result=PrepareSceneGeometryRows(records,draws,slot.deformation_rows,bytes);!result)
+    static const SceneGeometryStaticSection empty_section{};
+    const auto &static_rows=slot.static_section?*slot.static_section:empty_section;
+    if(auto result=PrepareSceneGeometrySections(records,draws,static_rows,
+            slot.deformation_rows,slot.static_position_offsets,bytes);!result)
         return result;
     slot.prepared_record_data.deformed_position_bytes=bytes;
     auto &position=slot.positions;
@@ -309,13 +405,16 @@ Result SceneGeometrySystem::RegisterCore(RenderGraphBuilder &graph,const SceneGe
         if(capture)capture->valid=true;
         auto &empty_slot=s->slots[prepared.frame_slot_];
         empty_slot.prepared_records.clear();empty_slot.prepared_instances.clear();empty_slot.deformation_rows.clear();
+        empty_slot.static_position_offsets.clear();empty_slot.static_section.reset();
         empty_slot.prepared_record_data={};
         empty_slot.prepared_active=false;prepared.active_=false;return Result::Success();
     }
     auto &records=slot.prepared_records;
     const auto &instances=slot.prepared_instances;
+    const auto static_section=slot.static_section;
     const auto positionBytes=current.deformed_position_bytes;
-    if(records.size()!=instances.size()||records.size()!=current.record_count||
+    const auto static_count=static_section?static_section->geometries.size():0;
+    if(records.size()!=instances.size()||records.size()+static_count!=current.record_count||
         (positionBytes&&(!slot.positions->resource||slot.positions->resource->GetDesc().Width<std::max<std::uint64_t>(positionBytes,4))))
         return Fail(ErrorCode::InvalidState,"Scene geometry prepared frame storage no longer matches its canonical range.");
     if(!has_deformation)
@@ -324,7 +423,6 @@ Result SceneGeometrySystem::RegisterCore(RenderGraphBuilder &graph,const SceneGe
         // rows and owner through submission because native GI still references
         // their stable ordering and transforms.
         if(capture)capture->valid=true;
-        out.geometries=std::span<const SceneGeometryRecord>{records};
         out.owner=prepared.owner_;
         impl_->pending.graph=&graph;impl_->pending.slot=in.frame_slot;
         prepared.active_=false;
@@ -356,13 +454,25 @@ Result SceneGeometrySystem::RegisterCore(RenderGraphBuilder &graph,const SceneGe
     if(FAILED(hr))return Native("Map scene geometry deformation records",hr);
     hr=slot.instance_upload.resource->Map(0,&empty,&instanceData);
     if(FAILED(hr)){slot.record_upload.resource->Unmap(0,nullptr);return Native("Map scene geometry deformation instances",hr);}
+    auto geometry_at=[&](std::size_t row) {
+        if(row<records.size())return records[row];
+        row-=records.size();auto geometry=static_section->geometries[row];
+        const auto rank=static_section->deformation_rank_by_row[row];
+        if(rank<slot.static_position_offsets.size())geometry.position_byte_offset=slot.static_position_offsets[rank];
+        return geometry;
+    };
+    auto instance_at=[&](std::size_t row) {
+        if(row<instances.size())return instances[row];
+        return static_section->instances[row-instances.size()];
+    };
     auto *recordBytesOut=static_cast<std::byte *>(recordData);
     auto *instanceBytesOut=static_cast<std::byte *>(instanceData);
     for(std::size_t compact=0;compact<deformationCount;++compact)
     {
         const auto row=slot.deformation_rows[compact];
-        std::memcpy(recordBytesOut+compact*sizeof(SceneGeometryRecord),&records[row],sizeof(SceneGeometryRecord));
-        std::memcpy(instanceBytesOut+compact*sizeof(SceneDrawInstance),&instances[row],sizeof(SceneDrawInstance));
+        const auto geometry=geometry_at(row);const auto instance=instance_at(row);
+        std::memcpy(recordBytesOut+compact*sizeof(SceneGeometryRecord),&geometry,sizeof(SceneGeometryRecord));
+        std::memcpy(instanceBytesOut+compact*sizeof(SceneDrawInstance),&instance,sizeof(SceneDrawInstance));
     }
     D3D12_RANGE recordWritten{0,recordBytes},instanceWritten{0,instanceBytes};
     slot.record_upload.resource->Unmap(0,&recordWritten);slot.instance_upload.resource->Unmap(0,&instanceWritten);
@@ -421,14 +531,16 @@ Result SceneGeometrySystem::RegisterCore(RenderGraphBuilder &graph,const SceneGe
         else position=retained->positions;
         deform->SetExecuteChecked([s,binder,slotIndex=in.frame_slot](RenderPassContext &c)->Result{auto *cmd=static_cast<ID3D12GraphicsCommandList *>(c.NativeCommandList());
             cmd->SetComputeRootSignature(s->root.Get());cmd->SetPipelineState(s->pipeline.Get());if(auto r=binder(cmd);!r)return r;
-            const auto &records=s->slots[slotIndex].prepared_records;
-            const auto &rows=s->slots[slotIndex].deformation_rows;
+            const auto &slot=s->slots[slotIndex];const auto &records=slot.prepared_records;
+            const auto &section=slot.static_section;const auto &rows=slot.deformation_rows;
+            const auto record_at=[&](std::size_t row)->const SceneGeometryRecord & {
+                return row<records.size()?records[row]:section->geometries[row-records.size()];};
             for(UINT n=0;n<rows.size();)
             {
-                const UINT first=n++,groups=(records[rows[first]].vertex_count+63)/64;
+                const UINT first=n++,groups=(record_at(rows[first]).vertex_count+63)/64;
                 // Equal-width jobs share a dispatch row each; no extra vertices or job buffer.
                 while(n<rows.size() && n-first<65535u &&
-                    (records[rows[n]].vertex_count+63)/64==groups)++n;
+                    (record_at(rows[n]).vertex_count+63)/64==groups)++n;
                 std::uint32_t pass[]{first,0};cmd->SetComputeRoot32BitConstants(6,2,pass,0);
                 cmd->Dispatch(std::min(groups,65535u),n-first,(groups+65534)/65535);
             }
@@ -439,7 +551,6 @@ Result SceneGeometrySystem::RegisterCore(RenderGraphBuilder &graph,const SceneGe
     if(capture){capture->positions=position;capture->valid=true;}
     slot.binder=std::move(binder);slot.reads.clear();for(auto &r:in.reads)slot.reads.emplace_back(r.resource);
     out.positions=position;out.position_resource=slot.positions->resource.Get();
-    out.geometries=std::span<const SceneGeometryRecord>{records};
     out.owner=prepared.owner_;
     impl_->pending=std::move(pending);prepared.active_=false;return Result::Success();
 }
@@ -451,6 +562,7 @@ Result SceneGeometrySystem::CompleteSubmission(const RenderGraphBuilder &graph,c
         i.resource->graph_completion.Merge(completion);i.resource->graph_completion.Merge(lease);
         if(success){i.resource->graph_access=graph.FinalAccess(i.handle);i.resource->graph_queue=graph.FinalQueue(i.handle);}}
     slot.prepared_records.clear();slot.prepared_instances.clear();slot.deformation_rows.clear();
+    slot.static_position_offsets.clear();slot.static_section.reset();
     slot.prepared_record_data={};slot.prepared_active=false;
     if(!success)s->usable=false;p={};return Result::Success();
 }

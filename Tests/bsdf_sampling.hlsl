@@ -252,6 +252,13 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
         const float raw_pdf = HsBsdfPdf(surface, wo, wi);
         error = max(error, abs(original_pdf - prepared_pdf));
         error = max(error, abs(original_pdf - raw_pdf));
+        float3 diffuse, specular;
+        HsBsdfEvaluateComponentsOptical(surface, wo, wi * 1.73, 0.08, diffuse, specular);
+        const float3 total = HsBsdfEvaluateOptical(surface, wo, wi * 1.73, 0.08);
+        error = HsProbeMaxError(error, diffuse + specular - total);
+        const HsSurfaceClosure oriented = HsBsdfOrientThinSurface(surface, normalize(wo));
+        if (dot(oriented.normal, wi) < 0.0 || surface.unlit)
+            error = HsProbeMaxError(error, specular);
     }
     return error;
 }

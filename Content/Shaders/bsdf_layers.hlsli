@@ -318,22 +318,9 @@ float4 HsBsdfLayerProbabilities(HsSurfaceClosure surface, float3 view)
     return total > 0.0 ? weights / total : float4(1.0, 0.0, 0.0, 0.0);
 }
 
-float3 HsBsdfEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+float3 HsBsdfEvaluateLayeredOptical(HsSurfaceClosure surface, float3 view, float3 light,
+    float no_v, float no_l, float base_fresnel_override)
 {
-    if (surface.unlit)
-    {
-        return 0.0;
-    }
-    if (!HsBsdfHasLayers(surface))
-    {
-        return HsBsdfBaseEvaluateOptical(surface, wo, wi, base_fresnel_override);
-    }
-    float3 view = normalize(wo);
-    float3 light = normalize(wi);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    float no_v = dot(normal, view);
-    float no_l = dot(normal, light);
     if (no_v <= 0.0 || no_l == 0.0)
     {
         return 0.0;
@@ -360,6 +347,26 @@ float3 HsBsdfEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, flo
     return result;
 }
 
+float3 HsBsdfEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+{
+    if (surface.unlit)
+    {
+        return 0.0;
+    }
+    if (!HsBsdfHasLayers(surface))
+    {
+        return HsBsdfBaseEvaluateOptical(surface, wo, wi, base_fresnel_override);
+    }
+    float3 view = normalize(wo);
+    float3 light = normalize(wi);
+    surface = HsBsdfOrientThinSurface(surface, view);
+    float3 normal = normalize(surface.normal);
+    float no_v = dot(normal, view);
+    float no_l = dot(normal, light);
+    return HsBsdfEvaluateLayeredOptical(surface, view, light, no_v, no_l,
+        base_fresnel_override);
+}
+
 float3 HsBsdfEvaluate(HsSurfaceClosure surface, float3 wo, float3 wi)
 {
     return HsBsdfEvaluateOptical(surface, wo, wi, -1.0);
@@ -370,11 +377,29 @@ float3 HsBsdfEvaluate(HsSurfaceClosure surface, float3 wo, float3 wi)
 void HsBsdfEvaluateComponentsOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override,
                               out float3 diffuse, out float3 specular)
 {
-    float3 total = HsBsdfEvaluateOptical(surface, wo, wi, base_fresnel_override);
-    float3 view = normalize(wo), light = normalize(wi);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    float no_v = dot(normal, view), no_l = dot(normal, light);
+    float3 total;
+    float no_v, no_l;
+    if (!surface.unlit && HsBsdfHasLayers(surface))
+    {
+        float3 view = normalize(wo);
+        float3 light = normalize(wi);
+        surface = HsBsdfOrientThinSurface(surface, view);
+        const float3 normal = normalize(surface.normal);
+        no_v = dot(normal, view);
+        no_l = dot(normal, light);
+        total = HsBsdfEvaluateLayeredOptical(surface, view, light, no_v, no_l,
+            base_fresnel_override);
+    }
+    else
+    {
+        total = HsBsdfEvaluateOptical(surface, wo, wi, base_fresnel_override);
+        float3 view = normalize(wo);
+        float3 light = normalize(wi);
+        surface = HsBsdfOrientThinSurface(surface, view);
+        const float3 normal = normalize(surface.normal);
+        no_v = dot(normal, view);
+        no_l = dot(normal, light);
+    }
     diffuse = 0.0;
     if (!surface.unlit && no_v > 0.0 && no_l < 0.0)
     {

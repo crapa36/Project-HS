@@ -97,7 +97,8 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
             std::wstring_view profile, std::wstring_view define,
             std::uint32_t sidecar_planes = 0, bool generated_deferred = false,
             bool feedback = false, bool hero_work = false,
-            bool hero_translucent_domain = false)
+            bool hero_translucent_domain = false,
+            bool terrain_visibility_resolve = false)
 {
     auto diagnostics = output;
     diagnostics += ".diagnostics.txt";
@@ -115,6 +116,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     if (feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
     if (hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
     if (hero_translucent_domain) args.emplace_back(L"-DHS_HERO_TRANSLUCENT_DOMAIN_ONLY=1");
+    if (terrain_visibility_resolve) args.emplace_back(L"-DHS_TERRAIN_VISIBILITY_RESOLVE=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
@@ -734,7 +736,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render.shader." + std::string(name);
     spec.recipe_id = "project-hs.render.material-shader";
-    spec.recipe_version = 10;
+    spec.recipe_version = terrain ? 11 : 10;
     spec.namespace_path = namespace_path;
     spec.inputs.push_back(SemanticInput(
         "material/" + std::string(name) + "/shader-ir", material_path,
@@ -818,10 +820,12 @@ void Produce(std::string_view name, const fs::path &source_root,
         for (const auto &program : outputs)
         {
             const auto output = stage / std::string(program.filename);
+            // Terrain's visibility bucket contains only Ground/Dirt and authored meadow ground.
             RunDxc(dxc, source_snapshot, stage, output,
                    program.source_relative, program.entry, program.profile,
                    L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1", sidecar_layout.plane_count, false,
-                   program.feedback);
+                   program.feedback, false, false,
+                   terrain && program.entry == L"SurfaceResolveCS");
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(std::string(program.id),
                                                std::string(program.filename), output));

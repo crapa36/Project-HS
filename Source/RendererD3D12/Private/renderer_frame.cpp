@@ -2269,7 +2269,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         frame.dynamic_visible_capacity < dynamic_visible_ref_capacity)
     {
         frame.dynamic_visible_refs.Reset();
-        frame.dynamic_visible_capacity = dynamic_visible_ref_capacity;
+        // Match the existing heap granularity so one extra ref does not replace the bank or its graph shape.
+        constexpr auto refs_per_allocation = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT / sizeof(GpuStaticDrawRef);
+        frame.dynamic_visible_capacity = std::min<std::size_t>(UINT32_MAX,
+            (dynamic_visible_ref_capacity + refs_per_allocation - 1) / refs_per_allocation * refs_per_allocation);
         if (auto created = impl_->CreateAllocation(
                 frame.dynamic_visible_refs, visibility_allocation,
                 BufferDescription(
@@ -5648,7 +5651,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         const Impl::StaticGpuScene::SoftwareSceneBase *static_base{};
     };
     std::vector<SoftwareSceneSource> software_scene_sources;
+    std::shared_ptr<const Impl::StaticGpuScene::SoftwareSceneCache::Rows> software_scene_static_rows;
+    std::size_t software_scene_current_job_count{};
     SceneGeometryPreparedFrame software_scene_prepared;
+    std::shared_ptr<const SceneGeometryStaticSection> software_scene_static_section;
     SceneGeometryRecordData scene_shape;
     std::vector<std::uint32_t> software_scene_page_slots;
     const auto prepare_software_scene = [&]() -> Result {
@@ -5737,13 +5743,26 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (static_scene && impl_->static_gpu_scene)
         {
             auto &cache = impl_->static_gpu_scene->software_scene;
-            const bool rebuild = !cache.valid || cache.foliage_density != foliage_density ||
+            bool page_shape_changed{};
+            if(cache.rows)
+                for(const auto &shape:cache.rows->page_shapes)
+                {
+                    const auto *page=impl_->FindGeometryPage(shape.page_slot);
+                    if(!page||page->generation!=shape.generation||page->vertex_count!=shape.vertex_count||
+                        page->index_count!=shape.index_count||page->submeshes.size()!=shape.submesh_count||
+                        page->storage.resource.Get()!=shape.resource||page->storage.allocation!=shape.allocation||
+                        page->offsets!=shape.offsets||page->source_digest!=shape.source_digest)
+                    {page_shape_changed=true;break;}
+                }
+            const bool rebuild = !cache.rows || cache.rows->source!=static_scene || !cache.valid || page_shape_changed || cache.foliage_density != foliage_density ||
                 cache.material_layouts != impl_->material_surface_layouts ||
                 cache.material_variants != impl_->environment_material_variants;
             if (rebuild)
             {
-                cache.rows.clear();
-                cache.rows.reserve(static_scene->instances.size());
+                auto next_rows=std::make_shared<Impl::StaticGpuScene::SoftwareSceneCache::Rows>();
+                next_rows->source=static_scene;
+                next_rows->bases.reserve(static_scene->instances.size());
+                std::array<bool,kGeometryPageCapacity> page_shape_seen{};
                 for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
                 {
                     const auto &source = static_scene->instances[index];
@@ -5774,6 +5793,23 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
                         flags |= SceneGeometryTwoSided;
                     if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
+                    const auto *page=impl_->FindGeometryPage(page_slot);
+                    if(!page)return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
+                        "Software scene candidate has no complete resident geometry page.");
+                    if(page_slot>=page_shape_seen.size())return Result::Failure(ErrorCode::InvalidState,
+                        "hs_renderer_d3d12","Static software scene page exceeds admitted page capacity.");
+                    if(!page_shape_seen[page_slot])
+                    {
+                        page_shape_seen[page_slot]=true;
+                        next_rows->page_shapes.push_back({page_slot,page->generation,page->vertex_count,
+                            page->index_count,static_cast<std::uint32_t>(page->submeshes.size()),
+                            page->storage.resource.Get(),page->storage.allocation,page->offsets,page->source_digest});
+                    }
+                    const bool builtin=page->page_slot==kProceduralGeometryPage;
+                    auto record_flags=flags;
+                    if(builtin)record_flags|=SceneGeometryBuiltin;
+                    if(!hero&&(builtin||HasEnvironmentWind(source.mesh,source.environment_variant)))
+                        record_flags|=SceneGeometryDeformed;
                     auto domain = BrixelizerGeometryDomain::Opaque;
                     if (environment && !hero)
                     {
@@ -5791,23 +5827,48 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
                         source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
                             ? 0.0f : std::bit_cast<float>(source.environment_seed)};
+                    SceneGeometryRecord geometry{1u+page->page_slot*kGeometryBuffersPerPage,
+                        2u+page->page_slot*kGeometryBuffersPerPage,0u,page->index_count,0u,
+                        sizeof(Vertex),page->vertex_count,0u,
+                        0x80000000u|static_cast<std::uint32_t>(index),
+                        impl_->static_gpu_scene->instance_generation,UINT32_MAX,
+                        static_cast<std::uint32_t>(source.mesh),ordinal,record_flags};
+                    SceneDrawInstance draw_instance{draw.position,draw.scale,draw.color,
+                        draw.mesh,draw.yaw,draw.padding};
+                    (void)FoldStaticBuiltinTerrainShape(geometry,draw_instance);
                     Impl::StaticGpuScene::SoftwareSceneBase row{
-                        index, draw, page_slot, ordinal, flags, domain};
+                        index, page_slot, domain};
                     DirectX::XMStoreFloat4x4(&row.world,
-                        DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
-                        DirectX::XMMatrixRotationY(draw.yaw) *
-                        DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
-                    row.yaw_sine = std::sin(draw.yaw);
-                    row.yaw_cosine = std::cos(draw.yaw);
-                    cache.rows.push_back(std::move(row));
+                        DirectX::XMMatrixScaling(draw_instance.scale.x, draw_instance.scale.y, draw_instance.scale.z) *
+                        DirectX::XMMatrixRotationY(draw_instance.yaw) *
+                        DirectX::XMMatrixTranslation(draw_instance.position.x, draw_instance.position.y, draw_instance.position.z));
+                    row.yaw_sine = std::sin(draw_instance.yaw);
+                    row.yaw_cosine = std::cos(draw_instance.yaw);
+                    const bool included_domain=domain==BrixelizerGeometryDomain::Opaque||
+                        domain==BrixelizerGeometryDomain::AuthoredCoverage;
+                    if(included_domain)
+                    {
+                        if(auto appended=AppendSceneGeometryStaticRow(next_rows->section,geometry,draw_instance);!appended)
+                            return appended;
+                    }
+                    else
+                    {
+                        if(auto valid=ValidateSceneGeometryRecord(geometry,draw_instance);!valid)return valid;
+                    }
+                    next_rows->bases.push_back(std::move(row));
                 }
+                cache.rows=std::move(next_rows);
                 cache.material_layouts = impl_->material_surface_layouts;
                 cache.material_variants = impl_->environment_material_variants;
                 cache.foliage_density = foliage_density;
                 cache.valid = true;
             }
-            for (const auto &base : cache.rows)
+            const auto rows=cache.rows;
+            software_scene_static_section=std::shared_ptr<const SceneGeometryStaticSection>(rows,&rows->section);
+            software_scene_static_rows=rows;
+            for (std::size_t base_index=0;base_index<rows->bases.size();++base_index)
             {
+                const auto &base=rows->bases[base_index];
                 if (base.source_index >= static_scene->instances.size())
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                         "Cached software scene source index exceeds its admitted static scene.");
@@ -5816,24 +5877,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 if (!page)
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                         "Software scene candidate has no complete resident geometry page.");
-                auto flags = base.flags;
-                const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
-                const bool builtin = page->page_slot == kProceduralGeometryPage;
-                if (builtin) flags |= SceneGeometryBuiltin;
-                if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant)))
-                    flags |= SceneGeometryDeformed;
-                const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
-                    2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
-                    0u, sizeof(Vertex), page->vertex_count, 0u,
-                    0x80000000u | static_cast<std::uint32_t>(base.source_index),
-                    impl_->static_gpu_scene->instance_generation, UINT32_MAX,
-                    static_cast<std::uint32_t>(source.mesh), base.material_ordinal, flags};
-                const SceneDrawInstance instance{base.draw.position, base.draw.scale,
-                    base.draw.color, base.draw.mesh, base.draw.yaw, base.draw.padding};
                 if (base.domain != BrixelizerGeometryDomain::Opaque &&
                     base.domain != BrixelizerGeometryDomain::AuthoredCoverage)
                 {
-                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
                     auto &count = base.domain == BrixelizerGeometryDomain::UnsupportedMasked
                         ? excluded_masked_count
                         : base.domain == BrixelizerGeometryDomain::UnsupportedThin
@@ -5842,18 +5888,19 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         return counted;
                     continue;
                 }
-                software_scene_job_inputs.push_back(job);
-                software_scene_draw_inputs.push_back(instance);
                 software_scene_pages.push_back(page);
                 software_scene_sources.push_back({&source, &base});
             }
         }
     }
-    if (!software_scene_job_inputs.empty())
+    if (!software_scene_job_inputs.empty()||
+        (software_scene_static_section&&!software_scene_static_section->geometries.empty()))
     {
+        software_scene_current_job_count=software_scene_job_inputs.size();
         if (auto prepared = impl_->scene_geometry.PrepareFrame(
                 std::move(software_scene_job_inputs), std::move(software_scene_draw_inputs),
-                frame_slot, impl_->graph_queue_executor.Completed(), software_scene_prepared);
+                software_scene_static_section,frame_slot,
+                impl_->graph_queue_executor.Completed(), software_scene_prepared);
             !prepared) return prepared;
         scene_shape = *software_scene_prepared.RecordData();
     }
@@ -5955,8 +6002,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     if (!local_shadow_join_result) return local_shadow_join_result;
     if (software_scene_prepare_exception) std::rethrow_exception(software_scene_prepare_exception);
     if (!software_scene_prepare_result) return software_scene_prepare_result;
-    const auto software_scene_jobs = software_scene_prepared.Geometries();
-    const auto software_scene_draws = software_scene_prepared.Instances();
+    const auto software_scene_job_count = software_scene_prepared.GeometryCount();
     record_graph_resource_detail(cpu_timings.graph_software_scene_prepare_us);
     bool direct_contract_failed{};
     const auto shape_of = [&](AllocationResource *resource) {
@@ -6237,7 +6283,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             saved.software_scene_page_slots != software_scene_page_slots)
             continue;
         if (!matches_direct_shapes(saved.direct_import_shapes) ||
-            (software_scene_jobs.empty()
+            (software_scene_job_count==0
                 ? saved.scene_geometry.valid && saved.scene_geometry.record.record_count != 0
                 : !saved.scene_geometry.valid ||
                     saved.scene_geometry.record.frame_slot != scene_shape.frame_slot ||
@@ -6346,6 +6392,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
     std::vector<SoftwareSceneGeometry> brixelizer_geometries;
     std::vector<BrixelizerSceneInstance> brixelizer_instances;
+    std::shared_ptr<const void> brixelizer_immutable_owner;
     BrixelizerGeometryLookup brixelizer_geometry_lookup;
     std::vector<std::shared_ptr<const void>> brixelizer_owners;
     std::unordered_set<D3D12MA::Allocation *> brixelizer_backing;
@@ -6356,98 +6403,176 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (software_scene_prepared.Owner())
             brixelizer_owners.push_back(software_scene_prepared.Owner());
     }
-    if (active_features.software_gi_enabled && !software_scene_jobs.empty())
+    const auto retain_brixelizer_allocation = [&](const AllocationResource &backing) {
+        if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
+        backing.allocation->AddRef();
+        std::shared_ptr<const void> owner(backing.allocation, [](const void *value) {
+            const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
+        });
+        brixelizer_owners.push_back(std::move(owner));
+    };
+    auto *const prepared_positions = software_scene_prepared.PositionResource();
+    const auto append_brixelizer_job = [&](std::size_t index, BrixelizerGeometryLookup &lookup,
+        std::vector<SoftwareSceneGeometry> &geometries, std::vector<BrixelizerSceneInstance> &instances,
+        std::vector<std::size_t> &leaf_jobs) -> Result {
+        SceneGeometryRecord job_scratch{};
+        const auto &job = software_scene_prepared.GeometryAt(index,job_scratch);
+        const auto &draw = software_scene_prepared.InstanceAt(index);
+        const auto &page = *software_scene_pages[index];
+        const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
+        const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
+        const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
+            std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
+                persistent_metadata[job.skin_slot].skin_vertex_stride : 0;
+        if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
+            page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
+            frame.skin_cache_vertices.resource->GetDesc().Width))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
+        SoftwareSceneGeometry geometry{std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
+            deformed ? prepared_positions : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
+            page.storage.resource.Get(), {},
+            ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
+                skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
+            page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session};
+        // Immutable shared pages retain their revision through frames.
+        if (!deformed && !skin) geometry.current_revision = page.generation;
+        const auto &scene_source = software_scene_sources[index];
+        DirectX::XMFLOAT4X4 world;
+        if (scene_source.static_base)
+            world = scene_source.static_base->world;
+        else
+            DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
+                DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
+        const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
+        const SoftwareSceneInstance instance{job.stable_gpu_scene_slot, job.instance_generation,
+            static_cast<std::uint32_t>(index), material_id, 0, page.generation, world};
+        retain_brixelizer_allocation(page.storage);
+        if (skin) retain_brixelizer_allocation(frame.skin_cache_vertices);
+        const auto &source = *scene_source.source;
+        const auto &sphere = page.metadata.bounds.sphere;
+        const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
+        const float sine = scene_source.static_base ? scene_source.static_base->yaw_sine : std::sin(draw.yaw);
+        const float cosine = scene_source.static_base ? scene_source.static_base->yaw_cosine : std::cos(draw.yaw);
+        const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
+        DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
+            draw.position.z - sine * sx + cosine * sz};
+        float radius = sphere[3] * maximum_scale;
+        if (skin)
+        {
+            center = {draw.position.x, draw.position.y, draw.position.z};
+            radius = std::max(draw.position.w, std::sqrt(sx*sx + sy*sy + sz*sz) + radius);
+        }
+        if (HasEnvironmentWind(source.mesh, source.environment_variant)) radius += grass_visibility_radius;
+        std::span<const render_data::CharacterMaterialBinding> bindings;
+        if (source.mesh == RenderMesh::Archer) bindings = impl_->archer_material_bindings;
+        else if (is_monster(source.mesh)) bindings = impl_->monster_assets[
+            static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::MonsterMelee)].material_bindings;
+        const auto ordinal = job.environment_ordinal;
+        const auto capabilities = ordinal < kAuthoredMaterialNames.size()
+            ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
+        const auto previous_leaf_count = geometries.size();
+        if (auto appended = AppendBrixelizerLeaf(geometry, instance, page.submeshes,
+                page.brixelizer_submesh_keys, bindings,
+                std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
+                (job.flags & SceneGeometryTwoSided) != 0,
+                (job.flags & SceneGeometryTransmissive) != 0,
+                {center.x-radius,center.y-radius,center.z-radius},
+                {center.x+radius,center.y+radius,center.z+radius},
+                ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
+                    : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
+                    impl_->material_parameter_revision,
+                lookup,geometries,instances); !appended) return appended;
+        for (auto leaf = previous_leaf_count; leaf < geometries.size(); ++leaf)
+            leaf_jobs.push_back(index);
+        return Result::Success();
+    };
+    std::vector<BrixelizerSceneInstanceRange> brixelizer_instance_ranges;
+    if (active_features.software_gi_enabled && software_scene_job_count!=0)
     {
-            auto *const prepared_positions = software_scene_prepared.PositionResource();
-            for (std::size_t index = 0; index < software_scene_jobs.size(); ++index)
+        using NativeRows = Impl::StaticGpuScene::SoftwareSceneCache::NativeRows;
+        std::shared_ptr<const NativeRows> cached;
+        if (software_scene_static_rows)
+        {
+            auto &cache = impl_->static_gpu_scene->software_scene;
+            if (!cache.native_rows || cache.native_rows->source != software_scene_static_rows ||
+                cache.native_rows->generation_owner != impl_->resident_generation_lease ||
+                cache.native_rows->material_revision != impl_->material_parameter_revision)
             {
-                const auto &job = software_scene_jobs[index];
-                const auto &draw = software_scene_draws[index];
-                const auto &page = *software_scene_pages[index];
-                const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
-                const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
-                const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
-                    std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
-                        persistent_metadata[job.skin_slot].skin_vertex_stride : 0;
-                if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
-                    page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
-                    frame.skin_cache_vertices.resource->GetDesc().Width))
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
-                SoftwareSceneGeometry geometry{std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
-                    deformed ? prepared_positions : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
-                    page.storage.resource.Get(), {},
-                    ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
-                        skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
-                    page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session};
-                // Immutable shared pages retain their revision through frames.
-                if (!deformed && !skin) geometry.current_revision = page.generation;
-                const auto &scene_source = software_scene_sources[index];
-                DirectX::XMFLOAT4X4 world;
-                if (scene_source.static_base)
-                    world = scene_source.static_base->world;
-                else
-                    DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
-                        DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
-                const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
-                const SoftwareSceneInstance instance{job.stable_gpu_scene_slot, job.instance_generation,
-                    static_cast<std::uint32_t>(index), material_id, 0, page.generation, world};
-                if (active_features.software_gi_enabled)
+                auto next = std::make_shared<NativeRows>();
+                next->source = software_scene_static_rows;
+                next->generation_owner = impl_->resident_generation_lease;
+                next->material_revision = impl_->material_parameter_revision;
+                BrixelizerGeometryLookup lookup;
+                for (std::size_t local = 0; local < software_scene_static_rows->section.geometries.size(); ++local)
                 {
-                    // Retain the allocator's actual backing in addition to COM
-                    // resources; native geometry IDs can outlive this frame slot.
-                    const auto retain_allocation = [&](const AllocationResource &backing) {
-                        if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
-                        backing.allocation->AddRef();
-                        std::shared_ptr<const void> owner(backing.allocation, [](const void *value) {
-                            const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
-                        });
-                        brixelizer_owners.push_back(std::move(owner));
-                    };
-                    retain_allocation(page.storage);
-                    if (skin) retain_allocation(frame.skin_cache_vertices);
-                    const auto &source = *scene_source.source;
-                    const auto &sphere = page.metadata.bounds.sphere;
-                    const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
-                    const float sine = scene_source.static_base ? scene_source.static_base->yaw_sine : std::sin(draw.yaw);
-                    const float cosine = scene_source.static_base ? scene_source.static_base->yaw_cosine : std::cos(draw.yaw);
-                    const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
-                    DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
-                        draw.position.z - sine * sx + cosine * sz};
-                    float radius = sphere[3] * maximum_scale;
-                    if (skin)
-                    {
-                        center = {draw.position.x, draw.position.y, draw.position.z};
-                        radius = std::max(draw.position.w, std::sqrt(sx*sx + sy*sy + sz*sz) + radius);
-                    }
-                    if (HasEnvironmentWind(source.mesh, source.environment_variant)) radius += grass_visibility_radius;
-                    std::span<const render_data::CharacterMaterialBinding> bindings;
-                    if (source.mesh == RenderMesh::Archer) bindings = impl_->archer_material_bindings;
-                    else if (is_monster(source.mesh)) bindings = impl_->monster_assets[
-                        static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::MonsterMelee)].material_bindings;
-                    const auto ordinal = job.environment_ordinal;
-                    const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-                        ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-                    const auto previous_leaf_count = brixelizer_geometries.size();
-                    if (auto appended = AppendBrixelizerLeaf(geometry, instance, page.submeshes,
-                            page.brixelizer_submesh_keys, bindings,
-                            std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
-                            (job.flags & SceneGeometryTwoSided) != 0,
-                            (job.flags & SceneGeometryTransmissive) != 0,
-                            {center.x-radius,center.y-radius,center.z-radius},
-                            {center.x+radius,center.y+radius,center.z+radius},
-                            ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
-                                : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
-                                impl_->material_parameter_revision,
-                            brixelizer_geometry_lookup,brixelizer_geometries,brixelizer_instances); !appended) return appended;
-                    for (auto leaf = previous_leaf_count; leaf < brixelizer_geometries.size(); ++leaf)
-                        brixelizer_leaf_jobs.push_back(index);
+                    const auto &row = software_scene_static_rows->section.geometries[local];
+                    if (row.flags & (SceneGeometryDeformed | SceneGeometryCachedSkin)) continue;
+                    if (next->runs.empty() || next->runs.back().job_begin + next->runs.back().job_count != local)
+                        next->runs.push_back({local, 0, next->instances.size(), 0});
+                    if (auto appended = append_brixelizer_job(software_scene_current_job_count + local,
+                        lookup, next->geometries, next->instances, next->leaf_jobs); !appended) return appended;
+                    auto &run = next->runs.back();
+                    ++run.job_count;
+                    run.instance_count = next->instances.size() - run.instance_begin;
                 }
+                for (auto &geometry : next->geometries) geometry.force_rebuild = false;
+                for (auto &job : next->leaf_jobs) job -= software_scene_current_job_count;
+                cache.native_rows = std::move(next);
             }
+            cached = cache.native_rows;
+            brixelizer_immutable_owner = cached;
+            brixelizer_owners.push_back(cached);
+            brixelizer_geometries.reserve(cached->geometries.size());
+            brixelizer_leaf_jobs.reserve(cached->leaf_jobs.size());
+            for (std::size_t leaf = 0; leaf < cached->geometries.size(); ++leaf)
+            {
+                auto geometry = cached->geometries[leaf];
+                geometry.force_rebuild = new_session;
+                const auto added = brixelizer_geometry_lookup.FindOrAdd(geometry, brixelizer_geometries);
+                assert(added == leaf);
+                brixelizer_leaf_jobs.push_back(software_scene_current_job_count + cached->leaf_jobs[leaf]);
+                const auto &page = *software_scene_pages[brixelizer_leaf_jobs.back()];
+                retain_brixelizer_allocation(page.storage);
+            }
+        }
+        struct InstanceRange { bool cached; std::size_t begin, count; };
+        std::vector<InstanceRange> ranges;
+        std::size_t run_index{}, current_begin{};
+        const auto append_current_range = [&]() {
+            if (brixelizer_instances.size() != current_begin)
+                ranges.push_back({false, current_begin, brixelizer_instances.size() - current_begin});
+            current_begin = brixelizer_instances.size();
+        };
+        for (std::size_t index = 0; index < software_scene_job_count;)
+        {
+            if (cached && run_index < cached->runs.size() &&
+                index == software_scene_current_job_count + cached->runs[run_index].job_begin)
+            {
+                append_current_range();
+                const auto &run = cached->runs[run_index++];
+                if (run.instance_count) ranges.push_back({true, run.instance_begin, run.instance_count});
+                index += run.job_count;
+            }
+            else
+            {
+                if (auto appended = append_brixelizer_job(index, brixelizer_geometry_lookup,
+                    brixelizer_geometries, brixelizer_instances, brixelizer_leaf_jobs); !appended) return appended;
+                ++index;
+            }
+        }
+        append_current_range();
+        brixelizer_instance_ranges.reserve(ranges.size());
+        for (const auto &range : ranges)
+            brixelizer_instance_ranges.push_back({range.cached
+                ? std::span(cached->instances).subspan(range.begin, range.count)
+                : std::span(brixelizer_instances).subspan(range.begin, range.count), range.cached});
     }
     const auto brixelizer_leaf_key = [&](std::size_t leaf) {
         const auto job_index = brixelizer_leaf_jobs[leaf];
+        SceneGeometryRecord job_scratch{};
+        const auto &job=software_scene_prepared.GeometryAt(job_index,job_scratch);
         return std::pair{software_scene_pages[job_index]->page_slot,
-            software_scene_jobs[job_index].flags &
+            job.flags &
                 (SceneGeometryDeformed | SceneGeometryCachedSkin)};
     };
     if (source_candidate && active_features.software_gi_enabled)
@@ -6480,7 +6605,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     BrixelizerFrameRecordData brixelizer_record;
     if (active_features.software_gi_enabled)
     {
-        native_scene.geometries = brixelizer_geometries; native_scene.instances = brixelizer_instances;
+        native_scene.geometries = brixelizer_geometries; native_scene.instance_ranges = brixelizer_instance_ranges;
+        native_scene.immutable_owner = brixelizer_immutable_owner;
         native_scene.excluded_masked_count = excluded_masked_count;
         native_scene.excluded_thin_count = excluded_thin_count;
         native_scene.excluded_translucent_count = excluded_translucent_count;
@@ -6621,15 +6747,20 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         back_buffer_contract.description.Format != owned_view.display_state.format)
     {
         ComPtr<IUnknown> resource_identity, owner_identity;
-        if (FAILED(native_back_buffer->QueryInterface(IID_PPV_ARGS(&resource_identity))) ||
-            FAILED(native_back_buffer->GetDevice(IID_PPV_ARGS(&owner_identity))))
+        if (FAILED(native_back_buffer->QueryInterface(IID_PPV_ARGS(&resource_identity))))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Cannot certify the current swapchain buffer owner.");
         ComPtr<IUnknown> renderer_device_identity;
-        if (FAILED(impl_->device->QueryInterface(IID_PPV_ARGS(&renderer_device_identity))) ||
+        if (FAILED(impl_->device->QueryInterface(IID_PPV_ARGS(&renderer_device_identity))))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Cannot identify the renderer device for the output contract.");
+        if (presented_view && impl_->sdk_presentation.PresentationOwner() == SdkPresentationOwner::None)
+            // Native DXGI buffers come from the swapchain created with our owned presentation queue.
+            owner_identity = renderer_device_identity;
+        else if (FAILED(native_back_buffer->GetDevice(IID_PPV_ARGS(&owner_identity))) ||
             renderer_device_identity.Get() != owner_identity.Get())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Swapchain buffer belongs to a different device.");
+                "Output buffer belongs to a different device.");
         auto &generation = back_buffer_contract_generation;
         if (++generation == 0) ++generation;
         back_buffer_contract = {};
@@ -9196,7 +9327,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 &impl_->monster_emissive, &impl_->monster_ram, &impl_->family_diffuse, &impl_->family_normal}) add_texture(*texture);
 
 
-        const auto &jobs = software_scene_jobs;
+        const auto job_count = software_scene_job_count;
         auto &scene_pages = software_scene_pages;
         std::vector<ResourceVersion> scene_page_versions;
         scene_page_versions.reserve(scene_pages.size());
@@ -9214,7 +9345,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         }
         for (const auto *page : scene_pages)
             scene_page_versions.push_back(scene_versions_by_slot.at(page->page_slot));
-        if (!jobs.empty())
+        if (job_count!=0)
         {
             const SceneGeometryInputs scene_inputs{scene_reads,
                 make_scene_bindings(kSceneGeometryTableOffset), frame_slot,
@@ -9230,7 +9361,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             {
                 auto &geometry = brixelizer_geometries[leaf];
                 const auto job_index = brixelizer_leaf_jobs[leaf];
-                const auto &job = scene_geometry_outputs.geometries[job_index];
+                SceneGeometryRecord job_scratch{};
+                const auto &job = software_scene_prepared.GeometryAt(job_index,job_scratch);
                 geometry.vertex_version = (job.flags & SceneGeometryDeformed) ? scene_geometry_outputs.positions
                     : (job.flags & SceneGeometryCachedSkin) ? skin_cache_version : scene_page_versions[job_index];
                 geometry.index_version = scene_page_versions[job_index];

@@ -5,6 +5,7 @@
 #include "renderer_sdk_frame.hpp"
 #include <hs/render_data/texture_descriptor.hpp>
 #include <array>
+#include <memory>
 #include <string>
 
 namespace hs
@@ -42,10 +43,16 @@ struct BrixelizerSceneInstance
     DirectX::XMFLOAT3 bounds_min{},bounds_max{}; // conservative ABSOLUTE world AABB
     BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
 };
+struct BrixelizerSceneInstanceRange
+{
+    std::span<const BrixelizerSceneInstance> instances;
+    bool immutable{}; // immutable rows require immutable_owner
+};
 struct BrixelizerSceneInputs
 {
     std::span<const SoftwareSceneGeometry> geometries; // original leaf / current SkinCache / procedural
-    std::span<const BrixelizerSceneInstance> instances; // all offscreen eligible instances too
+    std::span<const BrixelizerSceneInstanceRange> instance_ranges; // ordered borrowed instance sections
+    std::shared_ptr<const void> immutable_owner; // exact owner for immutable ranges
     DirectX::XMFLOAT3 sdf_center{};
     std::uint32_t frame_slot{};
     std::uint64_t frame_index{},scene_revision{};

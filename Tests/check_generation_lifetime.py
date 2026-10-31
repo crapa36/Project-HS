@@ -284,6 +284,42 @@ def main():
             assert catalog_path.read_bytes() == catalog_bytes
             print('PASS schema2 healthy sibling preserved during refused producer repair')
 
+            if os.name == 'nt':
+                import _winapi
+                guarded = base / 'junction-gc'
+                guarded_result = publish(guarded, 'a' * 64, b'old')
+                guarded_compose = [args.generation, '--compose', '--build-root', guarded,
+                    '--scope', 'guarded', '--result', guarded_result]
+                run(*guarded_compose)
+                guarded_pointer = guarded / 'GenerationState/guarded.json'
+                old_id = json.loads(guarded_pointer.read_bytes())['generation_id']
+                old_tree = guarded / 'Generations' / old_id
+                publish(guarded, 'b' * 64, b'current'); run(*guarded_compose)
+                selected = guarded_pointer.read_bytes()
+                current_id = json.loads(selected)['generation_id']
+                current_tree = guarded / 'Generations' / current_id
+                current_bytes = snapshot_tree(current_tree)
+                outside = base / 'outside-gc'
+                outside.mkdir(); (outside / 'keep').write_bytes(b'untouched')
+                junction = old_tree / 'nested' / 'link'
+                junction.parent.mkdir()
+                _winapi.CreateJunction(str(outside), str(junction))
+                guarded_gc = [args.generation, '--gc', '--build-root', guarded,
+                    '--grace-seconds', 0]
+                try:
+                    for mode in (['--dry-run', '--json'], []):
+                        assert 'path-escape' in run(*guarded_gc, *mode, success=False)
+                        assert guarded_pointer.read_bytes() == selected
+                        assert snapshot_tree(current_tree) == current_bytes
+                        assert old_tree.exists() and (old_tree / 'generation.json').exists()
+                        assert snapshot_tree(outside) == {'keep': b'untouched'}
+                finally:
+                    if junction.exists(): os.rmdir(junction)
+                run(*guarded_gc)
+                assert not old_tree.exists() and snapshot_tree(current_tree) == current_bytes
+                assert snapshot_tree(outside) == {'keep': b'untouched'}
+                print('PASS per-candidate GC junction refusal preserves current and external trees')
+
             # Process death before manifest commit owns only a marked partial tree.
             publishing = base / 'interrupted-publication'
             publication_result = publish(publishing, '7' * 64, b'P')

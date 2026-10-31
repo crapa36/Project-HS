@@ -242,13 +242,19 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
     context.instanceKey = uint2(draw.InstanceIndex + 1u, draw.InstanceGeneration);
     context.skinSlot = 0xffffffffu;
     context.gpuSceneRefs = true;
+#ifdef HS_TERRAIN_VISIBILITY_RESOLVE
+    context.cachedSkin = false;
+    context.cachedSkinHistory = false;
+#else
     context.cachedSkin = (draw.MeshFlags & 0x40000u) != 0u;
     context.cachedSkinHistory = (draw.MeshFlags & 0x80000u) != 0u;
+#endif
     const bool staticSource = HsRasterSourceIsStatic(record.refSource);
     if (staticSource)
         context.instance = HsLoadGpuSceneInstance(HsStaticScene, draw.InstanceIndex);
     else
         context.instance = HsLoadGpuSceneInstance(HsDynamicScene, draw.InstanceIndex);
+#ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     if (context.cachedSkin)
     {
         uint4 skin;
@@ -262,6 +268,7 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
             ? HsLoadGpuSceneSkinStrides(HsStaticScene, draw.InstanceIndex)
             : HsLoadGpuSceneSkinStrides(draw.InstanceIndex);
     }
+#endif
     context.instance.Mesh |= draw.MeshFlags;
     const uint resolvedMesh = context.instance.Mesh & 0xffu;
     if (resolvedMesh >= 10u && resolvedMesh <= 15u)

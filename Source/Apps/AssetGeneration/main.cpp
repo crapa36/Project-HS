@@ -1861,7 +1861,7 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
             if (unpublished_generations.contains(id))
             {
                 const auto pending = generations / (".pending-" + id + ".json");
-                CheckTree(root, entry.path());
+                if (dry_run) CheckTree(root, entry.path());
                 if (!retained_generations.contains(id) &&
                     PastGracePeriod(entry.path(), grace_seconds) &&
                     PastGracePeriod(pending, grace_seconds))
@@ -1879,15 +1879,15 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
             }
             if (retired_ids.contains(id) && !fs::exists(entry.path() / "generation.json"))
             {
-                CheckTree(root, entry.path());
+                if (dry_run) CheckTree(root, entry.path());
                 plan.obsolete_generations.push_back(
                     {entry.path(), {}, {}, "retired generation cleanup"});
                 continue;
             }
             const auto generation = LoadGeneration(root, id, true);
-            bool keep = retained_generations.contains(id) ||
-                        !PastGracePeriod(entry.path(), grace_seconds);
-            if (keep && !retained_generations.contains(id))
+            const bool explicitly_retained = retained_generations.contains(id);
+            bool keep = explicitly_retained || !PastGracePeriod(entry.path(), grace_seconds);
+            if (keep && !explicitly_retained)
                 plan.retained_generation_reasons[id].insert("grace period");
             hs::GenerationFileLock reader_lock;
             if (!keep)
@@ -1898,7 +1898,8 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
                 if (keep)
                     plan.retained_generation_reasons[id].insert("reader lease");
             }
-            if (keep)
+            // Explicit roots were already verified under this same mutation lock.
+            if (keep && !explicitly_retained)
                 VerifyProducts(root, generation.products, "-");
             for (const auto &product : generation.products)
             {
@@ -1908,7 +1909,7 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
             }
             if (keep)
                 continue;
-            CheckTree(root, entry.path());
+            if (dry_run) CheckTree(root, entry.path());
             plan.obsolete_generations.push_back(
                 {entry.path(), std::move(reader_lock), {},
                  "unreferenced generation past grace period"});
@@ -1949,7 +1950,7 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
             if (retained_sets.contains({namespace_path, set_id}) ||
                 !PastGracePeriod(entry.path(), grace_seconds))
                 continue;
-            CheckTree(root, entry.path());
+            if (dry_run) CheckTree(root, entry.path());
             const auto lease_path = entry.path().parent_path() / ".leases" /
                 (set_id + ".lock");
             RetiredProductSet candidate{entry.path(), lease_path, {}, fs::exists(lease_path)};
@@ -1974,6 +1975,7 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
         return;
     }
 
+    // Each independent tree is checked at deletion; dry-run checks during planning.
     for (auto &candidate : plan.obsolete_generations)
     {
         CheckTree(root, candidate.path);

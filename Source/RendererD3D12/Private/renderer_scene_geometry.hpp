@@ -62,12 +62,30 @@ struct SceneDrawInstance
     float yaw{},padding{};
 };
 static_assert(sizeof(SceneDrawInstance)==48);
+// Immutable logical static rows are owned by the admitted StaticGpuScene cache.
+// Frame slots own current rows and the per-frame offsets for this section.
+struct SceneGeometryStaticSection
+{
+    std::vector<SceneGeometryRecord> geometries;
+    std::vector<SceneDrawInstance> instances;
+    std::vector<std::uint32_t> deformation_rows;
+    std::vector<std::uint32_t> deformation_rank_by_row;
+};
 // Shared with early GI exclusions so unsupported domains retain source validation.
 [[nodiscard]] Result ValidateSceneGeometryRecord(const SceneGeometryRecord &, const SceneDrawInstance &);
+// Fold the fixed procedural Ground/Dirt placeholder Y shape into a static draw
+// transform so immutable native GI can consume the canonical page directly.
+// Returns true only when it applied the transform and cleared Deformed.
+[[nodiscard]] bool FoldStaticBuiltinTerrainShape(SceneGeometryRecord &,SceneDrawInstance &) noexcept;
+[[nodiscard]] Result AppendSceneGeometryStaticRow(SceneGeometryStaticSection &,
+    const SceneGeometryRecord &,const SceneDrawInstance &);
 // Production row planner used by the waited frame slot and its existing CPU fixture.
 // Keeps logical order while returning compact source rows for deformation staging.
 [[nodiscard]] Result PrepareSceneGeometryRows(std::span<SceneGeometryRecord>,
     std::span<const SceneDrawInstance>,std::vector<std::uint32_t> &,std::uint64_t &);
+[[nodiscard]] Result PrepareSceneGeometrySections(std::span<SceneGeometryRecord>,
+    std::span<const SceneDrawInstance>,const SceneGeometryStaticSection &,
+    std::vector<std::uint32_t> &,std::vector<std::uint32_t> &,std::uint64_t &);
 
 struct SceneShaderRead
 {
@@ -95,10 +113,6 @@ struct SceneGeometryOutputs
 {
     ResourceVersion positions{};
     ID3D12Resource *position_resource{};
-    // Logical input rows remain in caller order for software SDF geometry.
-    // Only deformed rows are staged for the compute shader; each stores
-    // vertex_count local float3 positions (12B stride) at its returned offset.
-    std::span<const SceneGeometryRecord> geometries;
     std::shared_ptr<const void> owner; // actual service allocations, retained by native SDF registrations
 };
 struct SceneGeometryReadToken
@@ -144,8 +158,9 @@ class SceneGeometryPreparedFrame
     SceneGeometryPreparedFrame(SceneGeometryPreparedFrame &&) noexcept;
     SceneGeometryPreparedFrame &operator=(SceneGeometryPreparedFrame &&) noexcept;
     ~SceneGeometryPreparedFrame();
-    [[nodiscard]] std::span<const SceneGeometryRecord> Geometries() const noexcept;
-    [[nodiscard]] std::span<const SceneDrawInstance> Instances() const noexcept;
+    [[nodiscard]] std::size_t GeometryCount() const noexcept;
+    [[nodiscard]] const SceneGeometryRecord &GeometryAt(std::size_t,SceneGeometryRecord &) const noexcept;
+    [[nodiscard]] const SceneDrawInstance &InstanceAt(std::size_t) const noexcept;
     [[nodiscard]] ID3D12Resource *PositionResource() const noexcept;
     [[nodiscard]] const SceneGeometryRecordData *RecordData() const noexcept;
     [[nodiscard]] const std::shared_ptr<const void> &Owner() const noexcept { return owner_; }
@@ -164,7 +179,8 @@ class SceneGeometrySystem
         bool enabled,std::uint32_t frame_slots,const SceneShaderReader &,SceneGeometryCandidate &) const;
     [[nodiscard]] Result Commit(SceneGeometryCandidate &&,const CompletionSet &);
     [[nodiscard]] Result PrepareFrame(std::vector<SceneGeometryRecord> &&,
-        std::vector<SceneDrawInstance> &&,std::uint32_t,const CompletionSet &,SceneGeometryPreparedFrame &);
+        std::vector<SceneDrawInstance> &&,std::shared_ptr<const SceneGeometryStaticSection>,
+        std::uint32_t,const CompletionSet &,SceneGeometryPreparedFrame &);
     [[nodiscard]] Result RegisterPrepared(RenderGraphBuilder &,const SceneGeometryInputs &,
         SceneGeometryPreparedFrame &,SceneGeometryOutputs &,
         SceneGeometryGraphLayout *capture=nullptr);

@@ -1,5 +1,6 @@
 #include "renderer_brixelizer_scene.hpp"
 #include <hs/render_data/material_ir.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <array>
 #include <iostream>
 #include <limits>
@@ -33,6 +34,40 @@ void Validation(){
  bad([](auto& x,auto&){x.first_index=UINT32_MAX;});
  g.flags=SceneGeometryCachedSkin;Check(bool(ValidateSceneGeometryRecord(g,i)),"valid skin rejected");
 }
+void StaticBuiltinTerrainShape(){
+ const auto check=[&](RenderMesh mesh,float factor){
+  SceneGeometryRecord geometry{};geometry.mesh_id=static_cast<std::uint32_t>(mesh);
+  geometry.flags=SceneGeometryBuiltin|SceneGeometryDeformed;
+  SceneDrawInstance instance{};instance.mesh=static_cast<std::uint32_t>(mesh);
+  instance.scale={2.0f,4.0f,3.0f,1.0f};
+  Check(FoldStaticBuiltinTerrainShape(geometry,instance),"static builtin terrain shape was not folded");
+  Check(instance.scale.x==2.0f&&instance.scale.y==4.0f*factor&&instance.scale.z==3.0f&&
+   (geometry.flags&SceneGeometryDeformed)==0&&(geometry.flags&SceneGeometryBuiltin)!=0,
+   "static builtin terrain transform or flags changed");
+  Check(!FoldStaticBuiltinTerrainShape(geometry,instance)&&instance.scale.y==4.0f*factor,
+   "static builtin terrain shape was applied more than once");
+ };
+ check(RenderMesh::Ground,0.1f);check(RenderMesh::DirtPatch,0.035f);
+ SceneGeometryRecord wind_geometry{};wind_geometry.mesh_id=static_cast<std::uint32_t>(RenderMesh::Grass);
+ wind_geometry.flags=SceneGeometryBuiltin|SceneGeometryDeformed;
+ SceneDrawInstance wind{};wind.mesh=wind_geometry.mesh_id;wind.scale={1.0f,1.0f,1.0f,1.0f};
+ Check(!FoldStaticBuiltinTerrainShape(wind_geometry,wind)&&wind_geometry.flags==
+  (SceneGeometryBuiltin|SceneGeometryDeformed)&&wind.scale.y==1.0f,
+  "wind builtin deformation was altered");
+ SceneGeometryRecord skin_geometry{};skin_geometry.mesh_id=static_cast<std::uint32_t>(RenderMesh::Ground);
+ skin_geometry.flags=SceneGeometryBuiltin|SceneGeometryCachedSkin;
+ SceneDrawInstance skin{};skin.mesh=skin_geometry.mesh_id;skin.scale={1.0f,1.0f,1.0f,1.0f};
+ Check(!FoldStaticBuiltinTerrainShape(skin_geometry,skin)&&skin_geometry.flags==
+  (SceneGeometryBuiltin|SceneGeometryCachedSkin)&&skin.scale.y==1.0f,
+  "cached skin row was altered");
+ SceneGeometryRecord tiny_geometry{};tiny_geometry.mesh_id=static_cast<std::uint32_t>(RenderMesh::Ground);
+ tiny_geometry.flags=SceneGeometryBuiltin|SceneGeometryDeformed;
+ SceneDrawInstance tiny{};tiny.mesh=tiny_geometry.mesh_id;
+ tiny.scale={1.0f,std::numeric_limits<float>::denorm_min(),1.0f,1.0f};
+ Check(!FoldStaticBuiltinTerrainShape(tiny_geometry,tiny)&&tiny_geometry.flags==
+  (SceneGeometryBuiltin|SceneGeometryDeformed)&&tiny.scale.y==std::numeric_limits<float>::denorm_min(),
+  "underflowing terrain scale did not retain the deformed fallback");
+}
 void DeformationSections(){
  std::array<SceneGeometryRecord,5> rows{{
   {1,2,0,3,0,76,3,91,10,1,0,9,~0u,0},
@@ -52,6 +87,30 @@ void DeformationSections(){
   "non-deformed static/SkinCache rows were modified");
  for(std::size_t i=0;i<rows.size();++i)
   Check(rows[i].stable_gpu_scene_slot==10u+i,"logical row order or stable identity changed");
+
+ SceneGeometryStaticSection cached;
+ const SceneGeometryRecord immutable{1,2,0,3,0,76,3,91,20,1,0,9,~0u,0};
+ const SceneGeometryRecord wind{1,2,0,6,0,76,4,777,21,1,0,9,~0u,SceneGeometryDeformed};
+ SceneDrawInstance immutable_draw{};immutable_draw.mesh=9;immutable_draw.scale={1,1,1,1};
+ auto wind_draw=immutable_draw;
+ Check(bool(AppendSceneGeometryStaticRow(cached,immutable,immutable_draw))&&
+  bool(AppendSceneGeometryStaticRow(cached,wind,wind_draw)),"static section construction failed");
+ Check(cached.deformation_rows==std::vector<std::uint32_t>{1}&&
+  cached.deformation_rank_by_row==std::vector<std::uint32_t>{UINT32_MAX,0},
+  "static deformation rank differs from section order");
+ std::array<SceneGeometryRecord,2> current{{
+  {1,2,0,3,0,76,3,999,30,1,0,9,~0u,SceneGeometryDeformed},
+  {1,2,0,3,0,76,3,888,31,1,0,9,~0u,SceneGeometryCachedSkin}}};
+ std::array<SceneDrawInstance,2> current_draws{};
+ for(auto &draw:current_draws){draw.mesh=9;draw.scale={1,1,1,1};}
+ std::vector<std::uint32_t> compact_rows,static_offsets;std::uint64_t section_bytes{};
+ Check(bool(PrepareSceneGeometrySections(current,current_draws,cached,compact_rows,static_offsets,section_bytes)),
+  "static/current section preparation failed");
+ Check(compact_rows==std::vector<std::uint32_t>{0,3}&&static_offsets==std::vector<std::uint32_t>{36}&&
+  section_bytes==84,"section deformation order/prefix changed");
+ Check(current[0].position_byte_offset==0&&cached.geometries[1].position_byte_offset==777&&
+  cached.geometries[0].position_byte_offset==91,
+  "section preparation mutated current/static source offsets incorrectly");
 }
 void DomainsAndCounts(){
  BrixelizerSceneInputs ingress{};
@@ -107,6 +166,37 @@ void DomainsAndCounts(){
  std::vector<SoftwareSceneGeometry> zero_geometries;std::vector<BrixelizerSceneInstance> zero_instances;
  Check(!AppendBrixelizerLeaf(geometry,instance,parts,zero_keys,bindings,layouts,0,false,false,{},{},3,zeroKeyLookup,zero_geometries,zero_instances),"zero submesh key accepted");
 }
+void OrderedInstanceRanges(){
+ using D=BrixelizerGeometryDomain;
+ std::array<BrixelizerSceneInstance,2> first{{
+  {11,1,1,4,5,6,{}, {}, {},D::Opaque},
+  {12,1,UINT32_MAX,5,6,7,{}, {}, {},D::UnsupportedMasked}}};
+ std::array<BrixelizerSceneInstance,2> second{{
+  {13,1,0,6,7,8,{}, {}, {},D::AuthoredCoverage},
+  {14,1,UINT32_MAX,7,8,9,{}, {}, {},D::Translucent}}};
+ const BrixelizerSceneInstanceRange empty{{},false};
+ std::array<BrixelizerSceneInstanceRange,3> ranges{{{first,true},empty,{second,false}}};
+ std::uint32_t count{},immutable_count{};
+ Check(bool(CountBrixelizerSceneInstanceRanges(ranges,count,immutable_count))&&count==4&&immutable_count==2,
+  "ordered spans failed count admission");
+ std::array<std::uint32_t,4> expected_slots{11,12,13,14};
+ std::uint32_t visited{};
+ Check(bool(ForEachBrixelizerSceneInstance(ranges,false,
+  [&](const BrixelizerSceneInstance &instance,std::uint32_t logical,bool immutable)->Result {
+   Check(logical==visited&&instance.stable_gpu_scene_slot==expected_slots[visited]&&immutable==(visited<2),
+    "ordered borrowed range traversal changed logical order/index");
+   ++visited;return Result::Success();
+  }))&&visited==4,"ordered borrowed range traversal failed");
+ visited=0;
+ Check(bool(ForEachBrixelizerSceneInstance(ranges,true,
+  [&](const BrixelizerSceneInstance &instance,std::uint32_t logical,bool immutable)->Result {
+   Check(!immutable&&logical==visited+2&&instance.stable_gpu_scene_slot==expected_slots[visited+2],
+    "immutable warm traversal failed to skip its rows or preserve logical indices");
+   ++visited;return Result::Success();
+  }))&&visited==2,"immutable warm traversal changed current-row order");
+ std::uint32_t total{};
+ Check(!AccumulateBrixelizerSceneInstanceCount(UINT32_MAX,1,total),"instance count overflow accepted");
 }
-int main()try{Validation();DeformationSections();DomainsAndCounts();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
+}
+int main()try{Validation();StaticBuiltinTerrainShape();DeformationSections();DomainsAndCounts();OrderedInstanceRanges();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
 catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
