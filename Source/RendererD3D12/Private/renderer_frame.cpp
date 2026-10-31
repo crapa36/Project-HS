@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cfloat>
 #include <cstddef>
+#include <exception>
 #include <limits>
 #include <iterator>
 #include <memory_resource>
@@ -4627,6 +4628,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     if(!static_indices.contains(previous_static_batch->keys[i])) removed_static_indices.push_back(i);
 
         }
+        dynamic_surface_receivers.reserve(dynamic_draw_refs.size());
         for (std::size_t index = 0; index < dynamic_draw_refs.size(); ++index)
         {
             if (dynamic_cooked_skin_bounds[index] && !dynamic_skin_needed[index])
@@ -4849,7 +4851,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             if (consumer == 0)
             {
                 DirectX::XMFLOAT3 view_center{};
-                DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3TransformCoord(
+                DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3Transform(
                     DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
                 const auto distance = view_center.z - radius - error;
                 if (distance <= constants->lod_options.z)
@@ -5031,7 +5033,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     auto &serialized = frame.scene_serialization_scratch;
     serialized.resize(required_slots);
     const auto uploaded_scene_revision = current_instance_snapshot->uploaded_revision;
-    impl_->dynamic_scene_slots.CollectDirtyRangesSince(uploaded_scene_revision, dirty_instance_ranges);
+    impl_->dynamic_scene_slots.CollectDirtyRangesSince(
+        uploaded_scene_revision, dirty_instance_ranges, frame.scene_channel_dirty_scratch);
     for (const auto &range : dirty_instance_ranges)
     {
         for (std::size_t index = 0; index < range.count; ++index)
@@ -5044,8 +5047,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     }
     const auto append_entries =
         [&](GpuSceneChannel channel, std::size_t destination_base, std::size_t stride, auto member) {
-            auto &ranges = frame.scene_channel_dirty_scratch;
-            impl_->dynamic_scene_slots.CollectDirtyRangesSince(channel, uploaded_scene_revision, ranges);
+            const auto &ranges = frame.scene_channel_dirty_scratch[static_cast<std::size_t>(channel)];
             for (const auto &range : ranges)
             {
                 const auto staging_offset = dynamic_scene_staging_bytes;
@@ -5369,6 +5371,11 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             end - graph_substage_start).count());
         graph_substage_start = end;
     };
+    auto graph_resource_detail_start = capture_clock();
+    const auto record_graph_resource_detail = [&](std::uint64_t &duration) {
+        duration += capture_elapsed(graph_resource_detail_start);
+        graph_resource_detail_start = capture_clock();
+    };
     std::size_t hero_candidate_count{};
     if (has_translucent_hero_binding(0))
         hero_candidate_count += archer_range.second;
@@ -5537,30 +5544,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
 #if defined(HS_DEVELOPMENT_TOOLS)
     devtools_ui_hook = imgui_draw_data && !impl_->sdk_presentation.IsEnabled();
 #endif
+    record_graph_resource_detail(cpu_timings.graph_resource_pre_shadow_us);
     LocalShadowInputs local_shadow_input;
     LocalShadowFramePlan local_shadow_plan;
     const bool local_shadow_planned = owned_view.local_shadows.AllocatedBytes() != 0;
-    if (local_shadow_planned)
-    {
-        if (!static_shadow_batch)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Local shadows have no prepared caster batch.");
-        local_shadow_input.lights = frame_lights;
-        local_shadow_input.camera_position = lod_eye;
-        local_shadow_input.rendered_frame_id = owned_view.frame_number;
-        local_shadow_input.frame_slot = frame_slot;
-        local_shadow_input.completed = impl_->graph_queue_executor.Completed();
-        local_shadow_input.reset_cache = new_session;
-        local_shadow_input.casters = ShadowCasterRange{static_shadow_batch->records, casters};
-        local_shadow_input.draw_groups = groups;
-        // Planning uses current lights/casters/groups. Native reads and callbacks
-        // are attached to this same object after logical graph slots are known.
-        local_shadow_input.draw = [](RenderPassContext &, const LocalShadowOutputs &,
-                                     std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
-        local_shadow_input.declare_material_sampling = [](PassBuilder &) {};
-        if (auto prepared = owned_view.local_shadows.PrepareFrameRecordData(
-                local_shadow_input, local_shadow_plan); !prepared) return prepared;
-    }
 #if defined(HS_DEVELOPMENT_TOOLS)
     const bool full_timing_capture = impl_->config.capture_timing_stream && impl_->config.capture_gpu_timings;
 #else
@@ -5615,10 +5602,20 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     }
     std::ranges::sort(geometry_page_slots);
     std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
+    record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
     std::vector<SceneGeometryRecord> software_scene_jobs;
     std::vector<SceneDrawInstance> software_scene_draws;
     std::vector<const GeometryPageGpu *> software_scene_pages;
-    std::vector<const RenderInstance *> software_scene_sources;
+    struct SoftwareSceneSource
+    {
+        const RenderInstance *source{};
+        const Impl::StaticGpuScene::SoftwareSceneBase *static_base{};
+    };
+    std::vector<SoftwareSceneSource> software_scene_sources;
+    SceneGeometryOutputs software_scene_preview;
+    SceneGeometryRecordData scene_shape;
+    std::vector<std::uint32_t> software_scene_page_slots;
+    const auto prepare_software_scene = [&]() -> Result {
     if (active_features.software_gi_enabled)
     {
         const auto append_scene = [&](const RenderInstance &source, const GpuInstance &draw,
@@ -5687,7 +5684,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             software_scene_jobs.push_back(job);
             software_scene_draws.push_back(instance);
             software_scene_pages.push_back(page);
-            software_scene_sources.push_back(&source);
+            software_scene_sources.push_back({&source, nullptr});
             return Result::Success();
         };
         std::vector<bool> included(persistent_instances.size());
@@ -5758,7 +5755,15 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
                         source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
                             ? 0.0f : std::bit_cast<float>(source.environment_seed)};
-                    cache.rows.push_back({index, draw, page_slot, ordinal, flags, domain});
+                    Impl::StaticGpuScene::SoftwareSceneBase row{
+                        index, draw, page_slot, ordinal, flags, domain};
+                    DirectX::XMStoreFloat4x4(&row.world,
+                        DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
+                        DirectX::XMMatrixRotationY(draw.yaw) *
+                        DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
+                    row.yaw_sine = std::sin(draw.yaw);
+                    row.yaw_cosine = std::cos(draw.yaw);
+                    cache.rows.push_back(std::move(row));
                 }
                 cache.material_layouts = impl_->material_surface_layouts;
                 cache.material_variants = impl_->environment_material_variants;
@@ -5804,11 +5809,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 software_scene_jobs.push_back(job);
                 software_scene_draws.push_back(instance);
                 software_scene_pages.push_back(page);
-                software_scene_sources.push_back(&source);
+                software_scene_sources.push_back({&source, &base});
             }
         }
     }
-    SceneGeometryOutputs software_scene_preview;
     if (!software_scene_jobs.empty())
     {
         const SceneGeometryInputs preview_inputs{software_scene_jobs, software_scene_draws, {}, {},
@@ -5821,8 +5825,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     }
     const SceneGeometryInputs scene_shape_inputs{software_scene_jobs, software_scene_draws,
         {}, {}, frame_slot, impl_->graph_queue_executor.Completed()};
-    const auto scene_shape = impl_->scene_geometry.PrepareRecordData(scene_shape_inputs);
-    std::vector<std::uint32_t> software_scene_page_slots;
+    scene_shape = impl_->scene_geometry.PrepareRecordData(scene_shape_inputs);
     std::array<bool, kGeometryPageCapacity> software_scene_page_seen{};
     software_scene_page_slots.reserve(software_scene_pages.size());
     for (const auto *page : software_scene_pages)
@@ -5835,6 +5838,93 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         software_scene_page_slots.push_back(page->page_slot);
     }
     std::ranges::sort(software_scene_page_slots);
+    return Result::Success();
+    };
+    Result local_shadow_prepare_result = Result::Success();
+    Result local_shadow_submit_result = Result::Success();
+    Result local_shadow_join_result = Result::Success();
+    std::exception_ptr local_shadow_submit_exception;
+    std::exception_ptr local_shadow_join_exception;
+    std::exception_ptr software_scene_prepare_exception;
+    bool local_shadow_task_attempted{};
+    if (local_shadow_planned)
+    {
+        if (!static_shadow_batch)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Local shadows have no prepared caster batch.");
+        local_shadow_input.lights = frame_lights;
+        local_shadow_input.camera_position = lod_eye;
+        local_shadow_input.rendered_frame_id = owned_view.frame_number;
+        local_shadow_input.frame_slot = frame_slot;
+        local_shadow_input.completed = impl_->graph_queue_executor.Completed();
+        local_shadow_input.reset_cache = new_session;
+        local_shadow_input.casters = ShadowCasterRange{static_shadow_batch->records, casters};
+        local_shadow_input.draw_groups = groups;
+        // Planning uses current lights/casters/groups. Native reads and callbacks
+        // are attached to this same object after logical graph slots are known.
+        local_shadow_input.draw = [](RenderPassContext &, const LocalShadowOutputs &,
+                                     std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
+        local_shadow_input.declare_material_sampling = [](PassBuilder &) {};
+        const bool independent_software_scene_work = active_features.software_gi_enabled &&
+            ((static_scene && impl_->static_gpu_scene && !static_scene->instances.empty()) ||
+                !render_instances.empty());
+        const auto &executor = impl_->config.task_executor;
+        if (independent_software_scene_work && executor.submit && executor.join)
+        {
+            local_shadow_task_attempted = true;
+            try
+            {
+                auto submitted = executor.submit([&] {
+                    const auto task_start = capture_clock();
+                    local_shadow_prepare_result = owned_view.local_shadows.PrepareFrameRecordData(
+                        local_shadow_input, local_shadow_plan);
+                    cpu_timings.graph_local_shadow_task_us = capture_elapsed(task_start);
+                });
+                if (!submitted) local_shadow_submit_result = std::move(submitted);
+            }
+            catch (...)
+            {
+                // A throwing submit callback may have admitted the task before throwing.
+                local_shadow_submit_exception = std::current_exception();
+            }
+        }
+        else
+        {
+            local_shadow_prepare_result = owned_view.local_shadows.PrepareFrameRecordData(
+                local_shadow_input, local_shadow_plan);
+        }
+    }
+    record_graph_resource_detail(cpu_timings.graph_local_shadow_prepare_us);
+    if (!local_shadow_task_attempted && !local_shadow_prepare_result)
+        return local_shadow_prepare_result;
+    Result software_scene_prepare_result = Result::Success();
+    try
+    {
+        software_scene_prepare_result = prepare_software_scene();
+    }
+    catch (...)
+    {
+        software_scene_prepare_exception = std::current_exception();
+    }
+    if (local_shadow_task_attempted)
+    {
+        try
+        {
+            local_shadow_join_result = impl_->config.task_executor.join();
+        }
+        catch (...)
+        {
+            local_shadow_join_exception = std::current_exception();
+        }
+    }
+    if (local_shadow_join_exception) std::rethrow_exception(local_shadow_join_exception);
+    if (local_shadow_submit_exception) std::rethrow_exception(local_shadow_submit_exception);
+    if (!local_shadow_prepare_result) return local_shadow_prepare_result;
+    if (!local_shadow_submit_result) return local_shadow_submit_result;
+    if (!local_shadow_join_result) return local_shadow_join_result;
+    if (software_scene_prepare_exception) std::rethrow_exception(software_scene_prepare_exception);
+    if (!software_scene_prepare_result) return software_scene_prepare_result;
+    record_graph_resource_detail(cpu_timings.graph_software_scene_prepare_us);
     bool direct_contract_failed{};
     const auto shape_of = [&](AllocationResource *resource) {
         FrameGraphLayout::ResourceShape shape;
@@ -5929,11 +6019,19 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     };
     // A value-only first gate precedes the stateful GI and probe record
     // preparation. Later guide and import checks must also qualify a restore.
+    AmbientOcclusionConstants ambient_constants;
+    DirectX::XMStoreFloat4x4(&ambient_constants.world_to_view,
+        DirectX::XMMatrixTranslationFromVector(eye) * view);
+    DirectX::XMStoreFloat4x4(&ambient_constants.projection,
+        projection * DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f));
+    DirectX::XMStoreFloat4x4(&ambient_constants.inverse_projection,
+        DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&ambient_constants.projection)));
     const auto matches_target_shapes = [&](const FrameGraphLayout &saved) {
         if (!owned_view.adaptive_shading.MatchesShape(saved.adaptive)) return false;
         if (!owned_view.ambient_occlusion.MatchesShape(saved.ambient,
                 !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) || new_session,
-                overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct)) return false;
+                overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct,
+                owned_view.state.render_active, ambient_constants.inverse_projection)) return false;
         if (!owned_view.subsurface.MatchesShape(saved.subsurface)) return false;
 
         if (!owned_view.screen_reflections.MatchesShape(saved.reflections,
@@ -6212,6 +6310,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     {
         source_candidate = nullptr;
     }
+    record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
     std::vector<SoftwareSceneGeometry> brixelizer_geometries;
     std::vector<BrixelizerSceneInstance> brixelizer_instances;
     BrixelizerGeometryLookup brixelizer_geometry_lookup;
@@ -6248,9 +6347,13 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session};
                 // Immutable shared pages retain their revision through frames.
                 if (!deformed && !skin) geometry.current_revision = page.generation;
+                const auto &scene_source = software_scene_sources[index];
                 DirectX::XMFLOAT4X4 world;
-                DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
-                    DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
+                if (scene_source.static_base)
+                    world = scene_source.static_base->world;
+                else
+                    DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
+                        DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
                 const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
                 const SoftwareSceneInstance instance{job.stable_gpu_scene_slot, job.instance_generation,
                     static_cast<std::uint32_t>(index), material_id, 0, page.generation, world};
@@ -6261,16 +6364,18 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     const auto retain_allocation = [&](const AllocationResource &backing) {
                         if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
                         backing.allocation->AddRef();
-                        brixelizer_owners.emplace_back(backing.allocation, [](const void *value) {
+                        std::shared_ptr<const void> owner(backing.allocation, [](const void *value) {
                             const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
                         });
+                        brixelizer_owners.push_back(std::move(owner));
                     };
                     retain_allocation(page.storage);
                     if (skin) retain_allocation(frame.skin_cache_vertices);
-                    const auto &source = *software_scene_sources[index];
+                    const auto &source = *scene_source.source;
                     const auto &sphere = page.metadata.bounds.sphere;
                     const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
-                    const float sine = std::sin(draw.yaw), cosine = std::cos(draw.yaw);
+                    const float sine = scene_source.static_base ? scene_source.static_base->yaw_sine : std::sin(draw.yaw);
+                    const float cosine = scene_source.static_base ? scene_source.static_base->yaw_cosine : std::cos(draw.yaw);
                     const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
                     DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
                         draw.position.z - sine * sx + cosine * sz};
@@ -6314,7 +6419,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     if (source_candidate && active_features.software_gi_enabled)
     {
         const auto &reads = source_candidate->brixelizer.record.geometry_reads;
-        const auto &saved_keys = source_candidate->brixelizer_leaf_keys;
+        const auto &saved_keys = source_candidate->brixelizer_leaf_reads;
         if (reads.size() != saved_keys.size() * 2u)
         {
             source_candidate = nullptr;
@@ -6322,13 +6427,17 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         else
             for (std::size_t leaf = 0; leaf < brixelizer_geometries.size(); ++leaf)
             {
-                const auto found = std::ranges::find(saved_keys, brixelizer_leaf_key(leaf));
-                if (found == saved_keys.end())
+                const auto key = brixelizer_leaf_key(leaf);
+                const auto found = std::lower_bound(saved_keys.begin(), saved_keys.end(), key,
+                    [](const FrameGraphLayout::BrixelizerLeafRead &entry, const auto &value) {
+                        return entry.key < value;
+                    });
+                if (found == saved_keys.end() || found->key != key)
                 {
                     source_candidate = nullptr;
                     break;
                 }
-                const auto old_leaf = static_cast<std::size_t>(found - saved_keys.begin());
+                const auto old_leaf = found->read_pair;
                 brixelizer_geometries[leaf].vertex_version = reads[old_leaf * 2u].version;
                 brixelizer_geometries[leaf].index_version = reads[old_leaf * 2u + 1u].version;
             }
@@ -6344,6 +6453,10 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         native_scene.sdf_center = lod_eye; native_scene.frame_slot = frame_slot;
         native_scene.frame_index = owned_view.frame_number; native_scene.scene_revision = impl_->pipeline_revision + 1;
         native_scene.completed = impl_->graph_queue_executor.Completed(); native_scene.owners = brixelizer_owners;
+    }
+    record_graph_resource_detail(cpu_timings.graph_resource_brixelizer_input_us);
+    if (active_features.software_gi_enabled)
+    {
         if (auto prepared = owned_view.brixelizer_gi.PrepareFrameRecordData(native_scene, brixelizer_record); !prepared)
             return prepared;
         if (source_candidate && !MatchesBrixelizerGraphLayout(
@@ -6352,6 +6465,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             source_candidate = nullptr;
         }
     }
+    record_graph_resource_detail(cpu_timings.graph_resource_brixelizer_prepare_us);
     struct PreparedGiGuard
     {
         BrixelizerGiSystem *service{};
@@ -6473,10 +6587,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         back_buffer_contract.description.Format != owned_view.display_state.format)
     {
         ComPtr<IUnknown> resource_identity, owner_identity;
-        ComPtr<ID3D12Device> native_device;
         if (FAILED(native_back_buffer->QueryInterface(IID_PPV_ARGS(&resource_identity))) ||
-            FAILED(native_back_buffer->GetDevice(IID_PPV_ARGS(&native_device))) ||
-            FAILED(native_device->QueryInterface(IID_PPV_ARGS(&owner_identity))))
+            FAILED(native_back_buffer->GetDevice(IID_PPV_ARGS(&owner_identity))))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Cannot certify the current swapchain buffer owner.");
         ComPtr<IUnknown> renderer_device_identity;
@@ -6515,9 +6627,23 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         pending_graph_layout.early = early_key;
         pending_graph_layout.geometry_page_slots = geometry_page_slots;
         pending_graph_layout.software_scene_page_slots = software_scene_page_slots;
-        pending_graph_layout.brixelizer_leaf_keys.reserve(brixelizer_leaf_jobs.size());
+        pending_graph_layout.brixelizer_leaf_reads.reserve(brixelizer_leaf_jobs.size());
         for (std::size_t leaf = 0; leaf < brixelizer_leaf_jobs.size(); ++leaf)
-            pending_graph_layout.brixelizer_leaf_keys.push_back(brixelizer_leaf_key(leaf));
+            pending_graph_layout.brixelizer_leaf_reads.push_back({brixelizer_leaf_key(leaf), leaf});
+        std::ranges::sort(pending_graph_layout.brixelizer_leaf_reads,
+            [](const auto &left, const auto &right) {
+                return left.key != right.key ? left.key < right.key
+                                             : left.read_pair < right.read_pair;
+            });
+#ifndef NDEBUG
+        for (std::size_t index = 1; index < pending_graph_layout.brixelizer_leaf_reads.size(); ++index)
+        {
+            const auto &previous = pending_graph_layout.brixelizer_leaf_reads[index - 1];
+            const auto &current = pending_graph_layout.brixelizer_leaf_reads[index];
+            if (previous.key == current.key)
+                assert(previous.read_pair < current.read_pair);
+        }
+#endif
         // Provider preparation may have replaced direct resources after a rejected candidate.
         collect_direct_shapes();
         pending_graph_layout.direct_import_shapes = impl_->graph_direct_shapes_scratch;
@@ -7099,6 +7225,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         return true;
     };
 
+    record_graph_resource_detail(cpu_timings.graph_resource_layout_remainder_us);
     record_graph_substage(cpu_timings.graph_resources_us);
     if (!owned_view.exposure_initialized)
     {
@@ -9094,13 +9221,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         if (!registered) return registered;
         return Result::Success();
     };
-    AmbientOcclusionConstants ambient_constants;
-    DirectX::XMStoreFloat4x4(&ambient_constants.world_to_view,
-        DirectX::XMMatrixTranslationFromVector(eye) * view);
-    DirectX::XMStoreFloat4x4(&ambient_constants.projection,
-        projection * DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f));
-    DirectX::XMStoreFloat4x4(&ambient_constants.inverse_projection,
-        DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&ambient_constants.projection)));
     ambient_constants.previous_depth_parameters = previous_view_valid
         ? owned_view.previous_projection_depth
         : DirectX::XMFLOAT4{lod_projection._33, lod_projection._34, lod_projection._43, lod_projection._44};
@@ -10714,7 +10834,9 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     {
         frame.timestamp_query_slots.assign(impl_->graph.PassCount(), UINT32_MAX);
         timing_query_pair_count = timing_mode == GpuTimingMode::Critical ? 2u : impl_->graph.PassCount();
-        if (auto prepared = impl_->PrepareFrameTimestamps(frame, timing_query_pair_count); !prepared)
+        if (auto prepared = impl_->PrepareFrameTimestamps(frame, timing_query_pair_count,
+                timing_mode == GpuTimingMode::Full && impl_->copy_queue_timestamp_queries_supported);
+            !prepared)
             return prepared;
         bool critical_begin_seen = false, critical_end_seen = false;
         for (std::uint32_t slot = 0; slot < impl_->graph.PassCount(); ++slot)
@@ -10814,9 +10936,12 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     GraphExecutionOptions execution_options;
     if (collect_gpu_timing)
     {
-        constexpr std::array timing_queues{QueueHint::Direct, QueueHint::Compute};
+        constexpr std::array timing_queues{QueueHint::Direct, QueueHint::Compute, QueueHint::Copy};
         for (const auto hint : timing_queues)
         {
+            if (hint == QueueHint::Copy &&
+                (timing_mode != GpuTimingMode::Full || !impl_->copy_queue_timestamp_queries_supported))
+                continue;
             const auto queue_index = static_cast<std::size_t>(hint);
             execution_options.timestamp_query_heaps[queue_index] = frame.timestamp_heaps[queue_index].Get();
             execution_options.timestamp_readbacks[queue_index] =

@@ -237,10 +237,9 @@ class PersistentGpuSceneSlots
     [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges();
     [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges(GpuSceneChannel channel);
     [[nodiscard]] std::uint64_t PayloadRevision() const noexcept;
-    void CollectDirtyRangesSince(GpuSceneChannel channel, std::uint64_t uploaded_revision,
-                                 std::vector<PersistentGpuSceneRange> &out) const;
     void CollectDirtyRangesSince(std::uint64_t uploaded_revision,
-                                 std::vector<PersistentGpuSceneRange> &out) const;
+                                 std::vector<PersistentGpuSceneRange> &union_ranges,
+                                 std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> &channel_ranges) const;
     [[nodiscard]] std::size_t ActiveCount() const noexcept { return active_count_; }
     [[nodiscard]] std::size_t SlotCount() const noexcept
     {
@@ -272,8 +271,6 @@ class PersistentGpuSceneSlots
     void MarkDirty(std::uint32_t slot, std::uint8_t channels = kGpuSceneAllChannels);
     void RebuildDirtyRanges();
     void CommitPayloadChanges() noexcept;
-    void CollectDirtyRangesSince(std::uint8_t channels, std::uint64_t uploaded_revision,
-                                 std::vector<PersistentGpuSceneRange> &out) const;
 
     std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> slots_;
     std::vector<Entry> entries_;

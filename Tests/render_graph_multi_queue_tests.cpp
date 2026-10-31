@@ -779,15 +779,22 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
 
 void RunTimestampResolveIsolation(Fixture &fixture)
 {
+    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
+    const bool copy_timestamp_queries_supported =
+        SUCCEEDED(fixture.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3,
+                                                       sizeof(options3))) &&
+        options3.CopyQueueTimestampQueriesSupported != FALSE;
     hs::TransientResourcePool pool;
     Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "timestamp isolation pool");
     hs::RenderGraphQueueExecutor executor;
-    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "timestamp isolation executor");
+    Check(executor.Initialize(fixture.device.Get(), nullptr, 1,
+                              copy_timestamp_queries_supported).Succeeded(), "timestamp isolation executor");
     hs::RenderGraphBuilder graph;
     graph.AddPass(1, "Direct timestamp producer", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
     graph.AddPass(2, "Gated compute timestamp producer", hs::QueueHint::Compute).SetExecute([](hs::RenderPassContext &) {});
     graph.AddPass(3, "Direct timestamp suffix", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
-    graph.AddPass(4, "Unmeasured copy", hs::QueueHint::Copy).SetExecute([](hs::RenderPassContext &) {});
+    graph.AddPass(4, copy_timestamp_queries_supported ? "Measured copy" : "Unmeasured copy",
+                  hs::QueueHint::Copy).SetExecute([](hs::RenderPassContext &) {});
     Check(graph.Prepare(pool).Succeeded(), "timestamp isolation prepare");
 
     constexpr std::size_t queue_count = 3;
@@ -798,10 +805,16 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     std::array<ComPtr<ID3D12QueryHeap>, queue_count> queries;
     std::array<ComPtr<ID3D12Resource>, queue_count> timestamps;
     hs::GraphExecutionOptions options;
-    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    const std::array timestamp_queues{hs::QueueHint::Direct, hs::QueueHint::Compute,
+                                      hs::QueueHint::Copy};
+    for (const auto queue : timestamp_queues)
     {
         const auto index = static_cast<std::size_t>(queue);
-        Hr(fixture.device->CreateQueryHeap(&query_description, IID_PPV_ARGS(&queries[index])),
+        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
+        auto queue_query_description = query_description;
+        if (queue == hs::QueueHint::Copy)
+            queue_query_description.Type = D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP;
+        Hr(fixture.device->CreateQueryHeap(&queue_query_description, IID_PPV_ARGS(&queries[index])),
            "create isolated timestamp query heap");
         Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
             &readback_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
@@ -810,13 +823,15 @@ void RunTimestampResolveIsolation(Fixture &fixture)
         options.timestamp_readbacks[index] = timestamps[index].Get();
     }
     std::vector<std::uint32_t> query_slots(graph.PassCount(), UINT32_MAX);
-    std::vector<std::uint32_t> direct_slots, compute_slots;
+    std::vector<std::uint32_t> direct_slots, compute_slots, copy_slots;
     for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
     {
         const auto queue = graph.CompiledPassQueue(position);
         if (queue == hs::QueueHint::Direct) direct_slots.push_back(position);
         else if (queue == hs::QueueHint::Compute) compute_slots.push_back(position);
-        if (queue != hs::QueueHint::Copy) query_slots[position] = position;
+        else if (queue == hs::QueueHint::Copy) copy_slots.push_back(position);
+        if (queue != hs::QueueHint::Copy || copy_timestamp_queries_supported)
+            query_slots[position] = position;
     }
     Check(direct_slots.size() == 2 && compute_slots.size() == 1,
           "timestamp isolation fixture keeps its Direct and Compute producers");
@@ -850,7 +865,7 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     Hr(executor.NativeQueue(hs::QueueHint::Compute)->Wait(compute_gate.Get(), 1),
        "gate independent timestamp compute");
     Hr(executor.NativeQueue(hs::QueueHint::Copy)->Wait(copy_gate.Get(), 1),
-       "gate unmeasured timestamp copy");
+       "gate timestamp copy");
 
     queue_guard.submitted = true;
     Check(executor.Execute(graph, 0, hs::BarrierMode::Legacy, completion, &options).Succeeded(),
@@ -869,15 +884,17 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     queue_guard.completed = waited.Succeeded();
     Check(waited.Succeeded(), "wait both timestamp queues before releasing readbacks");
 
-    std::array<std::vector<std::uint64_t>, 2> values;
-    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    std::array<std::vector<std::uint64_t>, 3> values;
+    for (const auto queue : timestamp_queues)
     {
         const auto index = static_cast<std::size_t>(queue);
+        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
         std::uint64_t *mapped{};
         D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
         Hr(timestamps[index]->Map(0, &range, reinterpret_cast<void **>(&mapped)),
            "map queue timestamp readback");
-        const auto &slots = queue == hs::QueueHint::Direct ? direct_slots : compute_slots;
+        const auto &slots = queue == hs::QueueHint::Direct ? direct_slots :
+            queue == hs::QueueHint::Compute ? compute_slots : copy_slots;
         for (const auto slot : slots)
             values[index].insert(values[index].end(), {mapped[slot * 2], mapped[slot * 2 + 1]});
         D3D12_RANGE no_write{};
@@ -885,8 +902,9 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     }
     Check(direct_resolved_while_compute_waited && compute_remained_gated && copy_remained_gated,
           "Direct timestamp resolve must not depend on unrelated gated Compute or Copy work");
-    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    for (const auto queue : timestamp_queues)
     {
+        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
         const auto &queue_values = values[static_cast<std::size_t>(queue)];
         Check(!queue_values.empty(), "each timestamp queue resolves its own producer pairs");
         for (std::size_t pair = 0; pair < queue_values.size(); pair += 2)

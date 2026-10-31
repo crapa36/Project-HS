@@ -99,51 +99,24 @@ void EmptyFeatureShapes()
 }
 void Hr(HRESULT result, const char *message) { Check(SUCCEEDED(result), message); }
 
-struct MembershipWork
+void CheckBatchResourceMembership(std::uint32_t count)
 {
-    std::uint64_t hashes{}, equalities{};
-    std::uint64_t Total() const { return hashes + equalities; }
-};
-struct MembershipResource
-{
-    std::uint32_t value{};
-    MembershipWork *work{};
-    bool operator==(const MembershipResource &other) const
-    {
-        ++work->equalities;
-        return value == other.value;
-    }
-};
-struct MembershipHash
-{
-    std::size_t operator()(const MembershipResource &resource) const noexcept
-    {
-        ++resource.work->hashes;
-        return std::hash<std::uint32_t>{}(resource.value);
-    }
-};
-
-std::uint64_t CheckBatchResourceMembership(std::uint32_t count)
-{
-    MembershipWork work;
-    std::vector<MembershipResource> ordered;
-    std::optional<std::unordered_set<MembershipResource, MembershipHash>> membership;
+    std::vector<std::uint32_t> ordered;
+    std::vector<std::uint64_t> membership((count + 63u) / 64u);
     std::vector<std::uint32_t> expected;
     for (std::uint32_t i = 0; i < count; ++i)
     {
         const auto value = (i * 17u) % count;
-        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership,
-            MembershipResource{value, &work}), "first batch resource must be appended");
+        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership, value, count),
+            "first dense batch resource must be appended");
         expected.push_back(value);
-        if (i + 1 < 1024) Check(!membership, "small batches do not allocate a membership index");
     }
     for (std::uint32_t i = count; i > 0; --i)
-        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership,
-            MembershipResource{expected[i - 1], &work}), "duplicate batch resource must be rejected");
+        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership, expected[i - 1], count),
+            "duplicate dense batch resource must be rejected");
     Check(ordered.size() == expected.size(), "batch membership preserves unique resource count");
     for (std::size_t i = 0; i < ordered.size(); ++i)
-        Check(ordered[i].value == expected[i], "batch membership preserves first-use order");
-    return work.Total();
+        Check(ordered[i] == expected[i], "batch membership preserves first-use order");
 }
 
 void ResourceAliasPatterns()
@@ -177,26 +150,44 @@ void ResourceAliasPatterns()
 
 void BatchResourceMembership()
 {
-    for (const auto count : {0u, 1u, 31u, 32u, 33u, 1023u, 1024u, 1025u})
-        (void)CheckBatchResourceMembership(count);
-    const auto small_work = CheckBatchResourceMembership(4096);
-    const auto large_work = CheckBatchResourceMembership(8192);
-    Check(large_work <= 8192u * 16u + 1024u * 1024u && large_work <= small_work * 3u + 1024u,
-          "doubling large batch resources must retain linear hash/equality work");
+    for (const auto count : {0u, 1u, 31u, 32u, 33u, 63u, 64u, 65u, 127u, 128u,
+                             129u, 1023u, 1024u, 1025u, 4096u, 8192u})
+        CheckBatchResourceMembership(count);
 
     std::vector<std::uint32_t> first, second;
-    std::optional<std::unordered_set<std::uint32_t>> first_membership, second_membership;
-    for (std::uint32_t i = 0; i < 1040; ++i)
+    std::vector<std::uint64_t> first_membership(3), second_membership(3);
+    for (const auto value : {0u, 63u, 64u, 129u})
     {
-        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, i), "first batch insert");
-        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 1039u - i), "second batch insert");
+        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, value, 130),
+            "first batch inserts a member at each tested word boundary");
+        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u - value, 130),
+            "second batch keeps independent membership bits");
     }
-    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 0u) &&
-          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 1039u),
-          "returning to an older batch still rejects duplicates after index promotion");
-    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 1040u) &&
-          first.front() == 0 && first.back() == 1040 && second.front() == 1039 && second.back() == 0,
-          "interleaved batch membership remains independent and ordered");
+    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 130) &&
+          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 65u, 130),
+          "each batch rejects only its own duplicates");
+    const auto first_capacity = first_membership.capacity();
+    hs::render_graph::ResetBatchResourceMembership(first, first_membership);
+    Check(first.empty() && first_membership.size() == 3 && first_membership.capacity() == first_capacity,
+          "reset clears members and retains the batch bitset storage");
+    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65) &&
+          !hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65),
+          "reset permits a new insertion and detects it at the 64/65 word boundary");
+    std::vector<std::uint32_t> growing_order;
+    std::vector<std::uint64_t> growing_membership;
+    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 65);
+    Check(growing_membership.size() == 2 &&
+          hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 64u, 65),
+          "a 65-resource graph needs two membership words");
+    hs::render_graph::ResetBatchResourceMembership(growing_order, growing_membership);
+    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 130);
+    Check(growing_membership.size() == 3 &&
+          hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130) &&
+          !hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130),
+          "growth initializes a new word while preserving reset semantics");
+    hs::render_graph::ResetBatchResourceMembership(second, second_membership);
+    Check(second.empty() && hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u, 130),
+          "independent batches can reset and reuse the same dense resource indices");
 }
 
 void HlodSlotSetTest()

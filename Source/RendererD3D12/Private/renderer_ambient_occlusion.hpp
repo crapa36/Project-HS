@@ -32,7 +32,7 @@ struct alignas(16) AmbientOcclusionConstants
     DirectX::XMFLOAT4 history_size{};
     DirectX::XMFLOAT4 previous_depth_parameters{}; // P33,P34,P43,P44.
     DirectX::XMFLOAT4 jitter_uv{}; // Current xy, previous zw; logical viewport UV.
-    DirectX::XMFLOAT4 gtao_parameters{1.0f, 1.0f, 0.8f, 0.0f}; // Radius, strength, falloff start, CPU-validated inverse-projection fast path.
+    DirectX::XMFLOAT4 gtao_parameters{1.0f, 1.0f, 0.8f, 0.0f}; // Radius, strength, falloff start, 0=general, 1=fast, 2=prepared inverse-W.
     DirectX::XMFLOAT4 filter_parameters{0.03f, 0.85f, 0.9f, 0.02f}; // Depth, normal, history, bilateral.
     DirectX::XMFLOAT4 contact_parameters{0.75f, 0.1f, 0.02f, 0.0f}; // Reach, thickness, bias in m.
     DirectX::XMFLOAT4 toward_light{}; // Normalized world direction toward sun.
@@ -70,12 +70,12 @@ struct AmbientOcclusionOutputs
 };
 struct AmbientOcclusionLayout
 {
-    bool valid{}, ao{}, contact{}, adaptive{}, history{};
+    bool valid{}, ao{}, contact{}, adaptive{}, history{}, prepared_inverse_w{};
     ViewExtent render_capacity{},ao_capacity{};
     QueueHint queue{};
     std::array<ResourceVersion, 6> guides{};
     std::array<TextureHandle, 7> textures{};
-    std::array<std::uint32_t, 4> passes{};
+    std::array<std::uint32_t, 5> passes{};
     ResourceVersion raw, history_output, metadata, resolved, contact_output;
 };
 
@@ -115,7 +115,11 @@ class AmbientOcclusionSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const AmbientOcclusionInputs &,
         AmbientOcclusionConstants, const AmbientOcclusionLayout &, AmbientOcclusionOutputs &);
     [[nodiscard]] bool MatchesLayout(const AmbientOcclusionInputs &,const AmbientOcclusionLayout &)const noexcept;
+    [[nodiscard]] bool MatchesLayout(const AmbientOcclusionInputs &, const AmbientOcclusionConstants &,
+        const AmbientOcclusionLayout &) const noexcept;
     [[nodiscard]] bool MatchesShape(const AmbientOcclusionLayout &, bool reset_history, QueueHint) const noexcept;
+    [[nodiscard]] bool MatchesShape(const AmbientOcclusionLayout &, bool reset_history, QueueHint,
+        ViewExtent active, const DirectX::XMFLOAT4X4 &inverse_projection) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;

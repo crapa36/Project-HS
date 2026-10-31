@@ -21,7 +21,6 @@
 #include <string>
 #include <tuple>
 #include <utility>
-#include <unordered_set>
 #include <vector>
 
 namespace hs
@@ -1061,7 +1060,6 @@ struct RenderGraphQueueExecutor::Impl
         std::uint32_t position{};
         std::vector<PlannedBarrier> before, after;
         std::vector<std::uint32_t> dependencies, resources;
-        std::optional<std::unordered_set<std::uint32_t>> resource_membership;
         CompletionSet imported;
         std::vector<std::uint32_t> external_imports;
         std::size_t recorder{};
@@ -1071,8 +1069,8 @@ struct RenderGraphQueueExecutor::Impl
         void Reset()
         {
             queue = {}; pass = external_finish = UINT32_MAX; position = 0;
-            before.clear(); after.clear(); dependencies.clear(); resources.clear();
-            if (resource_membership) resource_membership->clear();
+            before.clear(); after.clear(); dependencies.clear();
+            resources.clear();
             imported = {}; external_imports.clear(); recorder = 0; resolve_timestamps = false;
         }
     };
@@ -1087,6 +1085,7 @@ struct RenderGraphQueueExecutor::Impl
 
     Microsoft::WRL::ComPtr<ID3D12Device> device;
     Microsoft::WRL::ComPtr<ID3D12Device4> device4;
+    bool copy_timestamp_queries_supported{};
     std::array<QueueState, 3> queues;
     std::vector<FrameSlot> frames;
     HANDLE completion_event{};
@@ -1097,6 +1096,9 @@ struct RenderGraphQueueExecutor::Impl
     std::vector<ExternalRetention> external_retained;
     // Only CPU values survive Execute; recording tasks join before these are reused.
     std::vector<Batch> batches;
+    // Indexed by batch slot so scratch for synthesized join/export batches
+    // survives when the active Batch vector shrinks back to pass count.
+    std::vector<std::vector<std::uint64_t>> batch_resource_memberships;
     std::vector<ResourceState> resource_states;
     std::vector<std::uint32_t> submission_order;
     std::vector<std::size_t> counted_blocks, ordering_predecessor;
@@ -1126,7 +1128,8 @@ RenderGraphQueueExecutor::~RenderGraphQueueExecutor()
 
 Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
                                             ID3D12CommandQueue *direct_queue,
-                                            std::uint32_t frame_slot_count)
+                                            std::uint32_t frame_slot_count,
+                                            bool copy_timestamp_queries_supported)
 {
     Clear();
     if (impl_->device)
@@ -1139,6 +1142,7 @@ Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
     }
 
     impl_->device = device;
+    impl_->copy_timestamp_queries_supported = copy_timestamp_queries_supported;
     // Device4 creates command lists closed, which matches the recorder's
     // first operation (allocator/list Reset) and avoids the legacy open/Close
     // bootstrap. Keep the older path for devices without this interface.
@@ -1183,7 +1187,7 @@ Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
         state.next_fence = 1;
         state.timestamp_frequency = 0;
         state.joined = {};
-        if (queue_hint != QueueHint::Copy)
+        if (queue_hint != QueueHint::Copy || impl_->copy_timestamp_queries_supported)
             static_cast<void>(state.queue->GetTimestampFrequency(&state.timestamp_frequency));
     }
 
@@ -1356,6 +1360,7 @@ void RenderGraphQueueExecutor::Clear() noexcept
     }
     impl_->device.Reset();
     impl_->device4.Reset();
+    impl_->copy_timestamp_queries_supported = false;
     impl_->reliable = true;
     impl_->fault_drained = false;
     impl_->submitted = {};
@@ -1402,16 +1407,19 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 (options->timestamp_readbacks[queue] == nullptr))
                 return fail("Each timestamp queue requires both a query heap and a readback resource.");
         const auto copy = static_cast<std::size_t>(QueueHint::Copy);
-        if (options->timestamp_query_heaps[copy] || options->timestamp_readbacks[copy])
-            return fail("Copy queue timestamps are unsupported.");
-        const auto direct = static_cast<std::size_t>(QueueHint::Direct);
-        const auto compute = static_cast<std::size_t>(QueueHint::Compute);
-        if (options->timestamp_query_heaps[direct] && options->timestamp_query_heaps[direct] ==
-                options->timestamp_query_heaps[compute])
-            return fail("Direct and Compute timestamps require separate query heaps.");
-        if (options->timestamp_readbacks[direct] && options->timestamp_readbacks[direct] ==
-                options->timestamp_readbacks[compute])
-            return fail("Direct and Compute timestamps require separate readback resources.");
+        if ((options->timestamp_query_heaps[copy] || options->timestamp_readbacks[copy]) &&
+            !impl_->copy_timestamp_queries_supported)
+            return fail("Copy queue timestamps were supplied without device support.");
+        for (std::size_t first = 0; first < 3; ++first)
+            for (std::size_t second = first + 1; second < 3; ++second)
+            {
+                if (options->timestamp_query_heaps[first] &&
+                    options->timestamp_query_heaps[first] == options->timestamp_query_heaps[second])
+                    return fail("Each timestamp queue requires a separate query heap.");
+                if (options->timestamp_readbacks[first] &&
+                    options->timestamp_readbacks[first] == options->timestamp_readbacks[second])
+                    return fail("Each timestamp queue requires a separate readback resource.");
+            }
     }
     const auto queries_for = [&](QueueHint queue) {
         return options ? static_cast<ID3D12QueryHeap *>(
@@ -1502,6 +1510,18 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         }
     }
     auto &batches = impl_->batches;
+    auto &batch_resource_memberships = impl_->batch_resource_memberships;
+    for (std::size_t index = 0; index < batches.size(); ++index)
+    {
+        auto &batch = batches[index];
+        if (index < batch_resource_memberships.size())
+            render_graph::ResetBatchResourceMembership(batch.resources, batch_resource_memberships[index]);
+        else
+        {
+            assert(batch.resources.empty());
+            batch.resources.clear();
+        }
+    }
     batches.resize(g.passes.size());
     for (auto &batch : batches) batch.Reset();
     auto &submission_order = impl_->submission_order;
@@ -1520,7 +1540,13 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     }
     const auto include_resource = [&](std::uint32_t batch, std::uint32_t resource) {
         auto &target = batches[batch];
-        render_graph::AppendUniqueBatchResource(target.resources, target.resource_membership, resource);
+        // Use handles are one-based; every path below converts them to the
+        // zero-based index used by g.resources before reaching this helper.
+        if (batch_resource_memberships.size() <= batch)
+            batch_resource_memberships.resize(static_cast<std::size_t>(batch) + 1);
+        auto &membership = batch_resource_memberships[batch];
+        render_graph::EnsureBatchResourceMembershipDomain(membership, g.resources.size());
+        render_graph::AppendUniqueBatchResource(target.resources, membership, resource, g.resources.size());
     };
     const auto depend = [&](std::uint32_t consumer, std::uint32_t producer) {
         if (producer == UINT32_MAX || consumer == producer) return;
@@ -1767,7 +1793,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     // Ordinary pass boundaries (and Legacy decay) are unchanged.
     for (const auto batch : final_exports)
         if (batch != UINT32_MAX) submission_order.push_back(batch);
-    for (const auto queue : {QueueHint::Direct, QueueHint::Compute})
+    for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
     {
         if (!queries_for(queue) || !readback_for(queue)) continue;
         auto last_query_producer = UINT32_MAX;
@@ -1863,12 +1889,12 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             const bool pass_has_queries = query_slot != UINT32_MAX;
             const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
             if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
-                batch.queue != QueueHint::Copy && pass_has_queries)
+                pass_has_queries)
                 commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
             if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
             {
                 auto &pass = g.passes[batch.pass];
-                if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
+                if (queries && pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
 #if defined(HS_DEVELOPMENT_TOOLS)
                 // Copy lists are left unmarked because PIX may issue compute-only calls.
@@ -1890,12 +1916,12 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
 #if defined(HS_DEVELOPMENT_TOOLS)
                 if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
 #endif
-                if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
+                if (queries && pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             }
             for (const auto &barrier : batch.after) emit(barrier);
             buffer_barriers.Flush();
-            if (batch.external_finish != UINT32_MAX && queries && batch.queue != QueueHint::Copy && pass_has_queries)
+            if (batch.external_finish != UINT32_MAX && queries && pass_has_queries)
                 commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             if (batch.resolve_timestamps)
                 for (std::uint32_t position = 0; position < g.schedule.execution_order.size(); ++position)

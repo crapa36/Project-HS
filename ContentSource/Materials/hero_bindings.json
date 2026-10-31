@@ -26,25 +26,25 @@
     "enemy_melee": [
       {
         "diffuse": "SlimeMelee_BaseColor.png",
-        "material": "slime_features"
+        "materials": ["slime_body", "slime_features"]
       }
     ],
     "enemy_ranged": [
       {
         "diffuse": "SlimeRanged_BaseColor.png",
-        "material": "slime_features"
+        "materials": ["slime_body", "slime_features"]
       }
     ],
     "enemy_suicide": [
       {
         "diffuse": "SlimeSuicide_BaseColor.png",
-        "material": "slime_features"
+        "materials": ["slime_body", "slime_features"]
       }
     ],
     "enemy_gel_projectile": [
       {
         "diffuse": "SlimeGelProjectile_BaseColor.png",
-        "material": "slime_features"
+        "materials": ["slime_body", "slime_features"]
       }
     ],
     "boss_5m": [

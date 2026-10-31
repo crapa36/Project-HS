@@ -275,7 +275,8 @@ class RenderGraphQueueExecutor
     // this executor. Each queue has its own fence timeline.
     [[nodiscard]] Result Initialize(ID3D12Device *device,
                                     ID3D12CommandQueue *direct_queue = nullptr,
-                                    std::uint32_t frame_slot_count = 3);
+                                    std::uint32_t frame_slot_count = 3,
+                                    bool copy_timestamp_queries_supported = false);
     [[nodiscard]] Result Execute(RenderGraphBuilder &graph, std::uint32_t frame_slot,
                                  BarrierMode barriers, CompletionSet &completion,
                                  const GraphExecutionOptions *options = nullptr);

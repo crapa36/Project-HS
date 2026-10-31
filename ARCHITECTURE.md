@@ -105,6 +105,15 @@ counts/ratios while damage, uses, hit events and required summary values remain.
 
 Presentation projects stable GameDomain contracts. It does not execute rules or reach into Gameplay implementation state.
 
+Character authoring binds each FBX material slot to a material identity. Cooking
+reads that material's published capabilities and program set to select the
+opaque/masked or translucent domain; character names do not select a pass.
+The admitted GPU binding table stores the two domain ordinals and preparation
+publishes per-asset domain counts for candidate collection. Common Hero pass
+shaders are compiled once; material packages reference those shared programs
+and retain their own parameter layouts and capabilities. Procedural water keeps
+its explicit solid-transmission closure and participates in transparent work.
+
 RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotPair,
 VFX frame inputs and RenderFrameInput. Presentation owns RenderSnapshotExchange;
 Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
@@ -409,8 +418,11 @@ completed GPU publication are separate diagnostics.
 CPU frame/task capture can omit GPU timing queries and their measurement-only
 resolve. This is explicit in diagnostic metadata; absent GPU measurements are
 not zero-duration work. Direct and Compute own separate query/readback storage
-inside each submission slot; CPU reads only completed slots. Copy timing is
-unavailable. Active DRS uses an `OutputDependencyInterval` with both endpoints on
+inside each submission slot; CPU reads only completed slots. Copy timing uses its
+own storage when the device supports Copy queue timestamps. Capture-only CPU
+preparation slices measure main-thread wall intervals; separately reported worker
+intervals overlap those slices and must not be added to them.
+Active DRS uses an `OutputDependencyInterval` with both endpoints on
 Direct: the end reads the rendered output as Present and joins only its actual
 ancestors. The legacy whole-graph reference span remains a distinct diagnostic
 identity; full `SourceOutputReady` capture keeps its calibrated metric semantics.

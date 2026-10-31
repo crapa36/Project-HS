@@ -148,14 +148,9 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
     check(drained.Succeeded(), "native drain failed");
     check(status.enabled && status.shader_counters_enabled && !status.overflowed && status.failed_frames == 0 &&
         status.pending_frames == 0 && status.shader_invalid_samples == 0, "capture status failure/overflow/pending/invalid counters");
-    if (require_water)
-        check(status.submitted_frames == frames && status.completed_frames == frames &&
-            status.samples == samples.size() && !samples.empty(),
-            "completed frame/sample conservation or empty positive-water fixture");
-    else
-        check(status.submitted_frames == 0 && status.completed_frames == 0 &&
-            status.samples == 0 && samples.empty(),
-            "opaque slime preview unexpectedly submitted Hero transparency work");
+    check(status.submitted_frames == frames && status.completed_frames == frames &&
+        status.samples == samples.size() && !samples.empty(),
+        "completed frame/sample conservation or empty fixture");
     check(status.readback_bytes + status.shader_gpu_bytes + status.shader_readback_bytes + status.shader_zero_upload_bytes <=
         status.shader_storage_limit_bytes, "known diagnostic allocation limit");
     const auto hex = [](const std::array<std::byte, 32> &bytes) {
@@ -278,29 +273,6 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         }
         else check(c[14] == 0, "water construction appeared in a non-water contributor");
         uncalibrated += !sample.calibration_valid; mesh_statistics_na += !sample.mesh_statistics_available;
-    }
-    if (!require_water)
-    {
-        if (require_layer_transition)
-            check(quality_transition_valid, "actual applied refraction/transparency quality did not match the opaque-preview transition");
-        probe["opaque_preview"]["transparent_contributors"] = 0;
-        probe["opaque_preview"]["transparent_samples"] = samples.size();
-        probe["opaque_preview"]["transparent_layer_draws"] = 0;
-        probe["opaque_preview"]["transparent_draw_calls"] = 0;
-        probe["opaque_preview"]["quality_transition_valid"] =
-            require_layer_transition ? Json(quality_transition_valid) : Json(nullptr);
-        probe["surface_reuse"] = {{"standalone_guide_submitted", false}, {"nearest_composite_rows", 0},
-            {"nearest_composite_accepted_fragments", 0},
-            {"contract", "Opaque slime preview must bypass Hero transparency; the gameplay water fixture owns positive peel/composite coverage."}};
-        probe["counter_totals"] = Json::object();
-        for (std::size_t index = 0; index < totals.size(); ++index)
-            probe["counter_totals"][hs::kHeroWorkShaderCounterNames[index]] = totals[index];
-        probe["lighting_phase_accepted_fragments"] = 0;
-        probe["failures"] = failures;
-        probe["valid"] = failures.empty();
-        if (!failures.empty())
-            throw std::runtime_error("Hero work functional probe invariant failed; raw samples retained in result.json");
-        return;
     }
     check(totals[15] > 0 && totals[17] > 0 && shaded_accepted > 0, "fixture produced no actual accepted shaded Hero fragment");
     check(fused_rows > 0 && fused_accepted > 0, "fixture did not execute the fused nearest composite");
@@ -1333,36 +1305,6 @@ void ValidateGeometryDiagnostic(const std::filesystem::path &path, const char *r
     receipt["geometry_diagnostics"][receipt_name] = std::move(diagnostic);
 }
 
-void ValidateOpaqueHeroPreviewGeometry(const std::filesystem::path &path, Json &receipt)
-{
-    std::ifstream input(path);
-    if (!input) throw std::runtime_error("opaque hero preview geometry diagnostic is missing");
-    Json diagnostic;
-    input >> diagnostic;
-    const auto &records = diagnostic.at("records");
-    std::set<std::uint32_t> opaque_slime_instances;
-    std::set<std::uint32_t> visible_slime_meshes;
-    for (const auto &record : records)
-    {
-        const auto mesh = record.value("mesh", 0u);
-        if (mesh < static_cast<std::uint32_t>(hs::RenderMesh::MonsterMelee) ||
-            mesh > static_cast<std::uint32_t>(hs::RenderMesh::MonsterSuicide) ||
-            record.value("view", UINT32_MAX) != 0u || record.value("refsource", 0u) != 2u)
-            continue;
-        for (const auto &ref : record.at("visible_refs"))
-        {
-            opaque_slime_instances.insert(ref.value("InstanceIndex", UINT32_MAX));
-            visible_slime_meshes.insert(mesh);
-        }
-    }
-    if (opaque_slime_instances.empty())
-        throw std::runtime_error("opaque slime preview produced no main-view dynamic visible geometry refs");
-    receipt["hero_work"]["opaque_preview"] = {
-        {"transparent_work_expected", false}, {"geometry_diagnostic", path.filename().string()},
-        {"visible_opaque_slime_instances", opaque_slime_instances.size()},
-        {"visible_opaque_slime_meshes", visible_slime_meshes}};
-}
-
 void ValidateGpuLodGrowthSteady(const std::filesystem::path &path, Json &receipt)
 {
     std::ifstream input(path);
@@ -1796,13 +1738,12 @@ int main(int argc, char **argv)
             }
             config.temporal_reconstruction = false;
             config.bloom = config.outline = false;
-            receipt["hero_work"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "opaque-slime-family-preview-count1"}, {"requested_frames", frames},
+            receipt["hero_work"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "existing-slime-family-preview-count1"}, {"requested_frames", frames},
                 {"mode", HeroWorkModeName(config.hero_work_mode)}, {"functional_only", true}, {"performance_adoption", false}};
             if (hero_layer_probe)
                 receipt["hero_work"]["quality_transition"] = {{"request_frame", 5},
-                    {"hero_layers_expected", false},
-                    {"frames1_4", "Medium settings are applied while the slime family remains opaque; Hero transparency stays empty"},
-                    {"frames5_8", "Ultra settings are applied while the slime family remains opaque; Hero transparency stays empty"},
+                    {"frames1_4", "existing Medium refraction/transparency, one layer and original camera"},
+                    {"frames5_8", "Ultra refraction/transparency, four layers, camera yaw90/pitch0 for actual transparent overlap"},
                     {"camera_source", "snapshot camera yaw/pitch through MainViewInput; renderer preview_camera_override=false"},
                     {"frames", Json::array()}};
         }
@@ -1894,7 +1835,7 @@ int main(int argc, char **argv)
             config.slime_family_preview_count = 1;
             config.vfx_quality = hs::VfxQuality::Low;
         }
-        receipt["fixture"] = hero_work_probe ? (gameplay_scene ? "hero-work-functional-water-world-v1" : "hero-work-functional-opaque-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
+        receipt["fixture"] = hero_work_probe ? (gameplay_scene ? "hero-work-functional-water-world-v1" : "hero-work-functional-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
             ? "persistent-gpu-scene-v2"
             : skin_cache_monster_probe ? "skin-cache-monster-v1"
             : dynamic_lod_skin_growth_probe ? "dynamic-lod-skin-growth-v1"
@@ -3411,13 +3352,6 @@ int main(int argc, char **argv)
                         {"requested_refraction_quality", static_cast<unsigned>(status.requested.refraction_quality)},
                         {"actual_transparency_quality", status.actual_applied_available ? Json(static_cast<unsigned>(status.actual_applied.transparency_quality)) : Json(nullptr)},
                         {"actual_refraction_quality", status.actual_applied_available ? Json(static_cast<unsigned>(status.actual_applied.refraction_quality)) : Json(nullptr)}});
-                }
-                if (hero_work_probe && !gameplay_scene && frame == 1)
-                {
-                    failure_code = "HS_RENDER_HERO_WORK_PROBE_FAILED";
-                    const auto geometry = "opaque-slime-preview-geometry.json";
-                    Require(renderer.Capture({.path = artifacts / geometry, .kind = hs::CaptureKind::GeometryDiagnostics}));
-                    ValidateOpaqueHeroPreviewGeometry(artifacts / geometry, receipt);
                 }
                 if (hero_work_probe && gameplay_scene)
                 {

@@ -437,38 +437,22 @@ void PersistentGpuSceneSlots::CommitPayloadChanges() noexcept
 }
 
 void PersistentGpuSceneSlots::CollectDirtyRangesSince(
-    GpuSceneChannel channel, std::uint64_t uploaded_revision,
-    std::vector<PersistentGpuSceneRange> &out) const
+    std::uint64_t uploaded_revision,
+    std::vector<PersistentGpuSceneRange> &union_ranges,
+    std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> &channel_ranges) const
 {
-    const auto index = static_cast<std::size_t>(channel);
-    if (index >= kGpuSceneChannelCount)
-    {
-        out.clear();
-        return;
-    }
-    CollectDirtyRangesSince(static_cast<std::uint8_t>(1u << index), uploaded_revision, out);
-}
-
-void PersistentGpuSceneSlots::CollectDirtyRangesSince(
-    std::uint64_t uploaded_revision, std::vector<PersistentGpuSceneRange> &out) const
-{
-    CollectDirtyRangesSince(kGpuSceneAllChannels, uploaded_revision, out);
-}
-
-void PersistentGpuSceneSlots::CollectDirtyRangesSince(
-    std::uint8_t channels, std::uint64_t uploaded_revision,
-    std::vector<PersistentGpuSceneRange> &out) const
-{
-    out.clear();
+    union_ranges.clear();
+    for (auto &ranges : channel_ranges) ranges.clear();
     const auto pending_revision = PayloadRevision();
     const bool pending_is_newer = payload_change_pending_ && uploaded_revision < pending_revision;
     const bool all_active = uploaded_revision == 0 || payload_revision_exhausted_;
     if (!all_active && uploaded_revision == pending_revision) return;
-    const auto append = [&](std::uint32_t slot) {
-        if (!out.empty() && out.back().begin + out.back().count == slot)
-            ++out.back().count;
+
+    const auto append = [](std::vector<PersistentGpuSceneRange> &ranges, std::uint32_t slot) {
+        if (!ranges.empty() && ranges.back().begin + ranges.back().count == slot)
+            ++ranges.back().count;
         else
-            out.push_back({slot, 1});
+            ranges.push_back({slot, 1});
     };
     for (std::uint32_t slot = 0; slot < SlotCount(); ++slot)
     {
@@ -476,18 +460,19 @@ void PersistentGpuSceneSlots::CollectDirtyRangesSince(
             ? slot < pending_seen_.size() && pending_seen_[slot] != 0
             : slot < entries_.size() && entries_[slot].active;
         if (!active) continue;
-        bool changed = all_active;
-        if (!changed && slot < payload_slot_revisions_.size())
+        std::uint8_t changed_channels = all_active ? kGpuSceneAllChannels : 0;
+        if (!all_active && slot < payload_slot_revisions_.size())
             for (std::size_t channel = 0; channel < kGpuSceneChannelCount; ++channel)
-                if ((channels & (1u << channel)) &&
-                    payload_slot_revisions_[slot][channel] > uploaded_revision)
-                {
-                    changed = true;
-                    break;
-                }
-        if (!changed && pending_is_newer && slot < pending_payload_channels_.size())
-            changed = (pending_payload_channels_[slot] & channels) != 0;
-        if (changed) append(slot);
+                if (payload_slot_revisions_[slot][channel] > uploaded_revision)
+                    changed_channels |= static_cast<std::uint8_t>(1u << channel);
+        if (!all_active && pending_is_newer && slot < pending_payload_channels_.size())
+            changed_channels |= pending_payload_channels_[slot];
+        changed_channels &= kGpuSceneAllChannels;
+        if (changed_channels == 0) continue;
+
+        append(union_ranges, slot);
+        for (std::size_t channel = 0; channel < kGpuSceneChannelCount; ++channel)
+            if (changed_channels & (1u << channel)) append(channel_ranges[channel], slot);
     }
 }
 

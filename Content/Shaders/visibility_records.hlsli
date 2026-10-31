@@ -4,7 +4,7 @@
 #include "render_binding_contract.hlsli"
 
 // 0 is generic, then authored environment materials, then hero ordinals.
-// Ordinal5 is transparent and never writes opaque visibility.
+// Hero visibility variants are selected from the CPU-validated opaque binding domain.
 static const uint HsVisibilityInvalid = 0xffffffffu;
 static const uint HsVisibilityOffsetBase = HsVisibilityVariantCount;
 static const uint HsVisibilityCursorBase = HsVisibilityVariantCount * 2u;

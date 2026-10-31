@@ -90,12 +90,29 @@ std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterial
     std::vector<std::uint32_t> ordinals;
     for (const auto &rule : rules)
     {
-        Require(rule.is_object() && rule.contains("material") && rule.at("material").is_string(),
-            "character rule must select one material identity");
-        const auto name = rule.at("material").get<std::string>();
-        const auto found = std::ranges::find(hs::render_data::kHeroMaterialNames, name);
-        Require(found != hs::render_data::kHeroMaterialNames.end(), "unknown selected Hero material " + name);
-        ordinals.push_back(static_cast<std::uint32_t>(found - hs::render_data::kHeroMaterialNames.begin()));
+        Require(rule.is_object() && (rule.contains("material") != rule.contains("materials")),
+            "character rule must select material identity or identities");
+        const auto append_ordinal = [&](const std::string &name) {
+            const auto found = std::ranges::find(hs::render_data::kHeroMaterialNames, name);
+            Require(found != hs::render_data::kHeroMaterialNames.end(), "unknown selected Hero material " + name);
+            ordinals.push_back(static_cast<std::uint32_t>(found - hs::render_data::kHeroMaterialNames.begin()));
+        };
+        if (rule.contains("material"))
+        {
+            Require(rule.at("material").is_string(), "character material identity must be a string");
+            append_ordinal(rule.at("material").get<std::string>());
+        }
+        else
+        {
+            const auto &materials = rule.at("materials");
+            Require(materials.is_array() && !materials.empty() && materials.size() <= 2,
+                "character material identity list must contain one or two materials");
+            for (const auto &material : materials)
+            {
+                Require(material.is_string(), "character material identity must be a string");
+                append_ordinal(material.get<std::string>());
+            }
+        }
     }
     std::ranges::sort(ordinals);
     ordinals.erase(std::unique(ordinals.begin(), ordinals.end()), ordinals.end());

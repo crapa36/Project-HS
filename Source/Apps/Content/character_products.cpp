@@ -306,9 +306,10 @@ std::vector<CharacterMaterialSelection> PrepareCharacterMaterialSelections(
         for (const auto &rule : rules)
         {
             Require(rule.is_object() && (rule.contains("name") != rule.contains("diffuse")) &&
-                rule.contains("material") && rule.size() == 2, "invalid material identity rule");
+                (rule.contains("material") != rule.contains("materials")) && rule.size() == 2,
+                "invalid material identity rule");
             const auto key = rule.contains("name") ? "name" : "diffuse";
-            Require(rule.at(key).is_string() && rule.at("material").is_string(), "material identity must be a string");
+            Require(rule.at(key).is_string(), "material identity key must be a string");
             const auto matches = rule.at(key) == (rule.contains("name") ? material.name : material.diffuse.filename().string());
             if (!matches) continue;
             Require(selected == nullptr, "ambiguous material identity for slot " + std::to_string(slot));
@@ -316,8 +317,30 @@ std::vector<CharacterMaterialSelection> PrepareCharacterMaterialSelections(
         }
         Require(selected != nullptr, "unknown FBX material slot " + std::to_string(slot) +
             " name=" + material.name + " diffuse=" + material.diffuse.filename().string());
-        const auto material_name = selected->at("material").get<std::string>();
-        result.push_back({static_cast<std::uint16_t>(slot), HeroOrdinal(material_name)});
+        const auto append_material = [&](const std::string &material_name) {
+            const auto ordinal = HeroOrdinal(material_name);
+            const auto existing = std::ranges::find_if(result, [&](const auto &binding) {
+                return binding.slot == slot && binding.hero_ordinal == ordinal;
+            });
+            Require(existing == std::ranges::end(result), "duplicate material identity for FBX slot " + std::to_string(slot));
+            result.push_back({static_cast<std::uint16_t>(slot), ordinal});
+        };
+        if (selected->contains("material"))
+        {
+            Require(selected->at("material").is_string(), "material identity must be a string");
+            append_material(selected->at("material").get<std::string>());
+        }
+        else
+        {
+            const auto &materials = selected->at("materials");
+            Require(materials.is_array() && !materials.empty() && materials.size() <= 2,
+                "materials identity list must contain one or two materials");
+            for (const auto &material_name : materials)
+            {
+                Require(material_name.is_string(), "material identity must be a string");
+                append_material(material_name.get<std::string>());
+            }
+        }
     }
     return result;
 }

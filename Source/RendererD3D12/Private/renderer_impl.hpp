@@ -897,9 +897,14 @@ struct FrameGraphLayout
     std::uint64_t last_used{};
     bool certified_imports{true};
     std::vector<std::uint32_t> geometry_page_slots, software_scene_page_slots;
-    // One representative logical read pair per GI leaf source, indexed by
-    // resident page and vertex source kind. Actor multiplicity is frame data.
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> brixelizer_leaf_keys;
+    // Sorted by key, then original leaf read-pair index. Duplicate keys retain
+    // the old first-match behavior through the smallest read_pair.
+    struct BrixelizerLeafRead
+    {
+        std::pair<std::uint32_t, std::uint32_t> key;
+        std::size_t read_pair{};
+    };
+    std::vector<BrixelizerLeafRead> brixelizer_leaf_reads;
     std::vector<ResourceShape> direct_import_shapes;
     std::vector<ImportSlot> imports;
     std::vector<PassSlot> passes;
@@ -1247,6 +1252,8 @@ struct D3D12Renderer::Impl
             std::uint32_t material_ordinal{UINT32_MAX};
             std::uint32_t flags{};
             BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
+            DirectX::XMFLOAT4X4 world{};
+            float yaw_sine{}, yaw_cosine{};
         };
         struct SoftwareSceneCache
         {
@@ -1711,7 +1718,8 @@ struct D3D12Renderer::Impl
         ID3D12Resource *resource) const noexcept;
     void PublishEnvironmentMaterialTextures(std::uint32_t frame_slot) const noexcept;
     [[nodiscard]] Result WaitForFrame(FrameContext &frame);
-    [[nodiscard]] Result PrepareFrameTimestamps(FrameContext &frame, std::uint32_t pass_count);
+    [[nodiscard]] Result PrepareFrameTimestamps(FrameContext &frame, std::uint32_t pass_count,
+                                                bool include_copy_queue);
     [[nodiscard]] GpuPassTimings ReadFrameGpuTimings(const FrameContext &frame) const;
     [[nodiscard]] Result WaitForGpu();
     [[nodiscard]] Result CheckDevice(HRESULT result, std::string_view operation);
@@ -2126,6 +2134,7 @@ struct D3D12Renderer::Impl
     std::vector<render_graph::ResourceAlias> graph_alias_scratch;
     std::uint64_t graph_layout_use_serial{};
     RenderGraphQueueExecutor graph_queue_executor;
+    bool copy_queue_timestamp_queries_supported{};
     UINT rtv_stride{};
     UINT dsv_stride{};
     UINT srv_stride{};

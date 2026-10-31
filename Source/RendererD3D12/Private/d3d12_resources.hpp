@@ -119,7 +119,8 @@ struct FrameContext
     std::uint32_t static_input_ref_count{}, dynamic_input_ref_count{};
     std::shared_ptr<const std::vector<GpuStaticDrawRef>> static_input_refs;
     std::vector<GpuSceneSerializedSlot> scene_serialization_scratch;
-    std::vector<PersistentGpuSceneRange> scene_dirty_scratch, scene_channel_dirty_scratch;
+    std::vector<PersistentGpuSceneRange> scene_dirty_scratch;
+    std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> scene_channel_dirty_scratch;
     // CPU-only per-view instance preparation. Reused only after this frame slot
     // has been waited; these vectors do not escape the synchronous frame build.
     std::vector<GpuInstance> next_draw_instances_scratch;

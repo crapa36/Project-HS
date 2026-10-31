@@ -29,6 +29,7 @@ Texture2D<float4> AoRaw : register(t5, space12);
 Texture2D<float4> AoPrevious : register(t6, space12);
 Texture2D<uint> AoPreviousMetadata : register(t7, space12);
 Texture2D<float4> AoTemporal : register(t8, space12);
+Texture2D<uint> AoPreparedInverseW : register(t9, space12);
 RWTexture2D<float4> AoRawOutput : register(u0, space12);
 RWTexture2D<float4> AoHistoryOutput : register(u1, space12);
 RWTexture2D<float> AoResolvedOutput : register(u2, space12);
@@ -100,12 +101,53 @@ AoGuide AoLoadGuide(int2 pixel)
 }
 bool AoLoadHorizonPosition(int2 pixel, out float3 position)
 {
+    if (AoParameters.w > 1.5)
+    {
+        const uint packedInverseW = AoPreparedInverseW.Load(int3(pixel, 0));
+        if (packedInverseW == 0u) { position = 0.0; return false; }
+        const float inverseW = asfloat(packedInverseW);
+        if (!isfinite(inverseW) || inverseW <= 0.0) { position = 0.0; return false; }
+        const float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
+        const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+        position.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]) * inverseW;
+        position.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]) * inverseW;
+        position.z = AoInverseProjection[3][2] * inverseW;
+        return all(isfinite(position)) && position.z > 0.0;
+    }
     float depth = AoDepth.Load(int3(pixel, 0));
     uint material = AoMetadata.Load(int3(pixel, 0));
     position = 0.0;
     if (depth <= 0.0 || (material & HsSurfaceMetadataMaterialMask) == 0u) return false;
     position = AoViewPosition(pixel, depth);
     return all(isfinite(position)) && position.z > 0.0;
+}
+
+[numthreads(8, 8, 1)]
+void AoPrepareInverseWCS(uint3 dispatch : SV_DispatchThreadID)
+{
+    if (any(dispatch.xy >= uint2(AoSize.xy))) return;
+    const int2 pixel = int2(dispatch.xy);
+    const float depth = AoDepth.Load(int3(pixel, 0));
+    const uint material = AoMetadata.Load(int3(pixel, 0));
+    if (depth <= 0.0 || (material & HsSurfaceMetadataMaterialMask) == 0u)
+    {
+        AoMetadataOutput[pixel] = 0u;
+        return;
+    }
+    const float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
+    const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    const float viewX = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]);
+    const float viewY = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]);
+    const float viewNumeratorZ = mad(depth, AoInverseProjection[2][2], AoInverseProjection[3][2]);
+    const float viewW = mad(depth, AoInverseProjection[2][3], AoInverseProjection[3][3]);
+    const float inverseW = rcp(viewW);
+    const float3 position = float3(viewX, viewY, viewNumeratorZ) * inverseW;
+    if (!all(isfinite(position)) || position.z <= 0.0 || !isfinite(inverseW) || inverseW <= 0.0)
+    {
+        AoMetadataOutput[pixel] = 0u;
+        return;
+    }
+    AoMetadataOutput[pixel] = asuint(inverseW);
 }
 AoGuide AoGuideForSample(uint2 aoPixel)
 {

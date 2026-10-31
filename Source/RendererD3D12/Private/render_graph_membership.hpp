@@ -1,12 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <optional>
 #include <span>
-#include <unordered_set>
 #include <vector>
 
 namespace hs::render_graph
@@ -38,24 +37,34 @@ inline void CanonicalizeResourceAliases(std::span<ResourceAlias> aliases)
     }
 }
 
-// The ordered list remains the authority for publication order. Most batches
-// have few resources; only large batches allocate a membership index. Both
-// contents belong to one Execute attempt; their owner may retain capacity.
-template <typename Resource, typename Hash, typename Equal>
-bool AppendUniqueBatchResource(std::vector<Resource> &ordered,
-    std::optional<std::unordered_set<Resource, Hash, Equal>> &membership, const Resource &resource)
+// Resource indices are dense in [0, resource_count), matching the graph's
+// logical-resource vector. The ordered list remains authoritative for order;
+// the bitset is only a per-batch membership index and its owner retains storage.
+inline bool AppendUniqueBatchResource(std::vector<std::uint32_t> &ordered,
+    std::vector<std::uint64_t> &membership, std::uint32_t resource,
+    [[maybe_unused]] std::size_t resource_count)
 {
-    constexpr std::size_t indexed_threshold = 1024;
-    if (ordered.size() < indexed_threshold)
-    {
-        if (std::find(ordered.begin(), ordered.end(), resource) != ordered.end()) return false;
-        ordered.push_back(resource);
-        if (ordered.size() == indexed_threshold)
-            membership.emplace(ordered.begin(), ordered.end());
-        return true;
-    }
-    if (!membership->insert(resource).second) return false;
+    const auto word_index = static_cast<std::size_t>(resource / 64u);
+    assert(resource < resource_count && word_index < membership.size());
+    const auto mask = std::uint64_t{1} << (resource % 64u);
+    auto &word = membership[word_index];
+    if ((word & mask) != 0) return false;
     ordered.push_back(resource);
+    word |= mask;
     return true;
+}
+
+inline void EnsureBatchResourceMembershipDomain(std::vector<std::uint64_t> &membership,
+    std::size_t resource_count)
+{
+    const auto word_count = (resource_count + 63u) / 64u;
+    if (membership.size() < word_count) membership.resize(word_count, 0);
+}
+
+inline void ResetBatchResourceMembership(std::vector<std::uint32_t> &ordered,
+    std::vector<std::uint64_t> &membership)
+{
+    std::fill(membership.begin(), membership.end(), std::uint64_t{});
+    ordered.clear();
 }
 }

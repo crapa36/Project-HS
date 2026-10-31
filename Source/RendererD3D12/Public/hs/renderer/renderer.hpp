@@ -462,6 +462,16 @@ struct RendererCpuTimings
     std::uint64_t graph_resources_us{}, graph_base_passes_us{}, graph_shadows_us{};
     std::uint64_t graph_light_probes_us{}, graph_scene_selection_us{}, graph_ao_us{};
     std::uint64_t graph_opaque_us{}, graph_hero_us{}, graph_post_us{};
+    // Capture-only child slices of graph_resources_us. Rounded values should approximately
+    // sum to the parent when the full resource stage completes; do not add them to graph_build_us.
+    // scene_hlod_us sums its early-key and post-software-scene shape/HLOD preflight intervals.
+    std::uint64_t graph_resource_pre_shadow_us{}, graph_local_shadow_prepare_us{};
+    // Worker wall interval overlaps software-scene preparation; do not sum it with the main-thread slices.
+    std::uint64_t graph_local_shadow_task_us{};
+    // Main-thread software-scene preparation includes any wait when joining local-shadow work.
+    std::uint64_t graph_resource_scene_hlod_us{}, graph_software_scene_prepare_us{};
+    std::uint64_t graph_resource_brixelizer_input_us{};
+    std::uint64_t graph_resource_brixelizer_prepare_us{}, graph_resource_layout_remainder_us{};
     // Capture-only nested wall intervals; do not add to the outer stage totals.
     // The first three belong to scene_prepare_us; the rest to constants_upload_us.
     std::uint64_t retained_vfx_us{}, ribbon_prepare_us{}, particle_spawn_prepare_us{};

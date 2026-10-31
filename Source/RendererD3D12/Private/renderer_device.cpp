@@ -228,6 +228,15 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         }
     }
     feature_capabilities.hardware = QueryRendererFeatureHardware(device.Get());
+#if defined(HS_DEVELOPMENT_TOOLS)
+    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
+    copy_queue_timestamp_queries_supported =
+        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3,
+                                              sizeof(options3))) &&
+        options3.CopyQueueTimestampQueriesSupported != FALSE;
+#else
+    copy_queue_timestamp_queries_supported = false;
+#endif
     D3D12_FEATURE_DATA_D3D12_OPTIONS texture_options{};
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 feedback_options{};
     D3D12_FEATURE_DATA_SHADER_MODEL feedback_shader_model{D3D_SHADER_MODEL_6_5};
@@ -371,7 +380,8 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         return HResultFailure("CreateCommandQueue", result);
     }
     if (auto queue_result =
-            graph_queue_executor.Initialize(device.Get(), queue.Get(), kFrameCount);
+            graph_queue_executor.Initialize(device.Get(), queue.Get(), kFrameCount,
+                                            copy_queue_timestamp_queries_supported);
         !queue_result)
     {
         return queue_result;
@@ -577,16 +587,19 @@ Result D3D12Renderer::Impl::RefreshBudgetObservations()
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uint32_t pass_count)
+Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uint32_t pass_count,
+                                                   bool include_copy_queue)
 {
     // Render has already waited this slot's complete producer/reader requirements.
     // A topology change grows only this slot's query storage.
-    if (pass_count <= frame.timestamp_capacity) return Result::Success();
+    include_copy_queue = include_copy_queue && copy_queue_timestamp_queries_supported;
+    if (pass_count <= frame.timestamp_capacity &&
+        (!include_copy_queue || frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Copy)]))
+        return Result::Success();
     if (pass_count > std::numeric_limits<UINT>::max() / 2)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Timestamp query capacity overflow.");
     D3D12_QUERY_HEAP_DESC description{};
-    description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     description.Count = pass_count * 2;
     std::array<ComPtr<ID3D12QueryHeap>, 3> next_heaps;
     std::array<AllocationResource, 3> next_readbacks;
@@ -594,15 +607,19 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
     D3D12_RANGE range{0, static_cast<SIZE_T>(description.Count) * sizeof(std::uint64_t)};
-    for (std::size_t queue = 0; queue < 2; ++queue)
+    const std::size_t queue_count = include_copy_queue ? 3 : 2;
+    for (std::size_t queue = 0; queue < queue_count; ++queue)
     {
+        description.Type = queue == static_cast<std::size_t>(QueueHint::Copy)
+            ? D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP
+            : D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         auto result = device->CreateQueryHeap(&description, IID_PPV_ARGS(&next_heaps[queue]));
         if (FAILED(result)) return HResultFailure("Create frame timestamp query heap", result);
         if (auto created = CreateAllocation(next_readbacks[queue], allocation,
                 BufferDescription(static_cast<UINT64>(description.Count) * sizeof(std::uint64_t)),
                 D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
     }
-    for (std::size_t queue = 0; queue < 2; ++queue)
+    for (std::size_t queue = 0; queue < queue_count; ++queue)
     {
         const auto result = next_readbacks[queue].resource->Map(
             0, &range, reinterpret_cast<void **>(&next_mapped[queue]));
@@ -615,7 +632,7 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
         }
     }
     D3D12_RANGE no_write{};
-    for (std::size_t queue = 0; queue < 2; ++queue)
+    for (std::size_t queue = 0; queue < frame.mapped_timestamps.size(); ++queue)
         if (frame.mapped_timestamps[queue])
             frame.timestamp_readbacks[queue].resource->Unmap(0, &no_write);
     frame.timestamp_heaps = std::move(next_heaps);
@@ -718,10 +735,11 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             duplicate_endpoint |= end_slot != timings.passes.size();
             end_slot = slot;
         }
-        if (pass.queue == RenderQueue::Copy)
+        if (pass.queue == RenderQueue::Copy &&
+            (frame.timing_mode != GpuTimingMode::Full || !copy_queue_timestamp_queries_supported))
         {
             pass.measured = false;
-            continue; // Copy queue timestamps are unsupported.
+            continue; // Copy queue timestamps require OPTIONS3 support and Full capture.
         }
         if (!pass.measured) continue;
         const auto query_slot = frame.timestamp_pass_query_slots[slot];

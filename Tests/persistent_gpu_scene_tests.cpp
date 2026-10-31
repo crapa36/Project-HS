@@ -3,6 +3,7 @@
 #include "renderer_geometry.hpp"
 #include "renderer_monster_lod.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -214,6 +215,10 @@ void PayloadRevisionRangesTrackRotatingUploads()
     using Channel = hs::GpuSceneChannel;
     hs::PersistentGpuSceneSlots scene;
     std::vector<hs::PersistentGpuSceneRange> ranges;
+    std::array<std::vector<hs::PersistentGpuSceneRange>, hs::kGpuSceneChannelCount> channel_ranges;
+    const auto collect = [&](std::uint64_t uploaded_revision) {
+        scene.CollectDirtyRangesSince(uploaded_revision, ranges, channel_ranges);
+    };
 
     scene.BeginFrame();
     const auto a = scene.Upsert({11, 0}, Instance(1));
@@ -221,9 +226,13 @@ void PayloadRevisionRangesTrackRotatingUploads()
     const auto c = scene.Upsert({33, 0}, Instance(3));
     scene.EndFrame();
     const auto initial_revision = scene.PayloadRevision();
-    scene.CollectDirtyRangesSince(std::uint64_t{0}, ranges);
+    collect(std::uint64_t{0});
     Check(ranges.size() == 1 && ranges[0].begin == 0 && ranges[0].count == 3,
           "revision zero uploads every active row in one union range");
+    Check(std::ranges::all_of(channel_ranges, [](const auto &channel) {
+              return channel.size() == 1 && channel[0].begin == 0 && channel[0].count == 3;
+          }),
+          "revision-zero batch marks every active channel range");
     scene.Commit();
     Check(scene.PayloadRevision() == initial_revision,
           "commit publishes the prepared payload revision");
@@ -246,21 +255,28 @@ void PayloadRevisionRangesTrackRotatingUploads()
     scene.EndFrame();
     scene.Commit();
     const auto material_revision = scene.PayloadRevision();
-    scene.CollectDirtyRangesSince(material_revision, ranges);
-    Check(ranges.empty(), "a backing at the accepted revision reports no pending upload");
+    collect(material_revision);
+    Check(ranges.empty() && std::ranges::all_of(channel_ranges,
+              [](const auto &channel) { return channel.empty(); }),
+          "a backing at the accepted revision reports no pending upload");
     Check(transform_revision > baseline && material_revision > transform_revision,
           "payload revision advances independently for committed updates");
-    scene.CollectDirtyRangesSince(Channel::Transform, baseline, ranges);
-    Check(ranges.size() == 1 && ranges[0].begin == a.index && ranges[0].count == 1,
+    collect(baseline);
+    Check(channel_ranges[static_cast<std::size_t>(Channel::Transform)].size() == 1 &&
+              channel_ranges[static_cast<std::size_t>(Channel::Transform)][0].begin == a.index &&
+              channel_ranges[static_cast<std::size_t>(Channel::Transform)][0].count == 1,
           "channel collection reports transform changes after an older upload");
-    scene.CollectDirtyRangesSince(Channel::Material, baseline, ranges);
-    Check(ranges.size() == 1 && ranges[0].begin == b.index && ranges[0].count == 1,
+    Check(channel_ranges[static_cast<std::size_t>(Channel::Material)].size() == 1 &&
+              channel_ranges[static_cast<std::size_t>(Channel::Material)][0].begin == b.index &&
+              channel_ranges[static_cast<std::size_t>(Channel::Material)][0].count == 1,
           "channel collection retains material changes across skipped revisions");
-    scene.CollectDirtyRangesSince(baseline, ranges);
     Check(ranges.size() == 1 && ranges[0].begin == a.index && ranges[0].count == 2,
           "union collection merges adjacent rows changed in different revisions");
-    scene.CollectDirtyRangesSince(Channel::Bounds, baseline, ranges);
-    Check(ranges.empty(), "unrelated channels do not inherit another channel change");
+    Check(channel_ranges[static_cast<std::size_t>(Channel::Bounds)].empty() &&
+              channel_ranges[static_cast<std::size_t>(Channel::Skin)].empty() &&
+              channel_ranges[static_cast<std::size_t>(Channel::Mesh)].empty() &&
+              channel_ranges[static_cast<std::size_t>(Channel::Instance)].empty(),
+          "unrelated channels do not inherit another channel change");
 
     const auto before_abort = scene.PayloadRevision();
     scene.BeginFrame();
@@ -268,18 +284,25 @@ void PayloadRevisionRangesTrackRotatingUploads()
     scene.EndFrame();
     Check(scene.PayloadRevision() == before_abort + 1,
           "prepared update exposes its prospective payload revision");
+    collect(before_abort);
+    Check(ranges.size() == 1 && ranges[0].begin == a.index && ranges[0].count == 1 &&
+              channel_ranges[static_cast<std::size_t>(Channel::Transform)].size() == 1 &&
+              channel_ranges[static_cast<std::size_t>(Channel::Transform)][0].begin == a.index,
+          "batch collection includes pending changed channels before commit");
     scene.Abort();
     Check(scene.PayloadRevision() == before_abort,
           "aborting prepared payload changes does not publish a revision");
-    scene.CollectDirtyRangesSince(before_abort, ranges);
-    Check(ranges.empty(), "aborted pending dirty channels are removed");
+    collect(before_abort);
+    Check(ranges.empty() && std::ranges::all_of(channel_ranges,
+              [](const auto &channel) { return channel.empty(); }),
+          "aborted pending dirty channels are removed");
 
     scene.BeginFrame();
     static_cast<void>(scene.Upsert({11, 0}, Instance(1)));
     static_cast<void>(scene.Upsert({33, 0}, Instance(3)));
     scene.EndFrame();
     scene.Commit();
-    scene.CollectDirtyRangesSince(std::uint64_t{0}, ranges);
+    collect(std::uint64_t{0});
     Check(ranges.size() == 2 && ranges[0].begin == a.index && ranges[0].count == 1 &&
               ranges[1].begin == c.index && ranges[1].count == 1,
           "inactive holes are excluded from all-active initialization ranges");
@@ -290,8 +313,9 @@ void PayloadRevisionRangesTrackRotatingUploads()
     scene.EndFrame();
     Check(recycled.index == b.index, "new identity reuses the retired slot");
     scene.Commit();
-    scene.CollectDirtyRangesSince(Channel::Instance, before_reuse, ranges);
-    Check(ranges.size() == 1 && ranges[0].begin == recycled.index,
+    collect(before_reuse);
+    Check(channel_ranges[static_cast<std::size_t>(Channel::Instance)].size() == 1 &&
+              channel_ranges[static_cast<std::size_t>(Channel::Instance)][0].begin == recycled.index,
           "recycled identities request a fresh row upload");
 
     const auto before_reset = scene.PayloadRevision();
@@ -299,7 +323,7 @@ void PayloadRevisionRangesTrackRotatingUploads()
     static_cast<void>(scene.Upsert({66, 0}, Instance(6)));
     scene.EndFrame();
     scene.Commit();
-    scene.CollectDirtyRangesSince(before_reset, ranges);
+    collect(before_reset);
     Check(scene.PayloadRevision() > before_reset && ranges.size() == 1 &&
               ranges[0].begin == 0 && ranges[0].count == 1,
           "session reset starts a fresh active table and stamps its rows");
@@ -312,7 +336,7 @@ void PayloadRevisionRangesTrackRotatingUploads()
     static_cast<void>(scene.Upsert({55, 0}, Instance(5)));
     scene.EndFrame();
     scene.Commit();
-    scene.CollectDirtyRangesSince(before_clear, ranges);
+    collect(before_clear);
     Check(ranges.size() == 1 && ranges[0].begin == 0,
           "post-clear rows cannot silently match an older uploaded revision");
 }

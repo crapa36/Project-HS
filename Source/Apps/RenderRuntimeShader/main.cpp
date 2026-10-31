@@ -151,6 +151,7 @@ std::span<const ShaderFamily> ShaderFamilies()
 {
     static constexpr std::array ambient_programs{
         ProgramOutput{"gtao_horizon_cs.dxil", L"GTAOHorizonCS", L"cs_6_0"},
+        ProgramOutput{"gtao_prepare_inverse_w_cs.dxil", L"AoPrepareInverseWCS", L"cs_6_0"},
         ProgramOutput{"gtao_temporal_cs.dxil", L"GTAOTemporalCS", L"cs_6_0"},
         ProgramOutput{"gtao_bilateral_cs.dxil", L"GTAOBilateralCS", L"cs_6_0"},
         ProgramOutput{"contact_shadow_cs.dxil", L"ContactShadowCS", L"cs_6_0"}};

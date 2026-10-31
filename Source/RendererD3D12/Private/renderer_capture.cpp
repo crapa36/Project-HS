@@ -2338,8 +2338,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     return invalid(std::format(
                         "Classified hero pixel {} material slot {} does not resolve to exactly one opaque binding.",
                         pixel, submesh->material_index));
-                if (binding->hero_ordinal >= kHeroMaterialNames.size() ||
-                    binding->hero_ordinal == 5u)
+                if (binding->hero_ordinal >= kHeroMaterialNames.size())
                     return invalid(std::format(
                         "Classified hero pixel {} has invalid opaque hero ordinal {}.",
                         pixel, binding->hero_ordinal));

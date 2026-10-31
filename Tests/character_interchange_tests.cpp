@@ -301,6 +301,29 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     const auto opaque_slime_features = cc::PrepareCharacterMaterialSelections(ir, "archer", jelly);
     Check(opaque_slime_features.size() == 1 && opaque_slime_features[0].hero_ordinal == 4,
         "standalone opaque slime feature binding rejected");
+    auto layered = authoring;
+    layered["characters"]["archer"][0].erase("material");
+    layered["characters"]["archer"][0]["materials"] = Json::array({"slime_body", "slime_features"});
+    const auto layered_selections = cc::PrepareCharacterMaterialSelections(ir, "archer", layered);
+    Check(layered_selections.size() == 2 && layered_selections[0].slot == 0 &&
+        layered_selections[0].hero_ordinal == 5 && layered_selections[1].slot == 0 &&
+        layered_selections[1].hero_ordinal == 4,
+        "neutral same-slot material identity list changed order or domain-independent ordinals");
+    const std::array layered_domains{
+        cc::CharacterMaterialDomainSelection{5, rd::HeroMaterialDomain::Translucent},
+        cc::CharacterMaterialDomainSelection{4, rd::HeroMaterialDomain::Opaque}};
+    const auto layered_products = cc::BuildCharacterProducts(ir, "archer", layered_selections, layered_domains);
+    const auto &layered_metadata = find(layered_products, "render/character/archer.rpkg");
+    const auto decoded_layered = rd::DecodeCharacterMetadataPackage(layered_metadata.bytes,
+        hs::MakeAssetId(layered_metadata.logical_id));
+    Check(decoded_layered.material_bindings.size() == 2 &&
+        decoded_layered.material_bindings[0].slot == 0 &&
+        decoded_layered.material_bindings[0].hero_ordinal == 5 &&
+        decoded_layered.material_bindings[0].domain == rd::HeroMaterialDomain::Translucent &&
+        decoded_layered.material_bindings[1].slot == 0 &&
+        decoded_layered.material_bindings[1].hero_ordinal == 4 &&
+        decoded_layered.material_bindings[1].domain == rd::HeroMaterialDomain::Opaque,
+        "neutral same-slot material identities did not encode independent cooked domains");
 
     // A current native Archer product has 11 authored clips; the schema1 import
     // above retains 21/rate0. Exercise the actual image-link cross-binding gate

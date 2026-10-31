@@ -1698,9 +1698,21 @@ foreach(mode IN LISTS HS_CHARACTER_MODES ITEMS monster-materials)
         string(JSON binding_count LENGTH "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}")
         math(EXPR binding_last "${binding_count} - 1")
         foreach(binding_index RANGE 0 ${binding_last})
-            string(JSON material_name GET "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}" ${binding_index} material)
-            list(APPEND character_material_results
-                "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${material_name}/result.json")
+            string(JSON material_count ERROR_VARIABLE materials_error LENGTH
+                "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}" ${binding_index} materials)
+            if(materials_error)
+                string(JSON material_name GET "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}" ${binding_index} material)
+                list(APPEND character_material_results
+                    "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${material_name}/result.json")
+            else()
+                math(EXPR material_last "${material_count} - 1")
+                foreach(material_index RANGE 0 ${material_last})
+                    string(JSON material_name GET "${HS_HERO_BINDINGS_JSON}" characters "${character_stem}"
+                        ${binding_index} materials ${material_index})
+                    list(APPEND character_material_results
+                        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${material_name}/result.json")
+                endforeach()
+            endif()
         endforeach()
         list(REMOVE_DUPLICATES character_material_results)
     endif()

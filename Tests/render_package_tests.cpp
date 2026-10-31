@@ -896,6 +896,7 @@ void TestMaterialPrograms()
     Reject([&] { (void)rd::ReadPackage(rd::BuildPackage(asset, leaf_deps, invalid_chunks),
                                        asset); },
            "package reader accepted duplicate required program kind");
+
 }
 
 std::size_t MaterialNode(rd::MaterialGraph &graph, rd::MaterialType type, rd::MaterialOp op,
@@ -2647,7 +2648,7 @@ void TestHeroWorkRawDecoding()
 {
     hs::HeroWorkShaderLayout layout;
     Require(hs::HeroWorkMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
-        layout.contributor_bytes == 512 && layout.phase_bytes == 6144 && layout.total_bytes == 135168,
+        layout.contributor_bytes == 512 && layout.phase_bytes == 11264 && layout.total_bytes == 247808,
         "hero two exact bitmaps/header/aligned stride/slot total");
     Require(hs::HeroWorkMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
         layout.total_bytes <= hs::kHeroWorkShaderStorageLimit, "hero actual three-slot capture fits bounded storage");

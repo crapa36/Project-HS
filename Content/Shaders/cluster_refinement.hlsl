@@ -221,7 +221,7 @@ bool CompleteRepresentation(ClusterGroup group)
         complete = Resident(RepresentationPages[group.RepresentationPages.x + offset]) && complete;
     return complete;
 }
-bool DemandRepresentation(ClusterGroup group, float priority, bool check_residency)
+bool DemandRepresentation(ClusterGroup group, float priority)
 {
     const uint encoded = asuint(max(priority, 1.0));
     bool complete = true;
@@ -231,7 +231,7 @@ bool DemandRepresentation(ClusterGroup group, float priority, bool check_residen
         uint ignored;
         InterlockedMax(PageDemand[page_slot], encoded, ignored);
         // Missing pages still need demand; inspect the complete representation.
-        if (check_residency) complete = Resident(page_slot) && complete;
+        complete = Resident(page_slot) && complete;
     }
     return complete;
 }
@@ -299,10 +299,10 @@ uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
     return mask;
 }
 bool Refinement(ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
-                out uint mask, out float priority, out bool desired)
+                out uint mask, out float priority)
 {
     mask = Projection(group, candidate, instance, priority);
-    desired = mask != 0u && group.ChildCount != 0u && priority > 1.0;
+    const bool desired = mask != 0u && group.ChildCount != 0u && priority > 1.0;
     if (!desired) return false;
     bool complete = true;
     for (uint offset = 0u; offset < group.ChildCount; ++offset)
@@ -311,9 +311,11 @@ bool Refinement(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
         ClusterGroup child;
         if (!GroupValid(child_id, candidate, child))
         {
-            Fault(FailureCatalog); return false;
+            Fault(FailureCatalog);
+            complete = false;
+            continue;
         }
-        complete = CompleteRepresentation(child) && complete;
+        complete = DemandRepresentation(child, priority) && complete;
     }
     return complete;
 }
@@ -337,19 +339,12 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
         const uint id = node;
         ClusterGroup group;
         if (!GroupValid(id, candidate, group)) return;
-        uint mask; float priority; bool desired;
-        const bool refined = Refinement(group, candidate, instance, mask, priority, desired);
+        uint mask; float priority;
+        const bool refined = Refinement(group, candidate, instance, mask, priority);
         node = refined ? Children[group.FirstChild] : group.NextSubtree;
         if (mask == 0u) continue;
-        if (desired)
-            for (uint child = 0u; child < group.ChildCount; ++child)
-            {
-                const uint child_id = Children[group.FirstChild + child];
-                ClusterGroup child_group;
-                if (GroupValid(child_id, candidate, child_group)) DemandRepresentation(child_group, priority, false);
-            }
         if (refined) continue;
-        if (!DemandRepresentation(group, priority, true)) { Fault(FailureMissingPage); continue; }
+        if (!DemandRepresentation(group, priority)) { Fault(FailureMissingPage); continue; }
         if ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u)
         {
             Fault(FailureErrorDomain); continue;

@@ -48,7 +48,7 @@ void CheckFramePerformanceSchema()
     const auto names = split(header_line);
     const auto values = split(row_line);
     Check(names.size() == values.size() && names.size() == sentinel_index);
-    Check(names.size() == 194);
+    Check(names.size() == 202);
     const auto profile_task_name = std::find(names.begin(), names.end(), "vfx_profile_prepare_us");
     Check(profile_task_name != names.end());
     const auto profile_task_column = static_cast<std::size_t>(profile_task_name - names.begin());

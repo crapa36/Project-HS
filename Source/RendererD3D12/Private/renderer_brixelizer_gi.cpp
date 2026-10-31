@@ -5,6 +5,7 @@
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -152,8 +153,15 @@ struct BrixelizerStorage
         BrixelizerSceneInstance instance{};
         SoftwareSceneGeometry geometry{};
     };
-    std::map<InstanceKey,StaticInstance> static_instances;
+    using StaticInstanceMap=std::map<InstanceKey,StaticInstance>;
+    struct StaticMutation
+    {
+        enum class Action : std::uint8_t { Ignore, Unchanged, Create, Replace } action{Action::Ignore};
+        StaticInstanceMap::iterator existing{};
+    };
+    StaticInstanceMap static_instances;
     std::vector<InstanceKey> wanted_static_keys;
+    std::vector<StaticMutation> static_mutations;
     std::vector<std::uint32_t> static_invalidation_masks;
 #endif
     ~BrixelizerStorage()
@@ -599,6 +607,8 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     wanted_buffers.clear();wanted_buffers.reserve(in.geometries.size()*2u);
     auto &validated_geometries=s->validated_geometry_flags;
     validated_geometries.assign(in.geometries.size(),0);
+    auto &static_mutations=s->static_mutations;
+    static_mutations.assign(in.instances.size(),{});
     BrixelizerStatus counts=s->status;counts.static_instances=counts.dynamic_instances=0;
     counts.unsupported_masked=in.excluded_masked_count;counts.unsupported_thin=in.excluded_thin_count;
     counts.excluded_translucent=in.excluded_translucent_count;
@@ -641,12 +651,20 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         while(wanted_key!=wanted_static.end()&&*wanted_key<key)++wanted_key;
         if(wanted_key==wanted_static.end()||key<*wanted_key)++invalidations;
     }
-    for(const auto &instance:in.instances)
+    for(std::size_t index=0;index<in.instances.size();++index)
     {
+        const auto &instance=in.instances[index];
         if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)continue;
         const auto &g=in.geometries[instance.geometry_index];if(g.dynamic)continue;
-        auto old=s->static_instances.find({instance.stable_gpu_scene_slot,instance.generation,g.stable_key});
-        if(old==s->static_instances.end())++invalidations;else if(!SameStatic(old->second,instance,g))invalidations+=2;
+        auto &mutation=static_mutations[index];
+        const auto key=BrixelizerStorage::InstanceKey{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
+        const auto old=s->static_instances.find(key);
+        if(old==s->static_instances.end())
+        {mutation.action=BrixelizerStorage::StaticMutation::Action::Create;++invalidations;}
+        else if(SameStatic(old->second,instance,g))
+            mutation.action=BrixelizerStorage::StaticMutation::Action::Unchanged;
+        else
+        {mutation.action=BrixelizerStorage::StaticMutation::Action::Replace;mutation.existing=old;invalidations+=2;}
     }
     std::size_t buffer_count=s->registered_buffers.size();
     for(const auto &key:wanted_buffers)if(!s->registered_buffers.contains(key))++buffer_count;
@@ -680,15 +698,33 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         {if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&it->second.native_id,1));!result)return mutation_failure(result);
             it=s->static_instances.erase(it);}else ++it;
     }
-    for(const auto &instance:in.instances)
+    // Preflight iterators point only at wanted keys, so erasing stale nodes above
+    // leaves every planned existing entry valid until its own mutation.
+    for(std::size_t index=0;index<in.instances.size();++index)
     {
+        const auto &instance=in.instances[index];
         if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)continue;
-        const auto &g=in.geometries[instance.geometry_index];const BrixelizerStorage::InstanceKey key{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
-        auto found=s->static_instances.find(key);
-        if(!g.dynamic&&found!=s->static_instances.end()&&SameStatic(found->second,instance,g))continue;
-        if(found!=s->static_instances.end())
-        {if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&found->second.native_id,1));!result)return mutation_failure(result);
-            s->static_instances.erase(found);}
+        const auto &g=in.geometries[instance.geometry_index];
+        if(!g.dynamic&&static_mutations[index].action==BrixelizerStorage::StaticMutation::Action::Unchanged)continue;
+        const BrixelizerStorage::InstanceKey key{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
+        if(!g.dynamic)
+        {
+            auto &mutation=static_mutations[index];
+            if(mutation.action==BrixelizerStorage::StaticMutation::Action::Replace)
+            {
+                const auto found=mutation.existing;
+                if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&found->second.native_id,1));!result)return mutation_failure(result);
+                s->static_instances.erase(found);
+            }
+            else assert(mutation.action==BrixelizerStorage::StaticMutation::Action::Create);
+        }
+        else
+        {
+            const auto found=s->static_instances.find(key);
+            if(found!=s->static_instances.end())
+            {if(auto result=Sdk("ffxBrixelizerDeleteInstances",ffxBrixelizerDeleteInstances(s->sdf.get(),&found->second.native_id,1));!result)return mutation_failure(result);
+                s->static_instances.erase(found);}
+        }
         FfxBrixelizerInstanceID id{};
         if(auto result=CreateInstance(*s,instance,g,in.owners,id);!result)return mutation_failure(result);
         if(!g.dynamic)s->static_instances.emplace(key,BrixelizerStorage::StaticInstance{id,instance,g});

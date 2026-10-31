@@ -16,12 +16,12 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSrvCount = 9, kUavCount = 5, kDescriptorCount = 14;
+constexpr std::uint32_t kSrvCount = 10, kUavCount = 5, kDescriptorCount = 15;
 constexpr std::uint32_t kConstantStride = 512;
-constexpr std::array<std::string_view, 5> kShaderProducts{
+constexpr std::array<std::string_view, 6> kShaderProducts{
     "render/shader/gtao_horizon_cs.dxil", "render/shader/gtao_temporal_cs.dxil",
     "render/shader/gtao_bilateral_cs.dxil", "render/shader/contact_shadow_cs.dxil",
-    "render/shader/adaptive_gtao_cs.dxil"};
+    "render/shader/adaptive_gtao_cs.dxil", "render/shader/gtao_prepare_inverse_w_cs.dxil"};
 
 Result AoFailure(ErrorCode code, std::string message)
 {
@@ -66,6 +66,10 @@ bool SupportsFastAoUnprojection(const DirectX::XMFLOAT4X4 &inverse) noexcept
         static_cast<double>(inverse._34) * inverse._43;
     return inverse._11 != 0.0f && inverse._22 != 0.0f && depth_determinant != 0.0 &&
         std::isfinite(depth_determinant);
+}
+bool SupportsPreparedInverseW(const DirectX::XMFLOAT4X4 &inverse) noexcept
+{
+    return SupportsFastAoUnprojection(inverse) && inverse._33 == 0.0f && inverse._43 > 0.0f;
 }
 bool FitsGuide(const AmbientOcclusionGuide &guide, ViewExtent active, DXGI_FORMAT format)
 {
@@ -115,7 +119,7 @@ struct AmbientOcclusionTargets
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
+    std::array<ComPtr<ID3D12PipelineState>, 6> pipelines;
     ComPtr<ID3D12DescriptorHeap> descriptors;
     ComPtr<ID3D12DescriptorHeap> export_descriptors;
     AllocationResource constants, raw, resolved, contact;
@@ -260,8 +264,9 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     if (FAILED(native)) return NativeFailure("Create AO root signature", native);
     for (std::uint32_t index = 0; index < kShaderProducts.size(); ++index)
     {
-        if ((index < 3 && !aoEnabled) || (index == 3 && !contactEnabled)||(index>=4&&!next->adaptive_compute)||
-            (index==0&&next->adaptive_compute)) continue;
+        if ((index < 3 && !aoEnabled) || (index == 3 && !contactEnabled) ||
+            (index == 4 && !next->adaptive_compute) || (index == 5 && !aoEnabled) ||
+            (index == 0 && next->adaptive_compute)) continue;
         std::vector<std::byte> bytecode;
         if (auto read = readShader(kShaderProducts[index], bytecode); !read) return read;
         if (bytecode.empty()) return AoFailure(ErrorCode::TaskFailed, "Selected AO shader product is empty: " + std::string(kShaderProducts[index]));
@@ -337,12 +342,33 @@ bool AmbientOcclusionSystem::MatchesShape(const AmbientOcclusionLayout &layout,
          layout.render_capacity.width==s->render_capacity.width&&layout.render_capacity.height==s->render_capacity.height&&
          layout.ao_capacity.width==s->ao_capacity.width&&layout.ao_capacity.height==s->ao_capacity.height);
 }
+bool AmbientOcclusionSystem::MatchesShape(const AmbientOcclusionLayout &layout,
+    bool reset_history, QueueHint queue, ViewExtent active,
+    const DirectX::XMFLOAT4X4 &inverse_projection) const noexcept
+{
+    const auto &s = impl_->targets;
+    if (!MatchesShape(layout, reset_history, queue)) return false;
+    const auto aoActive = s->ao_enabled ? AoExtent(active, s->profile) : ViewExtent{};
+    const bool prepared = s->ao_enabled && ValidExtent(active) &&
+        aoActive.width == active.width && aoActive.height == active.height &&
+        SupportsPreparedInverseW(inverse_projection);
+    return layout.prepared_inverse_w == prepared;
+}
 bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,const AmbientOcclusionLayout &layout)const noexcept
 {
     return MatchesShape(layout, inputs.reset_history, inputs.queue) &&
         ((!impl_->targets->ao_enabled && !impl_->targets->contact_enabled) ||
          layout.guides==std::array{inputs.depth.version,inputs.normal.version,inputs.metadata.version,
              inputs.motion.version,inputs.surface_history.version,inputs.adaptive_density.version});
+}
+bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,
+    const AmbientOcclusionConstants &constants, const AmbientOcclusionLayout &layout) const noexcept
+{
+    return MatchesShape(layout, inputs.reset_history, inputs.queue, inputs.render_active,
+        constants.inverse_projection) &&
+        ((!impl_->targets->ao_enabled && !impl_->targets->contact_enabled) ||
+         layout.guides == std::array{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
+             inputs.motion.version, inputs.surface_history.version, inputs.adaptive_density.version});
 }
 Result AmbientOcclusionSystem::BindRetained(RenderGraphBuilder &graph, const AmbientOcclusionInputs &inputs,
     AmbientOcclusionConstants constants, const AmbientOcclusionLayout &layout, AmbientOcclusionOutputs &outputs)
@@ -358,8 +384,6 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     auto storage = impl_->targets;
     if (!storage) return AoFailure(ErrorCode::InvalidState, "Prepare and commit AO targets before registration.");
     const bool historyValid = storage->history_valid && !inputs.reset_history;
-    if (retained && !MatchesLayout(inputs,*retained))
-        return AoFailure(ErrorCode::InvalidState, "AO retained topology has changed.");
     if (capture)
     {
         capture->ao = storage->ao_enabled; capture->contact = storage->contact_enabled;
@@ -400,8 +424,15 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     // The shader's fast path is exact for axis-aligned homogeneous inverse
     // projections (including off-axis and jittered perspective and orthographic
     // projections). Keep arbitrary matrices on the original general multiply.
-    constants.gtao_parameters.w = SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f;
     const auto aoActive = AoExtent(active, storage->profile);
+    const bool preparedInverseW = storage->ao_enabled && aoActive.width == active.width &&
+        aoActive.height == active.height && SupportsPreparedInverseW(constants.inverse_projection);
+    constants.gtao_parameters.w = preparedInverseW ? 2.0f :
+        SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f;
+    if (retained && (!MatchesLayout(inputs, constants, *retained) ||
+                     retained->prepared_inverse_w != preparedInverseW))
+        return AoFailure(ErrorCode::InvalidState, "AO retained topology has changed.");
+    if (capture) capture->prepared_inverse_w = preparedInverseW;
     const auto writeIndex = 1u - storage->read_index;
     constants.render_size = SizeConstants(active); constants.ao_size = SizeConstants(aoActive);
     constants.history_size = SizeConstants(historyValid ? storage->previous_active : aoActive);
@@ -419,6 +450,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     storage->Srv(inputs.frame_slot, 6, historyValid ? storage->history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 8, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    storage->Srv(inputs.frame_slot, 9, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32_UINT);
     storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 2, storage->resolved.resource.Get(), DXGI_FORMAT_R16_FLOAT);
@@ -484,10 +516,25 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         auto resolved = import(storage->resolved, "AO.Resolved");
         if (!binding_result) return binding_result;
         if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained texture binding failed.");
-        auto horizonBinding = pass_binding(0, 45, storage->adaptive_compute?"AdaptiveGTAO":"GTAOHorizon", inputs.queue);
+        const std::size_t passOffset = preparedInverseW ? 1u : 0u;
+        if (preparedInverseW)
+        {
+            auto prepareBinding = pass_binding(0, 0x414f0001u, "GTAOPrepareInverseW", inputs.queue);
+            if (!prepareBinding) return AoFailure(ErrorCode::InvalidState, "AO inverse-W preparation pass is missing.");
+            auto &prepare = *prepareBinding;
+            if (!retained)
+            {
+                prepare.Read(inputs.depth.version, Access::ComputeRead);
+                prepare.Read(inputs.metadata.version, Access::ComputeRead);
+                metadata = prepare.Write(metadata, Access::UnorderedWrite);
+            }
+            prepare.SetExecute(execute(5, active));
+        }
+        auto horizonBinding = pass_binding(passOffset, 45, storage->adaptive_compute?"AdaptiveGTAO":"GTAOHorizon", inputs.queue);
         if (!horizonBinding) return AoFailure(ErrorCode::InvalidState, "AO horizon pass is missing.");
         auto &horizon = *horizonBinding;
         if (!retained) readGuides(horizon);
+        if (preparedInverseW && !retained) horizon.Read(metadata, Access::ComputeRead);
         if(storage->adaptive_compute)
         {
             if (!retained) { horizon.Read(inputs.adaptive_density.version,Access::ComputeRead); raw=horizon.Write(raw,Access::UnorderedWrite); }
@@ -496,7 +543,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         }
         else{raw=retained?retained->raw:horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
         if (capture) capture->raw = raw;
-        auto temporalBinding = pass_binding(1,46,"GTAOTemporal",inputs.queue);
+        auto temporalBinding = pass_binding(passOffset+1,46,"GTAOTemporal",inputs.queue);
         if (!temporalBinding) return AoFailure(ErrorCode::InvalidState, "AO retained temporal pass is missing.");
         auto &temporal = *temporalBinding;
         if (retained) { history = retained->history_output; metadata = retained->metadata; }
@@ -515,7 +562,7 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         }
         if (capture) { capture->history_output = history; capture->metadata = metadata; }
         temporal.SetExecute(execute(1, aoActive));
-        auto bilateralBinding = pass_binding(2,47,"GTAOBilateral",inputs.queue);
+        auto bilateralBinding = pass_binding(passOffset+2,47,"GTAOBilateral",inputs.queue);
         if (!bilateralBinding) return AoFailure(ErrorCode::InvalidState, "AO retained bilateral pass is missing.");
         auto &bilateral = *bilateralBinding;
         if (retained) resolved = retained->resolved;
@@ -538,7 +585,8 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         auto contact = import(storage->contact, "AO.ContactVisibility");
         if (!binding_result) return binding_result;
         if (!bound) return AoFailure(ErrorCode::InvalidState, "AO retained contact binding failed.");
-        auto contactBinding = pass_binding(3,48,"ContactShadows",QueueHint::Direct);
+        auto contactBinding = pass_binding(storage->ao_enabled && preparedInverseW ? 4u : 3u,
+            48,"ContactShadows",QueueHint::Direct);
         if (!contactBinding) return AoFailure(ErrorCode::InvalidState, "AO retained contact pass is missing.");
         auto &pass = *contactBinding;
         if (retained) contact = retained->contact_output;
