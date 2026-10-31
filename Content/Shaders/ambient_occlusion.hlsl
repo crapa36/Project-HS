@@ -106,7 +106,6 @@ bool AoLoadHorizonPosition(int2 pixel, out float3 position)
         const uint packedInverseW = AoPreparedInverseW.Load(int3(pixel, 0));
         if (packedInverseW == 0u) { position = 0.0; return false; }
         const float inverseW = asfloat(packedInverseW);
-        if (!isfinite(inverseW) || inverseW <= 0.0) { position = 0.0; return false; }
         const float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
         const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
         position.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]) * inverseW;

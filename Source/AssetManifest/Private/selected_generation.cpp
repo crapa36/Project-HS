@@ -215,6 +215,13 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
     try
     {
         const auto absolute_pointer = fs::absolute(pointer_path);
+        const auto root = fs::canonical(absolute_pointer.parent_path().parent_path());
+        GenerationFileLock root_reader_lease;
+        const auto mutation_lock_path = root / ".generation-mutation.lock";
+        if (fs::exists(mutation_lock_path))
+            root_reader_lease = GenerationFileLock(
+                mutation_lock_path, GenerationFileLock::Mode::Shared, false);
+
         std::string pointer_bytes;
         if (const auto read = ReadGenerationPointer(absolute_pointer, pointer_bytes); !read)
             return read;
@@ -227,9 +234,12 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
         if (!IsDigest(id) || scope.empty() ||
             locator != "Generations/" + id + "/generation.json")
             throw std::runtime_error("invalid Generation pointer identity");
-        const auto root = fs::canonical(absolute_pointer.parent_path().parent_path());
         const auto manifest_path = ResolveLocator(root, locator);
         auto lease = std::make_shared<GenerationFileLock>(manifest_path, GenerationFileLock::Mode::Shared);
+        // Root publication/GC can retire the selected path until the manifest
+        // reader lease is established. After that lease owns the generation,
+        // release the short-lived root lock before reading its immutable data.
+        root_reader_lease = GenerationFileLock{};
         const auto manifest = ReadJson(manifest_path);
         const auto &schema = manifest.at("schema_version");
         if (!schema.is_number_integer() || (schema != 2 && schema != 3))

@@ -1522,12 +1522,20 @@ struct RetiredGeneration
     std::string reason;
 };
 
+struct RetiredProductSet
+{
+    fs::path path;
+    fs::path lease_path;
+    hs::GenerationFileLock reader_lock;
+    bool had_lease_file{};
+};
+
 struct GarbageCollectionPlan
 {
     std::vector<RetiredGeneration> obsolete_generations;
     std::vector<fs::path> stale_retirements;
     std::vector<fs::path> stale_publications;
-    std::vector<fs::path> obsolete_sets;
+    std::vector<RetiredProductSet> obsolete_sets;
     std::map<std::string, std::set<std::string>> retained_generation_reasons;
 };
 
@@ -1587,7 +1595,7 @@ void PrintGarbageCollectionDryRun(
     }
     for (const auto &candidate : plan.obsolete_sets)
     {
-        const auto size = TreeBytes(root, candidate);
+        const auto size = TreeBytes(root, candidate.path);
         product_set_sizes.push_back(size);
         add_size(product_set_bytes, size);
     }
@@ -1633,7 +1641,7 @@ void PrintGarbageCollectionDryRun(
         {
             const auto &candidate = plan.obsolete_sets[index];
             report["candidates"]["product_sets"].push_back(
-                Json{{"locator", candidate.lexically_relative(root).generic_string()},
+                Json{{"locator", candidate.path.lexically_relative(root).generic_string()},
                      {"estimated_bytes", product_set_sizes[index]},
                      {"reason", "unreferenced ProductSet past grace period"}});
         }
@@ -1679,7 +1687,7 @@ void PrintGarbageCollectionDryRun(
     {
         const auto &candidate = plan.obsolete_sets[index];
         std::cout << "generation.gc candidate_product_set locator="
-                  << candidate.lexically_relative(root).generic_string()
+                  << candidate.path.lexically_relative(root).generic_string()
                   << " estimated_bytes=" << product_set_sizes[index]
                   << " reason=unreferenced ProductSet past grace period\n";
     }
@@ -1942,7 +1950,21 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
                 !PastGracePeriod(entry.path(), grace_seconds))
                 continue;
             CheckTree(root, entry.path());
-            plan.obsolete_sets.push_back(entry.path());
+            const auto lease_path = entry.path().parent_path() / ".leases" /
+                (set_id + ".lock");
+            RetiredProductSet candidate{entry.path(), lease_path, {}, fs::exists(lease_path)};
+            bool reader_active = false;
+            if (candidate.had_lease_file)
+            {
+                candidate.reader_lock = hs::GenerationFileLock(lease_path,
+                    hs::GenerationFileLock::Mode::TryExclusive);
+                if (!candidate.reader_lock.OwnsLock())
+                {
+                    reader_active = true;
+                }
+            }
+            if (!reader_active)
+                plan.obsolete_sets.push_back(std::move(candidate));
         }
     }
 
@@ -1967,10 +1989,18 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
         if (!candidate.pending_marker.empty())
             fs::remove(candidate.pending_marker);
     }
-    for (const auto &path : plan.obsolete_sets)
+    for (auto &candidate : plan.obsolete_sets)
     {
-        CheckTree(root, path);
-        fs::remove_all(path);
+        CheckTree(root, candidate.path);
+        fs::remove_all(candidate.path);
+        if (candidate.had_lease_file)
+            fs::remove(candidate.lease_path);
+        candidate.reader_lock = {};
+        if (candidate.had_lease_file)
+        {
+            std::error_code ignored;
+            fs::remove(candidate.lease_path.parent_path(), ignored);
+        }
     }
     // Retired manifests retain namespace discovery until ProductSet sweep completes.
     for (const auto &path : plan.stale_retirements)

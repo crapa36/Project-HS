@@ -1,4 +1,5 @@
 #include <hs/asset_manifest/selected_generation.hpp>
+#include <hs/asset_manifest/generation_lock.hpp>
 #include <hs/core/sha256.hpp>
 
 #include <nlohmann/json.hpp>
@@ -97,6 +98,19 @@ int main()
         valid["products"][0]["digest"] = Digest("a");
         valid["products"][1]["digest"] = Digest("b");
         Write(manifest, valid.dump());
+        fs::remove(manifest);
+        hs::SelectedGeneration missing_manifest;
+        const auto missing = hs::LoadSelectedGeneration(pointer, missing_manifest);
+        Check(!missing.Succeeded(), "unchanged pointer with a missing manifest was retried as success");
+        Check(missing_manifest.id.empty(), "failed manifest acquisition changed the selected Generation");
+        Check(!fs::exists(fixture.root / ".generation-mutation.lock"),
+              "readonly-style selection created a root mutation lock");
+        Write(manifest, valid.dump());
+        {
+            hs::GenerationFileLock mutation(fixture.root / ".generation-mutation.lock",
+                hs::GenerationFileLock::Mode::Exclusive, true);
+            Check(mutation.OwnsLock(), "fixture root mutation lock was not acquired");
+        }
         hs::SelectedGeneration loaded;
         const auto baseline = hs::LoadSelectedGeneration(pointer, loaded);
         Check(baseline.Succeeded(), std::string(baseline.Message()));

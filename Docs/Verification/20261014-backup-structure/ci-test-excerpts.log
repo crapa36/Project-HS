@@ -1,9 +1,0 @@
-2026-10-14T14:04:23.1751138Z 100% tests passed out of 18
-2026-10-14T14:05:44.1586648Z 100% tests passed out of 33
-2026-10-14T14:07:04.7664147Z       Start  4: runtime.vfx-session-state
-2026-10-14T14:07:04.7749390Z  4/35 Test  #4: runtime.vfx-session-state ...................   Passed    0.01 sec
-2026-10-14T14:07:05.5599354Z       Start  9: runtime.vfx-typed-frame
-2026-10-14T14:07:05.5701149Z  9/35 Test  #9: runtime.vfx-typed-frame .....................   Passed    0.01 sec
-2026-10-14T14:07:05.5703810Z       Start 10: rendering.persistent-gpu-scene
-2026-10-14T14:07:05.5788394Z 10/35 Test #10: rendering.persistent-gpu-scene ..............   Passed    0.01 sec
-2026-10-14T14:08:28.2697725Z 100% tests passed out of 35

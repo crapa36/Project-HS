@@ -155,6 +155,22 @@ void TestAssetActionSnapshot()
             throw std::runtime_error("reused partial-chunk scratch changed streamed bytes");
         ap::WriteBytes(path, bytes("corrupt! bytes")); // Equal size must not count as a hit.
         if (owned != original) throw std::runtime_error("snapshot owner changed with file");
+        const auto repair_stage = ap::CreateStage(root / "repair-actions");
+        ap::WriteBytes(repair_stage / "fixture.bin", bytes(original));
+        bool repair_blocked_by_reader = false;
+        try
+        {
+            ap::Publish(root, spec, repair_stage,
+                {ap::HashProduct("fixture/payload", "fixture.bin", repair_stage / "fixture.bin")});
+        }
+        catch (const std::exception &error)
+        {
+            repair_blocked_by_reader =
+                std::string_view(error.what()).find("product-set-in-use") != std::string_view::npos;
+        }
+        ap::RemoveStageAfterFailure(repair_stage);
+        if (!repair_blocked_by_reader || fs::exists(root / "CorruptProducts"))
+            throw std::runtime_error("active ProductSet reader did not block same-set repair");
         const auto rejects = [](auto operation) {
             try { operation(); } catch (const std::exception &) { return; }
             throw std::runtime_error("snapshot accepted corrupt or unbound product");

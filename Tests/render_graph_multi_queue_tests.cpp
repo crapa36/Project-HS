@@ -2002,6 +2002,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         UINT group_count{}, max_groups{}, fine_entries{}, fine_capacity{};
         std::vector<CasterInput> casters;
         std::vector<Segment> segments;
+        bool admission{};
     };
     const auto make_caster = [](UINT id, UINT group, bool mesh, UINT flags) {
         CasterInput value{};
@@ -2025,7 +2026,10 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         make_caster(0, 0, false, 1u), make_caster(1, 1, true, 1u)}, {{0, 0, 36u, 0u, 0, 0u, 0u, 0u}}};
     Case empty{"empty-caster-set-with-indexed-group", 1, 3, 2, 4, {},
         {{0, 1, 12u, 0u, 0, 0u, 0u, 0u}}};
-    std::array<Case, 3> cases{std::move(complete), std::move(overflow), std::move(empty)};
+    Case admission{"admission-skips-empty-word-before-overflow", 1, 1, 96, 0, {},
+        {{0, 6, 0u, 0u, 0, 0u, 0u, 0u}}};
+    admission.admission = true;
+    std::array<Case, 4> cases{std::move(complete), std::move(overflow), std::move(empty), std::move(admission)};
     constexpr UINT sentinel = 0xdedededeu;
 
     struct CompilerModule
@@ -2221,7 +2225,8 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         hs::VirtualShadowConstants constants{};
         constants.counts = {static_cast<UINT>(test.casters.size()), 0u, test.fine_entries, 0u};
         constants.identity.w = 91u;
-        constants.frame.w = test.group_count * 2u;
+        constants.frame.w = test.admission ? test.group_count : test.group_count * 2u;
+        constants.frame.z = test.admission ? 3u : 0u;
         constants.options.z = test.fine_capacity;
         constants.root_options = {1u, 1u, 1u, root_counter_base};
 
@@ -2235,7 +2240,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         std::vector<UINT> segments(segment_count, sentinel);
         for (UINT group = 0; group < test.group_count; ++group)
         {
-            const UINT word = (constants.frame.w + group) * 8u;
+            const UINT word = (test.admission ? group : constants.frame.w + group) * 8u;
             const auto &segment = test.segments[group];
             segments[word] = segment.first;
             segments[word + 1u] = segment.capacity;
@@ -2268,7 +2273,32 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         const UINT records_seed = append_poison(records_bytes);
         const UINT indexed_seed = append_poison(indexed_bytes);
         const UINT mesh_seed = append_poison(mesh_bytes);
+        if (test.admission)
+        {
+            std::vector<hs::GpuShadowPageEntry> admission_pages(test.fine_entries + 1u);
+            for (auto &page : admission_pages) page.flags = 1u;
+            std::memcpy(seed.data() + pages_seed, admission_pages.data(), pages_bytes);
+        }
         auto seed_upload = create_upload(seed.data(), seed.size(), "create CullCS output seed");
+
+        ComPtr<ID3D12Resource> requests_upload, page_draw_counts_upload;
+        hs::ResourceHandle requests_handle{}, page_draw_counts_handle{};
+        hs::ResourceHandle requests_upload_handle{}, page_draw_counts_upload_handle{};
+        UINT requests_bytes{}, page_draw_counts_bytes{};
+        if (test.admission)
+        {
+            const std::array<UINT, 3> request_words{(1u << 1u) | (1u << 4u), 0u, (1u << 0u) | (1u << 3u)};
+            std::vector<UINT> page_draw_counts(test.fine_entries, 0u);
+            page_draw_counts[1u] = 1u;
+            page_draw_counts[4u] = 1u;
+            page_draw_counts[64u] = 3u;
+            page_draw_counts[67u] = 2u;
+            requests_bytes = static_cast<UINT>(sizeof(request_words));
+            page_draw_counts_bytes = static_cast<UINT>(page_draw_counts.size() * sizeof(UINT));
+            requests_upload = create_upload(request_words.data(), requests_bytes, "create CullCS admission requests");
+            page_draw_counts_upload = create_upload(page_draw_counts.data(), page_draw_counts_bytes,
+                "create CullCS admission page draw counts");
+        }
 
         auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
         const UINT pages_read = 0u, counters_read = pages_read + pages_bytes;
@@ -2286,6 +2316,17 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         const auto segment_handle = graph.ImportBuffer({segment_upload.Get()}, hs::Access::ComputeRead, "CullCS.Segments");
         const auto constant_handle = graph.ImportBuffer({constant_upload.Get()}, hs::Access::ComputeRead, "CullCS.Constants");
         const auto seed_handle = graph.ImportBuffer({seed_upload.Get()}, hs::Access::CopySource, "CullCS.Seed");
+        if (test.admission)
+        {
+            requests_upload_handle = graph.ImportBuffer({requests_upload.Get()}, hs::Access::CopySource,
+                "CullCS.AdmissionRequests");
+            page_draw_counts_upload_handle = graph.ImportBuffer({page_draw_counts_upload.Get()}, hs::Access::CopySource,
+                "CullCS.AdmissionPageDrawCounts");
+            requests_handle = graph.CreateBuffer({requests_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS},
+                "CullCS.Requests");
+            page_draw_counts_handle = graph.CreateBuffer({page_draw_counts_bytes,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.PageDrawCounts");
+        }
         const auto pages_handle = graph.CreateBuffer({pages_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Pages");
         const auto counters_handle = graph.CreateBuffer({counters_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Counts");
         const auto records_handle = graph.CreateBuffer({records_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.DrawRecords");
@@ -2298,6 +2339,12 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         auto records = seed_pass.Write(graph.Version(records_handle), hs::Access::CopyDest);
         auto indexed = seed_pass.Write(graph.Version(indexed_handle), hs::Access::CopyDest);
         auto mesh = seed_pass.Write(graph.Version(mesh_handle), hs::Access::CopyDest);
+        hs::ResourceVersion requests{}, page_draw_counts{};
+        if (test.admission)
+        {
+            requests = seed_pass.Write(graph.Version(requests_handle), hs::Access::CopyDest);
+            page_draw_counts = seed_pass.Write(graph.Version(page_draw_counts_handle), hs::Access::CopyDest);
+        }
         seed_pass.SetExecute([&](hs::RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             auto *source = static_cast<ID3D12Resource *>(context.Resolve(seed_handle));
@@ -2306,6 +2353,14 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(records_handle)), 0, source, records_seed, records_bytes);
             list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(indexed_handle)), 0, source, indexed_seed, indexed_bytes);
             list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(mesh_handle)), 0, source, mesh_seed, mesh_bytes);
+            if (test.admission)
+            {
+                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(requests_handle)), 0,
+                    static_cast<ID3D12Resource *>(context.Resolve(requests_upload_handle)), 0, requests_bytes);
+                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle)), 0,
+                    static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_upload_handle)), 0,
+                    page_draw_counts_bytes);
+            }
         });
         const auto bind = [&](hs::RenderPassContext &context, UINT phase) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -2333,12 +2388,16 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             list->SetComputeRootShaderResourceView(3u, segment_upload->GetGPUVirtualAddress());
             list->SetComputeRootShaderResourceView(4u, segment_upload->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(5u, static_cast<ID3D12Resource *>(context.Resolve(pages_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(6u, static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
+            list->SetComputeRootUnorderedAccessView(6u, test.admission
+                ? static_cast<ID3D12Resource *>(context.Resolve(requests_handle))->GetGPUVirtualAddress()
+                : static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(7u, static_cast<ID3D12Resource *>(context.Resolve(records_handle))->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(8u, static_cast<ID3D12Resource *>(context.Resolve(indexed_handle))->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(9u, static_cast<ID3D12Resource *>(context.Resolve(mesh_handle))->GetGPUVirtualAddress());
             list->SetComputeRootDescriptorTable(10u, gpu_counts_handle);
-            list->SetComputeRootUnorderedAccessView(11u, static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
+            list->SetComputeRootUnorderedAccessView(11u, test.admission
+                ? static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle))->GetGPUVirtualAddress()
+                : static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
             auto input_table = count_heap->GetGPUDescriptorHandleForHeapStart();
             input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
             list->SetComputeRootDescriptorTable(12u, input_table);
@@ -2349,36 +2408,52 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             input_table.ptr += descriptor_stride;
             list->SetComputeRootDescriptorTable(15u, input_table);
         };
-        auto initialize = graph.AddPass(361u, "CullCS phase 3 root initialize", hs::QueueHint::Compute);
-        initialize.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
-        initialize.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
-        initialize.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
-        pages = initialize.Write(pages, hs::Access::UnorderedWrite);
-        counters = initialize.Write(counters, hs::Access::UnorderedWrite);
-        records = initialize.Write(records, hs::Access::UnorderedWrite);
-        indexed = initialize.Write(indexed, hs::Access::UnorderedWrite);
-        mesh = initialize.Write(mesh, hs::Access::UnorderedWrite);
-        initialize.SetExecute([&](hs::RenderPassContext &context) {
-            bind(context, 3u);
-            static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(1u, 1u, 1u);
-        });
-        if (!test.casters.empty())
+        if (test.admission)
         {
-            auto emit = graph.AddPass(362u, "CullCS phase 4 root emit", hs::QueueHint::Compute);
-            emit.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
-            emit.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
-            emit.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
-            pages = emit.ReadWrite(pages, hs::Access::UnorderedWrite);
-            counters = emit.ReadWrite(counters, hs::Access::UnorderedWrite);
-            records = emit.Write(records, hs::Access::UnorderedWrite);
-            indexed = emit.Write(indexed, hs::Access::UnorderedWrite);
-            mesh = emit.Write(mesh, hs::Access::UnorderedWrite);
-            emit.SetExecute([&](hs::RenderPassContext &context) {
-                auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-                context.UavBarrier(pages_handle); context.UavBarrier(counters_handle);
-                bind(context, 4u);
-                list->Dispatch((static_cast<UINT>(test.casters.size()) + 63u) / 64u, 1u, 1u);
+            auto admit = graph.AddPass(361u, "CullCS phase 1 ordered page admission", hs::QueueHint::Compute);
+            admit.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
+            admit.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
+            admit.Read(requests, hs::Access::UnorderedRead);
+            admit.Read(page_draw_counts, hs::Access::UnorderedRead);
+            pages = admit.ReadWrite(pages, hs::Access::UnorderedWrite);
+            admit.SetExecute([&](hs::RenderPassContext &context) {
+                bind(context, 1u);
+                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(test.group_count, 1u, 1u);
             });
+        }
+        else
+        {
+            auto initialize = graph.AddPass(361u, "CullCS phase 3 root initialize", hs::QueueHint::Compute);
+            initialize.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
+            initialize.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
+            initialize.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
+            pages = initialize.Write(pages, hs::Access::UnorderedWrite);
+            counters = initialize.Write(counters, hs::Access::UnorderedWrite);
+            records = initialize.Write(records, hs::Access::UnorderedWrite);
+            indexed = initialize.Write(indexed, hs::Access::UnorderedWrite);
+            mesh = initialize.Write(mesh, hs::Access::UnorderedWrite);
+            initialize.SetExecute([&](hs::RenderPassContext &context) {
+                bind(context, 3u);
+                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(1u, 1u, 1u);
+            });
+            if (!test.casters.empty())
+            {
+                auto emit = graph.AddPass(362u, "CullCS phase 4 root emit", hs::QueueHint::Compute);
+                emit.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
+                emit.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
+                emit.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
+                pages = emit.ReadWrite(pages, hs::Access::UnorderedWrite);
+                counters = emit.ReadWrite(counters, hs::Access::UnorderedWrite);
+                records = emit.Write(records, hs::Access::UnorderedWrite);
+                indexed = emit.Write(indexed, hs::Access::UnorderedWrite);
+                mesh = emit.Write(mesh, hs::Access::UnorderedWrite);
+                emit.SetExecute([&](hs::RenderPassContext &context) {
+                    auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+                    context.UavBarrier(pages_handle); context.UavBarrier(counters_handle);
+                    bind(context, 4u);
+                    list->Dispatch((static_cast<UINT>(test.casters.size()) + 63u) / 64u, 1u, 1u);
+                });
+            }
         }
         auto copy = graph.AddPass(363u, "CullCS readback", hs::QueueHint::Copy);
         copy.Read(pages, hs::Access::CopySource); copy.Read(counters, hs::Access::CopySource);
@@ -2441,6 +2516,22 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             const auto *actual = reinterpret_cast<const UINT *>(result + offset);
             Check(std::equal(expected.begin(), expected.end(), actual), label);
         };
+        if (test.admission)
+        {
+            const auto *actual_page_words = reinterpret_cast<const UINT *>(result + pages_read);
+            for (UINT entry = 0; entry <= test.fine_entries; ++entry)
+            {
+                const UINT expected_flags = entry == 67u ? 9u : 1u;
+                Check(actual_page_words[entry * 8u + 5u] == expected_flags,
+                    "production CullCS admission changed an unrequested page or violated ascending overflow after an empty request word");
+            }
+            readback->Unmap(0, nullptr);
+            fixture.CheckValidation();
+            pool.ResetCompletedClaims(fixture.executor.Completed());
+            std::printf("Production VSM CullCS %s/%s passed (empty request word between partial masks, ordered overflow).\n",
+                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy", test.name);
+            continue;
+        }
         std::vector<UINT> expected_pages((test.fine_entries + 1u) * 8u, sentinel);
         expected_pages[page_index * 8u + 0u] = 0u; expected_pages[page_index * 8u + 1u] = 0u;
         expected_pages[page_index * 8u + 2u] = 3u; expected_pages[page_index * 8u + 3u] = UINT_MAX;

@@ -2602,7 +2602,9 @@ HsSurfaceClosure HsHeroSelectedSurface(SceneOutput input,bool front,uint hsHeroC
     if(any(input.InstanceKey!=HeroFrontIdentity[layer].Load(int3(int2(input.Position.xy),0))))
     { HsHeroWorkAdd(9u); discard; }
 #else
-    if(!front || !HsHeroSelectedFront(input,layer)) discard;
+    // Composite/guide PSOs use early depth equality against this same
+    // read-only front DSV. Keep the identity match for coincident instances.
+    if(!front || any(input.InstanceKey!=HeroFrontIdentity[layer].Load(int3(int2(input.Position.xy),0)))) discard;
 #endif
     const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
     HS_HERO_WORK_ACCEPT(input.Position.xy);

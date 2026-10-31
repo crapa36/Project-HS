@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -79,6 +80,78 @@ void AddCharacterInputs(ap::ActionSpec &spec, const fs::path &source_root,
         for (const auto &texture : textures)
             AddInput(spec, source_root, texture);
     }
+}
+
+struct CharacterInputSnapshot
+{
+    fs::path root;
+    std::unordered_set<std::string> logical_ids;
+
+    fs::path Remap(const fs::path &source_root, const fs::path &path) const
+    {
+        const auto logical_id = RelativeId(source_root, path);
+        Require(logical_ids.contains(logical_id),
+                "character source file was not included in its authenticated inputs: " + logical_id);
+        return root / fs::path(logical_id);
+    }
+
+    fs::path RemapDirectory(const fs::path &source_root, const fs::path &path) const
+    {
+        auto logical_id = RelativeId(source_root, path);
+        logical_id += "/";
+        Require(std::ranges::any_of(logical_ids, [&](const std::string &input) {
+                    return input.starts_with(logical_id);
+                }), "character input snapshot does not contain the requested source directory: " +
+                path.string());
+        logical_id.pop_back();
+        return root / fs::path(logical_id);
+    }
+};
+
+CharacterInputSnapshot SnapshotActionInputs(const fs::path &stage,
+                                             const std::vector<ap::Input> &inputs)
+{
+    CharacterInputSnapshot snapshot{stage / "source-snapshot", {}};
+    std::unordered_map<std::string, const ap::Input *> staged_inputs;
+    for (const auto &input : inputs)
+    {
+        const fs::path relative(input.logical_id);
+        Require(!relative.empty() && !relative.is_absolute() && relative.has_relative_path() &&
+                std::ranges::none_of(relative, [](const fs::path &part) {
+                    return part == "." || part == "..";
+                }), "character input has an unsafe snapshot identity: " + input.logical_id);
+        const auto [found, inserted] = staged_inputs.emplace(input.logical_id, &input);
+        if (!inserted)
+        {
+            Require(found->second->digest == input.digest &&
+                    found->second->path.lexically_normal() == input.path.lexically_normal(),
+                    "character inputs contain a conflicting duplicate identity: " + input.logical_id);
+            continue;
+        }
+        const auto target = snapshot.root / relative;
+        ap::MakeDirectory(target.parent_path());
+        const auto copied = ap::CopyAndHashInput(input.logical_id, input.path, target);
+        Require(copied.digest == input.digest,
+                "character input changed after action identity was computed: " + input.logical_id);
+    }
+    for (const auto &[logical_id, input] : staged_inputs)
+    {
+        static_cast<void>(input);
+        snapshot.logical_ids.insert(logical_id);
+    }
+    return snapshot;
+}
+
+hs::content::CharacterAssetSource SnapshotCharacterSource(
+    const fs::path &source_root, const CharacterInputSnapshot &snapshot,
+    const hs::content::CharacterAssetSource &source)
+{
+    auto result = source;
+    result.model = snapshot.Remap(source_root, source.model);
+    for (auto &animation : result.animations) animation = snapshot.Remap(source_root, animation);
+    for (auto &animation : result.named_animations)
+        animation.file = snapshot.Remap(source_root, animation.file);
+    return result;
 }
 
 std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterialDomains(
@@ -173,28 +246,26 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
         return false;
     try
     {
-        const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-        if (result.at("action_id") != spec.action_id ||
-            result.at("action_key") != ap::ActionKey(spec) ||
-            result.at("namespace_path") != spec.namespace_path ||
-            !result.at("products").is_array())
+        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
+        if (snapshot.ActionId() != spec.action_id ||
+            snapshot.ActionKeyValue() != ap::ActionKey(spec) ||
+            snapshot.ProductCount() == 0)
             return false;
-        const auto &products = result.at("products");
-        if (products.empty()) return false;
+        const auto product_ids = snapshot.ProductIds();
         std::unordered_set<std::string> actual_names;
         fs::path metadata_path, page_path, animation_path;
-        for (const auto &product : products)
+        for (const auto product_id : product_ids)
         {
+            const auto &product = snapshot.ProductMetadata(product_id);
             const auto name = fs::path(product.at("locator").get<std::string>())
                                   .filename().string();
-            if (product.at("logical_id") != ProductId(name))
+            if (product_id != ProductId(name))
                 return false;
             if (!actual_names.insert(name).second)
                 return false;
             ap::UpstreamProduct dependency;
             fs::path product_path;
-            ap::ReadActionResult(build_root, spec.namespace_path,
-                                 ProductId(name), dependency, product_path);
+            snapshot.ReadProduct(product_id, dependency, product_path);
             if (source && name == source->output_name + ".rpkg") metadata_path = product_path;
             if (source && name == source->output_name + ".rpage") page_path = product_path;
             if (source && name == source->output_name + "_animation.rpkg") animation_path = product_path;
@@ -221,7 +292,7 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
                     const auto &lod_id=prepared.package.dependencies[entry.page_dependency_index];
                     ap::UpstreamProduct dependency;
                     fs::path lod_path;
-                    ap::ReadActionResult(build_root,spec.namespace_path,lod_id,dependency,lod_path);
+                    snapshot.ReadProduct(lod_id,dependency,lod_path);
                     const auto content=ap::ReadBytes(lod_path);
                     const auto lod_bytes=std::as_bytes(std::span(content.data(),content.size()));
                     if(!hs::render_data::ReadPackage(lod_bytes,hs::MakeAssetId(lod_id)).dependencies.empty()) return false;
@@ -315,20 +386,24 @@ void Produce(std::string_view mode, const fs::path &source_root,
         std::string error_message;
         std::vector<std::string> names;
         std::vector<hs::content::CharacterProduct> final_products;
+        const auto source_snapshot = SnapshotActionInputs(stage, spec.inputs);
         if (monster_materials)
         {
             if (!hs::content::CookMonsterMaterialTextures(
                     stage, error_message,
-                    source_root / "ContentSource/Textures/Monsters/PBR"))
+                    source_snapshot.RemapDirectory(source_root,
+                        source_root / "ContentSource/Textures/Monsters/PBR")))
                 throw std::runtime_error(error_message);
             names = {"monster_basecolor.dds", "monster_emissive.dds", "monster_ram.dds"};
         }
         else
         {
             hs::content::CharacterIR character;
-            if (!hs::content::ImportCharacterAsset(character, error_message, character_source))
+            const auto staged_character_source = SnapshotCharacterSource(
+                source_root, source_snapshot, character_source);
+            if (!hs::content::ImportCharacterAsset(character, error_message, staged_character_source))
                 throw std::runtime_error(error_message);
-            if (!hs::content::WriteCharacterTextures(stage, character, character_source, error_message))
+            if (!hs::content::WriteCharacterTextures(stage, character, staged_character_source, error_message))
                 throw std::runtime_error(error_message);
             const auto materials = hs::content::PrepareCharacterMaterialSelections(
                 character, character_source.output_name, material_authoring);
@@ -343,6 +418,10 @@ void Produce(std::string_view mode, const fs::path &source_root,
                                          product.filename.ends_with(".rpage");
                                  }));
         }
+        std::error_code remove_error;
+        fs::remove_all(source_snapshot.root, remove_error);
+        Require(!remove_error, "cannot remove private character source snapshot: " +
+                remove_error.message());
         std::vector<ap::Product> products;
         for (const auto &name : names)
         {

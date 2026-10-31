@@ -140,7 +140,6 @@ struct VolumetricLayout
     std::array<ResourceVersion, 22> input_versions{};
     std::array<ResourceHandle, 14> imports{};
     std::array<ResourceVersion, 6> output_versions{};
-    std::array<BufferRange, 3> read_ranges{}; // constants, volumes, heroes
     std::array<std::uint32_t, 7> pass_index{}; // 170..175, optional 176
     bool history{}, hero{}, shadows{}, local_shadows{}, compact_shadow{};
     bool root_static{}, root_dynamic{};

@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+namespace hs { class GenerationFileLock; }
+
 namespace hs::asset_pipeline
 {
 namespace fs = std::filesystem;
@@ -54,6 +56,8 @@ struct UpstreamProduct
     std::string digest;
     std::uint64_t size{};
     fs::path result_path;
+    // Keeps the source ProductSet readable while any consumer retains this token.
+    std::shared_ptr<hs::GenerationFileLock> reader_lease;
 };
 
 struct ActionSpec
@@ -86,6 +90,7 @@ class ActionResultSnapshot
                             UpstreamProduct &dependency, std::span<char> scratch = {}) const;
     [[nodiscard]] bool HasProduct(std::string_view product_id) const;
     [[nodiscard]] const Json &ProductMetadata(std::string_view product_id) const;
+    // dependency retains the ProductSet lease when product_path escapes this call.
     void ReadProduct(std::string_view product_id, UpstreamProduct &dependency,
                      fs::path &product_path) const;
     // Decode this owned buffer instead of reopening the verified product path.
@@ -98,6 +103,7 @@ class ActionResultSnapshot
     std::string namespace_path_;
     Json result_;
     std::map<std::string, std::size_t> product_indexes_;
+    std::shared_ptr<hs::GenerationFileLock> reader_lease_;
     void ResolveProduct(std::string_view product_id, UpstreamProduct &dependency,
                         fs::path &product_path) const;
 

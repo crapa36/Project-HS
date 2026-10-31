@@ -152,6 +152,13 @@ receipts own producer provenance without a duplicate content product.
 Resident whole-LOD geometry pages own their stable SDF submesh keys. Native scene
 expansion consumes those keys in authored submesh order; frame-scoped resources,
 versions, deformation and instance transforms remain current-frame inputs.
+Software GI prepares canonical geometry records, draws and deformation offsets
+once in the waited SceneGeometry slot. GI input construction borrows that prepared
+view and retains its position allocation lease; graph registration consumes the
+same records with current read versions and bindings. The move-only preparation
+token abandons unregistered CPU data. Accepted registration transfers that data
+to the existing pending submission until recording has joined; GPU allocation
+owners and completion remain independent of those CPU arrays.
 Visibility pixel classification is a separate runtime shader family. Count,
 prefix and scatter share variant decoding with material resolve through a small
 include; classification-only edits do not invalidate authored material shaders.
@@ -573,7 +580,10 @@ and the common analytic camera clock are not replaced by the frozen target.
 
 Each rendered package evaluates one display sample from the producer's actual
 adjacent tick pair. Transforms, poses and endpoint lifetime transitions share that
-sample across views; package-owned Archer palettes feed bounds and canonical skin
+sample across views. Endpoint samples reuse the caller's current snapshot for the
+synchronous Render call; only interpolation owns new instance/pose arrays. Common
+ribbon membership and lazily prepared camera/sun cull bases belong to the existing
+prepared package. Package-owned Archer palettes feed bounds and canonical skin
 compute. All actual character draw consumers use that cache; the unused128-matrix
 compatibility cbuffer and legacy vertex deformation are removed. Qualified bounds
 with no skin allocation encode no package consumer. Visibility omits their visible
@@ -665,6 +675,12 @@ The Apps-owned `hs_asset_pipeline` static library compiles the shared Action
 implementation once. Producers remain separate executables, so a producer-specific
 change does not invalidate unrelated recipes. Each process hashes its own executable;
 there is no intermediate recipe manifest or post-link preparation target.
+Action receipt snapshots pin their ProductSet with the existing OS file-lock
+contract. Upstream path values share that owner until consumption ends; publishing
+another action cannot release another reader's pin. GC and repair respect the
+stable per-set lease anchor. A short shared mutation lock covers receipt/pin and
+selected-pointer/manifest acquisition; immutable installed snapshots require no
+new lock-file writes.
 Material and runtime DXC compilation consume hashed private source/include
 snapshots; generated includes are owned by that producer stage. Saved runtime
 shader input closures permit cache hits without dependency-scanner processes.
@@ -675,6 +691,9 @@ uncertain process exit preserves its stage instead of racing cleanup.
 CharacterContent imports one CharacterIR and directly emits final character
 metadata, LOD0 geometry, named animation and DDS products. Normal builds do not
 exchange native meshbin or material JSON sidecars through a second producer.
+FBX, animations, sibling FBM textures and monster PBR inputs are copied into the
+producer's private stage and checked against the input digests before native
+import/texture decoding. Those consumers use only the staged paths.
 ContentLinker reads exact character/material/texture snapshots, retains checked
 bytes while validating their bindings, and reuses the prepared metadata. Explicit
 CharacterInterchange compatibility export remains a separate developer leaf.

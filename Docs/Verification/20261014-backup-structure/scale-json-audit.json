@@ -1,7 +1,0 @@
-{
-  "scope": "ContentSource JSON properties named scale/scaling (case-insensitive), numeric scalar or 3-vector only; excludes binary FBX/Blend transforms and runtime-generated values",
-  "json_files": 87,
-  "parse_errors": [],
-  "scale_values": 0,
-  "nonpositive": []
-}

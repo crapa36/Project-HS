@@ -44,19 +44,40 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const auto name = rd::kHeroMaterialNames[ordinal];
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
         const auto &prepared = materials.Get(name).prepared;
+        const auto kind = prepared.Graph().kind;
+        const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
+            kind == rd::MaterialGraphKind::HeroRefractive;
         const auto functions = rd::EmitHeroMaterialContextHlsl(prepared,
             "HsHeroEvaluateSurface_" + std::to_string(ordinal), "HsHeroEvaluateOpacity_" + std::to_string(ordinal));
+        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += functions;
+        if (!translucent) generated += "#endif\n";
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/hero-context-ir", path,
             std::as_bytes(std::span(functions.data(), functions.size()))));
     }
     generated += "HsSurfaceClosure HsHeroEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
     for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    {
+        const auto &prepared = materials.Get(rd::kHeroMaterialNames[ordinal]).prepared;
+        const auto kind = prepared.Graph().kind;
+        const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
+            kind == rd::MaterialGraphKind::HeroRefractive;
+        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += "    case " + std::to_string(ordinal) + "u: return HsHeroEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
+        if (!translucent) generated += "#endif\n";
+    }
     generated += "    default: return (HsSurfaceClosure)0;\n    }\n}\n";
     generated += "float HsHeroEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
     for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    {
+        const auto &prepared = materials.Get(rd::kHeroMaterialNames[ordinal]).prepared;
+        const auto kind = prepared.Graph().kind;
+        const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
+            kind == rd::MaterialGraphKind::HeroRefractive;
+        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += "    case " + std::to_string(ordinal) + "u: return HsHeroEvaluateOpacity_" + std::to_string(ordinal) + "(ctx);\n";
+        if (!translucent) generated += "#endif\n";
+    }
     return generated + "    default: return 0.0;\n    }\n}\n";
 }
 

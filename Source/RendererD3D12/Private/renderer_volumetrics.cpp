@@ -379,8 +379,6 @@ bool HistoryEligible(const VolumetricStorage &s,const VolumetricInputs &in) noex
             s.previous_hero_noise_volume.Get()==in.hero_noise_volume.resource)&&
         SameCamera(in.previous_camera,s.previous_camera);
 }
-bool SameRange(BufferRange a,BufferRange b) noexcept
-{return a.offset==b.offset&&a.size==b.size;}
 }
 struct VolumetricSystem::Impl
 {
@@ -537,14 +535,6 @@ bool VolumetricSystem::MatchesProjectedLayout(const VolumetricInputs &in,
     const auto versions=InputVersions(in);
     for(std::size_t index=0;index<versions.size();++index)
         if(!(versions[index]==layout.input_versions[index]))return false;
-    const std::array<BufferRange,3> ranges{{
-        {UINT64(in.frame_slot)*kConstantStride,kConstantStride},
-        {UINT64(in.frame_slot)*s->max_volumes*sizeof(VolumetricVolume),
-            UINT64(s->max_volumes)*sizeof(VolumetricVolume)},
-        {UINT64(in.frame_slot)*s->max_volumes*sizeof(VolumetricHeroVolume),
-            UINT64(s->max_volumes)*sizeof(VolumetricHeroVolume)}}};
-    for(std::size_t index=0;index<ranges.size();++index)
-        if(!SameRange(ranges[index],layout.read_ranges[index]))return false;
     return true;
 }
 Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInputs &in,
@@ -767,15 +757,6 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     for(auto *resource:in.local_shadows.resources)retain(resource);
     if(!p.heroes_state.empty()){retain(in.hero_blue_noise.resource);retain(in.hero_gradient.resource);
         retain(in.hero_noise_volume.resource);}
-    const BufferRange constantsRange{UINT64(p.slot)*kConstantStride,kConstantStride};
-    // Whole per-slot capacity is a conservative dependency. Shader counts and
-    // uploaded bytes remain current-frame data, so changing active volumes
-    // does not force another graph declaration for the same allocation.
-    const BufferRange volumesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricVolume),
-        UINT64(s->max_volumes)*sizeof(VolumetricVolume)};
-    const BufferRange heroesRange{UINT64(p.slot)*s->max_volumes*sizeof(VolumetricHeroVolume),
-        UINT64(s->max_volumes)*sizeof(VolumetricHeroVolume)};
-    if(layout)layout->read_ranges={constantsRange,volumesRange,heroesRange};
     auto execute=[s,binder,froxel=p.froxel,active=p.active](UINT stage)
     {
         return [s,binder,froxel,active,stage](RenderPassContext &ctx)->Result
@@ -789,14 +770,16 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
             return Result::Success();
         };
     };
-    auto constants=[&](PassBuilder &pass){pass.Read(p.constants,Access::ComputeRead,constantsRange);};
+    // These CPU-upload buffers have no graph writers; descriptors still select
+    // the waited slot, while whole-buffer reads keep slot offsets out of topology.
+    auto constants=[&](PassBuilder &pass){pass.Read(p.constants,Access::ComputeRead);};
     if(layout)layout->pass_index[0]=graph.PassCount();
     auto density=retained?*graph.BindPass(retained->pass_index[0],170):
         graph.AddPass(170,"VolumetricDensity",QueueHint::Direct);
     if(!retained)
     {
         constants(density);density.Read(in.depth.version,Access::ComputeRead);
-        density.Read(p.volumes,Access::ComputeRead,volumesRange);
+        density.Read(p.volumes,Access::ComputeRead);
         p.medium=density.Write(p.medium,Access::UnorderedWrite);
         p.phase=density.Write(p.phase,Access::UnorderedWrite);
         p.current_depth=density.Write(p.current_depth,Access::UnorderedWrite);
@@ -810,7 +793,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
             graph.AddPass(176,"VolumetricHeroDensity",QueueHint::Direct);
         if(!retained)
         {
-            constants(hero);hero.Read(p.heroes,Access::ComputeRead,heroesRange);
+            constants(hero);hero.Read(p.heroes,Access::ComputeRead);
             hero.Read(p.current_depth,Access::ComputeRead);
             hero.Read(in.hero_blue_noise.version,Access::ComputeRead);
             hero.Read(in.hero_gradient.version,Access::ComputeRead);

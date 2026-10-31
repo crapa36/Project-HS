@@ -263,9 +263,17 @@ bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_tick
 
 void GameSimulation::SimulationWorld::CommitBossSpawns()
 {
-    for (const auto &pending : progression->pending_boss_spawns)
+    auto &spawns = progression->pending_boss_spawns;
+    std::size_t kept{};
+    for (std::size_t index = 0; index < spawns.size(); ++index)
     {
-        if (pending.due > tick) continue;
+        const auto &pending = spawns[index];
+        if (pending.due > tick)
+        {
+            if (kept != index) spawns[kept] = pending;
+            ++kept;
+            continue;
+        }
         const auto kind = pending.kind;
         const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
         PreparedEnemy boss;
@@ -288,19 +296,24 @@ void GameSimulation::SimulationWorld::CommitBossSpawns()
         EmitVfx(DomainSignalKind::BossSpawned, pending.position, {}, 1.0f, 0.3f,
                 static_cast<std::uint8_t>(kind));
     }
-    std::erase_if(progression->pending_boss_spawns,
-                  [this](const PendingBossSpawn &pending) { return pending.due <= tick; });
+    spawns.resize(kept);
 }
 
 void GameSimulation::SimulationWorld::CommitDelayedEnemySpawns()
 {
-    for (const auto &pending : progression->pending_enemy_spawns_delayed)
+    auto &spawns = progression->pending_enemy_spawns_delayed;
+    std::size_t kept{};
+    for (std::size_t index = 0; index < spawns.size(); ++index)
     {
-        if (pending.due <= tick)
-            SpawnEnemy(pending.kind, pending.position, pending.random_key);
+        const auto &pending = spawns[index];
+        if (pending.due > tick)
+        {
+            if (kept != index) spawns[kept] = pending;
+            ++kept;
+        }
+        else SpawnEnemy(pending.kind, pending.position, pending.random_key);
     }
-    std::erase_if(progression->pending_enemy_spawns_delayed,
-                  [this](const PendingEnemySpawn &pending) { return pending.due <= tick; });
+    spawns.resize(kept);
 }
 
 void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,

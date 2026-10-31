@@ -96,7 +96,8 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
             const fs::path &source, std::wstring_view entry,
             std::wstring_view profile, std::wstring_view define,
             std::uint32_t sidecar_planes = 0, bool generated_deferred = false,
-            bool feedback = false, bool hero_work = false)
+            bool feedback = false, bool hero_work = false,
+            bool hero_translucent_domain = false)
 {
     auto diagnostics = output;
     diagnostics += ".diagnostics.txt";
@@ -113,6 +114,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     if (generated_deferred) args.emplace_back(L"-DHS_GENERATED_DEFERRED_MATERIALS=1");
     if (feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
     if (hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
+    if (hero_translucent_domain) args.emplace_back(L"-DHS_HERO_TRANSLUCENT_DOMAIN_ONLY=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
@@ -133,6 +135,14 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
             output.filename().string() + ": " +
             hs::shader_content::ReadDxcDiagnostics(diagnostics));
     fs::remove(diagnostics);
+}
+
+bool IsHeroTranslucentProgram(const ProgramOutput &program)
+{
+    constexpr std::array<std::wstring_view, 6> entries{
+        L"HeroPeelFrontPS", L"HeroPeelExitPS", L"HeroOitTailPS",
+        L"HeroTransparentGuidePS", L"HeroLayerCompositePS", L"HeroTranslucentPS"};
+    return std::ranges::find(entries, program.entry) != entries.end();
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
@@ -336,7 +346,8 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                 ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
             RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
-                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides, false, hero_work);
+                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides,
+                   false, hero_work, IsHeroTranslucentProgram(program));
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }

@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <numbers>
+#include <span>
 #include <vector>
 
 namespace hs
@@ -67,15 +68,12 @@ class RenderSceneSample
     {
         instances_.clear();
         poses_.clear();
+        current_poses_.clear();
+        previous_poses_.clear();
         const auto &current = pair.current;
         const auto &previous = pair.previous;
-        const bool between = pair.has_previous && alpha < 1.0f;
-        if (!between)
-        {
-            instances_.assign(current.instances.begin(), current.instances.end());
-            poses_.assign(current.poses.begin(), current.poses.end());
-            return;
-        }
+        endpoint_ = !(pair.has_previous && alpha < 1.0f);
+        if (endpoint_) return;
         previous_.Update(previous.instances);
         current_.Update(current.instances);
         current_poses_.assign(current.instances.size(), nullptr);
@@ -173,13 +171,17 @@ class RenderSceneSample
             if (instance.stable_id && !current_.Find(instance.stable_id))
                 append(instance, previous_poses_[index]);
         }
+        // Endpoint pose pointers only serve the interpolation above.
+        current_poses_.clear();
+        previous_poses_.clear();
     }
 
-    [[nodiscard]] RenderSnapshot View(RenderSnapshot snapshot) const noexcept
+    [[nodiscard]] RenderSnapshot View(RenderSnapshot current) const noexcept
     {
-        snapshot.instances = instances_;
-        snapshot.poses = poses_;
-        return snapshot;
+        if (endpoint_) return current;
+        current.instances = instances_;
+        current.poses = poses_;
+        return current;
     }
 
   private:
@@ -187,6 +189,7 @@ class RenderSceneSample
     std::vector<RenderInstance> instances_;
     std::vector<AnimationPoseRef> poses_;
     std::vector<const AnimationPoseRef *> current_poses_, previous_poses_;
+    bool endpoint_{};
 };
 
 } // namespace hs

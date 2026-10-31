@@ -1,47 +1,162 @@
 # DEV_STATE
 
-AI implementation continuity only. Main HEAD e448dc415f5fc2611391f081c9a6300f82f56337;
-work in the original main workspace and preserve all existing dirty changes.
-No current commit/push/branch authorization. Expanded prior technical evidence is
-archived at Build/static-gi-transform-20261031/DEV_STATE.before-compaction.md.
+AI implementation continuity only. Original main workspace, HEAD
+0546e32ae200ef390b6b46af367b93b89b30fc82. Preserve existing dirty work/external
+deletions. No current commit/push/branch authorization. Prior expanded state:
+Build/reanalysis-priority-20261031/DEV_STATE.before-priority.md.
 
-## Active objective and execution
+## Latest completed audit
 
-Goal ACTIVE: finish accepted reviews/directives and optimize actual Debug /Od,
-assertions/checked iterators,1080p Ultra100%,200enemies toward60FPS. Unmet.
-User ordering: measured core bottlenecks first, general new-review work afterward.
-Latest queue experiment REJECTED and restored: Build/ao-async-20261031.
-Classifier280+GTAO Compute creates .259/.274ms SDF overlap, but classifier cost
-.116->.317/.328ms offsets it. Output dependency envelope saves only~.10-.16ms.
-Both foreground orders pass receipts: FPS34.257->34.734 and34.194->34.297,
-1%low24.245->25.477 and25.151->24.947; tails mixed, no compelling net gain.
-Enhanced native21 validation0 verified queues, but GBV hit360s host limit during
-NVIDIA compiler work; no verdict/pass/hang claim. No extra GBV/Release run for
-this rejected candidate. Its three production files are restored,607source/shader
-files normalize-equal frozen5879 control; restored Debug build passes. Relink
-experiment SHA063d933d...73ae7 has no new FPS qualification. Existing Releasea25
-still matches restored source. No AO/adaptive queue fields/conditions retained.
-All root-owned game/profiler/build processes closed after work completes.
-Slimes remain translucent; generic material-driven transparent routing stays.
-No Linux or Computer Use. Subagents Luna/high, no Sol; root owns builds/GPU runs.
-One Ninja per build root and one GPU workload. Close owned helpers after use.
-Use existing narrow product checks; no source-spelling/disconnected algorithm tests
-or permanent before/after tools. No speculative manager/cache/validation registry.
-Release excludes developer CLI/capture/tests/logging; keep actionable failures.
+Ponytail whole-repo scoped audit+authorized fixes complete:
+Build/ponytail-audit-20261031/AUDIT.md, RESULTS.md, final-state.json/source.patch.
+Five concrete findings fixed: ActionResult/UpstreamProduct share a ProductSet
+GenerationFileLock anchored by stable per-set sidecar; receipt/pin acquisition is
+coordinated with publication/GC, busy repairs/GC retained. No shared-owner forced
+release in Publish. CharacterContent cooks FBX/animation/FBM and monster PBR from
+private copies authenticated against Action input digests; no live-path fallback.
+Dot-only experiment scenario names rejected before artifact cleanup. Experiment
+child starts suspended, joins kill-on-close Windows Job before resume; termination
+and exit outcomes reported. Generation selection briefly holds an existing shared
+root mutation lock through manifest lease acquisition (create=false; no writes to
+immutable installed snapshots). Retry wrapper was removed; no public API change.
 
-ARCHITECTURE.md and scoped AGENTS govern Public-only layering, OFF/OFF build,
-60Hz/strictFP/RNG semantics and native completion/partial-submit/borrow lifetime.
-Use VS2022BuildTools14.44.35207 and cached CMake4.4.3 via existing Tools workflow.
-Preserve /Od and pre-existing renderer_frame /Ob2; optimized offline cooker flags
-are separate. Named app builds use existing content. Cook only affected inputs.
+Debug selected targets/app and prebuilt Release build pass. Existing Runtime,
+selected-generation, scene-HLOD/action-snapshot, architecture and real generation
+lifetime/GC/repair cases pass; final selection+real lifetime suite rerun passes.
+Actual slime-melee4products and monster-materials3products retain every digest/size;
+producer keys differ, snapshot directories are not published. CPU experiment normal,
+invalid '..' sentinel preservation, parent hard-exit child cleanup and suspended-child
+watchdog exit-confirmed all pass. Process-fault proof precedes the final selection
+coordination-only relink; final normal180tick CLI also passes after that relink.
+No new executable/runner/dependency in production, no Linux/CU/GPU/full cook/install
+qualification repeated for these offline/startup changes. No current owned child
+process left. Current experiment/app hashes are final-state.json; prior GPU/FPS
+receipts belong to their older exact PEs and are not current binary qualification.
 
-## Current source, content and measured decisions
+Audit scope: no new actionable renderer/gameplay/VFX issue found in inspected
+paths, not exhaustive safety proof. Deep native audio/PCM, every UI callback,
+every producer and shader math were not audited. Earlier optimization and numeric
+exposure variability work remain ACTIVE below; audit completion is not60FPS or
+full-directive completion.
 
-Qualified shader content: Debug SDKON Gencc900feca5062ded1c008b46c06874f58e5c81c21c97b09ee3d5af7d275fd804.
-Surface ABI5; only ClusterCutCount product differs from prior qualified Gen1336.
-Release SDKOFF Genfcdae0397e3a5143640ee52659d5c0fab79a93e7288e54aa65a01d7661f84d92.
-Its last build/install SHA d56e2b4c...ea169c predates the current CPU batch.
-Do not compose a generation from stale experimental Action results.
+## Active objective and earlier priority
+
+Goal ACTIVE: finish accepted directives; actual Debug /Od/assertions/checked
+iterators,1080p Ultra100%,200enemies toward60FPS remains unmet. Highest priority:
+Desktop/Project-HS-Reanalysis-0546e32.md, all381lines read, SHA256
+31d5f64cf8d98678fa369443ea15633f4ccdcee96886882b9433ff43be7a44bf.
+Its fixed0546 source and historical5879/cc900 measurements are not current PE.
+Earlier two workload reports remain W01-W08 in
+Build/hero-crowd-20261031/workload-backlog.md. Do not replace the full queue with
+this report. .planning was externally deleted; do not restore unrelated deletions.
+
+Use existing narrow checks/batched builds; no permanent comparison tools, extra
+runners, disconnected/source-spelling tests. No Linux/CU. Root owns builds/one GPU
+workload; subagents Luna/high, no Sol. Preserve translucent slimes, full transport,
+4Hero layers, full quality/resolution. Release excludes developer capture/trace/tests.
+Keep Public layering/OFF-OFF/60Hz/strictFP/RNG and accepted-prefix/completion/borrow/
+old-reader lifetimes. VSBuildTools14.44.35207, existing Tools/CMake4.4.3. Existing
+renderer_frame /Ob2 is not permission to enable /O2 Debug.
+
+## Priority report disposition
+
+- A01 one move-only SceneGeometry preparation and G01 actual Hero domain codegen
+  are implemented; do not redo. G01 11PS DXIL -16.05% is not FPS evidence.
+- A02 first increment: full ordered logical records stay for native GI; only
+  SceneGeometryDeformed rows enter GPU records/draw upload/descriptors/dispatch.
+  NoD skips unused table/import/pass while preserving CPU rows, owners and pending
+  completion. Existing scene-input test calls production planner for mixed static,
+  SkinCache and deformed rows, checking offsets/order. Full static/current section
+  input architecture is incomplete; do not mark full A02 done.
+- A03 eager native SDK batches remain rejected:2.100ms control vs2.163/2.147ms.
+- G02 one controlled existing terrain producer trial (isolated copy) completed:
+  control82424B matches selectedDXIL; candidate82436B, same9159instructions,
+  28SampleGrad/3SampleLevel and linearSSApeak176. No demonstrated reduction;
+  not adopted, production terrain never edited. terrain-trial/trial-review.md.
+  Not hardware register/occupancy proof; other terrain improvements unresolved.
+- T01 fixed proven topology churn: SceneGeometry uses64KB owner-local buffer
+  widths consistently for creation/preflight; volumetric CPU-only upload resources
+  have whole-buffer graph Read declarations while actual waited-slot CPU/CBV/SRV
+  ranges stay exact. No cache enlargement or dependency/fence deletion. Temporary
+  FirstMismatch capture identified the causes and was removed. Restoring a file
+  via Copy-Item preserved an older mtime and Ninja reused its diagnostic object;
+  force-touched/recompiled clean render_graph.cpp and relinked. Current experiment
+  has no diagnostic literal; native runner relinked clean after prior run exited.
+
+## Current source/content and checks
+
+Selected Debug SDKON generation9750a33dc4e29081ffb464b2dce7a37ea9776018e9947ee092815ccece73fe05,
+pointer GenerationState/runtime-full-pixel-front-20261031.json. Versus da0 only2
+normal HeroPS differ; all3639product IDs, CS/nonshaders/bakes/ABI match. Redundant
+normal Composite/Guide front-depth SRV equality removed: same read-onlyDSV EQUAL
+already applies. Identity check stays (diagnostic9620validrows:0depth rejects,
+467identity rejects); Tail predicate and instrumented variants unchanged. Front
+world21 and offscreen200x600 pass, no isolated whole-FPS benefit claim.
+
+Current source diff freeze8ff1b3ef571261322f55348ecb48913401e738361957235df19010d69d6a821d:
+Build/reanalysis-priority-20261031/t01-final-source.patch and t01-final-identity.json.
+Clean experimentFNVbd5fcf031a22e7b7/SHA
+c546854534bf2737135c07fd126959c72d6b75fa9f9383555dcc96b538d9862b,Gen9750.
+Debug app/experiment/native runner/existing scene-input builds and CPU case pass;
+Release ProjectHS SDKOFF/ContentToolsOFF/TestsOFF C++ build passes. No new cook/install.
+Final world21 normal D3D validation: execution-valid/errors0, capture/sample-ready
+local probe and required transport passes complete. The shortened7frame check failed
+only local-probe readiness with capture textures still pending; retain that receipt,
+use21matching baseline rather than weaken readiness. Two final normal200x600 runs
+are execution-valid/assertions pass/no device loss. No latest foregroundFPS claim.
+Software-GI GBV360s and Probe-GI transport GBV240s attempts lack a completed-frame/
+result receipt and were stopped: INCOMPLETE, not pass/hang proof. No owned GPU
+process left. The240s attempt used interim diagnostic-linked native PE; don't
+relabel it as the final clean PE. Three-frame argument attempt failed before GPU
+startup because fixture requires minimum7. No further blind GBV repetitions.
+
+Matched481ticks120-600/config2/view1: A02-only vs finalT01 compile145->48frames
+(-67%), all48 also A02 compile frames. Per-compile mean8.431->8.568ms, not faster
+compiler. GraphPrepare mean3.057->1.352,p9913.588->10.521ms. Render mean40.932->40.622,
+p9555.296->52.480,p9966.346->63.781; Wait13.119->14.416. No whole-FPS attribution.
+A02 GPU upload compacting itself: oldtwo controls20us->7us; deformation64->63us.
+SoftwareScene/Brix input/native CPU means remain about1.97/1.77/2.22ms.
+T01 grouped HeroComposite3.892ms, SurfaceResolve3.926ms vs A02 3.702ms; no GPU gain
+claim. Earlier control repeats Resolve3.866-3.929ms. Sparse GPU telemetry observes
+P0/2805/11201MHz only36-40%window, not continuous external-load exclusion.
+t01-comparison.md/json and a02-normal-comparison.md/json retain all distributions.
+
+Numeric output is not blanket-qualified bit-exact:27/36 surfaces exact including
+depth/GBuffer/lighting/AO/guides/light lists/VSM. Composite maxabs.00390625,
+mean2.855e-6; current exposure relative difference~2.25e-5, histogram55bins differ
+(max43counts), total2073600samples unchanged. Oldsame-PEA1/A2 exposure exact;
+same-final-PE repeat also has27/36exact and~1.8e-5relative exposure drift,55histogram
+bins/max44counts differ, total2073600samples unchanged. Both repeats have the exact
+same48compile frame IDs and338/481frontend reuse. This establishes variability
+within the final PE, not source-caused drift or bit-exact equivalence. Do not infer harmlessness or root cause
+from a small global exposure shift alone. Native final visibility IDs/metadata/
+geometry/cluster exact in A02 comparison; worklist scatter order differs with same
+per-variant sets. Current full raw comparison remains scoped to recorded snapshots.
+
+Next: continue measured static/current section
+packing and remaining graph shape growth; Hero/terrain GPU bottlenecks remain.
+All earlier accepted/rejected technical decisions below stay in force.
+
+## Rejected current trials and retained scope
+
+W04 GPU cooperative triangle cache removed; visibility_buffer.hlsl matches HEAD.
+User-requested monitored A/B/A (samecb09PE,Gen9750 vs candidatec6be) confirms
+SurfaceResolve3.929/20.519/3.866ms over481commonframes, candidate5.27x slower.
+All valid/sampledP0clocks; sparse telemetry does not fully exclude other processes.
+Build/pixel-work-20261031/RETEST.ko.md preserves source/evidence; no blind retuning.
+W03 closed HeroCurrentVS union also removed: DXIL28112->20200B but Hero18
+6.7072/6.8045/6.7221ms; temporal guides8208pixels and HDR/exposure differ.
+hero-crowd-20261031/RESULTS.ko.md. Normal native slime/water pass; GBV180s attempts
+incomplete before receipt. Do not duplicate earlyZ, delete tiny background copies
+or remove mixed monster opaque-feature GI to claim the main bottleneck solved.
+
+Next: finish A02 GBV receipt, diagnose T01 exact cache miss and fix proven cause,
+temporary capture is closed valid600frames and logging source restored. It identifies
+VolumetricDensity resource-use and SceneGeometry.RecordUpload width differences.
+Local64KB allocation-granularity buffer widths applied consistently in preflight
+and allocation; build/performance pending. Continue measured static/current work.
+No latest foregroundFPS/60FPS or full long-run/multiview/failure qualification.
+Remaining broader technical decisions/evidence are retained below.
 
 Adopted measured work (scoped receipts, not every current function qualified):
 - Dense ordered graph batch membership: GraphPlan3.75->1.94ms; required completion,

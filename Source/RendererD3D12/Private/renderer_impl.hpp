@@ -122,6 +122,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1978,6 +1979,16 @@ struct D3D12Renderer::Impl
         std::optional<MonsterLodInstanceOrder> order;
         std::unordered_map<std::uint64_t, const AnimationPoseRef *> poses_by_id;
         std::vector<const AnimationPoseRef *> poses_by_source;
+        struct SkinCullView
+        {
+            std::array<double, 3> eye{}, target{}, forward{}, right{}, vertical{}, scene_origin{};
+            double tangent_x{}, tangent_y{}, side_x{}, side_y{}, near_plane{}, far_plane{};
+            bool valid{};
+        };
+        std::vector<SkinCullView> skin_cull_views;
+        std::array<double, 3> skin_cull_sun_right{}, skin_cull_sun_vertical{};
+        bool skin_cull_views_prepared{}, skin_cull_views_valid{}, skin_cull_sun_valid{};
+        std::unordered_set<std::uint64_t> ribbon_head_ids, ribbon_projectile_ids;
         EntitySurfaceFrame entity_surfaces;
         std::vector<std::pair<std::uint64_t,std::uint8_t>> vfx_replacements;
         std::vector<MonsterLodPreparedLocalLight> local_shadow_consumers;
@@ -1990,6 +2001,10 @@ struct D3D12Renderer::Impl
             poses_by_id.clear();
             poses_by_source.clear();
             gpu_slots.clear();
+            skin_cull_views.clear();
+            skin_cull_views_prepared = skin_cull_views_valid = skin_cull_sun_valid = false;
+            ribbon_head_ids.clear();
+            ribbon_projectile_ids.clear();
             local_shadow_consumers.clear();
             skin_deformation.reset();
             order.reset();

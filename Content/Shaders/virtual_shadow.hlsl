@@ -529,6 +529,8 @@ void CullCS(uint3 tid : SV_DispatchThreadID, uint3 group_id : SV_GroupID,
         {
             const uint word=RequestWord(rank);
             const uint request_mask = Requests.Load(word * 4u);
+            // All lanes see the same immutable word; empty words need no shared counts.
+            if (request_mask == 0u) continue;
             if (group_index < 32u)
             {
                 const uint entry = word * 32u + group_index;

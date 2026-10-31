@@ -222,6 +222,19 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
               loaded.timeline_actions.size() == 1 && loaded.termination.maximum_tick == 60,
           "experiment spec round trip");
 
+    for (const auto *name : {".", ".."})
+    {
+        auto invalid = source;
+        invalid.scenario_id = name;
+        Check(hs::SaveExperimentSpec(path, invalid) && !hs::LoadExperimentSpec(path, loaded),
+              "dot scenario names cannot escape or alias the default artifact directory");
+    }
+    auto dotted = source;
+    dotted.scenario_id = "batch.1";
+    Check(hs::SaveExperimentSpec(path, dotted) && hs::LoadExperimentSpec(path, loaded) &&
+              loaded.scenario_id == dotted.scenario_id,
+          "ordinary dotted scenario names remain valid");
+
     source.timeline_actions = {{2, 1, "heal_player", "{\"amount\":5}"},
                                {1, 1, "damage_player", "{\"amount\":10}"}};
     Check(hs::SaveExperimentSpec(path, source).Succeeded() &&

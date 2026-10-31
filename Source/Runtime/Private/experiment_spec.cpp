@@ -374,9 +374,10 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
         }
         parsed.schema_version = static_cast<std::uint32_t>(schema);
         parsed.scenario_id = String(root.at("scenario_id"), "scenario_id");
-        if (!IsSafeKey(parsed.scenario_id))
+        if (!IsSafeKey(parsed.scenario_id) || parsed.scenario_id == "." ||
+            parsed.scenario_id == "..")
         {
-            Invalid("scenario_id", "must be 1-64 ASCII key characters");
+            Invalid("scenario_id", "must be 1-64 ASCII key characters, excluding dot path components");
         }
         parsed.seed = Unsigned(root.at("seed"), "seed");
         parsed.mode = ParseMode(String(root.at("mode"), "mode"));

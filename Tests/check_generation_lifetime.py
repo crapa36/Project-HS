@@ -471,6 +471,30 @@ def main():
                 run(args.generation, '--gc', '--build-root', repairing, '--grace-seconds', 0)
                 run(args.generation, '--verify', '--build-root', repairing, '--scope', 'repair')
             print('PASS interrupted repair manifest/tree retirement recovery')
+
+            # A retained ActionResult snapshot must pin its ProductSet across receipt replacement and GC.
+            action_root = base / 'action-reader'
+            action_args = (action_root, 'fixture', 'fixture.action', 'fixture/product', 'product.bin')
+            run(args.probe, 'publish-action', *action_args[:3], '1', *action_args[3:], 'A')
+            old_result = json.loads((action_root / 'Actions/fixture/result.json').read_text())
+            old_product_set = action_root / 'Products/fixture' / old_result['product_set_id']
+            old_product = old_product_set / 'product.bin'
+            assert old_product.read_bytes() == b'A'
+            ready, release = base / 'action-ready', base / 'action-release'
+            action_reader = subprocess.Popen(
+                [str(args.probe), 'action-hold', str(action_root), 'fixture',
+                 'fixture/product', str(ready), str(release)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            processes.append(action_reader)
+            wait_ready(action_reader, ready)
+            run(args.probe, 'publish-action', *action_args[:3], '2', *action_args[3:], 'B')
+            run(args.generation, '--gc', '--build-root', action_root, '--grace-seconds', '0')
+            assert old_product.exists() and old_product.read_bytes() == b'A', \
+                'GC removed a ProductSet held by an ActionResult snapshot'
+            release.touch(); finish(action_reader)
+            run(args.generation, '--gc', '--build-root', action_root, '--grace-seconds', '0')
+            assert not old_product_set.exists(), 'released ActionResult ProductSet was not collected'
+            print('PASS ActionResult ProductSet lease across replacement and GC')
         finally:
             for p in processes:
                 if p.poll() is None: p.kill(); p.communicate(timeout=5)

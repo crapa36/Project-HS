@@ -788,8 +788,19 @@ ActionResultSnapshot::ActionResultSnapshot(const fs::path &build_root,
       namespace_path_(namespace_path)
 {
     ValidateNamespace(namespace_path_);
+    hs::GenerationFileLock mutation(build_root_ / ".generation-mutation.lock",
+        hs::GenerationFileLock::Mode::Shared, true);
     result_ = Json::parse(ReadBytes(result_path_));
     ValidateActionResult(result_, namespace_path_, product_indexes_);
+    const auto &products = result_.at("products");
+    Require(products.is_array() && !products.empty(),
+            "ActionResult has no ProductSet to lease");
+    const auto product_set_id = result_.at("product_set_id").get<std::string>();
+    const auto lease_path = build_root_ / "Products" / namespace_path_ /
+        ".leases" / (product_set_id + ".lock");
+    MakeDirectory(lease_path.parent_path());
+    reader_lease_ = std::make_shared<hs::GenerationFileLock>(
+        lease_path, hs::GenerationFileLock::Mode::Shared, true);
 }
 
 std::string_view ActionResultSnapshot::ActionId() const
@@ -891,7 +902,8 @@ void ActionResultSnapshot::ResolveProduct(std::string_view product_id,
     Require(locator == expected, "upstream product locator mismatch");
     product_path = build_root_ / fs::path(locator);
     dependency = {std::string(product_id), product.at("digest").get<std::string>(),
-                  product.at("size").get<std::uint64_t>(), result_path_};
+                  product.at("size").get<std::uint64_t>(), result_path_,
+                  reader_lease_};
     Require(IsDigest(dependency.digest), "invalid upstream product digest");
 }
 
@@ -1037,6 +1049,7 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
     ValidateNamespace(spec.namespace_path);
     Require(build_root.is_absolute(), "build root must be absolute");
     RequireDirectory(stage);
+    Require(!products.empty(), "cannot publish an empty ProductSet");
     hs::GenerationFileLock mutation(build_root / ".generation-mutation.lock",
         hs::GenerationFileLock::Mode::Exclusive, true);
     std::ranges::sort(products, {}, &Product::logical_id);
@@ -1112,6 +1125,15 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
         try { VerifyPublished(published, products); }
         catch (const std::exception &)
         {
+            const auto product_set_lease = products_root / ".leases" / (id + ".lock");
+            hs::GenerationFileLock product_reader;
+            if (fs::exists(product_set_lease))
+            {
+                product_reader = hs::GenerationFileLock(product_set_lease,
+                    hs::GenerationFileLock::Mode::TryExclusive);
+                Require(product_reader.OwnsLock(),
+                        "product-set-in-use: cannot repair a ProductSet held by a reader");
+            }
             const auto generations = build_root / "Generations";
             if (fs::exists(generations))
             {

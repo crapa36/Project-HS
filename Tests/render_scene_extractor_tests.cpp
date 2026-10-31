@@ -594,6 +594,67 @@ void CheckInstantMotionSample()
     Check(hs::MakeRenderContentKey(previous) == hs::MakeRenderContentKey(current),
           "movement epoch cannot rebind character content");
 }
+void CheckEndpointBorrowAndTransitions()
+{
+    hs::RenderInstance current{};
+    current.stable_id = 1;
+    current.position.x = 10;
+    hs::AnimationPoseRef current_pose{};
+    current_pose.instance_index = 0;
+    std::array current_instances{current};
+    std::array current_poses{current_pose};
+
+    hs::RenderSnapshotPair pair;
+    pair.has_current = true;
+    pair.current.instances = current_instances;
+    pair.current.poses = current_poses;
+    hs::RenderSceneSample sample;
+    sample.Prepare(pair, 1.0f, [](const auto &, auto) { return false; });
+    const hs::RenderSceneSample &const_sample = sample;
+    const auto endpoint = const_sample.View(pair.current);
+    Check(endpoint.instances.data() == current_instances.data() && endpoint.poses.data() == current_poses.data(),
+          "endpoint samples borrow both caller-owned arrays");
+    const auto repeated_endpoint = const_sample.View(pair.current);
+    Check(repeated_endpoint.instances.data() == current_instances.data() &&
+              repeated_endpoint.poses.data() == current_poses.data(),
+          "repeated endpoint views keep returning the caller-owned arrays");
+
+    hs::RenderInstance replacement{};
+    replacement.stable_id = 2;
+    std::array replacement_instances{replacement};
+    pair.current.instances = replacement_instances;
+    pair.current.poses = {};
+    sample.Prepare(pair, 1.0f, [](const auto &, auto) { return false; });
+    const auto replaced_endpoint = sample.View(pair.current);
+    Check(replaced_endpoint.instances.data() == replacement_instances.data() &&
+              replaced_endpoint.poses.empty(),
+          "repeated endpoint prepare replaces the old borrowed span");
+
+    hs::RenderInstance previous = current;
+    previous.position.x = 0;
+    std::array previous_instances{previous};
+    pair.has_previous = true;
+    pair.previous.instances = previous_instances;
+    pair.current.instances = current_instances;
+    pair.current.poses = current_poses;
+    sample.Prepare(pair, 0.5f, [](const auto &, auto) { return false; });
+    const auto interpolated = sample.View(pair.current);
+    Check(interpolated.instances.data() != current_instances.data() &&
+              interpolated.instances.size() == 1 && interpolated.instances[0].position.x == 5,
+          "interpolation owns its evaluated endpoint blend");
+
+    sample.Prepare(pair, 1.0f, [](const auto &, auto) { return false; });
+    const auto final_endpoint = sample.View(pair.current);
+    Check(final_endpoint.instances.data() == current_instances.data() &&
+              final_endpoint.poses.data() == current_poses.data(),
+          "interpolation-to-endpoint transition borrows fresh caller spans");
+
+    hs::RenderSnapshotPair empty_pair;
+    sample.Prepare(empty_pair, 1.0f, [](const auto &, auto) { return false; });
+    const auto empty_endpoint = sample.View(empty_pair.current);
+    Check(empty_endpoint.instances.empty() && empty_endpoint.poses.empty(),
+          "empty endpoint prepare drops previous interpolation output");
+}
 }
 int main()
 {
@@ -608,6 +669,7 @@ int main()
         CheckRetainedSnapshotCopy();
         CheckExactFinalPoseInputs();
         CheckInstantMotionSample();
+        CheckEndpointBorrowAndTransitions();
         hs::RenderSnapshotPair camera_pair;
         camera_pair.has_previous = camera_pair.has_current = true;
         camera_pair.previous.camera.target = {0, 2, 4};

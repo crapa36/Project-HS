@@ -34,6 +34,50 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
+void TestScheduledSpawnOrder()
+{
+    using namespace hs;
+    GameSimulation simulation;
+    Check(simulation.Initialize({73}, SimulationRules::Defaults()).Succeeded(), "scheduled spawn initialize");
+    auto &world = GameplayTestAccess::State(simulation);
+    world.pipeline_phase = gameplay_detail::SimulationPhaseId::Spawn;
+    world.tick = 10;
+    auto &bosses = world.progression->pending_boss_spawns;
+    bosses = {{BossKind::FiveMinute, {}, 12, 101}, {BossKind::TenMinute, {}, 10, 102},
+              {BossKind::Final, {}, 11, 103}, {BossKind::FiveMinute, {}, 9, 104}};
+    world.CommitBossSpawns();
+    auto &spawned = world.actors->pending_enemy_spawns;
+    Check(bosses.size() == 2 && bosses[0].warning_sequence == 101 && bosses[1].warning_sequence == 103 &&
+              spawned.size() == 2 && spawned.life[0].boss == BossKind::TenMinute &&
+              spawned.life[1].boss == BossKind::FiveMinute && spawned.ids[0].value < spawned.ids[1].value,
+          "boss commit preserves due order, future order and barrier ownership");
+    world.tick = 11;
+    world.CommitBossSpawns();
+    Check(bosses.size() == 1 && bosses[0].warning_sequence == 101 && spawned.size() == 3 &&
+              spawned.life[2].boss == BossKind::Final, "compacted boss schedule retains its later deadline");
+    world.tick = 12;
+    world.CommitBossSpawns();
+    Check(bosses.empty() && spawned.size() == 4, "boss schedule drains without duplicate spawning");
+
+    auto &enemies = world.progression->pending_enemy_spawns_delayed;
+    enemies = {{EnemyKind::Melee, {}, 201, 23}, {EnemyKind::Ranged, {}, 202, 19},
+               {EnemyKind::Suicide, {}, 203, 22}, {EnemyKind::Melee, {}, 204, 20}};
+    world.tick = 20;
+    world.CommitDelayedEnemySpawns();
+    Check(enemies.size() == 2 && enemies[0].random_key == 201 && enemies[1].random_key == 203 &&
+              spawned.size() == 6 && spawned.cold[4].random_key == 202 && spawned.cold[5].random_key == 204 &&
+              spawned.ids[4].value < spawned.ids[5].value, "enemy commit preserves source order and random identities");
+    world.tick = 22;
+    world.CommitDelayedEnemySpawns();
+    Check(enemies.size() == 1 && enemies[0].random_key == 201 && spawned.size() == 7 &&
+              spawned.cold[6].random_key == 203, "compacted enemy schedule retains its later deadline");
+    world.tick = 23;
+    world.CommitDelayedEnemySpawns();
+    Check(enemies.empty() && spawned.size() == 8 && spawned.cold[7].random_key == 201,
+          "enemy schedule drains without duplicate spawning");
+    Check(simulation.Shutdown().Succeeded(), "scheduled spawn shutdown");
+}
+
 void TestActorColumnStorage()
 {
     using namespace hs::gameplay_detail;
@@ -946,6 +990,7 @@ int main()
     try
     {
         TestActorColumnStorage();
+        TestScheduledSpawnOrder();
         TestSmallFactsIgnoreNoOpMutation();
         TestSimulationIdentityExhaustion();
         TestHomingProjectileUsesRetainedSpeed();

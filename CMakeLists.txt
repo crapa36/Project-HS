@@ -2304,7 +2304,8 @@ if(HS_BUILD_TESTS)
 
 
             add_executable(hs_generation_reader_probe Tests/generation_reader_probe.cpp)
-            target_link_libraries(hs_generation_reader_probe PRIVATE hs_asset_manifest)
+            target_link_libraries(hs_generation_reader_probe PRIVATE
+                hs_asset_manifest hs_asset_pipeline nlohmann_json::nlohmann_json)
             hs_configure_target(hs_generation_reader_probe)
             add_test(NAME content.generation-lifetime
                 COMMAND "${Python3_EXECUTABLE}"

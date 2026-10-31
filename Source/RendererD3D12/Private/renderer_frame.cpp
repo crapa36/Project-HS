@@ -623,6 +623,15 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         {2.5f,.1f,2.5f}, 0);
         }
         for (auto &source : prepared_instances) PopulateRenderInstanceIdentity(source);
+        if (!typed_ribbons.sources.empty() && !snapshot.persistent_vfx.empty())
+        {
+            for (const auto &source : typed_ribbons.sources)
+                prepared_scene.ribbon_head_ids.insert(source.owner_id);
+            for (const auto &visual : snapshot.persistent_vfx)
+                if (visual.kind == PersistentVfxKind::ProjectileHead &&
+                    prepared_scene.ribbon_head_ids.contains(visual.stable_id))
+                    prepared_scene.ribbon_projectile_ids.insert(visual.projectile_owner_id);
+        }
         prepared_scene.ready = true;
     }
     if (impl_->config.environment_preview)
@@ -714,12 +723,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         return reject_ribbon_update(Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error));
     const auto ribbon_updates = impl_->ribbon_state.Updates();
     const auto ribbon_outputs = impl_->ribbon_state.Outputs();
-    std::unordered_set<std::uint64_t> ribbon_head_ids;
-    for (const auto &source : typed_ribbons.sources) ribbon_head_ids.insert(source.owner_id);
-    std::unordered_set<std::uint64_t> ribbon_projectile_ids;
-    for (const auto &visual : snapshot.persistent_vfx)
-        if (visual.kind == PersistentVfxKind::ProjectileHead && ribbon_head_ids.contains(visual.stable_id))
-            ribbon_projectile_ids.insert(visual.projectile_owner_id);
+    const auto &ribbon_projectile_ids = prepared_scene.ribbon_projectile_ids;
     cpu_timings.ribbon_state_us = capture_elapsed(ribbon_state_start);
     const auto ribbon_history_bytes = static_cast<UINT64>(impl_->ribbon_state.Capacity()) * kRibbonHistoryStride;
     const auto ribbon_args_bytes = RibbonArgumentBufferBytes(ribbon_buffer_widths[2],
@@ -3453,13 +3457,6 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         archer_palette_slots[index] = static_cast<std::uint32_t>(slot);
     }
     cpu_timings.palette_prepare_us = capture_elapsed(palette_prepare_start);
-    // Non-Archer entries intentionally carry the sentinel; only actual Archer
-    // instances must have a palette prepared for the cache pass.
-    for (std::size_t index = 0; index < render_instances.size(); ++index)
-        if (render_instances[index].mesh == RenderMesh::Archer &&
-            archer_palette_slots[index] == std::numeric_limits<std::uint32_t>::max())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Archer instance has no prepared palette.");
     constants->render_options = {
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
         impl_->config.outline ? 1.0f : 0.0f,
@@ -3564,77 +3561,122 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     const bool non_view_skin_consumer =
         active_features.software_gi_enabled || !typed_volumes.empty() ||
         !prepared_scene.monster_lod_consumers_valid || prepared_scene.vsm_skin_consumer;
+    using SkinCullVec = std::array<double, 3>;
+    const auto skin_cull_dot = [](SkinCullVec a, SkinCullVec b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    const auto skin_cull_cross = [](SkinCullVec a, SkinCullVec b) -> SkinCullVec {
+        return {a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    };
+    const auto prepare_skin_cull_views = [&] {
+        auto &package_views = prepared_scene.skin_cull_views;
+        package_views.clear();
+        prepared_scene.skin_cull_views_valid = true;
+        package_views.reserve(impl_->explicit_frame->views.size());
+        for (const auto &consumer : impl_->explicit_frame->views)
+        {
+            auto &basis = package_views.emplace_back();
+            basis.near_plane = consumer.near_plane;
+            basis.far_plane = consumer.far_plane;
+            if (consumer.render_active.width == 0 || consumer.render_active.height == 0 ||
+                !std::isfinite(consumer.near_plane) || !std::isfinite(consumer.far_plane) ||
+                consumer.near_plane <= 0 || consumer.far_plane <= consumer.near_plane)
+            {
+                basis.valid = false;
+                prepared_scene.skin_cull_views_valid = false;
+                continue;
+            }
+            basis.eye = {consumer.camera.position.x, consumer.camera.position.y,
+                consumer.camera.position.z};
+            basis.target = {consumer.camera.target.x, consumer.camera.target.y,
+                consumer.camera.target.z};
+            basis.scene_origin = {consumer.scene_origin.x, consumer.scene_origin.y,
+                consumer.scene_origin.z};
+            const SkinCullVec up{consumer.camera.up.x, consumer.camera.up.y,
+                consumer.camera.up.z};
+            basis.forward = {basis.target[0] - basis.eye[0], basis.target[1] - basis.eye[1],
+                basis.target[2] - basis.eye[2]};
+            const double forward_length = std::sqrt(skin_cull_dot(basis.forward, basis.forward));
+            if (!std::isfinite(forward_length) || forward_length <= 0)
+            {
+                basis.valid = false;
+                prepared_scene.skin_cull_views_valid = false;
+                continue;
+            }
+            for (auto &value : basis.forward) value /= forward_length;
+            basis.right = skin_cull_cross(up, basis.forward);
+            const double right_length = std::sqrt(skin_cull_dot(basis.right, basis.right));
+            if (!std::isfinite(right_length) || right_length <= 0)
+            {
+                basis.valid = false;
+                prepared_scene.skin_cull_views_valid = false;
+                continue;
+            }
+            for (auto &value : basis.right) value /= right_length;
+            basis.vertical = skin_cull_cross(basis.forward, basis.right);
+            basis.tangent_y = std::tan(double(consumer.camera.vertical_fov_degrees) *
+                std::numbers::pi / 360.0);
+            basis.tangent_x = basis.tangent_y * double(consumer.render_active.width) /
+                double(consumer.render_active.height);
+            basis.valid = std::isfinite(basis.tangent_x) && std::isfinite(basis.tangent_y) &&
+                basis.tangent_x > 0 && basis.tangent_y > 0;
+            basis.side_x = std::hypot(1.0, basis.tangent_x);
+            basis.side_y = std::hypot(1.0, basis.tangent_y);
+            prepared_scene.skin_cull_views_valid &= basis.valid;
+        }
+        SkinCullVec sun{light.direction.x, light.direction.y, light.direction.z};
+        const double sun_length = std::sqrt(skin_cull_dot(sun, sun));
+        prepared_scene.skin_cull_sun_valid = std::isfinite(sun_length) && sun_length > 0;
+        if (prepared_scene.skin_cull_sun_valid)
+        {
+            for (auto &value : sun) value /= sun_length;
+            const SkinCullVec sun_up = std::abs(sun[1]) > 0.99 ? SkinCullVec{0, 0, 1} : SkinCullVec{0, 1, 0};
+            auto &sun_right = prepared_scene.skin_cull_sun_right;
+            sun_right = skin_cull_cross(sun_up, sun);
+            const double sun_right_length = std::sqrt(skin_cull_dot(sun_right, sun_right));
+            prepared_scene.skin_cull_sun_valid = std::isfinite(sun_right_length) && sun_right_length > 0;
+            if (prepared_scene.skin_cull_sun_valid)
+            {
+                for (auto &value : sun_right) value /= sun_right_length;
+                prepared_scene.skin_cull_sun_vertical = skin_cull_cross(sun, sun_right);
+            }
+        }
+        prepared_scene.skin_cull_views_prepared = true;
+    };
     const auto intersects_package_view = [&](Float3 center, float vertical_offset, float radius) {
         if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
             !std::isfinite(radius) || impl_->explicit_frame->views.empty() ||
             !std::isfinite(shadow_distance) || shadow_distance <= 0) return true;
-        for (const auto &consumer : impl_->explicit_frame->views)
+        if (!prepared_scene.skin_cull_views_prepared) prepare_skin_cull_views();
+        if (!prepared_scene.skin_cull_views_valid) return true;
+        for (const auto &basis : prepared_scene.skin_cull_views)
         {
-            if (consumer.render_active.width == 0 || consumer.render_active.height == 0 ||
-                !std::isfinite(consumer.near_plane) || !std::isfinite(consumer.far_plane) ||
-                consumer.near_plane <= 0 || consumer.far_plane <= consumer.near_plane)
-                return true;
-            using Vec = std::array<double, 3>;
-            const auto dot = [](Vec a, Vec b) {
-                return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-            };
-            const auto cross = [](Vec a, Vec b) -> Vec {
-                return {a[1] * b[2] - a[2] * b[1],
-                    a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
-            };
-            const Vec eye{consumer.camera.position.x, consumer.camera.position.y,
-                consumer.camera.position.z};
-            const Vec target{consumer.camera.target.x, consumer.camera.target.y,
-                consumer.camera.target.z};
-            const Vec up{consumer.camera.up.x, consumer.camera.up.y, consumer.camera.up.z};
-            const Vec point{consumer.scene_origin.x + center.x,
-                consumer.scene_origin.y + center.y + vertical_offset,
-                consumer.scene_origin.z + center.z};
-            const Vec delta{point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
-            Vec forward{target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]};
-            const double forward_length = std::sqrt(dot(forward, forward));
-            if (!std::isfinite(forward_length) || forward_length <= 0) return true;
-            for (auto &value : forward) value /= forward_length;
-            Vec right = cross(up, forward);
-            const double right_length = std::sqrt(dot(right, right));
-            if (!std::isfinite(right_length) || right_length <= 0) return true;
-            for (auto &value : right) value /= right_length;
-            const Vec vertical = cross(forward, right);
-            const double depth = dot(delta, forward);
-            const double x = dot(delta, right), y = dot(delta, vertical);
+            const SkinCullVec point{basis.scene_origin[0] + center.x,
+                basis.scene_origin[1] + center.y + vertical_offset,
+                basis.scene_origin[2] + center.z};
+            const SkinCullVec delta{point[0] - basis.eye[0], point[1] - basis.eye[1], point[2] - basis.eye[2]};
+            const double depth = skin_cull_dot(delta, basis.forward);
+            const double x = skin_cull_dot(delta, basis.right), y = skin_cull_dot(delta, basis.vertical);
             const double safe_radius = double(radius) + 2.0 +
-                0.0001 * std::sqrt(dot(delta, delta));
-            const double tangent_y = std::tan(double(consumer.camera.vertical_fov_degrees) *
-                std::numbers::pi / 360.0);
-            const double tangent_x = tangent_y * double(consumer.render_active.width) /
-                double(consumer.render_active.height);
-            if (!std::isfinite(safe_radius) || !std::isfinite(tangent_x) ||
-                !std::isfinite(tangent_y) || tangent_x <= 0 || tangent_y <= 0) return true;
-            const bool camera_outside = depth + safe_radius < consumer.near_plane ||
-                depth - safe_radius > consumer.far_plane ||
-                std::abs(x) > depth * tangent_x + safe_radius * std::hypot(1.0, tangent_x) ||
-                std::abs(y) > depth * tangent_y + safe_radius * std::hypot(1.0, tangent_y);
+                0.0001 * std::sqrt(skin_cull_dot(delta, delta));
+            if (!std::isfinite(safe_radius)) return true;
+            const bool camera_outside = depth + safe_radius < basis.near_plane ||
+                depth - safe_radius > basis.far_plane ||
+                std::abs(x) > depth * basis.tangent_x + safe_radius * basis.side_x ||
+                std::abs(y) > depth * basis.tangent_y + safe_radius * basis.side_y;
             if (!camera_outside) return true;
             // Without virtual shadows this view still records three CSM cuts.
             // Their largest snapped square can admit offscreen casters; ignore
             // the light-space depth limit here to keep this test conservative.
-            Vec sun{light.direction.x, light.direction.y, light.direction.z};
-            const double sun_length = std::sqrt(dot(sun, sun));
-            if (!std::isfinite(sun_length) || sun_length <= 0) return true;
-            for (auto &value : sun) value /= sun_length;
-            const Vec sun_up = std::abs(sun[1]) > 0.99 ? Vec{0, 0, 1} : Vec{0, 1, 0};
-            Vec sun_right = cross(sun_up, sun);
-            const double sun_right_length = std::sqrt(dot(sun_right, sun_right));
-            if (!std::isfinite(sun_right_length) || sun_right_length <= 0) return true;
-            for (auto &value : sun_right) value /= sun_right_length;
-            const Vec sun_vertical = cross(sun, sun_right);
-            const Vec shadow_delta{point[0] - target[0], point[1] - target[1],
-                point[2] - target[2]};
+            if (!prepared_scene.skin_cull_sun_valid) return true;
+            const SkinCullVec shadow_delta{point[0] - basis.target[0], point[1] - basis.target[1],
+                point[2] - basis.target[2]};
             const double half_extent = double(shadow_distance) * 0.5 + safe_radius + 2.0 +
                 double(shadow_distance) / std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
             if (!std::isfinite(half_extent) || half_extent <= 0 ||
-                (std::abs(dot(shadow_delta, sun_right)) <= half_extent &&
-                 std::abs(dot(shadow_delta, sun_vertical)) <= half_extent))
+                (std::abs(skin_cull_dot(shadow_delta, prepared_scene.skin_cull_sun_right)) <= half_extent &&
+                 std::abs(skin_cull_dot(shadow_delta, prepared_scene.skin_cull_sun_vertical)) <= half_extent))
                 return true;
         }
         const std::array<double, 3> world_center{
@@ -3728,17 +3770,15 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     (!skin_pose || (skin_pose->secondary_weight == 0.0f &&
                         skin_pose->upper_body_weight == 0.0f)) &&
                     selected_lod < asset.geometry_lods.size() &&
-                    asset.geometry_lods[selected_lod].lod == selected_lod &&
                     (asset.geometry_lods[selected_lod].flags & render_data::kGeometryFlagSkinned) != 0 &&
                     asset.geometry_lods[selected_lod].vertex_count == skin_geometry->vertex_count &&
-                    asset.bone_count != 0 && clip < asset.clip_meta.size() &&
+                    clip < asset.clip_meta.size() &&
                     std::isfinite(skin.current_time) &&
                     std::isfinite(source.scale.x) && std::isfinite(source.scale.y) &&
                     std::isfinite(source.scale.z))
                 {
                     const auto meta = asset.clip_meta[clip];
-                    if (meta.y != 0 && meta.w == asset.bone_count &&
-                        meta.x % asset.bone_count == 0)
+                    if (meta.y != 0)
                     {
                         const auto frame_position = std::clamp(skin.current_time, 0.0f, 1.0f) *
                             static_cast<float>(meta.y - 1u);
@@ -3746,21 +3786,20 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         const auto *bound = asset.IntervalBound(selected_lod, skin.current_clip, frame_index);
                         if (bound)
                         {
-                            if (bound->lod == selected_lod && bound->clip == skin.current_clip && bound->frame == frame_index)
+                            std::array<double, 3> extent{};
+                            const std::array<double, 3> scale{source.scale.x, source.scale.y, source.scale.z};
+                            for (std::size_t axis = 0; axis < 3; ++axis)
                             {
-                                std::array<double, 3> extent{};
-                                const std::array<double, 3> scale{source.scale.x, source.scale.y, source.scale.z};
-                                for (std::size_t axis = 0; axis < 3; ++axis)
-                                    extent[axis] = std::max(std::abs(double(bound->minimum[axis])),
-                                        std::abs(double(bound->maximum[axis]))) *
-                                        std::abs(scale[axis]);
-                                const double radius = std::hypot(extent[0], extent[1], extent[2]) * 1.0011 + 0.001;
-                                if (std::isfinite(radius) && radius < FLT_MAX / 2)
-                                {
-                                    conservative_radius = std::max(conservative_radius,
-                                        std::nextafter(static_cast<float>(radius), FLT_MAX));
-                                    dynamic_cooked_skin_bounds[index] = 1;
-                                }
+                                extent[axis] = std::max(std::abs(double(bound->minimum[axis])),
+                                    std::abs(double(bound->maximum[axis]))) *
+                                    std::abs(scale[axis]);
+                            }
+                            const double radius = std::hypot(extent[0], extent[1], extent[2]) * 1.0011 + 0.001;
+                            if (std::isfinite(radius) && radius < FLT_MAX / 2)
+                            {
+                                conservative_radius = std::max(conservative_radius,
+                                    std::nextafter(static_cast<float>(radius), FLT_MAX));
+                                dynamic_cooked_skin_bounds[index] = 1;
                             }
                         }
                     }
@@ -4367,7 +4406,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 { camera_receiver_domain_closed=false;return Result::Success(); }
                 const auto clip=std::min((dynamic_pose_flags[dynamic_index]>>8u)&0xfu,4u);
                 const auto meta=asset.clip_meta[clip];
-                if(!meta.y||!asset.bone_count) { camera_receiver_domain_closed=false;return Result::Success(); }
+                if(!meta.y) { camera_receiver_domain_closed=false;return Result::Success(); }
                 if(!std::isfinite(dynamic_pose_times[dynamic_index]))
                     return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera skin receiver time is nonfinite.");
                 const float frame_position=std::clamp(dynamic_pose_times[dynamic_index],0.0f,1.0f)*float(meta.y-1u);
@@ -4376,10 +4415,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 const auto *found=asset.IntervalBound(selected_lod,
                     static_cast<CharacterAnimationClip>(clip),frame0);
                 if(!found) { camera_receiver_domain_closed=false;return Result::Success(); }
-                const auto &bounds=*found;
-                if(bounds.lod!=selected_lod||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
-                { camera_receiver_domain_closed=false;return Result::Success(); }
-                for(unsigned axis=0;axis<3;++axis) { lo[axis]=bounds.minimum[axis];hi[axis]=bounds.maximum[axis]; }
+                for(unsigned axis=0;axis<3;++axis) { lo[axis]=found->minimum[axis];hi[axis]=found->maximum[axis]; }
             }
             else
             {
@@ -5603,8 +5639,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     std::ranges::sort(geometry_page_slots);
     std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
     record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
-    std::vector<SceneGeometryRecord> software_scene_jobs;
-    std::vector<SceneDrawInstance> software_scene_draws;
+    std::vector<SceneGeometryRecord> software_scene_job_inputs;
+    std::vector<SceneDrawInstance> software_scene_draw_inputs;
     std::vector<const GeometryPageGpu *> software_scene_pages;
     struct SoftwareSceneSource
     {
@@ -5612,7 +5648,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
         const Impl::StaticGpuScene::SoftwareSceneBase *static_base{};
     };
     std::vector<SoftwareSceneSource> software_scene_sources;
-    SceneGeometryOutputs software_scene_preview;
+    SceneGeometryPreparedFrame software_scene_prepared;
     SceneGeometryRecordData scene_shape;
     std::vector<std::uint32_t> software_scene_page_slots;
     const auto prepare_software_scene = [&]() -> Result {
@@ -5681,8 +5717,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     return AddBrixelizerExcludedCount(count, page->submeshes.size());
                 }
             }
-            software_scene_jobs.push_back(job);
-            software_scene_draws.push_back(instance);
+            software_scene_job_inputs.push_back(job);
+            software_scene_draw_inputs.push_back(instance);
             software_scene_pages.push_back(page);
             software_scene_sources.push_back({&source, nullptr});
             return Result::Success();
@@ -5806,26 +5842,21 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                         return counted;
                     continue;
                 }
-                software_scene_jobs.push_back(job);
-                software_scene_draws.push_back(instance);
+                software_scene_job_inputs.push_back(job);
+                software_scene_draw_inputs.push_back(instance);
                 software_scene_pages.push_back(page);
                 software_scene_sources.push_back({&source, &base});
             }
         }
     }
-    if (!software_scene_jobs.empty())
+    if (!software_scene_job_inputs.empty())
     {
-        const SceneGeometryInputs preview_inputs{software_scene_jobs, software_scene_draws, {}, {},
-            frame_slot, impl_->graph_queue_executor.Completed()};
-        if (auto previewed = impl_->scene_geometry.PreviewPreparedOutputs(
-                preview_inputs, software_scene_preview); !previewed) return previewed;
-        if (software_scene_preview.geometries.size() != software_scene_jobs.size())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Software GI scene geometry preview did not cover every current job.");
+        if (auto prepared = impl_->scene_geometry.PrepareFrame(
+                std::move(software_scene_job_inputs), std::move(software_scene_draw_inputs),
+                frame_slot, impl_->graph_queue_executor.Completed(), software_scene_prepared);
+            !prepared) return prepared;
+        scene_shape = *software_scene_prepared.RecordData();
     }
-    const SceneGeometryInputs scene_shape_inputs{software_scene_jobs, software_scene_draws,
-        {}, {}, frame_slot, impl_->graph_queue_executor.Completed()};
-    scene_shape = impl_->scene_geometry.PrepareRecordData(scene_shape_inputs);
     std::array<bool, kGeometryPageCapacity> software_scene_page_seen{};
     software_scene_page_slots.reserve(software_scene_pages.size());
     for (const auto *page : software_scene_pages)
@@ -5924,6 +5955,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     if (!local_shadow_join_result) return local_shadow_join_result;
     if (software_scene_prepare_exception) std::rethrow_exception(software_scene_prepare_exception);
     if (!software_scene_prepare_result) return software_scene_prepare_result;
+    const auto software_scene_jobs = software_scene_prepared.Geometries();
+    const auto software_scene_draws = software_scene_prepared.Instances();
     record_graph_resource_detail(cpu_timings.graph_software_scene_prepare_us);
     bool direct_contract_failed{};
     const auto shape_of = [&](AllocationResource *resource) {
@@ -6320,14 +6353,15 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
     if (active_features.software_gi_enabled)
     {
         brixelizer_owners.push_back(impl_->resident_generation_lease);
-        if (software_scene_preview.owner)
-            brixelizer_owners.push_back(software_scene_preview.owner);
+        if (software_scene_prepared.Owner())
+            brixelizer_owners.push_back(software_scene_prepared.Owner());
     }
     if (active_features.software_gi_enabled && !software_scene_jobs.empty())
     {
+            auto *const prepared_positions = software_scene_prepared.PositionResource();
             for (std::size_t index = 0; index < software_scene_jobs.size(); ++index)
             {
-                const auto &job = software_scene_preview.geometries[index];
+                const auto &job = software_scene_jobs[index];
                 const auto &draw = software_scene_draws[index];
                 const auto &page = *software_scene_pages[index];
                 const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
@@ -6340,7 +6374,7 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                     frame.skin_cache_vertices.resource->GetDesc().Width))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
                 SoftwareSceneGeometry geometry{std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
-                    deformed ? software_scene_preview.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
+                    deformed ? prepared_positions : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
                     page.storage.resource.Get(), {},
                     ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
                         skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
@@ -9162,10 +9196,8 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
                 &impl_->monster_emissive, &impl_->monster_ram, &impl_->family_diffuse, &impl_->family_normal}) add_texture(*texture);
 
 
-        auto &jobs = software_scene_jobs;
-        auto &draws = software_scene_draws;
+        const auto &jobs = software_scene_jobs;
         auto &scene_pages = software_scene_pages;
-        auto &scene_sources = software_scene_sources;
         std::vector<ResourceVersion> scene_page_versions;
         scene_page_versions.reserve(scene_pages.size());
         std::unordered_map<std::uint32_t, ResourceVersion> scene_versions_by_slot;
@@ -9184,14 +9216,14 @@ Result D3D12Renderer::RenderView(const RenderSnapshotPair &snapshots,
             scene_page_versions.push_back(scene_versions_by_slot.at(page->page_slot));
         if (!jobs.empty())
         {
-            const SceneGeometryInputs scene_inputs{jobs, draws, scene_reads,
+            const SceneGeometryInputs scene_inputs{scene_reads,
                 make_scene_bindings(kSceneGeometryTableOffset), frame_slot,
                 impl_->graph_queue_executor.Completed()};
             const auto registered_scene_geometry = restored_graph
-                ? impl_->scene_geometry.BindRetained(impl_->graph, scene_inputs,
-                    pending_graph_layout.scene_geometry, scene_geometry_outputs)
-                : impl_->scene_geometry.Register(impl_->graph, scene_inputs,
-                    scene_geometry_outputs, &pending_graph_layout.scene_geometry);
+                ? impl_->scene_geometry.BindRetainedPrepared(impl_->graph, scene_inputs,
+                    software_scene_prepared, pending_graph_layout.scene_geometry, scene_geometry_outputs)
+                : impl_->scene_geometry.RegisterPrepared(impl_->graph, scene_inputs,
+                    software_scene_prepared, scene_geometry_outputs, &pending_graph_layout.scene_geometry);
             if (!registered_scene_geometry) return registered_scene_geometry;
             pending_effects.scene_geometry = true;
             for (std::size_t leaf = 0; leaf < brixelizer_leaf_jobs.size(); ++leaf)

@@ -22,6 +22,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -156,23 +157,52 @@ struct Arguments
     auto last_write = std::filesystem::last_write_time(heartbeat_path, previous_heartbeat_error);
     if (previous_heartbeat_error) last_write = {};
 
+    using Handle = std::unique_ptr<void, decltype(&CloseHandle)>;
+    Handle job(CreateJobObjectW(nullptr, nullptr), &CloseHandle);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
+                                         &limits, sizeof(limits)))
+    {
+        std::cerr << "Cannot own experiment child lifetime (Win32 " << GetLastError() << ").\n";
+        return 1;
+    }
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0,
+    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
                         nullptr, executable.parent_path().c_str(), &startup, &process))
     {
         std::cerr << "CreateProcessW failed with error " << GetLastError() << ".\n";
         return 1;
     }
-    CloseHandle(process.hThread);
+    Handle child(process.hProcess, &CloseHandle);
+    Handle child_thread(process.hThread, &CloseHandle);
+    // Assign before any child code runs; parent exit then also stops descendants.
+    if (!AssignProcessToJobObject(job.get(), child.get()) ||
+        ResumeThread(child_thread.get()) == static_cast<DWORD>(-1))
+    {
+        const auto error = GetLastError();
+        const bool requested = TerminateProcess(child.get(), 4) != FALSE;
+        const auto stopped = WaitForSingleObject(child.get(), 5'000);
+        std::cerr << "Cannot start owned experiment child (Win32 " << error
+                  << "); termination_requested=" << requested
+                  << "; exit_confirmed=" << (stopped == WAIT_OBJECT_0) << ".\n";
+        return 1;
+    }
+    child_thread.reset();
 
     const auto startup_started = std::chrono::steady_clock::now();
-    const auto close_process = [&] { CloseHandle(process.hProcess); };
     auto last_progress = startup_started;
     bool running_heartbeat_started{};
     for (;;)
     {
-        if (WaitForSingleObject(process.hProcess, 100) == WAIT_OBJECT_0) break;
+        const auto waited = WaitForSingleObject(child.get(), 100);
+        if (waited == WAIT_OBJECT_0) break;
+        if (waited != WAIT_TIMEOUT)
+        {
+            std::cerr << "Cannot wait for experiment child (Win32 " << GetLastError() << ").\n";
+            return 1;
+        }
         std::error_code error;
         const auto write = std::filesystem::last_write_time(heartbeat_path, error);
         if (!error && write != last_write)
@@ -199,24 +229,35 @@ struct Arguments
         {
             const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
                                               artifact_directory / "watchdog.dmp");
+            const bool requested = TerminateJobObject(job.get(), 4) != FALSE;
+            const auto termination_error = requested ? ERROR_SUCCESS : GetLastError();
+            const auto stopped = WaitForSingleObject(child.get(), 5'000);
             std::ofstream(artifact_directory / "watchdog.json", std::ios::trunc)
                 << nlohmann::json{{"timeout_seconds", timeout.count()},
                                   {"phase", running_heartbeat_started ? "running" : "startup"},
                                   {"process_id", process.dwProcessId},
-                                  {"dump_written", dumped}}
+                                  {"dump_written", dumped},
+                                  {"termination_requested", requested},
+                                  {"termination_error", termination_error},
+                                  {"exit_confirmed", stopped == WAIT_OBJECT_0},
+                                  {"wait_status", stopped}}
                        .dump(2)
                 << '\n';
-            TerminateProcess(process.hProcess, 4);
-            WaitForSingleObject(process.hProcess, 5'000);
-            close_process();
             std::cerr << (running_heartbeat_started
                 ? "Experiment child heartbeat timed out.\n"
                 : "Experiment child startup timed out.\n");
+            if (stopped != WAIT_OBJECT_0)
+                std::cerr << "Child exit is unconfirmed; closing its lifetime job, PID="
+                          << process.dwProcessId << ".\n";
             return 1;
         }
     }
     DWORD exit_code{};
-    GetExitCodeProcess(process.hProcess, &exit_code);
+    if (!GetExitCodeProcess(child.get(), &exit_code))
+    {
+        std::cerr << "Cannot read experiment child exit code (Win32 " << GetLastError() << ").\n";
+        return 1;
+    }
     if (exit_code != 0)
     {
         const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
@@ -224,7 +265,6 @@ struct Arguments
         std::cerr << "Experiment child exited with code 0x" << std::hex << exit_code
                   << std::dec << "; dump_written=" << std::boolalpha << dumped << ".\n";
     }
-    close_process();
     return static_cast<int>(exit_code);
 #else
     (void)executable;

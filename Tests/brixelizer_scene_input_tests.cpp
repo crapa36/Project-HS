@@ -33,6 +33,26 @@ void Validation(){
  bad([](auto& x,auto&){x.first_index=UINT32_MAX;});
  g.flags=SceneGeometryCachedSkin;Check(bool(ValidateSceneGeometryRecord(g,i)),"valid skin rejected");
 }
+void DeformationSections(){
+ std::array<SceneGeometryRecord,5> rows{{
+  {1,2,0,3,0,76,3,91,10,1,0,9,~0u,0},
+  {1,2,0,6,0,76,4,777,11,1,0,9,~0u,SceneGeometryDeformed},
+  {1,2,0,3,0,76,3,888,12,1,4,9,~0u,SceneGeometryCachedSkin},
+  {1,2,0,9,0,76,6,999,13,1,0,9,~0u,SceneGeometryDeformed},
+  {1,2,0,3,0,76,3,92,14,1,0,9,~0u,0}}};
+ std::array<SceneDrawInstance,5> draws{};
+ for(auto& draw:draws){draw.mesh=9;draw.scale={1,1,1,1};}
+ std::vector<std::uint32_t> deformation_rows;
+ std::uint64_t position_bytes{};
+ Check(bool(PrepareSceneGeometryRows(rows,draws,deformation_rows,position_bytes)),"mixed scene row preparation failed");
+ Check(deformation_rows==std::vector<std::uint32_t>{1,3},"deformation source rows lost logical order");
+ Check(position_bytes==120&&rows[1].position_byte_offset==0&&rows[3].position_byte_offset==48,
+  "deformed position offsets are not compact-prefix offsets");
+ Check(rows[0].position_byte_offset==91&&rows[2].position_byte_offset==888&&rows[4].position_byte_offset==92,
+  "non-deformed static/SkinCache rows were modified");
+ for(std::size_t i=0;i<rows.size();++i)
+  Check(rows[i].stable_gpu_scene_slot==10u+i,"logical row order or stable identity changed");
+}
 void DomainsAndCounts(){
  BrixelizerSceneInputs ingress{};
  Check(ingress.excluded_masked_count==0&&ingress.excluded_thin_count==0&&ingress.excluded_translucent_count==0,"compact ingress defaults");
@@ -88,5 +108,5 @@ void DomainsAndCounts(){
  Check(!AppendBrixelizerLeaf(geometry,instance,parts,zero_keys,bindings,layouts,0,false,false,{},{},3,zeroKeyLookup,zero_geometries,zero_instances),"zero submesh key accepted");
 }
 }
-int main()try{Validation();DomainsAndCounts();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
+int main()try{Validation();DeformationSections();DomainsAndCounts();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
 catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
