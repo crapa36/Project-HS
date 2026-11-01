@@ -11,6 +11,7 @@ extern "C" FfxErrorCode ffxGetPermutationBlobByIndexUnavailable(FfxEffect,FfxPas
 #define FFX_CPU
 #include <FidelityFX/gpu/ffx_core.h>
 #include <FidelityFX/host/ffx_brixelizer_raw.h>
+#include <FidelityFX/gpu/brixelizergi/ffx_brixelizergi_resources.h>
 #include <ffx_brixelizer_raw_private.h>
 #include "renderer_brixelizer_backend.hpp"
 #include "renderer_brixelizer_shaders.hpp"
@@ -22,6 +23,7 @@ extern "C" FfxErrorCode ffxGetPermutationBlobByIndexUnavailable(FfxEffect,FfxPas
 #include <cstring>
 #include <format>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 namespace hs::brixelizer_native
@@ -33,6 +35,7 @@ static_assert(std::is_trivially_copyable_v<FfxShaderBlob>);
 thread_local const ShaderReader *shader_reader{};
 thread_local std::vector<std::byte> selected_blob;
 thread_local BackendSlots *active_slots{};
+constexpr GUID kProbeInitializationSource{0x5d5ac581,0x0f25,0x43cf,{0x93,0xce,0x28,0x89,0x9c,0x87,0x63,0xa2}};
 Result Fail(std::string message)
 {return Result::Failure(ErrorCode::TaskFailed,"hs_brixelizer_backend",std::move(message));}
 Result NativeFailure(std::string_view operation,HRESULT result)
@@ -55,6 +58,59 @@ FfxErrorCode SelectedBlob(FfxEffect effect,FfxPass pass,FfxBindStage stage,std::
     std::memcpy(out,metadata,sizeof(*out));
     out->data=reinterpret_cast<const std::uint8_t *>(selected_blob.data());
     return FFX_OK;
+}
+FfxErrorCode CreateProbeResource(FfxInterface *backend_interface,const FfxCreateResourceDescription *description,
+    FfxUInt32 effect,FfxResourceInternal *out)
+{
+    if(!description)return FFX_ERROR_INVALID_POINTER;
+    if(description->heapType!=FFX_HEAP_TYPE_DEFAULT||
+        description->id!=FFX_BRIXELIZER_GI_RESOURCE_IDENTIFIER_STATIC_PROBE_INFO||!description->name||
+        std::wstring_view(description->name)!=L"BrixelizerGI_StaticProbeInfo")
+        return CreateResourceDX12(backend_interface,description,effect,out);
+    // GI1.0.1 reprojects this buffer before its first write; 0xffff seeds are invalid.
+    auto *backend=reinterpret_cast<BackendContext_DX12 *>(backend_interface->scratchBuffer);
+    if(backend->gpuJobCount>=FFX_MAX_GPU_JOBS)return FFX_ERROR_INSUFFICIENT_MEMORY;
+    auto destination=*description;
+    destination.initData={FFX_RESOURCE_INIT_DATA_TYPE_UNINITIALIZED,0,nullptr};
+    destination.initialState=FFX_RESOURCE_STATE_COPY_DEST;
+    if(auto error=CreateResourceDX12(backend_interface,&destination,effect,out);error!=FFX_OK)return error;
+    auto upload=*description;
+    upload.heapType=FFX_HEAP_TYPE_UPLOAD;upload.initialState=FFX_RESOURCE_STATE_GENERIC_READ;
+    upload.resourceDescription.usage=FFX_RESOURCE_USAGE_READ_ONLY;
+    // The pinned upload loop treats the stride/height union as rows: upload bytes once.
+    upload.resourceDescription.stride=1;
+    upload.initData=FfxResourceInitData::FfxResourceInitValue(description->resourceDescription.width,0xff);
+    FfxResourceInternal source{};
+    auto error=CreateResourceDX12(backend_interface,&upload,effect,&source);
+    if(error==FFX_OK)
+    {
+        auto *destination_resource=backend->pResources[out->internalIndex].resourcePtr;
+        if(SUCCEEDED(destination_resource->SetPrivateData(kProbeInitializationSource,sizeof(source),&source)))
+        {
+            FfxGpuJobDescription copy{FFX_GPU_JOB_COPY,L"Initialize Invalid GI Probe Info"};
+            copy.copyJobDescriptor.src=source;copy.copyJobDescriptor.dst=*out;
+            copy.copyJobDescriptor.srcOffset=copy.copyJobDescriptor.dstOffset=0;
+            copy.copyJobDescriptor.size=description->resourceDescription.size;
+            // Creation precedes BeginBatch; the destination owns this upload until drained destruction.
+            error=ScheduleGpuJobDX12(backend_interface,&copy);
+            if(error==FFX_OK)return FFX_OK;
+        }
+        else error=FFX_ERROR_BACKEND_API_ERROR;
+        (void)DestroyResourceDX12(backend_interface,source,effect);
+    }
+    (void)DestroyResourceDX12(backend_interface,*out,effect);*out={};return error;
+}
+FfxErrorCode DestroyProbeResource(FfxInterface *backend_interface,FfxResourceInternal resource,FfxUInt32 effect)
+{
+    auto *backend=reinterpret_cast<BackendContext_DX12 *>(backend_interface->scratchBuffer);
+    auto *native=backend->pResources[resource.internalIndex].resourcePtr;
+    FfxResourceInternal source{};UINT size=sizeof(source);
+    if(native&&SUCCEEDED(native->GetPrivateData(kProbeInitializationSource,&size,&source)))
+    {
+        if(auto error=DestroyResourceDX12(backend_interface,source,effect);error!=FFX_OK)return error;
+        (void)native->SetPrivateData(kProbeInitializationSource,0,nullptr);
+    }
+    return DestroyResourceDX12(backend_interface,resource,effect);
 }
 }
 struct BackendSlots
@@ -332,5 +388,6 @@ ShaderReadScope::ShaderReadScope(const ShaderReader &reader):previous_(shader_re
 ShaderReadScope::~ShaderReadScope() {shader_reader=previous_;}
 void RequireSelectedShaderProducts(FfxInterface &backend_interface) noexcept
 {backend_interface.fpGetPermutationBlobByIndex=SelectedBlob;backend_interface.fpExecuteGpuJobs=ExecuteOwned;
-    backend_interface.fpStageConstantBufferDataFunc=StageOwned;backend_interface.fpScheduleGpuJob=ScheduleOwned;}
+    backend_interface.fpStageConstantBufferDataFunc=StageOwned;backend_interface.fpScheduleGpuJob=ScheduleOwned;
+    backend_interface.fpCreateResource=CreateProbeResource;backend_interface.fpDestroyResource=DestroyProbeResource;}
 }

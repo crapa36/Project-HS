@@ -569,18 +569,18 @@ void TestProductionVfxDecoding()
     Check(hs::runtime_detail::DispatchVfxUpgradeEvents(program,std::span(&mini,1),dispatched).Succeeded(),
           "actual cooked mini-bomb stage dispatch");
     hs::runtime_detail::VfxTypedFrameInputs typed_mini;
-    hs::runtime_detail::BuildVfxTypedFrameInputs(catalog.Image(),dispatched,{}, {},130,typed_mini);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(catalog.Image(),dispatched,{}, {},130,typed_mini);
     Check(typed_mini.events.size()==1 && typed_mini.unsupported_effect_ids.empty(),"mini-bomb Circle owner ingress");
     hs::PersistentVfxVisual mini_owner; mini_owner.kind=hs::PersistentVfxKind::MiniBombWarning;
     mini_owner.stable_id=901; mini_owner.active_tick=100; mini_owner.expires=160; mini_owner.radius=1.6f;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(typed_mini.events,std::span(&mini_owner,1),130);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(typed_mini.events,std::span(&mini_owner,1),130);
     Check(typed_mini.events.size()==1,"mini-bomb warning survives owner refresh");
     const auto mini_ground=hs::runtime_detail::BuildVfxTypedEventGroundCommands(vfx_image,typed_mini.events,130);
     Check(mini_ground.size()==2 && mini_ground[0].stable_id==901 &&
           mini_ground[0].geometry.shape==hs::VfxGroundShape::CirclePreviewBorder &&
           mini_ground[0].geometry.outer_radius==1.6f && mini_ground[1].geometry.tick_count==12,
           "actual cooked mini-bomb boundary and ticks follow gameplay radius");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(typed_mini.events,{},131);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(typed_mini.events,{},131);
     Check(typed_mini.events.empty(),"cancelled mini-bomb warning disappears with owner");
     struct UpgradeFixture { std::uint8_t skill; std::uint8_t index; std::uint8_t stage; const char *effect; bool circle; };
     for (const auto fixture : std::array{
@@ -713,7 +713,7 @@ void TestVfxCatalog()
             {0.0f, 0.0f, 1.0f}, 1.0f, {7.0f, 1.0f, 5.0f},
             static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget)});
         hs::runtime_detail::VfxTypedFrameInputs typed;
-        hs::runtime_detail::BuildVfxTypedFrameInputs(
+        hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(
             catalog.Image(), std::span(&pickup, 1), {}, {}, pickup.tick, typed);
         std::vector<hs::Sequence> superseded;
         const auto flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
@@ -737,7 +737,7 @@ void TestVfxCatalog()
         unadapted_pickup.sequence++;
         unadapted_pickup.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, 0});
         hs::runtime_detail::VfxTypedFrameInputs rejected_typed;
-        hs::runtime_detail::BuildVfxTypedFrameInputs(
+        hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(
             catalog.Image(), std::span(&unadapted_pickup, 1), {}, {}, unadapted_pickup.tick, rejected_typed);
         std::vector<hs::Sequence> no_replacements;
         const auto rejected_flashes = hs::runtime_detail::BuildVfxTypedFlashCommands(
@@ -879,7 +879,7 @@ void TestVfxCatalog()
         else if (raw.asset.value == hs::MakeAssetId("particle.skill.charged_shot.pulse").value)
             raw.geometry.source_id = 1ull << 60;
         hs::runtime_detail::VfxTypedFrameInputs typed;
-        hs::runtime_detail::BuildVfxTypedFrameInputs(catalog.Image(), std::span(&raw, 1), {}, {}, raw.tick, typed);
+        hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(catalog.Image(), std::span(&raw, 1), {}, {}, raw.tick, typed);
         Check(typed.events.size() == 1,
             (std::string("authored Ground event decodes to one typed input: ") + effect_name).c_str());
         const auto &input = typed.events.front();
@@ -933,7 +933,7 @@ void TestVfxCatalog()
     wave_timer.active_tick = 100;
     wave_timer.source_horizon_tick = 130;
     hs::runtime_detail::VfxTypedFrameInputs timer_inputs;
-    hs::runtime_detail::BuildVfxTypedFrameInputs(
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(
         catalog.Image(), {}, std::span(&wave_timer, 1), {}, 100, timer_inputs);
     Check(timer_inputs.events.empty() && timer_inputs.persistent.size() == 1,
         "wave warning keeps its actual snapshot-owned timer route");

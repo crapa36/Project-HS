@@ -216,11 +216,16 @@ void HsLightListEvaluateComponentsOptical(HsSurfaceClosure closure, float3 world
     out float3 diffuse, out float3 specular)
 {
     diffuse = 0.0; specular = 0.0;
-    const float3 view = normalize(camera_world - world);
-    closure = HsBsdfOrientThinSurface(closure, view);
     HsLightQuery query = HsBeginLightQuery(world, type_mask, world_query);
     uint index;
-    [loop] while (HsNextLight(query, index))
+    if (!HsNextLight(query, index)) return;
+    const float3 view = normalize(camera_world - world);
+    closure = HsBsdfOrientThinSurface(closure, view);
+    const float3 bsdf_view = normalize(view);
+    const bool flip_bsdf_normal = HsBsdfThinTransmissionWeight(closure) > 0.0 &&
+        dot(closure.normal, bsdf_view) < 0.0;
+    const float3 bsdf_normal = normalize(flip_bsdf_normal ? -closure.normal : closure.normal);
+    [loop] do
     {
         if(HsLightRecords[index].identity.w>=3u)
         {
@@ -232,13 +237,14 @@ void HsLightListEvaluateComponentsOptical(HsSurfaceClosure closure, float3 world
         float3 light, radiance;
         if (!HsLightIncident(index, world, light, radiance)) continue;
         float3 light_diffuse, light_specular;
-        HsBsdfEvaluateComponentsOptical(closure, view, light, base_fresnel_override, light_diffuse, light_specular);
+        HsBsdfEvaluateComponentsOpticalPrepared(closure, bsdf_view, bsdf_normal, flip_bsdf_normal,
+            light, base_fresnel_override, light_diffuse, light_specular);
         const float visibility = (HsLightRecords[index].metadata.w & 2u) != 0u ? primary_directional_visibility :
             HsLightShadowVisibility(HsLightRecords[index],world,closure.normal,world_query);
         const float3 incident = abs(dot(closure.normal, light)) * radiance * visibility;
         diffuse += light_diffuse * incident;
         specular += light_specular * incident;
-    }
+    } while (HsNextLight(query, index));
 }
 void HsLightListEvaluateComponents(HsSurfaceClosure closure, float3 world, float3 camera_world,
     float primary_directional_visibility, uint type_mask, bool world_query,

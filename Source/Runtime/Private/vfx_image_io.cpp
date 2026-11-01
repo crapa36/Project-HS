@@ -2896,9 +2896,9 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
         }
         if(!first||!second)return false;
         if(kind==VfxFresnelShellKind::BossCrown)
-            return row.sector_count>0&&row.sector_count<=64&&std::isfinite(row.rotation_hz);
+            return row.sector_count==6&&std::isfinite(row.rotation_hz)&&row.rotation_hz<0;
         if(kind==VfxFresnelShellKind::BossTransition)
-            return std::isfinite(row.fresnel_power)&&row.fresnel_power>0&&row.end_crack<=1;
+            return std::isfinite(row.fresnel_power)&&row.fresnel_power>0&&row.end_crack==1;
         return std::isfinite(row.fresnel_power)&&row.fresnel_power>0&&
             std::isfinite(row.noise_amount)&&row.noise_amount>=0&&row.noise_amount<=1;
     };
@@ -2949,6 +2949,7 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
                     !std::isfinite(output.motion_inset_fraction)||output.motion_inset_fraction<0||
                     output.motion_inset_fraction>1||
                     std::any_of(output.rgba.begin(),output.rgba.end(),[](float v){return !std::isfinite(v);})||
+                    output.rgba[0]<0||output.rgba[1]<0||output.rgba[2]<0||
                     output.rgba[3]<0||output.rgba[3]>1)continue;
                 VfxFresnelRecipe row{};row.effect_handle=effect.handle;row.source_index=si;
                 row.source_stable_id=source.stable_id;row.output_index=oi;row.min_quality=output.min_quality;

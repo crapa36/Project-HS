@@ -4,7 +4,7 @@
 #include <limits>
 #include <queue>
 #include <unordered_map>
-#include <unordered_set>
+#include <utility>
 
 namespace hs::render_graph
 {
@@ -63,7 +63,7 @@ bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &
     return true;
 }
 
-bool Overlaps(const Intervals &a, const Intervals &b)
+bool Overlaps(std::span<const Interval> a, std::span<const Interval> b)
 {
     std::size_t left{}, right{};
     while (left < a.size() && right < b.size())
@@ -75,7 +75,7 @@ bool Overlaps(const Intervals &a, const Intervals &b)
     return false;
 }
 
-void Include(Intervals &initialized, const Intervals &ranges)
+void Include(Intervals &initialized, std::span<const Interval> ranges)
 {
     initialized.insert(initialized.end(), ranges.begin(), ranges.end());
     std::sort(initialized.begin(), initialized.end(), [](auto a, auto b) { return a.begin < b.begin; });
@@ -89,7 +89,7 @@ void Include(Intervals &initialized, const Intervals &ranges)
     initialized.resize(count);
 }
 
-bool Covered(const Intervals &initialized, const Intervals &ranges)
+bool Covered(std::span<const Interval> initialized, std::span<const Interval> ranges)
 {
     return std::all_of(ranges.begin(), ranges.end(), [&](const auto range) {
         return std::any_of(initialized.begin(), initialized.end(), [&](const auto known) {
@@ -109,20 +109,25 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
     };
     if (passes.size() >= UINT32_MAX) return fail("RenderGraph has too many passes.");
     const auto pass_count = static_cast<std::uint32_t>(passes.size());
+    struct RangeSlice
+    {
+        std::size_t first{}, count{};
+    };
     struct UseInfo
     {
         std::uint32_t pass{};
-        Intervals ranges;
+        RangeSlice ranges;
+        std::size_t next{SIZE_MAX};
     };
     struct VersionInfo
     {
         std::int64_t producer{-1};
-        Intervals written;
-        std::vector<UseInfo> readers;
+        RangeSlice written;
+        std::size_t first_reader{SIZE_MAX},last_reader{SIZE_MAX};
     };
     std::vector<std::vector<VersionInfo>> versions(resources.size());
-    std::unordered_set<std::uintptr_t> imported_identities;
-    imported_identities.reserve(resources.size());
+    Intervals interval_arena;
+    std::vector<UseInfo> reader_records;
     for (std::size_t i = 0; i < resources.size(); ++i)
     {
         const auto &r = resources[i];
@@ -132,17 +137,28 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             (!r.mip_count || !r.array_count || !r.plane_count ||
              std::uint64_t(r.mip_count) * r.array_count > UINT32_MAX / r.plane_count))
             return fail("RenderGraph resource range extent is invalid.");
-        if (r.imported_identity && !imported_identities.insert(r.imported_identity).second)
-            return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
     }
-    std::vector<bool> has_writes(resources.size());
+    struct ResourceState
+    {
+        bool has_writes{};
+        std::uint32_t seen_pass{UINT32_MAX};
+        std::size_t first_use{};
+    };
+    std::vector<ResourceState> resource_states(resources.size());
+    auto *const state_data = resource_states.data();
+    const auto *const resource_data = resources.data();
+    const auto resource_count = resources.size();
     for (const auto &pass : passes)
-        for (const auto &use : pass.uses)
-            if (use.writes && use.predecessor.resource && use.predecessor.resource.value <= resources.size())
-                has_writes[use.predecessor.resource.value - 1] = true;
-    Intervals ranges;
-    std::vector<std::uint32_t> seen_pass(resources.size(), UINT32_MAX);
-    std::vector<std::size_t> first_use(resources.size());
+    {
+        const auto *const uses = pass.uses.data();
+        const auto use_count = pass.uses.size();
+        for (std::size_t i = 0; i < use_count; ++i)
+        {
+            const auto &use = uses[i];
+            if (use.writes && use.predecessor.resource && use.predecessor.resource.value <= resource_count)
+                state_data[use.predecessor.resource.value - 1].has_writes = true;
+        }
+    }
     std::unordered_map<std::uint32_t, std::uint32_t> pass_indices;
     pass_indices.reserve(pass_count);
     for (std::uint32_t index = 0; index < pass_count; ++index)
@@ -154,12 +170,18 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             return fail("RenderGraph pass requires an execute callback.");
         if (!pass_indices.emplace(pass.id, index).second)
             return fail("RenderGraph pass IDs must be unique.");
-        for (std::size_t i = 0; i < pass.uses.size(); ++i)
+        const auto *const uses = pass.uses.data();
+        const auto use_count = pass.uses.size();
+        for (std::size_t i = 0; i < use_count; ++i)
         {
-            const auto &use = pass.uses[i];
+            const auto &use = uses[i];
             const auto handle = use.predecessor.resource;
-            if (!handle || handle.value > resources.size() || resources[handle.value - 1].kind != handle.kind ||
-                use.predecessor.ordinal > pass_count ||
+            if (!handle || handle.value > resource_count)
+                return fail("RenderGraph names an invalid or nonexistent resource version.");
+            const auto resource_index = handle.value - 1;
+            const auto &resource = resource_data[resource_index];
+            auto &state = state_data[resource_index];
+            if (resource.kind != handle.kind || use.predecessor.ordinal > pass_count ||
                 use.successor.resource.value != handle.value || use.successor.resource.kind != handle.kind ||
                 use.successor.ordinal > pass_count ||
                 std::uint64_t(use.successor.ordinal) != std::uint64_t(use.predecessor.ordinal) + (use.writes ? 1u : 0u))
@@ -180,31 +202,41 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 return fail("RenderGraph geometry input requires a buffer.");
             // One callback has one access/state for each physical resource. A
             // disjoint range does not authorize simultaneous physical writers.
-            const auto resource_index = handle.value - 1;
-            if (seen_pass[resource_index] == index)
+            if (state.seen_pass == index)
                 return fail("RenderGraph pass " + std::to_string(pass.id) + " declares resource " +
-                    std::to_string(handle.value) + " (" + std::string(resources[resource_index].name) +
-                    ") twice; accesses " + std::to_string(static_cast<unsigned>(pass.uses[first_use[resource_index]].access)) +
+                    std::to_string(handle.value) + " (" + std::string(resource.name) +
+                    ") twice; accesses " + std::to_string(static_cast<unsigned>(uses[state.first_use].access)) +
                     " and " + std::to_string(static_cast<unsigned>(use.access)) + ".");
-            seen_pass[resource_index] = index;
-            first_use[resource_index] = i;
-            const bool immutable = resources[resource_index].initialized && !has_writes[resource_index] &&
+            state.seen_pass = index;
+            state.first_use = i;
+            const bool immutable = resource.initialized && !state.has_writes &&
                 use.predecessor.ordinal == 0;
-            ranges.clear();
-            if (!Normalize(resources[resource_index], use, ranges, !immutable))
+            // Positive resource extents already prove an unchanged whole-resource read is in bounds.
+            if (immutable && std::holds_alternative<std::monostate>(use.range)) continue;
+            const auto range_begin = interval_arena.size();
+            if (!Normalize(resource, use, interval_arena, !immutable))
                 return fail("RenderGraph resource range is empty, out of bounds, or the wrong kind.");
             // Initialized resources with no writers have no version hazards; range/access validation still applies.
             if (immutable) continue;
-            auto &chain = versions[handle.value - 1];
+            const RangeSlice ranges{range_begin, interval_arena.size() - range_begin};
+            auto &chain = versions[resource_index];
             if (chain.size() <= use.successor.ordinal)
                 chain.resize(std::size_t(use.successor.ordinal) + 1);
-            if (use.reads) chain[use.predecessor.ordinal].readers.push_back({index, ranges});
+            if (use.reads)
+            {
+                auto &version = chain[use.predecessor.ordinal];
+                const auto reader_index = reader_records.size();
+                reader_records.push_back({index, ranges});
+                if (version.last_reader == SIZE_MAX) version.first_reader = reader_index;
+                else reader_records[version.last_reader].next = reader_index;
+                version.last_reader = reader_index;
+            }
             if (use.writes)
             {
                 auto &version = chain[use.successor.ordinal];
                 if (version.producer >= 0) return fail("RenderGraph branches or duplicates a resource version write.");
                 version.producer = index;
-                version.written = std::move(ranges);
+                version.written = ranges;
             }
         }
     }
@@ -222,6 +254,9 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 return fail("RenderGraph ordering dependency names an absent or identical pass.");
             edge(producer->second, consumer);
         }
+    const auto interval_slice = [&](RangeSlice slice) {
+        return std::span<const Interval>{interval_arena}.subspan(slice.first, slice.count);
+    };
     for (std::size_t resource_index = 0; resource_index < resources.size(); ++resource_index)
     {
         const auto &r = resources[resource_index];
@@ -239,28 +274,31 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 if (ordinal > 1 && chain[ordinal - 1].producer < 0)
                     return fail("RenderGraph writes from a nonexistent predecessor version.");
                 latest = ordinal;
-                if (!r.initialized) Include(initialized, version.written);
+                if (!r.initialized) Include(initialized, interval_slice(version.written));
                 // Physical resource writes remain ordered even when their
                 // logical ranges do not overlap (both barrier backends).
                 edge(chain[ordinal - 1].producer, version.producer);
             }
-            else if (ordinal && !version.readers.empty())
+            else if (ordinal && version.first_reader != SIZE_MAX)
                 return fail("RenderGraph reads a nonexistent resource version.");
-            for (const auto &reader : version.readers)
+            for (auto reader_index = version.first_reader; reader_index != SIZE_MAX;
+                 reader_index = reader_records[reader_index].next)
             {
-                if (!r.initialized && !Covered(initialized, reader.ranges))
+                const auto &reader = reader_records[reader_index];
+                const auto reader_ranges = interval_slice(reader.ranges);
+                if (!r.initialized && !Covered(initialized, reader_ranges))
                     return fail("RenderGraph reads an undefined resource range.");
                 // Physical writes already form a chain; the nearest overlapping
                 // predecessor/successor orders every more distant writer too.
                 for (std::uint32_t writer = ordinal; writer > 0; --writer)
                 {
-                    if (chain[writer].producer < 0 || !Overlaps(reader.ranges, chain[writer].written)) continue;
+                    if (chain[writer].producer < 0 || !Overlaps(reader_ranges, interval_slice(chain[writer].written))) continue;
                     edge(chain[writer].producer, reader.pass);
                     break;
                 }
                 for (std::uint32_t writer = ordinal + 1; writer < chain.size(); ++writer)
                 {
-                    if (chain[writer].producer < 0 || !Overlaps(reader.ranges, chain[writer].written)) continue;
+                    if (chain[writer].producer < 0 || !Overlaps(reader_ranges, interval_slice(chain[writer].written))) continue;
                     edge(reader.pass, chain[writer].producer);
                     break;
                 }
@@ -330,8 +368,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         for (const auto next : successors[ready])
             if (!--indegree[next]) ready_passes.push(next);
     }
-    schedule.execution_order = order;
-    for (const auto pass : order)
+    schedule.execution_order = std::move(order);
+    for (const auto pass : schedule.execution_order)
         schedule.queue_orders[static_cast<std::size_t>(passes[pass].queue)].push_back(pass);
     std::vector<std::uint32_t> queue_positions(pass_count);
     for (const auto &queue_order : schedule.queue_orders)
@@ -360,8 +398,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
     }
     std::vector<std::uint32_t> execution_positions(pass_count);
     for (std::uint32_t position = 0; position < pass_count; ++position)
-        execution_positions[order[position]] = position;
-    for (const auto before : order)
+        execution_positions[schedule.execution_order[position]] = position;
+    for (const auto before : schedule.execution_order)
         for (const auto after : successors[before])
             if (passes[before].queue != passes[after].queue)
             {
@@ -444,7 +482,10 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
         {
             if (!use.predecessor.resource || use.predecessor.resource.value > resources.size())
                 return fail("RenderGraph alias planner received an invalid resource use.");
-            auto &resource_users = users[use.predecessor.resource.value - 1];
+            const auto resource = use.predecessor.resource.value - 1;
+            // Imported/initialized resources never enter transient alias groups.
+            if (resources[resource].initialized) continue;
+            auto &resource_users = users[resource];
             if (resource_users.empty() || resource_users.back() != pass)
                 resource_users.push_back(pass);
         }

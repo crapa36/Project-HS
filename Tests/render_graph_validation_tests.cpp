@@ -242,12 +242,6 @@ void VersionAndIdentityValidation()
     g.passes[0].uses.resize(1);
     g.passes[0].uses[0].predecessor.resource.kind = ResourceKind::Texture;
     Check(!g.Compile(), "wrong handle kind rejected");
-    Graph aliases; aliases.resources[0].initialized = true;
-    aliases.resources[0].imported_identity = 0x1234;
-    aliases.resources.push_back(aliases.resources[0]);
-    Check(!aliases.Compile(), "duplicate imports of same physical identity rejected");
-    aliases.resources[1].imported_identity = 0x5678;
-    Check(aliases.Compile(), "distinct physical imports accepted");
     Graph imported; imported.resources[0].initialized = true;
     imported.Add(2, {Read(0, BufferRange{0, 16})});
     imported.Add(0, {Write(0, BufferRange{32, 16})});
@@ -261,8 +255,6 @@ void LargeImportAndPassUseValidation()
     Graph graph;
     graph.resources.assign(count, {ResourceKind::Buffer, true, 64});
     graph.resources[0].name = "first imported buffer";
-    for (std::uint32_t index = 2; index < count; ++index)
-        graph.resources[index].imported_identity = std::uintptr_t{0x10000} + std::uintptr_t{index} * 4096;
     graph.Add(100, {});
     graph.Add(200, {});
     for (std::uint32_t index = 0; index < count; ++index)
@@ -275,17 +267,11 @@ void LargeImportAndPassUseValidation()
         for (const auto &pass : graph.passes) passes.push_back({pass.id, pass.queue, pass.callback, pass.uses});
         return hs::render_graph::Compile(graph.resources, passes, graph.schedule);
     };
-    Check(compile().Succeeded(), "large unique imports and read sets compile; zero identities remain unspecified");
-    graph.resources.back().imported_identity = graph.resources[512].imported_identity;
-    auto result = compile();
-    Check(!result && result.Message() == "RenderGraph imports one physical resource more than once; reuse its handle." &&
-              graph.schedule.execution_order.empty(), "distant duplicate import preserves the diagnostic and clears the schedule");
-    graph.resources.back().imported_identity += 1;
-    Check(compile().Succeeded(), "changed frame import identities are revalidated after a prior failure");
+    Check(compile().Succeeded(), "large initialized resource read sets compile");
     auto duplicate = Read(0, BufferRange{64, 1});
     duplicate.access = Access::CopySource;
     graph.passes[1].uses.push_back(duplicate);
-    result = compile();
+    auto result = compile();
     Check(!result && result.Message() == "RenderGraph pass 200 declares resource 1 (first imported buffer) twice; accesses " +
               std::to_string(static_cast<unsigned>(Access::ComputeRead)) + " and " +
               std::to_string(static_cast<unsigned>(Access::CopySource)) + ".",
@@ -409,6 +395,15 @@ void TextureBounds()
     arrays.passes[0].uses[0] = Write(0, {}, false, texture);
     arrays.passes[1].uses[0] = Read(1, {}, texture);
     Check(arrays.Compile(), "whole texture coalesces all contiguous mips arrays and planes");
+    Graph interval_chain; interval_chain.resources[0] = {ResourceKind::Texture, true, 0, 4, 3, 2};
+    const TextureSubresourceRange first_slice{0, 1, 0, 2, 0, 1};
+    const TextureSubresourceRange disjoint_slice{3, 1, 2, 1, 1, 1};
+    interval_chain.Add(20, {Read(0, first_slice, texture)});
+    interval_chain.Add(0, {Write(0, first_slice, true, texture)});
+    interval_chain.Add(10, {Read(1, first_slice, texture)});
+    interval_chain.Add(5, {Read(0, disjoint_slice, texture)});
+    Check(interval_chain.Compile() && interval_chain.Order({5, 20, 0, 10}),
+          "partial texture reads stay independent while old/read-write/new versions remain ordered");
 }
 
 void RandomizedVersionReplay()
@@ -663,8 +658,13 @@ void TransientAliasPlanner()
         return ResourceUse{{handle, 0}, {handle, 1}, Access::UnorderedWrite, true, false, {}};
     };
     {
-        std::vector<ResourceInfo> resources{make_resource(128), make_resource(64)};
+        auto initialized_import = make_resource(32);
+        initialized_import.initialized = true;
+        std::vector<ResourceInfo> resources{make_resource(128), make_resource(64), initialized_import};
         std::vector<ResourceUse> first_uses{write(1)}, second_uses{write(2)};
+        const ResourceHandle imported_handle{3, ResourceKind::Buffer};
+        first_uses.push_back({{imported_handle, 0}, {imported_handle, 0},
+                              Access::ComputeRead, false, true, {}});
         std::vector<PassInfo> passes{{0, QueueHint::Direct, true, first_uses},
                                      {1, QueueHint::Direct, true, second_uses}};
         CompiledSchedule schedule;
@@ -673,8 +673,15 @@ void TransientAliasPlanner()
         Check(PlanTransientAliases(resources, passes, schedule, plan).Succeeded(),
               "serial alias graph plans");
         Check(plan.groups.size() == 1 && plan.alias_activation_count == 1 &&
-                  plan.transient_backing_bytes < plan.transient_bytes_without_aliasing,
-              "serial resources share one best-fit backing block");
+                  plan.transient_backing_bytes < plan.transient_bytes_without_aliasing &&
+                  plan.resource_groups.size() == 3 &&
+                  plan.resource_groups[2] == AliasPlan::kExcluded &&
+                  plan.transient_bytes_without_aliasing == (128 + 64) * 1024,
+              "serial transients alias while initialized imported reads stay outside transient groups and byte totals");
+        first_uses[1].predecessor.resource = {};
+        AliasPlan invalid_plan;
+        Check(!PlanTransientAliases(resources, passes, schedule, invalid_plan).Succeeded(),
+              "alias planner validates a use handle before skipping an initialized import");
     }
     {
         std::vector<ResourceInfo> resources{make_resource(128), make_resource(64)};

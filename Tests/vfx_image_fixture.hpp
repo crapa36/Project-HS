@@ -32,7 +32,19 @@ inline runtime_detail::VfxTypedFrameInputs BuildFrameInputs(
     const VfxImage &image, std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous, Tick current_tick,
-    const runtime_detail::PreparedPairFacts *pair_facts = nullptr,
+    float interpolation = 1.0f)
+{
+    runtime_detail::VfxTypedFrameInputs result;
+    runtime_detail::BuildVfxTypedFrameInputsFromRaw(
+        image, events, current, previous, current_tick, result, interpolation);
+    return result;
+}
+
+inline runtime_detail::VfxTypedFrameInputs BuildFrameInputs(
+    const VfxImage &image, std::span<const PresentationEvent> events,
+    std::span<const PersistentVfxVisual> current,
+    std::span<const PersistentVfxVisual> previous, Tick current_tick,
+    const runtime_detail::PreparedPairFacts &pair_facts,
     float interpolation = 1.0f)
 {
     runtime_detail::VfxTypedFrameInputs result;

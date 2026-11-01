@@ -49,8 +49,12 @@ class VfxCatalog
     VfxCatalog &operator=(const VfxCatalog &) = delete;
     // External immutable backing must outlive the catalog and its users.
     // Never bind a shallow copy of this catalog's owned image; direct self-bind is a no-op.
-    void Bind(const VfxImage &image) noexcept;
+    [[nodiscard]] Result Bind(const VfxImage &image);
     [[nodiscard]] const VfxImage &Image() const noexcept { return image_; }
+    [[nodiscard]] const PreparedVfxFresnelRecipeView &FresnelRecipeView() const noexcept
+    { return fresnel_recipe_view_; }
+    [[nodiscard]] const PreparedVfxMeshRecipeView &MeshRecipeView() const noexcept
+    { return mesh_recipe_view_; }
     [[nodiscard]] static Result Load(const std::filesystem::path &path,
                                      VfxCatalog &catalog);
     [[nodiscard]] static Result Load(const std::filesystem::path &path,
@@ -82,6 +86,8 @@ class VfxCatalog
 
   private:
     VfxImage image_{};
+    PreparedVfxFresnelRecipeView fresnel_recipe_view_{};
+    PreparedVfxMeshRecipeView mesh_recipe_view_{};
     std::unique_ptr<VfxImageData> owned_;
 };
 

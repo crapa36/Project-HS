@@ -795,16 +795,19 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     graph.AddPass(3, "Direct timestamp suffix", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
     graph.AddPass(4, copy_timestamp_queries_supported ? "Measured copy" : "Unmeasured copy",
                   hs::QueueHint::Copy).SetExecute([](hs::RenderPassContext &) {});
+    graph.AddPass(5, "Direct timestamp tail", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
     Check(graph.Prepare(pool).Succeeded(), "timestamp isolation prepare");
 
     constexpr std::size_t queue_count = 3;
-    const auto query_count = graph.PassCount() * 2;
+    constexpr std::uint32_t timestamp_base = 4;
+    const auto query_count = timestamp_base + 2 * 4 + 2;
     const D3D12_QUERY_HEAP_DESC query_description{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
     const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
     const auto readback_description = BufferDescription(query_count * sizeof(std::uint64_t));
     std::array<ComPtr<ID3D12QueryHeap>, queue_count> queries;
     std::array<ComPtr<ID3D12Resource>, queue_count> timestamps;
     hs::GraphExecutionOptions options;
+    options.timestamp_base = timestamp_base;
     const std::array timestamp_queues{hs::QueueHint::Direct, hs::QueueHint::Compute,
                                       hs::QueueHint::Copy};
     for (const auto queue : timestamp_queues)
@@ -824,16 +827,31 @@ void RunTimestampResolveIsolation(Fixture &fixture)
     }
     std::vector<std::uint32_t> query_slots(graph.PassCount(), UINT32_MAX);
     std::vector<std::uint32_t> direct_slots, compute_slots, copy_slots;
+    std::uint32_t direct_count{};
     for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
     {
         const auto queue = graph.CompiledPassQueue(position);
-        if (queue == hs::QueueHint::Direct) direct_slots.push_back(position);
-        else if (queue == hs::QueueHint::Compute) compute_slots.push_back(position);
-        else if (queue == hs::QueueHint::Copy) copy_slots.push_back(position);
+        std::uint32_t slot{};
+        if (queue == hs::QueueHint::Direct)
+        {
+            slot = direct_count < 2 ? direct_count + 1 : 4;
+            ++direct_count;
+            direct_slots.push_back(slot);
+        }
+        else if (queue == hs::QueueHint::Compute)
+        {
+            slot = 1;
+            compute_slots.push_back(slot);
+        }
+        else if (queue == hs::QueueHint::Copy)
+        {
+            slot = 3;
+            copy_slots.push_back(slot);
+        }
         if (queue != hs::QueueHint::Copy || copy_timestamp_queries_supported)
-            query_slots[position] = position;
+            query_slots[position] = slot;
     }
-    Check(direct_slots.size() == 2 && compute_slots.size() == 1,
+    Check(direct_slots.size() == 3 && compute_slots.size() == 1,
           "timestamp isolation fixture keeps its Direct and Compute producers");
     options.timestamp_query_slots = query_slots.data();
     options.timestamp_query_slot_count = query_slots.size();
@@ -896,7 +914,8 @@ void RunTimestampResolveIsolation(Fixture &fixture)
         const auto &slots = queue == hs::QueueHint::Direct ? direct_slots :
             queue == hs::QueueHint::Compute ? compute_slots : copy_slots;
         for (const auto slot : slots)
-            values[index].insert(values[index].end(), {mapped[slot * 2], mapped[slot * 2 + 1]});
+            values[index].insert(values[index].end(),
+                {mapped[timestamp_base + slot * 2], mapped[timestamp_base + slot * 2 + 1]});
         D3D12_RANGE no_write{};
         timestamps[index]->Unmap(0, &no_write);
     }

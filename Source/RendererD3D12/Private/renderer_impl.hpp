@@ -28,7 +28,7 @@
 #include "renderer_entity_surface.hpp"
 #include "renderer_instance_order.hpp"
 #include "renderer_monster_lod.hpp"
-#include "render_instance_lookup.hpp"
+#include <hs/render_data/render_instance_lookup.hpp>
 #include "renderer_diagnostics.hpp"
 #include "renderer_lod.hpp"
 #include "renderer_visibility.hpp"
@@ -40,7 +40,6 @@
 #include "renderer_startup.hpp"
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
-#include "vfx_persistent_state.hpp"
 #include "vfx_ribbon_gpu.hpp"
 #include "vfx_ribbon_state.hpp"
 #include "view_state.hpp"
@@ -392,6 +391,7 @@ struct GeometryPageGpu
     std::array<std::byte, 32> source_digest{};
     AllocationResource storage;
     std::array<std::uint64_t,4> offsets{}, sizes{};
+    std::uint64_t brixelizer_position_offset{};
     ResidencyTicket residency;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_INDEX_BUFFER_VIEW index_view{};
@@ -410,7 +410,7 @@ struct GeometryPageGpu
 
     void Reset() noexcept
     {
-        storage.Reset(); offsets={}; sizes={};
+        storage.Reset(); offsets={}; sizes={}; brixelizer_position_offset=0;
         residency = {};
         vertex_view = {}; index_view = {};
         raster_index_offset = 0;
@@ -982,6 +982,14 @@ struct NativeGraphicsCapabilitySnapshot
     bool dlss_fg_dynamic_supported{};
 };
 
+struct D3D12Renderer::CanonicalFrame
+{
+    RenderFrameInput input;
+    float interpolation{1.0f};
+    bool advance_native_world{};
+    double native_display_tick{};
+};
+
 struct D3D12Renderer::Impl
 {
     struct NativeBudgetObservation
@@ -1134,7 +1142,6 @@ struct D3D12Renderer::Impl
         std::string hdr_capture_source_name{"reconstructed_hdr_before_post"};
         std::array<AllocationResource, 2> exposure_values;
         AllocationResource exposure_histogram, initial_exposure;
-        std::array<std::vector<UiModel>, kFrameCount> ui_models;
         std::array<std::shared_ptr<const UiDrawContent>, kFrameCount> ui_draw_content;
         std::array<bool, kFrameCount> ui_dirty{}, ui_initialized{};
         AmbientOcclusionSystem ambient_occlusion;
@@ -1249,7 +1256,6 @@ struct D3D12Renderer::Impl
         {
             std::size_t source_index{};
             std::uint32_t page_slot{};
-            BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
             DirectX::XMFLOAT4X4 world{};
             float yaw_sine{}, yaw_cosine{};
         };
@@ -1269,16 +1275,14 @@ struct D3D12Renderer::Impl
                 std::vector<SoftwareSceneBase> bases;
                 SceneGeometryStaticSection section;
                 std::vector<PageShape> page_shapes;
+                std::vector<std::uint32_t> included_page_slots;
+                std::uint32_t excluded_masked{},excluded_thin{},excluded_translucent{};
             };
             struct NativeRows
             {
-                struct Run { std::size_t job_begin{},job_count{},instance_begin{},instance_count{}; };
                 std::shared_ptr<const Rows> source;
                 std::shared_ptr<const void> generation_owner;
-                std::vector<SoftwareSceneGeometry> geometries;
-                std::vector<BrixelizerSceneInstance> instances;
-                std::vector<std::size_t> leaf_jobs;
-                std::vector<Run> runs;
+                std::shared_ptr<const BrixelizerImmutableSceneSection> section;
                 std::uint64_t material_revision{};
             };
             std::shared_ptr<const Rows> rows;
@@ -1595,7 +1599,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
     [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::span<const RenderInstance> &);
     [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &, bool &);
-    [[nodiscard]] Result PrepareHlodFrameRecordData(std::uint32_t frame_slot,
+    [[nodiscard]] Result PrepareHlodFrameRecordData(const RenderViewInput &, std::uint32_t frame_slot,
         std::uint32_t active_view_mask, ResourceVersion geometry_records,
         ResourceVersion static_scene, ResourceVersion proxy_refs,
         HlodRuntimeFrameRecordData &);
@@ -1603,8 +1607,8 @@ struct D3D12Renderer::Impl
         const HlodRuntimeFrameLayout &) const noexcept;
     [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, std::uint32_t,
         ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &,
-        HlodRuntimeFrameLayout *capture = nullptr,
-        HlodRuntimeFrameRecordData *prepared = nullptr,
+        HlodRuntimeFrameLayout *capture,
+        HlodRuntimeFrameRecordData &prepared,
         const HlodRuntimeFrameLayout *retained = nullptr);
     void ReadHlodFrame(PassBuilder &, const HlodFrameGraph &, bool) const;
     [[nodiscard]] Result DrawHlodGeometry(ID3D12GraphicsCommandList *, std::uint32_t, std::uint32_t);
@@ -1703,8 +1707,7 @@ struct D3D12Renderer::Impl
                                             std::uint32_t output_height);
     void CommitUiResources(OwnedView &owner, UiResources &) noexcept;
     [[nodiscard]] Result RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
-                                       std::span<const UiModel> models,
-                                       std::shared_ptr<const UiDrawContent> content = {});
+                                       const std::shared_ptr<const UiDrawContent> &content);
     [[nodiscard]] Result CreateAllocation(AllocationResource &output,
                                           const D3D12MA::ALLOCATION_DESC &allocation,
                                           const D3D12_RESOURCE_DESC &resource,
@@ -1982,13 +1985,8 @@ struct D3D12Renderer::Impl
     std::array<AutoFgCadenceSample, kRendererDiagnosticsFrameCapacity> auto_fg_cadence_samples{};
     std::uint64_t auto_fg_cadence_sequence{}, auto_fg_cadence_completed_sequence{};
     RenderViewRole active_view_role{RenderViewRole::Main};
-    const RenderViewInput *explicit_view{};
-    const RenderFrameInput *explicit_frame{};
-    bool render_scene_inputs{true};
     std::uint32_t active_native_viewport_id{}, next_native_viewport_id{1};
     std::uint64_t view_configuration_revision{1}, rendered_submission_count{}, render_package_id{}, active_render_package_id{};
-    std::chrono::steady_clock::time_point render_package_time;
-    float render_package_alpha{1.0f};
     RenderSceneSample render_scene_sample;
     struct PreparedScenePackage
     {
@@ -2012,7 +2010,6 @@ struct D3D12Renderer::Impl
         std::vector<SkinCullView> skin_cull_views;
         std::array<double, 3> skin_cull_sun_right{}, skin_cull_sun_vertical{};
         bool skin_cull_views_prepared{}, skin_cull_views_valid{}, skin_cull_sun_valid{};
-        std::unordered_set<std::uint64_t> ribbon_head_ids, ribbon_projectile_ids;
         EntitySurfaceFrame entity_surfaces;
         std::vector<std::pair<std::uint64_t,std::uint8_t>> vfx_replacements;
         std::vector<MonsterLodPreparedLocalLight> local_shadow_consumers;
@@ -2027,8 +2024,6 @@ struct D3D12Renderer::Impl
             gpu_slots.clear();
             skin_cull_views.clear();
             skin_cull_views_prepared = skin_cull_views_valid = skin_cull_sun_valid = false;
-            ribbon_head_ids.clear();
-            ribbon_projectile_ids.clear();
             local_shadow_consumers.clear();
             skin_deformation.reset();
             order.reset();

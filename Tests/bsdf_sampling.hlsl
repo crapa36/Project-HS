@@ -252,13 +252,40 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
         const float raw_pdf = HsBsdfPdf(surface, wo, wi);
         error = max(error, abs(original_pdf - prepared_pdf));
         error = max(error, abs(original_pdf - raw_pdf));
-        float3 diffuse, specular;
-        HsBsdfEvaluateComponentsOptical(surface, wo, wi * 1.73, 0.08, diffuse, specular);
-        const float3 total = HsBsdfEvaluateOptical(surface, wo, wi * 1.73, 0.08);
-        error = HsProbeMaxError(error, diffuse + specular - total);
-        const HsSurfaceClosure oriented = HsBsdfOrientThinSurface(surface, normalize(wo));
-        if (dot(oriented.normal, wi) < 0.0 || surface.unlit)
-            error = HsProbeMaxError(error, specular);
+
+        const float3 light_view = normalize(wo);
+        const HsSurfaceClosure light_surface = HsBsdfOrientThinSurface(surface, light_view);
+        const float3 prepared_view = normalize(light_view);
+        const bool flip_normal = HsBsdfThinTransmissionWeight(light_surface) > 0.0 &&
+            dot(light_surface.normal, prepared_view) < 0.0;
+        const float3 prepared_normal = normalize(flip_normal ? -light_surface.normal : light_surface.normal);
+        const float3 incident = wi * 1.73;
+        float3 raw_diffuse, raw_specular, prepared_diffuse, prepared_specular;
+        HsBsdfEvaluateComponentsOptical(light_surface, light_view, incident, 0.08,
+            raw_diffuse, raw_specular);
+        HsBsdfEvaluateComponentsOpticalPrepared(light_surface, prepared_view, prepared_normal,
+            flip_normal, incident, 0.08, prepared_diffuse, prepared_specular);
+        error = HsProbeMaxError(error, raw_diffuse - prepared_diffuse);
+        error = HsProbeMaxError(error, raw_specular - prepared_specular);
+
+        if (index < 2u)
+        {
+            HsSurfaceClosure base_surface = HsProbeSurface(case_index);
+            base_surface.normal = surface.normal;
+            const HsSurfaceClosure base_light_surface = HsBsdfOrientThinSurface(base_surface, light_view);
+            const bool base_flip_normal = HsBsdfThinTransmissionWeight(base_light_surface) > 0.0 &&
+                dot(base_light_surface.normal, prepared_view) < 0.0;
+            const float3 base_prepared_normal = normalize(base_flip_normal
+                ? -base_light_surface.normal : base_light_surface.normal);
+            float3 base_raw_diffuse, base_raw_specular, base_prepared_diffuse, base_prepared_specular;
+            HsBsdfEvaluateComponentsOptical(base_light_surface, light_view, incident, 0.08,
+                base_raw_diffuse, base_raw_specular);
+            HsBsdfEvaluateComponentsOpticalPrepared(base_light_surface, prepared_view,
+                base_prepared_normal, base_flip_normal, incident, 0.08,
+                base_prepared_diffuse, base_prepared_specular);
+            error = HsProbeMaxError(error, base_raw_diffuse - base_prepared_diffuse);
+            error = HsProbeMaxError(error, base_raw_specular - base_prepared_specular);
+        }
     }
     return error;
 }

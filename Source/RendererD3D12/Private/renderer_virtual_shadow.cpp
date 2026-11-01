@@ -557,10 +557,10 @@ Result VirtualShadowSystem::LoadBake(const RendererConfig &config,VirtualShadowP
         const auto index=render_data::ReadStaticShadowArchiveIndex(bytes);
         if(index.payload_bytes!=pages_bytes) return Invalid("Static shadow archive payload size differs from index.");
         ShippedContentOwner loose_pages;
-        if(!pages_source.pack)
-            if(auto r=ShippedContentOwner::Open(pages_source.path,loose_pages);!r) return r;
-        const auto &pages_file=pages_source.pack ? *pages_source.pack : loose_pages;
-        const auto pages_offset=pages_source.pack ? pages_source.range.offset : 0;
+        if(!pages_source.IsPacked())
+            if(auto r=ShippedContentOwner::Open(pages_source.Loose().path,loose_pages);!r) return r;
+        const auto &pages_file=pages_source.IsPacked() ? *pages_source.Packed().owner : loose_pages;
+        const auto pages_offset=pages_source.IsPacked() ? pages_source.Packed().range.offset : 0;
         auto data=std::make_shared<VirtualShadowBakeData>(); data->description=index.description;
         data->generation=config.content_generation_id; data->index_digest=digest; data->pages_digest=pages_digest;
         data->index_source=index_source; data->pages_source=pages_source;

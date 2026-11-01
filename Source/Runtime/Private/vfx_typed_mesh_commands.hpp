@@ -7,7 +7,9 @@
 namespace hs::runtime_detail
 {
 [[nodiscard]] std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs);
+    const VfxImage &image, const PreparedVfxMeshRecipeView &recipes,
+    std::span<const VfxPersistentInput> inputs);
 void AppendVfxTypedMeshCommands(const VfxImage &image,
+    const PreparedVfxMeshRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs, std::vector<VfxOwnedMeshInput> &result);
 }

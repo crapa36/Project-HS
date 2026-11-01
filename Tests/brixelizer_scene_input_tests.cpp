@@ -4,11 +4,17 @@
 #include <array>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 using namespace hs;
 namespace {
 void Check(bool ok,const char* what){if(!ok)throw std::runtime_error(what);}
 void Validation(){
+ Check(IsBrixelizerVertexStride(12)&&IsBrixelizerVertexStride(36)&&IsBrixelizerVertexStride(60)&&
+  !IsBrixelizerVertexStride(64)&&!IsBrixelizerVertexStride(76),
+  "Brixelizer stride must fit the SDK six-bit instance encoding");
  SceneGeometryRecord g{1,2,0,3,0,76,3,0,0,1,0,9,0,SceneGeometryDeformed};
  SceneDrawInstance i{};i.mesh=9;i.scale={1,1,1,1};
  Check(bool(ValidateSceneGeometryRecord(g,i)),"valid source rejected");
@@ -95,8 +101,8 @@ void DeformationSections(){
  auto wind_draw=immutable_draw;
  Check(bool(AppendSceneGeometryStaticRow(cached,immutable,immutable_draw))&&
   bool(AppendSceneGeometryStaticRow(cached,wind,wind_draw)),"static section construction failed");
- Check(cached.deformation_rows==std::vector<std::uint32_t>{1}&&
-  cached.deformation_rank_by_row==std::vector<std::uint32_t>{UINT32_MAX,0},
+ Check(cached.DeformationRows().size()==1&&cached.DeformationRows()[0]==1&&
+  cached.DeformationRankAt(0)==UINT32_MAX&&cached.DeformationRankAt(1)==0,
   "static deformation rank differs from section order");
  std::array<SceneGeometryRecord,2> current{{
   {1,2,0,3,0,76,3,999,30,1,0,9,~0u,SceneGeometryDeformed},
@@ -108,8 +114,8 @@ void DeformationSections(){
   "static/current section preparation failed");
  Check(compact_rows==std::vector<std::uint32_t>{0,3}&&static_offsets==std::vector<std::uint32_t>{36}&&
   section_bytes==84,"section deformation order/prefix changed");
- Check(current[0].position_byte_offset==0&&cached.geometries[1].position_byte_offset==777&&
-  cached.geometries[0].position_byte_offset==91,
+ Check(current[0].position_byte_offset==0&&cached.GeometryAt(1).position_byte_offset==777&&
+  cached.GeometryAt(0).position_byte_offset==91,
   "section preparation mutated current/static source offsets incorrectly");
 }
 void DomainsAndCounts(){
@@ -168,35 +174,97 @@ void DomainsAndCounts(){
 }
 void OrderedInstanceRanges(){
  using D=BrixelizerGeometryDomain;
- std::array<BrixelizerSceneInstance,2> first{{
+ const std::array<BrixelizerSceneInstance,2> immutable_instances{{
   {11,1,1,4,5,6,{}, {}, {},D::Opaque},
-  {12,1,UINT32_MAX,5,6,7,{}, {}, {},D::UnsupportedMasked}}};
- std::array<BrixelizerSceneInstance,2> second{{
-  {13,1,0,6,7,8,{}, {}, {},D::AuthoredCoverage},
+  {13,1,0,6,7,8,{}, {}, {},D::AuthoredCoverage}}};
+ const std::array<BrixelizerSceneRun,2> immutable_runs{{{1,1,0,1},{3,1,1,1}}};
+ auto section=std::make_shared<const BrixelizerImmutableSceneSection>(
+  std::vector<SoftwareSceneGeometry>{},std::vector<BrixelizerSceneInstance>(immutable_instances.begin(),immutable_instances.end()),
+  std::vector<std::size_t>{},std::vector<BrixelizerSceneRun>(immutable_runs.begin(),immutable_runs.end()));
+ const std::array<BrixelizerSceneInstance,3> current_instances{{
+  {10,1,1,3,4,5,{}, {}, {},D::Opaque},
+  {12,1,UINT32_MAX,5,6,7,{}, {}, {},D::UnsupportedMasked},
   {14,1,UINT32_MAX,7,8,9,{}, {}, {},D::Translucent}}};
- const BrixelizerSceneInstanceRange empty{{},false};
- std::array<BrixelizerSceneInstanceRange,3> ranges{{{first,true},empty,{second,false}}};
+ const std::array<BrixelizerCurrentSceneRun,3> current_runs{{{100,1,0,1},{102,1,1,1},{104,1,2,1}}};
+ BrixelizerSceneInputs input{};input.immutable_section=std::move(section);
+ input.current_instances=current_instances;input.current_runs=current_runs;input.static_job_base=100;
  std::uint32_t count{},immutable_count{};
- Check(bool(CountBrixelizerSceneInstanceRanges(ranges,count,immutable_count))&&count==4&&immutable_count==2,
-  "ordered spans failed count admission");
- std::array<std::uint32_t,4> expected_slots{11,12,13,14};
+ Check(bool(CountBrixelizerSceneRows(input,count,immutable_count))&&count==5&&immutable_count==2,
+  "interleaved scene runs failed count admission");
+ const std::array<std::uint32_t,5> expected_slots{10,11,12,13,14};
  std::uint32_t visited{};
- Check(bool(ForEachBrixelizerSceneInstance(ranges,false,
+ Check(bool(ForEachBrixelizerSceneInstance(input,false,
   [&](const BrixelizerSceneInstance &instance,std::uint32_t logical,bool immutable)->Result {
-   Check(logical==visited&&instance.stable_gpu_scene_slot==expected_slots[visited]&&immutable==(visited<2),
-    "ordered borrowed range traversal changed logical order/index");
+   Check(logical==visited&&instance.stable_gpu_scene_slot==expected_slots[visited]&&immutable==(visited==1||visited==3),
+    "interleaved immutable/current traversal changed logical order/index");
    ++visited;return Result::Success();
-  }))&&visited==4,"ordered borrowed range traversal failed");
+  }))&&visited==5,"interleaved production scene traversal failed");
  visited=0;
- Check(bool(ForEachBrixelizerSceneInstance(ranges,true,
+ Check(bool(ForEachBrixelizerSceneInstance(input,true,
   [&](const BrixelizerSceneInstance &instance,std::uint32_t logical,bool immutable)->Result {
-   Check(!immutable&&logical==visited+2&&instance.stable_gpu_scene_slot==expected_slots[visited+2],
-    "immutable warm traversal failed to skip its rows or preserve logical indices");
+   Check(!immutable&&logical==visited*2&&instance.stable_gpu_scene_slot==expected_slots[visited*2],
+    "warm traversal skipped immutable rows without preserving logical indices");
    ++visited;return Result::Success();
-  }))&&visited==2,"immutable warm traversal changed current-row order");
- std::uint32_t total{};
- Check(!AccumulateBrixelizerSceneInstanceCount(UINT32_MAX,1,total),"instance count overflow accepted");
+  }))&&visited==3,"warm production scene traversal changed current-row order");
+ input.static_job_base=std::numeric_limits<std::size_t>::max();
+ Check(!CountBrixelizerSceneRows(input,count,immutable_count),"static job base overflow accepted");
+}
+void GeometryReadSetRefresh(){
+ std::array<SoftwareSceneGeometry,2> geometries{};
+ geometries[0].vertex_version={{11,ResourceKind::Buffer},0};
+ geometries[0].index_version={{12,ResourceKind::Buffer},0};
+ geometries[1].vertex_version={{13,ResourceKind::Buffer},0};
+ geometries[1].index_version={{14,ResourceKind::Buffer},0};
+ BrixelizerFrameRecordData record;
+ record.geometry_reads.push_back({{{101,ResourceKind::Buffer},0},Access::ComputeRead});
+ Check(RefreshBrixelizerGeometryReadSet(geometries,record)&&record.geometry_reads.size()==4&&
+  record.unique_geometry_reads.size()==4,"placeholder geometry reads were not refreshed");
+ for(std::size_t i=0;i<geometries.size();++i)
+  Check(record.geometry_reads[i*2].version==geometries[i].vertex_version&&
+   record.geometry_reads[i*2+1].version==geometries[i].index_version,
+   "current vertex/index versions were not preserved");
+ Check(!RefreshBrixelizerGeometryReadSet(geometries,record),"unchanged graph versions rebuilt the read set");
+ geometries[0].index_version.ordinal=1;
+ Check(RefreshBrixelizerGeometryReadSet(geometries,record)&&
+  record.geometry_reads[1].version==geometries[0].index_version&&
+  record.unique_geometry_reads.size()==4&&
+  std::ranges::find(record.unique_geometry_reads,SceneGeometryReadToken{geometries[0].index_version,Access::ComputeRead})!=
+   record.unique_geometry_reads.end()&&
+  std::ranges::find(record.unique_geometry_reads,SceneGeometryReadToken{{{12,ResourceKind::Buffer},0},Access::ComputeRead})==
+   record.unique_geometry_reads.end(),"updated graph version did not replace its index read");
+
+ // The production immutable lookup keeps prefix indices while new physical
+ // ranges append only to the frame-local suffix.
+ SoftwareSceneGeometry first{};first.stable_key=1;first.generation=1;first.vertex_stride=12;
+ first.vertex_count=3;first.index_count=3;
+ auto second=first;second.stable_key=2;
+ BrixelizerGeometryLookup cold;std::vector<SoftwareSceneGeometry> prefix;
+ Check(cold.FindOrAdd(first,prefix)==0&&cold.FindOrAdd(second,prefix)==1,"immutable lookup indices changed");
+ BrixelizerGeometryLookup frame{&cold,2};std::vector<SoftwareSceneGeometry> suffix;
+ Check(frame.FindOrAdd(first,suffix)==0&&suffix.empty(),"current geometry did not reuse immutable index");
+ auto changed=first;changed.vertex_byte_offset=12;
+ Check(frame.FindOrAdd(changed,suffix)==2&&frame.FindOrAdd(changed,suffix)==2&&suffix.size()==1,
+  "distinct current range did not retain suffix index");
+ changed=first;changed.vertex_version={{99,ResourceKind::Buffer},1};
+ Check(frame.FindOrAdd(changed,suffix)==3&&suffix.size()==2,"different graph binding merged with immutable geometry");
+ BrixelizerGeometryLookup raw;std::vector<SoftwareSceneGeometry> raw_geometries;
+ Check(raw.FindOrAdd(first,raw_geometries)==0,"raw geometry admission failed");
+ Check(raw.FindOrAdd(first,raw_geometries)==0,"raw lookup failed to reuse identical geometry");
+ std::array<BrixelizerGeometryVersions,2> bindings{};
+ bindings[0].vertex={{21,ResourceKind::Buffer},1};bindings[0].index={{22,ResourceKind::Buffer},2};
+ bindings[1].vertex={{23,ResourceKind::Buffer},3};bindings[1].index={{24,ResourceKind::Buffer},4};
+ BrixelizerGeometryRange range{prefix,suffix,bindings};
+ BrixelizerFrameRecordData borrowed;
+ Check(range.size()==4 && &range[0]==&prefix[0] && &range[2]==&suffix[0] &&
+  range.VersionsAt(0).vertex==bindings[0].vertex&&range[2].vertex_byte_offset==12&&
+  range.VersionsAt(3).vertex==suffix[1].vertex_version,
+  "borrowed geometry prefix, suffix or frame binding changed");
+ Check(RefreshBrixelizerGeometryReadSet(range,borrowed)&&borrowed.geometry_reads[0].version==bindings[0].vertex,
+  "borrowed prefix binding was not used in graph read set");
+ bindings[0].vertex.ordinal=7;
+ Check(RefreshBrixelizerGeometryReadSet(range,borrowed)&&borrowed.geometry_reads[0].version==bindings[0].vertex,
+  "late prefix binding was not refreshed");
 }
 }
-int main()try{Validation();StaticBuiltinTerrainShape();DeformationSections();DomainsAndCounts();OrderedInstanceRanges();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
+int main()try{Validation();StaticBuiltinTerrainShape();DeformationSections();DomainsAndCounts();OrderedInstanceRanges();GeometryReadSetRefresh();std::cout<<"GI source validation and compact exclusion parity PASS\n";return 0;}
 catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

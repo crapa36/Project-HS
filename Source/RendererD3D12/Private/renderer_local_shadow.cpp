@@ -32,11 +32,11 @@ bool SameBounds(DirectX::XMFLOAT4 a,DirectX::XMFLOAT4 b)
 bool StaticCaster(const VirtualShadowCaster &c,bool previous=false)
 {return previous?c.previous_present&&c.previous_immutable_source&&!c.previous_skin&&!c.previous_wind&&!c.previous_animated_alpha:
     c.present&&c.immutable_source&&!c.skin&&!c.wind&&!c.animated_alpha;}
-bool Changed(const VirtualShadowCaster &c)
+bool Changed(const VirtualShadowCaster &c,bool current_static,bool previous_static)
 {
     return c.present!=c.previous_present||c.instance_generation!=c.previous_generation||
         c.current_revisions!=c.previous_revisions||c.current_cut_revision!=c.previous_cut_revision||
-        !SameBounds(c.current_bounds,c.previous_bounds)||StaticCaster(c)!=StaticCaster(c,true);
+        !SameBounds(c.current_bounds,c.previous_bounds)||current_static!=previous_static;
 }
 bool SameLight(const LightView &a,const LightView &b)
 {
@@ -182,6 +182,7 @@ struct LocalShadowFramePlanData
     LocalShadowStatus status;
     std::vector<LocalShadowLightReference> light_records;
     std::array<bool,2> has_batches{};
+    std::uint32_t draw_count{},batch_count{};
     bool consumed{};
 };
 namespace
@@ -285,28 +286,49 @@ GpuLocalShadowRecord Record(const LocalShadowStorage &s,const LightView &light)
     }
     record.state.y=1;return record;
 }
+struct ChangedStaticCaster
+{
+    const VirtualShadowCaster *source{};
+    bool current_static{},previous_static{};
+};
 UINT DirtyFaces(const LocalShadowStorage &s,const LocalShadowInputs &in,const GpuLocalShadowRecord &record,
-    const LocalShadowStorage::CachedLight *cached,const LightView &light,float expanded)
+    const LocalShadowStorage::CachedLight *cached,const LightView &light,float expanded,
+    std::span<const ChangedStaticCaster> changed_static)
 {
     const UINT all=(1u<<record.revision.w)-1;
     UINT dirty=in.reset_cache||!cached||!SameLight(cached->light,light)||cached->face_count!=record.revision.w||!s.initialized?
         all:all&~cached->valid_faces;
     for(UINT face=0;face<record.revision.w;++face)
-        if((dirty&(1u<<face))==0)for(const auto &c:in.casters)if(Changed(c)&&
-            ((StaticCaster(c)&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))||
-             (StaticCaster(c,true)&&Overlap(c.previous_bounds,record.world_to_clip[face],expanded))))
+        if((dirty&(1u<<face))==0)for(const auto &entry:changed_static)
+        {
+            const auto &c=*entry.source;
+            if((entry.current_static&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))||
+               (entry.previous_static&&Overlap(c.previous_bounds,record.world_to_clip[face],expanded)))
             {dirty|=1u<<face;break;}
+        }
     return dirty;
 }
-bool CommandsFit(const LocalShadowInputs &in,const GpuLocalShadowRecord &record,UINT dirty,float expanded,
-    UINT remaining,UINT &commands)
+bool CommandsFit(const GpuLocalShadowRecord &record,UINT dirty,float expanded,UINT remaining,
+    std::span<const VirtualShadowCaster *const> casters,std::span<const std::size_t> bucket_offsets,
+    std::size_t group_count,UINT &commands)
 {
     commands=0;
     // Every present caster belongs to exactly one validated draw group and
     // one bank. Count its exact face commands before reserving any tile/slot.
-    for(UINT face=0;face<record.revision.w;++face)for(const auto &c:in.casters)
-        if(c.present&&(!StaticCaster(c)||(dirty&(1u<<face)))&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))
-        {if(commands==remaining)return false;++commands;}
+    for(UINT face=0;face<record.revision.w;++face)
+    {
+        for(UINT layer=0;layer<2;++layer)
+        {
+            if(layer==0&&(dirty&(1u<<face))==0)continue;
+            for(std::size_t group=0;group<group_count;++group)
+            {
+                const auto bucket=std::size_t(layer)*group_count+group;
+                for(auto index=bucket_offsets[bucket];index<bucket_offsets[bucket+1];++index)
+                    if(Overlap(casters[index]->current_bounds,record.world_to_clip[face],expanded))
+                    {if(commands==remaining)return false;++commands;}
+            }
+        }
+    }
     return true;
 }
 } // namespace
@@ -408,24 +430,8 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
 {
     plan={};auto s=impl_->storage;if(!s)return Result::Success();
     if(!s->usable||impl_->pending.graph)return Failure(ErrorCode::InvalidState,"Local shadows require completion and reset after a failed graph.");
-    if(in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!in.draw||
-        in.casters.size()>s->profile.max_casters||in.draw_groups.size()>s->profile.max_draw_groups)
-        return Failure(ErrorCode::InvalidArgument,"Local shadow caster/draw capacity or completed frame slot is invalid.");
-    for(const auto &c:in.casters)if((c.present&&(!Sphere(c.current_bounds)||c.draw_group>=in.draw_groups.size()))||
-        (c.previous_present&&!Sphere(c.previous_bounds)))return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
-    auto data=std::make_shared<LocalShadowFramePlanData>();
-    data->source=&in;data->storage=s;
-    auto &native_frame=s->frames[in.frame_slot];
-    if(native_frame.record_generation==UINT64_MAX)
-        return Failure(ErrorCode::InvalidState,"Local shadow frame record generation is exhausted.");
-    data->record_generation=++native_frame.record_generation;
-    data->lights=in.lights.data();data->light_count=in.lights.size();
-    data->stable_casters=in.casters.stable.data();data->stable_count=in.casters.stable.size();
-    data->dynamic_casters=in.casters.dynamic.data();data->dynamic_count=in.casters.dynamic.size();
-    data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
-    data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;
-    data->frame_slot=in.frame_slot;data->reset_cache=in.reset_cache;
-    data->frame.mapped=native_frame.prepared_upload.data();
+    if(in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!in.draw)
+        return Failure(ErrorCode::InvalidArgument,"Local shadow completed frame slot or draw callback is invalid.");
     LocalShadowStatus status;status.enabled=true;status.allocated_bytes=s->allocated;
     struct Ranked{const LightView *light;double priority;};std::vector<Ranked> ranked;
     for(const auto &light:in.lights)
@@ -439,6 +445,56 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     }
     std::ranges::sort(ranked,[](const auto &a,const auto &b){return a.priority!=b.priority?a.priority>b.priority:
         std::tie(a.light->stable_id,a.light->generation)<std::tie(b.light->stable_id,b.light->generation);});
+    const auto group_count=in.draw_groups.size();
+    std::vector<ChangedStaticCaster> changed_static;
+    std::vector<std::size_t> bucket_offsets;
+    std::vector<const VirtualShadowCaster *> ordered_casters;
+    // Empty light sets still publish empty records and invalidate old owners without reading casters.
+    if(!ranked.empty())
+    {
+        if(in.casters.size()>s->profile.max_casters||group_count>s->profile.max_draw_groups)
+            return Failure(ErrorCode::InvalidArgument,"Local shadow caster/draw capacity is invalid.");
+        std::vector<std::size_t> bucket_counts(group_count*2);
+        for(const auto &c:in.casters)
+        {
+            if((c.present&&(!Sphere(c.current_bounds)||c.draw_group>=group_count))||
+                (c.previous_present&&!Sphere(c.previous_bounds)))
+                return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
+            const bool current_static=StaticCaster(c),previous_static=StaticCaster(c,true);
+            if(!in.reset_cache&&s->initialized&&Changed(c,current_static,previous_static)&&
+                (current_static||previous_static))
+                changed_static.push_back({&c,current_static,previous_static});
+            if(c.present)
+            {
+                const auto bucket=(current_static?0u:1u)*group_count+c.draw_group;
+                ++bucket_counts[bucket];
+            }
+        }
+        bucket_offsets.resize(bucket_counts.size()+1);
+        for(std::size_t bucket=0;bucket<bucket_counts.size();++bucket)
+            bucket_offsets[bucket+1]=bucket_offsets[bucket]+bucket_counts[bucket];
+        std::vector<std::size_t> bucket_cursors(bucket_offsets.begin(),bucket_offsets.end()-1);
+        ordered_casters.resize(bucket_offsets.back());
+        // Stable scatter preserves the legacy caster sequence inside each layer/group.
+        for(const auto &caster:in.casters)if(caster.present)
+        {
+            const auto bucket=(StaticCaster(caster)?0u:1u)*group_count+caster.draw_group;
+            ordered_casters[bucket_cursors[bucket]++]=&caster;
+        }
+    }
+    auto data=std::make_shared<LocalShadowFramePlanData>();
+    data->source=&in;data->storage=s;
+    auto &native_frame=s->frames[in.frame_slot];
+    if(native_frame.record_generation==UINT64_MAX)
+        return Failure(ErrorCode::InvalidState,"Local shadow frame record generation is exhausted.");
+    data->record_generation=++native_frame.record_generation;
+    data->lights=in.lights.data();data->light_count=in.lights.size();
+    data->stable_casters=in.casters.stable.data();data->stable_count=in.casters.stable.size();
+    data->dynamic_casters=in.casters.dynamic.data();data->dynamic_count=in.casters.dynamic.size();
+    data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
+    data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;
+    data->frame_slot=in.frame_slot;data->reset_cache=in.reset_cache;
+    data->frame.mapped=native_frame.prepared_upload.data();
     const float expanded=1.0f+2.0f*kLocalShadowGuard/s->profile.face_resolution;
     const UINT physical_tiles=s->profile.maximum_lights*6;
     struct Selected{const LightView *light;GpuLocalShadowRecord record;UINT old_slot,slot,dirty,commands;};
@@ -450,9 +506,11 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
         const auto old=std::ranges::find_if(s->cache,[&](const auto &c){return c.occupied&&
             c.light.stable_id==light.stable_id&&c.light.generation==light.generation;});
         const UINT old_slot=old==s->cache.end()?UINT_MAX:UINT(old-s->cache.begin());
-        auto record=Record(*s,light);const UINT dirty=DirtyFaces(*s,in,record,old==s->cache.end()?nullptr:&*old,light,expanded);
+        auto record=Record(*s,light);const UINT dirty=DirtyFaces(*s,in,record,old==s->cache.end()?nullptr:&*old,
+            light,expanded,changed_static);
         UINT commands{};
-        if(!CommandsFit(in,record,dirty,expanded,s->profile.command_capacity-reserved_commands,commands))
+        if(!CommandsFit(record,dirty,expanded,s->profile.command_capacity-reserved_commands,
+                ordered_casters,bucket_offsets,group_count,commands))
         {++status.overflow_lights;continue;}
         selected.push_back({&light,record,old_slot,UINT_MAX,dirty,commands});reserved_tiles+=faces;reserved_commands+=commands;
     }
@@ -516,8 +574,11 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
             for(UINT group=0;group<in.draw_groups.size();++group)
             {
                 const auto begin=draws.size();
-                for(const auto &c:in.casters)if(c.present&&c.draw_group==group&&UINT(!StaticCaster(c))==layer&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))
+                const auto bucket=std::size_t(layer)*group_count+group;
+                for(auto caster_index=bucket_offsets[bucket];caster_index<bucket_offsets[bucket+1];++caster_index)
                 {
+                    const auto &c=*ordered_casters[caster_index];
+                    if(!Overlap(c.current_bounds,record.world_to_clip[face],expanded))continue;
                     if(draws.size()>=s->profile.command_capacity)
                         return Failure(ErrorCode::InvalidState,"Local shadow emitted commands exceed their transactional preflight.");
                     const auto index=UINT(draws.size());
@@ -564,12 +625,9 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     for(const auto &choice:selected)
         data->light_records.push_back({choice.light->stable_id,choice.light->revision,
             choice.light->generation,choice.slot,choice.light->type});
-    // Complete the unused portions in the prepared value before publishing it
-    // to a waited native frame bank.
-    std::memset(frame.mapped+s->draw_offset+draws.size()*32,0,std::size_t(s->indexed_offset-s->draw_offset-draws.size()*32));
-    std::memset(frame.mapped+s->indexed_offset+indexed.size()*24,0,std::size_t(s->mesh_offset-s->indexed_offset-indexed.size()*24));
-    std::memset(frame.mapped+s->mesh_offset+mesh.size()*16,0,std::size_t(s->count_offset-s->mesh_offset-mesh.size()*16));
-    std::memset(frame.mapped+s->count_offset+counts.size()*4,0,std::size_t(s->upload_bytes-s->count_offset-counts.size()*4));
+    // Only batch-reachable prefixes are published; unused capacity has no reader.
+    data->draw_count=static_cast<std::uint32_t>(draws.size());
+    data->batch_count=static_cast<std::uint32_t>(counts.size());
     for(const auto &batch:frame.batches)data->has_batches[batch.layer]=true;
     plan.has_batches=data->has_batches;plan.data=std::move(data);
     return Result::Success();
@@ -649,7 +707,20 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
                 bool(in.declare_material_sampling);
     }
     auto &frame=s->frames[in.frame_slot];
-    std::memcpy(frame.mapped,data->frame.mapped,static_cast<std::size_t>(s->upload_bytes));
+    const auto draw_bytes=std::size_t(data->draw_count)*sizeof(GpuShadowDrawRecord);
+    const auto indexed_bytes=std::size_t(data->draw_count)*sizeof(IndexedCommand);
+    const auto mesh_bytes=std::size_t(data->draw_count)*sizeof(MeshCommand);
+    const auto count_bytes=std::size_t(data->batch_count)*sizeof(UINT);
+    std::memcpy(frame.mapped,data->frame.mapped,sizeof(LocalShadowMetadata));
+    std::memcpy(frame.mapped+s->record_offset,data->frame.mapped+s->record_offset,
+        std::size_t(s->profile.maximum_lights)*sizeof(GpuLocalShadowRecord));
+    if(draw_bytes)
+    {
+        std::memcpy(frame.mapped+s->draw_offset,data->frame.mapped+s->draw_offset,draw_bytes);
+        std::memcpy(frame.mapped+s->indexed_offset,data->frame.mapped+s->indexed_offset,indexed_bytes);
+        std::memcpy(frame.mapped+s->mesh_offset,data->frame.mapped+s->mesh_offset,mesh_bytes);
+    }
+    if(count_bytes)std::memcpy(frame.mapped+s->count_offset,data->frame.mapped+s->count_offset,count_bytes);
     frame.batches=std::move(data->frame.batches);frame.clears=std::move(data->frame.clears);
     auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;
     pending.cache=std::move(data->cache);pending.status=std::move(data->status);
@@ -687,11 +758,18 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
         meta=retained->outputs[0];record=retained->outputs[1];draw=retained->outputs[2];
         index=retained->outputs[3];mesh_args=retained->outputs[4];count=retained->outputs[5];
     }
-    copy.SetExecute([s,slot=in.frame_slot](RenderPassContext &context)
+    const auto record_bytes=std::size_t(s->profile.maximum_lights)*sizeof(GpuLocalShadowRecord);
+    copy.SetExecute([s,slot=in.frame_slot,draw_bytes,indexed_bytes,mesh_bytes,count_bytes,record_bytes](RenderPassContext &context)
     {auto *cmd=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());auto &f=s->frames[slot];
-        const std::pair<AllocationResource *,UINT64> copies[]{{&f.metadata,0},{&f.records,s->record_offset},{&f.draws,s->draw_offset},
-            {&f.indexed,s->indexed_offset},{&f.mesh,s->mesh_offset},{&f.counts,s->count_offset}};
-        for(auto [r,offset]:copies)cmd->CopyBufferRegion(r->resource.Get(),0,f.upload.resource.Get(),offset,r->resource->GetDesc().Width);});
+        cmd->CopyBufferRegion(f.metadata.resource.Get(),0,f.upload.resource.Get(),0,sizeof(LocalShadowMetadata));
+        cmd->CopyBufferRegion(f.records.resource.Get(),0,f.upload.resource.Get(),s->record_offset,record_bytes);
+        if(draw_bytes)
+        {
+            cmd->CopyBufferRegion(f.draws.resource.Get(),0,f.upload.resource.Get(),s->draw_offset,draw_bytes);
+            cmd->CopyBufferRegion(f.indexed.resource.Get(),0,f.upload.resource.Get(),s->indexed_offset,indexed_bytes);
+            cmd->CopyBufferRegion(f.mesh.resource.Get(),0,f.upload.resource.Get(),s->mesh_offset,mesh_bytes);
+        }
+        if(count_bytes)cmd->CopyBufferRegion(f.counts.resource.Get(),0,f.upload.resource.Get(),s->count_offset,count_bytes);});
     out.metadata=meta;out.records=record;out.draw_records=draw;out.indexed_commands=index;out.mesh_commands=mesh_args;out.command_counts=count;
     out.resources={frame.metadata.resource.Get(),frame.records.resource.Get(),s->static_bank.resource.Get(),s->dynamic_bank.resource.Get(),frame.draws.resource.Get()};
     for(UINT i=0;i<5;++i)out.srvs[i]=s->Srv(in.frame_slot,i);out.depth_views={s->Dsv(0),s->Dsv(1)};

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace hs::renderer_detail
+namespace hs::runtime_detail
 {
 std::optional<StatusParticleBirthRange> StatusParticleBirths(
     const PersistentVfxVisual *episode, std::uint64_t owner,

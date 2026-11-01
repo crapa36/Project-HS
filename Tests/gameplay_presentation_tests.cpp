@@ -2113,29 +2113,48 @@ void TestSessionIdentityAcrossPresentationReset()
 
 void TestVisualLinkSnapshotTransport()
 {
-    hs::GameReadModelStorage model;model.tick=105;
-    const hs::VisualLinkView ricochet{91,hs::VisualLinkKind::Ricochet,{1,.4f,2},{7,.8f,-4},.09f,100,108};
-    const hs::VisualLinkView burn{92,hs::VisualLinkKind::BurnTransfer,{-3,.4f,9},{-2,.4f,5},.12f,100,111};
-    const hs::VisualLinkView relic{93,hs::VisualLinkKind::RelicChain,{4,.4f,2},{8,.4f,3},.10f,100,109};
-    model.AddVisualLink(ricochet);model.AddVisualLink(burn);model.AddVisualLink(relic);
-    model.AddVisualLink({94,hs::VisualLinkKind::Ricochet,{},{1,0,1},.09f,105,105});
-    model.AddVisualLink({95,hs::VisualLinkKind::Ricochet,{},{1,0,1},.09f,106,114});
+    hs::GameReadModelStorage model;model.tick=105;model.session_id=7;
+    const std::array links{
+        hs::DomainSignal{.sequence=91,.tick=100,.kind=hs::DomainSignalKind::RicochetLinked,
+            .position={1,.4f,2},.target={7,.8f,-4},.flags=static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget),.session_id=7},
+        hs::DomainSignal{.sequence=92,.tick=100,.kind=hs::DomainSignalKind::BurnTransferred,
+            .position={-3,.4f,9},.target={-2,.4f,5},.flags=static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget),.session_id=7,
+            .upgrade_skill=static_cast<std::uint8_t>(hs::SkillKind::PiercingShot),.upgrade_index=6,.upgrade_cast_id=15},
+        hs::DomainSignal{.sequence=93,.tick=100,.kind=hs::DomainSignalKind::RelicChainLinked,
+            .position={4,.4f,2},.target={8,.4f,3},.flags=static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget),.session_id=7},
+        hs::DomainSignal{.sequence=94,.tick=97,.kind=hs::DomainSignalKind::RicochetLinked,
+            .position={},.target={1,0,1},.flags=static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget),.session_id=7},
+        hs::DomainSignal{.sequence=95,.tick=106,.kind=hs::DomainSignalKind::RicochetLinked,
+            .position={},.target={1,0,1},.flags=static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget),.session_id=7}};
     hs::RenderSnapshotStorage snapshot(8, 1, 1, 16);
-    Check(hs::ProjectRenderSnapshot(model.View(),DefaultContent().presentation,test_ui,hs::SettingsData{},snapshot),"link snapshot projection");
-    for(const auto &link:std::array{ricochet,burn,relic})
+    Check(hs::ProjectRenderSnapshot(model.View(),DefaultContent().presentation,test_ui,
+        hs::SettingsData{},snapshot,0xFF,nullptr,{},nullptr,links),"link snapshot projection");
+    for(std::size_t index=0;index<3;++index)
     {
-        const auto found=std::ranges::find_if(snapshot.View().persistent_vfx,[&](const auto &visual){return visual.stable_id==link.owner_id;});
-        const auto expected=link.kind==hs::VisualLinkKind::Ricochet?hs::PersistentVfxKind::RicochetLink:
-            link.kind==hs::VisualLinkKind::BurnTransfer?hs::PersistentVfxKind::BurnTransferLink:hs::PersistentVfxKind::RelicChainLink;
-        Check(found!=snapshot.View().persistent_vfx.end() && found->kind==expected && found->position.x==link.source_position.x &&
-                  found->position.y==link.source_position.y && found->position.z==link.source_position.z &&
-                  found->link_target_position.x==link.target_position.x && found->link_target_position.y==link.target_position.y &&
-                  found->link_target_position.z==link.target_position.z && found->link_width==link.width &&
-                  found->active_tick==link.started && found->expires==link.expires,"snapshot preserves fixed link geometry and owner clocks");
+        const auto &link=links[index];
+        const auto found=std::ranges::find_if(snapshot.View().persistent_vfx,[&](const auto &visual){return visual.stable_id==link.sequence;});
+        const auto expected=link.kind==hs::DomainSignalKind::RicochetLinked?hs::PersistentVfxKind::RicochetLink:
+            link.kind==hs::DomainSignalKind::BurnTransferred?hs::PersistentVfxKind::BurnTransferLink:hs::PersistentVfxKind::RelicChainLink;
+        const float width=index==0?.09f:index==1?.12f:.10f;
+        const hs::Tick duration=index==0?8:index==1?11:9;
+        Check(found!=snapshot.View().persistent_vfx.end() && found->kind==expected && found->position.x==link.position.x &&
+                  found->position.y==link.position.y && found->position.z==link.position.z &&
+                  found->link_target_position.x==link.target.x && found->link_target_position.y==link.target.y &&
+                  found->link_target_position.z==link.target.z && found->link_width==width &&
+                  found->active_tick==link.tick && found->expires==link.tick+duration,
+              "snapshot projects signal endpoints, stable identity, width, and tick lifetime");
+        if (index==1)
+            Check(found->cast_id==15 && found->skill==link.upgrade_skill && found->source_upgrade==6,
+                  "snapshot preserves link signal upgrade provenance");
     }
     Check(std::ranges::none_of(snapshot.View().persistent_vfx,[](const auto &visual){return visual.stable_id==94 || visual.stable_id==95;}),
-          "expired and future links are not published");
-    model.Clear();Check(model.View().visual_links.empty(),"read model Clear removes prior links");
+          "expired and future retained link signals are not published");
+    model.session_id=8;
+    snapshot.Clear();
+    Check(hs::ProjectRenderSnapshot(model.View(),DefaultContent().presentation,test_ui,
+        hs::SettingsData{},snapshot,0xFF,nullptr,{},nullptr,links),"new-session link projection");
+    Check(std::ranges::none_of(snapshot.View().persistent_vfx,[](const auto &visual){return visual.stable_id==91 || visual.stable_id==92 || visual.stable_id==93;}),
+          "link signals from the previous session are not projected");
 }
 
 void TestUpgradeActivationProjection()

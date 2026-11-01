@@ -22,7 +22,7 @@ struct SoftwareSceneGeometry
     std::uint64_t vertex_byte_offset{}, index_byte_offset{};
     std::uint32_t vertex_stride{}, vertex_count{}, index_count{};
     DXGI_FORMAT index_format{DXGI_FORMAT_R32_UINT};
-    bool opaque{true}, dynamic{}, force_rebuild{};
+    bool opaque{true}, dynamic{};
 };
 struct SoftwareSceneInstance
 {
@@ -66,10 +66,24 @@ static_assert(sizeof(SceneDrawInstance)==48);
 // Frame slots own current rows and the per-frame offsets for this section.
 struct SceneGeometryStaticSection
 {
-    std::vector<SceneGeometryRecord> geometries;
-    std::vector<SceneDrawInstance> instances;
-    std::vector<std::uint32_t> deformation_rows;
-    std::vector<std::uint32_t> deformation_rank_by_row;
+  private:
+    std::vector<SceneGeometryRecord> geometries_;
+    std::vector<SceneDrawInstance> instances_;
+    std::vector<std::uint32_t> deformation_rows_;
+    std::vector<std::uint32_t> deformation_rank_by_row_;
+    friend Result AppendSceneGeometryStaticRow(SceneGeometryStaticSection &,
+        const SceneGeometryRecord &,const SceneDrawInstance &);
+    friend Result PrepareSceneGeometrySections(std::span<SceneGeometryRecord>,
+        std::span<const SceneDrawInstance>,const SceneGeometryStaticSection &,
+        std::vector<std::uint32_t> &,std::vector<std::uint32_t> &,std::uint64_t &);
+    friend class SceneGeometryPreparedFrame;
+    friend class SceneGeometrySystem;
+  public:
+    [[nodiscard]] std::size_t GeometryCount() const noexcept { return geometries_.size(); }
+    [[nodiscard]] const SceneGeometryRecord &GeometryAt(std::size_t index) const noexcept { return geometries_[index]; }
+    [[nodiscard]] const SceneDrawInstance &InstanceAt(std::size_t index) const noexcept { return instances_[index]; }
+    [[nodiscard]] std::span<const std::uint32_t> DeformationRows() const noexcept { return deformation_rows_; }
+    [[nodiscard]] std::uint32_t DeformationRankAt(std::size_t index) const noexcept { return deformation_rank_by_row_[index]; }
 };
 // Shared with early GI exclusions so unsupported domains retain source validation.
 [[nodiscard]] Result ValidateSceneGeometryRecord(const SceneGeometryRecord &, const SceneDrawInstance &);

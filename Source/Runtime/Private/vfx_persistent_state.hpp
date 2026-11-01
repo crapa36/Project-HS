@@ -3,7 +3,7 @@
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <optional>
 
-namespace hs::renderer_detail
+namespace hs::runtime_detail
 {
 struct StatusParticleBirthRange
 {

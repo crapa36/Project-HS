@@ -142,27 +142,20 @@ void D3D12Renderer::Impl::CommitUiResources(OwnedView &owner, UiResources &resou
     for (std::size_t index = 0; index < frames.size(); ++index)
     {
         owner.ui_initialized[index] = false;
-        owner.ui_models[index].clear();
         owner.ui_draw_content[index].reset();
         owner.ui_dirty[index] = false;
     }
-    owner.ui.text_layouts.clear();
+    // Layouts use logical text dimensions and the process font collection; raster target replacement does not invalidate them.
 }
 
 Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
-                                        std::span<const UiModel> models,
-                                        std::shared_ptr<const UiDrawContent> content)
+                                        const std::shared_ptr<const UiDrawContent> &content)
 {
-    const auto equal = [](const UiModel &left, const UiModel &right) {
-        return left.kind == right.kind && left.anchor_pixels.x == right.anchor_pixels.x &&
-            left.anchor_pixels.y == right.anchor_pixels.y &&
-            left.size_pixels.x == right.size_pixels.x && left.size_pixels.y == right.size_pixels.y &&
-            left.color_rgba == right.color_rgba && left.value == right.value &&
-            left.font_pixels == right.font_pixels && left.utf8_text == right.utf8_text;
-    };
+    if (!content)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "UI draw content is required.");
+    const auto &models = content->models;
     const auto &cached_content = owner.ui_draw_content[frame_index];
-    const auto &cached_models = cached_content ? cached_content->models : owner.ui_models[frame_index];
-    std::vector<UiModel> candidate_models;
     auto &surface = owner.ui.surfaces[frame_index];
     if (surface.copy_completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         surface.completed_version = surface.submitted_version;
@@ -199,30 +192,17 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                 pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(owner.ui.row_bytes));
         return Result::Success();
     };
-    if (surface.bitmap_valid && ((content && cached_content == content) ||
-        (cached_models.size() == models.size() &&
-         std::equal(cached_models.begin(), cached_models.end(), models.begin(), equal))))
+    if (surface.bitmap_valid && cached_content == content)
     {
         if (surface.completed_version == surface.bitmap_version)
         {
-            if (content)
-            {
-                owner.ui_draw_content[frame_index] = std::move(content);
-                owner.ui_models[frame_index].clear();
-            }
             owner.ui_dirty[frame_index] = false;
             return Result::Success();
         }
         if (auto copied = copy_bitmap(); !copied) return copied;
-        if (content)
-        {
-            owner.ui_draw_content[frame_index] = std::move(content);
-            owner.ui_models[frame_index].clear();
-        }
         owner.ui_dirty[frame_index] = true;
         return Result::Success();
     }
-    if (!content) candidate_models.assign(models.begin(), models.end());
     // Layouts are independent CPU products: publish each valid creation immediately;
     // bitmap validity and native copy state remain transactional below.
     owner.ui.text_layouts.resize(std::max(owner.ui.text_layouts.size(), models.size()));
@@ -396,9 +376,7 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
 
     if (auto copied = copy_bitmap(); !copied) return copied;
     owner.ui.text_layouts.resize(models.size());
-    owner.ui_draw_content[frame_index] = std::move(content);
-    if (owner.ui_draw_content[frame_index]) owner.ui_models[frame_index].clear();
-    else owner.ui_models[frame_index].swap(candidate_models);
+    owner.ui_draw_content[frame_index] = content;
     owner.ui_dirty[frame_index] = true;
     ++surface.bitmap_version;
     surface.bitmap_valid = true;

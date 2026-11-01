@@ -1262,7 +1262,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Invalid character geometry " + metadata_path.path.string() + ": " + error.what());
+                "Invalid character geometry " + metadata_path.Describe(logical_id) + ": " + error.what());
         }
         return Result::Success();
     };
@@ -1660,7 +1660,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             catch (const std::exception &error)
             {
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Invalid character texture package " + path.path.string() + ": " +
+                    "Invalid character texture package " + path.Describe(package_id) + ": " +
                     error.what());
             }
             const auto &view = sources[slice].view;
@@ -1677,7 +1677,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                 view.subresources.size() != mips)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Character texture package shape or dependency changed: " +
-                    path.path.string());
+                    path.Describe(package_id));
             if (slice && view.description.format != sources.front().view.description.format)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character texture array mixes native formats.");
         }
@@ -1825,7 +1825,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Invalid VFX texture package " + path.path.string() + ": " + error.what());
+                "Invalid VFX texture package " + path.Describe(package_id) + ": " + error.what());
         }
         const auto &shape = view.description;
         if (shape.width != expected_width ||
@@ -1839,7 +1839,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             view.subresources.size() !=
                 static_cast<std::size_t>(shape.array_size) * shape.mip_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "VFX texture package shape or dependency changed: " + path.path.string());
+                "VFX texture package shape or dependency changed: " + path.Describe(package_id));
 
         D3D12_RESOURCE_DESC description{};
         description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1872,7 +1872,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                     source.slice_pitch)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "VFX texture package subresource pitch differs from the GPU footprint: " +
-                    path.path.string());
+                    path.Describe(package_id));
         }
 
         uploads.emplace_back();

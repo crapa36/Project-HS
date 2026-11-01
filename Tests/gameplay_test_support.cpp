@@ -75,7 +75,7 @@ hs::TickResult Tick(hs::GameSimulation &simulation,
     input.target_tick = simulation.GetObservation().tick + 1;
     input.held = held;
     input.ordered_edges = edges;
-    return simulation.TickFixed(input, kFixedStep);
+    return simulation.TickFixed(input);
 }
 
 hs::TickResult TickEdge(hs::GameSimulation &simulation, hs::GameAction action,

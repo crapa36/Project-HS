@@ -232,7 +232,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         input.expected_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
         !storage || !residency.Contains(storage) || impl_->reads.contains(input.request.value))
         return IoFailure("Immutable asset read identity, lease or reservation is invalid.");
-    if (input.ranges.empty() && input.source.range.byte_count)
+    if (input.ranges.empty() && (input.source.IsPacked() || input.source.HasAdmittedWholeFileProof()))
     {
         std::uint64_t bytes{};
         if (auto result = input.source.ByteCount(bytes); !result) return result;
@@ -255,7 +255,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     std::optional<CpuTaskLease> cpu_task;
     const bool native_file_read =
 #if HS_WITH_DIRECTSTORAGE
-        impl_->transport && !input.source.pack;
+        impl_->transport && !input.source.IsPacked();
 #else
         false;
 #endif
@@ -269,7 +269,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     read->storage = storage;
 #if HS_WITH_DIRECTSTORAGE
     // DirectStorage's file handle denies atomic replacement; packed input already owns its native Core file.
-    if (impl_->transport && !read->input.source.pack)
+    if (impl_->transport && !read->input.source.IsPacked())
     {
         auto &transport = *impl_->transport;
         std::uint64_t product_bytes{};
@@ -293,7 +293,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
             return Result::Success(); // Requested remains eligible for the next pump.
         if (transport.next_tag == UINT64_MAX) return IoFailure("DirectStorage cancellation tag exhausted.");
         if (transport.submit_generation == UINT64_MAX) return IoFailure("DirectStorage batch generation exhausted.");
-        auto hr = transport.factory->OpenFile(read->input.source.path.c_str(), IID_PPV_ARGS(&read->file));
+        auto hr = transport.factory->OpenFile(read->input.source.Loose().path.c_str(), IID_PPV_ARGS(&read->file));
         BY_HANDLE_FILE_INFORMATION file_info{};
         if (SUCCEEDED(hr)) hr = read->file->GetFileInformation(&file_info);
         const auto actual_size = (static_cast<std::uint64_t>(file_info.nFileSizeHigh) << 32u) | file_info.nFileSizeLow;
@@ -374,7 +374,7 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
             {
                 // shortcut: authenticated packed ranges are read serially per owner; upgrade when the retained pack transport can batch discontiguous verified reads.
                 bytes.resize(static_cast<std::size_t>(expected));
-                const auto base = source.pack ? source.range.offset : 0;
+                const auto base = source.IsPacked() ? source.Packed().range.offset : 0;
                 std::size_t destination{};
                 for (const auto &range : ranges)
                 {
@@ -458,15 +458,15 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                 if (!cpu_task) return Result::Success(); // Keep bytes and marker owner until verification can be admitted.
                 read.cpu_task = std::move(*cpu_task);
                 const auto prepare = read.input.prepare;
-                const auto source_range = read.input.source.range;
+                const auto source_proof = read.input.source.AdmittedWholeFileProof();
                 const auto cancellation = read.cancellation;
                 auto *bytes = &read.bytes;
                 try
                 {
                     read.prepare_future = std::async(std::launch::async, [prepare,
-                        ranges = read.input.ranges, source_range, cancellation, bytes] {
+                        ranges = read.input.ranges, source_proof, cancellation, bytes] {
                         if (cancellation->load(std::memory_order_acquire)) return;
-                        if (ranges.empty() && source_range.byte_count && Sha256(*bytes) != source_range.expected_digest)
+                        if (ranges.empty() && source_proof && Sha256(*bytes) != source_proof->digest)
                             throw std::runtime_error("Immutable file digest mismatch.");
                         if (!ranges.empty())
                         {

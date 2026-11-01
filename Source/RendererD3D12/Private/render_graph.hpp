@@ -425,6 +425,7 @@ class RenderGraphBuilder
     // cleared at entry, with completed stage durations published only on success.
     [[nodiscard]] Result Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu = nullptr);
     [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
+    [[nodiscard]] std::optional<D3D12_RESOURCE_DESC> ResourceDescription(ResourceHandle handle) const noexcept;
     [[nodiscard]] Result Execute(void *native_command_list, void *enhanced_command_list,
                                  BarrierMode barriers, void *timestamp_query_heap = nullptr,
                                  void *timestamp_readback = nullptr,

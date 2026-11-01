@@ -453,7 +453,7 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
 {
     id = {};
     const auto supplied = impl_->supplied_descriptors.find(registration.logical_id);
-    if ((registration.source.pack && !registration.compiled_texture && supplied == impl_->supplied_descriptors.end()) ||
+    if ((registration.source.IsPacked() && !registration.compiled_texture && supplied == impl_->supplied_descriptors.end()) ||
         (registration.compiled_texture && (registration.compiled_texture.value >= impl_->texture_catalog.size() ||
             impl_->texture_catalog[registration.compiled_texture.value].dimension != render_data::TextureDimension::Texture2DArray ||
             impl_->texture_catalog[registration.compiled_texture.value].asset_id.value != MakeAssetId(registration.logical_id).value ||

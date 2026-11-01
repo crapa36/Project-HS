@@ -50,17 +50,23 @@ bool GeometryEffects(const HdrPostSettings &settings)
     return settings.motion_blur != GraphicsMotionBlur::Off || settings.depth_of_field;
 }
 bool Enabled(const HdrPostSettings &settings) { return GeometryEffects(settings) || settings.color_grading; }
-bool Fits(const HdrPostResource &input, ViewExtent active, DXGI_FORMAT format)
+bool Fits(const RenderGraphBuilder &graph, const HdrPostResource &input, ViewExtent active, DXGI_FORMAT format)
 {
-    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture) return false;
-    const auto desc = input.resource->GetDesc();
-    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 &&
-        desc.SampleDesc.Count == 1 && desc.Width >= active.width && desc.Height >= active.height && desc.Format == format;
+    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(input.version.resource) != input.resource) return false;
+    const auto desc = graph.ResourceDescription(input.version.resource);
+    if (!desc) return false;
+    return desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc->DepthOrArraySize == 1 &&
+        desc->SampleDesc.Count == 1 && desc->Width >= active.width && desc->Height >= active.height && desc->Format == format;
 }
-bool FitsDepth(const HdrPostResource &input, ViewExtent active)
+bool FitsDepth(const RenderGraphBuilder &graph, const HdrPostResource &input, ViewExtent active)
 {
-    return Fits(input, active, DXGI_FORMAT_R32_TYPELESS) || Fits(input, active, DXGI_FORMAT_D32_FLOAT) ||
-        Fits(input, active, DXGI_FORMAT_R32_FLOAT);
+    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(input.version.resource) != input.resource) return false;
+    const auto desc = graph.ResourceDescription(input.version.resource);
+    return desc && desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc->DepthOrArraySize == 1 &&
+        desc->SampleDesc.Count == 1 && desc->Width >= active.width && desc->Height >= active.height &&
+        (desc->Format == DXGI_FORMAT_R32_TYPELESS || desc->Format == DXGI_FORMAT_D32_FLOAT || desc->Format == DXGI_FORMAT_R32_FLOAT);
 }
 bool ValidGrade(const DirectX::XMFLOAT4 &value, bool positive, bool nonnegative)
 {
@@ -236,7 +242,7 @@ struct HdrPostSystem::Impl
             inputs.render_active.height > storage->render_capacity.height || !ValidExtent(inputs.output_active) ||
             inputs.output_active.width > storage->output_capacity.width || inputs.output_active.height > storage->output_capacity.height ||
             inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed) ||
-            !Fits(inputs.hdr, inputs.output_active, kColor) || !std::isfinite(inputs.sharpening) ||
+            !Fits(graph, inputs.hdr, inputs.output_active, kColor) || !std::isfinite(inputs.sharpening) ||
             inputs.sharpening < 0 || inputs.sharpening > 1)
             return Failure(ErrorCode::InvalidArgument, "HDR post extent, frame slot, completion or output-resolution HDR input is invalid.");
         if (pending.graph)
@@ -428,13 +434,13 @@ Result HdrPostSystem::RegisterMotionImpl(RenderGraphBuilder &graph, const HdrPos
     }
     if (impl_->pending.geometry_registered || impl_->pending.grade_registered)
         return Failure(ErrorCode::InvalidState, "Register HDR motion/DoF once, before grading.");
-    if (!FitsDepth(inputs.depth, inputs.render_active) || !Fits(inputs.motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
-        !Fits(inputs.surface_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
-        (storage->settings.motion_blur != GraphicsMotionBlur::Off && !Fits(inputs.normal, inputs.render_active, DXGI_FORMAT_R16G16_SNORM)) ||
-        (inputs.transparent_guides_enabled && (!Fits(inputs.transparent_depth, inputs.render_active, DXGI_FORMAT_R32_FLOAT) ||
-            !Fits(inputs.transparent_motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
-            !Fits(inputs.transparent_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
-            !Fits(inputs.transparent_classification, inputs.render_active, kColor))))
+    if (!FitsDepth(graph, inputs.depth, inputs.render_active) || !Fits(graph, inputs.motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
+        !Fits(graph, inputs.surface_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
+        (storage->settings.motion_blur != GraphicsMotionBlur::Off && !Fits(graph, inputs.normal, inputs.render_active, DXGI_FORMAT_R16G16_SNORM)) ||
+        (inputs.transparent_guides_enabled && (!Fits(graph, inputs.transparent_depth, inputs.render_active, DXGI_FORMAT_R32_FLOAT) ||
+            !Fits(graph, inputs.transparent_motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
+            !Fits(graph, inputs.transparent_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
+            !Fits(graph, inputs.transparent_classification, inputs.render_active, kColor))))
         return Failure(ErrorCode::InvalidArgument, "HDR post render/transparent deformation guides are invalid.");
     for (const auto &row : constants.inverse_jittered_view_projection.m)
         for (const auto value : row) if (!std::isfinite(value)) return Failure(ErrorCode::InvalidArgument, "HDR post inverse matrix is nonfinite.");

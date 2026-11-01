@@ -1162,48 +1162,35 @@ void TestVisualLinksRetainCapturedEndpoints()
     hs::HeldInputState held;held.aim_world={20,0,0};hs::Sequence sequence{};
     (void)TickEdge(simulation,hs::GameAction::SkillQ,hs::EdgeKind::Pressed,sequence,held);
     hs::GameReadModelStorage model;
-    std::vector<hs::VisualLinkView> captured;
-    for(int i=0;i<90 && captured.empty();++i)
+    std::vector<hs::DomainSignal> captured;
+    for(int i=0;i<90 && captured.size()<2;++i)
     {
-        (void)Tick(simulation,held);hs::CopyReadModelForDevelopment(simulation, model);
-        if(model.View().visual_links.size()>=2)
-            captured.assign(model.View().visual_links.begin(),model.View().visual_links.end());
+        (void)Tick(simulation,held);
+        for (const auto &signal : simulation.PendingDomainSignals())
+            if (signal.kind == hs::DomainSignalKind::RicochetLinked ||
+                signal.kind == hs::DomainSignalKind::BurnTransferred)
+                if (std::ranges::none_of(captured, [&](const auto &item) { return item.sequence == signal.sequence; }))
+                    captured.push_back(signal);
     }
-    Check(captured.size()>=2,"actual ricochet and burn transfer create visual owners");
+    Check(captured.size()>=2,"actual ricochet and burn transfer are represented by domain signals");
     if(captured.size()>=2)
     {
-        Check(captured[0].owner_id!=captured[1].owner_id,"simultaneous links have distinct sequence owners");
-        for(const auto &link:captured)
+        Check(captured[0].sequence!=captured[1].sequence,"line signals have distinct sequence identities");
+        for(const auto &signal:captured)
         {
-            const bool burn=link.kind==hs::VisualLinkKind::BurnTransfer;
-            Check(link.expires-link.started==(burn?11u:8u) && std::abs(link.width-(burn?.12f:.09f))<.0001f,
-                  "visual link uses explicit cosmetic width and tick lifetime");
-            const auto signal=std::ranges::find_if(simulation.PendingDomainSignals(),[&](const auto &event){return event.sequence==link.owner_id;});
-            Check(signal!=simulation.PendingDomainSignals().end() && signal->position.x==link.source_position.x &&
-                      signal->position.z==link.source_position.z && signal->target.x==link.target_position.x && signal->target.z==link.target_position.z,
-                  "link endpoints and owner match the emitted domain event");
+            Check((signal.flags & static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget)) != 0 &&
+                      (signal.position.x != signal.target.x || signal.position.z != signal.target.z),
+                  "line signal retains its captured endpoints");
+            if (signal.kind == hs::DomainSignalKind::BurnTransferred)
+                Check(signal.upgrade_skill == static_cast<std::uint8_t>(hs::SkillKind::RicochetArrow) &&
+                          signal.upgrade_index == 3 && signal.upgrade_cast_id != 0,
+                      "transferred burn signal retains upgrade and cast provenance");
         }
         const auto checksum=simulation.ComputeChecksum();hs::CopyReadModelForDevelopment(simulation, model);
         Check(simulation.ComputeChecksum()==checksum,"visual publication does not mutate gameplay checksum");
-        (void)Tick(simulation,held);hs::CopyReadModelForDevelopment(simulation, model);
-        for(const auto &original:captured)
-        {
-            const auto current=std::ranges::find_if(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;});
-            Check(current!=model.View().visual_links.end() && current->started==original.started && current->expires==original.expires &&
-                      current->source_position.x==original.source_position.x && current->source_position.z==original.source_position.z &&
-                      current->target_position.x==original.target_position.x && current->target_position.z==original.target_position.z,
-                  "moving enemies do not retarget captured link endpoints or restart lifetime");
-        }
-        const auto last_expiry=std::ranges::max(captured,{},&hs::VisualLinkView::expires).expires;
-        while(simulation.GetObservation().tick<last_expiry) (void)Tick(simulation,held);
-        hs::CopyReadModelForDevelopment(simulation, model);
-        for(const auto &original:captured)
-            Check(std::ranges::none_of(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;}),
-                  "visual link expires at its exact end tick");
     }
     Debug(simulation,hs::DebugCommandKind::StartSession);
-    hs::CopyReadModelForDevelopment(simulation, model);
-    Check(model.View().visual_links.empty(),"session reset clears visual links");
+    Check(simulation.PendingDomainSignals().empty(),"session reset clears prior domain signals");
     Check(simulation.Shutdown().Succeeded(),"visual link shutdown");
 }
 

@@ -365,6 +365,10 @@ activation does not rescan source/output tables or retain non-ribbon events in
 the ribbon profile.
 Ribbon and EntitySurface share prepared image tables; Fresnel and direct-owner
 Mesh iterate accepted ordered recipes without authored parameter/path decoding.
+Their fixed recipe records live in RenderData values. Catalog admission creates
+checked borrowed recipe views; frame commands carry recipe indices and live owner
+geometry/time only. The catalog backing outlives synchronous Render and its joined
+recording jobs. Actual atlas bounds and dynamic command ranges remain frame facts.
 Successful Ballistic activation suppresses only the corresponding legacy Mesh
 before emitter construction; ShockShell and unrelated layers retain their original
 meaning. Native pending uses the same owner and stable legacy-before-typed order.
@@ -420,8 +424,10 @@ publication. Incompatible sun/grid/layout or reloaded materials/pipelines use
 the realtime path. A per-view CPU plan admits omission of the full CSM producer
 only when baked supply, all receiver domains and current coarse-page command
 capacity are guaranteed. Otherwise the actual CSM remains registered. Software
-GI retains CSM until its off-camera receiver domain is closed. CPU policy and
-completed GPU publication are separate diagnostics.
+GI's direct-light seed samples the current GBuffer receiver domain. Active hero
+volumes and allocated froxels add world receivers; disabled volumetrics add no
+hero-volume receiver bounds. CPU policy and completed GPU publication are
+separate diagnostics.
 CPU frame/task capture can omit GPU timing queries and their measurement-only
 resolve. This is explicit in diagnostic metadata; absent GPU measurements are
 not zero-duration work. Direct and Compute own separate query/readback storage
@@ -496,12 +502,17 @@ is no second semantic registration graph above it. The post compiler emits the
 configured fixed pass chain. Native services validate actual resource formats
 and extents at their boundaries.
 
-The graph retains at most eight exact value-only compiled plans. Declaration
-storage can survive Reset; callbacks, external owners and logical uses do not.
+The graph retains at most eight exact value-only compiled plans. Validated logical
+declarations survive Reset; current callbacks, native owners and bindings do not.
 Candidate scans share one current resource-shape snapshot. Flat reusable alias
 scratch labels the first occurrence rather than retaining native addresses or
 allocating a hash node per resource. Cold registration refreshes that snapshot
 after provider preparation; native certification and binding remain authoritative.
+
+Physical import identity and placed-resource overlap are checked against current
+native bindings before logical compilation, including retained-plan hits. The
+logical compiler receives sizes, ranges and versions, without a second native
+identity tag or duplicate hash table. Its range, access and version checks remain.
 
 Essential renderer initialization has a per-segment ceiling from reported adapter
 capacity, charging successful native allocation sizes only during that startup
@@ -574,6 +585,13 @@ decal and volume lifetimes use fractional display ticks from that timestamp.
 Native VFX input owns a frozen session/target/sequence batch until actual producer
 submission, independently of CPU activation or UI Present. Collision particles
 hold at the integer display target; native analytic slots age at display time.
+Runtime projects status and persistent snapshot particle births before freezing
+that batch. They follow the decoded birth prefix in the same retained vector;
+family preview selects the snapshot suffix without changing its acknowledgement.
+Renderer consumes explicit births and does not regenerate them from snapshots.
+The native-free instance lookup/content identity helper belongs to RenderData;
+Runtime evaluates only status-bearing owners while Renderer prepares its shared
+scene/pose sample. Both retain the same identity,content and motion-epoch rules.
 An explicit zero sequence supplies the held clock without a batch; legacy callers
 that omit the clock retain snapshot-tick stepping. Gameplay/rendered snapshot tick
 and the common analytic camera clock are not replaced by the frozen target.

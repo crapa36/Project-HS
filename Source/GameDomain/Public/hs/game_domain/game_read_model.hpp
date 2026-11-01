@@ -196,22 +196,6 @@ struct BossActionView
     std::array<StatusEpisodeView, 4> status_episodes{};
 };
 
-// Cosmetic links retain their captured endpoints for a bounded simulation-tick
-// lifetime. They never affect collision, damage, or GameplayChecksum.
-enum class VisualLinkKind : std::uint8_t { Ricochet, BurnTransfer, RelicChain };
-struct VisualLinkView
-{
-    Sequence owner_id{};
-    VisualLinkKind kind{};
-    Float3 source_position{}, target_position{};
-    float width{};
-    Tick started{}, expires{};
-    // Presentation provenance; never participates in simulation checksums.
-    std::uint64_t cast_id{};
-    SkillKind skill{SkillKind::Count};
-    std::uint8_t source_upgrade{0xFF};
-};
-
 struct SpawnWarningView
 {
     Sequence owner_id{};
@@ -315,7 +299,6 @@ struct GameReadModel
     // Monotonic identity for the active simulation session. This is presentation
     // metadata and is intentionally excluded from GameplayChecksum.
     std::uint64_t session_id{};
-    std::span<const VisualLinkView> visual_links;
     std::span<const MiniBombView> mini_bombs;
     std::span<const SpawnWarningView> spawn_warnings;
     std::span<const ScheduledAreaDeliveryView> scheduled_area_deliveries;
@@ -337,7 +320,6 @@ class GameReadModelStorage
     void AddArea(const AreaView &value);
     void AddPickup(const PickupView &value);
     void AddBossAction(const BossActionView &value);
-    void AddVisualLink(const VisualLinkView &value);
     void AddMiniBomb(const MiniBombView &value);
     void AddSpawnWarning(const SpawnWarningView &value);
     void AddScheduledAreaDelivery(const ScheduledAreaDeliveryView &value);
@@ -372,7 +354,6 @@ class GameReadModelStorage
     std::vector<AreaView> areas_;
     std::vector<PickupView> pickups_;
     std::vector<BossActionView> boss_actions_;
-    std::vector<VisualLinkView> visual_links_;
     std::vector<MiniBombView> mini_bombs_;
     std::vector<SpawnWarningView> spawn_warnings_;
     std::vector<ScheduledAreaDeliveryView> scheduled_area_deliveries_;

@@ -283,7 +283,8 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
 
 bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
                            HsRasterRecord record, GeometryDrawRecord geometry,
-                           StaticDrawRef draw, out SceneOutput vertex0,
+                           StaticDrawRef draw, uint expectedVariant,
+                           out SceneOutput vertex0,
                            out SceneOutput vertex1, out SceneOutput vertex2,
                            out HsTriangleSample sample)
 {
@@ -291,14 +292,6 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
     vertex1 = (SceneOutput)0;
     vertex2 = (SceneOutput)0;
     sample = (HsTriangleSample)0;
-    if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||
-        visibility.y < geometry.FirstIndex / 3u ||
-        visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u ||
-        record.pageGeneration != geometry.GeometryGeneration ||
-        draw.InstanceGeneration != record.instanceGeneration ||
-        !HsRasterRefIndexValid(geometry, record))
-        return false;
-
     uint4 sceneHeader0, sceneHeader1, sceneHeader2, sceneHeader3;
     bool sceneSlotValid;
     if (HsRasterSourceIsStatic(record.refSource))
@@ -317,6 +310,10 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
     const uint3 indices = GeometryBuffers[NonUniformResourceIndex(descriptors + 1u)]
         .Load3(indexByteOffset);
     const SceneInput input0 = LoadGeometryVertex(descriptors, indices.x);
+    uint classifiedVariant;
+    if (!HsClassifiedMaterialVariant(record, geometry, input0.Material, classifiedVariant) ||
+        classifiedVariant != expectedVariant)
+        return false;
     const SceneInput input1 = LoadGeometryVertex(descriptors, indices.y);
     const SceneInput input2 = LoadGeometryVertex(descriptors, indices.z);
     const HsSceneVertexContext context =
@@ -435,11 +432,9 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
         return;
     const GeometryDrawRecord geometry =
         LoadGeometryDrawRecord(record.geometryRecordId);
-    uint classified_variant;
-    if (!HsClassifiedVariant(visibility, record, geometry, classified_variant) ||
-        classified_variant != variant)
-        return;
-    if (geometry.PageSlot >= HsGeometryPageCapacity || visibility.y < geometry.FirstIndex / 3u ||
+    if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||
+        record.pageGeneration != geometry.GeometryGeneration ||
+        visibility.y < geometry.FirstIndex / 3u ||
         visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u ||
         !HsRasterRefIndexValid(geometry, record))
         return;
@@ -450,7 +445,7 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
         return;
     SceneOutput vertex0, vertex1, vertex2;
     HsTriangleSample sample;
-    if (!HsLoadResolveTriangle(pixel, visibility, record, geometry, draw,
+    if (!HsLoadResolveTriangle(pixel, visibility, record, geometry, draw, variant,
                                vertex0, vertex1, vertex2, sample))
         return;
     SceneOutput input = HsInterpolateSceneOutput(vertex0, vertex1, vertex2,

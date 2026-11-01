@@ -65,7 +65,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <charconv>
 #include <condition_variable>
 #include <cmath>
 #include <exception>
@@ -87,7 +86,6 @@
 
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <future>
-#include <nlohmann/json.hpp>
 #endif
 
 namespace hs
@@ -98,62 +96,6 @@ namespace
 #if defined(HS_DEVELOPMENT_TOOLS)
 using runtime_detail::SceneGenerationBinding;
 
-struct PreparedContentGeneration
-{
-    SelectedGeneration candidate;
-    Result result{Result::Success()};
-    const char *stage{"manifest"};
-    bool superseded{};
-};
-
-PreparedContentGeneration PrepareContentGeneration(std::filesystem::path pointer_path,
-    std::string pointer_text, std::string active_id, std::string active_scope)
-{
-    PreparedContentGeneration prepared;
-    try
-    {
-        std::string current;
-        prepared.result = ReadGenerationPointer(pointer_path, current);
-        if (!prepared.result) return prepared;
-        if (current != pointer_text)
-        {
-            prepared.superseded = true;
-            return prepared;
-        }
-        const auto expected = nlohmann::json::parse(pointer_text);
-        prepared.result = LoadSelectedGeneration(pointer_path, prepared.candidate);
-        if (prepared.result)
-        {
-            // Load reads the pathname again; identity checks also reject an A -> B -> A race.
-            const auto &candidate = prepared.candidate;
-            if (expected.at("schema_version") != 1 ||
-                expected.at("generation_id") != candidate.id ||
-                expected.at("scope") != candidate.scope ||
-                expected.at("manifest_locator") != "Generations/" + candidate.id + "/generation.json")
-                prepared.superseded = true;
-            else if (candidate.scope != active_scope)
-                prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                    "Content Generation changes the selected scope.");
-            else if (candidate.id != active_id)
-            {
-                prepared.stage = "integrity";
-                prepared.result = VerifySelectedGenerationProducts(candidate);
-            }
-        }
-        if (const auto read = ReadGenerationPointer(pointer_path, current); !read)
-        {
-            if (prepared.result) prepared.result = read;
-        }
-        else
-            prepared.superseded |= current != pointer_text;
-    }
-    catch (const std::exception &error)
-    {
-        prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-            "Content Generation preparation failed: " + std::string(error.what()));
-    }
-    return prepared;
-}
 #endif
 
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -243,212 +185,6 @@ std::uint64_t CompletedPresentingFrame(const RendererDiagnosticsSnapshot &diagno
         if (frame.fence_completed && frame.view_id == view->view_id)
             latest = std::max(latest, frame.rendered_frame_id);
     return latest;
-}
-
-void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
-                             const RendererDiagnosticsSnapshot &diagnostics, bool validation)
-{
-    const auto extent = [](GraphicsExtent value) {
-        return value.width && value.height ? std::format("{}x{}", value.width, value.height)
-                                           : std::string("확인 중");
-    };
-    const auto view = std::ranges::find_if(diagnostics.views, [](const auto &entry) { return entry.presenting; });
-    const auto *measurements = view == diagnostics.views.end() ? nullptr
-        : validation ? &view->validation_on : &view->validation_off;
-    const auto fps = [](const RendererDiagnosticsCadence *cadence) {
-        return cadence && cadence->available && std::isfinite(cadence->fps) && cadence->fps > 0.0
-            ? std::format("{:.1f}", cadence->fps) : std::string("확인 중");
-    };
-    model.telemetry_status[1] = std::format("렌더링 {} / 출력 {} · 렌더링 {} FPS · 표시 {} FPS",
-        extent(diagnostics.reconstruction.render_extent), extent(diagnostics.reconstruction.output_extent),
-        fps(measurements ? &measurements->rendered_cadence : nullptr), fps(&diagnostics.displayed_cadence));
-    const auto mib = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
-    const auto &memory = diagnostics.current_memory;
-    const auto current = memory.budget_available
-        ? std::format("{:.1f} / {:.1f} MiB", mib(memory.local_usage_bytes), mib(memory.local_budget_bytes))
-        : std::string("확인 중");
-    const auto peak = diagnostics.transition_memory_peak_available && diagnostics.transition_memory_peak.budget_available
-        ? std::format("{:.1f} MiB", mib(diagnostics.transition_memory_peak.local_usage_bytes))
-        : std::string("확인 중");
-    model.telemetry_status[2] = std::format("VRAM 사용량 / 한도 {} · 설정 전환 최대 사용량 {}",
-                                          current, peak);
-}
-
-std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
-    const D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
-    HWND window_handle, bool validation)
-{
-    auto model = std::make_shared<GraphicsSettingsUiModel>();
-    model->requested = graphics;
-    model->generation = generation;
-    const auto canonical = renderer.GetGraphicsSettingsStatus();
-    if (canonical.actual_applied_available)
-    {
-        model->requested = canonical.requested;
-        model->generation = canonical.generation;
-        model->transaction_state = canonical.state == SettingsApplyState::Restored
-            ? "복원됨" : canonical.state == SettingsApplyState::Rejected
-                ? "적용 거부" : canonical.state == SettingsApplyState::Applied
-                    ? "적용됨" : "적용 중";
-    }
-    const auto reconstruction = renderer.GetReconstructionStatus();
-    const auto presentation = renderer.GetPresentationStatus();
-    const auto lighting = renderer.GetLightingStatus();
-    const auto streaming = renderer.GetTextureStreamingStatus();
-    const auto capabilities = renderer.GetGraphicsCapabilities();
-    if (presentation.availability == "available" && presentation.maximum_multiplier >= 2)
-        model->frame_generation_maximum = presentation.maximum_multiplier;
-    const auto choice = [&](SettingId id, std::string token, bool available, std::string reason) {
-        const auto found = std::ranges::find_if(model->choices, [&](const auto &c) {
-            return c.setting == id && c.token == token;
-        });
-        if (found == model->choices.end()) model->choices.push_back(
-            {id, token, token, std::move(reason), available});
-        else if (available || !found->available) { found->available = available; found->reason = std::move(reason); }
-    };
-    const auto status = [&](SettingId id, std::string effective, std::string reason) {
-        // Keep detailed native reasons in diagnostics; the settings page needs a short readable summary.
-        if (!reason.empty() && static_cast<unsigned char>(reason.front()) < 0x80)
-        {
-            const auto requested = GraphicsSettingToken(model->requested, id);
-            const auto selected = std::ranges::find_if(model->choices, [&](const auto &entry) {
-                return entry.setting == id && entry.token == requested;
-            });
-            reason = effective.empty() ? "적용 결과를 기다리는 중입니다"
-                : selected != model->choices.end() && !selected->available ? selected->reason
-                : requested == "auto" ? "현재 장치와 설정에 맞춰 자동으로 선택합니다"
-                : requested == effective ? "요청한 설정으로 적용했습니다"
-                : "현재 장치와 설정에서 가능한 값으로 적용했습니다";
-        }
-        model->resolved.push_back({id, std::move(effective), std::move(reason)});
-    };
-    constexpr std::array<std::pair<std::string_view, SettingId>, 12> capability_settings{{
-        std::pair<std::string_view, SettingId>{"sr_provider", SettingId::ReconstructionProvider},
-        {"reconstruction", SettingId::ReconstructionQuality},
-        {"fg_provider", SettingId::FrameGenerationProvider},
-        {"frame_generation", SettingId::FrameGenerationMode},
-        {"frame_generation_multiplier", SettingId::FrameGenerationMultiplier},
-        {"hdr", SettingId::HdrMode}, {"latency", SettingId::LowLatency},
-        {"ao", SettingId::AoMode}, {"gi", SettingId::GiMode},
-        {"reflection", SettingId::ReflectionMode}, {"shadow", SettingId::ShadowMode},
-        {"adaptive_shading", SettingId::AdaptiveShading}}};
-    const auto support_reason = [](GraphicsCapabilityReason reason) -> std::string {
-        switch (reason)
-        {
-        case GraphicsCapabilityReason::None: return "현재 장치와 설정에서 지원합니다";
-        case GraphicsCapabilityReason::Unsupported: return "현재 장치 또는 방식에서 지원하지 않습니다";
-        case GraphicsCapabilityReason::Unavailable: return "필요한 기능이 아직 준비되지 않았습니다";
-        case GraphicsCapabilityReason::MissingProvider: return "필요한 기능이 설치되어 있지 않습니다";
-        case GraphicsCapabilityReason::MissingDisplay: return "필요한 모니터를 사용할 수 없습니다";
-        case GraphicsCapabilityReason::Incompatible: return "현재 설정과 함께 사용할 수 없습니다";
-        case GraphicsCapabilityReason::BudgetLimited: return "현재 메모리 한도를 초과합니다";
-        case GraphicsCapabilityReason::Rejected: return "장치에서 설정 변경을 거부했습니다";
-        }
-        return "현재 사용할 수 없습니다";
-    };
-    for (const auto &entry : capabilities.options)
-    {
-        const std::string_view qualified = entry.option.value;
-        const auto separator = qualified.find(':');
-        if (separator == std::string_view::npos) continue;
-        const auto setting = std::ranges::find_if(capability_settings, [&](const auto &candidate) {
-            return candidate.first == qualified.substr(0, separator);
-        });
-        if (setting == capability_settings.end()) continue;
-        const auto token = qualified.substr(separator + 1);
-        choice(setting->second, std::string(token), entry.available, support_reason(entry.reason));
-        if (setting->second == SettingId::FrameGenerationMultiplier && entry.available)
-        {
-            std::uint32_t multiplier{};
-            const auto parsed = std::from_chars(token.data(), token.data() + token.size(), multiplier);
-            if (parsed.ec == std::errc{} && parsed.ptr == token.data() + token.size())
-                model->frame_generation_maximum = std::max(model->frame_generation_maximum.value_or(0), multiplier);
-        }
-    }
-    for (const auto &[category, id] : capability_settings)
-    {
-        static_cast<void>(category);
-        const auto token = GraphicsSettingToken(model->requested, id);
-        if (std::ranges::none_of(model->choices, [&](const auto &entry) {
-                return entry.setting == id && entry.token == token;
-            }))
-            choice(id, token, false, "저장된 선택은 현재 장치에서 사용할 수 없습니다");
-    }
-    std::vector<RendererDisplayOutput> displays;
-    const auto enumerated = EnumerateRendererDisplays(displays);
-    choice(SettingId::DisplayOutput, "auto", static_cast<bool>(enumerated), enumerated ? std::string("현재 창이 있는 모니터") : std::string("모니터 목록을 확인할 수 없습니다"));
-    choice(SettingId::OutputExtent, "auto", true, "현재 창 크기에 맞춥니다");
-    for (const auto &display : displays)
-    {
-        choice(SettingId::DisplayOutput, display.id, true, "사용할 수 있는 모니터");
-        const auto selected = std::ranges::find_if(model->choices, [&](const auto &entry) {
-            return entry.setting == SettingId::DisplayOutput && entry.token == display.id;
-        });
-        selected->label = std::format("모니터 {} ({}×{})", &display - displays.data() + 1,
-                                      display.width, display.height);
-        choice(SettingId::OutputExtent, std::format("{}x{}", display.width, display.height), true, "현재 모니터 해상도에 맞춥니다");
-    }
-    MONITORINFO monitor{sizeof(MONITORINFO)};
-    const auto renderer_hdr = canonical.actual_applied_available
-        ? canonical.actual_applied.hdr_mode == GraphicsHdrMode::On ? "HDR10" : "SDR"
-        : "확인 중";
-    model->telemetry_status[0] = std::format("모니터 확인 중 · 주사율 확인 중 · 모니터 HDR 확인 중 · 출력 {}", renderer_hdr);
-    if (GetMonitorInfoW(MonitorFromWindow(window_handle, MONITOR_DEFAULTTONEAREST), &monitor))
-        for (const auto &display : displays)
-            if (display.left == monitor.rcMonitor.left && display.top == monitor.rcMonitor.top &&
-                static_cast<std::int64_t>(display.left) + display.width == monitor.rcMonitor.right &&
-                static_cast<std::int64_t>(display.top) + display.height == monitor.rcMonitor.bottom)
-            {
-                status(SettingId::DisplayOutput, display.id, graphics.display_output.value == "auto" || graphics.display_output.value == display.id
-                    ? "현재 창이 있는 모니터에 적용했습니다" : "선택한 모니터를 사용할 수 없어 현재 모니터를 유지합니다");
-                double refresh_hz{};
-                const auto refresh = QueryWindowDisplayRefresh(window_handle, refresh_hz);
-                model->telemetry_status[0] = std::format("모니터 {} · 주사율 {} · 모니터 HDR {} · 출력 {}",
-                    std::format("{}", &display - displays.data() + 1), refresh ? std::format("{:.2f} Hz", refresh_hz) : std::string("확인 중"),
-                    display.hdr_active ? "켜짐" : "꺼짐", renderer_hdr);
-                break;
-            }
-    status(SettingId::HdrMode, canonical.actual_applied_available
-        ? GraphicsSettingToken(canonical.actual_applied, SettingId::HdrMode) : std::string{},
-        canonical.actual_applied_available
-            ? canonical.actual_applied.hdr_mode == GraphicsHdrMode::On
-                ? "HDR10 화면으로 출력합니다" : "일반 SDR 화면으로 출력합니다"
-            : "화면 설정의 적용 결과를 기다리는 중입니다");
-    choice(SettingId::DisplayOutput, graphics.display_output.value, false, "저장된 모니터를 현재 찾을 수 없습니다");
-    choice(SettingId::OutputExtent, GraphicsSettingToken(graphics, SettingId::OutputExtent), false, "직접 지정한 창 크기입니다");
-    status(SettingId::ReconstructionProvider, reconstruction.effective_provider.value, reconstruction.requested_availability + ": " + reconstruction.fallback_reason);
-    status(SettingId::ReconstructionQuality, reconstruction.effective_quality.value, reconstruction.fallback_reason);
-    status(SettingId::OutputExtent, std::format("{}x{}", reconstruction.output_extent.width, reconstruction.output_extent.height), "실제로 출력하는 해상도입니다");
-    status(SettingId::FrameGenerationProvider, presentation.effective_provider.value, presentation.availability + ": " + presentation.fallback_reason);
-    status(SettingId::FrameGenerationMode, std::string(GraphicsEnumToken(presentation.active_mode)), presentation.fallback_reason);
-    status(SettingId::FrameGenerationMultiplier, FrameGenerationMultiplierPolicyToken(presentation), presentation.maximum_multiplier
-        ? std::format("지원하는 프레임 생성 배수: 2~{}배", presentation.maximum_multiplier)
-        : presentation.requested.provider.value == "fsr" ? "이 방식은 배수를 직접 설정할 수 없습니다"
-        : "프레임 생성을 켜면 지원하는 배수를 확인합니다");
-    status(SettingId::LowLatency, presentation.low_latency_active ? "on" : "off", presentation.fallback_reason);
-    status(SettingId::AoMode, std::string(GraphicsEnumToken(lighting.active.ao_mode)), lighting.ao_fallback_reason);
-    status(SettingId::GiMode, std::string(GraphicsEnumToken(lighting.active.gi_mode)), lighting.gi_fallback_reason.empty() ? lighting.software_gi.reason : lighting.gi_fallback_reason);
-    status(SettingId::ReflectionMode, std::string(GraphicsEnumToken(lighting.active.reflection_mode)), lighting.reflection_fallback_reason);
-    status(SettingId::ShadowMode, std::string(GraphicsEnumToken(lighting.active.shadow_mode)), lighting.shadow_fallback_reason + "; " + lighting.local_shadows.reason);
-    const auto &adaptive = lighting.adaptive_shading;
-    status(SettingId::AdaptiveShading,
-        std::format("래스터 {} · 연산 {}", adaptive.raster_applied ? "켜짐" : "꺼짐", adaptive.compute_applied ? "켜짐" : "꺼짐"),
-        std::format("Requested {}; resolved raster {} / compute {}; ready raster {} / compute {}; usable {}; VRS tier {} / tile {}; {} bytes. Raster: {} Compute: {}",
-            GraphicsEnumToken(adaptive.requested), adaptive.raster_resolved, adaptive.compute_resolved,
-            adaptive.raster_ready, adaptive.compute_ready, adaptive.usable, adaptive.vrs_tier,
-            adaptive.vrs_tile_size, adaptive.allocated_bytes, adaptive.raster_reason, adaptive.compute_reason));
-    const auto streaming_reason = std::format("Ready {}; native asset I/O {}; sampler feedback {}; {} textures / {} physical bytes. {}",
-        streaming.ready, streaming.native_asset_io, streaming.sampler_feedback, streaming.texture_count,
-        streaming.physical_bytes, streaming.reason);
-    status(SettingId::TextureQuality, std::string(GraphicsEnumToken(streaming.applied_quality)), streaming_reason);
-    status(SettingId::TextureBudgetMib, streaming.applied_budget_mib ? std::to_string(streaming.applied_budget_mib) : "0", streaming_reason);
-    for (const auto &descriptor : GraphicsSettingDescriptors())
-        if (std::ranges::find(model->resolved, descriptor.id, &GraphicsUiStatus::setting) == model->resolved.end())
-            status(descriptor.id, canonical.actual_applied_available
-                ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{},
-                canonical.actual_applied_available ? "요청한 설정으로 적용했습니다" : "렌더러의 적용 결과를 기다리는 중입니다");
-    UpdateGraphicsTelemetry(*model, renderer.GetDiagnostics(), validation);
-    return model;
 }
 
 UiModel SettingsStatusText(std::string_view label, Float2 anchor,
@@ -742,7 +478,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         !loaded)
         return {loaded};
 #else
-    vfx_catalog.Bind(shipping::Vfx());
+    if (auto bound = vfx_catalog.Bind(shipping::Vfx()); !bound)
+        return {bound};
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
     PlaytestReplay replay;
@@ -1046,7 +783,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     }
     if (capture_clock)
         WriteText(config.artifact_directory / "runtime_capture.json", std::format(
-            "{{\"qpc_frequency\":{},\"audio_startup_us\":{},\"audio_startup_calls\":{},\"audio_startup_detail\":\"aggregate including preload and native initialization\",\"diagnostic_enemy_count\":{},\"scripted_input\":{},\"automatic_spawning\":{},\"capture_checksums\":{},\"cpu_scopes\":\"wall elapsed; nested inclusive\",\"audio_latency\":\"enqueue to API drain; worker request to verified Ready; XAudio2 latency is SDK estimate\",\"device_kernel_internal_time\":null,\"sleep_probe_requested_ms\":1,\"sleep_probe_begin_qpc\":{},\"sleep_probe_end_qpc\":{},\"sleep_probe_us\":{},\"os_thread_ready_qpc\":null}}\n",
+            "{{\"qpc_frequency\":{},\"audio_startup_us\":{},\"audio_startup_calls\":{},\"audio_startup_detail\":\"aggregate including preload and native initialization\",\"diagnostic_enemy_count\":{},\"scripted_input\":{},\"automatic_spawning\":{},\"capture_checksums\":{},\"cpu_scopes\":\"wall elapsed; nested inclusive; graph_software_scene_prepare excludes parallel shadow join; graph_local_shadow_prepare includes setup/join wait\",\"audio_latency\":\"enqueue to API drain; worker request to verified Ready; XAudio2 latency is SDK estimate\",\"device_kernel_internal_time\":null,\"sleep_probe_requested_ms\":1,\"sleep_probe_begin_qpc\":{},\"sleep_probe_end_qpc\":{},\"sleep_probe_us\":{},\"os_thread_ready_qpc\":null}}\n",
             capture_frequency.QuadPart, audio_startup.ticks * task_microseconds, audio_startup.calls,
             config.diagnostic_enemy_count, config.diagnostic_enemy_count != 0, config.diagnostic_enemy_count == 0,
             config.diagnostic_enemy_count == 0 && (config.smoke || config.record_playtest || !config.replay_directory.empty()),
@@ -1081,7 +818,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         (void)failure;
 #endif
     };
-    bool settings_persistence_rollback_requested{};
     const auto save_committed_settings = [&] {
         try
         {
@@ -1089,19 +825,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (auto saved = save_store.SaveSettingsV2(confirmation); !saved)
             {
                 log_settings_save_failure(saved);
-                settings_persistence_rollback_requested = true;
             }
             else
             {
                 settings_commit.ConfirmPersisted(std::move(confirmation));
-                settings_persistence_rollback_requested = false;
                 settings_save_failed.store(false, std::memory_order_release);
             }
         }
         catch (const std::bad_alloc &)
         {
             settings_save_failed.store(true, std::memory_order_release);
-            settings_persistence_rollback_requested = true;
 #ifdef HS_DEVELOPMENT_TOOLS
             OutputDebugStringA("Settings save allocation failed; last persisted profile retained.\n");
 #endif
@@ -1402,7 +1135,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #if defined(HS_DEVELOPMENT_TOOLS)
         runtime_detail::GenerationReloadWatch generation_reload_watch;
         // The future joins on teardown; the worker owns only file inputs and its read lease.
-        std::future<PreparedContentGeneration> generation_preparation;
+        std::future<runtime_detail::PreparedContentGeneration> generation_preparation;
         std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
         SceneGenerationBinding scene_generation{selected_generation.id, selected_generation.id, {}};
         auto next_generation_check = std::chrono::steady_clock::now();
@@ -1413,6 +1146,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::PreparedPairFacts vfx_pair_facts;
+        runtime_detail::SnapshotParticleScratch snapshot_particle_scratch;
         runtime_detail::VfxTypedFrameInputs typed_vfx;
         std::vector<PresentationEvent> frame_events, dispatched_event_scratch;
         std::vector<VfxScreenInput> typed_screen;
@@ -1439,6 +1173,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::vector<std::size_t> birth_order;
         runtime_detail::VfxRibbonInputScratch ribbon_inputs;
         runtime_detail::DecodedVfxState prepared_births;
+        std::vector<ParticleSpawnCommand> snapshot_particle_births;
         std::vector<runtime_detail::VfxEntitySurfaceEventCapture> surface_capture_inputs;
         std::vector<runtime_detail::VfxEntitySurfacePersistentCapture> surface_persistent;
         std::vector<runtime_detail::VfxGroundBirthSuppressionFacts> ground_birth_suppressions;
@@ -1470,11 +1205,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     Add(vfx_pair_facts.RetainedCapacityBytes(), Add(persistent_sparks.RetainedCapacityBytes(),
                         vfx_upgrade_movements.RetainedCapacityBytes())))));
             sample.raw_event_bytes = vfx_session.raw_events.LogicalCapacityBytes();
+            sample.retained_bytes = Add(sample.retained_bytes, snapshot_particle_scratch.RetainedCapacityBytes());
             sample.prepared_bytes = Add(prepared_births.LogicalCapacityBytes(),
                 Add(prepared_profiles.LogicalCapacityBytes(),
                     Add(Vector(profile_admission_plans),
                         Add(Vector(profile_additions), Vector(prepared_mote_bursts)))));
-            for (const auto bytes : {Vector(prepared_status_mote_bursts), Vector(prepared_flash_outputs),
+            for (const auto bytes : {Vector(snapshot_particle_births), Vector(prepared_status_mote_bursts), Vector(prepared_flash_outputs),
                     Vector(prepared_ballistic_bursts), Vector(prepared_legacy_events),
                     Vector(prepared_legacy_emitters), Vector(birth_requests), Vector(birth_order)})
                 sample.prepared_bytes = Add(sample.prepared_bytes, bytes);
@@ -1786,7 +1522,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             if (generation_ready)
             {
-                PreparedContentGeneration prepared;
+                runtime_detail::PreparedContentGeneration prepared;
                 try
                 {
                     prepared = generation_preparation.get();
@@ -1996,7 +1732,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             {
                 try
                 {
-                    generation_preparation = std::async(std::launch::async, PrepareContentGeneration,
+                    generation_preparation = std::async(std::launch::async, runtime_detail::PrepareContentGeneration,
                         generation_pointer, pointer_text, render_generation->id, render_generation->scope);
                 }
                 catch (const std::exception &error)
@@ -2221,7 +1957,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (performance_lines) simulation_wait_ticks = runtime_detail::PerformanceLogState::ElapsedTicks(simulation_wait_begin, read_performance_qpc());
                 if (auto simulated = renderer.SimulationCompleted(token); !simulated) { record_thread_failure(simulated); break; }
             }
-            // AcquireLatest below observes the simulation's completed publication.
+            // Acquire the selected snapshot before sampling the event prefix:
+            // its publication follows that tick's event pushes on the producer.
+            runtime_detail::DiagnosticScope snapshot_scope(vfx_work[1], capture_clock);
+            auto snapshots = snapshot_consumer.AcquireLatest();
+            snapshot_scope.Stop();
             runtime_detail::DiagnosticScope event_drain_scope(vfx_work[0], capture_clock);
             vfx_session.raw_events.DrainIngress(channels.presentation_events, [&](const PresentationEvent &event) {
                 if (capture_diagnostics) event_lines.Append(
@@ -2232,15 +1972,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 event.position.z));
             });
             event_drain_scope.Stop();
-            runtime_detail::DiagnosticScope snapshot_scope(vfx_work[1], capture_clock);
-            auto snapshots = snapshot_consumer.AcquireLatest();
 #if defined(HS_DEVELOPMENT_TOOLS)
             if (snapshots.has_previous)
                 snapshots.previous.static_scene = scene_generation.Resolve(snapshots.previous.static_scene);
             if (snapshots.has_current)
                 snapshots.current.static_scene = scene_generation.Resolve(snapshots.current.static_scene);
 #endif
-            snapshot_scope.Stop();
             if (renderer_settings_suspended)
             {
                 std::this_thread::yield();
@@ -2358,14 +2095,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto refresh_owner_event = [&](VfxEventInput &input) {
                     return runtime_detail::RefreshVfxGroundEventOwner(input,
                         current_vfx, snapshots.current.header.tick,
-                        &vfx_pair_facts, previous_vfx, sample_alpha);
+                        vfx_pair_facts, previous_vfx, sample_alpha);
                 };
                 runtime_detail::DiagnosticScope frame_adapter_scope(vfx_work[4], capture_clock);
                 runtime_detail::BuildVfxTypedFrameInputs(
                     vfx_catalog.Image(), frame_events,
                     current_vfx, previous_vfx,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
-                    typed_vfx, &vfx_pair_facts, sample_alpha, active_vfx_quality);
+                    typed_vfx, vfx_pair_facts, sample_alpha, active_vfx_quality);
                 frame_adapter_scope.Stop();
                 {
                     runtime_detail::DiagnosticScope movement_scope(vfx_work[6], capture_clock);
@@ -2382,6 +2119,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 };
                 runtime_detail::DiagnosticScope ground_birth_scope(vfx_work[11], capture_clock);
                 ground_birth_suppressions.clear();
+                // Birth-time eligibility and duplicate sequences differ from display-time ground outputs.
                 runtime_detail::AppendVfxTypedEventGroundBirthSuppression(
                     vfx_catalog.Image(), typed_vfx.events, ground_birth_suppressions);
                 std::ranges::sort(ground_birth_suppressions, {},
@@ -3181,12 +2919,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::DiagnosticScope mesh_scope(vfx_work[14], capture_clock);
                 typed_mesh_spawns.clear();
                 runtime_detail::AppendVfxTypedMeshCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, typed_mesh_spawns);
+                    vfx_catalog.Image(), vfx_catalog.MeshRecipeView(),
+                    typed_vfx.persistent, typed_mesh_spawns);
                 mesh_scope.Stop();
                 runtime_detail::DiagnosticScope fresnel_scope(vfx_work[22], capture_clock);
                 typed_fresnels.clear();
                 runtime_detail::AppendVfxTypedFresnelCommands(
-                    vfx_catalog.Image(), typed_vfx.persistent, typed_fresnels);
+                    vfx_catalog.Image(), vfx_catalog.FresnelRecipeView(),
+                    typed_vfx.persistent, typed_fresnels);
                 fresnel_scope.Stop();
                 runtime_detail::DiagnosticScope ribbon_scope(vfx_work[15], capture_clock);
                 active_effects.EraseIf(VfxEventProfile::Ribbon, [&](const VfxEventInput &input) {
@@ -3208,14 +2948,43 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 vfx_session.decoded.SortNewParticleSpawns(retained_particle_count);
                 const Tick stateful_target = current_snapshot.header.tick -
                     (snapshots.has_previous && sample_alpha < 1.0f && current_snapshot.header.tick != 0 ? 1u : 0u);
+                const bool rewound = (vfx_session.has_committed_stateful_target &&
+                    !vfx_session.particle_reset_pending && stateful_target < vfx_session.last_committed_stateful_target) ||
+                    (vfx_session.native_batch_active && stateful_target < vfx_session.native_batch.identity.stateful_target);
+                const bool reset_particles = rewound || vfx_session.particle_reset_pending ||
+                    !vfx_session.has_committed_stateful_target;
+                const bool new_world_step = reset_particles ||
+                    stateful_target != vfx_session.last_committed_stateful_target;
+                snapshot_particle_births.clear();
+                if ((!vfx_session.native_batch_active || rewound) && new_world_step)
+                {
+                    auto birth_alpha = sample_alpha;
+                    if (snapshots.has_previous && birth_alpha < 1.0f)
+                    {
+                        const auto previous_time = snapshots.previous.header.simulation_time;
+                        const auto duration = current_snapshot.header.simulation_time - previous_time;
+                        const auto display_time = previous_time + std::chrono::nanoseconds(
+                            static_cast<std::int64_t>(static_cast<double>(duration.count()) * birth_alpha));
+                        birth_alpha = static_cast<float>(static_cast<double>((display_time - previous_time).count()) /
+                            static_cast<double>(duration.count()));
+                    }
+                    runtime_detail::AppendPersistentSnapshotParticleBirths(snapshots,
+                        RenderVfxFrameInput{.ground = typed_ground_spawns, .ribbons = typed_ribbons},
+                        stateful_target, vfx_session.last_committed_stateful_target, reset_particles,
+                        birth_alpha, vfx_catalog.Image().sprite_bindings,
+                        config.slime_family_preview_count != 0, vfx_pair_facts,
+                        snapshot_particle_scratch, snapshot_particle_births);
+                }
                 auto *native_batch = vfx_session.PrepareNativeBatch(stateful_target,
                     !vfx_session.has_committed_stateful_target ||
-                    stateful_target != vfx_session.last_committed_stateful_target, &prepared_births);
+                    stateful_target != vfx_session.last_committed_stateful_target, &prepared_births,
+                    snapshot_particle_births);
                 const RenderVfxWorldBatch native_world = native_batch ? native_batch->identity :
                     RenderVfxWorldBatch{.session = current_snapshot.header.session_id,
                         .stateful_target = stateful_target};
                 const auto native_particles = native_batch
-                    ? std::span<const ParticleSpawnCommand>(native_batch->particle_spawns)
+                    ? std::span<const ParticleSpawnCommand>(native_batch->particle_spawns).subspan(
+                        config.slime_family_preview_count ? native_batch->decoded_particle_count : 0)
                     : std::span<const ParticleSpawnCommand>{};
                 const auto native_lines = native_batch
                     ? std::span<const VfxLineSpawnCommand>(native_batch->effect_lines)
@@ -3254,6 +3023,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         .ground = typed_ground_spawns,
                         .flashes = visible_flashes,
                         .meshes = typed_mesh_spawns,
+                        .mesh_recipe_view = vfx_catalog.MeshRecipeView(),
+                        .fresnel_recipe_view = vfx_catalog.FresnelRecipeView(),
                         .fresnels = typed_fresnels,
                         .ribbons = typed_ribbons,
                         .lights = typed_lights,
@@ -3934,6 +3705,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RenderSnapshotStorage dynamic_current(1'024, 256, 4, 0);
         bool has_dynamic_sample{};
         bool has_previous_dynamic_sample{};
+        std::vector<DomainSignal> retained_line_signals;
+        std::uint64_t retained_line_session{};
+        Sequence retained_line_sequence_high_water{};
+        Tick retained_line_last_tick{};
+        bool retained_line_state_initialized{};
         std::uint64_t display_clock_epoch{};
         RenderClockMode display_clock_mode{RenderClockMode::Scripted};
         std::uint64_t dynamic_pair_revision{};
@@ -3958,14 +3734,51 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 (model.arena_half_extent >= 14.0f ? MeadowGroundHeight({dynamic_current.camera.target.x,
                     dynamic_current.camera.target.z}) : 0.0f);
         };
+        const auto retain_line_signals = [&](const TickReadView &model) {
+            if (!retained_line_state_initialized || retained_line_session != model.session_id ||
+                model.tick < retained_line_last_tick)
+            {
+                retained_line_signals.clear();
+                retained_line_sequence_high_water = 0;
+                retained_line_session = model.session_id;
+                retained_line_state_initialized = true;
+            }
+            const auto is_line_signal = [](DomainSignalKind kind) {
+                switch (kind)
+                {
+                case DomainSignalKind::RicochetLinked:
+                case DomainSignalKind::BurnTransferred:
+                case DomainSignalKind::RelicChainLinked: return true;
+                default: return false;
+                }
+            };
+            std::erase_if(retained_line_signals, [&](const DomainSignal &signal) {
+                return signal.session_id != model.session_id || !is_line_signal(signal.kind) ||
+                    signal.tick + 11 <= model.tick;
+            });
+            for (const auto &signal : model.domain_signals)
+            {
+                if (signal.sequence <= retained_line_sequence_high_water) continue;
+                // Gameplay appends DomainSignals in sequence order. Advance over
+                // every event so repeated read seeds cannot re-admit an old line.
+                retained_line_sequence_high_water = signal.sequence;
+                if (!is_line_signal(signal.kind) || signal.session_id != model.session_id ||
+                    signal.tick > model.tick || signal.tick + 11 <= model.tick ||
+                    (signal.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) == 0)
+                    continue;
+                retained_line_signals.push_back(signal);
+            }
+            retained_line_last_tick = model.tick;
+        };
         {
             auto read_scope = simulation.BorrowTickReadView();
             const auto &model = read_scope.View();
+            retain_line_signals(model);
             // Seed the preceding endpoint without consuming or replaying pending events.
             enemy_animations.Update(model, {});
             footstep_timeline.Reset(model, enemy_animations.PlayerMotionEpoch());
             if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                    environment_cache.Resolve(model), &enemy_animations); !projected)
+                    environment_cache.Resolve(model), &enemy_animations, retained_line_signals); !projected)
             {
                 record_thread_failure(projected);
                 channels.simulation_done.store(true, std::memory_order_release);
@@ -4230,7 +4043,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
                 input_scope.Stop();
                 runtime_detail::DiagnosticScope tick_scope(simulation_work[2], capture_clock);
-                const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
+                const auto tick = simulation.TickFixed(input);
                 tick_scope.Stop();
 #ifdef HS_DEVELOPMENT_TOOLS
                 if (config.diagnostic_enemy_count)
@@ -4260,6 +4073,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         dynamic_current.header.session_id != model.session_id;
                     const bool tick_changed = !has_dynamic_sample ||
                         dynamic_current.header.tick != model.tick;
+                    retain_line_signals(model);
                     const bool project_dynamic = new_session || tick_changed || tick.world_changed ||
                         forced_dynamic_refresh || harness_added != 0;
                     if (project_dynamic)
@@ -4398,7 +4212,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
                         if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                                environment_cache.Resolve(model), &enemy_animations); !projected)
+                                environment_cache.Resolve(model), &enemy_animations, retained_line_signals); !projected)
                         {
                             record_thread_failure(projected);
                             break;
@@ -4728,7 +4542,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     };
     const auto restore_display_mode = [&] {
         if (!rollback_window_placement()) return false;
-        settings_commit.RollbackUnpersisted();
+        settings_commit.RestorePersistedDisplay();
         display_restoring = true;
         display_generation = 0;
         display_modal_phase.store(GraphicsUiPhase::RestoringDisplay,
@@ -5008,17 +4822,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
         display_confirm_clicked = false;
         display_cancel_clicked = false;
-        if (settings_persistence_rollback_requested && !settings_commit.HasPending())
-        {
-            settings_commit.RollbackUnpersisted();
-            settings_persistence_rollback_requested = false;
-            if (window_display_graphics.display_output != settings_commit.ApplyTargetGraphics().display_output ||
-                window_display_graphics.output_extent != settings_commit.ApplyTargetGraphics().output_extent ||
-                window_borderless != settings_commit.ApplyTargetEffective().borderless)
-                (void)rollback_window_placement();
-            graphics_ui_phase.store(GraphicsUiPhase::RestoringDisplay, std::memory_order_release);
-            presentation_settings_changed = true;
-        }
         if (settings_commit.HasPending() && !settings_commit.TimedOut() &&
             std::chrono::steady_clock::now() >= settings_request_deadline)
         {
@@ -5181,7 +4984,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     : phase == GraphicsUiPhase::RestoringDisplay ? "이전 화면 설정을 복원하는 중입니다"
                     : phase == GraphicsUiPhase::ApplyFailed ? "적용할 수 없어 이전 설정을 유지합니다"
                     : receipt ? "적용 및 저장 완료 · 값이나 − / + 버튼으로 변경하세요" : "렌더러 상태를 확인하는 중입니다";
-                model->transaction_state = std::string(state) + (save_failure ? " · 저장 실패: 이전 설정을 복원합니다" : "");
+                model->transaction_state = std::string(state) + (save_failure ? " · 저장 실패: 적용 상태는 유지됩니다" : "");
                 if (receipt && receipt->generation != settings_commit.CommittedGeneration())
                     model->transaction_state += " · 새 적용 결과를 기다리는 중입니다";
                 if (settings_commit.FollowupRejected()) model->transaction_state += " · 함께 사용할 수 없는 변경은 취소했습니다";

@@ -868,23 +868,9 @@ class D3D12Renderer
     [[nodiscard]] Result CaptureVisibilityDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result ApplyOptions(const RendererOptions &options);
     [[nodiscard]] Result InitializeGraphicsSettings(const GraphicsSettings &);
-    [[nodiscard]] Result RenderView(const RenderSnapshotPair &snapshots,
-                                std::span<const ParticleSpawnCommand> particle_spawns,
-                                std::span<const VfxLineSpawnCommand> effect_lines,
-                                std::uint32_t typed_vfx_event_count,
-                                std::uint32_t typed_vfx_persistent_count,
-                                std::span<const VfxGroundSpawnInput> typed_ground_spawns,
-                                std::span<const VfxFlashSpawnInput> typed_flash_spawns,
-                                std::span<const VfxOwnedMeshInput> typed_mesh_spawns,
-                                std::span<const VfxFresnelInput> typed_fresnels,
-                                const VfxRibbonFrameInput &typed_ribbons,
-                                std::span<const VfxLightInput> typed_lights,
-                                std::span<const VfxDistortionInput> typed_distortions,
-                                std::span<const VfxDecalInput> typed_decals,
-                                const DevToolsFrameData &devtools,
-                                RendererFrameResult &frame_result,
-                                VfxVolumeInputs typed_volumes = {}, VfxScreenInputs typed_screen = {},
-                                VfxEntitySurfaceInputs typed_entity_surfaces = {});
+    struct CanonicalFrame;
+    [[nodiscard]] Result RenderView(const CanonicalFrame &, const RenderViewInput &,
+                                    bool consume_scene_inputs, float view_delta_seconds, RendererFrameResult &);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

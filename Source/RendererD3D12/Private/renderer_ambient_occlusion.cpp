@@ -71,18 +71,23 @@ bool SupportsPreparedInverseW(const DirectX::XMFLOAT4X4 &inverse) noexcept
 {
     return SupportsFastAoUnprojection(inverse) && inverse._33 == 0.0f && inverse._43 > 0.0f;
 }
-bool FitsGuide(const AmbientOcclusionGuide &guide, ViewExtent active, DXGI_FORMAT format)
+bool FitsGuide(const RenderGraphBuilder &graph,const AmbientOcclusionGuide &guide, ViewExtent active, DXGI_FORMAT format)
 {
-    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture)
+    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(guide.version.resource)!=guide.resource)
         return false;
-    const auto d = guide.resource->GetDesc();
-    return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize == 1 &&
-        d.SampleDesc.Count == 1 && d.Width >= active.width && d.Height >= active.height && d.Format == format;
+    const auto d=graph.ResourceDescription(guide.version.resource);
+    return d&&d->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d->DepthOrArraySize==1&&
+        d->SampleDesc.Count==1&&d->Width>=active.width&&d->Height>=active.height&&d->Format==format;
 }
-bool FitsDepth(const AmbientOcclusionGuide &guide, ViewExtent active)
+bool FitsDepth(const RenderGraphBuilder &graph,const AmbientOcclusionGuide &guide, ViewExtent active)
 {
-    return FitsGuide(guide, active, DXGI_FORMAT_R32_TYPELESS) ||
-        FitsGuide(guide, active, DXGI_FORMAT_D32_FLOAT) || FitsGuide(guide, active, DXGI_FORMAT_R32_FLOAT);
+    if(!guide.resource||!guide.version.resource||guide.version.resource.kind!=ResourceKind::Texture||
+        graph.Resolve(guide.version.resource)!=guide.resource)return false;
+    const auto d=graph.ResourceDescription(guide.version.resource);
+    return d&&d->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d->DepthOrArraySize==1&&d->SampleDesc.Count==1&&
+        d->Width>=active.width&&d->Height>=active.height&&
+        (d->Format==DXGI_FORMAT_R32_TYPELESS||d->Format==DXGI_FORMAT_D32_FLOAT||d->Format==DXGI_FORMAT_R32_FLOAT);
 }
 Result CheckUavFormat(ID3D12Device *device, DXGI_FORMAT format)
 {
@@ -403,17 +408,16 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         inputs.frame_slot >= storage->frame_slot_count ||
         !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return AoFailure(ErrorCode::InvalidArgument, "AO active extent or completed frame slot is invalid.");
-    if (!FitsDepth(inputs.depth, active) || !FitsGuide(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) ||
-        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
-        (storage->ao_enabled && (!FitsGuide(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
-                                !FitsGuide(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT))))
+    if (!FitsDepth(graph,inputs.depth,active) || !FitsGuide(graph,inputs.normal,active,DXGI_FORMAT_R16G16_SNORM) ||
+        !FitsGuide(graph,inputs.metadata,active,DXGI_FORMAT_R32_UINT) ||
+        (storage->ao_enabled && (!FitsGuide(graph,inputs.motion,active,DXGI_FORMAT_R16G16_FLOAT) ||
+                                !FitsGuide(graph,inputs.surface_history,active,DXGI_FORMAT_R32G32_FLOAT))))
         return AoFailure(ErrorCode::InvalidArgument, "AO guide resource, version, format or active extent is invalid.");
     const std::array guides{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
         inputs.motion.version, inputs.surface_history.version, inputs.adaptive_density.version};
     if (capture) capture->guides = guides;
     const ViewExtent density_active{(active.width+7)/8,(active.height+7)/8};
-    if(storage->adaptive_compute&&(!FitsGuide(inputs.adaptive_density,density_active,DXGI_FORMAT_R8_UINT)||
-        graph.Resolve(inputs.adaptive_density.version.resource)!=inputs.adaptive_density.resource))
+    if(storage->adaptive_compute&&!FitsGuide(graph,inputs.adaptive_density,density_active,DXGI_FORMAT_R8_UINT))
         return AoFailure(ErrorCode::InvalidArgument,"Selected adaptive GTAO requires its actual current R8 tile8 density graph image.");
     if (!std::isfinite(constants.gtao_parameters.x) || constants.gtao_parameters.x <= 0.0f ||
         !std::isfinite(constants.gtao_parameters.y) || constants.gtao_parameters.y < 0.0f || constants.gtao_parameters.y > 1.0f ||

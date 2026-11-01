@@ -1,6 +1,5 @@
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
-#include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/process_info.hpp>
 
@@ -627,7 +626,7 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
             return MakeCombatInput(before, read.View().enemies, target_tick, control);
         }();
         const auto started = std::chrono::steady_clock::now();
-        const auto tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto tick = simulation.TickFixed(input);
         tick_microseconds.push_back(static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count()));
@@ -978,7 +977,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
             auto read = simulation.BorrowTickReadView();
             return MakeCombatInput(before, read.View().enemies, target_tick, control);
         }();
-        (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        (void)simulation.TickFixed(input);
         simulation.ClearDomainSignals();
         const auto after = simulation.GetObservation();
         constexpr std::array phase_boundaries{hs::Tick{300 * 60},

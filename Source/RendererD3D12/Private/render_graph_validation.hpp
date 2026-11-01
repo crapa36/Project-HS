@@ -29,7 +29,6 @@ struct ResourceInfo
     std::uint32_t mip_count{1};
     std::uint32_t array_count{1};
     std::uint32_t plane_count{1};
-    std::uintptr_t imported_identity{};
     bool final_set{};
     ResourceVersion final_version{};
     // D3D12 allocation properties supplied by the backend. These are kept out

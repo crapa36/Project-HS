@@ -26,6 +26,131 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
+void TestSnapshotStatusBirthDisplaySample()
+{
+    std::array<hs::RenderInstance, 2> previous{}, current{};
+    previous[0].stable_id = current[0].stable_id = 1;
+    previous[0].position.x = 2; current[0].position.x = 6;
+    previous[0].scale = current[0].scale = {1, 1, 1};
+    previous[0].status_visual_mask = static_cast<std::uint32_t>(hs::StatusVisual::Slow);
+    previous[1].stable_id = 2;
+    previous[1].position.x = 8;
+    previous[1].scale = {1, 1, 1};
+    previous[1].status_visual_mask = static_cast<std::uint32_t>(hs::StatusVisual::Mark);
+    current[1].stable_id = 3;
+    current[1].status_visual_mask = static_cast<std::uint32_t>(hs::StatusVisual::Slow);
+    hs::RenderSnapshotPair pair;
+    pair.previous.instances = previous;
+    pair.current.instances = current;
+    pair.has_previous = pair.has_current = true;
+    hs::runtime_detail::SnapshotParticleScratch scratch;
+    hs::runtime_detail::PreparedPairFacts facts;
+    facts.Prepare({}, pair.previous.persistent_vfx, pair.current.persistent_vfx, {}, {});
+    std::vector<hs::ParticleSpawnCommand> births;
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {}, 9, 8, false,
+        0.5f, {}, false, facts, scratch, births);
+    Check(births.size() == 2 && births[0].position.x == 4 && births[1].position.x == 8,
+        "status births use displayed previous mask, interpolated pose and departing owner");
+    current[0].motion_epoch = 1;
+    births.clear();
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {}, 9, 8, false,
+        0.5f, {}, false, facts, scratch, births);
+    Check(births.size() == 2 && births[0].position.x == 2,
+        "status births hold the old pose across a motion epoch change");
+}
+
+void TestPersistentVisualInterpolationUsesFirstDuplicate()
+{
+    hs::PersistentVfxVisual previous_first{};
+    previous_first.stable_id = 77;
+    previous_first.kind = hs::PersistentVfxKind::TrapPending;
+    previous_first.position.x = 2.0f;
+    hs::PersistentVfxVisual previous_duplicate = previous_first;
+    previous_duplicate.position.x = 10.0f;
+    hs::PersistentVfxVisual current = previous_first;
+    current.position.x = 40.0f;
+
+    hs::RenderSnapshotPair pair;
+    const std::array previous_visuals{previous_first, previous_duplicate};
+    pair.has_previous = pair.has_current = true;
+    pair.previous.persistent_vfx = previous_visuals;
+    pair.current.persistent_vfx = std::span(&current, 1);
+    hs::runtime_detail::SnapshotParticleScratch scratch;
+    hs::runtime_detail::PreparedPairFacts facts;
+    facts.Prepare({}, pair.previous.persistent_vfx, pair.current.persistent_vfx, {}, {});
+    std::vector<hs::ParticleSpawnCommand> births;
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {}, 9, 8, false,
+        0.5f, {}, false, facts, scratch, births);
+    Check(births.size() == 1 && births.front().position.x == 21.0f,
+          "persistent visual interpolation did not use the first previous duplicate");
+}
+
+void TestSnapshotGroundRoutesPreserveDuplicateOwnersAndAccents()
+{
+    std::array<hs::RenderInstance, 2> instances{};
+    std::array<hs::PersistentVfxVisual, 3> visuals{};
+    for (std::size_t index = 0; index < instances.size(); ++index)
+    {
+        instances[index].stable_id = index + 1;
+        instances[index].scale = {1, 1, 1};
+        instances[index].status_visual_mask = static_cast<std::uint32_t>(hs::StatusVisual::Slow);
+        visuals[index].stable_id = 40;
+        visuals[index].kind = hs::PersistentVfxKind::EnemySlowStatus;
+        visuals[index].entity_render_id = index + 1;
+        visuals[index].status_episode_generation = 1;
+        visuals[index].active_tick = 1;
+        visuals[index].expires = 20;
+    }
+    visuals[2].stable_id = 50;
+    visuals[2].kind = hs::PersistentVfxKind::FireArea;
+    visuals[2].radius = 1;
+    hs::RenderSnapshotPair pair;
+    pair.has_current = true;
+    pair.current.instances = instances;
+    pair.current.persistent_vfx = visuals;
+    hs::runtime_detail::PreparedPairFacts facts;
+    facts.Prepare({}, {}, visuals, {}, {});
+    hs::runtime_detail::SnapshotParticleScratch scratch;
+    std::vector<hs::ParticleSpawnCommand> births;
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {}, 9, 8, false,
+        1, {}, false, facts, scratch, births);
+    Check(births.size() == 4, "missing typed routes must retain both status births and fire outputs");
+
+    std::array<hs::VfxGroundSpawnInput, 2> ground{};
+    ground[0].stable_id = 40;
+    ground[0].source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::EnemySlowStatus);
+    ground[0].geometry.shape = hs::VfxGroundShape::PolarRune;
+    ground[1].stable_id = 50;
+    ground[1].source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::FireArea);
+    ground[1].geometry.shape = hs::VfxGroundShape::Circle;
+    ground[1].command.primitive = hs::VfxPrimitive::ExactRing;
+    births.clear();
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {.ground = ground}, 9, 8, false,
+        1, {}, false, facts, scratch, births);
+    Check(births.size() == 1 && births[0].primitive == hs::VfxPrimitive::Flame,
+        "typed outputs cover duplicate status owners and fire ring while retaining fire interior");
+    ground[1].command.primitive = hs::VfxPrimitive::Disc;
+    births.clear();
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {.ground = ground}, 9, 8, false,
+        1, {}, false, facts, scratch, births);
+    Check(births.size() == 2 && births[0].primitive == hs::VfxPrimitive::Ring,
+        "a non-exact typed circle must not suppress the legacy ring");
+    ground[1].command.primitive = hs::VfxPrimitive::ExactRing;
+    births.clear();
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {.ground = ground}, 9, 8, false,
+        1, {}, true, facts, scratch, births);
+    Check(births.size() == 4, "preview must retain legacy status and circle outputs");
+    visuals[2].kind = hs::PersistentVfxKind::ChargeGuide;
+    visuals[2].length = 2;
+    ground[1].source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::ChargeGuide);
+    ground[1].geometry.shape = hs::VfxGroundShape::LineBorder;
+    facts.Prepare({}, {}, visuals, {}, {});
+    births.clear();
+    hs::runtime_detail::AppendPersistentSnapshotParticleBirths(pair, {.ground = ground}, 9, 8, false,
+        1, {}, false, facts, scratch, births);
+    Check(births.empty(), "typed line border retains the existing whole-guide suppression");
+}
+
 void TestUniformGapFormulaMatchesExpandedAngles()
 {
     const std::array offsets{-725.0f,-360.0f,-0.0f,0.0f,7.0f,359.0f,719.0f,
@@ -199,17 +324,17 @@ void TestFrameInputStorageReused()
     event.kind = hs::PresentationKind::Vfx;
     event.asset = {effect_id};
     event.parameters = hs::EncodeVfxParameters({{0.0f, 0.0f, 1.0f}, 1.0f, {}, {}});
-    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4,
-        result, nullptr, 1.0f, hs::VfxQuality::Low);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(image, std::array{event}, {}, {}, 4,
+        result, 1.0f, hs::VfxQuality::Low);
     Check(result.events.size() == 1 && result.persistent.empty() &&
               result.unsupported_effect_ids.empty() && result.events.front().quality == hs::VfxQuality::Low,
           "reused frame inputs retained previous payloads or diagnostics");
-    hs::runtime_detail::BuildVfxTypedFrameInputs(image, std::array{event}, {}, {}, 4,
-        result, nullptr, 1.0f, hs::VfxQuality::Medium);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(image, std::array{event}, {}, {}, 4,
+        result, 1.0f, hs::VfxQuality::Medium);
     Check(result.events.size() == 1 && result.events.front().quality == hs::VfxQuality::Medium &&
           result.events.data() == events_storage,
           "frame quality change retained default High or replaced reusable storage");
-    hs::runtime_detail::BuildVfxTypedFrameInputs(image, {}, {}, {}, 5, result);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(image, {}, {}, {}, 5, result);
     Check(result.events.empty() && result.events.data() == events_storage &&
               result.persistent.data() == persistent_storage &&
               result.unsupported_effect_ids.data() == unsupported_storage,
@@ -615,8 +740,8 @@ void TestSafeSectorFanout()
           "maximum source gap fanout lost its sector order or original ring");
     const auto fanout_capacity = maximum.events.capacity();
     const auto *fanout_data = maximum.events.data();
-    hs::runtime_detail::BuildVfxTypedFrameInputs(hs::test::VfxLookupImage(program),
-        std::array{many_gaps}, {}, {}, 40, maximum, nullptr, 1.0f, hs::VfxQuality::Low);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(hs::test::VfxLookupImage(program),
+        std::array{many_gaps}, {}, {}, 40, maximum, 1.0f, hs::VfxQuality::Low);
     Check(maximum.events.size() == 256 && maximum.events.capacity() == fanout_capacity &&
           maximum.events.data() == fanout_data && maximum.events[254].geometry_sector_index == 254 &&
           maximum.events.back().effect_handle == 1 &&
@@ -627,7 +752,7 @@ void TestSafeSectorFanout()
     owner.position = event.position; owner.radius = 5; owner.ring_inner_radius = 1.7f; owner.ring_outer_radius = 5;
     owner.active_tick = 10; owner.expires = 83; owner.gap_count = 2;
     owner.gap_half_angle_degrees = 20; owner.gap_offset_degrees = 0;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(markers, std::array{owner}, 40);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(markers, std::array{owner}, 40);
     Check(markers.size() == 2 &&
           std::get<hs::VfxSafeSectorPayload>(markers[1].payload).direction.x < -0.999f,
           "safe sector refresh did not update angle or remove invalid sector index");
@@ -639,7 +764,7 @@ void TestSafeSectorFanout()
     Check(markers.size() == 2 && markers[1].effect_handle == 3 && markers[1].geometry_sector_index == 1,
           "safe sector reload lost index or exact recipe identity");
     auto cancelled = markers;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(cancelled, {}, 41);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(cancelled, {}, 41);
     Check(cancelled.empty(), "safe sector survived cancelled owner");
     reloaded.effects[2].timing_kind = 0;
     hs::runtime_detail::RebindVfxGroundEventOwners(hs::test::VfxLookupImage(reloaded), markers);
@@ -679,21 +804,21 @@ void TestSafeSectorRefreshUsesRingOracleAndStaysCompact()
 
     auto ring_event = built.events.back();
     std::vector<hs::VfxEventInput> retained_ring{ring_event};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(
-        retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(
+        retained_ring, current_owner, 40, previous_owner, .25f);
     auto &ring = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
     Check(ring.GapCount() == 255 && ring.gap_angles_degrees.capacity() == 0,
           "refreshed ring lost maximum source gaps or allocated angle items");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(
-        retained_ring, current_owner, 40, nullptr, previous_owner, .25f);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(
+        retained_ring, current_owner, 40, previous_owner, .25f);
     Check(std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).GapCount() == 255 &&
           std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload).gap_angles_degrees.capacity() == 0,
           "repeated ring refresh materialized angle storage");
 
     auto sector_event = built.events[254];
     Check(sector_event.geometry_sector_index == 254 &&
-          hs::runtime_detail::RefreshVfxGroundEventOwner(
-              sector_event, current_owner, 40, nullptr, previous_owner, .25f),
+          hs::runtime_detail::RefreshVfxGroundEventOwnerFromRaw(
+              sector_event, current_owner, 40, previous_owner, .25f),
           "maximum indexed sector did not refresh");
     const auto &sector = std::get<hs::VfxSafeSectorPayload>(sector_event.payload);
     const auto &oracle = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
@@ -709,9 +834,9 @@ void TestSafeSectorRefreshUsesRingOracleAndStaysCompact()
     current.gap_count = 128;
     const std::array fewer_gaps{current};
     auto removed = built.events[254];
-    Check(!hs::runtime_detail::RefreshVfxGroundEventOwner(removed, fewer_gaps, 40),
+    Check(!hs::runtime_detail::RefreshVfxGroundEventOwnerFromRaw(removed, fewer_gaps, 40),
           "sector index outside decreased owner gap count remained valid");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(retained_ring, fewer_gaps, 40);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(retained_ring, fewer_gaps, 40);
     const auto &shrunk = std::get<hs::VfxRingGapsPayload>(retained_ring.front().payload);
     Check(shrunk.GapCount() == 128 && shrunk.gap_angles_degrees.capacity() == 0,
           "decreased ring gap count materialized angle storage");
@@ -736,7 +861,7 @@ void TestShockwaveWarningOwner()
     owner.position = event.position; owner.radius = 5; owner.ring_inner_radius = 1.7f; owner.ring_outer_radius = 5;
     owner.active_tick = 10; owner.expires = 83; owner.gap_count = 3;
     owner.gap_half_angle_degrees = 20; owner.gap_offset_degrees = 359;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(inputs.events, std::array{owner}, 40);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(inputs.events, std::array{owner}, 40);
     Check(inputs.events.size() == 1, "shockwave warning owner missing");
     const auto &ring = std::get<hs::VfxRingGapsPayload>(inputs.events[0].payload);
     Check(ring.center.x == 3 && ring.center.z == 4 && ring.inner_radius == 1.7f && ring.outer_radius == 5 &&
@@ -750,7 +875,7 @@ void TestShockwaveWarningOwner()
     Check(inputs.events.size() == 1 && inputs.events[0].effect_handle == 2 &&
           inputs.events[0].geometry_owner_id == 831 && inputs.events[0].event_tick == 10,
           "shockwave reload lost exact identity or restarted lifetime");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(inputs.events, {}, 41);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(inputs.events, {}, 41);
     Check(inputs.events.empty(), "cancelled shockwave warning survived missing owner");
     Check(hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{owner}, {}, 40).persistent.empty(),
           "shockwave warning incorrectly used persistent recipe mode");
@@ -780,18 +905,27 @@ void TestShockwaveWavefrontBinding()
           ring.GapAngleDegrees(1) == 119 && ring.GapAngleDegrees(2) == 239,
           "wavefront payload changed actual annulus, gap rotation or owner age");
     const std::array retained{visual};
+    hs::runtime_detail::PreparedPairFacts retained_pair_facts;
+    retained_pair_facts.Prepare({.session_id = 1, .previous_publication = 1, .current_publication = 2},
+        retained, retained, {}, {});
     const auto between = hs::test::BuildFrameInputs(
-        hs::test::VfxLookupImage(program), {}, retained, retained, 120, nullptr, 0.5f);
+        hs::test::VfxLookupImage(program), {}, retained, retained, 120, retained_pair_facts, 0.5f);
     Check(between.persistent.size() == 1 &&
               std::abs(between.persistent.front().normalized_age - 19.5f / 40.0f) < 0.0001f,
           "persistent age was rounded to a simulation endpoint");
+    hs::runtime_detail::PreparedPairFacts new_owner_pair_facts;
+    new_owner_pair_facts.Prepare({.session_id = 1, .previous_publication = 2, .current_publication = 3},
+        {}, retained, {}, {});
     Check(hs::test::BuildFrameInputs(
-              hs::test::VfxLookupImage(program), {}, retained, {}, 120, nullptr, 0.5f).persistent.empty(),
+              hs::test::VfxLookupImage(program), {}, retained, {}, 120, new_owner_pair_facts, 0.5f).persistent.empty(),
           "new owner appeared before its current endpoint");
+    hs::runtime_detail::PreparedPairFacts removed_owner_pair_facts;
+    removed_owner_pair_facts.Prepare({.session_id = 1, .previous_publication = 3, .current_publication = 4},
+        retained, {}, {}, {});
     Check(hs::test::BuildFrameInputs(
-              hs::test::VfxLookupImage(program), {}, {}, retained, 120, nullptr, 0.5f).persistent.size() == 1 &&
+              hs::test::VfxLookupImage(program), {}, {}, retained, 120, removed_owner_pair_facts, 0.5f).persistent.size() == 1 &&
           hs::test::BuildFrameInputs(
-              hs::test::VfxLookupImage(program), {}, {}, retained, 120).persistent.empty(),
+              hs::test::VfxLookupImage(program), {}, {}, retained, 120, removed_owner_pair_facts).persistent.empty(),
           "removed owner did not end at its current endpoint");
     visual.gap_count = 0; visual.gap_half_angle_degrees = 0;
     const auto continuous = hs::test::BuildFrameInputs(hs::test::VfxLookupImage(program), {}, std::array{visual}, {}, 100);
@@ -906,8 +1040,8 @@ void TestUpgradeSlowAreaAliases()
           "trap landing slow did not submit distinct alias and bound base owners");
     const auto &trap_input = trap_result.persistent.front();
     hs::runtime_detail::VfxTypedFrameInputs medium_trap;
-    hs::runtime_detail::BuildVfxTypedFrameInputs(hs::test::VfxLookupImage(program),
-        {}, std::array{trap}, {}, 130, medium_trap, nullptr, 1.0f, hs::VfxQuality::Medium);
+    hs::runtime_detail::BuildVfxTypedFrameInputsFromRaw(hs::test::VfxLookupImage(program),
+        {}, std::array{trap}, {}, 130, medium_trap, 1.0f, hs::VfxQuality::Medium);
     Check(medium_trap.persistent.size() == 2 &&
           std::ranges::all_of(medium_trap.persistent, [](const auto &input) {
               return input.quality == hs::VfxQuality::Medium;
@@ -1333,9 +1467,9 @@ void TestWarningOwnerRefresh()
     const std::array owners{owner, unrelated};
     hs::runtime_detail::PreparedPairFacts facts;
     facts.Prepare({}, {}, owners, {}, {});
-    hs::runtime_detail::RefreshVfxGroundEventOwners(events, owners, 130, &facts);
+    hs::runtime_detail::RefreshVfxGroundEventOwners(events, owners, 130, facts);
     auto refreshed_single = line;
-    Check(hs::runtime_detail::RefreshVfxGroundEventOwner(refreshed_single, owners, 130, &facts),
+    Check(hs::runtime_detail::RefreshVfxGroundEventOwner(refreshed_single, owners, 130, facts),
           "single owner refresh discarded a valid warning");
     Check(events.size() == 2 && events[1].geometry_owner_id == original_sibling.geometry_owner_id,
           "owner refresh removed or altered an unrelated event");
@@ -1358,16 +1492,16 @@ void TestWarningOwnerRefresh()
     auto next_owner = owner;
     next_owner.yaw = -3.0f;
     auto moving = events;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(
-        moving, std::array{next_owner}, 131, nullptr, std::array{prior_owner}, 0.5f);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(
+        moving, std::array{next_owner}, 131, std::array{prior_owner}, 0.5f);
     const auto &middle_line = std::get<hs::VfxLinePayload>(moving.front().payload);
     Check(std::abs((middle_line.start.x + middle_line.end.x) * 0.5f - 3.0f) < 0.0001f &&
               std::abs(middle_line.width - 0.8f) < 0.0001f && middle_line.direction.z < -0.99f,
           "warning geometry did not share display interpolation or shortest-arc rotation");
     auto retiring = events;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(retiring, {}, 131, nullptr, owners, 0.5f);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(retiring, {}, 131, owners, 0.5f);
     Check(retiring.size() == 2, "warning owner vanished before its removal endpoint");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(retiring, {}, 131);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(retiring, {}, 131);
     Check(retiring.size() == 1 && retiring.front().geometry_owner_id == 0,
           "warning owner survived its removal endpoint");
 
@@ -1376,11 +1510,11 @@ void TestWarningOwnerRefresh()
     std::vector future_events{future};
     hs::PersistentVfxVisual absent = owner;
     absent.stable_id = 700;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(future_events, std::array{absent}, 130);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(future_events, std::array{absent}, 130);
     Check(future_events.size() == 1 && future_events[0].event_tick == 500,
           "future warning event was erased before its event tick");
     std::vector cancelled{line};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(
         cancelled, std::span<const hs::PersistentVfxVisual>{}, 130);
     Check(cancelled.empty(), "cancelled warning owner remained in the event stream");
 
@@ -1399,7 +1533,7 @@ void TestWarningOwnerRefresh()
     cone_owner.cone_half_angle_degrees = 73.0f;
     SetLifetime(cone_owner, 100, 180);
     std::vector cone_events{cone};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(cone_events, std::array{cone_owner}, 120);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(cone_events, std::array{cone_owner}, 120);
     Check(cone_events.size() == 1, "cone warning owner was rejected");
     const auto &updated_cone = std::get<hs::VfxConePayload>(cone_events[0].payload);
     Check(std::abs(updated_cone.origin.x + 2.0f) < 0.0001f &&
@@ -1407,7 +1541,7 @@ void TestWarningOwnerRefresh()
               std::abs(updated_cone.half_angle_degrees - 73.0f) < 0.0001f,
           "cone warning was not retargeted from its live owner");
     cone_owner.kind = hs::PersistentVfxKind::BossDashWarning;
-    hs::runtime_detail::RefreshVfxGroundEventOwners(cone_events, std::array{cone_owner}, 120);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(cone_events, std::array{cone_owner}, 120);
     Check(cone_events.empty(), "wrong owner warning kind was accepted");
 
     hs::VfxEventInput retained_line = line;
@@ -1465,7 +1599,7 @@ void TestRangedWarningIdentity()
           "ranged stable recipe identity was lost");
     auto boss = decoded.events[0]; boss.geometry_effect_id = dash_id; boss.effect_handle = 1;
     std::vector events{decoded.events[0], boss};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(events, std::array{dash, ranged}, 120);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(events, std::array{dash, ranged}, 120);
     Check(events.size() == 2 && std::abs(std::get<hs::VfxLinePayload>(events[0].payload).start.x - 3) < .0001f &&
           std::abs(std::get<hs::VfxLinePayload>(events[1].payload).start.x - 99) < .0001f,
           "same-ID ranged and boss line owners were confused");
@@ -1476,7 +1610,7 @@ void TestRangedWarningIdentity()
     Check(events.size() == 2 && events[0].effect_handle == 1 && events[1].effect_handle == 2 &&
           events[0].geometry_effect_id == ranged_id && events[0].geometry_start_tick == 100 && events[0].geometry_end_tick == 140,
           "catalog reordering confused the two line recipes or reset owner clocks");
-    hs::runtime_detail::RefreshVfxGroundEventOwners(events, std::array{dash}, 125);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(events, std::array{dash}, 125);
     Check(events.size() == 1 && events[0].geometry_effect_id == dash_id,
           "cancelled ranged warning was preserved using boss owner");
     auto invalid = boss; invalid.geometry_effect_id = 0;
@@ -1485,7 +1619,7 @@ void TestRangedWarningIdentity()
     Check(unknown.empty(), "unknown recipe identity inferred from line shape");
     auto wrong_shape = decoded.events[0]; wrong_shape.payload = hs::VfxConePayload{};
     std::vector malformed{wrong_shape};
-    hs::runtime_detail::RefreshVfxGroundEventOwners(malformed, std::array{ranged}, 120);
+    hs::runtime_detail::RefreshVfxGroundEventOwnersFromRaw(malformed, std::array{ranged}, 120);
     Check(malformed.empty(), "ranged recipe accepted a cone payload");
 
 }
@@ -2292,6 +2426,8 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
     Check(facts.Previous(current_owner.stable_id, current_owner.kind, previous)->position.x == 1.0f &&
           facts.Current(7, PersistentVfxKind::ProjectileHead, current)->position.x == 4.0f,
           "pair facts changed source-order first-match semantics");
+    Check(facts.CurrentAliases().size() == 2 && facts.CurrentAliases()[0] == 0 &&
+          facts.CurrentAliases()[1] == 0, "duplicate current visual rows must share their first canonical row");
     Check(facts.Instance(91, instances)->position.x == 3.0f &&
           facts.Capture(11, 22, 33, 44, captures)->instance.position.x == 6.0f,
           "pair facts changed first instance/capture match");
@@ -2305,6 +2441,8 @@ void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
           "relocated identical publication pair repeated preparation");
     Check(facts.RetainedCapacityBytes() == pair_capacity,
           "relocating a retained publication must neither allocate nor lose its accounted indexes");
+    Check(facts.CurrentAliases().size() == 2 && facts.CurrentAliases()[1] == 0,
+          "publication cache hits must preserve canonical row aliases");
     Check(facts.Current(7, PersistentVfxKind::ProjectileHead, copied_current) == &copied_current[0] &&
           facts.Instance(91, copied_instances) == &copied_instances[0] &&
           facts.Capture(11, 22, 33, 44, copied_captures) == &copied_captures[0],
@@ -2472,6 +2610,9 @@ void TestRetreatMovementAppendPublishesStateWithOutputs()
 int main()
 {
     const std::array cases{
+        TestSnapshotGroundRoutesPreserveDuplicateOwnersAndAccents,
+        TestSnapshotStatusBirthDisplaySample,
+        TestPersistentVisualInterpolationUsesFirstDuplicate,
         TestTerminalVfxClock,
         TestEnemyStatusOwners,
         TestBossStateOwners,

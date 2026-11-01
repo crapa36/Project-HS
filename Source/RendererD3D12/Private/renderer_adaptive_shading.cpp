@@ -25,8 +25,15 @@ D3D12_RESOURCE_DESC Buffer(UINT64 bytes)
 bool Guide(const RenderGraphBuilder &graph,AmbientOcclusionGuide g,ViewExtent e,DXGI_FORMAT format)
 {
     if(!g.resource||!g.version.resource||g.version.resource.kind!=ResourceKind::Texture||graph.Resolve(g.version.resource)!=g.resource)return false;
-    const auto d=g.resource->GetDesc();return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.DepthOrArraySize==1&&d.MipLevels==1&&
-        d.SampleDesc.Count==1&&d.Width>=e.width&&d.Height>=e.height&&d.Format==format;
+    const auto d=graph.ResourceDescription(g.version.resource);return d&&d->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&
+        d->DepthOrArraySize==1&&d->MipLevels==1&&d->SampleDesc.Count==1&&d->Width>=e.width&&d->Height>=e.height&&d->Format==format;
+}
+bool DepthGuide(const RenderGraphBuilder &graph,AmbientOcclusionGuide g,ViewExtent e)
+{
+    if(!g.resource||!g.version.resource||g.version.resource.kind!=ResourceKind::Texture||graph.Resolve(g.version.resource)!=g.resource)return false;
+    const auto d=graph.ResourceDescription(g.version.resource);return d&&d->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&
+        d->DepthOrArraySize==1&&d->MipLevels==1&&d->SampleDesc.Count==1&&d->Width>=e.width&&d->Height>=e.height&&
+        (d->Format==DXGI_FORMAT_R32_TYPELESS||d->Format==DXGI_FORMAT_R32_FLOAT||d->Format==DXGI_FORMAT_D32_FLOAT);
 }
 }
 struct AdaptiveShadingStorage
@@ -218,8 +225,7 @@ Result AdaptiveShadingSystem::RegisterFrame(RenderGraphBuilder &graph,const Adap
     if(!Extent(in.render_active)||in.render_active.width>s->profile.render_capacity.width||in.render_active.height>s->profile.render_capacity.height||
         in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||in.material_policy.size()>s->profile.maximum_materials)
         return Failure(ErrorCode::InvalidArgument,"Invalid adaptive active extent, frame fence or material capacity.");
-    if(!(Guide(graph,in.depth,in.render_active,DXGI_FORMAT_R32_TYPELESS)||Guide(graph,in.depth,in.render_active,DXGI_FORMAT_R32_FLOAT)||
-        Guide(graph,in.depth,in.render_active,DXGI_FORMAT_D32_FLOAT))||!Guide(graph,in.normal,in.render_active,DXGI_FORMAT_R16G16_SNORM)||
+    if(!DepthGuide(graph,in.depth,in.render_active)||!Guide(graph,in.normal,in.render_active,DXGI_FORMAT_R16G16_SNORM)||
         !Guide(graph,in.base,in.render_active,DXGI_FORMAT_R8G8B8A8_UNORM)||!Guide(graph,in.material,in.render_active,DXGI_FORMAT_R8G8B8A8_UNORM)||
         !Guide(graph,in.metadata,in.render_active,DXGI_FORMAT_R32_UINT)||!Guide(graph,in.motion,in.render_active,DXGI_FORMAT_R16G16_FLOAT)||
         !std::isfinite(in.depth_parameters.x)||!std::isfinite(in.depth_parameters.y)||!std::isfinite(in.depth_parameters.z)||!std::isfinite(in.depth_parameters.w))

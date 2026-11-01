@@ -37,27 +37,35 @@ bool ValidExtent(ViewExtent extent)
         extent.width <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
         extent.height <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
 }
-bool FitsGuide(const SubsurfaceGuide &guide, ViewExtent active, DXGI_FORMAT format)
+bool FitsGuide(const RenderGraphBuilder &graph, const SubsurfaceGuide &guide, ViewExtent active, DXGI_FORMAT format)
 {
-    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture)
+    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(guide.version.resource) != guide.resource)
         return false;
-    const auto description = guide.resource->GetDesc();
-    return description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        description.DepthOrArraySize == 1 && description.SampleDesc.Count == 1 &&
-        description.Width >= active.width && description.Height >= active.height && description.Format == format;
+    const auto description = graph.ResourceDescription(guide.version.resource);
+    return description && description->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        description->DepthOrArraySize == 1 && description->SampleDesc.Count == 1 &&
+        description->Width >= active.width && description->Height >= active.height && description->Format == format;
 }
-bool FitsDepth(const SubsurfaceGuide &guide, ViewExtent active)
+bool FitsDepth(const RenderGraphBuilder &graph, const SubsurfaceGuide &guide, ViewExtent active)
 {
-    return FitsGuide(guide, active, DXGI_FORMAT_R32_TYPELESS) ||
-        FitsGuide(guide, active, DXGI_FORMAT_D32_FLOAT) || FitsGuide(guide, active, DXGI_FORMAT_R32_FLOAT);
+    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(guide.version.resource) != guide.resource) return false;
+    const auto description = graph.ResourceDescription(guide.version.resource);
+    return description && description->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        description->DepthOrArraySize == 1 && description->SampleDesc.Count == 1 &&
+        description->Width >= active.width && description->Height >= active.height &&
+        (description->Format == DXGI_FORMAT_R32_TYPELESS || description->Format == DXGI_FORMAT_D32_FLOAT ||
+            description->Format == DXGI_FORMAT_R32_FLOAT);
 }
-bool FitsParameters(const SubsurfaceGuide &guide)
+bool FitsParameters(const RenderGraphBuilder &graph, const SubsurfaceGuide &guide)
 {
     if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Buffer)
         return false;
-    const auto description = guide.resource->GetDesc();
-    return description.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && description.Width >= 16 &&
-        description.Width % 16 == 0 && guide.resource->GetGPUVirtualAddress() != 0;
+    const auto description = graph.ResourceDescription(guide.version.resource);
+    return graph.Resolve(guide.version.resource) == guide.resource && description &&
+        description->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && description->Width >= 16 &&
+        description->Width % 16 == 0 && guide.resource->GetGPUVirtualAddress() != 0;
 }
 Result CreateTexture(D3D12MA::Allocator *allocator, ViewExtent extent, AllocationResource &texture)
 {
@@ -301,10 +309,10 @@ Result SubsurfaceSystem::RegisterFrame(RenderGraphBuilder &graph, const Subsurfa
         inputs.frame_slot >= storage->frame_slot_count ||
         !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return SssFailure(ErrorCode::InvalidArgument, "Subsurface active extent or completed frame slot is invalid.");
-    if (!FitsDepth(inputs.depth, active) || !FitsGuide(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) ||
-        !FitsGuide(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
-        !FitsGuide(inputs.diffuse, active, kColorFormat) || !FitsGuide(inputs.hdr, active, kColorFormat) ||
-        !FitsParameters(inputs.material_parameters))
+    if (!FitsDepth(graph, inputs.depth, active) || !FitsGuide(graph, inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) ||
+        !FitsGuide(graph, inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
+        !FitsGuide(graph, inputs.diffuse, active, kColorFormat) || !FitsGuide(graph, inputs.hdr, active, kColorFormat) ||
+        !FitsParameters(graph, inputs.material_parameters))
         return SssFailure(ErrorCode::InvalidArgument, "Subsurface guide resource, version, format or active extent is invalid.");
     const std::array guides{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
         inputs.material_parameters.version, inputs.diffuse.version, inputs.hdr.version};

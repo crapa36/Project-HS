@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_snapshot_values.hpp>
-#include "render_instance_lookup.hpp"
+#include <hs/render_data/render_instance_lookup.hpp>
 
 #include <array>
 #include <bit>
@@ -49,14 +49,6 @@ inline RenderPoseKey MakeRenderPoseKey(const RenderInstance &instance,
         std::bit_cast<std::uint32_t>(p.upper_body_normalized_time),
         std::bit_cast<std::uint32_t>(p.upper_body_playback_rate),
         std::bit_cast<std::uint32_t>(p.upper_body_weight)}};
-}
-
-using RenderContentKey = std::array<std::uint64_t, 6>;
-inline RenderContentKey MakeRenderContentKey(const RenderInstance &instance) noexcept
-{
-    return {instance.asset_id.value, static_cast<std::uint64_t>(instance.mesh),
-        instance.environment_seed, instance.environment_variant,
-        instance.vfx_owner_id, instance.revisions.content};
 }
 
 // One immutable display sample is shared by all views in the rendered package.

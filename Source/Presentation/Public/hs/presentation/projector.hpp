@@ -174,7 +174,8 @@ class PlayerFootstepTimeline
 [[nodiscard]] Result ProjectDynamicTick(const TickReadView &model,
                                         RenderSnapshotStorage &snapshot,
                                         std::shared_ptr<const StaticRenderScene> environment_scene,
-                                        const EnemyAnimationState *enemy_animations = nullptr);
+                                        const EnemyAnimationState *enemy_animations = nullptr,
+                                        std::span<const DomainSignal> retained_visual_links = {});
 void ProjectTickUi(const TickReadView &model,
                    const PresentationCatalog &presentation,
                    const PresentationUiState &ui,
@@ -197,7 +198,8 @@ void CaptureUiProjectionFacts(const TickReadView &model,
                                          std::shared_ptr<const StaticRenderScene> environment_scene,
                                          std::uint8_t pending_rebind_slot = 0xFF,
                                          const EnemyAnimationState *enemy_animations = nullptr,
-                                         const GraphicsSettingsUiModel *graphics_ui = nullptr);
+                                         const GraphicsSettingsUiModel *graphics_ui = nullptr,
+                                         std::span<const DomainSignal> retained_visual_links = {});
 
 // Owned-format development fixture adapter; Runtime projects a scoped TickReadView.
 [[nodiscard]] Result ProjectRenderSnapshot(const GameReadModel &model,
@@ -208,6 +210,7 @@ void CaptureUiProjectionFacts(const TickReadView &model,
                                          std::uint8_t pending_rebind_slot = 0xFF,
                                          const EnemyAnimationState *enemy_animations = nullptr,
                                          std::shared_ptr<const StaticRenderScene> environment_scene = {},
-                                         const GraphicsSettingsUiModel *graphics_ui = nullptr);
+                                         const GraphicsSettingsUiModel *graphics_ui = nullptr,
+                                         std::span<const DomainSignal> retained_visual_links = {});
 
 } // namespace hs

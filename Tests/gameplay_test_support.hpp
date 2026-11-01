@@ -6,7 +6,6 @@
 #include <hs/presentation/projector.hpp>
 
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -14,8 +13,6 @@
 
 namespace gameplay_test
 {
-
-inline constexpr auto kFixedStep = std::chrono::nanoseconds{16'666'667};
 
 void Check(bool condition, std::string_view message);
 void Check(const hs::Result &result, std::string_view message);

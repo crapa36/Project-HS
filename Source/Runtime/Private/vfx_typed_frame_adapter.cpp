@@ -1,5 +1,6 @@
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_generation_rebind.hpp"
+#include "vfx_persistent_state.hpp"
 #include "vfx_workspace_size.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <unordered_set>
 
 namespace hs::runtime_detail
 {
@@ -447,15 +449,9 @@ std::optional<float> Lifetime(const PersistentVfxVisual &visual,
 const PersistentVfxVisual *FindPrevious(
     std::span<const PersistentVfxVisual> previous,
     const PersistentVfxVisual &visual,
-    const PreparedPairFacts *pair_facts) noexcept
+    const PreparedPairFacts &pair_facts) noexcept
 {
-    if (pair_facts) return pair_facts->Previous(visual.stable_id, visual.kind, previous);
-    const auto found = std::find_if(previous.begin(), previous.end(),
-        [&visual](const PersistentVfxVisual &candidate) {
-            return candidate.stable_id == visual.stable_id &&
-                candidate.kind == visual.kind;
-        });
-    return found == previous.end() ? nullptr : &*found;
+    return pair_facts.Previous(visual.stable_id, visual.kind, previous);
 }
 
 bool ValidRingGaps(const PersistentVfxVisual &visual) noexcept
@@ -724,7 +720,7 @@ std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) co
 std::size_t PreparedPairFacts::RetainedCapacityBytes() const noexcept
 {
     using namespace vfx_retained_size;
-    return Add(Add(HashTable(previous_), HashTable(current_)),
+    return Add(Add(Add(HashTable(previous_), HashTable(current_)), Vector(current_aliases_)),
         Add(HashTable(instances_), HashTable(captures_)));
 }
 
@@ -742,13 +738,14 @@ bool PreparedPairFacts::Prepare(Key key,
         (previous.empty() || key.previous_publication != 0);
     if (prepared_ && identified && key_ == key) return false;
     prepared_ = false;
-    previous_.clear(); current_.clear(); instances_.clear(); captures_.clear();
+    previous_.clear(); current_.clear(); current_aliases_.clear(); instances_.clear(); captures_.clear();
     previous_.reserve(previous.size()); current_.reserve(current.size());
+    current_aliases_.reserve(current.size());
     instances_.reserve(instances.size()); captures_.reserve(captures.size());
     for (std::size_t i = 0; i < previous.size(); ++i)
         previous_.try_emplace({previous[i].stable_id, previous[i].kind}, i);
     for (std::size_t i = 0; i < current.size(); ++i)
-        current_.try_emplace({current[i].stable_id, current[i].kind}, i);
+        current_aliases_.push_back(current_.try_emplace({current[i].stable_id, current[i].kind}, i).first->second);
     for (std::size_t i = 0; i < instances.size(); ++i)
         instances_.try_emplace(instances[i].stable_id, i);
     for (std::size_t i = 0; i < captures.size(); ++i)
@@ -757,6 +754,19 @@ bool PreparedPairFacts::Prepare(Key key,
     key_ = key;
     prepared_ = true;
     return true;
+}
+
+namespace
+{
+PreparedPairFacts PrepareRawPairFacts(
+    std::span<const PersistentVfxVisual> previous,
+    std::span<const PersistentVfxVisual> current)
+{
+    PreparedPairFacts facts;
+    (void)facts.Prepare({.previous_publication = previous.empty() ? 0u : 1u,
+                         .current_publication = 1u}, previous, current, {}, {});
+    return facts;
+}
 }
 
 const PersistentVfxVisual *PreparedPairFacts::Previous(
@@ -797,7 +807,7 @@ void BuildVfxTypedFrameInputs(
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
     VfxTypedFrameInputs &result,
-    const PreparedPairFacts *pair_facts, float interpolation, VfxQuality quality)
+    const PreparedPairFacts &pair_facts, float interpolation, VfxQuality quality)
 {
     const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
@@ -1024,15 +1034,7 @@ void BuildVfxTypedFrameInputs(
             }
             else
             {
-                const auto *present = pair_facts
-                    ? pair_facts->Current(source_visual.stable_id, source_visual.kind, current) : nullptr;
-                if (!pair_facts)
-                {
-                    const auto found = std::find_if(current.begin(), current.end(), [&](const auto &row) {
-                        return row.stable_id == source_visual.stable_id && row.kind == source_visual.kind;
-                    });
-                    if (found != current.end()) present = &*found;
-                }
+                const auto *present = pair_facts.Current(source_visual.stable_id, source_visual.kind, current);
                 if (present) continue;
                 display_previous = &source_visual;
             }
@@ -1630,6 +1632,17 @@ std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
     return rebind(owners_) + rebind(staged_owners_);
 }
 
+void BuildVfxTypedFrameInputsFromRaw(
+    const VfxImage &image, std::span<const PresentationEvent> events,
+    std::span<const PersistentVfxVisual> current,
+    std::span<const PersistentVfxVisual> previous, Tick current_tick,
+    VfxTypedFrameInputs &result, float interpolation, VfxQuality quality)
+{
+    auto facts = PrepareRawPairFacts(previous, current);
+    BuildVfxTypedFrameInputs(image, events, current, previous, current_tick,
+                             result, facts, interpolation, quality);
+}
+
 void VfxUpgradeMovementState::Append(
     const VfxImage &image,
     std::span<const PresentationEvent> dispatched_events,
@@ -1741,7 +1754,7 @@ void VfxUpgradeMovementState::Append(
 
 bool RefreshVfxGroundEventOwner(VfxEventInput &event,
     std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    const PreparedPairFacts *pair_facts,
+    const PreparedPairFacts &pair_facts,
     std::span<const PersistentVfxVisual> previous, float interpolation)
 {
     const double display_tick = static_cast<double>(current_tick) -
@@ -1759,27 +1772,12 @@ bool RefreshVfxGroundEventOwner(VfxEventInput &event,
         const bool line = binding->payload_kind == kLinePayload;
         const auto expected_kind = binding->kind;
         const PersistentVfxVisual *found{};
-        if (pair_facts) found = pair_facts->Current(event.geometry_owner_id, expected_kind, owners);
-        else
-        {
-            const auto row = std::find_if(owners.begin(), owners.end(),
-                [&](const PersistentVfxVisual &owner) {
-                    return owner.stable_id == event.geometry_owner_id && owner.kind == expected_kind;
-                });
-            if (row != owners.end()) found = &*row;
-        }
+        found = pair_facts.Current(event.geometry_owner_id, expected_kind, owners);
         std::optional<PersistentVfxVisual> sampled_owner;
         if (interpolation < 1.0f)
         {
-            const PersistentVfxVisual *prior = pair_facts
-                ? pair_facts->Previous(event.geometry_owner_id, expected_kind, previous) : nullptr;
-            if (!pair_facts)
-            {
-                const auto row = std::find_if(previous.begin(), previous.end(), [&](const auto &owner) {
-                    return owner.stable_id == event.geometry_owner_id && owner.kind == expected_kind;
-                });
-                if (row != previous.end()) prior = &*row;
-            }
+            const PersistentVfxVisual *prior = pair_facts.Previous(
+                event.geometry_owner_id, expected_kind, previous);
             if (!prior)
             {
                 event.geometry_start_tick = current_tick;
@@ -1863,7 +1861,7 @@ bool RefreshVfxGroundEventOwner(VfxEventInput &event,
 
 void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
     std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    const PreparedPairFacts *pair_facts,
+    const PreparedPairFacts &pair_facts,
     std::span<const PersistentVfxVisual> previous, float interpolation)
 {
     std::size_t retained{};
@@ -1875,6 +1873,25 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
         ++retained;
     }
     events.resize(retained);
+}
+
+bool RefreshVfxGroundEventOwnerFromRaw(VfxEventInput &event,
+    std::span<const PersistentVfxVisual> owners, Tick current_tick,
+    std::span<const PersistentVfxVisual> previous, float interpolation)
+{
+    auto facts = PrepareRawPairFacts(previous, owners);
+    return RefreshVfxGroundEventOwner(event, owners, current_tick, facts,
+                                      previous, interpolation);
+}
+
+void RefreshVfxGroundEventOwnersFromRaw(
+    std::vector<VfxEventInput> &events,
+    std::span<const PersistentVfxVisual> owners, Tick current_tick,
+    std::span<const PersistentVfxVisual> previous, float interpolation)
+{
+    auto facts = PrepareRawPairFacts(previous, owners);
+    RefreshVfxGroundEventOwners(events, owners, current_tick, facts,
+                                previous, interpolation);
 }
 void RebindVfxGroundEventOwners(const VfxImage &image,
                                 std::vector<VfxEventInput> &events)
@@ -1902,6 +1919,502 @@ void RebindVfxGroundEventOwners(const VfxImage &image,
         rebound.push_back(std::move(event));
     }
     events = std::move(rebound);
+}
+
+
+
+std::size_t SnapshotParticleScratch::RetainedCapacityBytes() const noexcept
+{
+    return vfx_retained_size::Add(vfx_retained_size::Vector(ground_routes),
+        vfx_retained_size::Add(previous.RetainedCapacityBytes(), current.RetainedCapacityBytes()));
+}
+
+void AppendPersistentSnapshotParticleBirths(
+    const RenderSnapshotPair &snapshots, const RenderVfxFrameInput &typed,
+    Tick stateful_target, Tick last_accepted_target, bool reset,
+    float interpolation, const RendererVfxSpriteBindings &sprite_bindings,
+    bool preview, const PreparedPairFacts &pair_facts,
+    SnapshotParticleScratch &scratch, std::vector<ParticleSpawnCommand> &output)
+{
+    const auto &snapshot = snapshots.current;
+    constexpr std::uint8_t exact_ring = 1, line_border = 2, polar_rune = 4;
+    const auto aliases = pair_facts.CurrentAliases();
+    if (aliases.size() != snapshot.persistent_vfx.size())
+        throw std::invalid_argument("snapshot particle routes require the prepared snapshot pair");
+    scratch.ground_routes.assign(aliases.size(), 0);
+    for (const auto &ground : typed.ground)
+    {
+        std::uint8_t route{};
+        if (ground.geometry.shape == VfxGroundShape::PolarRune) route = polar_rune;
+        else if (ground.geometry.shape == VfxGroundShape::LineBorder) route = line_border;
+        else if (!preview && ground.geometry.shape == VfxGroundShape::Circle &&
+                 ground.command.primitive == VfxPrimitive::ExactRing) route = exact_ring;
+        if (!route) continue;
+        if (const auto *owner = pair_facts.Current(ground.stable_id,
+                static_cast<PersistentVfxKind>(ground.source_visual_kind), snapshot.persistent_vfx))
+            scratch.ground_routes[static_cast<std::size_t>(owner - snapshot.persistent_vfx.data())] |= route;
+    }
+    std::unordered_set<std::uint64_t> ribbon_head_ids, ribbon_projectile_ids;
+    for (const auto &source : typed.ribbons.sources) ribbon_head_ids.insert(source.owner_id);
+    for (const auto &visual : snapshot.persistent_vfx)
+        if (visual.kind == PersistentVfxKind::ProjectileHead &&
+            ribbon_head_ids.contains(visual.stable_id))
+            ribbon_projectile_ids.insert(visual.projectile_owner_id);
+    struct StatusEpisodes
+    {
+        std::array<const PersistentVfxVisual *, 4> rows{};
+        std::uint32_t covered{};
+    };
+    std::unordered_map<std::uint64_t, StatusEpisodes> status_episodes;
+    for (std::size_t row = 0; row < snapshot.persistent_vfx.size(); ++row)
+    {
+        const auto &visual = snapshot.persistent_vfx[row];
+        std::size_t index;
+        switch (visual.kind)
+        {
+        case PersistentVfxKind::EnemyBleedStatus: index = 0; break;
+        case PersistentVfxKind::EnemyBurnStatus: index = 1; break;
+        case PersistentVfxKind::EnemySlowStatus: index = 2; break;
+        case PersistentVfxKind::EnemyMarkStatus: index = 3; break;
+        default: continue;
+        }
+        auto &episodes = status_episodes[visual.entity_render_id];
+        if (!episodes.rows[index]) episodes.rows[index] = &visual;
+        if ((index == 2 || index == 3) && (scratch.ground_routes[aliases[row]] & polar_rune))
+            episodes.covered |= 1u << index;
+    }
+    const auto emit_status = [&](const RenderInstance &source) {
+        const auto episodes = status_episodes.find(source.stable_id);
+        const auto add_status = [&](StatusVisual status,
+                                    const ParticleSpriteBinding &binding,
+                                    ParticleFacing facing, VfxRenderer renderer,
+                                    VfxPrimitive primitive, float height,
+                                    float size, Float4 color, std::uint32_t count) {
+            if ((source.status_visual_mask & static_cast<std::uint32_t>(status)) == 0)
+                return;
+            if (!preview &&
+                (status == StatusVisual::Slow || status == StatusVisual::Mark))
+            {
+                if (episodes != status_episodes.end() &&
+                    (episodes->second.covered & static_cast<std::uint32_t>(status))) return;
+            }
+            ParticleSpawnCommand command;
+            command.position = {source.position.x, source.position.y + height,
+                                source.position.z};
+            command.shape = ParticleShape::Point;
+            command.velocity_mode = ParticleVelocity::Direction;
+            command.facing = facing;
+            command.renderer = renderer;
+            command.primitive = primitive;
+            command.sprite = binding.sprite;
+            command.frame_columns = binding.frame_columns;
+            command.frame_rows = binding.frame_rows;
+            command.direction = {0.0f, 1.0f, 0.0f};
+            command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
+            command.start_color = command.end_color = color;
+            command.start_size_min = command.start_size_max = size;
+            command.end_size_min = command.end_size_max = size;
+            command.count = count;
+            if (status == StatusVisual::Bleed)
+            {
+                command.position.y = source.position.y + source.scale.y * 0.85f;
+                command.shape = ParticleShape::Sphere;
+                command.shape_extent = {source.scale.x * 0.35f,
+                                        source.scale.y * 0.35f,
+                                        source.scale.z * 0.35f};
+                command.direction = {0.0f, -1.0f, 0.0f};
+                command.speed_min = 0.25f;
+                command.speed_max = 0.6f;
+                command.lifetime_min = 0.35f;
+                command.lifetime_max = 0.5f;
+                command.end_color.w = 0.0f;
+                command.end_size_min = command.end_size_max = size * 0.45f;
+                command.gravity = -3.0f;
+                command.stretch = 2.0f;
+            }
+            else if (status == StatusVisual::Burn)
+            {
+                command.position.y = source.position.y + source.scale.y * 0.2f;
+                command.shape = ParticleShape::Sphere;
+                command.velocity_mode = ParticleVelocity::Upward;
+                command.shape_extent = {source.scale.x * 0.4f,
+                                        source.scale.y * 0.35f,
+                                        source.scale.z * 0.4f};
+                command.speed_min = 0.3f;
+                command.speed_max = 0.9f;
+                command.lifetime_min = 0.28f;
+                command.lifetime_max = 0.45f;
+                command.end_color.w = 0.0f;
+                command.end_size_min = size * 0.35f;
+                command.end_size_max = size * 0.6f;
+                command.gravity = -0.4f;
+            }
+            const auto *episode = episodes == status_episodes.end() ? nullptr
+                : episodes->second.rows[std::countr_zero(static_cast<std::uint32_t>(status))];
+            const auto births = StatusParticleBirths(episode,
+                source.stable_id, status, stateful_target, last_accepted_target,
+                reset,
+                static_cast<Tick>(std::ceil(command.lifetime_max * 60.0f)));
+            if (!births) return;
+            for (Tick birth = births->first;; birth += births->cadence)
+            {
+                command.tick = birth;
+                command.sequence = source.stable_id ^ birth ^ static_cast<std::uint32_t>(status);
+                command.seed = static_cast<std::uint32_t>(command.sequence);
+                // Older owner poses are not retained: preserve the observed
+                // owner position while GPU spawn reconstructs the known age.
+                output.push_back(command);
+                if (births->last - birth < births->cadence) break;
+            }
+        };
+        add_status(StatusVisual::Bleed, sprite_bindings.bleed_status_sprite,
+                   ParticleFacing::Velocity, VfxRenderer::Sprite,
+                   VfxPrimitive::Shard, source.scale.y * 0.55f,
+                   source.scale.y * 0.16f, {1.8f, 0.04f, 0.05f, 0.42f}, 1);
+        add_status(StatusVisual::Burn, sprite_bindings.burn_status_sprite,
+                   ParticleFacing::Camera, VfxRenderer::Sprite,
+                   VfxPrimitive::Flame, source.scale.y * 0.5f,
+                   source.scale.y * 0.18f, {2.2f, 0.7f, 0.08f, 0.38f}, 1);
+        add_status(StatusVisual::Slow, sprite_bindings.slow_status_sprite,
+                   ParticleFacing::Ground, VfxRenderer::Ground,
+                   VfxPrimitive::Rune, 0.025f, source.scale.x * 0.72f,
+                   {0.25f, 0.85f, 1.8f, 0.28f}, 1);
+        add_status(StatusVisual::Mark, sprite_bindings.mark_status_sprite,
+                   ParticleFacing::Ground, VfxRenderer::Ground,
+                   VfxPrimitive::Rune, 0.025f,
+                   source.scale.x * 0.42f, {2.1f, 1.0f, 0.15f, 0.26f}, 1);
+    };
+    constexpr std::uint32_t status_bits = static_cast<std::uint32_t>(StatusVisual::Bleed) |
+        static_cast<std::uint32_t>(StatusVisual::Burn) | static_cast<std::uint32_t>(StatusVisual::Slow) |
+        static_cast<std::uint32_t>(StatusVisual::Mark);
+    const auto has_status = [=](const RenderInstance &row) { return (row.status_visual_mask & status_bits) != 0; };
+    if (!(snapshots.has_previous && interpolation < 1.0f))
+    {
+        for (const auto &row : snapshot.instances) if (has_status(row)) emit_status(row);
+    }
+    else if (std::ranges::any_of(snapshot.instances, has_status) ||
+             std::ranges::any_of(snapshots.previous.instances, has_status))
+    {
+        scratch.previous.Update(snapshots.previous.instances);
+        scratch.current.Update(snapshot.instances);
+        for (const auto &row : snapshot.instances)
+        {
+            const auto *old = scratch.previous.Find(row.stable_id);
+            if (row.stable_id && !old) continue;
+            if (!old) { if (has_status(row)) emit_status(row); continue; }
+            if (!has_status(*old)) continue;
+            if (MakeRenderContentKey(*old) != MakeRenderContentKey(row) || old->motion_epoch != row.motion_epoch)
+            {
+                emit_status(*old);
+                continue;
+            }
+            auto sampled = row;
+            sampled.position = {std::lerp(old->position.x, row.position.x, interpolation),
+                std::lerp(old->position.y, row.position.y, interpolation),
+                std::lerp(old->position.z, row.position.z, interpolation)};
+            sampled.scale = {std::lerp(old->scale.x, row.scale.x, interpolation),
+                std::lerp(old->scale.y, row.scale.y, interpolation),
+                std::lerp(old->scale.z, row.scale.z, interpolation)};
+            sampled.status_visual_mask = old->status_visual_mask;
+            emit_status(sampled);
+        }
+        for (const auto &row : snapshots.previous.instances)
+            if (row.stable_id && has_status(row) && !scratch.current.Find(row.stable_id)) emit_status(row);
+    }
+    for (std::size_t visual_row = 0; visual_row < snapshot.persistent_vfx.size(); ++visual_row)
+    {
+        const auto &visual = snapshot.persistent_vfx[visual_row];
+        const auto routes = scratch.ground_routes[aliases[visual_row]];
+        // Boss areas use authored direct outputs rather than a legacy emitter.
+        if (visual.kind == PersistentVfxKind::BossAreaActive ||
+            visual.kind == PersistentVfxKind::ProjectileHead ||
+            visual.kind == PersistentVfxKind::BossDashWarning ||
+            visual.kind == PersistentVfxKind::BossVolleyWarning ||
+            visual.kind == PersistentVfxKind::RangedEnemyWarning ||
+            visual.kind == PersistentVfxKind::MiniBombWarning ||
+            visual.kind == PersistentVfxKind::EnemySpawnWarning ||
+            visual.kind == PersistentVfxKind::BossSpawnWarning ||
+            visual.kind == PersistentVfxKind::BossAreaWarning ||
+            visual.kind == PersistentVfxKind::SuicideEnemyWarning ||
+            visual.kind == PersistentVfxKind::BossShockwaveWavefront ||
+            visual.kind == PersistentVfxKind::BossShockwaveWarning ||
+            visual.kind == PersistentVfxKind::RicochetLink ||
+            visual.kind == PersistentVfxKind::BurnTransferLink ||
+            visual.kind == PersistentVfxKind::RelicChainLink) continue;
+        // The authored head recipe owns the shared history. Do not add the
+        // compatibility straight segment on top of the same projectile.
+        if ((visual.kind == PersistentVfxKind::ProjectileTrail ||
+             visual.kind == PersistentVfxKind::ProjectileTrailOuter ||
+             visual.kind == PersistentVfxKind::RicochetProjectileTrail) &&
+            ribbon_projectile_ids.contains(visual.projectile_owner_id)) continue;
+        if ((visual.kind == PersistentVfxKind::DamageTrail ||
+             visual.kind == PersistentVfxKind::ChargeGuide) &&
+            (routes & line_border)) continue;
+        const bool authored_exact_ring = (routes & exact_ring) != 0;
+        auto position = visual.position;
+        auto visual_yaw = visual.yaw;
+        if (interpolation < 1.0f)
+        {
+            if (const auto *previous = pair_facts.Previous(
+                    visual.stable_id, visual.kind, snapshots.previous.persistent_vfx))
+            {
+                const auto &prior = *previous;
+                position.x = std::lerp(prior.position.x, position.x, interpolation);
+                position.y = std::lerp(prior.position.y, position.y, interpolation);
+                position.z = std::lerp(prior.position.z, position.z, interpolation);
+                const auto yaw_delta = std::remainder(visual_yaw - prior.yaw,
+                                                      2.0f * std::numbers::pi_v<float>);
+                visual_yaw = prior.yaw + yaw_delta * interpolation;
+            }
+        }
+        ParticleSpawnCommand command;
+        command.sequence = visual.stable_id ^ stateful_target;
+        command.tick = stateful_target;
+        command.position = position;
+        command.shape = ParticleShape::Point;
+        command.velocity_mode = ParticleVelocity::Direction;
+        command.facing = ParticleFacing::Ground;
+        command.renderer = VfxRenderer::Ground;
+        command.direction = {0.0f, 1.0f, 0.0f};
+        command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
+        command.start_size_min = command.start_size_max = visual.radius;
+        command.end_size_min = command.end_size_max = visual.radius;
+        command.rotation_min = command.rotation_max = visual_yaw;
+        switch (visual.kind)
+        {
+        case PersistentVfxKind::TrapPending:
+            command.primitive = VfxPrimitive::Cracks;
+            command.start_color = command.end_color = {0.45f, 0.8f, 1.3f, 0.18f};
+            break;
+        case PersistentVfxKind::TrapArmed:
+            command.primitive = VfxPrimitive::Rune;
+            command.start_color = command.end_color = {1.55f, 0.8f, 0.16f, 0.24f};
+            break;
+        case PersistentVfxKind::FireArea:
+            command.primitive = VfxPrimitive::Ring;
+            command.start_color = command.end_color = {3.2f, 0.62f, 0.035f, 0.34f};
+            break;
+        case PersistentVfxKind::SlowArea:
+            command.primitive = VfxPrimitive::Rune;
+            command.start_color = command.end_color = {0.2f, 0.75f, 1.65f, 0.16f};
+            break;
+        case PersistentVfxKind::ArrowRainArea:
+            command.primitive = VfxPrimitive::Ring;
+            command.start_color = command.end_color = {1.55f, 1.05f, 0.28f, 0.18f};
+            break;
+        case PersistentVfxKind::RangeIndicator:
+            command.primitive = VfxPrimitive::Ring;
+            command.start_color = command.end_color = {0.2f, 1.45f, 0.45f, 0.3f};
+            break;
+        case PersistentVfxKind::DamageTrail:
+        case PersistentVfxKind::ChargeGuide:
+        case PersistentVfxKind::ProjectileTrail:
+        case PersistentVfxKind::ProjectileTrailOuter:
+        case PersistentVfxKind::RicochetProjectileTrail:
+        {
+            command.renderer = VfxRenderer::Segment;
+            command.primitive = visual.kind == PersistentVfxKind::ProjectileTrail
+                                    ? VfxPrimitive::DashWake
+                                    : VfxPrimitive::SolidTrail;
+            const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                          std::cos(visual_yaw)};
+            command.direction = direction;
+            // Segment orientation is carried through the particle's initial velocity.
+            command.speed_min = command.speed_max = 0.001f;
+            command.rotation_min = command.rotation_max = 0.0f;
+            command.start_size_min = command.start_size_max = visual.radius;
+            command.end_size_min = command.end_size_max = visual.radius;
+            command.stretch = visual.length / std::max(visual.radius * 2.0f, 0.001f);
+            if (visual.kind == PersistentVfxKind::ChargeGuide)
+                command.start_color = command.end_color =
+                    {0.25f, 1.2f, 2.4f, 0.28f};
+            else if (visual.kind == PersistentVfxKind::ProjectileTrail)
+            {
+                command.start_color = {0.65f, 2.2f, 3.6f, 0.58f};
+                command.end_color = {0.1f, 0.45f, 1.2f, 0.0f};
+            }
+            else if (visual.kind == PersistentVfxKind::ProjectileTrailOuter)
+            {
+                command.start_color = {0.3f, 1.1f, 2.1f, 0.18f};
+                command.end_color = {0.08f, 0.25f, 0.7f, 0.0f};
+            }
+            else if (visual.kind == PersistentVfxKind::RicochetProjectileTrail)
+            {
+                command.start_color = {1.4f, 0.5f, 0.08f, 0.36f};
+                command.end_color = {0.35f, 0.1f, 0.02f, 0.0f};
+            }
+            else
+                command.start_color = command.end_color =
+                    {0.35f, 1.0f, 1.8f, 0.16f};
+            break;
+        }
+        default:
+            // New authored owners have no legacy primitive; never emit the default white ground quad.
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::ChargeGuide)
+        {
+            constexpr auto border_radius = 0.035f;
+            const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                          std::cos(visual_yaw)};
+            const auto right = Float3{direction.z, 0.0f, -direction.x};
+            const auto border_offset = std::max(visual.radius - border_radius, 0.0f);
+            command.primitive = VfxPrimitive::SolidTrail;
+            command.start_size_min = command.start_size_max = border_radius;
+            command.end_size_min = command.end_size_max = border_radius;
+            command.stretch = visual.length / (border_radius * 2.0f);
+            command.start_color = command.end_color = {0.25f, 1.2f, 2.4f, 0.28f};
+            for (const auto side : {-1.0f, 1.0f})
+            {
+                auto border = command;
+                border.sequence ^= side < 0.0f ? 0xD1B54A32D192ED03ull
+                                               : 0x94D049BB133111EBull;
+                border.seed = static_cast<std::uint32_t>(border.sequence);
+                border.position.x += right.x * border_offset * side;
+                border.position.z += right.z * border_offset * side;
+                border.count = 1;
+                output.push_back(border);
+            }
+            const auto cap_length = visual.radius * 2.0f;
+            for (const auto side : {-1.0f, 1.0f})
+            {
+                auto cap = command;
+                cap.sequence ^= side < 0.0f ? 0x4CF5AD432745937Full
+                                            : 0x8A5CD789635D2DFFull;
+                cap.seed = static_cast<std::uint32_t>(cap.sequence);
+                cap.position.x += direction.x * visual.length * 0.5f * side;
+                cap.position.z += direction.z * visual.length * 0.5f * side;
+                cap.direction = right;
+                cap.rotation_min = cap.rotation_max =
+                    visual_yaw + std::numbers::pi_v<float> * 0.5f;
+                cap.stretch = cap_length / (border_radius * 2.0f);
+                cap.count = 1;
+                output.push_back(cap);
+            }
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::DamageTrail)
+        {
+            const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                          std::cos(visual_yaw)};
+            const auto right = Float3{direction.z, 0.0f, -direction.x};
+            constexpr auto border_radius = 0.035f;
+            const auto border_offset = std::max(visual.radius - border_radius, 0.0f);
+            command.start_size_min = command.start_size_max = border_radius;
+            command.end_size_min = command.end_size_max = border_radius;
+            command.stretch = visual.length / (border_radius * 2.0f);
+            command.start_color = command.end_color = {0.35f, 1.0f, 1.8f, 0.24f};
+            for (const auto side : {-1.0f, 1.0f})
+            {
+                auto border = command;
+                border.sequence ^= side < 0.0f ? 0xD1B54A32D192ED03ull
+                                               : 0x94D049BB133111EBull;
+                border.seed = static_cast<std::uint32_t>(border.sequence);
+                border.position.x += right.x * border_offset * side;
+                border.position.z += right.z * border_offset * side;
+                border.count = 1;
+                output.push_back(border);
+            }
+            auto streak = command;
+            streak.sequence ^= 0x9E3779B97F4A7C15ull;
+            streak.seed = static_cast<std::uint32_t>(streak.sequence);
+            streak.primitive = VfxPrimitive::DashedRicochet;
+            streak.start_size_min = streak.start_size_max = 0.025f;
+            streak.end_size_min = streak.end_size_max = 0.025f;
+            streak.stretch = visual.length / 0.05f;
+            streak.start_color = streak.end_color = {0.2f, 0.75f, 1.5f, 0.10f};
+            streak.count = 1;
+            output.push_back(streak);
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::SlowArea)
+        {
+            command.count = 1;
+            command.seed = static_cast<std::uint32_t>(command.sequence);
+            if (!authored_exact_ring) output.push_back(command);
+            constexpr auto notch_count = 4;
+            for (auto index = 0; index < notch_count; ++index)
+            {
+                const auto angle = static_cast<float>(index) *
+                                   (2.0f * std::numbers::pi_v<float> / notch_count);
+                auto notch = command;
+                notch.sequence ^= 0x9E3779B97F4A7C15ull +
+                                  static_cast<std::uint64_t>(index);
+                notch.seed = static_cast<std::uint32_t>(notch.sequence);
+                notch.primitive = VfxPrimitive::Chevron;
+                notch.position.x += std::sin(angle) * visual.radius * 0.52f;
+                notch.position.z += std::cos(angle) * visual.radius * 0.52f;
+                notch.rotation_min = notch.rotation_max = angle + std::numbers::pi_v<float>;
+                notch.start_size_min = notch.start_size_max = visual.radius * 0.12f;
+                notch.end_size_min = notch.end_size_max = visual.radius * 0.12f;
+                notch.count = 1;
+                output.push_back(notch);
+            }
+            continue;
+        }
+        command.count = 1;
+        command.seed = static_cast<std::uint32_t>(command.sequence);
+        if (!authored_exact_ring ||
+            (visual.kind != PersistentVfxKind::FireArea &&
+             visual.kind != PersistentVfxKind::ArrowRainArea &&
+             visual.kind != PersistentVfxKind::RangeIndicator))
+            output.push_back(command);
+        if (visual.kind == PersistentVfxKind::ArrowRainArea)
+        {
+            constexpr std::array marks{
+                Float2{-0.34f, -0.18f}, Float2{0.22f, -0.30f},
+                Float2{0.0f, 0.0f}, Float2{-0.18f, 0.32f},
+                Float2{0.36f, 0.20f}};
+            for (std::size_t index = 0; index < marks.size(); ++index)
+            {
+                auto mark = command;
+                mark.sequence ^= 0x9E3779B97F4A7C15ull + index;
+                mark.seed = static_cast<std::uint32_t>(mark.sequence);
+                mark.position.x += marks[index].x * visual.radius;
+                mark.position.z += marks[index].y * visual.radius;
+                mark.primitive = VfxPrimitive::Arrow;
+                mark.start_size_min = mark.start_size_max = visual.radius * 0.11f;
+                mark.end_size_min = mark.end_size_max = visual.radius * 0.11f;
+                mark.start_color = mark.end_color = {1.3f, 0.85f, 0.2f, 0.09f};
+                output.push_back(mark);
+            }
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::RangeIndicator)
+        {
+            constexpr auto mark_count = 6;
+            for (auto index = 0; index < mark_count; ++index)
+            {
+                const auto angle = static_cast<float>(index) *
+                                   (2.0f * std::numbers::pi_v<float> / mark_count);
+                auto mark = command;
+                mark.sequence ^= 0xD1B54A32D192ED03ull +
+                                 static_cast<std::uint64_t>(index);
+                mark.seed = static_cast<std::uint32_t>(mark.sequence);
+                mark.position.x += std::sin(angle) * visual.radius * 0.58f;
+                mark.position.z += std::cos(angle) * visual.radius * 0.58f;
+                mark.rotation_min = mark.rotation_max = angle + std::numbers::pi_v<float>;
+                mark.primitive = VfxPrimitive::Chevron;
+                mark.start_size_min = mark.start_size_max = visual.radius * 0.10f;
+                mark.end_size_min = mark.end_size_max = visual.radius * 0.10f;
+                mark.start_color = mark.end_color = {0.18f, 0.8f, 0.35f, 0.10f};
+                output.push_back(mark);
+            }
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::FireArea)
+        {
+            auto interior = command;
+            interior.sequence ^= 0x9E3779B97F4A7C15ull;
+            interior.seed = static_cast<std::uint32_t>(interior.sequence);
+            interior.start_size_min = interior.start_size_max = visual.radius * 0.78f;
+            interior.end_size_min = interior.end_size_max = visual.radius * 0.78f;
+            interior.primitive = VfxPrimitive::Flame;
+            interior.start_color = interior.end_color =
+                {2.2f, 0.42f, 0.025f, 0.11f};
+            output.push_back(interior);
+        }
+    }
 }
 
 } // namespace hs::runtime_detail

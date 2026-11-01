@@ -325,7 +325,8 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
 Result ProjectDynamicTick(const TickReadView &model,
                         RenderSnapshotStorage &snapshot,
                         std::shared_ptr<const StaticRenderScene> environment_scene,
-                        const EnemyAnimationState *enemy_animations)
+                        const EnemyAnimationState *enemy_animations,
+                        std::span<const DomainSignal> retained_visual_links)
 {
     if (!environment_scene)
         return Result::Failure(ErrorCode::InvalidState, "hs_presentation",
@@ -1286,25 +1287,32 @@ Result ProjectDynamicTick(const TickReadView &model,
         warning.skill = static_cast<std::uint8_t>(SkillKind::ExplosiveArrow); warning.source_upgrade = 1;
         add_visual(warning);
     }
-    for (const auto &link : model.visual_links)
+    for (const auto &link : retained_visual_links)
     {
-        if (link.started > model.tick || link.expires <= model.tick) continue;
+        if (link.session_id != model.session_id || link.tick > model.tick ||
+            (link.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) == 0)
+            continue;
         PersistentVfxVisual visual{};
+        Tick duration{};
         switch (link.kind)
         {
-        case VisualLinkKind::Ricochet: visual.kind = PersistentVfxKind::RicochetLink; break;
-        case VisualLinkKind::BurnTransfer: visual.kind = PersistentVfxKind::BurnTransferLink; break;
-        case VisualLinkKind::RelicChain: visual.kind = PersistentVfxKind::RelicChainLink; break;
+        case DomainSignalKind::RicochetLinked:
+            visual.kind = PersistentVfxKind::RicochetLink; visual.link_width = .09f; duration = 8; break;
+        case DomainSignalKind::BurnTransferred:
+            visual.kind = PersistentVfxKind::BurnTransferLink; visual.link_width = .12f; duration = 11; break;
+        case DomainSignalKind::RelicChainLinked:
+            visual.kind = PersistentVfxKind::RelicChainLink; visual.link_width = .10f; duration = 9; break;
+        default: continue;
         }
-        visual.stable_id = link.owner_id;
-        visual.position = link.source_position;
-        visual.link_target_position = link.target_position;
-        visual.link_width = link.width;
-        visual.active_tick = link.started;
-        visual.expires = link.expires;
-        visual.cast_id = link.cast_id;
-        visual.skill = static_cast<std::uint8_t>(link.skill);
-        visual.source_upgrade = link.source_upgrade;
+        visual.stable_id = link.sequence;
+        visual.position = link.position;
+        visual.link_target_position = link.target;
+        visual.active_tick = link.tick;
+        visual.expires = link.tick + duration;
+        visual.cast_id = link.upgrade_cast_id;
+        visual.skill = link.upgrade_skill;
+        visual.source_upgrade = link.upgrade_index;
+        if (visual.expires <= model.tick) continue;
         add_visual(visual);
     }
     for (const auto &action : model.boss_actions)
@@ -2795,9 +2803,11 @@ Result ProjectTick(const TickReadView &model,
                  std::shared_ptr<const StaticRenderScene> environment_scene,
                  std::uint8_t pending_rebind_slot,
                  const EnemyAnimationState *enemy_animations,
-                 const GraphicsSettingsUiModel *graphics_ui)
+                 const GraphicsSettingsUiModel *graphics_ui,
+                 std::span<const DomainSignal> retained_visual_links)
 {
-    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), enemy_animations);
+    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), enemy_animations,
+                                     retained_visual_links);
     if (!result) return result;
     ProjectTickUi(model, presentation, ui, settings, snapshot, pending_rebind_slot, graphics_ui);
     return Result::Success();
@@ -2808,12 +2818,14 @@ Result ProjectRenderSnapshot(const GameReadModel &model,
     const SettingsData &settings, RenderSnapshotStorage &snapshot,
     std::uint8_t pending_rebind_slot, const EnemyAnimationState *enemy_animations,
     std::shared_ptr<const StaticRenderScene> environment_scene,
-    const GraphicsSettingsUiModel *graphics_ui)
+    const GraphicsSettingsUiModel *graphics_ui,
+    std::span<const DomainSignal> retained_visual_links)
 {
     const auto view = development::BorrowOwnedReadModel(model);
     if (!environment_scene) environment_scene = ProcessSceneView(BuildProcessSceneAtLaunch(view, {}));
     return ProjectTick(view, presentation, ui, settings,
-        snapshot, std::move(environment_scene), pending_rebind_slot, enemy_animations, graphics_ui);
+        snapshot, std::move(environment_scene), pending_rebind_slot, enemy_animations, graphics_ui,
+        retained_visual_links);
 }
 
 } // namespace hs

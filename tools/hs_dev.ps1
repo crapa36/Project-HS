@@ -166,31 +166,58 @@ function Invoke-ExplicitBuild {
         !$ninja -or !(Test-Path -LiteralPath $ninja -PathType Leaf)) {
         Fail 'build requires a configured CMake/Ninja build tree'
     }
-    $queryCache = @{}
+    $nativeErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $targetLines = @(& $ninja -C $BuildRoot -t targets all 2>&1)
+        $targetExitCode = [int]$LASTEXITCODE
+    } catch {
+        Fail "Ninja target enumeration failed: $($_.Exception.Message)"
+    } finally {
+        $ErrorActionPreference = $nativeErrorPreference
+    }
+    $targetErrors = @($targetLines | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+    if ($targetExitCode -ne 0 -or $targetErrors.Count -ne 0) {
+        Fail "Ninja target enumeration failed: $([string]::Join(' ', $targetLines))"
+    }
+    $targetRules = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+    foreach ($lineObject in $targetLines) {
+        $line = [string]$lineObject
+        if ($line -match '^ninja: Entering directory ') { continue }
+        if ($line -notmatch '^(.*): ([^\s:]+)$') {
+            Fail "invalid Ninja target enumeration line: $line"
+        }
+        $output = Normalize-Id $matches[1]
+        $rule = $matches[2]
+        if (!$output -or ($targetRules.ContainsKey($output) -and $targetRules[$output] -cne $rule)) {
+            Fail "ambiguous Ninja target enumeration: $output"
+        }
+        $targetRules[$output] = $rule
+    }
     $actionTargets = $null
     $resolved = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $resolutions = @()
     foreach ($name in $requested) {
-        $query = $null
-        try { $query = Get-HsNinjaQuery $ninja $BuildRoot $name $queryCache } catch { }
-        if ($query -and $query.rule -ceq 'phony') {
+        if ($targetRules.ContainsKey($name) -and $targetRules[$name] -ceq 'phony') {
             $resolvedTarget = $name
             $kind = 'native'
         } else {
             if ($null -eq $actionTargets) { $actionTargets = Get-BuildActionTargets }
-            if (!$actionTargets.ContainsKey($name)) { Fail "unknown native build target or Action ID: $name" }
+            if (!$actionTargets.ContainsKey($name) -or $actionTargets[$name].Id -cne $name) {
+                Fail "unknown native build target or Action ID: $name"
+            }
             $resolvedTarget = [string]$actionTargets[$name].Target
-            try { $query = Get-HsNinjaQuery $ninja $BuildRoot $resolvedTarget $queryCache }
-            catch {
+            $configuredTarget = Normalize-Id $resolvedTarget
+            if (!$targetRules.ContainsKey($configuredTarget)) {
                 if ($Json) {
                     Fail "ActionResult target is absent from the configured Ninja graph: $resolvedTarget" `
                         -Code 'HS_DEV_TARGET_UNAVAILABLE' -Dependency $resolvedTarget `
                         -Remediation 'Configure this build tree for the requested Action and retry.'
                 }
-                throw
+                Fail "ActionResult target is absent from the configured Ninja graph: $resolvedTarget"
             }
-            if ($query.rule -cne 'CUSTOM_COMMAND') {
+            if ($targetRules[$configuredTarget] -cne 'CUSTOM_COMMAND') {
                 Fail "ActionResult is not a configured Ninja action output: $resolvedTarget"
             }
             $kind = 'action'

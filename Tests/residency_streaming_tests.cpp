@@ -55,6 +55,40 @@ void CheckFeedbackSamplingDomains()
         "surface pass must retain both feedback outputs after opacity sampling");
 }
 
+void CheckTextureFeedbackMinimumMipRows()
+{
+    using hs::texture_feedback_detail::kNoMipDemand;
+    using hs::texture_feedback_detail::MinimumRequestedMip;
+    constexpr std::array<std::size_t, 8> widths{0, 1, 15, 16, 17, 31, 32, 33};
+    for (const auto width : widths)
+    {
+        std::vector<std::byte> row(width, std::byte{0xff});
+        Check(MinimumRequestedMip(row, 8) == kNoMipDemand,
+              "all-0xff texture feedback row must mean no sample");
+        if (width == 0) continue;
+        std::fill(row.begin(), row.end(), std::byte{7});
+        row.back() = std::byte{2};
+        Check(MinimumRequestedMip(row, 8) == 2,
+              "late minimum in a partial or full SIMD row was missed");
+        row.back() = std::byte{0};
+        Check(MinimumRequestedMip(row, 8) == 0,
+              "zero mip demand must remain the early-out minimum");
+    }
+
+    std::vector<std::byte> padded(33 + 16, std::byte{0});
+    std::fill_n(padded.begin(), 33, std::byte{200});
+    Check(MinimumRequestedMip(std::span<const std::byte>(padded).first(33), 8) == 7,
+          "feedback row scan read padding or failed to clamp to the mip chain");
+    for (std::size_t lane = 0; lane < 32; ++lane)
+    {
+        std::array<std::byte, 34> storage;
+        storage.fill(std::byte{0xff});
+        storage[lane + 1] = std::byte{3};
+        Check(MinimumRequestedMip(std::span<const std::byte>(storage).subspan(1, 32), 8) == 3,
+              "feedback minimum must include every lane of an unaligned row");
+    }
+}
+
 void CheckSoftwareTransactionSupersession()
 {
     Check(hs::TextureSoftwareTransactionSuperseded(2, 4, true) &&
@@ -263,7 +297,7 @@ void CheckAsyncAssetPreparation()
         const auto storage = residency.ReserveHost(contents.size() * 2);
         Check(request && storage, "async asset request reservation failed");
         bool submitted{};
-        const auto result = io.Enqueue({request, "generation", id, hs::RendererAssetSource{path}, contents.size(),
+        const auto result = io.Enqueue({request, "generation", id, hs::RendererAssetSource::Loose(path), contents.size(),
             std::make_shared<int>(1), std::move(prepare)}, streaming, residency, storage, submitted);
         Check(static_cast<bool>(result) && submitted, "async asset read was not submitted");
         return std::pair{request, storage};
@@ -301,7 +335,7 @@ void CheckAsyncAssetPreparation()
         hs::ImmutableAssetRange{3, 1, hs::Sha256(std::span(contents).subspan(3, 1))}};
     bool ranged_submitted{};
     Check(ranged && ranged_storage && bool(io.Enqueue({ranged, "generation", "ranged-subresources",
-        hs::RendererAssetSource{path}, 3, std::make_shared<int>(1), {},
+        hs::RendererAssetSource::Loose(path), 3, std::make_shared<int>(1), {},
         std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency,
         ranged_storage, ranged_submitted)) && ranged_submitted,
         "authenticated texture subresource ranges were not submitted");
@@ -315,7 +349,7 @@ void CheckAsyncAssetPreparation()
     const auto corrupt_storage = residency.ReserveHost(invalid_range.byte_count);
     bool corrupt_submitted{};
     Check(corrupt_request && corrupt_storage && bool(io.Enqueue({corrupt_request, "generation",
-        "corrupt-subresource-range", hs::RendererAssetSource{path}, invalid_range.byte_count,
+        "corrupt-subresource-range", hs::RendererAssetSource::Loose(path), invalid_range.byte_count,
         std::make_shared<int>(1), {}, {invalid_range}}, streaming, residency, corrupt_storage,
         corrupt_submitted)) && corrupt_submitted, "corrupt range fixture was not submitted");
     hs::AssetReadCompletion corrupt_output;
@@ -376,7 +410,7 @@ void CheckAsyncAssetPreparation()
         const auto request = streaming.Request(id, id, "generation", 1);
         const auto storage = residency.ReserveHost(contents.size() * 2);
         bool submitted{};
-        const auto queued = io.Enqueue({request, "generation", id, hs::RendererAssetSource{path}, contents.size(),
+        const auto queued = io.Enqueue({request, "generation", id, hs::RendererAssetSource::Loose(path), contents.size(),
             std::make_shared<int>(1), [task_gate, tasks_started, tasks_finished](std::span<const std::byte>) {
                 tasks_started->fetch_add(1, std::memory_order_release);
                 task_gate.wait();
@@ -400,7 +434,7 @@ void CheckAsyncAssetPreparation()
     auto deferred_storage = residency.ReserveHost(contents.size() * 2);
     bool deferred_submitted{};
     const auto deferred_result = io.Enqueue({deferred_request, "generation", deferred_id,
-        hs::RendererAssetSource{path}, contents.size(), std::make_shared<int>(1), {}},
+        hs::RendererAssetSource::Loose(path), contents.size(), std::make_shared<int>(1), {}},
         streaming, residency, deferred_storage, deferred_submitted);
     const auto *deferred_page = streaming.Find(deferred_request);
     const bool deferred_cleanly = bool(deferred_result) && !deferred_submitted && deferred_page &&
@@ -417,7 +451,7 @@ void CheckAsyncAssetPreparation()
     auto completed_but_uncollected_storage = residency.ReserveHost(contents.size() * 2);
     bool completed_but_uncollected_submitted{};
     const auto completed_but_uncollected = io.Enqueue({deferred_request, "generation", deferred_id,
-        hs::RendererAssetSource{path}, contents.size(), std::make_shared<int>(1), {}},
+        hs::RendererAssetSource::Loose(path), contents.size(), std::make_shared<int>(1), {}},
         streaming, residency, completed_but_uncollected_storage, completed_but_uncollected_submitted);
     Check(bool(completed_but_uncollected) && !completed_but_uncollected_submitted &&
         residency.ReleaseNow(completed_but_uncollected_storage),
@@ -431,7 +465,7 @@ void CheckAsyncAssetPreparation()
     }
     deferred_storage = residency.ReserveHost(contents.size() * 2);
     Check(static_cast<bool>(deferred_storage), "deferred task could not reacquire host admission");
-    Check(bool(io.Enqueue({deferred_request, "generation", deferred_id, hs::RendererAssetSource{path},
+    Check(bool(io.Enqueue({deferred_request, "generation", deferred_id, hs::RendererAssetSource::Loose(path),
         contents.size(), std::make_shared<int>(1), {}}, streaming, residency, deferred_storage,
         deferred_submitted)) && deferred_submitted,
         "deferred CPU task did not submit after earlier futures reached terminal");
@@ -472,17 +506,18 @@ void CheckPackAssetReads(bool native)
     Check(bool(hs::ShippedContentOwner::Open(path, *owner)) &&
         bool(hs::ShippedContentOwner::Open(path, *unbound_owner)), "could not open pack fixture");
     const auto identity = owner->Identity();
-    hs::RendererAssetSource source{{}, owner, {64, payload.size(), {}, hs::Sha256(payload)}};
-    auto unbound = source;
-    unbound.pack = unbound_owner;
+    auto source = hs::RendererAssetSource::Packed(owner,
+        {64, payload.size(), {}, hs::Sha256(payload)});
+    auto unbound = hs::RendererAssetSource::Packed(unbound_owner, source.Packed().range);
     std::vector<std::byte> output;
     Check(bool(source.Read(output, payload.size())) && std::equal(output.begin(), output.end(), payload.begin(), payload.end()),
         "pack source did not read its nonzero-offset range");
     const auto previous = output;
     Check(!source.Read(output, payload.size() + 1) && output == previous,
         "pack expected-size mismatch must preserve output");
-    auto corrupt = source;
-    corrupt.range.expected_digest[0] ^= std::byte{1};
+    auto corrupt_range = source.Packed().range;
+    corrupt_range.expected_digest[0] ^= std::byte{1};
+    auto corrupt = hs::RendererAssetSource::Packed(owner, corrupt_range);
     Check(!corrupt.Read(output) && output == previous, "pack digest mismatch must preserve output");
 
     const std::string shader_id = "render/shader/test.dxil";
@@ -618,7 +653,7 @@ void CheckPackAssetReads(bool native)
         // Loose immutable products retain FILE->MEMORY transport for compact
         // authenticated ranges; texture Pump defers these requests so one
         // queue submission covers every texture admitted in that pump.
-        hs::RendererAssetSource loose{path, {}, {}};
+        auto loose = hs::RendererAssetSource::Loose(path);
         const std::array ranges{hs::ImmutableAssetRange{64, static_cast<std::uint32_t>(payload.size()), hs::Sha256(payload)}};
         const auto range_request = streaming.Request("native-range", "native-range", "generation", 1);
         const auto range_storage = residency.ReserveHost(payload.size() * 2);
@@ -1050,6 +1085,7 @@ int main()
             "reset aliased an old asynchronous request identity");
         CheckSoftwareTransactionSupersession();
         CheckFeedbackSamplingDomains();
+        CheckTextureFeedbackMinimumMipRows();
         CheckAsyncAssetPreparation();
         CheckPackAssetReads(false);
         CheckPackAssetReads(true);

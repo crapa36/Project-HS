@@ -3,11 +3,15 @@
 #include <hs/runtime/settings_projection.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/renderer/renderer.hpp>
+#include <Windows.h>
 
+#include <cstdint>
+#include <memory>
 #include <string>
 
 namespace hs
 {
+struct GraphicsSettingsUiModel;
 
 [[nodiscard]] inline bool AllowGameplayFrameGeneration(SessionPhase phase) noexcept
 {
@@ -40,5 +44,11 @@ namespace hs
     config.requested_graphics = graphics;
     return config;
 }
+
+void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
+                             const RendererDiagnosticsSnapshot &diagnostics, bool validation);
+[[nodiscard]] std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
+    const D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
+    HWND window_handle, bool validation);
 
 } // namespace hs

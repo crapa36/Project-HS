@@ -568,6 +568,8 @@ void ImportedInitialAccess(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsComma
     Check(graph.Prepare(pool).Succeeded(), "prepare valid Common imports");
     Check(graph.Execute(f.commands.Get(), enhanced, mode).Succeeded() && called, "execute valid Common imports");
     f.Submit();
+    read.Read(graph.Version(common_buffer), hs::Access::CopySource);
+    Check(!graph.Prepare(pool).Succeeded(), "editing a prepared pass revalidates its complete use list");
 }
 
 void CachedLogicalLifetimes(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
@@ -773,6 +775,122 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     Check(hs::RenderGraphTestAccess::Reuses(plan_graph) - plan_reuses_before == 4,
           "second cycle reuses all four retained exact plans");
     Check(fresh_callback_calls == 8, "cached plans invoke each current callback");
+    {
+        // Exercise recency through the real plan APIs: a hit on the oldest
+        // retained plan must protect it when a ninth topology is compiled.
+        hs::RenderGraphBuilder lru_graph;
+        std::array<hs::RenderGraphBuilder::PlanHandle, 8> lru_handles{};
+        const std::array<std::string_view, 9> lru_pass_names{
+            "p0",
+            "LRU pass name beyond small-string storage for topology 1",
+            "LRU pass name beyond small-string storage for topology 2",
+            "LRU pass name beyond small-string storage for topology 3",
+            "LRU pass name beyond small-string storage for topology 4",
+            "LRU pass name beyond small-string storage for topology 5",
+            "LRU pass name beyond small-string storage for topology 6",
+            "LRU pass name beyond small-string storage for topology 7",
+            "LRU pass name beyond small-string storage for topology 8"};
+        std::uint32_t lru_callback_calls{};
+        const auto declare_shape = [&](std::uint32_t pass_id) {
+            const auto imported = lru_graph.ImportBuffer(
+                {plan_imports[7].Get(), {}, hs::QueueHint::Direct, {}, &plan_contracts[7]},
+                hs::Access::CopySource, "LRU plan import");
+            auto pass = lru_graph.AddPass(pass_id, lru_pass_names[pass_id], hs::QueueHint::Direct);
+            pass.Read(lru_graph.Version(imported), hs::Access::CopySource);
+            pass.SetExecute([&, imported](hs::RenderPassContext &context) {
+                ++lru_callback_calls;
+                Check(context.Resolve(imported) == plan_imports[7].Get(),
+                      "LRU plan binds the current native import");
+            });
+        };
+        const auto bind_restored_shape = [&](std::uint32_t pass_id) {
+            Check(lru_graph.BindBuffer({1, hs::ResourceKind::Buffer},
+                {plan_imports[7].Get(), {}, hs::QueueHint::Direct, {}, &plan_contracts[7]},
+                hs::Access::CopySource), "bind current import to restored LRU plan");
+            auto pass = lru_graph.BindPass(0, pass_id);
+            Check(pass.has_value(), "bind restored LRU pass by its retained ID");
+            pass->SetExecute([&](hs::RenderPassContext &context) {
+                ++lru_callback_calls;
+                Check(context.Resolve({1, hs::ResourceKind::Buffer}) == plan_imports[7].Get(),
+                      "restored LRU callback resolves the current import");
+            });
+        };
+        for (std::uint32_t pass_id = 0; pass_id < lru_handles.size(); ++pass_id)
+        {
+            if (pass_id != 0) { first.ResetClaims(); lru_graph.Reset(); }
+            declare_shape(pass_id);
+            const auto compilations = hs::RenderGraphTestAccess::Compilations(lru_graph);
+            Check(lru_graph.Prepare(first).Succeeded(), "compile each LRU pass-id topology");
+            Check(hs::RenderGraphTestAccess::Compilations(lru_graph) == compilations + 1,
+                  "distinct pass IDs compile distinct retained plan topologies");
+            Check(lru_graph.CompiledPassName(0) == lru_pass_names[pass_id],
+                  "cold compiled plan retains its owned pass name");
+            lru_handles[pass_id] = lru_graph.PreparedPlan();
+            Check(lru_handles[pass_id] != 0, "compiled LRU topology exposes a plan handle");
+            Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+                  "execute each LRU pass-id topology");
+            f.Submit();
+        }
+        first.ResetClaims(); lru_graph.Reset();
+        declare_shape(0);
+        const auto lru_reuses = hs::RenderGraphTestAccess::Reuses(lru_graph);
+        const auto lru_compilations = hs::RenderGraphTestAccess::Compilations(lru_graph);
+        Check(lru_graph.Prepare(first).Succeeded() &&
+              hs::RenderGraphTestAccess::Reuses(lru_graph) == lru_reuses + 1 &&
+              hs::RenderGraphTestAccess::Compilations(lru_graph) == lru_compilations &&
+              lru_graph.CompiledPassName(0) == lru_pass_names[0],
+              "preparing the oldest cached topology touches its LRU recency");
+        Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+              "execute recently reused oldest topology");
+        f.Submit();
+
+        first.ResetClaims();
+        Check(lru_graph.RestorePlan(lru_handles[7]), "restore newest retained LRU topology");
+        bind_restored_shape(7);
+        Check(lru_graph.Prepare(first).Succeeded() &&
+              lru_graph.CompiledPassName(0) == lru_pass_names[7],
+              "restored newest LRU topology retains its heap-owned pass name");
+        Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+              "execute restored newest LRU topology");
+        f.Submit();
+
+        first.ResetClaims(); lru_graph.Reset();
+        declare_shape(8);
+        const auto ninth_compilations = hs::RenderGraphTestAccess::Compilations(lru_graph);
+        Check(lru_graph.Prepare(first).Succeeded() &&
+              hs::RenderGraphTestAccess::Compilations(lru_graph) == ninth_compilations + 1 &&
+              lru_graph.CompiledPassName(0) == lru_pass_names[8],
+              "ninth topology compiles and evicts the least recently used plan");
+        Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+              "execute ninth LRU topology");
+        f.Submit();
+
+        first.ResetClaims();
+        Check(lru_graph.RestorePlan(lru_handles[0]), "recently reused oldest topology survives eviction");
+        bind_restored_shape(0);
+        Check(lru_graph.Prepare(first).Succeeded() &&
+              lru_graph.CompiledPassName(0) == lru_pass_names[0],
+              "retained recently reused topology keeps its SSO pass name after restore");
+        Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+              "execute retained recently reused topology");
+        f.Submit();
+        first.ResetClaims();
+        Check(!lru_graph.RestorePlan(lru_handles[1]), "least recently used topology is evicted");
+        Check(lru_callback_calls == 12, "LRU cached and restored plans invoke current callbacks");
+        Check(lru_graph.RestorePlan(lru_handles[0]), "restore original plan before a rejected edit");
+        auto edited_pass = lru_graph.BindPass(0, 0);
+        Check(edited_pass.has_value(), "select retained pass for a rejected declaration edit");
+        bind_restored_shape(0);
+        edited_pass->Read({{1, hs::ResourceKind::Buffer}, 0}, hs::Access::CopySource);
+        Check(!lru_graph.Prepare(first).Succeeded(), "restored passes reject changed declarations");
+        Check(lru_graph.RestorePlan(lru_handles[0]), "rejected edit preserves retained declarations");
+        bind_restored_shape(0);
+        Check(lru_graph.Prepare(first).Succeeded() &&
+              lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+              "execute original retained plan after a rejected declaration edit");
+        f.Submit();
+        Check(lru_callback_calls == 13, "rejected edit leaves the original callback and declarations intact");
+    }
     const auto restored_handle = plan_graph.PreparedPlan();
     const auto restored_input_builds = hs::RenderGraphTestAccess::InputBuilds(plan_graph);
     first.ResetClaims();

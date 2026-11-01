@@ -167,6 +167,7 @@ struct FrameContext
     std::uint64_t timing_source_sequence{}, timing_quality_generation{}, timing_provider_generation{};
     ViewExtent timing_render_active;
     bool timing_main_view{}, timing_frame_generation_enabled{};
+#if defined(HS_DEVELOPMENT_TOOLS)
     struct ClockAnchor
     {
         std::uint64_t gpu{}, cpu{}, gpu_frequency{}, cpu_frequency{};
@@ -175,6 +176,7 @@ struct FrameContext
     std::array<ClockAnchor, 3> timing_clock_before{};
     std::vector<std::uint32_t> timing_closure_slots;
     bool timing_closure_imports_ready{};
+#endif
     std::uint64_t timing_execute_begin_qpc{}, timing_execute_end_qpc{};
     CompletionSet timing_prior_output_completion;
     bool timing_backlog_at_submit{};

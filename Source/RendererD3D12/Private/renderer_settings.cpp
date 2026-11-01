@@ -29,7 +29,10 @@ Result D3D12Renderer::Impl::LoadQualityProfiles(const RendererConfig &source)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected Generation omits quality product digest.");
         constexpr char hex[] = "0123456789abcdef";
         std::string digest = "sha256:";
-        for (const auto value : path.pack ? path.range.expected_digest : render_data::Sha256(bytes))
+        const auto loose_proof = path.AdmittedWholeFileProof();
+        const auto source_digest = path.IsPacked() ? path.Packed().range.expected_digest :
+            loose_proof ? loose_proof->digest : render_data::Sha256(bytes);
+        for (const auto value : source_digest)
         {
             const auto byte = std::to_integer<unsigned>(value);
             digest += hex[byte >> 4]; digest += hex[byte & 15];

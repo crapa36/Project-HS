@@ -19,16 +19,20 @@ bool InRange(VfxRange range, std::span<const T> values) noexcept
 }
 
 std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs)
+    const VfxImage &image, const PreparedVfxMeshRecipeView &recipes,
+    std::span<const VfxPersistentInput> inputs)
 {
     std::vector<VfxOwnedMeshInput> result;
-    AppendVfxTypedMeshCommands(image, inputs, result);
+    AppendVfxTypedMeshCommands(image, recipes, inputs, result);
     return result;
 }
 
 void AppendVfxTypedMeshCommands(const VfxImage &image,
+    const PreparedVfxMeshRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs, std::vector<VfxOwnedMeshInput> &result)
 {
+    if (!recipes.IsAdmitted() || !recipes.Matches(image.mesh_recipes)) return;
+    const auto recipe_rows = recipes.Rows();
     const auto original_size = result.size();
     try
     {
@@ -40,22 +44,21 @@ void AppendVfxTypedMeshCommands(const VfxImage &image,
             continue;
         const auto &effect = image.mesh_effect_recipes[input.effect_handle - 1];
         if (!effect.route_valid || effect.effect_handle != input.effect_handle ||
-            !InRange(effect.outputs, image.mesh_recipes)) continue;
+            !InRange(effect.outputs, recipe_rows)) continue;
         const Float3 position{input.current_transform[12], input.current_transform[13],
                               input.current_transform[14]};
         const Float3 previous{input.previous_transform[12], input.previous_transform[13],
                               input.previous_transform[14]};
         if (!Finite(position) || !Finite(previous) || !Finite(owner->velocity) ||
             !std::isfinite(owner->hitbox_radius) || owner->hitbox_radius <= 0.0f) continue;
-        for (const auto &recipe : std::span(image.mesh_recipes).subspan(
-                 effect.outputs.first, effect.outputs.count))
+        for (std::uint32_t recipe_index = effect.outputs.first;
+             recipe_index < effect.outputs.first + effect.outputs.count; ++recipe_index)
         {
+            const auto &recipe = recipe_rows[recipe_index];
             if (recipe.effect_handle != effect.effect_handle ||
                 recipe.min_quality > static_cast<std::uint32_t>(input.quality)) continue;
             result.push_back({input.stable_id, position, previous, owner->velocity,
-                recipe.color, owner->hitbox_radius, recipe.hdr, recipe.fresnel,
-                recipe.mesh_index, recipe.gradient_row, recipe.head_to_tail_ratio,
-                recipe.shell_thickness});
+                owner->hitbox_radius, recipe_index});
         }
     }
     }

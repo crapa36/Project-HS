@@ -457,11 +457,11 @@ struct GameSimulation::SimulationWorld
 {
     SimulationRules rules{SimulationRules::Defaults()};
     SimulationConfig config{};
-    std::unique_ptr<ActorState> actors;
-    std::unique_ptr<CombatState> combat_state;
-    std::unique_ptr<NavigationState> navigation;
-    std::unique_ptr<ProgressionState> progression;
-    std::unique_ptr<TelemetryState> telemetry;
+    ActorState actors{};
+    CombatState combat_state{};
+    NavigationState navigation{};
+    ProgressionState progression{};
+    TelemetryState telemetry{};
     InputFrame current_input{};
     Tick tick{};
     std::uint64_t session_id{};
@@ -549,7 +549,7 @@ struct GameSimulation::SimulationWorld
         Tick charge_normal_ready_tick{};
         std::array<SkillRuntimeView, kCombatSkillCount> skills{};
         std::array<WaveView, 5> waves{};
-        std::size_t enemies{}, projectiles{}, areas{}, pickups{}, visual_links{}, mini_bombs{}, spawn_warnings{}, deliveries{};
+        std::size_t enemies{}, projectiles{}, areas{}, pickups{}, mini_bombs{}, spawn_warnings{}, deliveries{};
     };
     mutable SmallReadFacts read_facts;
     void RequireOwnerThread() const;
@@ -573,8 +573,8 @@ struct GameSimulation::SimulationWorld
         if (!config.capture_checksums) checksum = 0;
         observation.checksum_dirty = false;
     }
-    BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
-    const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
+    BalanceTelemetry &Metrics() noexcept { return telemetry.Metrics(); }
+    const BalanceTelemetry &Metrics() const noexcept { return telemetry.Metrics(); }
     void InitializePlayerState();
     bool ApplyUiAction(const UiAction &action);
     void RebuildNavigation();
@@ -618,7 +618,6 @@ struct GameSimulation::SimulationWorld
                  float height = 0.3f, std::uint8_t context = 0,
                  std::uint64_t source_entity_id = 0,
                  DomainSignalGeometry geometry = {});
-    void PruneVisualLinks();
     void EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                      float height = 0.75f);
     void EmitUpgradeVisual(SkillKind skill, std::uint8_t ordinal,

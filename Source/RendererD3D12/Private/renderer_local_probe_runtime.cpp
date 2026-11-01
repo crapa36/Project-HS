@@ -77,7 +77,7 @@ std::vector<std::byte> ReadProduct(const RendererConfig &config,std::string_view
     std::vector<std::byte> bytes; const auto read=source.Read(bytes,count);
     Require(static_cast<bool>(read),read.Message());
     read_timing.Stop();
-    if(!source.pack) Require(Hash(bytes)==digest,"Probe/shader digest mismatch: "+std::string(id)); return bytes;
+    if(!source.IsPacked()) Require(Hash(bytes)==digest,"Probe/shader digest mismatch: "+std::string(id)); return bytes;
 }
 class Identity
 {

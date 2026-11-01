@@ -125,7 +125,14 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
         std::uint64_t(bytes[1].size()) * (raster_suffix ? 2u : 1u),bytes[2].size(),bytes[3].size() + bytes[4].size() + bytes[5].size()};
     if (!GeometryPageLayout(sizes, upload_offsets, upload_size))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Geometry page GPU buffer size exceeds its ABI.");
+    const auto position_bytes = std::uint64_t(metadata.vertex_count) * 3u * sizeof(float);
+    if (bytes[0].size() != std::uint64_t(metadata.vertex_count) * sizeof(Vertex) ||
+        position_bytes > UINT32_MAX - upload_size)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Brixelizer position stream exceeds the validated geometry page.");
     GeometryPageGpu next;
+    next.brixelizer_position_offset = upload_size;
+    upload_size += position_bytes;
     next.brixelizer_submesh_keys.reserve(submeshes.size());
     for (std::size_t part = 0; part < submeshes.size(); ++part)
         next.brixelizer_submesh_keys.push_back(BrixelizerSubmeshKey(std::uint64_t(page_slot) + 1, part));
@@ -159,6 +166,13 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     {
         std::memcpy(static_cast<std::byte *>(mapped) + auxiliary_offset, bytes[index].data(), bytes[index].size());
         auxiliary_offset += bytes[index].size();
+    }
+    if (!WriteGeometryPositionStream(
+        {static_cast<std::byte *>(mapped) + next.brixelizer_position_offset, static_cast<std::size_t>(position_bytes)},
+        bytes[0], sizeof(Vertex)))
+    {
+        next_upload.resource->Unmap(0, nullptr);
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid Brixelizer position stream.");
     }
     if (raster_suffix && !WriteGeometryRasterIndexSuffix(
         {static_cast<std::byte *>(mapped) + upload_offsets[1] + next.raster_index_offset, bytes[1].size()},

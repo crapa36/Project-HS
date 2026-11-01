@@ -10,7 +10,9 @@ namespace hs::runtime_detail
 {
 [[nodiscard]] std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
     const VfxImage &image,
+    const PreparedVfxFresnelRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs);
 void AppendVfxTypedFresnelCommands(const VfxImage &image,
+    const PreparedVfxFresnelRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs, std::vector<VfxFresnelInput> &result);
 }

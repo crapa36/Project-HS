@@ -234,7 +234,7 @@ void TestChargedShotDamageFormula()
                 hs::ActionEdge{++sequence, hs::GameAction::SkillQ, hs::EdgeKind::Pressed},
                 hs::ActionEdge{++sequence, hs::GameAction::SkillQ, hs::EdgeKind::Released}};
             hs::InputFrame input{simulation.GetObservation().tick + 1, held, edges};
-            (void)simulation.TickFixed(input, kFixedStep);
+            (void)simulation.TickFixed(input);
         }
         else
         {

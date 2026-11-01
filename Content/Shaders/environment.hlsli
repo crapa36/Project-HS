@@ -285,6 +285,9 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         const HsLocalProbeBlend local_probe_blend=HsLocalProbePrepareBlend(
             HsLocalProbeWeights(world,local_probe_count),local_probe_count);
 #endif
+        const bool local_diffuse=ProbeOptions.w>0.0 && diffuse_consumed && indirect_diffuse_enabled;
+        const bool local_specular=ProbeOptions.w>0.0 && indirect_specular_enabled;
+        const bool baseline_needed=!local_specular || (diffuse_consumed && !local_diffuse);
         const HsBsdfSamplingContext bsdf_sampling=HsBsdfPrepareSampling(closure,v);
         [loop] for(uint index=0u;index<sample_count;++index)
         {
@@ -298,9 +301,8 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
 #endif
             float3 sample_diffuse,sample_specular;
             HsBsdfEvaluateComponentsOptical(closure,v,sample.wi,base_fresnel_override,sample_diffuse,sample_specular);
-            float3 baseline_sky=EnvironmentSkyRadiance(sample.wi);
-            const bool local_diffuse=ProbeOptions.w>0.0 && diffuse_consumed && indirect_diffuse_enabled;
-            const bool local_specular=ProbeOptions.w>0.0 && indirect_specular_enabled;
+            float3 baseline_sky=0.0;
+            [branch] if(baseline_needed) baseline_sky=EnvironmentSkyRadiance(sample.wi);
             const float3 local_sky=local_diffuse || local_specular ?
                 HsSceneProbeRadiance(world,sample.wi,local_probe_count,local_probe_blend) : 0.0;
             float3 diffuse_sky=local_diffuse ? local_sky : baseline_sky;

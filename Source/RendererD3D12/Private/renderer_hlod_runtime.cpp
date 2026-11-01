@@ -124,7 +124,7 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         if (auto result = ResolveRendererAsset(config, next->logical_id, path); !result) return result;
         std::vector<std::byte> bytes;
         if (auto result = ReadBinary(path, bytes); !result) return result;
-        if (!path.pack && HlodDigest(bytes) != ProductDigest(config, next->logical_id))
+        if (!path.IsPacked() && HlodDigest(bytes) != ProductDigest(config, next->logical_id))
             return HlodFailure("SHL1 bytes differ from selected Generation digest.");
         next->scene = render_data::DecodeSceneHlod(bytes);
         if (next->scene.scene_asset_id.value != MakeAssetId(next->logical_id).value)
@@ -226,11 +226,10 @@ const HlodViewRuntime *D3D12Renderer::Impl::ActiveHlodView() const noexcept
     if (!hlod_runtime) return nullptr;
     const auto owner = owned_views.find(active_view_id.value);
     if (owner == owned_views.end()) return nullptr;
-    const auto session = explicit_frame
-        ? (explicit_frame->snapshots.has_current ? explicit_frame->snapshots.current.header.session_id : 0u)
-        : owner->second->view_session_id;
-    const auto found = hlod_runtime->views.find({active_view_id.value, session});
-    return found == hlod_runtime->views.end() ? nullptr : found->second.get();
+    // Package admission retires the old session before publishing this view's context.
+    const auto found = hlod_runtime->views.lower_bound({active_view_id.value, 0u});
+    return found == hlod_runtime->views.end() || found->first.first != active_view_id.value
+        ? nullptr : found->second.get();
 }
 
 Result D3D12Renderer::Impl::RetireHlodView(ViewId id)
@@ -491,7 +490,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(std::uint32_t frame_slot,std::uint32_t active_view_mask,
+Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(const RenderViewInput &view_input, std::uint32_t frame_slot,std::uint32_t active_view_mask,
     ResourceVersion geometry_records,ResourceVersion static_scene,ResourceVersion proxy_refs,
     HlodRuntimeFrameRecordData &record)
 {
@@ -505,13 +504,13 @@ Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(std::uint32_t frame_slot,
     inputs.frame_slot = frame_slot; inputs.active_view_mask = active_view_mask;
     inputs.rendered_frame_id = native.frame_id; inputs.static_scene_generation = static_gpu_scene->instance_generation;
     const auto &owner = *owned_views.at(active_view_id.value);
-    const bool camera_cut = explicit_view && explicit_view->camera_cut;
+    const bool camera_cut = view_input.camera_cut;
     const bool scene_changed = owner.frame_number != 0u && owner.scene_lease != view.matching_scene;
     // These increments match successful publication in renderer_frame/views.
     // The cut frame cannot read history, but its output owns the new generation.
     inputs.history_generation = owner.history_generation + (camera_cut ? 1u : 0u) + (scene_changed ? 1u : 0u);
     inputs.history_valid = !camera_cut && !scene_changed && view.session_id == owner.view_session_id &&
-        owner.previous_origins_valid && explicit_view && explicit_view->scene_origin == owner.previous_scene_origin;
+        owner.previous_origins_valid && view_input.scene_origin == owner.previous_scene_origin;
     inputs.completed = graph_queue_executor.Completed(); inputs.content_generation_id = resource_generation_id;
     inputs.layout_abi = view.matching_scene->layout_abi; inputs.layout_digest = view.matching_scene->eligible_layout_digest;
     inputs.members = native.members; inputs.proxies = native.bindings; inputs.buckets = native.buckets; inputs.views = native.views;
@@ -535,7 +534,7 @@ bool D3D12Renderer::Impl::MatchesHlodFrameLayout(const HlodRuntimeFrameRecordDat
 
 Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uint32_t active_view_mask,
     ResourceVersion geometry_records,ResourceVersion static_scene,ResourceVersion static_refs,
-    HlodFrameGraph &state,HlodRuntimeFrameLayout *capture,HlodRuntimeFrameRecordData *prepared,
+    HlodFrameGraph &state,HlodRuntimeFrameLayout *capture,HlodRuntimeFrameRecordData &prepared,
     const HlodRuntimeFrameLayout *retained)
 {
     state={};if(capture)*capture={};
@@ -551,21 +550,15 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uin
         (retained && retained->refs != static_refs.resource))
         return HlodFailure("HLOD static refs do not match the scene-owned graph import.");
     state.refs = static_refs.resource;
-    HlodRuntimeFrameRecordData local;
-    if(!prepared)
-    {
-        if(auto result=PrepareHlodFrameRecordData(frame_slot,active_view_mask,geometry_records,static_scene,static_refs,local);!result)return result;
-        prepared=&local;
-    }
-    if(prepared->view!=context||prepared->inputs.frame_slot!=frame_slot||prepared->inputs.active_view_mask!=active_view_mask)
+    if(prepared.view!=context||prepared.inputs.frame_slot!=frame_slot||prepared.inputs.active_view_mask!=active_view_mask)
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD prepared runtime frame changed.");
     // Logical slots can be assigned cold after the CPU plan was prepared.
-    prepared->inputs.geometry_records.version=geometry_records;prepared->inputs.static_scene.version=static_scene;
-    prepared->inputs.proxy_refs.version=static_refs;
-    if(retained&&!MatchesHlodFrameLayout(*prepared,*retained))
+    prepared.inputs.geometry_records.version=geometry_records;prepared.inputs.static_scene.version=static_scene;
+    prepared.inputs.proxy_refs.version=static_refs;
+    if(retained&&!MatchesHlodFrameLayout(prepared,*retained))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained runtime layout changed.");
-    auto result=retained?view.system.BindRetained(graph,prepared->inputs,prepared->selection,retained->selection,state.outputs):
-        view.system.Register(graph,prepared->inputs,state.outputs,capture?&capture->selection:nullptr,&prepared->selection);
+    auto result=retained?view.system.BindRetained(graph,prepared.inputs,prepared.selection,retained->selection,state.outputs):
+        view.system.Register(graph,prepared.inputs,state.outputs,capture?&capture->selection:nullptr,&prepared.selection);
     if(!result)return result;
     state.registered=true;native.registered=true;native.outputs=state.outputs;
     auto descriptor=srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();

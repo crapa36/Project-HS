@@ -1552,6 +1552,7 @@ struct VfxSessionState
         RenderVfxWorldBatch identity;
         std::vector<ParticleSpawnCommand> particle_spawns;
         std::vector<VfxLineSpawnCommand> effect_lines;
+        std::size_t decoded_particle_count{};
 
         [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
         { return vfx_retained_size::Add(vfx_retained_size::Vector(particle_spawns),
@@ -1905,7 +1906,8 @@ struct VfxSessionState
     // Freeze due prefixes once. A retry returns the same owned vectors and identity;
     // later decoded output stays pending for the next batch.
     NativeEmissionBatch *PrepareNativeBatch(Tick target, bool stateful_step_needed,
-        DecodedVfxState *reusable_storage = nullptr)
+        DecodedVfxState *reusable_storage = nullptr,
+        std::span<const ParticleSpawnCommand> snapshot_births = {})
     {
         if (reusable_storage && (std::addressof(*reusable_storage) == std::addressof(decoded) ||
             !reusable_storage->particle_spawns.empty() || !reusable_storage->effect_lines.empty()))
@@ -1926,7 +1928,7 @@ struct VfxSessionState
         std::size_t line_count{};
         while (line_count < decoded.effect_lines.size() && decoded.effect_lines[line_count].tick <= target)
             ++line_count;
-        if (!particle_count && !line_count && !stateful_step_needed && !particle_reset_pending)
+        if (!particle_count && !line_count && snapshot_births.empty() && !stateful_step_needed && !particle_reset_pending)
             return nullptr;
 
         native_batch.particle_spawns.clear();
@@ -1942,7 +1944,11 @@ struct VfxSessionState
             reusable_storage ? &reusable_storage->particle_spawns : nullptr);
         prepare_capacity(native_batch.effect_lines, decoded.effect_lines, line_count,
             reusable_storage ? &reusable_storage->effect_lines : nullptr);
-        native_batch.identity = {session_id, target, next_native_batch_sequence++, particle_reset_pending};
+        const auto total_particles = CheckedAdd(particle_count, snapshot_births.size());
+        if (particle_count && particle_count > decoded.particle_spawns.size() - particle_count)
+            decoded.particle_spawns.reserve(total_particles);
+        else
+            native_batch.particle_spawns.reserve(total_particles);
         const auto freeze = [](auto &owned, auto &pending, std::size_t count) {
             using Row = typename std::remove_reference_t<decltype(pending)>::value_type;
             static_assert(std::is_nothrow_copy_constructible_v<Row> && std::is_nothrow_copy_assignable_v<Row>);
@@ -1967,6 +1973,10 @@ struct VfxSessionState
         };
         freeze(native_batch.particle_spawns, decoded.particle_spawns, particle_count);
         freeze(native_batch.effect_lines, decoded.effect_lines, line_count);
+        native_batch.decoded_particle_count = particle_count;
+        native_batch.particle_spawns.insert(native_batch.particle_spawns.end(),
+            snapshot_births.begin(), snapshot_births.end());
+        native_batch.identity = {session_id, target, next_native_batch_sequence++, particle_reset_pending};
         native_batch_active = true;
         return &native_batch;
     }

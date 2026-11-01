@@ -2,6 +2,8 @@
 
 #include <hs/core/presentation_event.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
+#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_instance_lookup.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/runtime/vfx_image.hpp>
 
@@ -45,6 +47,7 @@ class PreparedPairFacts
     [[nodiscard]] const PersistentVfxVisual *Current(
         std::uint64_t stable_id, PersistentVfxKind kind,
         std::span<const PersistentVfxVisual> rows) const noexcept;
+    [[nodiscard]] std::span<const std::size_t> CurrentAliases() const noexcept { return current_aliases_; }
     [[nodiscard]] const RenderInstance *Instance(
         std::uint64_t stable_id, std::span<const RenderInstance> rows) const noexcept;
     [[nodiscard]] const CapturedRenderInstance *Capture(
@@ -78,6 +81,7 @@ class PreparedPairFacts
     bool prepared_{};
     std::unordered_map<VisualKey, std::size_t, VisualHash> previous_;
     std::unordered_map<VisualKey, std::size_t, VisualHash> current_;
+    std::vector<std::size_t> current_aliases_;
     std::unordered_map<std::uint64_t, std::size_t> instances_;
     std::unordered_map<CaptureKey, std::size_t, CaptureHash> captures_;
 };
@@ -92,8 +96,32 @@ void BuildVfxTypedFrameInputs(
     std::span<const PersistentVfxVisual> previous,
     Tick current_tick,
     VfxTypedFrameInputs &result,
-    const PreparedPairFacts *pair_facts = nullptr,
+    const PreparedPairFacts &pair_facts,
     float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
+
+// Raw fixtures/tools have no retained publication identity; prepare one temporary
+// index at this boundary and use the same indexed consumer as the normal frame.
+void BuildVfxTypedFrameInputsFromRaw(
+    const VfxImage &image, std::span<const PresentationEvent> events,
+    std::span<const PersistentVfxVisual> current,
+    std::span<const PersistentVfxVisual> previous, Tick current_tick,
+    VfxTypedFrameInputs &result, float interpolation = 1.0f,
+    VfxQuality quality = VfxQuality::High);
+
+struct SnapshotParticleScratch
+{
+    RenderInstanceLookup previous, current;
+    std::vector<std::uint8_t> ground_routes;
+    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
+};
+
+// Expand snapshot births once for the native batch, after decoded births.
+void AppendPersistentSnapshotParticleBirths(
+    const RenderSnapshotPair &snapshots, const RenderVfxFrameInput &typed,
+    Tick stateful_target, Tick last_accepted_target, bool reset,
+    float interpolation, const RendererVfxSpriteBindings &sprite_bindings,
+    bool preview, const PreparedPairFacts &pair_facts,
+    SnapshotParticleScratch &scratch, std::vector<ParticleSpawnCommand> &output);
 
 // Retain only the captured endpoints of a successful second retreat. The
 // movement is instantaneous in gameplay; fixed authored seconds own the fade.
@@ -131,17 +159,28 @@ class VfxUpgradeMovementState
 // False means its owner/recipe/age contract is no longer retainable.
 [[nodiscard]] bool RefreshVfxGroundEventOwner(
     VfxEventInput &event, std::span<const PersistentVfxVisual> owners,
-    Tick current_tick, const PreparedPairFacts *pair_facts = nullptr,
+    Tick current_tick, const PreparedPairFacts &pair_facts,
     std::span<const PersistentVfxVisual> previous = {}, float interpolation = 1.0f);
+
+[[nodiscard]] bool RefreshVfxGroundEventOwnerFromRaw(
+    VfxEventInput &event, std::span<const PersistentVfxVisual> owners,
+    Tick current_tick, std::span<const PersistentVfxVisual> previous = {},
+    float interpolation = 1.0f);
 
 // Refresh retained warning events from their authoritative persistent owners.
 // Events without owner metadata are preserved unchanged.
 void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
                                  std::span<const PersistentVfxVisual> owners,
                                  Tick current_tick,
-                                 const PreparedPairFacts *pair_facts = nullptr,
+                                 const PreparedPairFacts &pair_facts,
                                  std::span<const PersistentVfxVisual> previous = {},
                                  float interpolation = 1.0f);
+
+void RefreshVfxGroundEventOwnersFromRaw(
+    std::vector<VfxEventInput> &events,
+    std::span<const PersistentVfxVisual> owners, Tick current_tick,
+    std::span<const PersistentVfxVisual> previous = {},
+    float interpolation = 1.0f);
 
 // Validate prepared owner-backed events against exact warning/sector recipes.
 // Events without owner metadata retain their already remapped handles.

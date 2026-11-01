@@ -201,7 +201,7 @@ class TextureStreamFixture
         hs::TextureStreamRegistration registration{};
         registration.generation = "native-fixture-generation";
         registration.logical_id = logical_id_;
-        registration.source.path = source_.path;
+        registration.source = hs::RendererAssetSource::Loose(source_.path);
         registration.generation_lease = std::make_shared<int>(1);
         registration.description = description_;
         registration.fallback = fallback_;
@@ -249,7 +249,7 @@ class TextureStreamFixture
         hs::TextureStreamRegistration registration{};
         registration.generation = "native-fixture-sibling-generation";
         registration.logical_id = sibling_logical_id_;
-        registration.source.path = sibling_source_->path;
+        registration.source = hs::RendererAssetSource::Loose(sibling_source_->path);
         registration.generation_lease = std::make_shared<int>(1);
         registration.description = description_;
         registration.fallback = sibling_fallback_;

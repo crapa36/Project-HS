@@ -425,7 +425,6 @@ add_library(
     Source/RendererD3D12/Private/renderer.cpp
     Source/RendererD3D12/Private/renderer_capture.cpp
     Source/RendererD3D12/Private/renderer_device.cpp
-    Source/RendererD3D12/Private/vfx_persistent_state.cpp
     Source/RendererD3D12/Private/vfx_ribbon_state.cpp
     Source/RendererD3D12/Private/renderer_frame.cpp
     Source/RendererD3D12/Private/renderer_pipeline.cpp
@@ -554,11 +553,14 @@ endif()
 add_library(
     hs_runtime STATIC
     Source/Runtime/Private/application.cpp
+    Source/Runtime/Private/generation_reload_watch.cpp
+    Source/Runtime/Private/renderer_settings_projection.cpp
     Source/Runtime/Private/shipping_content.cpp
     Source/Runtime/Private/audio_engine.cpp
     Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/vfx_catalog.cpp
     Source/Runtime/Private/vfx_typed_frame_adapter.cpp
+    Source/Runtime/Private/vfx_persistent_state.cpp
     Source/Runtime/Private/vfx_upgrade_dispatch.cpp
     Source/Runtime/Private/vfx_typed_decal_commands.cpp
     Source/Runtime/Private/vfx_typed_volume_commands.cpp
@@ -2222,6 +2224,7 @@ if(HS_BUILD_TESTS)
         add_executable(hs_vfx_typed_frame_tests
             Tests/vfx_typed_frame_adapter_tests.cpp
             Source/Runtime/Private/vfx_typed_frame_adapter.cpp
+            Source/Runtime/Private/vfx_persistent_state.cpp
             Source/Runtime/Private/vfx_typed_screen_commands.cpp
             Source/Runtime/Private/vfx_typed_volume_commands.cpp)
         target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_runtime_contracts)
@@ -2849,10 +2852,10 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_TYPED_VFX_GENERATION_TARGET})
     add_executable(hs_vfx_persistent_tests
         Tests/vfx_persistent_state_tests.cpp
-        Source/RendererD3D12/Private/vfx_persistent_state.cpp)
+        Source/Runtime/Private/vfx_persistent_state.cpp)
     target_link_libraries(hs_vfx_persistent_tests PRIVATE hs_core hs_render_data_values)
     target_include_directories(hs_vfx_persistent_tests PRIVATE
-        Source/RendererD3D12/Public Source/RendererD3D12/Private)
+        Source/Runtime/Private)
     hs_configure_target(hs_vfx_persistent_tests)
     add_test(NAME rendering.vfx-persistent-lifetime COMMAND hs_vfx_persistent_tests)
     add_executable(hs_render_graph_tests Tests/render_graph_tests.cpp)

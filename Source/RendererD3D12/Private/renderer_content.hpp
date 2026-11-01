@@ -250,12 +250,13 @@ inline Result ResolveRendererAsset(const RendererConfig &config, std::string_vie
         const auto *bulk = FindRendererBulk(config, id);
         if (!bulk)
             return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing compiled renderer bulk: " + std::string(id));
-        source.pack = config.packed_content;
-        source.range = bulk->range;
+        source = RendererAssetSource::Packed(config.packed_content, bulk->range);
     }
     else
     {
-        if (auto result = config.ResolveProduct(id, source.path); !result) return result;
+        std::filesystem::path path;
+        if (auto result = config.ResolveProduct(id, path); !result) return result;
+        std::optional<LooseRendererAsset::WholeFileProof> proof;
         // Developer feedback selection can redirect a shader ID to its variant path.
         if (config.development_catalog && !id.ends_with(".dxil"))
         {
@@ -263,8 +264,11 @@ inline Result ResolveRendererAsset(const RendererConfig &config, std::string_vie
             const auto found = std::lower_bound(config.packed_bulks.begin(), config.packed_bulks.end(), asset,
                 [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
             if (found != config.packed_bulks.end() && found->asset_id.value == asset)
-                source.range = found->range;
+                if (found->range.byte_count)
+                    proof = LooseRendererAsset::WholeFileProof{
+                        found->range.byte_count, found->range.expected_digest};
         }
+        source = RendererAssetSource::Loose(std::move(path), std::move(proof));
     }
     output = std::move(source);
     return Result::Success();
@@ -326,8 +330,7 @@ inline Result ReadRendererMaterialProgram(const RendererConfig &config,
             bulk = FindRendererBulk(config, program.product_id);
         if (!bulk || bulk->range.format != render_data::RenderBulkFormat::ShaderDxil)
             return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Invalid selected material shader bulk.");
-        source.pack = config.packed_content;
-        source.range = bulk->range;
+        source = RendererAssetSource::Packed(config.packed_content, bulk->range);
     }
     else if (auto result = ResolveRendererAsset(config, program.product_id, source); !result) return result;
     return source.Read(output);

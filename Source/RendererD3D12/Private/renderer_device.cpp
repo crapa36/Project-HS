@@ -802,6 +802,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     // is unavailable. DRS requires critical_path_valid as well as completion.
     timings.pass_timings_valid = frame.timing_mode == GpuTimingMode::Full && pass_timings_valid;
     timings.valid = frame.timing_mode == GpuTimingMode::Full && pass_timings_valid;
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (timings.metric_kind == GpuFrameTimingKind::SourceOutputReady)
     {
         if (!duplicate_endpoint && end_slot != timings.passes.size())
@@ -956,6 +957,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         timings.pacing_gap = current.pacing_gap;
         return publish();
     }
+#endif
     if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan &&
         timings.metric_kind != GpuFrameTimingKind::OutputDependencyInterval)
         return publish();

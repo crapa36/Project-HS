@@ -100,7 +100,7 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
         const auto expected_digest = ExpectedDigest(config, logical_id);
         std::vector<std::byte> bytes;
         if (auto loaded = read(hierarchy_path, bytes); !loaded) return loaded;
-        Require(hierarchy_path.pack || Digest(bytes) == expected_digest, "hierarchy bytes differ from selected Generation digest");
+        Require(hierarchy_path.IsPacked() || Digest(bytes) == expected_digest, "hierarchy bytes differ from selected Generation digest");
         EnvironmentClusterCatalog prepared;
         prepared.hierarchy_ = rd::DecodeGeometryHierarchy(bytes);
         Require(prepared.hierarchy_.geometry_flags == metadata.flags &&

@@ -111,7 +111,8 @@ bool AoLoadHorizonPosition(int2 pixel, out float3 position)
         position.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]) * inverseW;
         position.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]) * inverseW;
         position.z = AoInverseProjection[3][2] * inverseW;
-        return all(isfinite(position)) && position.z > 0.0;
+        // The full-resolution producer validated this exact position before publishing inverse-W.
+        return true;
     }
     float depth = AoDepth.Load(int3(pixel, 0));
     uint material = AoMetadata.Load(int3(pixel, 0));

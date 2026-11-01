@@ -19,13 +19,38 @@
 
 namespace hs::runtime_detail
 {
-std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+struct FresnelTestBatch
 {
     VfxImageData data;
-    data.program = program;
-    PrepareVfxFresnelRecipes(program.View(), data.fresnel_effect_recipes, data.fresnel_recipes);
-    return BuildVfxTypedFresnelCommands(data.View(), inputs);
+    PreparedVfxFresnelRecipeView recipes;
+    std::vector<VfxFresnelInput> commands;
+
+    FresnelTestBatch() = default;
+    FresnelTestBatch(const FresnelTestBatch &) = delete;
+    FresnelTestBatch &operator=(const FresnelTestBatch &) = delete;
+    FresnelTestBatch(FresnelTestBatch &&) noexcept = default;
+    FresnelTestBatch &operator=(FresnelTestBatch &&) noexcept = default;
+    [[nodiscard]] std::size_t size() const noexcept { return commands.size(); }
+    [[nodiscard]] std::size_t capacity() const noexcept { return commands.capacity(); }
+    [[nodiscard]] bool empty() const noexcept { return commands.empty(); }
+    [[nodiscard]] const VfxFresnelInput &operator[](std::size_t index) const { return commands[index]; }
+    [[nodiscard]] const VfxFresnelInput &front() const { return commands.front(); }
+    [[nodiscard]] const VfxFresnelRecipe &Recipe(const VfxFresnelInput &command) const
+    { return recipes.Rows()[command.recipe_index]; }
+};
+
+FresnelTestBatch BuildVfxTypedFresnelCommands(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+{
+    FresnelTestBatch batch;
+    batch.data.program = program;
+    PrepareVfxFresnelRecipes(program.View(), batch.data.fresnel_effect_recipes,
+                             batch.data.fresnel_recipes);
+    if (auto prepared = PreparedVfxFresnelRecipeView::Create(
+            batch.data.fresnel_recipes, batch.recipes); !prepared)
+        throw std::runtime_error(std::string(prepared.Message()));
+    AppendVfxTypedFresnelCommands(batch.data.View(), batch.recipes, inputs, batch.commands);
+    return batch;
 }
 }
 
@@ -171,37 +196,38 @@ void PreservesBossOwnerAndAuthoredShells()
     {
         const auto program = Program(transition);
         const auto input = Input();
-        const auto commands = hs::runtime_detail::BuildVfxTypedFresnelCommands(
+        const auto batch = hs::runtime_detail::BuildVfxTypedFresnelCommands(
             program, std::span(&input, 1));
-        Require(commands.size() == 1, "boss Fresnel output missing");
-        const auto &command = commands[0];
-        Require(command.kind == (transition ? hs::VfxFresnelShellKind::BossTransition
+        Require(batch.size() == 1, "boss Fresnel output missing");
+        const auto &command = batch[0];
+        const auto &recipe = batch.Recipe(command);
+        Require(recipe.kind == (transition ? hs::VfxFresnelShellKind::BossTransition
                                              : hs::VfxFresnelShellKind::BossCrown) &&
                 command.render_instance_id == 0xabcdef &&
                 command.stable_id == input.stable_id &&
-                command.effect_handle == 1 &&
+                recipe.effect_handle == 1 &&
                 command.current_transform == input.current_transform &&
                 command.previous_transform == input.previous_transform &&
                 Near(command.footprint_radius, 1.4f) &&
                 Near(command.source_progress, .5f) &&
                 Near(command.elapsed_seconds, 2.0f),
                 "Fresnel shell lost its gameplay owner or source-local time");
-        Require(Near(command.color.x, .2f) && Near(command.color.y, .4f) &&
-                Near(command.color.z, .6f) &&
-                Near(command.color.w, transition ? .52f : .36f) &&
-                Near(command.hdr, transition ? 3.4f : 2.2f) &&
-                command.gradient_row == 13 &&
-                Near(command.motion_rate_hz, .25f) &&
-                Near(command.motion_amplitude, .2f) &&
-                Near(command.motion_inset_fraction, .1f),
+        Require(Near(recipe.color.x, .2f) && Near(recipe.color.y, .4f) &&
+                Near(recipe.color.z, .6f) &&
+                Near(recipe.color.w, transition ? .52f : .36f) &&
+                Near(recipe.hdr, transition ? 3.4f : 2.2f) &&
+                recipe.gradient_row == 13 &&
+                Near(recipe.motion_rate_hz, .25f) &&
+                Near(recipe.motion_amplitude, .2f) &&
+                Near(recipe.motion_inset_fraction, .1f),
                 "Fresnel shell lost cooked material or motion");
         if (transition)
-            Require(Near(command.fresnel_power, 2.3f) && command.end_crack == 1 &&
-                    command.sector_count == 0,
+            Require(Near(recipe.fresnel_power, 2.3f) && recipe.end_crack == 1 &&
+                    recipe.sector_count == 0,
                     "transition shell did not decode fresnel/end crack params");
         else
-            Require(command.sector_count == 6 && Near(command.rotation_hz, -.09f) &&
-                    Near(command.fresnel_power, 0),
+            Require(recipe.sector_count == 6 && Near(recipe.rotation_hz, -.09f) &&
+                    Near(recipe.fresnel_power, 0),
                     "crown shell did not decode sector/rotation params");
     }
 }
@@ -213,17 +239,20 @@ void AppendPreservesOwnerPrefixAndCapacity()
     data.program=program;
     hs::PrepareVfxFresnelRecipes(data.program.View(),data.fresnel_effect_recipes,data.fresnel_recipes);
     auto image=data.View();
+    hs::PreparedVfxFresnelRecipeView recipes;
+    Require(hs::PreparedVfxFresnelRecipeView::Create(data.fresnel_recipes, recipes).Succeeded(),
+            "prepare checked Fresnel recipes");
     auto owner=Input();
     std::vector<hs::VfxFresnelInput> result;
     result.reserve(4);
     hs::VfxFresnelInput prefix;prefix.stable_id=77;result.push_back(prefix);
     const auto capacity=result.capacity();
-    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,{},result);
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,recipes,{},result);
     auto rejected=owner;rejected.stable_id=0;
-    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&rejected,1),result);
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,recipes,std::span(&rejected,1),result);
     Require(result.size()==1&&result[0].stable_id==77&&result.capacity()==capacity,
             "empty/rejected Fresnel append changed prefix or capacity");
-    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,std::span(&owner,1),result);
+    hs::runtime_detail::AppendVfxTypedFresnelCommands(image,recipes,std::span(&owner,1),result);
     Require(result.size() - 1 <= hs::runtime_detail::PrepareVfxEventProfileAdmission(
                 image, owner.effect_handle).persistent_fresnel_rows,
             "prepared Fresnel reservation was smaller than actual output");
@@ -285,11 +314,27 @@ void SkipsMalformedOutputAndKeepsSiblingOutputOrder()
     program.outputs.push_back(second);
     program.sources.front().outputs.count = 2;
     const auto input = Input();
-    const auto commands = hs::runtime_detail::BuildVfxTypedFresnelCommands(
+    const auto batch = hs::runtime_detail::BuildVfxTypedFresnelCommands(
         program, std::span(&input, 1));
-    Require(commands.size() == 1 && Near(commands[0].color.w, .74f) &&
-        Near(commands[0].hdr, 4.0f),
+    Require(batch.size() == 1 && Near(batch.Recipe(batch[0]).color.w, .74f) &&
+        Near(batch.Recipe(batch[0]).hdr, 4.0f),
         "malformed Fresnel output suppressed or reordered a valid sibling");
+}
+
+void RejectsInvalidPreparedRecipeRows()
+{
+    auto program = Program(false);
+    hs::VfxImageData data;
+    data.program = program;
+    hs::PrepareVfxFresnelRecipes(program.View(), data.fresnel_effect_recipes, data.fresnel_recipes);
+    hs::PreparedVfxFresnelRecipeView admitted;
+    Require(hs::PreparedVfxFresnelRecipeView::Create(data.fresnel_recipes, admitted).Succeeded(),
+            "valid Fresnel table was not admitted");
+    auto malformed = data.fresnel_recipes;
+    malformed.front().color.x = -1.0f;
+    Require(!hs::PreparedVfxFresnelRecipeView::Create(malformed, admitted) &&
+                admitted.Matches(data.fresnel_recipes),
+            "malformed fixed recipe was accepted or replaced the prior admitted view");
 }
 
 void PreservesPlayerInvulnerableOwnerAndCookedShell()
@@ -303,7 +348,8 @@ void PreservesPlayerInvulnerableOwnerAndCookedShell()
     const auto commands = run();
     Require(commands.size() == 1, "player invulnerability Fresnel output missing");
     const auto &shell = commands.front();
-    Require(shell.kind == hs::VfxFresnelShellKind::PlayerInvulnerable &&
+    const auto &recipe = commands.Recipe(shell);
+    Require(recipe.kind == hs::VfxFresnelShellKind::PlayerInvulnerable &&
             shell.render_instance_id == 0xabcdef &&
             shell.stable_id == input.stable_id &&
             shell.current_transform == input.current_transform &&
@@ -311,9 +357,9 @@ void PreservesPlayerInvulnerableOwnerAndCookedShell()
             Near(shell.footprint_radius, 1.4f) &&
             Near(shell.source_progress, .5f) && Near(shell.elapsed_seconds, 2.0f),
             "player shell lost actual owner mesh, footprint, or lifecycle clock");
-    Require(Near(shell.fresnel_power, 3.5f) && Near(shell.noise_amount, .08f) &&
-            Near(shell.color.x, .25f) && Near(shell.color.w, .28f) &&
-            Near(shell.hdr, 1.6f) && shell.gradient_row == 5,
+    Require(Near(recipe.fresnel_power, 3.5f) && Near(recipe.noise_amount, .08f) &&
+            Near(recipe.color.x, .25f) && Near(recipe.color.w, .28f) &&
+            Near(recipe.hdr, 1.6f) && recipe.gradient_row == 5,
             "player shell lost cooked parameters or material");
     program.sources[0].stable_id = Hash32("wrong_shell");
     Require(run().empty(), "wrong player shell source accepted");
@@ -404,13 +450,13 @@ void CookedPlayerShellConvertsWhenAvailable()
         }
         auto input = Input();
         input.effect_handle = lookup.handle;
-        const auto commands = hs::runtime_detail::BuildVfxTypedFresnelCommands(
+        const auto batch = hs::runtime_detail::BuildVfxTypedFresnelCommands(
             program, std::span(&input, 1));
-        converted += commands.size();
-        if (!commands.empty())
-            Require(commands[0].kind == hs::VfxFresnelShellKind::PlayerInvulnerable &&
-                    Near(commands[0].fresnel_power, 3.5f) &&
-                    Near(commands[0].noise_amount, .08f),
+        converted += batch.size();
+        if (!batch.empty())
+            Require(batch.Recipe(batch[0]).kind == hs::VfxFresnelShellKind::PlayerInvulnerable &&
+                    Near(batch.Recipe(batch[0]).fresnel_power, 3.5f) &&
+                    Near(batch.Recipe(batch[0]).noise_amount, .08f),
                     "cooked player shell parameter or kind changed");
     }
     Require(authored == 1 && converted == 1,
@@ -426,6 +472,7 @@ int RunVfxFresnelTests()
         AppendPreservesOwnerPrefixAndCapacity();
         RejectsMissingOwnerAndWrongAuthoredContract();
         SkipsMalformedOutputAndKeepsSiblingOutputOrder();
+        RejectsInvalidPreparedRecipeRows();
         PreservesPlayerInvulnerableOwnerAndCookedShell();
         CookedBossShellsConvertWhenAvailable();
         CookedPlayerShellConvertsWhenAvailable();

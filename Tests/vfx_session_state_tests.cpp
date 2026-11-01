@@ -2483,6 +2483,40 @@ void CheckFrozenNativeBatches()
               frozen->particle_spawns[0].position.x == 1 && frozen->particle_spawns[0].seed == 41 &&
               frozen->particle_spawns[0].authored_birth_tick == 199 && all_due.decoded.particle_spawns.size() == 1,
           "retry retains the first prepared world-space birth while newer owner data stays pending");
+
+    for (const auto [due_count, future_count] :
+         std::array<std::pair<std::size_t, std::size_t>, 4>{{{0, 2}, {2, 0}, {1, 3}, {3, 1}}})
+    {
+        hs::runtime_detail::VfxSessionState with_snapshot;
+        with_snapshot.Synchronize(10);
+        for (std::size_t index = 0; index < due_count + future_count; ++index)
+        {
+            hs::ParticleSpawnCommand row;
+            row.tick = index < due_count ? 10 : 20;
+            row.sequence = index + 1;
+            with_snapshot.decoded.particle_spawns.push_back(row);
+        }
+        hs::ParticleSpawnCommand snapshot_birth;
+        snapshot_birth.sequence = 777;
+        const std::array suffix{snapshot_birth};
+        auto *first = with_snapshot.PrepareNativeBatch(10, true, nullptr, suffix);
+        Check(first && first->decoded_particle_count == due_count &&
+              first->particle_spawns.size() == due_count + 1 &&
+              first->particle_spawns.back().sequence == 777 &&
+              with_snapshot.decoded.particle_spawns.size() == future_count,
+              "snapshot births follow the frozen decoded prefix in every freeze partition");
+        for (std::size_t index = 0; index < due_count; ++index)
+            Check(first->particle_spawns[index].sequence == index + 1, "decoded birth order is retained");
+        const auto receipt = first->identity;
+        const auto *retry_batch = with_snapshot.PrepareNativeBatch(11, true, nullptr, suffix);
+        Check(retry_batch == first && retry_batch->identity.sequence == receipt.sequence &&
+              retry_batch->particle_spawns.size() == due_count + 1 &&
+              retry_batch->particle_spawns.back().sequence == 777,
+              "snapshot suffix is frozen once across retry");
+        Check(with_snapshot.AcknowledgeNativeBatch(receipt, true) &&
+              with_snapshot.last_committed_stateful_target == 10 && !with_snapshot.native_batch_active,
+              "snapshot batch acknowledges its original target");
+    }
 }
 
 void CheckNativeBatchReusesPreparedStorage()

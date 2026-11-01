@@ -158,7 +158,7 @@ struct BrixelizerStorage
     using StaticInstanceMap=std::map<InstanceKey,StaticInstance>;
     struct ImmutableSceneSummary
     {
-        std::shared_ptr<const void> owner;
+        std::shared_ptr<const BrixelizerImmutableSceneSection> owner;
         std::vector<BufferKey> buffers;
         std::vector<std::uint32_t> geometry_indices;
         std::uint32_t input_rows{},static_instances{};
@@ -306,10 +306,10 @@ bool SameStatic(const BrixelizerStorage::StaticInstance &old,const BrixelizerSce
 Result ValidateGeometryShape(const SoftwareSceneGeometry &g)
 {
     const auto index_bytes=g.index_format==DXGI_FORMAT_R32_UINT?4u:g.index_format==DXGI_FORMAT_R16_UINT?2u:0u;
-    if(!g.stable_key||!g.generation||g.vertex_count<3||g.index_count<3||g.index_count%3||g.vertex_stride<12||g.vertex_stride%4||
+    if(!g.stable_key||!g.generation||g.vertex_count<3||g.index_count<3||g.index_count%3||!IsBrixelizerVertexStride(g.vertex_stride)||
         g.vertex_byte_offset%4||!index_bytes||g.index_byte_offset%index_bytes||g.vertex_byte_offset>UINT32_MAX||g.index_byte_offset>UINT32_MAX||
         !g.vertices||!g.indices)
-        return Fail(ErrorCode::InvalidArgument,"Brixelizer requires actual generation-scoped indexed float3 geometry ranges.");
+        return Fail(ErrorCode::InvalidArgument,"Brixelizer requires actual indexed float3 geometry with a stride at most 63 bytes.");
     for(const auto &entry:{std::tuple{g.vertices,g.vertex_byte_offset,std::uint64_t(g.vertex_count-1)*g.vertex_stride+12},
         std::tuple{g.indices,g.index_byte_offset,std::uint64_t(g.index_count)*index_bytes}})
     {
@@ -319,10 +319,11 @@ Result ValidateGeometryShape(const SoftwareSceneGeometry &g)
     }
     return Result::Success();
 }
-Result ValidateGeometryGraphBinding(const RenderGraphBuilder &graph,const SoftwareSceneGeometry &g)
+Result ValidateGeometryGraphBinding(const RenderGraphBuilder &graph,const SoftwareSceneGeometry &g,
+    BrixelizerGeometryVersions versions)
 {
-    if(!g.vertex_version.resource||!g.index_version.resource||
-        graph.Resolve(g.vertex_version.resource)!=g.vertices||graph.Resolve(g.index_version.resource)!=g.indices)
+    if(!versions.vertex.resource||!versions.index.resource||
+        graph.Resolve(versions.vertex.resource)!=g.vertices||graph.Resolve(versions.index.resource)!=g.indices)
         return Fail(ErrorCode::InvalidArgument,"Brixelizer graph versions do not bind the admitted geometry buffers.");
     return Result::Success();
 }
@@ -369,13 +370,7 @@ struct BrixelizerGiSystem::Impl
         std::uint32_t slot{},updated_cascade{};
         std::uint64_t frame{},scene_revision{},light_revision{};
         bool prepared{};
-        const SoftwareSceneGeometry *prepared_geometries{};
-        const BrixelizerSceneInstanceRange *prepared_instance_ranges{};
-        std::size_t prepared_instance_range_count{};
-        std::uint32_t prepared_instance_count{};
 #if HS_WITH_BRIXELIZER
-        std::shared_ptr<const void> prepared_immutable_owner;
-        std::uint32_t prepared_immutable_count{};
         BrixelizerStorage::ImmutableSceneSummary candidate_immutable_scene;
         std::vector<BrixelizerStorage::InstanceKey> candidate_mutable_static_keys;
         bool publish_immutable_scene{},clear_immutable_scene{};
@@ -428,25 +423,6 @@ struct BrixelizerGiSystem::Impl
         return graph.AddPass(id,name,QueueHint::Direct);
     }
 };
-namespace
-{
-std::vector<SceneGeometryReadToken> UniqueGeometryReads(
-    const std::vector<SceneGeometryReadToken> &reads)
-{
-    std::vector<SceneGeometryReadToken> unique;
-    unique.reserve(reads.size());
-    for (const auto &read : reads) if (read.version.resource) unique.push_back(read);
-    const auto key=[](const SceneGeometryReadToken &read) {
-        return std::tuple{read.version.resource.value,read.version.resource.kind,
-            read.version.ordinal,read.access};
-    };
-    std::ranges::sort(unique,[&](const auto &left,const auto &right) {
-        return key(left)<key(right);
-    });
-    unique.erase(std::unique(unique.begin(),unique.end()),unique.end());
-    return unique;
-}
-}
 bool MatchesBrixelizerGraphLayout(const BrixelizerFrameRecordData &current,
     const BrixelizerGraphLayout &layout) noexcept
 {
@@ -460,8 +436,20 @@ bool MatchesBrixelizerGraphLayout(const BrixelizerFrameRecordData &current,
 }
 BrixelizerGiSystem::BrixelizerGiSystem():impl_(std::make_unique<Impl>()) {}
 BrixelizerGiSystem::~BrixelizerGiSystem()=default;
+BrixelizerPreparedScene::~BrixelizerPreparedScene() { Reset(); }
+void BrixelizerPreparedScene::Reset() noexcept
+{
+    if(auto *owner=std::exchange(owner_,nullptr))owner->AbandonPreparedFrame();
+    record_=nullptr;geometries_=BrixelizerGeometryRange{};immutable_section_.reset();
+}
 std::uint64_t BrixelizerCandidate::AllocatedBytes()const noexcept {return storage_?storage_->GpuBytes():0;}
 std::uint64_t BrixelizerGiSystem::AllocatedBytes()const noexcept {return impl_->storage?impl_->storage->GpuBytes():0;}
+std::optional<std::uint64_t> BrixelizerGiSystem::HistoryLightRevision()const noexcept
+{
+    const auto *storage=impl_->storage.get();
+    if(!storage||!storage->history_valid)return std::nullopt;
+    return storage->status.light_revision;
+}
 float BrixelizerGiSystem::FinestVoxelSizeMeters()const noexcept
 {
     const auto *storage=impl_->storage.get();
@@ -613,7 +601,7 @@ Result BrixelizerGiSystem::Commit(BrixelizerCandidate &&candidate,const Completi
     if(auto old=impl_->storage;old&&!old->completion.IsSatisfiedBy(completed))return Fail(ErrorCode::InvalidState,"Brixelizer publication requires all old queue uses completed.");
     impl_->storage=std::move(candidate.storage_);return Result::Success();
 }
-Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &in,BrixelizerFrameRecordData &out)
+Result BrixelizerGiSystem::PrepareFrameRecordData(BrixelizerSceneInputs &&in,BrixelizerPreparedScene &out)
 {
     out={};auto s=impl_->storage;if(!s)return Result::Success();
 #if !HS_WITH_BRIXELIZER
@@ -624,13 +612,19 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     if(s->noise_uploaded)for(auto &upload:s->noise_uploads)if(upload&&upload->graph_completion.IsSatisfiedBy(in.completed))upload.reset();
     if(in.frame_slot>=s->slots.size()||!s->slots[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!Finite(in.sdf_center)||
         (s->successful_updates&&in.frame_index<=s->last_frame)||in.frame_index>UINT32_MAX||in.owners.empty()||
-        in.geometries.size()>UINT32_MAX)
+        in.geometries.prefix.size()>UINT32_MAX||
+        in.geometries.current.size()>UINT32_MAX-in.geometries.prefix.size())
         return Fail(ErrorCode::InvalidArgument,"Brixelizer scene requires a completed frame slot, monotonic frame and backed owners.");
+    if((!in.geometries.prefix_versions.empty()&&in.geometries.prefix_versions.size()!=in.geometries.prefix.size())||
+        (!in.geometries.prefix.empty()&&(!in.immutable_section||
+            in.geometries.prefix.data()!=in.immutable_section->Geometries().data()||
+            in.geometries.prefix.size()!=in.immutable_section->Geometries().size())))
+        return Fail(ErrorCode::InvalidArgument,"Brixelizer immutable geometry prefix or frame versions do not match their owner.");
     std::uint32_t instance_count{},immutable_row_count{};
-    if(auto result=CountBrixelizerSceneInstanceRanges(in.instance_ranges,instance_count,immutable_row_count);!result)
+    if(auto result=CountBrixelizerSceneRows(in,instance_count,immutable_row_count);!result)
         return result;
-    const bool immutable_cache_hit=in.immutable_owner&&
-        s->immutable_scene.owner==in.immutable_owner&&
+    const bool immutable_cache_hit=in.immutable_section&&
+        s->immutable_scene.owner==in.immutable_section&&
         s->immutable_scene.input_rows==immutable_row_count;
     const auto mutation_count=immutable_cache_hit?instance_count-immutable_row_count:instance_count;
     // Validate every input before mutating SDK CPU identity and invalidations.
@@ -655,9 +649,9 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     auto &static_mutations=s->static_mutations;
     static_mutations.assign(mutation_count,{});
     BrixelizerStorage::ImmutableSceneSummary next_immutable_scene;
-    if(!immutable_cache_hit&&in.immutable_owner)
+    if(!immutable_cache_hit&&in.immutable_section)
     {
-        next_immutable_scene.owner=in.immutable_owner;
+        next_immutable_scene.owner=in.immutable_section;
         next_immutable_scene.input_rows=immutable_row_count;
         next_immutable_scene.geometry_indices.reserve(in.geometries.size());
         next_immutable_scene.buffers.reserve(in.geometries.size()*2u);
@@ -673,23 +667,26 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         if(auto result=AddBrixelizerExcludedCount(counts.unsupported_thin,s->immutable_scene.excluded_thin);!result)return result;
         if(auto result=AddBrixelizerExcludedCount(counts.excluded_translucent,s->immutable_scene.excluded_translucent);!result)return result;
     }
-    if(auto result=ForEachBrixelizerSceneInstance(in.instance_ranges,
-        immutable_cache_hit,[&](const BrixelizerSceneInstance &instance,std::uint32_t,bool immutable)->Result {
+    std::size_t invalidations{};
+    std::uint32_t mutable_logical_count{};
+    if(auto result=ForEachBrixelizerSceneInstance(in,
+        immutable_cache_hit,[&](const BrixelizerSceneInstance &instance,std::uint32_t logical_index,bool immutable)->Result {
+        const auto mutation_index=immutable_cache_hit?mutable_logical_count++:logical_index;
         if(instance.domain==BrixelizerGeometryDomain::Translucent)
         {
-            if(immutable&&!immutable_cache_hit&&in.immutable_owner)
+            if(immutable&&!immutable_cache_hit&&in.immutable_section)
                 if(auto result=AddBrixelizerExcludedCount(next_immutable_scene.excluded_translucent,1);!result)return result;
             return AddBrixelizerExcludedCount(counts.excluded_translucent,1);
         }
         if(instance.domain==BrixelizerGeometryDomain::UnsupportedMasked)
         {
-            if(immutable&&!immutable_cache_hit&&in.immutable_owner)
+            if(immutable&&!immutable_cache_hit&&in.immutable_section)
                 if(auto result=AddBrixelizerExcludedCount(next_immutable_scene.excluded_masked,1);!result)return result;
             return AddBrixelizerExcludedCount(counts.unsupported_masked,1);
         }
         if(instance.domain==BrixelizerGeometryDomain::UnsupportedThin)
         {
-            if(immutable&&!immutable_cache_hit&&in.immutable_owner)
+            if(immutable&&!immutable_cache_hit&&in.immutable_section)
                 if(auto result=AddBrixelizerExcludedCount(next_immutable_scene.excluded_thin,1);!result)return result;
             return AddBrixelizerExcludedCount(counts.unsupported_thin,1);
         }
@@ -708,7 +705,7 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
             validated_geometries[geometry_index] |= kGeometryShapeAdmitted;
             wanted_buffers.push_back({g.vertices,g.generation});wanted_buffers.push_back({g.indices,g.generation});
         }
-        if(immutable&&!immutable_cache_hit&&in.immutable_owner&&
+        if(immutable&&!immutable_cache_hit&&in.immutable_section&&
             !(validated_geometries[geometry_index]&kImmutableGeometryAdmitted))
         {
             validated_geometries[geometry_index] |= kImmutableGeometryAdmitted;
@@ -722,12 +719,26 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
         if(!g.dynamic)
         {
             wanted_static.push_back(key);
-            if(!immutable)wanted_mutable_static.push_back(key);
-            if(immutable&&!immutable_cache_hit&&in.immutable_owner)
+            if(!immutable_cache_hit&&!immutable)wanted_mutable_static.push_back(key);
+            if(immutable&&!immutable_cache_hit&&in.immutable_section)
             {
                 ++next_immutable_scene.static_instances;
             }
             ++counts.static_instances;
+            if(instance.domain==BrixelizerGeometryDomain::Opaque||
+                instance.domain==BrixelizerGeometryDomain::AuthoredCoverage)
+            {
+                auto &mutation=static_mutations[mutation_index];
+                mutation.immutable=immutable;
+                const auto old=s->static_instances.find(key);
+                mutation.existing=old;
+                if(old==s->static_instances.end())
+                {mutation.action=BrixelizerStorage::StaticMutation::Action::Create;++invalidations;}
+                else if(SameStatic(old->second,instance,g))
+                    mutation.action=BrixelizerStorage::StaticMutation::Action::Unchanged;
+                else
+                {mutation.action=BrixelizerStorage::StaticMutation::Action::Replace;invalidations+=2;}
+            }
         }
         else ++counts.dynamic_instances;
         return Result::Success();
@@ -736,8 +747,9 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     std::ranges::sort(wanted_static);
     if(std::adjacent_find(wanted_static.begin(),wanted_static.end())!=wanted_static.end())
         return Fail(ErrorCode::InvalidArgument,"Duplicate static Brixelizer identity.");
-    std::ranges::sort(wanted_mutable_static);
-    if(!immutable_cache_hit&&in.immutable_owner)
+    if(!immutable_cache_hit)std::ranges::sort(wanted_mutable_static);
+    const auto &mutable_static_keys=immutable_cache_hit?wanted_static:wanted_mutable_static;
+    if(!immutable_cache_hit&&in.immutable_section)
     {
         std::ranges::sort(next_immutable_scene.buffers);
         next_immutable_scene.buffers.erase(std::unique(next_immutable_scene.buffers.begin(),next_immutable_scene.buffers.end()),
@@ -745,16 +757,15 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     }
     std::ranges::sort(wanted_buffers);
     wanted_buffers.erase(std::unique(wanted_buffers.begin(),wanted_buffers.end()),wanted_buffers.end());
-    if(immutable_cache_hit&&std::ranges::any_of(wanted_mutable_static,[&](const auto &key) {
+    if(immutable_cache_hit&&std::ranges::any_of(mutable_static_keys,[&](const auto &key) {
         const auto found=s->static_instances.find(key);
         return found!=s->static_instances.end()&&found->second.immutable;
     }))
         return Fail(ErrorCode::InvalidArgument,"Current static Brixelizer identity duplicates an immutable row.");
-    std::size_t invalidations{};
     if(immutable_cache_hit)
     {
         for(const auto &key:s->committed_mutable_static_keys)
-            if(!std::binary_search(wanted_mutable_static.begin(),wanted_mutable_static.end(),key)&&
+            if(!std::binary_search(mutable_static_keys.begin(),mutable_static_keys.end(),key)&&
                 s->static_instances.contains(key))++invalidations;
     }
     else
@@ -766,40 +777,15 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
             if(wanted_key==wanted_static.end()||key<*wanted_key)++invalidations;
         }
     }
-    std::uint32_t mutable_logical_count{};
-    if(auto result=ForEachBrixelizerSceneInstance(in.instance_ranges,immutable_cache_hit,
-        [&](const BrixelizerSceneInstance &instance,std::uint32_t logical_index,bool immutable)->Result {
-        const auto mutation_index=immutable_cache_hit?mutable_logical_count++:logical_index;
-        if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)
-            return Result::Success();
-        const auto geometry_index=instance.geometry_index;
-        const auto &g=in.geometries[geometry_index];if(g.dynamic)return Result::Success();
-        auto &mutation=static_mutations[mutation_index];
-        mutation.immutable=immutable;
-        const auto key=BrixelizerStorage::InstanceKey{instance.stable_gpu_scene_slot,instance.generation,g.stable_key};
-        const auto old=s->static_instances.find(key);
-        mutation.existing=old;
-        if(old==s->static_instances.end())
-        {mutation.action=BrixelizerStorage::StaticMutation::Action::Create;++invalidations;}
-        else if(SameStatic(old->second,instance,g))
-            mutation.action=BrixelizerStorage::StaticMutation::Action::Unchanged;
-        else
-        {mutation.action=BrixelizerStorage::StaticMutation::Action::Replace;mutation.existing=old;invalidations+=2;}
-        return Result::Success();
-    });!result)return result;
     std::size_t buffer_count=s->registered_buffers.size();
     for(const auto &key:wanted_buffers)if(!s->registered_buffers.contains(key))++buffer_count;
     if(buffer_count>FFX_BRIXELIZER_MAX_INSTANCES||std::uint64_t(counts.static_instances)+counts.dynamic_instances+
         s->static_invalidation_masks.size()+invalidations>FFX_BRIXELIZER_MAX_INSTANCES)
         return Fail(ErrorCode::InvalidState,"Native buffer IDs or pending old/new static invalidations exceed the pinned capacity before mutation.");
     impl_->pending={};auto &p=impl_->pending;p.slot=in.frame_slot;p.frame=in.frame_index;p.scene_revision=in.scene_revision;
-    p.prepared_geometries=in.geometries.data();p.prepared_instance_ranges=in.instance_ranges.data();
-    p.prepared_instance_range_count=in.instance_ranges.size();p.prepared_instance_count=instance_count;
-    p.prepared_immutable_owner=in.immutable_owner;
-    p.prepared_immutable_count=immutable_row_count;
     p.publish_immutable_scene=!immutable_cache_hit;
     if(p.publish_immutable_scene)p.candidate_immutable_scene=std::move(next_immutable_scene);
-    p.candidate_mutable_static_keys=std::move(wanted_mutable_static);
+    p.candidate_mutable_static_keys=immutable_cache_hit?std::move(wanted_static):std::move(wanted_mutable_static);
     s->static_invalidation_masks.insert(s->static_invalidation_masks.end(),invalidations,(1u<<s->settings.logical_cascades)-1u);
     p.updated_cascade=ffxBrixelizerRawGetCascadeToUpdate(std::uint32_t(in.frame_index),s->settings.logical_cascades);
     auto &slot=s->slots[in.frame_slot];slot.owners=in.owners;slot.resources.clear();slot.binders={};slot.restore={};
@@ -844,7 +830,7 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     // Preflight iterators point only at wanted keys, so erasing stale nodes above
     // leaves every planned existing entry valid until its own mutation.
     mutable_logical_count=0;
-    if(auto result=ForEachBrixelizerSceneInstance(in.instance_ranges,immutable_cache_hit,
+    if(auto result=ForEachBrixelizerSceneInstance(in,immutable_cache_hit,
         [&](const BrixelizerSceneInstance &instance,std::uint32_t logical_index,bool immutable)->Result {
         const auto mutation_index=immutable_cache_hit?mutable_logical_count++:logical_index;
         if(instance.domain!=BrixelizerGeometryDomain::Opaque&&instance.domain!=BrixelizerGeometryDomain::AuthoredCoverage)
@@ -916,15 +902,14 @@ Result BrixelizerGiSystem::PrepareFrameRecordData(const BrixelizerSceneInputs &i
     p.record.geometry_count=std::uint32_t(in.geometries.size());p.record.instance_count=instance_count;
     p.record.physical_cascades=s->status.physical_cascades;p.record.extent=s->extent;
     p.record.history_valid=s->history_valid;p.record.noise_upload=!s->noise_uploaded;
-    p.record.geometry_reads.reserve(in.geometries.size()*2);
-    for(const auto &geometry:in.geometries)
-    {p.record.geometry_reads.push_back({geometry.vertex_version,Access::ComputeRead});
-     p.record.geometry_reads.push_back({geometry.index_version,Access::ComputeRead});}
-    p.record.unique_geometry_reads=UniqueGeometryReads(p.record.geometry_reads);
-    p.prepared=true;out=p.record;return Result::Success();
+    (void)RefreshBrixelizerGeometryReadSet(in.geometries,p.record);
+    p.prepared=true;
+    out.record_=&p.record;out.geometries_=in.geometries;out.immutable_section_=std::move(in.immutable_section);
+    out.owner_=this;out.frame_slot_=in.frame_slot;out.frame_index_=in.frame_index;out.scene_revision_=in.scene_revision;
+    return Result::Success();
 #endif
 }
-Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const BrixelizerSceneInputs &in,
+Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,BrixelizerPreparedScene &&in,
     BrixelizerSceneOutputs &out,BrixelizerGraphLayout *capture,const BrixelizerGraphLayout *retained)
 {
     out={};auto s=impl_->storage;if(!s)return Result::Success();
@@ -932,39 +917,34 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     (void)graph;(void)in;return Fail(ErrorCode::InvalidState,"Brixelizer native package is unavailable.");
 #else
     auto &p=impl_->pending;
-    std::uint32_t current_instance_count{},current_immutable_count{};
-    if(auto result=CountBrixelizerSceneInstanceRanges(
-            in.instance_ranges,current_instance_count,current_immutable_count);!result)
-        return Fail(ErrorCode::InvalidState,"Brixelizer instance ranges changed after frame preparation.");
-    if(!s->usable||!p.prepared||p.graph||p.slot!=in.frame_slot||p.frame!=in.frame_index||
-        p.scene_revision!=in.scene_revision||p.prepared_geometries!=in.geometries.data()||
-        p.prepared_instance_ranges!=in.instance_ranges.data()||
-        p.prepared_instance_range_count!=in.instance_ranges.size()||
-        p.prepared_immutable_owner!=in.immutable_owner||
-        p.prepared_immutable_count!=current_immutable_count||
-        p.prepared_instance_count!=p.record.instance_count||
-        p.prepared_instance_count!=current_instance_count||
-        p.record.geometry_count!=in.geometries.size())
-        return Fail(ErrorCode::InvalidState,"Brixelizer scene does not match its once-prepared frame inputs.");
-    if((capture&&retained)||(retained&&!MatchesBrixelizerGraphLayout(p.record,*retained)))
+    if(!s->usable||!p.prepared||p.graph||in.owner_!=this||p.slot!=in.frame_slot_||p.frame!=in.frame_index_||
+        p.scene_revision!=in.scene_revision_||in.record_!=&p.record||
+        p.record.geometry_count!=in.geometries_.size())
+        return Fail(ErrorCode::InvalidState,"Brixelizer scene does not match its once-prepared frame token.");
+    const auto &geometries=in.geometries_;
+    if(capture&&retained)
+        return Fail(ErrorCode::InvalidState,"Brixelizer graph cannot capture and restore a retained layout together.");
+    p.capture=capture;p.retained=retained;
+    if(s->validated_geometry_flags.size()!=geometries.size())
+        return Fail(ErrorCode::InvalidState,"Brixelizer native geometry admission changed after preparation.");
+    // Inputs are frame-local vectors built once before Prepare and retained until
+    // Register; only graph versions are assigned in between and are checked here.
+    for(std::size_t index=0;index<geometries.size();++index)
+    {
+        const auto &geometry=geometries[index];
+        if(!(s->validated_geometry_flags[index]&kGeometryShapeAdmitted))
+            if(auto result=ValidateGeometryShape(geometry);!result)return result;
+        if(auto result=ValidateGeometryGraphBinding(graph,geometry,geometries.VersionsAt(index));!result)return result;
+    }
+    (void)RefreshBrixelizerGeometryReadSet(geometries,p.record);
+    if(retained&&!MatchesBrixelizerGraphLayout(p.record,*retained))
         return Fail(ErrorCode::InvalidState,"Brixelizer graph layout changed after current SDK preparation.");
     if(capture)
     {
         *capture={};capture->record=p.record;
     }
-    p.capture=capture;p.retained=retained;
-    if(s->validated_geometry_flags.size()!=in.geometries.size())
-        return Fail(ErrorCode::InvalidState,"Brixelizer native geometry admission changed after preparation.");
-    // Inputs are frame-local vectors built once before Prepare and retained until
-    // Register; only graph versions are assigned in between and are checked here.
-    for(std::size_t index=0;index<in.geometries.size();++index)
-    {
-        const auto &geometry=in.geometries[index];
-        if(!(s->validated_geometry_flags[index]&kGeometryShapeAdmitted))
-            if(auto result=ValidateGeometryShape(geometry);!result)return result;
-        if(auto result=ValidateGeometryGraphBinding(graph,geometry);!result)return result;
-    }
     p.graph=&graph;
+    in.owner_=nullptr;
     const auto counts=s->status;
     auto pass=impl_->Pass(graph,0,261,"BrixelizerSdfUpdate");
     if(!pass)return Fail(ErrorCode::InvalidState,"Brixelizer SDF pass does not match retained plan.");
@@ -1030,7 +1010,8 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
             batch=brixelizer_native::BatchResult(*s->backend_slots);
             brixelizer_native::EndBatch(*s->backend_slots);
             static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList())->SetComputeRootSignature(s->root.Get());
-            if(error!=FFX_OK)return Sdk("ffxBrixelizerUpdate",error);return batch;
+            if(error!=FFX_OK)return Sdk("ffxBrixelizerUpdate",error);
+            return batch;
         };
         const auto result=ctx.RecordLegacyResourceCommands(native_accesses,execute_native);
         auto *cmd=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
@@ -1444,8 +1425,8 @@ void BrixelizerGiSystem::AbandonPreparedFrame() noexcept
 Result BrixelizerGiSystem::ResetHistoryAfterCompletion(const CompletionSet &completed,ViewExtent extent,bool rebuild_sdf)
 {
     auto s=impl_->storage;if(!s)return Result::Success();
-    if(impl_->pending.graph||!s->completion.IsSatisfiedBy(completed)||!Extent(extent))
-        return Fail(ErrorCode::InvalidState,"Native GI history recreation requires no pending graph and actual completion of every queue use.");
+    if(impl_->pending.graph||impl_->pending.prepared||!s->completion.IsSatisfiedBy(completed)||!Extent(extent))
+        return Fail(ErrorCode::InvalidState,"Native GI history recreation requires no prepared frame or pending graph, a valid extent and completion of every queue use.");
 #if !HS_WITH_BRIXELIZER
     (void)rebuild_sdf;return Fail(ErrorCode::InvalidState,"Brixelizer native package is unavailable.");
 #else
@@ -1460,18 +1441,25 @@ Result BrixelizerGiSystem::ResetHistoryAfterCompletion(const CompletionSet &comp
     }
     if(s->gi_created)
     {if(auto result=Sdk("ffxBrixelizerGIContextDestroy",ffxBrixelizerGIContextDestroy(s->gi.get()));!result)return result;s->gi_created=false;}
-    s->history_valid=false;s->extent=extent;
-    for(std::uint32_t i=0;i<ScreenCount;++i)
-    {Allocation next;if(auto result=Texture(s->device.Get(),s->allocator.Get(),extent,kScreenFormats[i],next,1,i==CacheInjection);!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;return result;}
-        s->screens[i]=std::move(next);D3D12_SHADER_RESOURCE_VIEW_DESC desc{};desc.Format=kScreenFormats[i];desc.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-        desc.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;desc.Texture2D.MipLevels=1;
-        s->device->CreateShaderResourceView(s->screens[i]->resource.Get(),&desc,s->Export(i));}
-    s->device->CreateRenderTargetView(s->screens[CacheInjection]->resource.Get(),nullptr,s->cache_rtv->GetCPUDescriptorHandleForHeapStart());
+    for(auto &slot:s->slots){slot.owners.clear();slot.resources.clear();slot.binders={};}
+    s->retired_scratch.clear();
+    s->history_valid=false;
+    // A drained same-extent reset seeds current inputs before reading history.
+    // Keep the backing's graph state and exported descriptors in that case.
+    if(s->extent.width!=extent.width||s->extent.height!=extent.height)
+    {
+        s->extent=extent;
+        for(std::uint32_t i=0;i<ScreenCount;++i)
+        {Allocation next;if(auto result=Texture(s->device.Get(),s->allocator.Get(),extent,kScreenFormats[i],next,1,i==CacheInjection);!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;return result;}
+            s->screens[i]=std::move(next);D3D12_SHADER_RESOURCE_VIEW_DESC desc{};desc.Format=kScreenFormats[i];desc.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+            desc.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;desc.Texture2D.MipLevels=1;
+            s->device->CreateShaderResourceView(s->screens[i]->resource.Get(),&desc,s->Export(i));}
+        s->device->CreateRenderTargetView(s->screens[CacheInjection]->resource.Get(),nullptr,s->cache_rtv->GetCPUDescriptorHandleForHeapStart());
+    }
     if(auto result=CreateGi(*s);!result){s->usable=false;s->status.faulted=true;s->status.native_ready=false;return result;}
     if(s->GpuBytes()>s->settings.memory_budget_bytes){s->usable=false;s->status.faulted=true;s->status.native_ready=false;
         return Fail(ErrorCode::InvalidState,"Recreated native GI extent exceeds the measured memory budget.");}
-    for(auto &slot:s->slots){slot.owners.clear();slot.resources.clear();slot.binders={};}
-    s->retired_scratch.clear();s->status.native_ready=true;s->status.reason="Drained fixed-extent native GI history recreated; SDF retained.";return Result::Success();
+    s->status.native_ready=true;s->status.reason="Drained fixed-extent native GI history recreated; SDF retained.";return Result::Success();
 #endif
 }
 Result BrixelizerGiSystem::ResetAfterCompletion(const CompletionSet &completed)

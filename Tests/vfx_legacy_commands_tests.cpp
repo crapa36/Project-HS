@@ -41,7 +41,7 @@ void TestLegacyMeshReplacement()
         image.authored_mesh_indices = meshes;
         image.decorative_definitions = decorative;
         hs::VfxCatalog catalog;
-        catalog.Bind(image);
+        Check(catalog.Bind(image).Succeeded(), "bind checked VFX image");
         hs::PresentationEvent event;
         event.kind = hs::PresentationKind::Vfx;
         event.asset = id;
@@ -116,7 +116,7 @@ void TestLegacyGroundSuppression()
     image.emitters = emitters;
     image.decorative_definitions = decorative;
     hs::VfxCatalog catalog;
-    catalog.Bind(image);
+    Check(catalog.Bind(image).Succeeded(), "bind checked VFX image");
 
     hs::PresentationEvent event;
     event.kind = hs::PresentationKind::Vfx;
@@ -164,7 +164,7 @@ void TestLegacyGroundSuppression()
     optional_image.emitters = optional_emitters;
     optional_image.decorative_definitions = optional_definition;
     hs::VfxCatalog optional_catalog;
-    optional_catalog.Bind(optional_image);
+    Check(optional_catalog.Bind(optional_image).Succeeded(), "bind checked optional VFX image");
     auto optional_event = event;
     optional_event.asset = optional_id;
     hs::VfxPreparedLegacyEvent optional_plan;
@@ -287,7 +287,7 @@ int RunVfxLegacyTests()
             image.definitions = std::span(&definition, 1);
             image.decorative_definitions = decorative;
             hs::VfxCatalog catalog;
-            catalog.Bind(image);
+            Check(catalog.Bind(image).Succeeded(), "bind checked VFX image");
             hs::PresentationEvent event;
             event.kind = hs::PresentationKind::Vfx;
             event.asset = hs::AssetId{definition.effect_id};

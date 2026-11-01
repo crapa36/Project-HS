@@ -8,6 +8,19 @@
 
 namespace hs
 {
+// Brixelizer's pinned instance encoding stores a six-bit vertex stride.
+inline bool WriteGeometryPositionStream(std::span<std::byte> destination,
+    std::span<const std::byte> vertices, std::size_t stride) noexcept
+{
+    constexpr std::size_t position_bytes = 3 * sizeof(float);
+    if (stride < position_bytes || vertices.empty() || vertices.size() % stride ||
+        destination.size() % position_bytes || destination.size() / position_bytes != vertices.size() / stride)
+        return false;
+    for (std::size_t row = 0; row < vertices.size() / stride; ++row)
+        std::memcpy(destination.data() + row * position_bytes, vertices.data() + row * stride, position_bytes);
+    return true;
+}
+
 // The package boundary validates the remap permutation and material subranges.
 // Byte spans avoid alignment assumptions about the portable package storage.
 inline bool WriteGeometryRasterIndexSuffix(std::span<std::byte> destination,

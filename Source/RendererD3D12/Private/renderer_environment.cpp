@@ -266,7 +266,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         if (auto read = ReadBinary(path, storage); !read) return read;
         render_data::TexturePackageView package;
         auto invalid = [&] { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "Invalid environment texture: " + path.path.string()); };
+            "Invalid environment texture: " + path.Describe(logical_id)); };
         {
             try
             {
@@ -275,7 +275,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
             catch (const std::exception &error)
             {
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Invalid environment texture package " + path.path.string() + ": " + error.what());
+                    "Invalid environment texture package " + path.Describe(logical_id) + ": " + error.what());
             }
             if (package.description.width != spec.width ||
                 package.description.height != spec.height ||
@@ -470,7 +470,12 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture handle is invalid.");
         const auto &texture = config.packed_textures[compiled_texture.value];
         if (auto resolved = ResolveRendererAsset(config, binding.product_id, path); !resolved) return resolved;
-        if (path.range.byte_count != config.packed_bulks[texture.bulk_index].range.byte_count)
+        const auto expected_bytes = config.packed_bulks[texture.bulk_index].range.byte_count;
+        const auto loose_proof = path.AdmittedWholeFileProof();
+        const bool size_matches = path.IsPacked()
+            ? path.Packed().range.byte_count == expected_bytes
+            : loose_proof && loose_proof->byte_count == expected_bytes;
+        if (!size_matches)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture product handle differs.");
     }
     else if (auto resolved = ResolveRendererAsset(config, binding.product_id, path); !resolved) return resolved;
@@ -557,7 +562,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
             static_cast<UINT64>(rows[subresource] - 1) * footprint.Footprint.RowPitch +
                 row_sizes[subresource] > upload_size - footprint.Offset)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Invalid material texture footprint: " + path.path.string());
+                                   "Invalid material texture footprint: " + path.Describe(binding.product_id));
     }
     uploads.emplace_back();
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;

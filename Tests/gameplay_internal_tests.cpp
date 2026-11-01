@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <limits>
 #include <map>
+#include <memory>
 #include <ranges>
 #include <stdexcept>
 #include <vector>
@@ -42,11 +43,11 @@ void TestScheduledSpawnOrder()
     auto &world = GameplayTestAccess::State(simulation);
     world.pipeline_phase = gameplay_detail::SimulationPhaseId::Spawn;
     world.tick = 10;
-    auto &bosses = world.progression->pending_boss_spawns;
+    auto &bosses = world.progression.pending_boss_spawns;
     bosses = {{BossKind::FiveMinute, {}, 12, 101}, {BossKind::TenMinute, {}, 10, 102},
               {BossKind::Final, {}, 11, 103}, {BossKind::FiveMinute, {}, 9, 104}};
     world.CommitBossSpawns();
-    auto &spawned = world.actors->pending_enemy_spawns;
+    auto &spawned = world.actors.pending_enemy_spawns;
     Check(bosses.size() == 2 && bosses[0].warning_sequence == 101 && bosses[1].warning_sequence == 103 &&
               spawned.size() == 2 && spawned.life[0].boss == BossKind::TenMinute &&
               spawned.life[1].boss == BossKind::FiveMinute && spawned.ids[0].value < spawned.ids[1].value,
@@ -59,7 +60,7 @@ void TestScheduledSpawnOrder()
     world.CommitBossSpawns();
     Check(bosses.empty() && spawned.size() == 4, "boss schedule drains without duplicate spawning");
 
-    auto &enemies = world.progression->pending_enemy_spawns_delayed;
+    auto &enemies = world.progression.pending_enemy_spawns_delayed;
     enemies = {{EnemyKind::Melee, {}, 201, 23}, {EnemyKind::Ranged, {}, 202, 19},
                {EnemyKind::Suicide, {}, 203, 22}, {EnemyKind::Melee, {}, 204, 20}};
     world.tick = 20;
@@ -216,18 +217,18 @@ void TestSmallFactsIgnoreNoOpMutation()
               "no-op ownership scope invalidated small facts or stopped invalidating checksum");
     }
     hs::InputFrame input;
-    input.held.aim_world = {world.actors->player.position.x, 0.0f, world.actors->player.position.y};
-    const auto no_op = simulation.TickFixed(input, std::chrono::nanoseconds{16'666'667});
+    input.held.aim_world = {world.actors.player.position.x, 0.0f, world.actors.player.position.y};
+    const auto no_op = simulation.TickFixed(input);
     Check(!no_op.world_changed && !world.observation.small_facts_dirty,
           "frozen no-op tick invalidated collection-derived facts");
-    const auto valid_aim = world.actors->player.aim;
+    const auto valid_aim = world.actors.player.aim;
     for (const auto component : {std::numeric_limits<float>::max(),
                                 std::numeric_limits<float>::quiet_NaN()})
     {
         input.held.aim_world = {component, 0.0f, component};
-        const auto invalid_aim = simulation.TickFixed(input, std::chrono::nanoseconds{16'666'667});
-        Check(!invalid_aim.world_changed && world.actors->player.aim.x == valid_aim.x &&
-              world.actors->player.aim.y == valid_aim.y,
+        const auto invalid_aim = simulation.TickFixed(input);
+        Check(!invalid_aim.world_changed && world.actors.player.aim.x == valid_aim.x &&
+              world.actors.player.aim.y == valid_aim.y,
               "unrepresentable aim changed the last valid firing direction");
     }
     simulation.ApplyUiAction({hs::UiActionKind::Resume});
@@ -350,7 +351,8 @@ void TestHomingProjectileUsesRetainedSpeed()
 {
     using namespace hs;
     using namespace hs::gameplay_detail;
-    PickupWorld world;
+    auto world_storage = std::make_unique<PickupWorld>();
+    auto &world = *world_storage;
     InitializePickupFixture(world);
     world.StartSession();
 
@@ -359,7 +361,7 @@ void TestHomingProjectileUsesRetainedSpeed()
     target.motion.position = {4.0f, 0.0f};
     target.life.health = 100;
     target.life.max_health = 100;
-    world.actors->enemies.push_back(std::move(target));
+    world.actors.enemies.push_back(std::move(target));
 
     PreparedProjectile homing;
     homing.id = {88};
@@ -368,20 +370,20 @@ void TestHomingProjectileUsesRetainedSpeed()
     homing.motion.remaining_range = 100.0f;
     homing.combat.homing = true;
     homing.combat.homing_target = 77;
-    world.actors->projectiles.push_back(std::move(homing));
+    world.actors.projectiles.push_back(std::move(homing));
     world.next_entity_id = 89;
 
     const auto assigned_speed_checksum = world.CalculateChecksum();
-    world.actors->projectiles.motion[0].speed = 7.0f;
+    world.actors.projectiles.motion[0].speed = 7.0f;
     const auto changed_speed_checksum = world.CalculateChecksum();
     Check(assigned_speed_checksum != changed_speed_checksum,
           "gameplay checksum includes retained projectile speed when all other state is unchanged");
 
-    world.actors->projectiles.motion[0].speed = 6.0f;
+    world.actors.projectiles.motion[0].speed = 6.0f;
     world.tick = 1;
     world.MovementPhase();
     {
-        const auto projectile = std::as_const(world.actors->projectiles)[0];
+        const auto projectile = std::as_const(world.actors.projectiles)[0];
         Check(projectile.motion.velocity.x == 6.0f && projectile.motion.velocity.y == 0.0f &&
               projectile.motion.position.x == 6.0f * kTickSeconds,
               "homing movement uses assigned speed instead of the rounded prior velocity magnitude");
@@ -389,7 +391,7 @@ void TestHomingProjectileUsesRetainedSpeed()
 
     world.rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed = 8.0f;
     world.rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed = 0.0f;
-    world.actors->player.upgrades[static_cast<std::size_t>(SkillKind::RicochetArrow)] = 1;
+    world.actors.player.upgrades[static_cast<std::size_t>(SkillKind::RicochetArrow)] = 1;
     {
         auto ricochet = world.FireProjectile(SkillKind::RicochetArrow, {1.0f, 0.0f}, {1.0f, 0.0f},
                                          1.0f, EffectOrigin::Original, 1, 1, true);
@@ -399,7 +401,7 @@ void TestHomingProjectileUsesRetainedSpeed()
     }
     world.pipeline_phase = SimulationPhaseId::CollisionHit;
     world.CollisionHitPhase();
-    const auto returned = std::as_const(world.actors->projectiles).back();
+    const auto returned = std::as_const(world.actors.projectiles).back();
     Check(returned.combat.returning && returned.motion.speed == 8.0f &&
               returned.motion.velocity.x == -8.0f && returned.motion.velocity.y == 0.0f,
           "Ricochet return redirect keeps its effective spawn speed when authored speed is nonpositive");
@@ -412,13 +414,13 @@ void ReferencePickupPass(PickupWorld &world)
     using namespace hs::gameplay_detail;
     Check(!world.config.scenario.progression_enabled, "pickup oracle excludes separate level-card kernel");
     if (world.session_phase != SessionPhase::Playing) return;
-    for (auto &pickup : world.actors->pickups)
+    for (auto &pickup : world.actors.pickups)
     {
         if (pickup.dead) continue;
         if (world.config.scenario.auto_collect_progression &&
             (pickup.kind == PickupKind::Experience || pickup.kind == PickupKind::RelicChest))
-            pickup.position = world.actors->player.position;
-        const auto delta = Subtract(world.actors->player.position, pickup.position);
+            pickup.position = world.actors.player.position;
+        const auto delta = Subtract(world.actors.player.position, pickup.position);
         const auto global = pickup.kind == PickupKind::Experience && pickup.globally_attracted;
         const auto radius = global ? world.rules.arena_half_extent * 3.0f : world.EffectiveMagnetRadius();
         if (LengthSquared(delta) <= radius * radius)
@@ -439,7 +441,7 @@ void ReferencePickupPass(PickupWorld &world)
             pickup.position = Add(pickup.position, Multiply(Normalize(delta),
                 world.rules.growth.experience_pickup_speed * kTickSeconds));
         }
-        if (DistanceSquared(pickup.position, world.actors->player.position) <=
+        if (DistanceSquared(pickup.position, world.actors.player.position) <=
             world.rules.growth.experience_pickup_radius * world.rules.growth.experience_pickup_radius)
         {
             world.CollectPickup(pickup);
@@ -452,19 +454,19 @@ void CheckPickupEquivalence(const PickupWorld &actual, const PickupWorld &refere
 {
     Check(actual.CalculateChecksum() == reference.CalculateChecksum(),
           "pickup work preserves exact authoritative state, counters, RNG and canonical hash");
-    Check(actual.actors->pickups.size() == reference.actors->pickups.size(), "pickup storage size equivalence");
-    for (std::size_t row = 0; row < actual.actors->pickups.size(); ++row)
+    Check(actual.actors.pickups.size() == reference.actors.pickups.size(), "pickup storage size equivalence");
+    for (std::size_t row = 0; row < actual.actors.pickups.size(); ++row)
     {
-        const auto &left = actual.actors->pickups[row];
-        const auto &right = reference.actors->pickups[row];
+        const auto &left = actual.actors.pickups[row];
+        const auto &right = reference.actors.pickups[row];
         Check(left.id.value == right.id.value && left.visual_motion_started == right.visual_motion_started &&
                   left.visual_motion_updated == right.visual_motion_updated &&
                   std::bit_cast<std::uint32_t>(left.visual_motion_initial_distance) ==
                       std::bit_cast<std::uint32_t>(right.visual_motion_initial_distance),
               "pickup motion episode clocks and exact initial distance stay unchanged");
     }
-    const auto &left = actual.combat_state->domain_signals;
-    const auto &right = reference.combat_state->domain_signals;
+    const auto &left = actual.combat_state.domain_signals;
+    const auto &right = reference.combat_state.domain_signals;
     Check(left.size() == right.size(), "pickup signal count equivalence");
     for (std::size_t row = 0; row < left.size(); ++row)
         Check(left[row].sequence == right[row].sequence && left[row].kind == right[row].kind &&
@@ -479,7 +481,10 @@ void TestPickupWorkAgainstOriginalTraversal()
 {
     using namespace hs;
     using namespace hs::gameplay_detail;
-    PickupWorld actual, reference;
+    auto actual_storage = std::make_unique<PickupWorld>();
+    auto reference_storage = std::make_unique<PickupWorld>();
+    auto &actual = *actual_storage;
+    auto &reference = *reference_storage;
     InitializePickupFixture(actual);
     InitializePickupFixture(reference);
     for (auto *world : {&actual, &reference})
@@ -494,9 +499,9 @@ void TestPickupWorkAgainstOriginalTraversal()
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.actors->pickups[0].position.x == 10.0f &&
-              actual.actors->pickups[2].position.x == -9.75f &&
-              actual.actors->pickups[3].position.x == 1.75f,
+    Check(actual.actors.pickups[0].position.x == 10.0f &&
+              actual.actors.pickups[2].position.x == -9.75f &&
+              actual.actors.pickups[3].position.x == 1.75f,
           "XP_A waits until next tick while XP_B and already queued XP move exactly once after Magnet");
     actual.CommitCleanupBarrier();
     reference.CommitCleanupBarrier();
@@ -505,7 +510,7 @@ void TestPickupWorkAgainstOriginalTraversal()
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.actors->pickups[0].position.x == 9.75f,
+    Check(actual.actors.pickups[0].position.x == 9.75f,
           "earlier global XP participates after stable compaction on the next tick");
     for (auto *world : {&actual, &reference})
     {
@@ -518,10 +523,13 @@ void TestPickupWorkAgainstOriginalTraversal()
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
     Check(actual.session_phase == SessionPhase::RelicSelection &&
-              actual.actors->pickups[1].position.x == 2.0f,
+              actual.actors.pickups[1].position.x == 2.0f,
           "chest phase transition stops later XP and reset discards old work IDs");
 
-    PickupWorld automatic, automatic_reference;
+    auto automatic_storage = std::make_unique<PickupWorld>();
+    auto automatic_reference_storage = std::make_unique<PickupWorld>();
+    auto &automatic = *automatic_storage;
+    auto &automatic_reference = *automatic_reference_storage;
     InitializePickupFixture(automatic, true);
     InitializePickupFixture(automatic_reference, true);
     for (auto *world : {&automatic, &automatic_reference})
@@ -533,7 +541,7 @@ void TestPickupWorkAgainstOriginalTraversal()
     automatic.XpCardPhase();
     ReferencePickupPass(automatic_reference);
     CheckPickupEquivalence(automatic, automatic_reference);
-    Check(automatic.actors->player.experience == 7 && automatic.session_phase == SessionPhase::RelicSelection,
+    Check(automatic.actors.player.experience == 7 && automatic.session_phase == SessionPhase::RelicSelection,
           "development auto collect includes off-grid XP and chests in canonical order");
 }
 
@@ -541,7 +549,10 @@ void TestPickupWorkStopRestartAndSparseTick()
 {
     using namespace hs;
     using namespace hs::gameplay_detail;
-    PickupWorld actual, reference;
+    auto actual_storage = std::make_unique<PickupWorld>();
+    auto reference_storage = std::make_unique<PickupWorld>();
+    auto &actual = *actual_storage;
+    auto &reference = *reference_storage;
     InitializePickupFixture(actual);
     InitializePickupFixture(reference);
     for (auto *world : {&actual, &reference})
@@ -549,15 +560,15 @@ void TestPickupWorkStopRestartAndSparseTick()
     for (Tick tick = 1; tick <= 4; ++tick)
     {
         actual.tick = reference.tick = tick;
-        actual.actors->player.position = reference.actors->player.position =
+        actual.actors.player.position = reference.actors.player.position =
             tick == 2 || tick == 3 ? Float2{20.0f, 0.0f} : Float2{};
         actual.XpCardPhase();
         ReferencePickupPass(reference);
         CheckPickupEquivalence(actual, reference);
         if (tick == 3)
-            Check(actual.progression->pickup_work.Visited().empty(), "stopped distant XP leaves the active work set");
+            Check(actual.progression.pickup_work.Visited().empty(), "stopped distant XP leaves the active work set");
     }
-    Check(actual.actors->pickups[0].visual_motion_started == 4,
+    Check(actual.actors.pickups[0].visual_motion_started == 4,
           "local attraction interruption restarts its original cosmetic motion episode");
 
     for (auto *world : {&actual, &reference})
@@ -565,14 +576,14 @@ void TestPickupWorkStopRestartAndSparseTick()
         world->StartSession();
         const auto stat = static_cast<std::size_t>(StatKind::MagnetRadius);
         world->rules.stats.allocations[stat].amount_per_point = 1.0f;
-        world->actors->player.stats[stat] = 2;
+        world->actors.player.stats[stat] = 2;
         world->SpawnPickup(PickupKind::Experience, {4.0f, 0.0f}, 1);
         world->tick = 1;
     }
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.actors->pickups[0].attracted_by_magnet_stat,
+    Check(actual.actors.pickups[0].attracted_by_magnet_stat,
           "stat-only attraction retains its original attribution flag");
 
     for (auto *world : {&actual, &reference})
@@ -586,7 +597,7 @@ void TestPickupWorkStopRestartAndSparseTick()
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.actors->player.experience == 3, "collection radius may exceed attraction radius");
+    Check(actual.actors.player.experience == 3, "collection radius may exceed attraction radius");
     for (auto *world : {&actual, &reference})
     {
         world->StartSession();
@@ -597,8 +608,8 @@ void TestPickupWorkStopRestartAndSparseTick()
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.progression->pickup_work.Visited().empty() &&
-              !actual.progression->pickup_work.NeedsCompaction(),
+    Check(actual.progression.pickup_work.Visited().empty() &&
+              !actual.progression.pickup_work.NeedsCompaction(),
           "ordinary distant stationary XP causes no per-pickup tick work or cleanup scan");
 }
 
@@ -607,7 +618,10 @@ void TestPickupDistanceArithmeticEquivalence()
     using namespace hs;
     for (const auto speed : {0.0f, 15.0f, 120.0f})
     {
-        PickupWorld actual, reference;
+        auto actual_storage = std::make_unique<PickupWorld>();
+        auto reference_storage = std::make_unique<PickupWorld>();
+        auto &actual = *actual_storage;
+        auto &reference = *reference_storage;
         InitializePickupFixture(actual);
         InitializePickupFixture(reference);
         for (auto *world : {&actual, &reference})
@@ -622,7 +636,7 @@ void TestPickupDistanceArithmeticEquivalence()
         ReferencePickupPass(reference);
         CheckPickupEquivalence(actual, reference);
         if (speed == 120.0f)
-            Check(!actual.actors->pickups[2].dead,
+            Check(!actual.actors.pickups[2].dead,
                   "post-movement collection distance preserves an overshoot outside collection radius");
     }
 }
@@ -669,21 +683,22 @@ void TestBalanceHitDeduplication()
               observer.player_hit_casts.empty() && !observer.enemy_seen_zero[0],
           "session reset marks disabled detail and clears all retained causes");
 
-    PickupWorld world;
-    auto &retained = world.telemetry->balance_observer;
+    auto world_storage = std::make_unique<PickupWorld>();
+    auto &world = *world_storage;
+    auto &retained = world.telemetry.balance_observer;
     retained.Reset(true);
     retained.player_hit_casts = {123};
-    world.actors->player.retreat_followup_cast = 123;
-    world.actors->player.retreat_landing_pending = true;
+    world.actors.player.retreat_followup_cast = 123;
+    world.actors.player.retreat_landing_pending = true;
     world.RetireBalanceHitCauses();
     Check(retained.player_hit_casts == std::vector<std::uint64_t>{123},
           "landing still owns the original hit-cast membership");
-    world.actors->player.retreat_landing_pending = false;
-    world.actors->player.retreat_followup_tick = 20;
+    world.actors.player.retreat_landing_pending = false;
+    world.actors.player.retreat_followup_tick = 20;
     world.RetireBalanceHitCauses();
     Check(retained.player_hit_casts == std::vector<std::uint64_t>{123},
           "delayed second retreat still owns the original hit-cast membership");
-    world.actors->player.retreat_followup_tick = 0;
+    world.actors.player.retreat_followup_tick = 0;
     world.RetireBalanceHitCauses();
     Check(retained.player_hit_casts.empty(),
           "retreat membership retires after both future causes resolve");
@@ -865,13 +880,14 @@ void TestSlowMultiplierIsReadOnly()
 {
     using namespace hs;
     using namespace hs::gameplay_detail;
-    PickupWorld world;
+    auto world_storage = std::make_unique<PickupWorld>();
+    auto &world = *world_storage;
     InitializePickupFixture(world);
     Check(world.SpawnEnemy(EnemyKind::Melee, {2.0f, 0.0f}),
           "slow read fixture enemy spawn");
-    world.actors->enemies.AppendFrom(world.actors->pending_enemy_spawns);
+    world.actors.enemies.AppendFrom(world.actors.pending_enemy_spawns);
     world.tick = 100;
-    auto enemy = world.actors->enemies[0];
+    auto enemy = world.actors.enemies[0];
     enemy.status.slows = {{0.5f, 101}, {0.75f, 99}, {0.25f, 102}};
     const auto before = enemy.status.slows;
     Check(world.SlowMultiplier(enemy) == 0.375f &&

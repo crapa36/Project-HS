@@ -33,6 +33,7 @@ struct RenderVfxWorldBatch
 
 struct RenderVfxFrameInput
 {
+    // Producer supplies the complete native birth set; Renderer does not synthesize snapshot births.
     std::span<const ParticleSpawnCommand> particle_spawns;
     std::span<const VfxLineSpawnCommand> effect_lines;
     std::uint32_t event_count{};
@@ -40,6 +41,10 @@ struct RenderVfxFrameInput
     std::span<const VfxGroundSpawnInput> ground;
     std::span<const VfxFlashSpawnInput> flashes;
     std::span<const VfxOwnedMeshInput> meshes;
+    // Borrowed from an admitted catalog through Render's frame submission.
+    PreparedVfxMeshRecipeView mesh_recipe_view;
+    // Borrowed from an admitted catalog/static image through Render's joined record callbacks.
+    PreparedVfxFresnelRecipeView fresnel_recipe_view;
     std::span<const VfxFresnelInput> fresnels;
     VfxRibbonFrameInput ribbons;
     std::span<const VfxLightInput> lights;

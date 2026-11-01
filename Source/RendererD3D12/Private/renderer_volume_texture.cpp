@@ -41,7 +41,7 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
     }
     catch (const std::exception &error)
     {
-        return Invalid("Invalid VFX volume texture package " + path.path.string() + ": " +
+        return Invalid("Invalid VFX volume texture package " + path.Describe(kNoiseVolumePackage) + ": " +
                        error.what());
     }
     const auto &description = package.description;
@@ -49,7 +49,8 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
         description.mip_count != 1 || description.format != render_data::kTextureFormatRgba8 ||
         !RendererTextureDependencyMatches(config, kNoiseVolumePackage, package, kNoiseVolumeSource) ||
         package.subresources.size() != 1)
-        return Invalid("VFX volume texture package shape or dependency changed: " + path.path.string());
+        return Invalid("VFX volume texture package shape or dependency changed: " +
+                       path.Describe(kNoiseVolumePackage));
 
     const auto &source = package.subresources.front();
     if (source.mip_level != 0 || source.width != 64 || source.height != 64 || source.depth != 64 ||
@@ -57,7 +58,7 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
         source.volume_pitch != 64u * 64u * 64u * 4u ||
         source.volume_pitch != source.slice_pitch * source.depth ||
         source.bytes.size() != source.volume_pitch)
-        return Invalid("VFX volume texture package pitches changed: " + path.path.string());
+        return Invalid("VFX volume texture package pitches changed: " + path.Describe(kNoiseVolumePackage));
 
     D3D12_RESOURCE_DESC description_native{};
     description_native.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
@@ -93,7 +94,7 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
                     source.row_pitch >
                 upload_size - footprint.Offset)
         return Invalid("VFX volume texture package does not match the native copy footprint: " +
-                       path.path.string());
+                       path.Describe(kNoiseVolumePackage));
 
     uploads.emplace_back();
     D3D12MA::ALLOCATION_DESC upload_allocation{};

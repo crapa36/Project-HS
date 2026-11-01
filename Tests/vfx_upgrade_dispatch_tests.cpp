@@ -11,7 +11,6 @@
 #include <hs/presentation/projector.hpp>
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <numbers>
@@ -168,13 +167,12 @@ void SimulationProjectionDispatchUsesZeroBasedUpgradeIndex()
     hs::InputFrame input;
     input.held.basic_attack_held=true;
     input.held.aim_world={20.0f,0.0f,0.0f};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     hs::DomainSignal upgrade_signal{};
     bool found=false;
     for(std::uint32_t tick=0;tick<300 && !found;++tick)
     {
         input.target_tick=simulation.GetObservation().tick+1;
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         for(const auto &signal:simulation.PendingDomainSignals())
         {
             if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
@@ -219,7 +217,6 @@ void SimulationChargedShotPulseProjectsAndDispatches()
 
     hs::InputFrame input;
     input.held.aim_world={20.0f,0.0f,0.0f};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const std::array press{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
     hs::DomainSignal pulse{};
     bool found=false;
@@ -243,14 +240,14 @@ void SimulationChargedShotPulseProjectsAndDispatches()
 
     input.target_tick=simulation.GetObservation().tick+1;
     input.ordered_edges=std::span<const hs::ActionEdge>(press);
-    (void)simulation.TickFixed(input,fixed_step);
+    (void)simulation.TickFixed(input);
     inspect_pulse();
     if(!found) simulation.ClearDomainSignals();
     input.ordered_edges=std::span<const hs::ActionEdge>{};
     for(std::uint32_t tick=0;tick<24 && !found;++tick)
     {
         input.target_tick=simulation.GetObservation().tick+1;
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         inspect_pulse();
         if(!found) simulation.ClearDomainSignals();
     }
@@ -294,7 +291,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
     const std::array release{hs::ActionEdge{2,hs::GameAction::SkillQ,hs::EdgeKind::Released}};
     input.target_tick=simulation.GetObservation().tick+1;
     input.ordered_edges=std::span<const hs::ActionEdge>(release);
-    (void)simulation.TickFixed(input,fixed_step);
+    (void)simulation.TickFixed(input);
     hs::GameReadModelStorage model;
     hs::CopyReadModelForDevelopment(simulation, model);
     const auto projectile=std::find_if(model.View().projectiles.begin(),
@@ -321,7 +318,6 @@ void SimulationEmitsSecondaryFanAfterSuccessfulVolley()
     hs::InputFrame input;
     input.held.aim_world={20.0f,0.0f,0.0f};
     const std::array edges{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     hs::DomainSignal secondary{};
     bool found=false;
     for(std::uint32_t tick=0;tick<90 && !found;++tick)
@@ -329,7 +325,7 @@ void SimulationEmitsSecondaryFanAfterSuccessfulVolley()
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=tick==0 ? std::span<const hs::ActionEdge>(edges) :
                                       std::span<const hs::ActionEdge>{};
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         for(const auto &signal:simulation.PendingDomainSignals())
         {
             if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
@@ -371,7 +367,6 @@ void ScheduledFanIngressUsesFrozenCastDirection()
         hs::InputFrame input;
         input.held.aim_world={20.0f,0.0f,0.0f};
         const std::array edges{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
-        constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
         hs::DomainSignal fan{};
         std::uint32_t fan_count{};
         std::array<std::array<float,2>,3> retreat_directions{};
@@ -381,7 +376,7 @@ void ScheduledFanIngressUsesFrozenCastDirection()
             input.target_tick=simulation.GetObservation().tick+1;
             input.ordered_edges=tick==0 ? std::span<const hs::ActionEdge>(edges) :
                                           std::span<const hs::ActionEdge>{};
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(skill==hs::SkillKind::RetreatShot &&
@@ -492,7 +487,6 @@ void SimulationEmitsOuterArrowConeAfterSuccessfulProjectile()
     hs::InputFrame input;
     input.held.aim_world={20.0f,0.0f,0.0f};
     const std::array edges{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     hs::DomainSignal outer_signal{};
     std::uint32_t outer_count{};
     for(std::uint32_t tick=0;tick<40;++tick)
@@ -500,7 +494,7 @@ void SimulationEmitsOuterArrowConeAfterSuccessfulProjectile()
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=tick==0 ? std::span<const hs::ActionEdge>(edges) :
                                       std::span<const hs::ActionEdge>{};
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         for(const auto &signal:simulation.PendingDomainSignals())
         {
             if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
@@ -575,11 +569,10 @@ void SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding()
 
     hs::InputFrame input;
     input.held.aim_world={20.0f,0.0f,0.0f};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const std::array retreat_edge{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
     input.target_tick=simulation.GetObservation().tick+1;
     input.ordered_edges=std::span<const hs::ActionEdge>(retreat_edge);
-    (void)simulation.TickFixed(input,fixed_step);
+    (void)simulation.TickFixed(input);
 
     hs::DomainSignal landing_signal{};
     bool found=false;
@@ -587,7 +580,7 @@ void SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding()
     {
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=std::span<const hs::ActionEdge>{};
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         for(const auto &signal:simulation.PendingDomainSignals())
         {
             if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
@@ -650,7 +643,7 @@ void RealSecondRetreatRetainsCapturedGeometry()
         const auto before=simulation.GetObservation().player_position;
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=step==0?std::span<const hs::ActionEdge>(edge):std::span<const hs::ActionEdge>{};
-        (void)simulation.TickFixed(input,std::chrono::nanoseconds{16'666'667});
+        (void)simulation.TickFixed(input);
         for(const auto &signal:simulation.PendingDomainSignals())
             if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
                signal.upgrade_skill==static_cast<std::uint8_t>(hs::SkillKind::RetreatShot) &&
@@ -727,23 +720,22 @@ void SimulationEmitsCooldownProcForRealRefund()
 
     hs::InputFrame input;
     input.held.aim_world={20.0f,0.0f,0.0f};
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const std::array retreat_edge{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
     input.target_tick=simulation.GetObservation().tick+1;
     input.ordered_edges=std::span<const hs::ActionEdge>(retreat_edge);
-    (void)simulation.TickFixed(input,fixed_step);
+    (void)simulation.TickFixed(input);
 
     input.ordered_edges=std::span<const hs::ActionEdge>{};
     for(std::uint32_t tick=0;tick<24;++tick)
     {
         input.target_tick=simulation.GetObservation().tick+1;
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
     }
 
     const std::array followup_edge{hs::ActionEdge{2,hs::GameAction::SkillW,hs::EdgeKind::Pressed}};
     input.target_tick=simulation.GetObservation().tick+1;
     input.ordered_edges=std::span<const hs::ActionEdge>(followup_edge);
-    (void)simulation.TickFixed(input,fixed_step);
+    (void)simulation.TickFixed(input);
 
     const auto &signals=simulation.PendingDomainSignals();
     const auto signal=std::find_if(signals.begin(),signals.end(),[](const auto &value) {
@@ -895,7 +887,6 @@ void CooldownProcMappings()
 void RealSlowAreaOwnersSelectAuthoredAliases()
 {
     const auto slow_program=UpgradeSlowProgram();
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const auto check_cast=[&](hs::SkillKind skill,std::uint8_t upgrade_index,
                               std::uint64_t seed,std::uint32_t expected_effect,
                               std::string_view expected_effect_name,
@@ -915,7 +906,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
                                               hs::EdgeKind::Pressed}};
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=std::span<const hs::ActionEdge>(edge);
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         input.ordered_edges=std::span<const hs::ActionEdge>{};
 
         hs::GameReadModelStorage model;
@@ -967,7 +958,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
                 break;
             }
             input.target_tick=simulation.GetObservation().tick+1;
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
         }
         Check(found,label);
         const auto ground_height = model.arena_half_extent >= 14.0f
@@ -1089,7 +1080,6 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
 }
 void RealArrowRainPullProjectsAndDispatches()
 {
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const auto cast_and_find=[&](bool with_target,hs::DomainSignal &output) {
         hs::GameSimulation simulation;
         auto rules=QuietRules();
@@ -1114,7 +1104,7 @@ void RealArrowRainPullProjectsAndDispatches()
                                               hs::EdgeKind::Pressed}};
         input.target_tick=simulation.GetObservation().tick+1;
         input.ordered_edges=std::span<const hs::ActionEdge>(edge);
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         simulation.ClearDomainSignals();
         input.ordered_edges=std::span<const hs::ActionEdge>{};
 
@@ -1123,7 +1113,7 @@ void RealArrowRainPullProjectsAndDispatches()
         for(std::uint32_t tick=0;tick<90 && !found;++tick)
         {
             input.target_tick=simulation.GetObservation().tick+1;
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(signal.kind==hs::DomainSignalKind::Pull)
@@ -1300,7 +1290,6 @@ void FourNewBindingsRequireExactStageAndCookedMembership()
 void RealEmpoweredBasicAndRollTrapBindings()
 {
     const auto program=Program();
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     {
         hs::GameSimulation simulation;
         Check(simulation.Initialize({0xB45C1u},QuietRules()).Succeeded(),
@@ -1322,7 +1311,7 @@ void RealEmpoweredBasicAndRollTrapBindings()
             input.ordered_edges=step==0 ? std::span<const hs::ActionEdge>(skill_edge)
                                         : std::span<const hs::ActionEdge>{};
             input.held.basic_attack_held=step>=30;
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(signal.kind==hs::DomainSignalKind::ArrowReleased &&
@@ -1374,7 +1363,7 @@ void RealEmpoweredBasicAndRollTrapBindings()
         input.held.aim_world={20.0f,0.0f,0.0f};
         const std::array edge{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
         input.ordered_edges=std::span<const hs::ActionEdge>(edge);
-        (void)simulation.TickFixed(input,fixed_step);
+        (void)simulation.TickFixed(input);
         std::uint32_t spawn_count{};
         std::uint32_t generic_count{};
         std::uint32_t audio_count{};
@@ -1425,7 +1414,6 @@ void RealEmpoweredBasicAndRollTrapBindings()
 void RealTrapRearmPullAndBleedBindings()
 {
     const auto program=Program();
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const auto run=[&](std::uint8_t upgrade_index, hs::Float2 enemy_position,
                        std::string_view effect, bool expect_visual) {
         auto rules=QuietRules();
@@ -1453,7 +1441,7 @@ void RealTrapRearmPullAndBleedBindings()
             input.target_tick=simulation.GetObservation().tick+1;
             input.ordered_edges=step==0 ? std::span<const hs::ActionEdge>(edge)
                                         : std::span<const hs::ActionEdge>{};
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
@@ -1502,7 +1490,6 @@ void RealTrapRearmPullAndBleedBindings()
 void RealFirePulseAndTrapMarkBindings()
 {
     const auto program=Program();
-    constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     auto rules=QuietRules();
     auto &enemy=rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
     enemy.health=100'000;
@@ -1530,7 +1517,7 @@ void RealFirePulseAndTrapMarkBindings()
             input.target_tick=simulation.GetObservation().tick+1;
             input.ordered_edges=step==0 ? std::span<const hs::ActionEdge>(edge)
                                         : std::span<const hs::ActionEdge>{};
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(signal.kind!=hs::DomainSignalKind::FireAreaPulse ||
@@ -1593,7 +1580,7 @@ void RealFirePulseAndTrapMarkBindings()
                 input.held.basic_attack_held=true;
                 input.held.aim_world={0.0f,0.0f,0.0f};
             }
-            (void)simulation.TickFixed(input,fixed_step);
+            (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
                 if(signal.kind==hs::DomainSignalKind::MarkApplied)

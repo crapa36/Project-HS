@@ -35,26 +35,42 @@ const CookedVfxDefinition *VfxCatalog::FindEffect(EffectId id) const noexcept
 VfxCatalog::VfxCatalog() noexcept = default;
 VfxCatalog::~VfxCatalog() = default;
 VfxCatalog::VfxCatalog(VfxCatalog &&other) noexcept
-    : image_(std::exchange(other.image_, {})), owned_(std::move(other.owned_)) {}
+    : image_(std::exchange(other.image_, {})),
+      fresnel_recipe_view_(std::exchange(other.fresnel_recipe_view_, PreparedVfxFresnelRecipeView{})),
+      mesh_recipe_view_(std::exchange(other.mesh_recipe_view_, PreparedVfxMeshRecipeView{})),
+      owned_(std::move(other.owned_)) {}
 VfxCatalog &VfxCatalog::operator=(VfxCatalog &&other) noexcept
 {
     if (this != &other)
     {
         image_ = std::exchange(other.image_, {});
+        fresnel_recipe_view_ = std::exchange(other.fresnel_recipe_view_, PreparedVfxFresnelRecipeView{});
+        mesh_recipe_view_ = std::exchange(other.mesh_recipe_view_, PreparedVfxMeshRecipeView{});
         owned_ = std::move(other.owned_);
     }
     return *this;
 }
-void VfxCatalog::Bind(const VfxImage &image) noexcept
+Result VfxCatalog::Bind(const VfxImage &image)
 {
-    if (&image == &image_) return;
+    if (&image == &image_) return Result::Success();
+    PreparedVfxFresnelRecipeView recipe_view;
+    if (auto result = PreparedVfxFresnelRecipeView::Create(image.fresnel_recipes, recipe_view); !result)
+        return result;
+    PreparedVfxMeshRecipeView mesh_recipe_view;
+    if (auto result = PreparedVfxMeshRecipeView::Create(image.mesh_recipes, mesh_recipe_view); !result)
+        return result;
     owned_.reset();
     image_ = image;
+    fresnel_recipe_view_ = recipe_view;
+    mesh_recipe_view_ = mesh_recipe_view;
+    return Result::Success();
 }
 void VfxCatalog::Swap(VfxCatalog &prepared) noexcept
 {
     using std::swap;
     swap(image_, prepared.image_);
+    swap(fresnel_recipe_view_, prepared.fresnel_recipe_view_);
+    swap(mesh_recipe_view_, prepared.mesh_recipe_view_);
     swap(owned_, prepared.owned_);
 }
 

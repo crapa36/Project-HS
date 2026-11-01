@@ -22,16 +22,20 @@ bool FiniteTransform(const VfxTransform &transform) noexcept
 
 std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
     const VfxImage &image,
+    const PreparedVfxFresnelRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs)
 {
     std::vector<VfxFresnelInput> result;
-    AppendVfxTypedFresnelCommands(image, inputs, result);
+    AppendVfxTypedFresnelCommands(image, recipes, inputs, result);
     return result;
 }
 
 void AppendVfxTypedFresnelCommands(const VfxImage &image,
+    const PreparedVfxFresnelRecipeView &recipes,
     std::span<const VfxPersistentInput> inputs, std::vector<VfxFresnelInput> &result)
 {
+    if (!recipes.IsAdmitted() || !recipes.Matches(image.fresnel_recipes)) return;
+    const auto recipe_rows = recipes.Rows();
     const auto original_size = result.size();
     try
     {
@@ -51,10 +55,11 @@ void AppendVfxTypedFresnelCommands(const VfxImage &image,
             static_cast<std::uint32_t>(owner.quality) > 2) continue;
         const auto &effect = image.fresnel_effect_recipes[owner.effect_handle - 1];
         if (!effect.route_valid || effect.effect_handle != owner.effect_handle ||
-            !InRange(effect.outputs, image.fresnel_recipes)) continue;
-        for (const auto &recipe : std::span(image.fresnel_recipes).subspan(
-                 effect.outputs.first, effect.outputs.count))
+            !InRange(effect.outputs, recipe_rows)) continue;
+        for (std::uint32_t recipe_index = effect.outputs.first;
+             recipe_index < effect.outputs.first + effect.outputs.count; ++recipe_index)
         {
+            const auto &recipe = recipe_rows[recipe_index];
             if (recipe.effect_handle != effect.effect_handle || recipe.kind != effect.kind ||
                 static_cast<std::uint32_t>(owner.quality) < recipe.min_quality ||
                 owner.normalized_age < recipe.knot_start || owner.normalized_age >= recipe.knot_end)
@@ -66,25 +71,12 @@ void AppendVfxTypedFresnelCommands(const VfxImage &image,
             VfxFresnelInput command;
             command.render_instance_id = entity->render_instance_id;
             command.stable_id = owner.stable_id;
-            command.effect_handle = effect.effect_handle;
-            command.kind = recipe.kind;
+            command.recipe_index = recipe_index;
             command.current_transform = owner.current_transform;
             command.previous_transform = owner.previous_transform;
             command.footprint_radius = entity->footprint_radius;
             command.source_progress = progress;
             command.elapsed_seconds = owner.elapsed_seconds;
-            command.color = {recipe.color.x, recipe.color.y, recipe.color.z,
-                             recipe.color.w};
-            command.hdr = recipe.hdr;
-            command.gradient_row = recipe.gradient_row;
-            command.motion_rate_hz = recipe.motion_rate_hz;
-            command.motion_amplitude = recipe.motion_amplitude;
-            command.motion_inset_fraction = recipe.motion_inset_fraction;
-            command.sector_count = recipe.sector_count;
-            command.rotation_hz = recipe.rotation_hz;
-            command.fresnel_power = recipe.fresnel_power;
-            command.noise_amount = recipe.noise_amount;
-            command.end_crack = recipe.end_crack;
             result.push_back(command);
         }
     }

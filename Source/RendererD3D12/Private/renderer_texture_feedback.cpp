@@ -1,13 +1,49 @@
 #include "renderer_texture_feedback.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
+#if defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 namespace hs
 {
+std::uint32_t texture_feedback_detail::MinimumRequestedMip(
+    std::span<const std::byte> row, std::uint32_t mip_count) noexcept
+{
+    auto minimum = std::uint8_t{0xff};
+    std::size_t offset{};
+#if defined(_M_X64)
+    if (row.size() >= 16)
+    {
+        auto lanes = _mm_set1_epi8(static_cast<char>(0xff));
+        const auto zero = _mm_setzero_si128();
+        const auto vector_end = row.size() - row.size() % 16;
+        for (; offset < vector_end; offset += 16)
+        {
+            const auto values = _mm_loadu_si128(
+                reinterpret_cast<const __m128i *>(row.data() + offset));
+            lanes = _mm_min_epu8(lanes, values);
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(lanes, zero)) != 0)
+                return 0;
+        }
+        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 8));
+        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 4));
+        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 2));
+        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 1));
+        minimum = static_cast<std::uint8_t>(_mm_cvtsi128_si32(lanes));
+    }
+#endif
+    for (; offset < row.size() && minimum != 0; ++offset)
+        minimum = std::min(minimum, std::to_integer<std::uint8_t>(row[offset]));
+    if (minimum == 0xff) return texture_feedback_detail::kNoMipDemand;
+    // Preserve the byte sentinel and the prior uint32 clamp arithmetic exactly.
+    return std::min(static_cast<std::uint32_t>(minimum), mip_count - 1u);
+}
 namespace
 {
 using Microsoft::WRL::ComPtr;
@@ -73,7 +109,7 @@ struct RendererTextureFeedback::Impl
             &resource.allocation, IID_PPV_ARGS(&resource.resource));
         return FAILED(hr) ? NativeFailure("Allocate sampler feedback resource", hr) : Result::Success();
     }
-    Result MakeOwner(FeedbackOwner &owner, TextureStreamView view, ResidencyManager &residency)
+    Result MakeOwner(FeedbackOwner &owner, const TextureStreamView &view, ResidencyManager &residency)
     {
         owner.target = view.resource; owner.mip_count = view.logical_description.mip_count;
         owner.opacity_sampling = view.opacity_sampling;
@@ -178,10 +214,12 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
     if (previous && (!previous->completion.IsSatisfiedBy(completed) || previous->pending))
         return FeedbackFailure("Sampler feedback frame bank is still in flight or unconsumed.");
     std::array<TextureMipMetadata, kTextureFeedbackBindingCount> metadata{};
+    std::array<TextureStreamView, kTextureFeedbackBindingCount> views{};
     bool reuse = static_cast<bool>(previous);
     for (UINT index = 0; index < bindings.size(); ++index)
     {
-        const auto view = streaming.View(bindings[index]);
+        views[index] = streaming.View(bindings[index]);
+        const auto &view = views[index];
         if (view.resource) metadata[index] = {view.first_mip, view.resident_min_mip,
             view.logical_description.mip_count, static_cast<UINT>(impl_->hardware && view.reserved)};
         if (!previous) continue;
@@ -207,7 +245,7 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
         candidate->owners.reserve(bindings.size());
         for (UINT index = 0; index < bindings.size(); ++index)
         {
-            const auto view = streaming.View(bindings[index]);
+            const auto &view = views[index];
             if (!view.resource) continue;
             metadata[index] = {view.first_mip, view.resident_min_mip, view.logical_description.mip_count,
                 static_cast<UINT>(impl_->hardware && view.reserved)};
@@ -522,20 +560,24 @@ Result RendererTextureFeedback::Consume(std::uint32_t slot, const CompletionSet 
         const auto hr = owner.readback.resource->Map(0, &range, &address);
         if (FAILED(hr)) return NativeFailure("Map decoded material feedback", hr);
         const auto *mapped = static_cast<const std::byte *>(address);
-        UINT mip = UINT32_MAX;
+        UINT mip = texture_feedback_detail::kNoMipDemand;
         for (UINT slice = 0; slice < owner.slices && mip != 0u; ++slice)
             for (UINT y = 0; y < owner.height && mip != 0u; ++y)
-                for (UINT x = 0; x < owner.width && mip != 0u; ++x)
+            {
+                const auto offset = owner.footprints[slice].Offset +
+                    static_cast<SIZE_T>(y) * owner.footprints[slice].Footprint.RowPitch;
+                const auto row = std::span<const std::byte>(mapped + offset, owner.width);
+                const auto row_mip = texture_feedback_detail::MinimumRequestedMip(row, owner.mip_count);
+                if (row_mip != texture_feedback_detail::kNoMipDemand)
                 {
-                    const auto value = std::to_integer<UINT>(mapped[owner.footprints[slice].Offset +
-                        static_cast<SIZE_T>(y) * owner.footprints[slice].Footprint.RowPitch + x]);
-                    if (value == 0xffu) continue;
                     // MinMip stores ideal, unclamped LOD. Coarser demand can
                     // exceed the actual chain without requesting new backing.
-                    mip = std::min(mip, std::min(value, owner.mip_count - 1u));
+                    mip = std::min(mip, row_mip);
                 }
+            }
         D3D12_RANGE none{}; owner.readback.resource->Unmap(0, &none);
-        if (mip != UINT32_MAX) streaming.Demand(owner.id, mip, UINT32_MAX - mip, demand_frame);
+        if (mip != texture_feedback_detail::kNoMipDemand)
+            streaming.Demand(owner.id, mip, UINT32_MAX - mip, demand_frame);
     }
     frame->pending = false; return Result::Success();
 }

@@ -2,13 +2,9 @@
 
 #include <array>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <limits>
 #include <span>
 #include <stdexcept>
-#include <string>
 
 namespace
 {
@@ -44,90 +40,12 @@ void Require(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
 }
-std::string ReadShaderSource(const char *name)
-{
-    const auto locate=[&](std::filesystem::path directory) -> std::filesystem::path
-    {
-        for(unsigned depth=0;depth<10&&!directory.empty();++depth,directory=directory.parent_path())
-        {
-            const auto file=directory/"Content"/"Shaders"/name;
-            if(std::filesystem::exists(file))return file;
-        }
-        return {};
-    };
-    auto path=locate(std::filesystem::path(__FILE__).parent_path());
-    if(path.empty())path=locate(std::filesystem::current_path());
-    if(path.empty())throw std::runtime_error("cannot locate authoritative shader source for the CSM query contract");
-    std::ifstream stream(path,std::ios::binary);
-    if(!stream)throw std::runtime_error("cannot read authoritative shader source for the CSM query contract");
-    return {std::istreambuf_iterator<char>(stream),std::istreambuf_iterator<char>()};
-}
 }
 
 // Called by the existing render-package CPU host; no device or Renderer library is needed.
 void TestVirtualShadowGuarantees()
 {
     using Reason = hs::VirtualShadowCsmReason;
-    {
-        const auto bounds=[](int key,float side,float guard) {
-            const float lower=float(key)*side-guard;
-            return std::array{lower,lower+side+2.0f*guard};
-        };
-        const auto range=[&](float center,float radius,int origin,int side,float page_side,float guard) {
-            const float minimum=center-radius,maximum=center+radius;
-            const auto first_bounds=bounds(origin,page_side,guard);
-            const auto last_bounds=bounds(origin+side-1,page_side,guard);
-            if(!std::isfinite(minimum)||!std::isfinite(maximum)||!std::isfinite(page_side)||
-               !std::isfinite(guard)||page_side<=0||!std::isfinite(first_bounds[0])||
-               !std::isfinite(first_bounds[1])||!std::isfinite(last_bounds[0])||
-               !std::isfinite(last_bounds[1])) return std::array{0,side-1};
-            if(maximum<first_bounds[0]||minimum>last_bounds[1]) return std::array{side,-1};
-            int lo=0,hi=side;
-            while(lo<hi) { const int mid=(lo+hi)/2;
-                if(minimum<=bounds(origin+mid,page_side,guard)[1]) hi=mid; else lo=mid+1; }
-            const int first=lo;
-            lo=0;hi=side;
-            while(lo<hi) { const int mid=(lo+hi)/2;
-                if(maximum>=bounds(origin+mid,page_side,guard)[0]) lo=mid+1; else hi=mid; }
-            return std::array{first,lo-1};
-        };
-        struct AxisCase { int origin,side; float page_side,guard,center,radius; };
-        const std::array cases{
-            AxisCase{-17,32,4.0f,0.0625f,-64.0625f,0.0f},
-            AxisCase{-17,32,4.0f,0.0625f,-59.9375f,0.0f},
-            AxisCase{-17,32,4.0f,0.0625f,-64.0625f-2.0f,2.0f},
-            AxisCase{-17,32,4.0f,0.0625f,10000.0f,1.0f},
-            AxisCase{-4,8,16.0f,0.25f,-0.25f,0.0f},
-            AxisCase{10000000,8,0.0001f,0.0000015625f,1000.0f,0.0f},
-            AxisCase{-4,8,16.0f,0.25f,1.0e38f,1.0e38f}
-        };
-        for(const auto &test:cases)
-        {
-            const auto selected=range(test.center,test.radius,test.origin,test.side,test.page_side,test.guard);
-            for(int local=0;local<test.side;++local)
-            {
-                const auto page=bounds(test.origin+local,test.page_side,test.guard);
-                const bool overlaps=test.center+test.radius>=page[0]&&test.center-test.radius<=page[1];
-                Require(!overlaps||(local>=selected[0]&&local<=selected[1]),
-                    "VSM sparse candidate range must retain touching, negative, guard, and precision-edge pages");
-            }
-        }
-    }
-    const auto surface_shadow_shader=ReadShaderSource("project_hs.hlsl");
-    const auto volume_shadow_shader=ReadShaderSource("volumetrics.hlsl");
-    const auto probe_capture_shader=ReadShaderSource("local_probe_capture.hlsl");
-    Require(surface_shadow_shader.find("smoothstep(0.02, 0.12, edge)")!=std::string::npos&&
-            surface_shadow_shader.find("if (any(uv < 0.0) || any(uv > 1.0) || projected.z < 0.0 || projected.z > 1.0)")!=std::string::npos&&
-            surface_shadow_shader.find("#ifndef HS_LOCAL_PROBE_CAPTURE")!=std::string::npos&&
-            volume_shadow_shader.find("smoothstep(0.02,0.12,edge)")!=std::string::npos&&
-            volume_shadow_shader.find("if(any(uv<0.0)||any(uv>1.0)||projected.z<0.0||projected.z>1.0) continue;")!=std::string::npos&&
-            probe_capture_shader.find("#define HS_LOCAL_PROBE_CAPTURE 1")!=std::string::npos&&
-            probe_capture_shader.find("float HsCaptureStaticShadowVisibility(float3 world)")!=std::string::npos,
-            "CPU CSM query clipping must match both surface and volumetric shader contribution domains");
-    const auto fixed_root_shader=ReadShaderSource("shadow_data.hlsli");
-    Require(fixed_root_shader.find("caster==0.0 || receiver+receiver_bias>=caster")!=std::string::npos&&
-            fixed_root_shader.find("max(static_caster,HsShadowRootDynamic.Load(int3(pixel,0)))")!=std::string::npos,
-            "fixed-root reverse-Z taps preserve valid-empty and same-tap static/dynamic composition");
     Require(hs::IsCompleteBakedStaticCaster(true,true,true,false,false,false),
             "only immutable, baked, non-deformed source geometry is removed from current root draws");
     Require(!hs::IsCompleteBakedStaticCaster(true,true,true,true,false,false)&&

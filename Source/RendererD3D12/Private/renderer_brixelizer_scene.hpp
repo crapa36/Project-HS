@@ -6,64 +6,117 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <functional>
 #include <limits>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
 namespace hs
 {
-// Ordered borrowed ranges keep immutable instance rows owned by their scene
-// section while frame-local rows remain in the waited frame slot.
-[[nodiscard]] inline bool AccumulateBrixelizerSceneInstanceCount(
-    std::uint32_t current,std::size_t additional,std::uint32_t &total) noexcept
+[[nodiscard]] constexpr bool IsBrixelizerVertexStride(std::uint32_t stride) noexcept
+{ return stride >= 12 && stride <= 63 && stride % 4 == 0; }
+
+// Refresh only when frame registration replaced projected/placeholder versions.
+[[nodiscard]] inline bool RefreshBrixelizerGeometryReadSet(
+    BrixelizerGeometryRange geometries,BrixelizerFrameRecordData &record)
 {
-    if(additional>std::numeric_limits<std::uint32_t>::max()-current)return false;
-    total=current+static_cast<std::uint32_t>(additional);
+    bool changed=record.geometry_reads.size()!=geometries.size()*2u;
+    if(!changed)
+        for(std::size_t i=0;i<geometries.size();++i)
+        {
+            const auto versions=geometries.VersionsAt(i);
+            if(record.geometry_reads[i*2u]!=SceneGeometryReadToken{versions.vertex,Access::ComputeRead}||
+                record.geometry_reads[i*2u+1u]!=SceneGeometryReadToken{versions.index,Access::ComputeRead})
+            {changed=true;break;}
+        }
+    if(!changed)return false;
+    record.geometry_reads.clear();record.geometry_reads.reserve(geometries.size()*2u);
+    for(std::size_t i=0;i<geometries.size();++i)
+    {
+        const auto versions=geometries.VersionsAt(i);
+        record.geometry_reads.push_back({versions.vertex,Access::ComputeRead});
+        record.geometry_reads.push_back({versions.index,Access::ComputeRead});
+    }
+    record.unique_geometry_reads.clear();record.unique_geometry_reads.reserve(record.geometry_reads.size());
+    for(const auto &read:record.geometry_reads)if(read.version.resource)record.unique_geometry_reads.push_back(read);
+    const auto key=[](const SceneGeometryReadToken &read) {
+        return std::tuple{read.version.resource.value,read.version.resource.kind,read.version.ordinal,read.access};
+    };
+    std::ranges::sort(record.unique_geometry_reads,[&](const auto &left,const auto &right) {
+        return key(left)<key(right);
+    });
+    record.unique_geometry_reads.erase(std::unique(record.unique_geometry_reads.begin(),
+        record.unique_geometry_reads.end()),record.unique_geometry_reads.end());
     return true;
 }
-[[nodiscard]] inline Result CountBrixelizerSceneInstanceRanges(
-    std::span<const BrixelizerSceneInstanceRange> ranges,std::uint32_t &instance_count,
-    std::uint32_t &immutable_instance_count)
+[[nodiscard]] inline bool RefreshBrixelizerGeometryReadSet(
+    std::span<const SoftwareSceneGeometry> geometries,BrixelizerFrameRecordData &record)
+{ return RefreshBrixelizerGeometryReadSet({{},geometries,{}},record); }
+
+// Validate the merged run shape and total once at the GI admission boundary.
+[[nodiscard]] inline Result CountBrixelizerSceneRows(const BrixelizerSceneInputs &input,
+    std::uint32_t &instance_count,std::uint32_t &immutable_count)
 {
-    instance_count=immutable_instance_count=0;
-    for(const auto &range:ranges)
+    instance_count=immutable_count=0;
+    const auto immutable=input.immutable_section?input.immutable_section->Runs():std::span<const BrixelizerSceneRun>{};
+    std::size_t a{},b{},previous_end{};
+    while(a<immutable.size()||b<input.current_runs.size())
     {
-        std::uint32_t total{};
-        if(!AccumulateBrixelizerSceneInstanceCount(instance_count,range.instances.size(),total))
-            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
-                "Brixelizer total instance count exceeds native addressing.");
-        instance_count=total;
-        if(range.immutable)
-        {
-            if(!AccumulateBrixelizerSceneInstanceCount(immutable_instance_count,range.instances.size(),total))
-                return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
-                    "Brixelizer immutable instance count exceeds native addressing.");
-            immutable_instance_count=total;
-        }
+        if(a<immutable.size()&&input.static_job_base>std::numeric_limits<std::size_t>::max()-immutable[a].job_begin)
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Brixelizer immutable run index overflows.");
+        const auto immutable_begin=a<immutable.size()?input.static_job_base+immutable[a].job_begin:
+            std::numeric_limits<std::size_t>::max();
+        const auto current_begin=b<input.current_runs.size()?input.current_runs[b].job_begin:
+            std::numeric_limits<std::size_t>::max();
+        if(immutable_begin==current_begin)
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Brixelizer immutable and current runs overlap.");
+        const bool use_immutable=immutable_begin<current_begin;
+        const auto job_begin=use_immutable?immutable_begin:current_begin;
+        const auto job_count=use_immutable?immutable[a].job_count:input.current_runs[b].job_count;
+        const auto row_begin=use_immutable?immutable[a].instance_begin:input.current_runs[b].instance_begin;
+        const auto row_count=use_immutable?immutable[a].instance_count:input.current_runs[b].instance_count;
+        const auto rows=use_immutable?input.immutable_section->Instances():input.current_instances;
+        if(!job_count||job_begin>std::numeric_limits<std::size_t>::max()-job_count||job_begin<previous_end||
+            row_begin>rows.size()||row_count>rows.size()-row_begin||row_count>UINT32_MAX-instance_count||
+            (use_immutable&&row_count>UINT32_MAX-immutable_count))
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Invalid or overflowing Brixelizer scene run.");
+        previous_end=job_begin+job_count;
+        instance_count+=static_cast<std::uint32_t>(row_count);
+        if(use_immutable){immutable_count+=static_cast<std::uint32_t>(row_count);++a;}else ++b;
     }
     return Result::Success();
 }
 
-// Production and CPU-fixture traversal share borrowed-span order and logical
-// row numbering. The caller validates the total before visiting.
+// Keep static rows owned by their immutable section and merge them with the
+// waited-slot rows without flattening either source.
 template<class Visitor>
-[[nodiscard]] Result ForEachBrixelizerSceneInstance(
-    std::span<const BrixelizerSceneInstanceRange> ranges,bool skip_immutable,Visitor &&visitor)
+[[nodiscard]] Result ForEachBrixelizerSceneInstance(const BrixelizerSceneInputs &input,
+    bool skip_immutable,Visitor &&visitor)
 {
+    const auto immutable=input.immutable_section?input.immutable_section->Runs():std::span<const BrixelizerSceneRun>{};
+    std::size_t a{},b{};
     std::uint32_t logical_index{};
-    for(const auto &range:ranges)
+    while(a<immutable.size()||b<input.current_runs.size())
     {
-        if(skip_immutable&&range.immutable)
+        const auto immutable_begin=a<immutable.size()?input.static_job_base+immutable[a].job_begin:
+            std::numeric_limits<std::size_t>::max();
+        const auto current_begin=b<input.current_runs.size()?input.current_runs[b].job_begin:
+            std::numeric_limits<std::size_t>::max();
+        const bool use_immutable=immutable_begin<current_begin;
+        const auto row_begin=use_immutable?immutable[a].instance_begin:input.current_runs[b].instance_begin;
+        const auto row_count=use_immutable?immutable[a].instance_count:input.current_runs[b].instance_count;
+        const auto rows=use_immutable?input.immutable_section->Instances():input.current_instances;
+        if(row_begin>rows.size()||row_count>rows.size()-row_begin)
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Brixelizer scene run exceeds its row owner.");
+        if(skip_immutable&&use_immutable)logical_index+=static_cast<std::uint32_t>(row_count);
+        else for(const auto &instance:rows.subspan(row_begin,row_count))
         {
-            logical_index+=static_cast<std::uint32_t>(range.instances.size());
-            continue;
-        }
-        for(const auto &instance:range.instances)
-        {
-            if(auto result=visitor(instance,logical_index,range.immutable);!result)return result;
+            if(auto result=visitor(instance,logical_index,use_immutable);!result)return result;
             ++logical_index;
         }
+        if(use_immutable)++a;else ++b;
     }
     return Result::Success();
 }
@@ -83,7 +136,7 @@ struct BrixelizerGeometryKey
     std::uint64_t vertex_byte_offset{}, index_byte_offset{};
     std::uint32_t vertex_stride{}, vertex_count{}, index_count{};
     DXGI_FORMAT index_format{};
-    bool dynamic{}, opaque{}, force_rebuild{};
+    bool dynamic{}, opaque{};
     bool operator==(const BrixelizerGeometryKey &) const = default;
 };
 
@@ -105,7 +158,7 @@ struct BrixelizerGeometryKeyHash
         mix(key.vertex_byte_offset); mix(key.index_byte_offset);
         mix(key.vertex_stride); mix(key.vertex_count); mix(key.index_count);
         mix(static_cast<std::uint64_t>(key.index_format));
-        mix(key.dynamic); mix(key.opaque); mix(key.force_rebuild);
+        mix(key.dynamic); mix(key.opaque);
         return hash;
     }
 };
@@ -113,6 +166,9 @@ struct BrixelizerGeometryKeyHash
 class BrixelizerGeometryLookup
 {
 public:
+    BrixelizerGeometryLookup()=default;
+    BrixelizerGeometryLookup(const BrixelizerGeometryLookup *prefix,std::uint32_t prefix_size) noexcept
+        : prefix_(prefix),prefix_size_(prefix_size) {}
     [[nodiscard]] std::uint32_t FindOrAdd(const SoftwareSceneGeometry &geometry,
         std::vector<SoftwareSceneGeometry> &geometries)
     {
@@ -127,10 +183,14 @@ public:
             geometry.index_version.ordinal,
             geometry.vertex_byte_offset, geometry.index_byte_offset,
             geometry.vertex_stride, geometry.vertex_count, geometry.index_count,
-            geometry.index_format, geometry.dynamic, geometry.opaque,
-            geometry.force_rebuild};
+            geometry.index_format, geometry.dynamic, geometry.opaque};
+        if(prefix_)
+        {
+            const auto existing=prefix_->entries_.find(key);
+            if(existing!=prefix_->entries_.end())return existing->second;
+        }
         const auto [found, inserted] = entries_.try_emplace(key,
-            static_cast<std::uint32_t>(geometries.size()));
+            prefix_size_+static_cast<std::uint32_t>(geometries.size()));
         if (inserted) geometries.push_back(geometry);
         return found->second;
     }
@@ -138,6 +198,8 @@ public:
 private:
     std::unordered_map<BrixelizerGeometryKey, std::uint32_t,
         BrixelizerGeometryKeyHash> entries_;
+    const BrixelizerGeometryLookup *prefix_{};
+    std::uint32_t prefix_size_{};
 };
 
 // Shared domain precedence for homogeneous early exclusions and mixed-page expansion.

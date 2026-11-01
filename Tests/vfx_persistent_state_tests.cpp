@@ -30,7 +30,7 @@ hs::PersistentVfxVisual StatusEpisode(hs::StatusVisual status, hs::Tick first = 
 std::vector<hs::Tick> Births(const hs::PersistentVfxVisual &episode, hs::StatusVisual status,
                            hs::Tick now, hs::Tick last, bool reset, hs::Tick maximum_age = 30)
 {
-    const auto range = hs::renderer_detail::StatusParticleBirths(&episode,
+    const auto range = hs::runtime_detail::StatusParticleBirths(&episode,
         episode.entity_render_id, status, now, last, reset, maximum_age);
     std::vector<hs::Tick> result;
     if (range)
@@ -93,11 +93,11 @@ void TestStatusEpisodeAndSubmissionBoundaries()
     Check(Births(episode, hs::StatusVisual::Burn, 10, 60, true) ==
               std::vector<hs::Tick>({1, 4, 7, 10}),
           "rewound fresh particle pool retained the future schedule");
-    const auto unknown = hs::renderer_detail::StatusParticleBirths(nullptr, 2,
+    const auto unknown = hs::runtime_detail::StatusParticleBirths(nullptr, 2,
         hs::StatusVisual::Burn, 61, 1, false, 27);
     Check(unknown && unknown->first == 61 && unknown->last == 61,
           "missing episode metadata invented past active duration");
-    Check(!hs::renderer_detail::StatusParticleBirths(nullptr, 2,
+    Check(!hs::runtime_detail::StatusParticleBirths(nullptr, 2,
         hs::StatusVisual::Burn, 60, 1, false, 27),
           "compatibility fallback shifted the original cadence phase");
 }
@@ -112,7 +112,7 @@ void TestStatusScheduleTickLimit()
         return birth <= limit - 1 && limit - 1 - birth < 30 &&
                (birth % 6 + episode.entity_render_id % 6) % 6 == 0;
     }), "status cadence overflowed at the Tick limit");
-    Check(!hs::renderer_detail::StatusParticleBirths(nullptr, limit, hs::StatusVisual::Bleed,
+    Check(!hs::runtime_detail::StatusParticleBirths(nullptr, limit, hs::StatusVisual::Bleed,
         limit, limit, false, 30), "submitted maximum Tick was replayed");
 }
 }

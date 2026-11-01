@@ -1405,17 +1405,30 @@ float ShadowVisibility(float3 world)
     if (HsShadowMetadata.Load(324u) != 0u && asfloat(HsShadowMetadata.Load(348u)) == 0.0)
         return 1.0;
 #endif
-    float visibility = 1.0;
-    // Coarse coverage supplies the edge of each finer map, including the far fade.
-    [unroll] for (int cascade = 2; cascade >= 0; --cascade)
+    float3 cascade_samples[3] = {float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0)};
+    float cascade_weights[3] = {0.0, 0.0, 0.0};
+    int coarsest = 2;
+    // A fully weighted finer cascade makes every coarser filter unobservable.
+    [unroll] for (int cascade = 0; cascade < 3; ++cascade)
     {
         float4 projected = mul(float4(world, 1.0), ShadowViewProjection[cascade]);
         projected.xyz /= projected.w;
         const float2 uv = projected.xy * float2(0.5, -0.5) + 0.5;
         if (any(uv < 0.0) || any(uv > 1.0) || projected.z < 0.0 || projected.z > 1.0)
             continue;
+        const float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        cascade_samples[cascade] = float3(uv, projected.z);
+        cascade_weights[cascade] = smoothstep(0.02, 0.12, edge);
+        if (cascade_weights[cascade] == 1.0) { coarsest = cascade; break; }
+    }
+    float visibility = 1.0;
+    // Preserve coarse-to-fine blending and the original edge/far fade.
+    [unroll] for (int cascade = 2; cascade >= 0; --cascade)
+    {
+        if (cascade > coarsest || cascade_weights[cascade] == 0.0) continue;
+        const float3 sample = cascade_samples[cascade];
         const float4 tile = ShadowAtlasScaleOffset[cascade];
-        const float2 atlas_uv = uv * tile.xy + tile.zw;
+        const float2 atlas_uv = sample.xy * tile.xy + tile.zw;
         const float2 lower = tile.zw + ShadowAtlasTexelSize.xy * 0.5;
         const float2 upper = tile.zw + tile.xy - ShadowAtlasTexelSize.xy * 0.5;
         float filtered = 0.0;
@@ -1424,10 +1437,9 @@ float ShadowVisibility(float3 world)
         {
                 const float2 sample_uv = clamp(
                     atlas_uv + float2(HsShadowFilterOffsets[sample_index]) * ShadowAtlasTexelSize.xy, lower, upper);
-                filtered += ShadowMap.SampleCmpLevelZero(ShadowCompare, sample_uv, projected.z);
+                filtered += ShadowMap.SampleCmpLevelZero(ShadowCompare, sample_uv, sample.z);
         }
-        const float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-        visibility = lerp(visibility, filtered / float(samples), smoothstep(0.02, 0.12, edge));
+        visibility = lerp(visibility, filtered / float(samples), cascade_weights[cascade]);
     }
     return visibility;
 }

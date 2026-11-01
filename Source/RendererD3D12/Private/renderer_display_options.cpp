@@ -17,12 +17,13 @@ Result D3D12Renderer::Impl::PrepareDisplayPipeline(
                                std::pair{"ui_ps.dxil", &pixel}})
     {
         RendererAssetSource path;
-        if (auto resolved = ResolveRendererAsset(candidate_config, "render/shader/" + std::string(name), path);
+        const auto product_id = "render/shader/" + std::string(name);
+        if (auto resolved = ResolveRendererAsset(candidate_config, product_id, path);
             !resolved) return resolved;
         if (auto read = ReadBinary(path, *bytes); !read) return read;
         if (bytes->empty())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Empty selected display shader: " + path.path.string());
+                                   "Empty selected display shader: " + path.Describe(product_id));
     }
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};

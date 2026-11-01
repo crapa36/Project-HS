@@ -137,63 +137,48 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     const auto &input = frame_input;
     std::unordered_set<std::uint64_t> fresnel_ids;
     if (input.vfx.fresnels.size() > 32) return ViewFailure("Too many Fresnel shell commands.");
+    const auto &fresnel_recipe_view = input.vfx.fresnel_recipe_view;
+    const auto fresnel_recipes = fresnel_recipe_view.Rows();
+    if (!input.vfx.fresnels.empty() && !fresnel_recipe_view.IsAdmitted())
+        return ViewFailure("Fresnel commands require an admitted recipe table.");
+    if (fresnel_recipe_view.IsAdmitted() && !fresnel_recipes.empty() &&
+        fresnel_recipe_view.MaximumGradientRow() >= this->vfx_gradient_rows)
+        return ViewFailure("Admitted Fresnel recipe table exceeds the selected gradient atlas.");
     for (const auto &source : input.vfx.fresnels)
     {
         const auto finite_transform = [](const VfxTransform &transform) {
             return std::ranges::all_of(transform, [](float value) { return std::isfinite(value); });
         };
-        const bool crown = source.kind == VfxFresnelShellKind::BossCrown;
-        const bool transition = source.kind == VfxFresnelShellKind::BossTransition;
-        const bool player = source.kind == VfxFresnelShellKind::PlayerInvulnerable;
         if (source.render_instance_id == 0 || source.stable_id == 0 ||
-            source.effect_handle == kInvalidVfxEffectHandle ||
-            !fresnel_ids.insert(source.stable_id).second || (!crown && !transition && !player) ||
+            source.recipe_index >= fresnel_recipes.size() ||
+            !fresnel_ids.insert(source.stable_id).second ||
             !finite_transform(source.current_transform) ||
             !finite_transform(source.previous_transform) ||
             !std::isfinite(source.footprint_radius) || source.footprint_radius <= 0.0f ||
             !std::isfinite(source.source_progress) || source.source_progress < 0.0f ||
             source.source_progress >= 1.0f ||
-            !std::isfinite(source.elapsed_seconds) || source.elapsed_seconds < 0.0f ||
-            !std::isfinite(source.color.x) || source.color.x < 0.0f ||
-            !std::isfinite(source.color.y) || source.color.y < 0.0f ||
-            !std::isfinite(source.color.z) || source.color.z < 0.0f ||
-            !std::isfinite(source.color.w) || source.color.w < 0.0f || source.color.w > 1.0f ||
-            !std::isfinite(source.hdr) || source.hdr <= 0.0f ||
-            source.gradient_row >= this->vfx_gradient_rows ||
-            !std::isfinite(source.motion_rate_hz) || source.motion_rate_hz < 0.0f ||
-            !std::isfinite(source.motion_amplitude) || source.motion_amplitude < 0.0f ||
-            source.motion_amplitude > 1.0f ||
-            !std::isfinite(source.motion_inset_fraction) ||
-            source.motion_inset_fraction < 0.0f || source.motion_inset_fraction > 1.0f ||
-            !std::isfinite(source.noise_amount) || source.noise_amount < 0.0f ||
-            source.noise_amount > 1.0f ||
-            (crown && (source.sector_count != 6 || !std::isfinite(source.rotation_hz) ||
-                       source.rotation_hz >= 0.0f || source.fresnel_power != 0.0f ||
-                       source.end_crack != 0 || source.noise_amount != 0.0f)) ||
-            (transition && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
-                            !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
-                            source.end_crack != 1 || source.noise_amount != 0.0f)) ||
-            (player && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
-                        !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
-                        source.end_crack != 0)))
+            !std::isfinite(source.elapsed_seconds) || source.elapsed_seconds < 0.0f)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "Invalid Fresnel shell command.");
     }
+    const auto &mesh_recipe_view = input.vfx.mesh_recipe_view;
+    const auto mesh_recipes = mesh_recipe_view.Rows();
+    if (!input.vfx.meshes.empty() && !mesh_recipe_view.IsAdmitted())
+        return ViewFailure("Owned mesh commands require an admitted recipe table.");
+    if (mesh_recipe_view.IsAdmitted() && !mesh_recipes.empty() &&
+        mesh_recipe_view.MaximumGradientRow() >= this->vfx_gradient_rows)
+        return ViewFailure("Admitted owned mesh recipe table exceeds the selected gradient atlas.");
+    const auto finite_mesh_vector = [](const Float3 &v) {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    };
     for (const auto &source : input.vfx.meshes)
     {
-            const auto finite = [](const Float3 &v) {
-                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
-            };
-            if (source.mesh_index == 0 || source.mesh_index > 7 ||
-                source.gradient_row >= this->vfx_gradient_rows || !finite(source.position) ||
-                !finite(source.previous_position) || !finite(source.velocity) ||
-                !finite({source.color.x,source.color.y,source.color.z}) || !std::isfinite(source.color.w) ||
-                !std::isfinite(source.radius) || source.radius <= 0 ||
-                !std::isfinite(source.hdr) || source.hdr <= 0 ||
-                !std::isfinite(source.fresnel) || source.fresnel < 0 || source.fresnel > 1 ||
-                !std::isfinite(source.head_to_tail_ratio) || source.head_to_tail_ratio < 0 || source.head_to_tail_ratio >= 1 ||
-                !std::isfinite(source.shell_thickness) || source.shell_thickness < 0)
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid owner mesh command.");
+        if (source.recipe_index >= mesh_recipes.size())
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid owner mesh command.");
+        if (!finite_mesh_vector(source.position) ||
+            !finite_mesh_vector(source.previous_position) || !finite_mesh_vector(source.velocity) ||
+            !std::isfinite(source.radius) || source.radius <= 0)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid owner mesh command.");
     }
     for (const auto &source : input.vfx.flashes)
     {
@@ -545,17 +530,21 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         if (distortion.shape == VfxDistortionShape::GappedAnnulus) gaps += distortion.GapCount();
     if (gaps > UINT32_MAX || input.vfx.ground.size() > UINT32_MAX || input.vfx.flashes.size() > UINT32_MAX || input.vfx.meshes.size() > UINT32_MAX)
         return ViewFailure("Authored VFX upload counts exceed their native index capacity.");
-    auto snapshot = input.snapshots.has_current ? input.snapshots.current : RenderSnapshot{};
-    if (input.scene) snapshot.static_scene = input.scene->lease;
-    auto render_instances = snapshot.instances;
+    const RenderSnapshot empty_snapshot{};
+    const auto &snapshot = input.snapshots.has_current ? input.snapshots.current : empty_snapshot;
+    const auto static_scene = input.scene ? input.scene->lease : snapshot.static_scene;
+    const auto render_instances = snapshot.instances;
     std::vector<RenderInstance> retained_instances;
     if (!input.vfx.entity_surfaces.empty())
     {
-        retained_instances.assign(render_instances.begin(), render_instances.end());
         for (const auto &command : input.vfx.entity_surfaces)
         {
-            if (!command.has_retained_instance || std::ranges::any_of(retained_instances,
-                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; })) continue;
+            const auto already_present = [&](const auto &instances) {
+                return std::ranges::any_of(instances,
+                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; });
+            };
+            if (!command.has_retained_instance || already_present(render_instances) ||
+                already_present(retained_instances)) continue;
             const auto &instance = command.retained_instance;
             if (instance.stable_id != command.render_instance_id ||
                 instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
@@ -564,43 +553,54 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                 return ViewFailure("Entity surface retention requires its actual boss mesh and captured pose.");
             retained_instances.push_back(instance);
         }
-        render_instances = retained_instances;
     }
+    const auto render_instance_count = render_instances.size() + retained_instances.size();
     std::vector<VfxEntitySurfaceCommand> admitted_surfaces;
     for (const auto &command : input.vfx.entity_surfaces)
         if (std::ranges::any_of(render_instances, [&](const auto &instance) {
+                return instance.stable_id == command.render_instance_id &&
+                    instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
+            }) || std::ranges::any_of(retained_instances, [&](const auto &instance) {
                 return instance.stable_id == command.render_instance_id &&
                     instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
             })) admitted_surfaces.push_back(command);
     EntitySurfaceFrame surface;
     if (auto r = surface.Build(admitted_surfaces); !r) return r;
     std::unordered_set<RenderSceneInstanceKey, RenderSceneInstanceKeyHash> source_keys;
-    bool unique_sources = render_instances.size() <= UINT32_MAX;
+    bool unique_sources = render_instance_count <= UINT32_MAX;
     for (std::size_t index = 0; unique_sources && index < render_instances.size(); ++index)
         unique_sources = source_keys.emplace(MakeRenderSceneInstanceKey(
             render_instances[index].stable_id, static_cast<std::uint32_t>(index))).second;
+    for (std::size_t index = 0; unique_sources && index < retained_instances.size(); ++index)
+        unique_sources = source_keys.emplace(MakeRenderSceneInstanceKey(
+            retained_instances[index].stable_id,
+            static_cast<std::uint32_t>(render_instances.size() + index))).second;
     if (!unique_sources)
         return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
-    for (const auto &instance : render_instances)
-    {
-        if (!instance.animation_clip_id.value) continue;
-        if (instance.mesh != RenderMesh::Archer) return ViewFailure("Explicit named animation requires a loaded skeleton-bound character extension.");
-        const auto index = static_cast<std::uint32_t>(&instance - render_instances.data());
-        const auto key = MakeRenderPoseKey(instance, FindLastRenderPose(snapshot.poses, index));
+    const auto validate_animation = [&](const RenderInstance &instance, std::size_t index) -> Result {
+        if (!instance.animation_clip_id.value) return Result::Success();
+        if (instance.mesh != RenderMesh::Archer)
+            return ViewFailure("Explicit named animation requires a loaded skeleton-bound character extension.");
+        const auto key = MakeRenderPoseKey(instance,
+            FindLastRenderPose(snapshot.poses, static_cast<std::uint32_t>(index)));
         if (std::ranges::any_of(prepared_archer_palettes,
-                [&](const auto &entry) { return entry.key == key; })) continue;
+                [&](const auto &entry) { return entry.key == key; })) return Result::Success();
         auto &prepared = prepared_archer_palettes.emplace_back();
         prepared.key = key;
         const auto sampled = archer_compiled_animation
             ? SampleNamedCharacterAnimation(*archer_compiled_animation, archer_named_packed_transforms, instance,
                 std::span(prepared.bones.data(), archer_bone_count))
             : SampleNamedCharacterAnimation(archer_named_animations, instance, std::span(prepared.bones.data(), archer_bone_count));
-        if (!sampled) return sampled;
-    }
-    if (snapshot.static_scene && (!static_gpu_scene || static_gpu_scene->source != snapshot.static_scene))
+        return sampled;
+    };
+    for (std::size_t index = 0; index < render_instances.size(); ++index)
+        if (auto r = validate_animation(render_instances[index], index); !r) return r;
+    for (std::size_t index = 0; index < retained_instances.size(); ++index)
+        if (auto r = validate_animation(retained_instances[index], render_instances.size() + index); !r) return r;
+    if (static_scene && (!static_gpu_scene || static_gpu_scene->source != static_scene))
     {
         std::uint64_t output_count{};
-        for (const auto &instance : snapshot.static_scene->instances)
+        for (const auto &instance : static_scene->instances)
         {
             const bool environment = render_data::IsEnvironmentMesh(instance.mesh);
             if (!environment && instance.mesh != RenderMesh::Ground && instance.mesh != RenderMesh::DirtPatch)
@@ -608,22 +608,28 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
             output_count += environment ? 3u : 1u;
         }
         if (output_count > UINT32_MAX / 4u) return ViewFailure("Static visibility output index overflow.");
-        const auto keys = snapshot.static_scene->static_keys;
-        if (keys.size() != snapshot.static_scene->instances.size() ||
+        const auto keys = static_scene->static_keys;
+        if (keys.size() != static_scene->instances.size() ||
             !std::ranges::is_sorted(keys, {}, &RenderSceneInstanceKey::stable_id) ||
             std::adjacent_find(keys.begin(), keys.end()) != keys.end())
             return ViewFailure("Static scene does not carry complete unique prepared identities.");
-        for (const auto &instance : snapshot.static_scene->instances)
+        for (const auto &instance : static_scene->instances)
             if (instance.stable_id && !std::ranges::binary_search(
                     keys, instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
                 return ViewFailure("Static scene identity does not match its prepared owner.");
     }
-    if (snapshot.static_scene)
+    if (static_scene)
+    {
         for (const auto &instance : render_instances)
-            if (instance.stable_id && std::ranges::binary_search(snapshot.static_scene->static_keys,
+            if (instance.stable_id && std::ranges::binary_search(static_scene->static_keys,
                     instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
                 return ViewFailure("Dynamic render identity collides with the immutable process scene.");
-    if (render_instances.size() > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
+        for (const auto &instance : retained_instances)
+            if (instance.stable_id && std::ranges::binary_search(static_scene->static_keys,
+                    instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
+                return ViewFailure("Dynamic render identity collides with the immutable process scene.");
+    }
+    if (render_instance_count > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
     std::string ribbon_error;
     if (config.ribbon_history_points < kRibbonHistorySamples)
         return ViewFailure("Ribbon point budget must provide at least one 64-sample slot");
@@ -920,14 +926,15 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     std::chrono::steady_clock::duration view_render_time{};
     if (!impl_->initialized || impl_->frame_submission_faulted)
         return Result::Failure(ErrorCode::InvalidState, "hs_render_view", "Renderer is not available for frame submission.");
-    auto input = source_input;
-    impl_->render_package_time = input.sample_time.value_or(std::chrono::steady_clock::now());
+    CanonicalFrame canonical{source_input};
+    auto &input = canonical.input;
+    const auto package_time = input.sample_time.value_or(std::chrono::steady_clock::now());
     if (input.simulation_time)
     {
         input.snapshots.current.header.simulation_time = *input.simulation_time;
         input.snapshots.current.header.clock.mode = RenderClockMode::Scripted;
     }
-    auto alpha = RenderSnapshotInterpolation(input.snapshots, impl_->render_package_time, impl_->config.interpolate);
+    auto alpha = RenderSnapshotInterpolation(input.snapshots, package_time, impl_->config.interpolate);
     auto &sample_header = input.snapshots.current.header;
     const auto current_time = sample_header.simulation_time;
     auto display_time = current_time;
@@ -970,7 +977,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
             }
             return false;
         });
-    impl_->render_package_alpha = alpha;
+    canonical.interpolation = alpha;
     input.snapshots.current = impl_->render_scene_sample.View(input.snapshots.current);
     sample_header.simulation_time = display_time;
     impl_->prepared_archer_palettes.clear();
@@ -1057,12 +1064,38 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         main_owner.temporal_history_valid = false; main_owner.hzb_history_valid = false;
         main_owner.history_output_extent = main_owner.state.output_extent;
     }
-    const auto saved_devtools_visible = impl_->config.devtools_visible;
     const auto saved_identity = main_owner.sdk_frame_identity;
     const auto saved_input_phase = impl_->native_input_phase;
     impl_->active_render_package_id = impl_->render_package_id + 1;
+    if (input.scene) { input.snapshots.current.static_scene = input.scene->lease; input.snapshots.has_current = true; }
+    if (input.override_ui) { input.snapshots.current.ui = input.ui; input.snapshots.has_current = true; }
+    if (input.simulation_time) input.snapshots.has_current = true;
+    if (!input.snapshots.has_current) input.snapshots.current = {};
+    input.sample_time = package_time;
+    if (!input.ui_draw_content)
+    {
+        static const auto empty_ui = std::make_shared<const UiDrawContent>();
+        if (input.snapshots.current.ui.empty()) input.ui_draw_content = empty_ui;
+        else
+        {
+            auto content = std::make_shared<UiDrawContent>();
+            content->models.assign(input.snapshots.current.ui.begin(), input.snapshots.current.ui.end());
+            input.ui_draw_content = std::move(content);
+        }
+    }
+    canonical.advance_native_world = !input.vfx.world_batch || input.vfx.world_batch->sequence != 0;
+    canonical.native_display_tick = static_cast<double>(input.snapshots.current.header.tick);
+    if (input.vfx.world_batch && input.snapshots.has_previous && alpha < 1.0f)
+        canonical.native_display_tick -= 1.0 - alpha;
+    if (!input.vfx.world_batch)
+        input.vfx.world_batch = RenderVfxWorldBatch{input.snapshots.current.header.session_id,
+            input.snapshots.current.header.tick, 0, false};
     if (auto r = impl_->BeginHlodViewPackage(input); !r) return r;
-    impl_->explicit_frame = &input;
+    input.ui = {};
+    input.override_ui = false;
+    input.snapshots.current.ui = {};
+    input.simulation_time.reset();
+    input.screen_overlay_intensity = input.screen_overlay_intensity.value_or(impl_->config.screen_overlay_intensity);
     auto &prepared_scene = impl_->prepared_scene_package;
     prepared_scene.ReleaseBorrowed();
     struct PreparedSceneLease
@@ -1075,6 +1108,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     std::vector<RenderViewFrameResult> view_results;
     view_results.reserve(input.views.size());
     bool rendered_main{}, rendered_any{}, failed_view_history_committed{};
+    const RenderViewInput *attempted_view{};
     const auto main = std::ranges::find(input.views, RenderViewRole::Main, &RenderViewInput::role);
     auto next = input.views.begin();
     for (std::size_t ordinal = 0; ordinal < input.views.size(); ++ordinal)
@@ -1087,10 +1121,10 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
             view_pointer = next++;
         }
         const auto &view = *view_pointer;
+        attempted_view = nullptr;
         if (auto r = impl_->ActivateView(view.id); !r) { result = r; break; }
         auto &owned_view = *impl_->owned_views.at(view.id.value);
-        impl_->explicit_view = &view;
-        impl_->config.devtools_visible = saved_devtools_visible && view.role == RenderViewRole::Main;
+        attempted_view = &view;
         if (view.role == RenderViewRole::Main) { impl_->native_input_phase = saved_input_phase; owned_view.sdk_frame_identity = saved_identity; }
         const bool active_changed = view.render_active != owned_view.state.render_active;
         (void)UpdateViewState(owned_view.state, view.output_extent, view.render_capacity, view.render_active);
@@ -1105,21 +1139,15 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
             owned_view.ambient_occlusion.ResetHistory(); owned_view.screen_reflections.ResetHistory();
             owned_view.volumetrics.ResetHistory();
         }
-        auto snapshots = input.snapshots;
-        if (input.scene) { snapshots.current.static_scene = input.scene->lease; snapshots.has_current = true; }
-        if (input.override_ui) { snapshots.current.ui = input.ui; snapshots.has_current = true; }
-        if (input.simulation_time) snapshots.has_current = true;
-        const auto &v = input.vfx;
         RendererFrameResult rendered{};
         // Event spawns are scene simulation inputs and are consumed once; the
         // retained particles/ribbons are shared by every sequential view.
         const bool first = ordinal == 0;
-        impl_->render_scene_inputs = first;
         const auto view_render_start = std::chrono::steady_clock::now();
-        result = RenderView(snapshots, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
-            first ? v.effect_lines : std::span<const VfxLineSpawnCommand>{},
-            v.event_count, v.persistent_count, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
-            v.lights, v.distortions, v.decals, input.devtools, rendered, v.volumes, v.screen, v.entity_surfaces);
+        const auto view_delta_seconds = input.delta_seconds.value_or(
+            owned_view.exposure_sample_time.time_since_epoch().count() == 0 ? 1.0f / 60.0f
+                : std::chrono::duration<float>(package_time - owned_view.exposure_sample_time).count());
+        result = RenderView(canonical, view, first, view_delta_seconds, rendered);
         view_render_time += std::chrono::steady_clock::now() - view_render_start;
         if (rendered.presented_ui_packet_generation)
             world_step_receipt.presented_ui_generation = rendered.presented_ui_packet_generation;
@@ -1142,22 +1170,17 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         frame_result = rendered;
         if (view.role == RenderViewRole::Main) { rendered_main = true; main_result = rendered; }
     }
-    if (!result && impl_->explicit_view && !failed_view_history_committed)
+    if (!result && attempted_view && !failed_view_history_committed)
     {
-        if (impl_->explicit_view)
-        {
-            auto &failed_view = *impl_->owned_views.at(impl_->explicit_view->id.value);
-            failed_view.temporal_history_valid = false;
-            failed_view.hzb_history_valid = false;
-            failed_view.brixelizer_history_valid = false;
-            failed_view.previous_origins_valid = false;
-            failed_view.previous_skin_deformation.reset();
-            failed_view.previous_instances.reset();
-            failed_view.skin_history.Clear();
-        }
+        auto &failed_view = *impl_->owned_views.at(attempted_view->id.value);
+        failed_view.temporal_history_valid = false;
+        failed_view.hzb_history_valid = false;
+        failed_view.brixelizer_history_valid = false;
+        failed_view.previous_origins_valid = false;
+        failed_view.previous_skin_deformation.reset();
+        failed_view.previous_instances.reset();
+        failed_view.skin_history.Clear();
     }
-    impl_->explicit_view = nullptr; impl_->explicit_frame = nullptr;
-    impl_->config.devtools_visible = saved_devtools_visible;
     if (auto restored = impl_->ActivateView(kMainRenderViewId); !restored) return restored;
     if (!rendered_main) { impl_->native_input_phase = saved_input_phase; main_owner.sdk_frame_identity = saved_identity; }
     if (rendered_main) frame_result = main_result;

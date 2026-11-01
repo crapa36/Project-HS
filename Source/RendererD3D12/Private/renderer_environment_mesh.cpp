@@ -152,7 +152,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
                     hierarchy_chunk->stride != render_data::kGeometryHierarchyReferenceStride)) ||
                 (index % 3 != 0 && hierarchy_chunk))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Invalid geometry package chunks: " + path.path.string());
+                    "Invalid geometry package chunks: " + path.Describe(logical_id));
             const auto material_dependency = render_data::DecodeGeometryMaterialReference(
                 material_reference->bytes, package.dependencies);
             const auto expected_material_product = render_data::MaterialProduct(material_name);
@@ -175,13 +175,13 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
                     !ResolveRendererAsset(config, dependency, dependency_path))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                            "Invalid render package dependency " + dependency +
-                                               ": " + path.path.string());
+                                               ": " + path.Describe(logical_id));
             }
             if (std::ranges::find(package.dependencies, mesh_dependency) ==
                 package.dependencies.end())
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                       "Render package omits mesh dependency " + mesh_dependency +
-                                           ": " + path.path.string());
+                                           "Render package omits mesh dependency " + mesh_dependency +
+                                           ": " + path.Describe(logical_id));
             geometry_metadata = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryMetadata(
                 geometry_chunk->bytes, package.dependencies, logical_id); });
             if (geometry_metadata.lod != index % 3 ||
@@ -315,7 +315,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Invalid render package " + path.path.string() + ": " + error.what());
+                                   "Invalid render package " + path.Describe(logical_id) + ": " + error.what());
         }
         auto &mesh = environment_meshes[index];
         const auto &sphere = geometry_metadata.bounds.sphere;
@@ -366,7 +366,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
         catch (const std::exception &error)
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Invalid environment geometry page " + page_path.path.string() + ": " +
+                                   "Invalid environment geometry page " + page_path.Describe(page_id) + ": " +
                                        error.what());
         }
         if (auto created = MeasureStartupOperation(RendererStartupOperation::GeometryPrepare, [&] { return CreateGeometryPage(mesh, geometry_metadata, page_bytes,
@@ -528,8 +528,8 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             const auto preparation = stream.preparation;
             const auto descriptor = stream.compiled_geometry ? &config.packed_geometry[stream.compiled_geometry.value] : nullptr;
             const auto development_catalog = stream.development_catalog;
-            const auto verified_digest = stream.source.pack ?
-                std::optional(stream.source.range.expected_digest) : std::nullopt;
+            const auto verified_digest = stream.source.IsPacked() ?
+                std::optional(stream.source.Packed().range.expected_digest) : std::nullopt;
             bool submitted{};
             const auto queued = asset_io.Enqueue({stream.request, stream.content_generation,
                     stream.logical_id, stream.source, file_bytes, resident_generation_lease,
@@ -621,6 +621,10 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         std::uint64_t upload_size{}; std::array<std::uint64_t, 4> offsets{};
         if (!GeometryPageLayout(sizes, offsets, upload_size))
             return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Streamed geometry allocation size overflow.");
+        const auto position_bytes = std::uint64_t(metadata.vertex_count) * 3u * sizeof(float);
+        if (position_bytes > UINT32_MAX - upload_size)
+            return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Streamed Brixelizer position size overflow.");
+        upload_size += position_bytes;
         const auto resident_description = BufferDescription(upload_size);
         const auto resident_size = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_size);

@@ -1739,7 +1739,8 @@ int main(int argc, char **argv)
             config.temporal_reconstruction = false;
             config.bloom = config.outline = false;
             receipt["hero_work"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "existing-slime-family-preview-count1"}, {"requested_frames", frames},
-                {"mode", HeroWorkModeName(config.hero_work_mode)}, {"functional_only", true}, {"performance_adoption", false}};
+                {"mode", HeroWorkModeName(config.hero_work_mode)}, {"exposure_delta_seconds", 1.0f / 60.0f},
+                {"functional_only", true}, {"performance_adoption", false}};
             if (hero_layer_probe)
                 receipt["hero_work"]["quality_transition"] = {{"request_frame", 5},
                     {"frames1_4", "existing Medium refraction/transparency, one layer and original camera"},
@@ -3118,6 +3119,7 @@ int main(int argc, char **argv)
                     Require(renderer.Resize(config.width + (frame == 13 ? 64 : 0),
                                             config.height + (frame == 13 ? 32 : 0)));
                 auto main_view = renderer.MainViewInput(pair.current.camera);
+                if (software_gi_probe && frame == 8) main_view.camera_cut = true;
                 std::vector<hs::VfxEntitySurfaceCommand> entity_surfaces;
                 if (entity_surface_probe)
                 {
@@ -3250,7 +3252,7 @@ int main(int argc, char **argv)
                     .views = std::span(&main_view, 1), .snapshots = pair,
                     .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces},
                     .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
-                        : local_probe_revision_probe ? std::optional<float>{1.0f / 60.0f}
+                        : local_probe_revision_probe || hero_work_probe ? std::optional<float>{1.0f / 60.0f}
                         : !vfx_composition_probe.empty()
                         ? std::optional<float>{vfx_composition_probe == "auto" || vfx_composition_probe == "switch"
                             ? 1.0f / 60.0f : 0.0f}

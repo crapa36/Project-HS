@@ -1,7 +1,6 @@
 #include "test_generation_paths.hpp"
 #include "vfx_catalog.hpp"
 #include "vfx_light_reference.hpp"
-#include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/shipped_content_owner.hpp>
@@ -115,7 +114,7 @@ void TestCompiledVfxImage()
     Check(hs::VfxCatalog::Load(test_generation::ProductPath("vfx/particle_effects.hsbin"),
         test_generation::ProductPath("vfx/vfx_program.hsbin"),loaded).Succeeded(),"load independent VFX reference");
     const auto &image=hs::shipping::Vfx(); const auto &ref=loaded.Image();
-    Check(&image==&hs::shipping::Vfx(),"compiled VFX stable identity"); compiled.Bind(image);
+    Check(&image==&hs::shipping::Vfx() && compiled.Bind(image).Succeeded(),"compiled VFX stable identity and admission");
     Check(image.payload_hash==ref.payload_hash && image.sprite_count==ref.sprite_count &&
         image.has_typed_wavefront==ref.has_typed_wavefront && image.has_required_sprite_bindings==ref.has_required_sprite_bindings &&
         image.definitions.size()==ref.definitions.size() && image.emitters.size()==ref.emitters.size(),"compiled VFX identity and extents");
@@ -161,7 +160,8 @@ void TestCompiledVfxImage()
         }
     }
     Check(particles>0 && lines>0,"comparison exercises both command families");
-    const auto *backing=loaded.Image().definitions.data(); loaded.Bind(loaded.Image());
+    const auto *backing=loaded.Image().definitions.data();
+    Check(loaded.Bind(loaded.Image()).Succeeded(),"self-bind retains prepared recipe view");
     Check(loaded.Image().definitions.data()==backing,"self-bind preserves owned backing");
     hs::VfxCatalog moved(std::move(loaded));
     Check(loaded.Image().definitions.empty() && moved.Image().definitions.data()==backing,"move clears source and transfers owner");
@@ -272,8 +272,8 @@ void TestCompiledShippingTables()
             edges[0] = {++sequence, hs::GameAction::SkillQ,
                 tick % 90 == 1 ? hs::EdgeKind::Pressed : hs::EdgeKind::Released}; input.ordered_edges = edges;
         }
-        const auto expected = loaded_world.TickFixed(input, hs::FixedStepClock::kFixedStep);
-        const auto actual = compiled_world.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto expected = loaded_world.TickFixed(input);
+        const auto actual = compiled_world.TickFixed(input);
         Check(actual.tick == expected.tick && actual.phase == expected.phase && actual.checksum == expected.checksum,
               "compiled rules must preserve each scripted gameplay tick");
         const auto position = loaded_world.GetObservation().player_position;

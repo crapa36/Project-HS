@@ -46,17 +46,17 @@ class GraphicsSettingsCommit
     [[nodiscard]] const SettingsDocument &Requested() const noexcept { return requested_; }
     [[nodiscard]] const SettingsDocument &Committed() const noexcept { return committed_; }
     [[nodiscard]] bool HasPending() const noexcept { return pending_generation_ != 0; }
-    [[nodiscard]] bool HasUnsentEdits() const noexcept { return graphics_dirty_ || recovery_requested_; }
-    [[nodiscard]] bool IsRecovering() const noexcept { return recovery_requested_ || in_flight_recovery_; }
+    [[nodiscard]] bool HasUnsentEdits() const noexcept { return graphics_dirty_ || timeout_restore_requested_; }
+    [[nodiscard]] bool IsRecovering() const noexcept { return timeout_restore_requested_ || in_flight_timeout_restore_; }
     [[nodiscard]] bool TimedOut() const noexcept { return timed_out_; }
     [[nodiscard]] bool PreparationFailed() const noexcept { return preparation_failed_; }
     void SuspendUnsentAfterAllocationFailure() noexcept { preparation_failed_ = true; }
     [[nodiscard]] bool FollowupRejected() const noexcept { return followup_rejected_; }
     [[nodiscard]] std::uint64_t CommittedGeneration() const noexcept { return committed_generation_; }
     [[nodiscard]] const GraphicsSettings &ApplyTargetGraphics() const noexcept
-    { return recovery_requested_ ? persisted_.graphics : requested_.graphics; }
+    { return timeout_restore_requested_ ? persisted_.graphics : requested_.graphics; }
     [[nodiscard]] const SettingsData &ApplyTargetEffective() const noexcept
-    { return recovery_requested_ ? persisted_effective_ : desired_effective_; }
+    { return timeout_restore_requested_ ? persisted_effective_ : desired_effective_; }
 
     void EditDisplayOutput(GraphicsDisplayId output)
     {
@@ -94,17 +94,19 @@ class GraphicsSettingsCommit
     // the actual setting ID, and serial order preserves preset/field ordering.
     bool EditGraphics(const UiCommand &command)
     {
-        const auto index = GraphicsEditIndex(command);
+        auto canonical = CanonicalGraphicsEdit(command);
+        if (!canonical) return false;
+        const auto index = GraphicsEditIndex(*canonical);
         if (!index) return false;
         auto candidate = requested_;
-        if (!ApplySettingsEdit(candidate, command)) return false;
+        if (!ApplySettingsEdit(candidate, *canonical)) return false;
         auto projection = ProjectSettingsDocument(candidate);
         projection.width = desired_effective_.width;
         projection.height = desired_effective_.height;
         if (mute_audio_) projection.master_volume = 0;
         requested_ = std::move(candidate);
         desired_effective_ = projection;
-        followup_edits_[*index] = PendingEdit{command, ++edit_serial_};
+        followup_edits_[*index] = PendingEdit{*canonical, ++edit_serial_};
         graphics_dirty_ = true;
         preparation_failed_ = false;
         return true;
@@ -149,31 +151,31 @@ class GraphicsSettingsCommit
         if (HasPending() || !HasUnsentEdits() || preparation_failed_) return std::nullopt;
         // All allocating copies precede publication. OOM leaves the previous
         // snapshot and requested intent intact, with no outstanding read lease.
-        auto document = recovery_requested_ ? persisted_ : requested_;
+        auto document = timeout_restore_requested_ ? persisted_ : requested_;
         CopyImmediate(requested_, document);
-        auto native_graphics = recovery_requested_ ? document.graphics : graphics;
-        auto projection = recovery_requested_ ? persisted_effective_ : desired_effective_;
+        auto native_graphics = timeout_restore_requested_ ? document.graphics : graphics;
+        auto projection = timeout_restore_requested_ ? persisted_effective_ : desired_effective_;
         CopyImmediateProjection(requested_, projection);
         in_flight_document_ = std::move(document);
         in_flight_graphics_ = std::move(native_graphics);
         in_flight_effective_ = projection;
-        in_flight_recovery_ = recovery_requested_;
-        recovery_requested_ = false;
+        in_flight_timeout_restore_ = timeout_restore_requested_;
+        timeout_restore_requested_ = false;
         timed_out_ = false;
         pending_generation_ = ++next_generation_;
         graphics_dirty_ = false;
-        if (!in_flight_recovery_) ClearFollowups();
-        const auto cause = in_flight_recovery_ ? GraphicsSettingsRequestCause::Recovery
-                                               : GraphicsSettingsRequestCause::User;
-        return GraphicsSettingsCommitRequest{pending_generation_, projection, &in_flight_graphics_, cause};
+        if (!in_flight_timeout_restore_) ClearFollowups();
+        return GraphicsSettingsCommitRequest{pending_generation_, projection, &in_flight_graphics_,
+            in_flight_timeout_restore_ ? GraphicsSettingsRequestCause::Recovery
+                                        : GraphicsSettingsRequestCause::User};
     }
 
     void RejectUnqueuedRequest() noexcept
     {
         if (!HasPending()) return;
         pending_generation_ = 0;
-        recovery_requested_ = in_flight_recovery_;
-        in_flight_recovery_ = false;
+        timeout_restore_requested_ = in_flight_timeout_restore_;
+        in_flight_timeout_restore_ = false;
         graphics_dirty_ = true;
     }
 
@@ -183,7 +185,7 @@ class GraphicsSettingsCommit
         auto restored = committed_;
         requested_ = std::move(restored);
         desired_effective_ = effective_;
-        graphics_dirty_ = recovery_requested_ = false;
+        graphics_dirty_ = timeout_restore_requested_ = false;
         ClearFollowups();
     }
 
@@ -201,15 +203,11 @@ class GraphicsSettingsCommit
         persisted_effective_ = effective_;
     }
 
-    // A failed save needs a real acknowledged renderer recovery. Subsequent
-    // edits remain coalesced and immediate audio/keys remain current.
-    void RollbackUnpersisted() noexcept
+    // Display confirmation cancel restores the last accepted display profile.
+    void RestorePersistedDisplay() noexcept
     {
         if (HasPending()) return;
-        // Recording recovery cannot allocate after a failed save. Its snapshot
-        // is prepared by NextRequest; follow-ups replay only when the actual
-        // restoration is acknowledged, within Acknowledge's strong transaction.
-        recovery_requested_ = true;
+        timeout_restore_requested_ = true;
         preparation_failed_ = false;
     }
 
@@ -224,8 +222,8 @@ class GraphicsSettingsCommit
         auto next_effective = ack.error == ErrorCode::None ? in_flight_effective_ : effective_;
         CopyImmediate(requested_, next_committed);
         CopyImmediateProjection(requested_, next_effective);
-        const auto was_recovery = in_flight_recovery_;
         const auto was_timeout = timed_out_;
+        const auto was_timeout_restore = in_flight_timeout_restore_;
         // Replay allocates only before completing the main-thread commit. A
         // caller can retain and retry this ack if its UI/document allocation fails.
         ReplayFollowupEdits(was_timeout ? persisted_ : next_committed,
@@ -234,37 +232,28 @@ class GraphicsSettingsCommit
         effective_ = next_effective;
         if (ack.error == ErrorCode::None) committed_generation_ = ack.generation;
         pending_generation_ = 0;
-        in_flight_recovery_ = false;
+        in_flight_timeout_restore_ = false;
         timed_out_ = false;
-        if (was_timeout && ack.error == ErrorCode::None) recovery_requested_ = true;
+        if (was_timeout && ack.error == ErrorCode::None) timeout_restore_requested_ = true;
         if (ack.error != ErrorCode::None) return AckOutcome::Rejected;
         if (was_timeout) return AckOutcome::Recovering;
-        return was_recovery ? AckOutcome::Restored : AckOutcome::Applied;
+        return was_timeout_restore ? AckOutcome::Restored : AckOutcome::Applied;
     }
 
   private:
     struct PendingEdit { UiCommand command; std::uint64_t serial; };
-    static constexpr std::size_t kEditSlots = 8 + kGraphicsSettingCount + 1;
+    static constexpr std::size_t kEditSlots = kGraphicsSettingCount + 1;
 
     [[nodiscard]] static std::optional<std::size_t> GraphicsEditIndex(const UiCommand &command) noexcept
     {
-        switch (command.kind)
+        if (command.kind == UiCommandKind::SetVfxScreenOverlayIntensityPercent)
+            return kGraphicsSettingCount;
+        if (command.kind != UiCommandKind::SetGraphicsSetting) return std::nullopt;
+        for (std::size_t i = 0; i < GraphicsSettingDescriptors().size(); ++i)
         {
-        case UiCommandKind::SetBorderless: return 0;
-        case UiCommandKind::SetVsync: return 1;
-        case UiCommandKind::SetFrameCap: return 2;
-        case UiCommandKind::SetRenderScale: return 3;
-        case UiCommandKind::SetShadowResolution: return 4;
-        case UiCommandKind::SetParticlePercentage: return 5;
-        case UiCommandKind::SetBloom: return 6;
-        case UiCommandKind::SetOutline: return 7;
-        case UiCommandKind::SetVfxScreenOverlayIntensityPercent: return kEditSlots - 1;
-        case UiCommandKind::SetGraphicsSetting:
-            for (std::size_t i = 0; i < GraphicsSettingDescriptors().size(); ++i)
-                if (GraphicsSettingDescriptors()[i].id == command.graphics_setting) return 8 + i;
-            return std::nullopt;
-        default: return std::nullopt;
+            if (GraphicsSettingDescriptors()[i].id == command.graphics_setting) return i;
         }
+        return std::nullopt;
     }
 
     static void CopyImmediate(const SettingsDocument &source, SettingsDocument &target) noexcept
@@ -345,7 +334,7 @@ class GraphicsSettingsCommit
     std::optional<GraphicsDisplayId> followup_display_output_;
     std::optional<GraphicsOutputExtent> followup_display_extent_;
     std::uint64_t edit_serial_{}, next_generation_{}, pending_generation_{}, committed_generation_{};
-    bool graphics_dirty_{}, mute_audio_{}, recovery_requested_{}, in_flight_recovery_{};
+    bool graphics_dirty_{}, mute_audio_{}, timeout_restore_requested_{}, in_flight_timeout_restore_{};
     bool timed_out_{}, followup_rejected_{}, preparation_failed_{};
 };
 

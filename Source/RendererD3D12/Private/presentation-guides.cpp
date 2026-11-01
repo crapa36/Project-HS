@@ -40,13 +40,23 @@ bool Extent(ViewExtent extent)
     return extent.width && extent.height && extent.width <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
         extent.height <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
 }
-bool Fits(PresentationGuideResource input, ViewExtent extent, DXGI_FORMAT format)
+bool Fits(const RenderGraphBuilder &graph,PresentationGuideResource input, ViewExtent extent, DXGI_FORMAT format)
 {
-    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture) return false;
-    const auto desc = input.resource->GetDesc();
-    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.Width >= extent.width &&
-        desc.Height >= extent.height && desc.DepthOrArraySize == 1 && desc.SampleDesc.Count == 1 &&
-        desc.MipLevels == 1 && desc.Format == format;
+    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(input.version.resource)!=input.resource) return false;
+    const auto desc=graph.ResourceDescription(input.version.resource);
+    return desc&&desc->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&desc->Width>=extent.width&&
+        desc->Height>=extent.height&&desc->DepthOrArraySize==1&&desc->SampleDesc.Count==1&&
+        desc->MipLevels==1&&desc->Format==format;
+}
+bool FitsDepth(const RenderGraphBuilder &graph,PresentationGuideResource input,ViewExtent extent)
+{
+    if(!input.resource||!input.version.resource||input.version.resource.kind!=ResourceKind::Texture||
+        graph.Resolve(input.version.resource)!=input.resource)return false;
+    const auto desc=graph.ResourceDescription(input.version.resource);
+    return desc&&desc->Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&desc->Width>=extent.width&&
+        desc->Height>=extent.height&&desc->DepthOrArraySize==1&&desc->SampleDesc.Count==1&&desc->MipLevels==1&&
+        (desc->Format==DXGI_FORMAT_R32_FLOAT||desc->Format==DXGI_FORMAT_R32_TYPELESS||desc->Format==DXGI_FORMAT_D32_FLOAT);
 }
 Result CreateTexture(ID3D12Device *device, D3D12MA::Allocator *allocator, ViewExtent extent,
     DXGI_FORMAT format, bool renderTarget, AllocationResource &output)
@@ -306,18 +316,17 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
         colorPassId == guidePassId || colorPassId == devtoolsPassId || guidePassId == devtoolsPassId ||
         !std::isfinite(input.paper_white_nits) || !std::isfinite(input.peak_nits) || input.paper_white_nits <= 0 || input.peak_nits < input.paper_white_nits)
         return Failure(ErrorCode::InvalidArgument, "Invalid presentation extent, completed slot, pass IDs or luminance parameters.");
-    if (!Fits(input.display_linear, storage->output, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-        !Fits(input.encoded_ui, storage->output, DXGI_FORMAT_B8G8R8A8_UNORM) ||
-        !Fits(input.motion, input.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
-        !(Fits(input.depth, input.render_active, DXGI_FORMAT_R32_FLOAT) ||
-          Fits(input.depth, input.render_active, DXGI_FORMAT_R32_TYPELESS) || Fits(input.depth, input.render_active, DXGI_FORMAT_D32_FLOAT)))
+    if (!Fits(graph,input.display_linear,storage->output,DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+        !Fits(graph,input.encoded_ui,storage->output,DXGI_FORMAT_B8G8R8A8_UNORM) ||
+        !Fits(graph,input.motion,input.render_active,DXGI_FORMAT_R16G16_FLOAT) ||
+        !FitsDepth(graph,input.depth,input.render_active))
         return Failure(ErrorCode::InvalidArgument, "Native presentation needs actual HUDless display-linear RGBA16F, premultiplied encoded BGRA8 UI, undilated UV motion and reversed device Z.");
     const auto slotIndex = input.frame_slot;
     if (input.transparent_guides_enabled &&
-        (!Fits(input.transparent_depth, input.render_active, DXGI_FORMAT_R32_FLOAT) ||
-         !Fits(input.transparent_motion, input.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
-         !Fits(input.transparent_classification, input.render_active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-         !Fits(input.transparent_metadata, input.render_active, DXGI_FORMAT_R32G32_UINT)))
+        (!Fits(graph,input.transparent_depth,input.render_active,DXGI_FORMAT_R32_FLOAT) ||
+         !Fits(graph,input.transparent_motion,input.render_active,DXGI_FORMAT_R16G16_FLOAT) ||
+         !Fits(graph,input.transparent_classification,input.render_active,DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+         !Fits(graph,input.transparent_metadata,input.render_active,DXGI_FORMAT_R32G32_UINT)))
         return Failure(ErrorCode::InvalidArgument, "Native transparent depth/motion requires the actual nearest surface classification and identity guides.");
     auto &slot = storage->slots[slotIndex];
     for(auto *resource:{&slot.hudless,&slot.ui,&slot.composite,&slot.depth,&slot.motion,&slot.devtools})
@@ -468,7 +477,7 @@ Result PresentationGuides::RegisterTagImpl(RenderGraphBuilder &graph,const Prese
     if(retained&&(!MatchesTagLayout(output,backBuffer,passId,*retained)||
         !graph.BindPass(retained->pass_index,passId)))
         return Failure(ErrorCode::InvalidState,"Presentation retained tag topology changed.");
-    if (!Fits(backBuffer, storage->output, storage->format))
+    if (!Fits(graph,backBuffer,storage->output,storage->format))
         return Failure(ErrorCode::InvalidArgument, "Presentation backbuffer version/format/extent does not match the resolved native chain.");
     auto tag=retained?*graph.BindPass(retained->pass_index,passId):
         graph.AddPass(passId,"SDK Frame Generation Prepare",QueueHint::Direct);

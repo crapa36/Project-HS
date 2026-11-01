@@ -40,12 +40,15 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
             }
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(request, feedback, path); !resolved) return resolved;
+            if (path.IsPacked())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Loose feedback shader resolved to a packed source: " + path.Describe(feedback));
             const auto digest = request.product_digests.find(feedback);
             if (digest == request.product_digests.end() || !selected.product_paths.contains(baseline) ||
                 !selected.product_digests.contains(baseline))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Selected feedback shader or its baseline has no immutable product identity: " + feedback);
-            selected.product_paths.at(baseline) = std::move(path.path);
+            selected.product_paths.at(baseline) = std::move(path.Loose().path);
             selected.product_digests.at(baseline) = digest->second;
         }
     }
@@ -512,7 +515,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         const auto logical_id = "render/shader/" + std::string(name);
         if (auto resolved = ResolveRendererAsset(pipeline_config, logical_id, path);
             !resolved) return resolved;
-        const bool bytes_already_verified = bool(path.pack) || path.range.byte_count != 0;
+        const bool bytes_already_verified = path.IsPacked() || path.HasAdmittedWholeFileProof();
         if (auto read = ReadBinary(path, bytes); !read) return read;
         return register_shader_owner(logical_id, bytes, bytes_already_verified);
     };
@@ -657,7 +660,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     RendererAssetSource deferred_path;
     if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/deferred_ps.dxil", deferred_path);
         !resolved) return resolved;
-    const bool deferred_bytes_verified = bool(deferred_path.pack) || deferred_path.range.byte_count != 0;
+    const bool deferred_bytes_verified = deferred_path.IsPacked() || deferred_path.HasAdmittedWholeFileProof();
     if (auto read = ReadBinary(deferred_path, deferred_pixel); !read) return read;
     if (auto registered = register_shader_owner("render/shader/deferred_ps.dxil", deferred_pixel,
         deferred_bytes_verified); !registered)
@@ -703,7 +706,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                 RendererAssetSource shader_path;
                 if (auto resolved = ResolveRendererAsset(pipeline_config, logical_id, shader_path); !resolved)
                     return resolved;
-                const bool shader_bytes_verified = bool(shader_path.pack) || shader_path.range.byte_count != 0;
+                const bool shader_bytes_verified = shader_path.IsPacked() || shader_path.HasAdmittedWholeFileProof();
                 if (auto read = ReadBinary(shader_path, *bytes); !read)
                     return read;
                 if (auto registered = register_shader_owner(logical_id, *bytes,

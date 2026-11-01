@@ -1,10 +1,7 @@
 #include "gameplay_test_support.hpp"
 
-#include <hs/core/fixed_step_clock.hpp>
-
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <format>
@@ -64,7 +61,7 @@ void TestPauseStopsTicks()
     steady_aim.aim_world = {before_pause.player_position.x, 0.0f,
                             before_pause.player_position.y};
     const auto no_op = simulation.TickFixed(
-        {before_pause.tick, steady_aim, {}, no_op_reroll}, hs::FixedStepClock::kFixedStep);
+        {before_pause.tick, steady_aim, {}, no_op_reroll});
     Check(!no_op.world_changed && no_op.tick == before_pause.tick,
           "a rejected paused UI action does not report a world change");
     for (std::uint32_t attempt = 0; attempt < 3; ++attempt)
@@ -248,7 +245,7 @@ void RunGameplayDeterminismTests()
         }
         input.ui_actions = actions;
         const auto expected = Tick(individual);
-        const auto actual = batched.TickFixed(input, std::chrono::nanoseconds{16'666'667});
+        const auto actual = batched.TickFixed(input);
         Check(actual.checksum == expected.checksum && actual.phase == expected.phase &&
                   actual.tick == expected.tick, "batched UI preserves ordered final observation");
         Check(individual.Shutdown().Succeeded() && batched.Shutdown().Succeeded(),

@@ -1,4 +1,3 @@
-#include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/gameplay/game_simulation_development.hpp>
 
@@ -37,7 +36,7 @@ hs::GameplayChecksum RunDeterministicSimulation()
         input.held.move_target_world =
             tick <= 120 ? hs::Float3{30.0f, 0.0f, 30.0f}
                         : hs::Float3{-30.0f, 0.0f, 0.0f};
-        checksum = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep).checksum;
+        checksum = simulation.TickFixed(input).checksum;
     }
     return checksum;
 }
@@ -60,11 +59,11 @@ void TestPauseDoesNotAdvance()
     hs::InputFrame pause{};
     pause.target_tick = 1;
     pause.ordered_edges = edge;
-    const auto paused = simulation.TickFixed(pause, hs::FixedStepClock::kFixedStep);
+    const auto paused = simulation.TickFixed(pause);
     Check(paused.phase == hs::SessionPhase::Paused, "pause command enters paused phase");
     hs::InputFrame waiting{};
     waiting.target_tick = 2;
-    const auto unchanged = simulation.TickFixed(waiting, hs::FixedStepClock::kFixedStep);
+    const auto unchanged = simulation.TickFixed(waiting);
     Check(unchanged.tick == paused.tick && unchanged.checksum == paused.checksum,
           "paused simulation does not advance");
 }
@@ -91,8 +90,8 @@ void TestOptionalChecksums()
         input.held.move_held = true;
         input.held.move_target_world = {20, 0, tick < 120 ? 10.0f : -10.0f};
         input.held.basic_attack_held = tick % 8 == 0;
-        const auto expected = captured.TickFixed(input, hs::FixedStepClock::kFixedStep);
-        const auto actual = ordinary.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto expected = captured.TickFixed(input);
+        const auto actual = ordinary.TickFixed(input);
         Check(actual.tick == expected.tick && actual.phase == expected.phase &&
               actual.checksum == 0, "ordinary tick omits checksum only");
         Check(ordinary.ComputeChecksum() == expected.checksum, "capture mode preserves gameplay state");
@@ -105,8 +104,8 @@ void TestOptionalChecksums()
         captured.ApplyUiAction({action});
         ordinary.ApplyUiAction({action});
         Check(ordinary.ComputeChecksum() == captured.ComputeChecksum(), "on-demand UI checksum");
-        const auto expected = captured.TickFixed({}, hs::FixedStepClock::kFixedStep);
-        const auto actual = ordinary.TickFixed({}, hs::FixedStepClock::kFixedStep);
+        const auto expected = captured.TickFixed({});
+        const auto actual = ordinary.TickFixed({});
         Check(actual.checksum == 0 && ordinary.ComputeChecksum() == expected.checksum,
               "optional checksum handles inactive and resumed phases");
     }
@@ -134,8 +133,8 @@ void TestOptInSimulationTimings()
     {
         hs::InputFrame input{}; input.target_tick = tick;
         input.held.move_held = true; input.held.move_target_world = {10, 0, 5};
-        const auto plain = ordinary.TickFixed(input, hs::FixedStepClock::kFixedStep);
-        const auto timed = measured.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto plain = ordinary.TickFixed(input);
+        const auto timed = measured.TickFixed(input);
         Check(plain.tick == timed.tick && plain.checksum == timed.checksum && plain.phase == timed.phase,
               "clock observations preserve deterministic tick results");
         const auto off = ordinary.GetTimingDiagnostics();
@@ -157,7 +156,7 @@ void TestOptInSimulationTimings()
               "post-tick small facts are measured without mutating logical state");
     }
     Check(measured.ApplyDebugCommand({hs::DebugCommandKind::TogglePause}).Succeeded(), "pause timing fixture");
-    const auto paused = measured.TickFixed({}, hs::FixedStepClock::kFixedStep);
+    const auto paused = measured.TickFixed({});
     const auto snapshot = measured.GetTimingDiagnostics();
     Check(snapshot.completed && snapshot.tick == paused.tick &&
               snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Input)].calls == 1,
@@ -181,15 +180,15 @@ void TestAutomaticSpawningScenarioPolicy()
     Check(natural.Initialize(controlled, rules).Succeeded(), "natural spawn scenario initialize");
     for (hs::Tick tick = 1; tick <= 2; ++tick)
     {
-        (void)fixed.TickFixed({tick}, hs::FixedStepClock::kFixedStep);
-        (void)natural.TickFixed({tick}, hs::FixedStepClock::kFixedStep);
+        (void)fixed.TickFixed({tick});
+        (void)natural.TickFixed({tick});
     }
     Check(fixed.GetSessionProbe().normal_enemy_count == 0 &&
               natural.GetSessionProbe().normal_enemy_count > 0,
           "automatic spawn policy is independent of XP progression and defaults to natural spawning");
     Check(fixed.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, 0}}).Succeeded(),
           "fixed-count scenario admits explicit enemy setup");
-    (void)fixed.TickFixed({3}, hs::FixedStepClock::kFixedStep);
+    (void)fixed.TickFixed({3});
     Check(fixed.GetSessionProbe().normal_enemy_count == 1,
           "manual setup remains active through normal AI ticks without natural additions");
 }
@@ -221,7 +220,7 @@ void TestScopedTickReadView()
             try { operation(); } catch (const std::logic_error &) { rejected = true; }
             Check(rejected, "every public mutation ingress rejects active read borrows");
         };
-        rejects([&] { (void)simulation.TickFixed({}, hs::FixedStepClock::kFixedStep); });
+        rejects([&] { (void)simulation.TickFixed({}); });
         rejects([&] { simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu}); });
         rejects([&] { (void)simulation.ApplyDebugCommand({hs::DebugCommandKind::DamagePlayer, 1}); });
         rejects([&] { (void)simulation.ApplySimulationRules(simulation.Rules()); });
@@ -281,15 +280,15 @@ void TestQueuedResumePreservesQuit()
     hs::GameSimulation simulation;
     Check(simulation.Initialize({7}).Succeeded(), "queued UI simulation initialize");
     const std::array pause{hs::ActionEdge{1, hs::GameAction::Pause, hs::EdgeKind::Pressed}};
-    const auto paused = simulation.TickFixed({1, {}, pause}, hs::FixedStepClock::kFixedStep);
+    const auto paused = simulation.TickFixed({1, {}, pause});
     const std::array resume{hs::UiAction{hs::UiActionKind::Resume}};
-    const auto playing = simulation.TickFixed({1, {}, {}, resume}, hs::FixedStepClock::kFixedStep);
+    const auto playing = simulation.TickFixed({1, {}, {}, resume});
     Check(playing.phase == hs::SessionPhase::Playing && playing.tick == paused.tick + 1,
           "legitimate UI resume advances one fixed tick");
-    const auto paused_again = simulation.TickFixed({2, {}, pause}, hs::FixedStepClock::kFixedStep);
+    const auto paused_again = simulation.TickFixed({2, {}, pause});
     const std::array queued{hs::UiAction{hs::UiActionKind::Quit},
                             hs::UiAction{hs::UiActionKind::Resume}};
-    const auto quit = simulation.TickFixed({2, {}, {}, queued}, hs::FixedStepClock::kFixedStep);
+    const auto quit = simulation.TickFixed({2, {}, {}, queued});
     Check(quit.phase == hs::SessionPhase::QuitRequested && quit.tick == paused_again.tick,
           "queued Resume cannot cancel QuitRequested or advance gameplay");
     simulation.ApplyUiAction({hs::UiActionKind::Resume});
@@ -298,7 +297,10 @@ void TestQueuedResumePreservesQuit()
     hs::GameSimulation menu;
     Check(menu.Initialize({9, false, true}).Succeeded(), "menu UI simulation initialize");
     const auto before = menu.ComputeChecksum();
-    const auto unchanged = menu.TickFixed({1, {}, {}, resume}, hs::FixedStepClock::kFixedStep);
+    menu.ApplyUiAction({hs::UiActionKind::Resume});
+    Check(menu.ComputeChecksum() == before,
+          "stale direct Resume leaves the MainMenu checksum unchanged");
+    const auto unchanged = menu.TickFixed({1, {}, {}, resume});
     Check(unchanged.phase == hs::SessionPhase::MainMenu && unchanged.tick == 0 &&
               unchanged.checksum == before,
           "stale Resume cannot start a session from MainMenu");
@@ -352,7 +354,7 @@ void TestSameTickFinalBossVictory()
           "advance to final boss tick");
     hs::InputFrame input{};
     input.target_tick = 1;
-    (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    (void)simulation.TickFixed(input);
     Check(simulation.GetSessionProbe().final_boss_spawned &&
               simulation.GetObservation().boss_count == 0 &&
               simulation.GetObservation().normal_enemy_count == 0,
@@ -363,7 +365,7 @@ void TestSameTickFinalBossVictory()
     for (hs::Tick tick = 2; tick <= 91; ++tick)
     {
         input.target_tick = tick;
-        (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        (void)simulation.TickFixed(input);
     }
     Check(simulation.GetObservation().boss_count == 1,
           "final boss spawns after the warning window");
@@ -376,7 +378,7 @@ void TestSameTickFinalBossVictory()
               .Succeeded(),
           "kill player");
     input.target_tick = 92;
-    const auto result = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    const auto result = simulation.TickFixed(input);
     Check(result.phase == hs::SessionPhase::Victory,
           "same-tick final boss and player death resolves victory");
 }
@@ -403,7 +405,7 @@ hs::TickResult Advance(hs::GameSimulation &simulation,
     input.target_tick = simulation.GetSessionProbe().tick + 1;
     input.held = held;
     input.ordered_edges = edges;
-    return simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    return simulation.TickFixed(input);
 }
 
 void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,

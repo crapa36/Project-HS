@@ -5,8 +5,12 @@
 #include "renderer_sdk_frame.hpp"
 #include <hs/render_data/texture_descriptor.hpp>
 #include <array>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace hs
 {
@@ -43,16 +47,66 @@ struct BrixelizerSceneInstance
     DirectX::XMFLOAT3 bounds_min{},bounds_max{}; // conservative ABSOLUTE world AABB
     BrixelizerGeometryDomain domain{BrixelizerGeometryDomain::Opaque};
 };
-struct BrixelizerSceneInstanceRange
+struct BrixelizerSceneRun
 {
-    std::span<const BrixelizerSceneInstance> instances;
-    bool immutable{}; // immutable rows require immutable_owner
+    std::size_t job_begin{},job_count{},instance_begin{},instance_count{};
+};
+struct BrixelizerCurrentSceneRun
+{
+    std::size_t job_begin{},job_count{},instance_begin{},instance_count{};
+};
+class BrixelizerGeometryLookup;
+// A const shared section is the semantic owner of immutable GI rows and their
+// original scene order. Graph resource versions remain frame-current bindings.
+class BrixelizerImmutableSceneSection
+{
+  public:
+    BrixelizerImmutableSceneSection(std::vector<SoftwareSceneGeometry> geometries,
+        std::vector<BrixelizerSceneInstance> instances,std::vector<std::size_t> leaf_jobs,
+        std::vector<BrixelizerSceneRun> runs,
+        std::shared_ptr<const BrixelizerGeometryLookup> geometry_lookup={})
+        : geometries_(std::move(geometries)),instances_(std::move(instances)),
+          leaf_jobs_(std::move(leaf_jobs)),runs_(std::move(runs)),
+          geometry_lookup_(std::move(geometry_lookup)) {}
+    [[nodiscard]] std::span<const SoftwareSceneGeometry> Geometries() const noexcept { return geometries_; }
+    [[nodiscard]] std::span<const BrixelizerSceneInstance> Instances() const noexcept { return instances_; }
+    [[nodiscard]] std::span<const std::size_t> LeafJobs() const noexcept { return leaf_jobs_; }
+    [[nodiscard]] std::span<const BrixelizerSceneRun> Runs() const noexcept { return runs_; }
+    [[nodiscard]] const BrixelizerGeometryLookup *GeometryLookup() const noexcept { return geometry_lookup_.get(); }
+  private:
+    std::vector<SoftwareSceneGeometry> geometries_;
+    std::vector<BrixelizerSceneInstance> instances_;
+    std::vector<std::size_t> leaf_jobs_;
+    std::vector<BrixelizerSceneRun> runs_;
+    std::shared_ptr<const BrixelizerGeometryLookup> geometry_lookup_;
+};
+struct BrixelizerGeometryVersions { ResourceVersion vertex{},index{}; };
+// The immutable prefix is borrowed; only its frame-current graph versions vary.
+struct BrixelizerGeometryRange
+{
+    std::span<const SoftwareSceneGeometry> prefix,current;
+    std::span<const BrixelizerGeometryVersions> prefix_versions;
+    BrixelizerGeometryRange &operator=(std::span<const SoftwareSceneGeometry> raw) noexcept
+    {prefix={};current=raw;prefix_versions={};return *this;}
+    [[nodiscard]] std::size_t size() const noexcept { return prefix.size()+current.size(); }
+    [[nodiscard]] const SoftwareSceneGeometry &operator[](std::size_t index) const noexcept
+    {
+        return index<prefix.size()?prefix[index]:current[index-prefix.size()];
+    }
+    [[nodiscard]] BrixelizerGeometryVersions VersionsAt(std::size_t index) const noexcept
+    {
+        if(index<prefix.size()&&!prefix_versions.empty())return prefix_versions[index];
+        const auto &geometry=(*this)[index];
+        return {geometry.vertex_version,geometry.index_version};
+    }
 };
 struct BrixelizerSceneInputs
 {
-    std::span<const SoftwareSceneGeometry> geometries; // original leaf / current SkinCache / procedural
-    std::span<const BrixelizerSceneInstanceRange> instance_ranges; // ordered borrowed instance sections
-    std::shared_ptr<const void> immutable_owner; // exact owner for immutable ranges
+    BrixelizerGeometryRange geometries; // immutable prefix, then current SkinCache / procedural leaves
+    std::span<const BrixelizerSceneInstance> current_instances;
+    std::span<const BrixelizerCurrentSceneRun> current_runs;
+    std::shared_ptr<const BrixelizerImmutableSceneSection> immutable_section;
+    std::size_t static_job_base{};
     DirectX::XMFLOAT3 sdf_center{};
     std::uint32_t frame_slot{};
     std::uint64_t frame_index{},scene_revision{};
@@ -63,6 +117,36 @@ struct BrixelizerSceneInputs
     std::uint32_t excluded_masked_count{},excluded_thin_count{},excluded_translucent_count{};
 };
 struct BrixelizerSceneOutputs { ResourceVersion sdf_atlas{}; std::uint32_t instance_count{}; };
+struct BrixelizerFrameRecordData;
+class BrixelizerGiSystem;
+class BrixelizerPreparedScene
+{
+  public:
+    BrixelizerPreparedScene()=default;
+    ~BrixelizerPreparedScene();
+    BrixelizerPreparedScene(const BrixelizerPreparedScene&)=delete;
+    BrixelizerPreparedScene &operator=(const BrixelizerPreparedScene&)=delete;
+    BrixelizerPreparedScene(BrixelizerPreparedScene&& other) noexcept { MoveFrom(std::move(other)); }
+    BrixelizerPreparedScene &operator=(BrixelizerPreparedScene&& other) noexcept
+    { if(this!=&other){Reset();MoveFrom(std::move(other));}return *this; }
+    [[nodiscard]] const BrixelizerFrameRecordData &Record() const noexcept { return *record_; }
+    [[nodiscard]] explicit operator bool() const noexcept { return owner_!=nullptr; }
+  private:
+    const BrixelizerFrameRecordData *record_{};
+    BrixelizerGeometryRange geometries_;
+    std::shared_ptr<const BrixelizerImmutableSceneSection> immutable_section_;
+    BrixelizerGiSystem *owner_{};
+    std::uint32_t frame_slot_{};
+    std::uint64_t frame_index_{},scene_revision_{};
+    void Reset() noexcept;
+    void MoveFrom(BrixelizerPreparedScene &&other) noexcept
+    {
+        record_=std::exchange(other.record_,nullptr);geometries_=other.geometries_;other.geometries_=BrixelizerGeometryRange{};
+        immutable_section_=std::move(other.immutable_section_);frame_slot_=other.frame_slot_;
+        frame_index_=other.frame_index_;scene_revision_=other.scene_revision_;owner_=std::exchange(other.owner_,nullptr);
+    }
+    friend class BrixelizerGiSystem;
+};
 // Ephemeral current-frame CPU/SDK preparation. The SDK BakeUpdate and native
 // identity mutations happen once before graph plan selection; no native owner
 // pointer or baked SDK descriptor is retained in a graph layout.
@@ -154,7 +238,8 @@ struct BrixelizerSettings
     std::uint32_t internal_resolution_percent{};
     std::uint32_t logical_cascades{}; // static+dynamic+merged => 12 physical
     float first_voxel_size_m{0.125f};
-    std::uint32_t max_references{1u<<20},triangle_swap_bytes{64u<<20},max_bricks_per_bake{4096};
+    // Arena/200-enemy batches require over 7M references and 10K bricks.
+    std::uint32_t max_references{8u<<20},triangle_swap_bytes{64u<<20},max_bricks_per_bake{16u<<10};
     std::uint64_t memory_budget_bytes{1024ull<<20}; // includes old+candidate during Prepare
 };
 struct BrixelizerStatus
@@ -185,9 +270,8 @@ class BrixelizerGiSystem
         ViewExtent fixed_render_extent,std::uint32_t frame_slots,const BrixelizerSettings &,
         const SceneShaderReader &,std::span<const render_data::TextureDescriptor>,BrixelizerCandidate &) const;
     [[nodiscard]] Result Commit(BrixelizerCandidate &&,const CompletionSet &);
-    [[nodiscard]] Result PrepareFrameRecordData(const BrixelizerSceneInputs &,
-        BrixelizerFrameRecordData &);
-    [[nodiscard]] Result RegisterScene(RenderGraphBuilder &,const BrixelizerSceneInputs &,BrixelizerSceneOutputs &,
+    [[nodiscard]] Result PrepareFrameRecordData(BrixelizerSceneInputs &&,BrixelizerPreparedScene &);
+    [[nodiscard]] Result RegisterScene(RenderGraphBuilder &,BrixelizerPreparedScene &&,BrixelizerSceneOutputs &,
         BrixelizerGraphLayout *capture=nullptr,const BrixelizerGraphLayout *retained=nullptr);
     [[nodiscard]] Result RegisterCacheInjection(RenderGraphBuilder &,const BrixelizerCacheInjectionInputs &,AmbientOcclusionGuide &);
     [[nodiscard]] Result RegisterLighting(RenderGraphBuilder &,const BrixelizerLightingInputs &,
@@ -195,11 +279,13 @@ class BrixelizerGiSystem
     [[nodiscard]] Result RegisterComposite(RenderGraphBuilder &,const BrixelizerCompositeInputs &,BrixelizerTexture &);
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     void AbandonPreparedFrame() noexcept;
-    // SDK has no reset flag. Drained GI recreation retains SDF on a pure extent
-    // change; camera cut/origin discontinuity requests rebuild_sdf=true.
+    // SDK has no reset flag. Before frame preparation, drained GI recreation
+    // retains SDF unless a scene/origin discontinuity requires rebuilding it.
     [[nodiscard]] Result ResetHistoryAfterCompletion(const CompletionSet &,ViewExtent fixed_render_extent,bool rebuild_sdf=false);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] BrixelizerStatus Status() const;
+    // Native history can outlive the view's validity flag after a cut.
+    [[nodiscard]] std::optional<std::uint64_t> HistoryLightRevision() const noexcept;
     // Exact finest SDF voxel configured on the active native context; zero
     // means no usable context and requires LOD0 at its consumers.
     [[nodiscard]] float FinestVoxelSizeMeters() const noexcept;

@@ -25,7 +25,6 @@ void CopyReadModelForDevelopment(const GameSimulation &simulation, GameReadModel
     for (const auto &a : view.areas) model.AddArea(a);
     for (const auto &p : view.pickups) model.AddPickup(p);
     for (const auto &a : view.boss_actions) model.AddBossAction(a);
-    for (const auto &v : view.visual_links) model.AddVisualLink(v);
     for (const auto &v : view.mini_bombs) model.AddMiniBomb(v);
     for (const auto &v : view.spawn_warnings) model.AddSpawnWarning(v);
     for (const auto &v : view.scheduled_area_deliveries) model.AddScheduledAreaDelivery(v);

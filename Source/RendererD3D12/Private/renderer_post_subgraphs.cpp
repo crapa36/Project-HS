@@ -1,6 +1,7 @@
 #include "renderer_post_subgraphs.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <utility>
 
 namespace hs
@@ -160,23 +161,19 @@ Result BindRetainedPostSubgraphs(RenderGraphBuilder &graph,
     if (!MatchesPostSubgraphLayout(inputs, targets, layout))
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features",
             "Post retained layout variant changed.");
+    std::array<std::optional<PassBuilder>, 9> passes;
     for (std::uint32_t index = 0; index < layout.pass_count; ++index)
     {
         const auto [ordinal, id] = layout.passes[index];
-        if (id < 9 || id > 17 || ordinal >= graph.PassCount() ||
-            graph.DeclaredPassId(ordinal) != id || !callbacks[id - 9] ||
-            !graph.BindPass(ordinal, id))
+        if (id < 9 || id > 17 || !callbacks[id - 9] || passes[id - 9] ||
+            !(passes[id - 9] = graph.BindPass(ordinal, id)))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features",
                 "Post retained pass or callback changed.");
     }
     for (std::uint32_t index = 0; index < layout.pass_count; ++index)
     {
-        const auto [ordinal, id] = layout.passes[index];
-        auto pass = graph.BindPass(ordinal, id);
-        if (!pass)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features",
-                "Post retained pass was already bound.");
-        pass->SetExecute(std::move(callbacks[id - 9]));
+        const auto id = layout.passes[index].id;
+        passes[id - 9]->SetExecute(std::move(callbacks[id - 9]));
     }
     outputs = layout.outputs;
     return Result::Success();

@@ -4,6 +4,8 @@
 #include <hs/runtime/save_store.hpp>
 
 #include <algorithm>
+#include <charconv>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -91,6 +93,67 @@ inline void ApplyGraphicsPreset(GraphicsSettings &graphics)
     graphics.reflection_mode = preset == GraphicsPreset::Low ? GraphicsReflectionMode::Probe : GraphicsReflectionMode::ScreenSpace;
     graphics.shadow_mode = GraphicsShadowMode::Raster;
     if (preset == GraphicsPreset::Low) graphics.volumetric_quality = GraphicsOptionalQuality::Off;
+}
+
+// Runtime transactions store only setting-id/token edits. Legacy UI commands
+// remain boundary adapters until all callers publish the canonical form.
+[[nodiscard]] inline std::optional<UiCommand> CanonicalGraphicsEdit(const UiCommand &command)
+{
+    UiCommand edit{UiCommandKind::SetGraphicsSetting};
+    std::string_view token;
+    switch (command.kind)
+    {
+    case UiCommandKind::SetVfxScreenOverlayIntensityPercent:
+    case UiCommandKind::SetGraphicsSetting:
+        return command;
+    case UiCommandKind::SetBorderless:
+        edit.graphics_setting = SettingId::DisplayMode;
+        if (command.value > 1) return std::nullopt;
+        token = command.value ? "borderless_fullscreen" : "windowed";
+        break;
+    case UiCommandKind::SetVsync:
+        edit.graphics_setting = SettingId::Vsync;
+        if (command.value > 1) return std::nullopt;
+        token = command.value ? "true" : "false";
+        break;
+    case UiCommandKind::SetFrameCap:
+        edit.graphics_setting = SettingId::FrameLimitFps;
+        break;
+    case UiCommandKind::SetRenderScale:
+        edit.graphics_setting = SettingId::ManualScalePercent;
+        break;
+    case UiCommandKind::SetShadowResolution:
+        edit.graphics_setting = SettingId::ShadowQuality;
+        if (command.value != 1024 && command.value != 2048) return std::nullopt;
+        token = command.value == 1024 ? "medium" : "high";
+        break;
+    case UiCommandKind::SetParticlePercentage:
+        edit.graphics_setting = SettingId::ParticleQuality;
+        if (command.value != 50 && command.value != 75 && command.value != 100) return std::nullopt;
+        token = command.value == 50 ? "low" : command.value == 75 ? "medium" : "high";
+        break;
+    case UiCommandKind::SetBloom:
+        edit.graphics_setting = SettingId::Bloom;
+        if (command.value > 1) return std::nullopt;
+        token = command.value ? "true" : "false";
+        break;
+    case UiCommandKind::SetOutline:
+        edit.graphics_setting = SettingId::Outline;
+        if (command.value > 1) return std::nullopt;
+        token = command.value ? "true" : "false";
+        break;
+    default: return std::nullopt;
+    }
+    if (token.empty())
+    {
+        const auto [end, error] = std::to_chars(edit.graphics_token.data(),
+            edit.graphics_token.data() + edit.graphics_token.size() - 1, command.value);
+        if (error != std::errc{}) return std::nullopt;
+        token = std::string_view(edit.graphics_token.data(), static_cast<std::size_t>(end - edit.graphics_token.data()));
+        return edit;
+    }
+    std::copy(token.begin(), token.end(), edit.graphics_token.begin());
+    return edit;
 }
 
 // Complete validation and allocation occur in a local candidate. Invalid edits

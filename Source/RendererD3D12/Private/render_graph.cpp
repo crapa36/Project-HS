@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -159,7 +160,6 @@ struct LogicalResource
     bool alias_activation{};
     std::size_t pool_view_index{SIZE_MAX};
     ExternalQueueCompletion imported_external_completion;
-    std::uintptr_t imported_identity{};
     D3D12_HEAP_TYPE fixed_buffer_heap{D3D12_HEAP_TYPE_DEFAULT};
     D3D12_RESOURCE_DESC native_description{};
     const std::string *cached_name{};
@@ -198,6 +198,15 @@ struct Pass
     std::vector<ResourceUse> uses;
     [[nodiscard]] const std::string &Name() const noexcept { return cached_name ? *cached_name : name; }
     [[nodiscard]] const std::vector<ResourceUse> &Uses() const noexcept { return cached_uses ? *cached_uses : uses; }
+    std::vector<ResourceUse> &MutableUses()
+    {
+        if (cached_uses)
+        {
+            uses = *cached_uses;
+            cached_uses = nullptr;
+        }
+        return uses;
+    }
     std::move_only_function<void(RenderPassContext &)> execute;
     std::shared_ptr<ExternalOperation> external;
     std::move_only_function<Result(RenderPassContext &)> owner_execute;
@@ -284,36 +293,63 @@ struct TopologyValues
     };
     std::vector<AliasValues> alias_values;
 
-    bool Matches(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
-                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
-                 bool restored_declarations = false) const
+    enum class MismatchKind : std::uint8_t
     {
-        if (!valid || resources.size() != current_resources.size() || passes.size() != current_passes.size() ||
-            ordering != current_ordering) return false;
+        None, Invalid, ResourceCount, PassCount, Ordering, ResourceKind, ResourceImport,
+        ResourceFinalAccess, ResourceHeap, ResourceFinalVersion, ResourceDescriptor,
+        PassId, PassQueue, PassExecution, PassUses, ExternalQueue, ExternalBoundaries
+    };
+    struct Mismatch
+    {
+        MismatchKind kind{};
+        std::size_t index{};
+    };
+
+    Mismatch Compare(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
+                     const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
+                     bool restored_declarations = false) const
+    {
+        if (!valid) return {MismatchKind::Invalid};
+        if (resources.size() != current_resources.size()) return {MismatchKind::ResourceCount};
+        if (passes.size() != current_passes.size()) return {MismatchKind::PassCount};
+        if (ordering != current_ordering) return {MismatchKind::Ordering};
         for (std::size_t i = 0; i < resources.size(); ++i)
         {
             const auto &a = resources[i]; const auto &b = current_resources[i];
-            if (a.kind != b.kind || a.imported != b.imported || a.final_set != b.final_set ||
-                a.fixed_heap != b.fixed_buffer_heap || a.final != (b.final_set ? b.final : Access::Undefined) ||
-                !SameVersion(a.final_version, b.final_version) ||
-                !SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
-                return false;
+            if (a.kind != b.kind) return {MismatchKind::ResourceKind, i};
+            if (a.imported != b.imported) return {MismatchKind::ResourceImport, i};
+            if (a.final_set != b.final_set || a.final != (b.final_set ? b.final : Access::Undefined))
+                return {MismatchKind::ResourceFinalAccess, i};
+            if (a.fixed_heap != b.fixed_buffer_heap) return {MismatchKind::ResourceHeap, i};
+            if (!SameVersion(a.final_version, b.final_version)) return {MismatchKind::ResourceFinalVersion, i};
+            if (!SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
+                return {MismatchKind::ResourceDescriptor, i};
         }
         for (std::size_t i = 0; i < passes.size(); ++i)
         {
             const auto &a = passes[i]; const auto &b = current_passes[i];
-            if (a.id != b.id || a.queue != b.queue || a.execution_kind != ExecutionKind(b) ||
-                (!restored_declarations &&
-                 !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))) return false;
+            if (a.id != b.id) return {MismatchKind::PassId, i};
+            if (a.queue != b.queue) return {MismatchKind::PassQueue, i};
+            if (a.execution_kind != ExecutionKind(b)) return {MismatchKind::PassExecution, i};
+            if (!restored_declarations &&
+                !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))
+                return {MismatchKind::PassUses, i};
             if (!b.external) continue;
-            if (a.external_queue != b.external->binding.queue_type ||
-                !std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(), b.external->accesses.end(),
-                    [](const auto &left, const auto &right) {
+            if (a.external_queue != b.external->binding.queue_type) return {MismatchKind::ExternalQueue, i};
+            if (!std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(),
+                    b.external->accesses.end(), [](const auto &left, const auto &right) {
                         return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
                             left.incoming == right.incoming && left.outgoing == right.outgoing;
-                    })) return false;
+                    })) return {MismatchKind::ExternalBoundaries, i};
         }
-        return true;
+        return {};
+    }
+
+    bool Matches(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
+                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
+                 bool restored_declarations = false) const
+    {
+        return Compare(current_resources,current_passes,current_ordering,restored_declarations).kind==MismatchKind::None;
     }
 
     std::string FirstMismatch(std::span<const LogicalResource> current_resources,
@@ -321,68 +357,75 @@ struct TopologyValues
                               const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
                               bool restored_declarations = false) const
     {
-        if (!valid) return "cached topology is invalid";
-        if (resources.size() != current_resources.size()) return "resource count";
-        if (passes.size() != current_passes.size()) return "pass count";
-        if (ordering != current_ordering) return "ordering dependencies";
-        for (std::size_t i = 0; i < resources.size(); ++i)
+        const auto mismatch=Compare(current_resources,current_passes,current_ordering,restored_declarations);
+        switch(mismatch.kind)
         {
-            const auto &a = resources[i]; const auto &b = current_resources[i];
-            const auto name = b.Name();
-            if (a.kind != b.kind) return "resource[" + std::to_string(i) + "] " + std::string(name) + " kind";
-            if (a.imported != b.imported) return "resource[" + std::to_string(i) + "] " + std::string(name) + " import mode";
-            if (a.final_set != b.final_set || a.final != (b.final_set ? b.final : Access::Undefined))
-                return "resource[" + std::to_string(i) + "] " + std::string(name) + " final access";
-            if (a.fixed_heap != b.fixed_buffer_heap)
-                return "resource[" + std::to_string(i) + "] " + std::string(name) + " fixed heap";
-            if (!SameVersion(a.final_version, b.final_version))
-                return "resource[" + std::to_string(i) + "] " + std::string(name) + " final version";
-            if (!SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
-                return "resource[" + std::to_string(i) + "] " + std::string(name) + " descriptor";
-        }
-        for (std::size_t i = 0; i < passes.size(); ++i)
+        case MismatchKind::Invalid: return "cached topology is invalid";
+        case MismatchKind::ResourceCount: return "resource count";
+        case MismatchKind::PassCount: return "pass count";
+        case MismatchKind::Ordering: return "ordering dependencies";
+        case MismatchKind::ResourceKind:
+        case MismatchKind::ResourceImport:
+        case MismatchKind::ResourceFinalAccess:
+        case MismatchKind::ResourceHeap:
+        case MismatchKind::ResourceFinalVersion:
+        case MismatchKind::ResourceDescriptor:
         {
-            const auto &a = passes[i]; const auto &b = current_passes[i];
-            const auto name = b.Name();
-            if (a.id != b.id) return "pass[" + std::to_string(i) + "] " + std::string(name) + " id";
-            if (a.queue != b.queue) return "pass[" + std::to_string(i) + "] " + std::string(name) + " queue";
-            if (a.execution_kind != ExecutionKind(b)) return "pass[" + std::to_string(i) + "] " + std::string(name) + " execution binding";
-            if (!restored_declarations && !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))
-                return "pass[" + std::to_string(i) + "] " + std::string(name) + " resource uses";
-            if (b.external)
+            const auto name=current_resources[mismatch.index].Name();
+            const auto prefix="resource["+std::to_string(mismatch.index)+"] "+std::string(name)+" ";
+            switch(mismatch.kind)
             {
-                if (a.external_queue != b.external->binding.queue_type)
-                    return "pass[" + std::to_string(i) + "] " + std::string(name) + " external queue";
-                if (!std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(),
-                        b.external->accesses.end(), [](const auto &left, const auto &right) {
-                            return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
-                                left.incoming == right.incoming && left.outgoing == right.outgoing;
-                        }))
-                    return "pass[" + std::to_string(i) + "] " + std::string(name) + " external boundaries";
+            case MismatchKind::ResourceKind: return prefix+"kind";
+            case MismatchKind::ResourceImport: return prefix+"import mode";
+            case MismatchKind::ResourceFinalAccess: return prefix+"final access";
+            case MismatchKind::ResourceHeap: return prefix+"fixed heap";
+            case MismatchKind::ResourceFinalVersion: return prefix+"final version";
+            default: return prefix+"descriptor";
             }
         }
-        return "external binding or unknown topology value";
+        case MismatchKind::PassId:
+        case MismatchKind::PassQueue:
+        case MismatchKind::PassExecution:
+        case MismatchKind::PassUses:
+        case MismatchKind::ExternalQueue:
+        case MismatchKind::ExternalBoundaries:
+        {
+            const auto name=current_passes[mismatch.index].Name();
+            const auto prefix="pass["+std::to_string(mismatch.index)+"] "+std::string(name)+" ";
+            switch(mismatch.kind)
+            {
+            case MismatchKind::PassId: return prefix+"id";
+            case MismatchKind::PassQueue: return prefix+"queue";
+            case MismatchKind::PassExecution: return prefix+"execution binding";
+            case MismatchKind::PassUses: return prefix+"resource uses";
+            case MismatchKind::ExternalQueue: return prefix+"external queue";
+            default: return prefix+"external boundaries";
+            }
+        }
+        default: return "external binding or unknown topology value";
+        }
     }
 
-    void Capture(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
+    void Capture(std::span<LogicalResource> current_resources, std::span<Pass> current_passes,
                  const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
                  const render_graph::CompiledSchedule &schedule, const render_graph::AliasPlan &aliases)
     {
         resources.clear(); resources.reserve(current_resources.size());
         passes.clear(); passes.reserve(current_passes.size());
         for (const auto &r : current_resources)
-            resources.push_back({r.Name(), r.kind, r.imported, r.final_set, r.texture, r.buffer,
+            resources.push_back({r.cached_name ? r.Name() : std::string{}, r.kind, r.imported, r.final_set, r.texture, r.buffer,
                 r.imported ? r.native_description : NativeDesc(r.kind, r.texture, r.buffer),
                 r.fixed_buffer_heap, r.final_set ? r.final : Access::Undefined, r.final_version});
         for (const auto &p : current_passes)
         {
             auto &stored = passes.emplace_back();
-            stored.id = p.id; stored.name = p.Name(); stored.queue = p.queue;
-            stored.execution_kind = ExecutionKind(p); stored.uses = p.Uses();
+            stored.id = p.id; if (p.cached_name) stored.name = p.Name(); stored.queue = p.queue;
+            stored.execution_kind = ExecutionKind(p);
+            if (p.cached_uses) stored.uses = p.Uses();
             if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
             // Owner/provider callbacks can bridge read-only resources through COMMON.
             if (p.external || p.execute_on_owner)
-                for (const auto &use : stored.uses)
+                for (const auto &use : p.Uses())
                     resources[use.predecessor.resource.value - 1].excludes_shared_reads = true;
         }
         ordering = current_ordering;
@@ -404,6 +447,21 @@ struct TopologyValues
                 values.descriptors.push_back(resources[resource].descriptor);
                 values.aliased |= aliases.resource_groups[resource] != render_graph::AliasPlan::kExcluded;
             }
+        }
+        // Finish allocations before transferring declaration storage and redirecting borrows.
+        for (std::size_t i = 0; i < current_resources.size(); ++i)
+        {
+            auto &current = current_resources[i];
+            if (!current.cached_name) resources[i].name = std::move(current.name);
+            current.cached_name = &resources[i].name;
+        }
+        for (std::size_t i = 0; i < current_passes.size(); ++i)
+        {
+            auto &current = current_passes[i];
+            if (!current.cached_name) passes[i].name = std::move(current.name);
+            current.cached_name = &passes[i].name;
+            if (!current.cached_uses) passes[i].uses = std::move(current.uses);
+            current.cached_uses = &passes[i].uses;
         }
         valid = true;
     }
@@ -999,8 +1057,8 @@ struct RenderGraphBuilder::Impl
         render_graph::CompiledSchedule schedule;
         render_graph::AliasPlan aliases;
     };
+    // Current topology is newest; previous plans are ordered from most to least recently used.
     std::array<PreviousPlan, 7> previous_plans;
-    std::size_t next_previous_plan{};
     std::uint64_t plan_input_builds{};
     std::uint64_t plan_compilations{};
     std::uint64_t plan_reuses{};
@@ -1924,18 +1982,30 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (batch.external_finish != UINT32_MAX && queries && pass_has_queries)
                 commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             if (batch.resolve_timestamps)
+            {
+                std::uint32_t range_start = UINT32_MAX;
+                std::uint32_t range_pairs{};
+                const auto flush = [&] {
+                    if (range_pairs == 0) return;
+                    const auto query = options->timestamp_base + range_start * 2;
+                    commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query,
+                        range_pairs * 2, readback, static_cast<UINT64>(query) * sizeof(std::uint64_t));
+                    range_start = UINT32_MAX;
+                    range_pairs = 0;
+                };
                 for (std::uint32_t position = 0; position < g.schedule.execution_order.size(); ++position)
                 {
-                    const auto slot = options && options->timestamp_query_slots &&
-                        position < options->timestamp_query_slot_count
-                        ? options->timestamp_query_slots[position] : position;
-                    if (slot != UINT32_MAX && g.passes[g.schedule.execution_order[position]].queue == batch.queue)
-                    {
-                        const auto query = options->timestamp_base + slot * 2;
-                        commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query, 2, readback,
-                                                  static_cast<UINT64>(query) * sizeof(std::uint64_t));
-                    }
+                    const auto slot = query_slot_for(position);
+                    if (slot == UINT32_MAX || g.passes[g.schedule.execution_order[position]].queue != batch.queue)
+                        continue;
+                    if (range_pairs != 0 && static_cast<std::uint64_t>(slot) !=
+                        static_cast<std::uint64_t>(range_start) + range_pairs)
+                        flush();
+                    if (range_pairs == 0) range_start = slot;
+                    ++range_pairs;
                 }
+                flush();
+            }
             result = commands->Close();
             if (FAILED(result)) record_results[index] = QueueFailure("Close graph command list", result);
         }
@@ -2421,7 +2491,7 @@ PassBuilder::PassBuilder(void *graph, std::uint32_t pass) noexcept : graph_(grap
 void PassBuilder::Read(ResourceVersion version, Access access)
 {
     static_cast<RenderGraphBuilder::Impl *>(graph_)->state = Preparation::Building;
-    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].uses.push_back(
+    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].MutableUses().push_back(
         {version, version, access, false, true, {}});
 }
 
@@ -2429,7 +2499,7 @@ ResourceVersion PassBuilder::Write(ResourceVersion predecessor, Access access)
 {
     static_cast<RenderGraphBuilder::Impl *>(graph_)->state = Preparation::Building;
     const ResourceVersion successor{predecessor.resource, predecessor.ordinal + 1};
-    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].uses.push_back(
+    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].MutableUses().push_back(
         {predecessor, successor, access, true, false, {}});
     return successor;
 }
@@ -2438,7 +2508,7 @@ ResourceVersion PassBuilder::ReadWrite(ResourceVersion predecessor, Access acces
 {
     static_cast<RenderGraphBuilder::Impl *>(graph_)->state = Preparation::Building;
     const ResourceVersion successor{predecessor.resource, predecessor.ordinal + 1};
-    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].uses.push_back(
+    static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_].MutableUses().push_back(
         {predecessor, successor, access, true, true, {}});
     return successor;
 }
@@ -2557,7 +2627,8 @@ void RenderGraphBuilder::Reset()
     for (std::size_t index = 0; index < impl_->passes.size(); ++index)
     {
         auto &reusable = impl_->reusable_pass_uses[index];
-        reusable.swap(impl_->passes[index].uses);
+        auto &uses = impl_->passes[index].uses;
+        if (uses.capacity() > reusable.capacity()) reusable.swap(uses);
         reusable.clear();
     }
     impl_->passes.clear();
@@ -2579,6 +2650,7 @@ bool RenderGraphBuilder::RestorePlan(PlanHandle handle)
         std::swap(impl_->topology, found->topology);
         std::swap(impl_->schedule, found->schedule);
         std::swap(impl_->alias_plan, found->aliases);
+        std::rotate(impl_->previous_plans.begin(), found, std::next(found));
     }
     const auto &plan = impl_->topology;
     if (!plan.valid) return false;
@@ -2787,6 +2859,17 @@ void *RenderGraphBuilder::Resolve(ResourceHandle handle) const noexcept
     return nullptr;
 }
 
+std::optional<D3D12_RESOURCE_DESC> RenderGraphBuilder::ResourceDescription(ResourceHandle handle) const noexcept
+{
+    const auto *resource=impl_->Find(handle);
+    if(!resource)return std::nullopt;
+    if(!resource->imported)return NativeDesc(resource->kind,resource->texture,resource->buffer);
+    if(!resource->native)return std::nullopt;
+    if(resource->certified&&resource->native_contract.native_resource==resource->native)
+        return resource->native_contract.description;
+    return static_cast<ID3D12Resource *>(resource->native)->GetDesc();
+}
+
 Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu)
 {
     if (capture_cpu) *capture_cpu = {};
@@ -2923,9 +3006,9 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         if (!resource.certified &&
             FAILED(static_cast<ID3D12Resource *>(resource.native)->QueryInterface(IID_PPV_ARGS(&identity))))
             return fail("RenderGraph cannot identify an imported resource.");
-        resource.imported_identity = reinterpret_cast<std::uintptr_t>(resource.certified
+        const auto imported_identity = reinterpret_cast<std::uintptr_t>(resource.certified
             ? resource.native_contract.resource_identity : identity.Get());
-        imported_identities.push_back(resource.imported_identity);
+        imported_identities.push_back(imported_identity);
         if (resource.certified && resource.native_contract.heap_identity)
         {
             const auto &contract = resource.native_contract;
@@ -2974,6 +3057,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             std::swap(impl_->topology, previous->topology);
             std::swap(impl_->schedule, previous->schedule);
             std::swap(impl_->alias_plan, previous->aliases);
+            std::rotate(impl_->previous_plans.begin(), previous, std::next(previous));
             reused = true;
         }
     if (reused) ++impl_->plan_reuses;
@@ -3025,7 +3109,6 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             if (r.imported)
             {
                 const auto &desc = r.native_description;
-                info.imported_identity = r.imported_identity;
                 if (r.kind == ResourceKind::Buffer) info.buffer_size = desc.Width;
                 else
                 {
@@ -3145,16 +3228,30 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             return result;
         // Publish only a fully validated compiler result. A failed candidate
         // leaves the previous successful plan available for a later frame.
+        const auto scratch_passes = std::max(impl_->passes.size(),
+            impl_->previous_plans.back().topology.passes.size());
+        if (impl_->reusable_pass_uses.size() < scratch_passes)
+            impl_->reusable_pass_uses.resize(scratch_passes);
         TopologyValues compiled_topology;
         compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies, schedule, aliases);
         compiled_topology.handle = impl_->next_plan_handle++;
         if (impl_->topology.valid)
         {
-            auto &previous = impl_->previous_plans[impl_->next_previous_plan];
+            // Only the evicted value-only plan can release buffers still retained by cached plans.
+            auto &retired = impl_->previous_plans.back().topology;
+            for (std::size_t index = 0; index < retired.passes.size(); ++index)
+            {
+                auto &reusable = impl_->reusable_pass_uses[index];
+                auto &uses = retired.passes[index].uses;
+                if (uses.capacity() > reusable.capacity()) reusable.swap(uses);
+                reusable.clear();
+            }
+            std::move_backward(impl_->previous_plans.begin(), impl_->previous_plans.end() - 1,
+                impl_->previous_plans.end());
+            auto &previous = impl_->previous_plans.front();
             previous.topology = std::move(impl_->topology);
             previous.schedule = std::move(impl_->schedule);
             previous.aliases = std::move(impl_->alias_plan);
-            impl_->next_previous_plan = (impl_->next_previous_plan + 1) % impl_->previous_plans.size();
         }
         impl_->schedule = std::move(schedule);
         impl_->alias_plan = std::move(aliases);

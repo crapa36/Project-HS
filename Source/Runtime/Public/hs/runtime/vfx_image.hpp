@@ -9,6 +9,7 @@
 #include <hs/render_data/vfx_volume_input.hpp>
 #include <hs/render_data/vfx_entity_surface_input.hpp>
 #include <hs/render_data/vfx_fresnel_input.hpp>
+#include <hs/render_data/vfx_owned_mesh.hpp>
 #include <hs/render_data/vfx_ribbon_input.hpp>
 #include <array>
 #include <span>
@@ -439,30 +440,11 @@ struct VfxFresnelEffectRecipe
     VfxRange outputs{};
     bool route_valid{};
 };
-struct VfxFresnelRecipe
-{
-    std::uint32_t effect_handle{}, source_index{}, source_stable_id{}, output_index{}, min_quality{};
-    VfxFresnelShellKind kind{};
-    float knot_start{}, knot_end{};
-    std::uint32_t sector_count{}, end_crack{};
-    float fresnel_power{}, rotation_hz{}, noise_amount{};
-    Float4 color{};
-    float hdr{};
-    std::uint32_t gradient_row{};
-    float motion_rate_hz{}, motion_amplitude{}, motion_inset_fraction{};
-};
 struct VfxMeshEffectRecipe
 {
     std::uint32_t effect_handle{};
     VfxRange outputs{};
     bool route_valid{};
-};
-struct VfxMeshRecipe
-{
-    std::uint32_t effect_handle{}, source_index{}, output_index{}, source_stable_id{};
-    std::uint32_t mesh_index{}, min_quality{}, gradient_row{};
-    Float4 color{};
-    float hdr{}, fresnel{}, head_to_tail_ratio{}, shell_thickness{};
 };
 // Borrowed immutable rows. Generated storage lives for the process; developer
 // storage must remain alive until all users of the adopted image have stopped.

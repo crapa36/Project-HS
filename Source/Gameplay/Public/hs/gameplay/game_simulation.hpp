@@ -7,7 +7,6 @@
 #include <hs/game_domain/domain_signal.hpp>
 #include <hs/game_domain/tick_read_view.hpp>
 
-#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -79,8 +78,7 @@ class GameSimulation
     [[nodiscard]] Result Initialize(const SimulationConfig &config);
     [[nodiscard]] Result Initialize(const SimulationConfig &config,
                                     const SimulationRules &rules);
-    [[nodiscard]] TickResult TickFixed(const InputFrame &input,
-                                       std::chrono::nanoseconds fixed_delta);
+    [[nodiscard]] TickResult TickFixed(const InputFrame &input);
     // Always returns the current checksum, even when automatic capture is disabled.
     [[nodiscard]] GameplayChecksum ComputeChecksum() const;
     [[nodiscard]] const SimulationRules &Rules() const noexcept;

@@ -14,7 +14,6 @@ GameReadModelStorage::GameReadModelStorage(std::size_t enemy_capacity,
     areas_.reserve(area_capacity);
     pickups_.reserve(pickup_capacity);
     boss_actions_.reserve(boss_action_capacity);
-    visual_links_.reserve(64);
     mini_bombs_.reserve(32);
     scheduled_area_deliveries_.reserve(32);
     boss_death_visuals_.reserve(kCosmeticOwnerCapacity);
@@ -27,7 +26,6 @@ void GameReadModelStorage::Clear() noexcept
     areas_.clear();
     pickups_.clear();
     boss_actions_.clear();
-    visual_links_.clear();
     mini_bombs_.clear();
     spawn_warnings_.clear();
     scheduled_area_deliveries_.clear();
@@ -45,8 +43,6 @@ void GameReadModelStorage::AddBossAction(const BossActionView &value)
 {
     boss_actions_.push_back(value);
 }
-
-void GameReadModelStorage::AddVisualLink(const VisualLinkView &value) { visual_links_.push_back(value); }
 
 void GameReadModelStorage::AddSpawnWarning(const SpawnWarningView &value) { spawn_warnings_.push_back(value); }
 void GameReadModelStorage::AddMiniBomb(const MiniBombView &value) { mini_bombs_.push_back(value); }
@@ -86,7 +82,6 @@ GameReadModel GameReadModelStorage::View() const noexcept
             waves,
             summary,
             session_id,
-            visual_links_,
             mini_bombs_, spawn_warnings_, scheduled_area_deliveries_, boss_death_visuals_};
 }
 

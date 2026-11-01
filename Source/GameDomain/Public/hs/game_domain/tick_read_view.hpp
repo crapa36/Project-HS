@@ -128,7 +128,6 @@ struct TickReadView
     std::span<const WaveView> waves;
     SessionSummaryReadView summary;
     std::uint64_t session_id{};
-    TickRows<VisualLinkView> visual_links;
     TickRows<MiniBombView> mini_bombs;
     TickRows<SpawnWarningView> spawn_warnings;
     TickRows<ScheduledAreaDeliveryView> scheduled_area_deliveries;
@@ -173,12 +172,6 @@ inline TickReadView BorrowOwnedReadModel(const GameReadModel &model)
             value = model.boss_actions[row];
             return true;
         });
-    TickRows<VisualLinkView> visual_links(&model, model.visual_links.size(), model.visual_links.size(),
-        [](const void *source, std::size_t row, VisualLinkView &value) {
-            const auto &model = *static_cast<const GameReadModel *>(source);
-            value = model.visual_links[row];
-            return true;
-        });
     TickRows<MiniBombView> mini_bombs(&model, model.mini_bombs.size(), model.mini_bombs.size(),
         [](const void *source, std::size_t row, MiniBombView &value) {
             const auto &model = *static_cast<const GameReadModel *>(source);
@@ -206,7 +199,7 @@ inline TickReadView BorrowOwnedReadModel(const GameReadModel &model)
         {model.summary.direct_damage, model.summary.derived_damage, model.summary.damage_over_time,
          model.summary.upgrade_damage, model.summary.relic_damage, model.summary.relic_triggers,
          model.summary.relic_kills, model.summary.relic_effects},
-        model.session_id, visual_links, mini_bombs, spawn_warnings, scheduled_area_deliveries,
+        model.session_id, mini_bombs, spawn_warnings, scheduled_area_deliveries,
         model.boss_death_visuals, {}};
 }
 inline TickReadView BorrowOwnedReadModel(GameReadModel &&) = delete;

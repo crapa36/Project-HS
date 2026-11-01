@@ -4,6 +4,11 @@
 #include <chrono>
 #include <string>
 #include <string_view>
+#ifdef HS_DEVELOPMENT_TOOLS
+#include <hs/asset_manifest/selected_generation.hpp>
+
+#include <filesystem>
+#endif
 
 namespace hs::runtime_detail
 {
@@ -65,4 +70,17 @@ class GenerationReloadWatch
     bool preparing_{};
     bool superseded_{};
 };
+
+#ifdef HS_DEVELOPMENT_TOOLS
+struct PreparedContentGeneration
+{
+    SelectedGeneration candidate;
+    Result result{Result::Success()};
+    const char *stage{"manifest"};
+    bool superseded{};
+};
+
+PreparedContentGeneration PrepareContentGeneration(std::filesystem::path pointer_path,
+    std::string pointer_text, std::string active_id, std::string active_scope);
+#endif
 } // namespace hs::runtime_detail

@@ -651,7 +651,10 @@ void TestFullGraphicsTransactions()
     original.graphics.display_output.value = "saved_monitor";
     original.graphics.frame_limit_fps = 120;
     hs::GraphicsSettingsCommit controller(original, hs::ProjectSettingsDocument(original), false);
-    Check(controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "ultra")) &&
+    Check(controller.EditGraphics({hs::UiCommandKind::SetBloom, 0}) &&
+              controller.EditGraphics(GraphicsCommand(hs::SettingId::Bloom, "true")) &&
+              controller.Requested().graphics.bloom &&
+              controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "ultra")) &&
               controller.Requested().graphics.preset == hs::GraphicsPreset::Ultra &&
               controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid &&
               controller.Requested().graphics.shadow_mode == hs::GraphicsShadowMode::Raster &&
@@ -681,32 +684,36 @@ void TestFullGraphicsTransactions()
               controller.Requested().graphics.gi_quality == hs::GraphicsQuality::High &&
               controller.Requested().master_volume == 0.4f,
           "follow-ups preserve actual serial order and immediate audio");
-    controller.RollbackUnpersisted();
-    const auto recovery = controller.NextRequest();
-    Check(recovery && recovery->graphics->gi_mode == original.graphics.gi_mode &&
-              recovery->effective.master_volume == 0.4f &&
-              controller.Acknowledge({recovery->generation, hs::ErrorCode::None}) ==
-                  hs::GraphicsSettingsCommit::AckOutcome::Restored &&
-              controller.Committed().graphics.gi_mode == original.graphics.gi_mode &&
-              controller.Requested().graphics.gi_quality == hs::GraphicsQuality::High,
-          "save recovery restores acknowledged baseline and retains newer intent/audio");
+    const auto preset_followup = controller.NextRequest();
+    Check(preset_followup && controller.Acknowledge({preset_followup->generation, hs::ErrorCode::None}) ==
+              hs::GraphicsSettingsCommit::AckOutcome::Applied,
+          "ordered graphics follow-ups apply after the first acknowledgment");
+    Check(!controller.NextRequest(), "saving does not enqueue a native recovery request");
+    controller.EditGraphics(GraphicsCommand(hs::SettingId::HdrMode, "on"));
     const auto later = controller.NextRequest();
-    Check(later.has_value(), "newer intent follows recovery");
+    Check(later.has_value(), "newer intent creates a native apply request");
     const auto *packet = later->graphics;
+    controller.EditGraphics(GraphicsCommand(hs::SettingId::DynamicMaxPercent, "90"));
     controller.MarkTimedOut();
     Check(controller.HasPending() && controller.TimedOut() && packet == later->graphics &&
               !controller.NextRequest(), "timeout retains native read lease and blocks replacement");
     Check(controller.Acknowledge({later->generation, hs::ErrorCode::None}) ==
-              hs::GraphicsSettingsCommit::AckOutcome::Recovering,
-          "late applied acknowledgment schedules a real baseline restore");
-    const auto timed_recovery = controller.NextRequest();
-    Check(timed_recovery && timed_recovery->generation > later->generation &&
+              hs::GraphicsSettingsCommit::AckOutcome::Recovering &&
+              controller.Requested().graphics.dynamic_max_percent == 90.0f,
+          "late successful acknowledgment schedules timeout restore and retains newer edits");
+    const auto timeout_restore = controller.NextRequest();
+    Check(timeout_restore && timeout_restore->generation > later->generation &&
               controller.Acknowledge({later->generation, hs::ErrorCode::None}) ==
                   hs::GraphicsSettingsCommit::AckOutcome::Ignored,
-          "stale receipt cannot replace recovery generation");
-    Check(controller.Acknowledge({timed_recovery->generation, hs::ErrorCode::None}) ==
+          "stale receipt cannot replace timeout restoration generation");
+    Check(controller.Acknowledge({timeout_restore->generation, hs::ErrorCode::None}) ==
               hs::GraphicsSettingsCommit::AckOutcome::Restored,
-          "timeout restore is acknowledged");
+          "timeout restore is acknowledged before newer intent is sent");
+    const auto followup = controller.NextRequest();
+    Check(followup && followup->graphics->dynamic_max_percent == 90.0f &&
+              controller.Acknowledge({followup->generation, hs::ErrorCode::None}) ==
+                  hs::GraphicsSettingsCommit::AckOutcome::Applied,
+          "newer edit is applied after the timeout restore");
     Check(controller.EditGraphics({hs::UiCommandKind::SetVfxScreenOverlayIntensityPercent, 30}),
           "accessibility option uses renderer transaction");
     const auto overlay = controller.NextRequest();

@@ -1,7 +1,6 @@
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
-#include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/core/windows_command_line.hpp>
 #include <hs/gameplay/game_simulation.hpp>
@@ -557,7 +556,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
 
         hs::InputFrame input;
         input.target_tick = target;
-        tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        tick = simulation.TickFixed(input);
         const auto probe = simulation.GetObservation();
         const auto cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() - tick_start)

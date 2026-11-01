@@ -101,10 +101,9 @@ float3 HsBsdfToWorld(float3 value, float3 tangent, float3 bitangent, float3 norm
     return tangent * value.x + bitangent * value.y + normal * value.z;
 }
 
-float3 HsBsdfBaseEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+float3 HsBsdfBaseEvaluateOpticalPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
+                                         float3 wi, float base_fresnel_override)
 {
-    float3 normal = normalize(surface.normal);
-    float3 view = normalize(wo);
     float3 light = normalize(wi);
     float raw_no_v = dot(normal, view);
     float raw_no_l = dot(normal, light);
@@ -145,6 +144,12 @@ float3 HsBsdfBaseEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi,
     float3 diffuse = diffuse_transmission * ((1.0 - metallic) * surface.base_color) * HsBsdfInvPi;
     float3 specular = distribution * fresnel / (view_smith_denominator * light_smith_denominator);
     return diffuse + specular;
+}
+
+float3 HsBsdfBaseEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+{
+    return HsBsdfBaseEvaluateOpticalPrepared(surface, normalize(surface.normal), normalize(wo),
+        wi, base_fresnel_override);
 }
 
 float3 HsBsdfBaseEvaluate(HsSurfaceClosure surface, float3 wo, float3 wi)

@@ -2,12 +2,21 @@
 
 #include "renderer_texture_streaming.hpp"
 #include <hs/render_data/material_schema.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <span>
 
 namespace hs
 {
 inline constexpr std::uint32_t kTextureFeedbackBindingCount = static_cast<std::uint32_t>(render_data::kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots);
 inline constexpr std::uint32_t kTextureFeedbackDescriptorCount = 1 + kTextureFeedbackBindingCount;
+namespace texture_feedback_detail
+{
+inline constexpr std::uint32_t kNoMipDemand = ~std::uint32_t{};
+// Scans one logical row only; row-pitch padding is excluded by the caller.
+[[nodiscard]] std::uint32_t MinimumRequestedMip(std::span<const std::byte> row,
+                                                std::uint32_t mip_count) noexcept;
+}
 struct TextureFeedbackGraphBinding
 {
     TextureStreamId texture;

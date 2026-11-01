@@ -52,17 +52,22 @@ DirectX::XMFLOAT4 SizeConstants(ViewExtent extent)
 {
     return {float(extent.width), float(extent.height), 1.0f / float(extent.width), 1.0f / float(extent.height)};
 }
-bool FitsTexture(const ScreenReflectionResource &input, ViewExtent active, DXGI_FORMAT format)
+bool FitsTexture(const RenderGraphBuilder &graph, const ScreenReflectionResource &input, ViewExtent active, DXGI_FORMAT format)
 {
-    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture) return false;
-    const auto d = input.resource->GetDesc();
-    return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.DepthOrArraySize == 1 &&
-        d.SampleDesc.Count == 1 && d.Width >= active.width && d.Height >= active.height && d.Format == format;
+    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(input.version.resource) != input.resource) return false;
+    const auto d = graph.ResourceDescription(input.version.resource);
+    return d && d->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d->DepthOrArraySize == 1 &&
+        d->SampleDesc.Count == 1 && d->Width >= active.width && d->Height >= active.height && d->Format == format;
 }
-bool FitsDepth(const ScreenReflectionResource &input, ViewExtent active)
+bool FitsDepth(const RenderGraphBuilder &graph, const ScreenReflectionResource &input, ViewExtent active)
 {
-    return FitsTexture(input, active, DXGI_FORMAT_R32_TYPELESS) || FitsTexture(input, active, DXGI_FORMAT_D32_FLOAT) ||
-        FitsTexture(input, active, DXGI_FORMAT_R32_FLOAT);
+    if (!input.resource || !input.version.resource || input.version.resource.kind != ResourceKind::Texture ||
+        graph.Resolve(input.version.resource) != input.resource) return false;
+    const auto d = graph.ResourceDescription(input.version.resource);
+    return d && d->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d->DepthOrArraySize == 1 &&
+        d->SampleDesc.Count == 1 && d->Width >= active.width && d->Height >= active.height &&
+        (d->Format == DXGI_FORMAT_R32_TYPELESS || d->Format == DXGI_FORMAT_D32_FLOAT || d->Format == DXGI_FORMAT_R32_FLOAT);
 }
 bool FiniteMatrix(const DirectX::XMFLOAT4X4 &matrix)
 {
@@ -349,12 +354,12 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     if (!ValidExtent(active) || active.width > storage->render_capacity.width || active.height > storage->render_capacity.height ||
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed))
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection active extent or completed frame slot.");
-    if (!FitsDepth(inputs.depth, active) || !FitsTexture(inputs.base, active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
-        !FitsTexture(inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) || !FitsTexture(inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
-        !FitsTexture(inputs.material, active, DXGI_FORMAT_R8G8B8A8_UNORM) || !FitsTexture(inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
-        !FitsTexture(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
-        !FitsTexture(inputs.opaque_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-        !FitsTexture(inputs.environment_specular, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+    if (!FitsDepth(graph, inputs.depth, active) || !FitsTexture(graph, inputs.base, active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
+        !FitsTexture(graph, inputs.normal, active, DXGI_FORMAT_R16G16_SNORM) || !FitsTexture(graph, inputs.metadata, active, DXGI_FORMAT_R32_UINT) ||
+        !FitsTexture(graph, inputs.material, active, DXGI_FORMAT_R8G8B8A8_UNORM) || !FitsTexture(graph, inputs.motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
+        !FitsTexture(graph, inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
+        !FitsTexture(graph, inputs.opaque_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+        !FitsTexture(graph, inputs.environment_specular, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
         inputs.sidecar_plane_count > inputs.sidecars.size())
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection compact-surface or radiance input.");
     const std::array guides{inputs.depth.version, inputs.base.version, inputs.normal.version,
@@ -363,17 +368,26 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
         inputs.sidecars[0].version, inputs.sidecars[1].version, inputs.ambient_visibility.version};
     if (capture) capture->guides = guides;
     for (std::uint32_t index = 0; index < inputs.sidecar_plane_count; ++index)
-        if (!FitsTexture(inputs.sidecars[index], active, DXGI_FORMAT_R32_UINT) &&
-            !FitsTexture(inputs.sidecars[index], active, DXGI_FORMAT_R32G32_UINT) &&
-            !FitsTexture(inputs.sidecars[index], active, DXGI_FORMAT_R32G32B32A32_UINT))
+    {
+        const auto &sidecar = inputs.sidecars[index];
+        const auto desc = sidecar.version.resource ? graph.ResourceDescription(sidecar.version.resource) : std::nullopt;
+        if (!desc || !sidecar.resource || sidecar.version.resource.kind != ResourceKind::Texture ||
+            graph.Resolve(sidecar.version.resource) != sidecar.resource || desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            desc->DepthOrArraySize != 1 || desc->SampleDesc.Count != 1 || desc->Width < active.width || desc->Height < active.height ||
+            (desc->Format != DXGI_FORMAT_R32_UINT && desc->Format != DXGI_FORMAT_R32G32_UINT &&
+                desc->Format != DXGI_FORMAT_R32G32B32A32_UINT))
             return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection sidecar input.");
-    if (inputs.ambient_visibility_enabled && !FitsTexture(inputs.ambient_visibility, active, DXGI_FORMAT_R16_FLOAT))
+    }
+    if (inputs.ambient_visibility_enabled && !FitsTexture(graph, inputs.ambient_visibility, active, DXGI_FORMAT_R16_FLOAT))
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection ambient visibility input.");
+    const auto parameterDescription = inputs.material_parameters.version.resource ?
+        graph.ResourceDescription(inputs.material_parameters.version.resource) : std::nullopt;
     if (!inputs.material_parameters.resource || !inputs.material_parameters.version.resource ||
         inputs.material_parameters.version.resource.kind != ResourceKind::Buffer ||
-        inputs.material_parameters.resource->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
-        inputs.material_parameters.resource->GetDesc().Width < sizeof(DirectX::XMUINT4) ||
-        inputs.material_parameters.resource->GetDesc().Width / sizeof(DirectX::XMUINT4) > UINT32_MAX ||
+        graph.Resolve(inputs.material_parameters.version.resource) != inputs.material_parameters.resource || !parameterDescription ||
+        parameterDescription->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+        parameterDescription->Width < sizeof(DirectX::XMUINT4) ||
+        parameterDescription->Width / sizeof(DirectX::XMUINT4) > UINT32_MAX ||
         !inputs.frame_constants_address || inputs.frame_constants_address % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)
         return ReflectionFailure(ErrorCode::InvalidArgument, "Reflection requires material parameter buffer and aligned live frame constants.");
     if (!FiniteMatrix(constants.inverse_view_projection) || !FiniteMatrix(constants.world_to_view) || !FiniteMatrix(constants.projection) ||
@@ -412,12 +426,16 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     D3D12_SHADER_RESOURCE_VIEW_DESC parameterView{};
     parameterView.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     parameterView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    parameterView.Buffer.NumElements = UINT(inputs.material_parameters.resource->GetDesc().Width / sizeof(DirectX::XMUINT4));
+    parameterView.Buffer.NumElements = UINT(parameterDescription->Width / sizeof(DirectX::XMUINT4));
     parameterView.Buffer.StructureByteStride = sizeof(DirectX::XMUINT4);
     storage->device->CreateShaderResourceView(inputs.material_parameters.resource, &parameterView, storage->Cpu(inputs.frame_slot, 9));
     for (std::uint32_t index = 0; index < 2; ++index)
-        storage->Srv(inputs.frame_slot, 10 + index, index < inputs.sidecar_plane_count ? inputs.sidecars[index].resource : nullptr,
-            index < inputs.sidecar_plane_count ? inputs.sidecars[index].resource->GetDesc().Format : DXGI_FORMAT_R32G32B32A32_UINT);
+    {
+        const auto *sidecar = index < inputs.sidecar_plane_count ? &inputs.sidecars[index] : nullptr;
+        const auto description = sidecar ? graph.ResourceDescription(sidecar->version.resource) : std::nullopt;
+        storage->Srv(inputs.frame_slot, 10 + index, sidecar ? sidecar->resource : nullptr,
+            description ? description->Format : DXGI_FORMAT_R32G32B32A32_UINT);
+    }
     storage->Srv(inputs.frame_slot, 12, inputs.ambient_visibility_enabled ? inputs.ambient_visibility.resource : nullptr, DXGI_FORMAT_R16_FLOAT);
     storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->history[storage->read_index].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
