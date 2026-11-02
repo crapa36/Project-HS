@@ -25,11 +25,6 @@ uint HsSurfaceModel(uint2 metadata)
     return (metadata.y & HsSurfaceModelMask) >> HsSurfaceModelShift;
 }
 
-uint HsSurfaceOutlineGroup(uint2 metadata)
-{
-    return metadata.y >> HsSurfaceOutlineShift;
-}
-
 static const uint HsSurfaceMetadataMaterialMask = 0x0fffffffu;
 
 // ABI 2 relocates the original namespace nibble into physical bits 24-27.

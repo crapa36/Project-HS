@@ -41,7 +41,6 @@ hs::SettingsDocument StronglyDifferentSettings()
     settings.graphics.shadow_quality = hs::GraphicsQuality::Ultra;
     settings.graphics.particle_quality = hs::GraphicsQuality::Low;
     settings.graphics.bloom = true;
-    settings.graphics.outline = true;
     return settings;
 }
 
@@ -53,15 +52,15 @@ void TestSmokeUsesProcessDefaults()
     Check(smoke.width == 1280 && smoke.height == 720 && !smoke.borderless,
           "smoke resolution defaults");
     Check(smoke.render_scale_percent == 100 && smoke.shadow_resolution == 1024 &&
-              smoke.particle_percentage == 100 && smoke.bloom && smoke.outline,
+              smoke.particle_percentage == 100 && smoke.bloom,
           "smoke quality defaults");
 
     const auto overridden = Parse({"--smoke", "--resolution=1920x1080", "--render-scale=75",
                                    "--shadow=2048", "--particles=50", "--no-bloom",
-                                   "--no-outline", "--frame-cap=31"});
+                                   "--frame-cap=31"});
     Check(overridden.smoke && overridden.width == 1920 && overridden.height == 1080 &&
               overridden.render_scale_percent == 75 && overridden.shadow_resolution == 2048 &&
-              overridden.particle_percentage == 50 && !overridden.bloom && !overridden.outline &&
+              overridden.particle_percentage == 50 && !overridden.bloom &&
               overridden.frame_cap == 31,
           "smoke explicit overrides");
 }
@@ -70,7 +69,6 @@ void TestInteractiveSettingsAndCliPrecedence()
 {
     auto saved = StronglyDifferentSettings();
     saved.graphics.bloom = false;
-    saved.graphics.outline = false;
     saved.opaque_optional_json = R"({"graphics":{"future_key":"keep"}})";
     const auto config = Parse({});
     auto requested = saved;
@@ -81,15 +79,15 @@ void TestInteractiveSettingsAndCliPrecedence()
               !config.frame_cap_explicit && !config.borderless_explicit,
           "saved display settings");
     Check(from_saved.render_scale_percent == 75 && from_saved.shadow_resolution == 2048 &&
-              from_saved.particle_percentage == 50 && !from_saved.bloom && !from_saved.outline &&
+              from_saved.particle_percentage == 50 && !from_saved.bloom &&
               !config.render_scale_explicit && !config.shadow_resolution_explicit &&
-              !config.particle_percentage_explicit && !config.bloom_explicit && !config.outline_explicit &&
+              !config.particle_percentage_explicit && !config.bloom_explicit &&
               requested.opaque_optional_json == saved.opaque_optional_json,
           "saved quality settings");
 
     const auto overrides = Parse({"--resolution=1920x1080", "--vsync", "--frame-cap=90",
                                    "--render-scale=100", "--shadow=1024", "--particles=100",
-                                   "--no-bloom", "--no-outline"});
+                                   "--no-bloom"});
     requested = StronglyDifferentSettings();
     const auto overridden = hs::PrepareStartupGraphicsSettings(requested, overrides);
     Check(!overrides.smoke && overridden.width == 1920 && overridden.height == 1080 &&
@@ -98,9 +96,9 @@ void TestInteractiveSettingsAndCliPrecedence()
               overrides.frame_cap_explicit && !overrides.borderless_explicit,
           "interactive cli display precedence");
     Check(overridden.render_scale_percent == 100 && overridden.shadow_resolution == 1024 &&
-              overridden.particle_percentage == 100 && !overridden.bloom && !overridden.outline &&
+              overridden.particle_percentage == 100 && !overridden.bloom &&
               overrides.render_scale_explicit && overrides.shadow_resolution_explicit &&
-              overrides.particle_percentage_explicit && overrides.bloom_explicit && overrides.outline_explicit,
+              overrides.particle_percentage_explicit && overrides.bloom_explicit,
           "interactive cli quality precedence");
 }
 
@@ -162,7 +160,7 @@ void TestStartupGraphicsAuthority()
               !effective.vsync && effective.frame_cap == 0,
           "CLI display overrides reach both startup authorities");
     hs::GraphicsSettingsCommit commit(requested, effective, false);
-    Check(commit.EditGraphics({hs::UiCommandKind::SetOutline, 0}), "later graphics edit");
+    Check(commit.EditGraphics({hs::UiCommandKind::SetBloom, 0}), "later graphics edit");
     const auto packet = commit.NextRequest();
     Check(packet && packet->graphics->output_extent == requested.graphics.output_extent &&
               !packet->graphics->vsync && packet->graphics->frame_limit_fps == 0 &&
@@ -232,13 +230,11 @@ void TestStartupGraphicsAuthority()
     explicit_preset.particle_percentage_explicit = true;
     explicit_preset.bloom = false;
     explicit_preset.bloom_explicit = true;
-    explicit_preset.outline = false;
-    explicit_preset.outline_explicit = true;
     const auto explicit_effective = hs::PrepareStartupGraphicsSettings(requested, explicit_preset);
     Check(explicit_effective.width == 1920 && explicit_effective.height == 1080 &&
               explicit_effective.borderless && !explicit_effective.vsync && explicit_effective.frame_cap == 30 &&
               explicit_effective.render_scale_percent == 75 && explicit_effective.shadow_resolution == 1024 &&
-              explicit_effective.particle_percentage == 50 && !explicit_effective.bloom && !explicit_effective.outline &&
+              explicit_effective.particle_percentage == 50 && !explicit_effective.bloom &&
               requested.graphics.lighting_quality == hs::GraphicsQuality::Ultra &&
               requested.graphics.shadow_quality == hs::GraphicsQuality::Medium &&
               requested.graphics.particle_quality == hs::GraphicsQuality::Low,
@@ -252,20 +248,20 @@ void TestStartupGraphicsAuthority()
 
     requested = saved;
     requested.graphics.display_mode = hs::GraphicsDisplayMode::BorderlessFullscreen;
-    requested.graphics.bloom = requested.graphics.outline = false;
+    requested.graphics.bloom = false;
     const auto smoke = hs::PrepareStartupGraphicsSettings(requested, Parse({"--smoke"}));
     Check(smoke.width == 1280 && smoke.height == 720 && !smoke.borderless &&
               !requested.graphics.vsync && requested.graphics.frame_limit_fps == 0 &&
               smoke.render_scale_percent == 100 && smoke.shadow_resolution == 1024 &&
-              smoke.particle_percentage == 100 && smoke.bloom && smoke.outline,
+              smoke.particle_percentage == 100 && smoke.bloom,
           "smoke graphics defaults replace stale profile intent");
     requested = saved;
     const auto smoke_override = hs::PrepareStartupGraphicsSettings(requested,
         Parse({"--smoke", "--resolution=1920x1080", "--borderless", "--render-scale=75",
-               "--shadow=2048", "--particles=50", "--no-bloom", "--no-outline"}));
+               "--shadow=2048", "--particles=50", "--no-bloom"}));
     Check(smoke_override.width == 1920 && smoke_override.height == 1080 && smoke_override.borderless &&
               smoke_override.render_scale_percent == 75 && smoke_override.shadow_resolution == 2048 &&
-              smoke_override.particle_percentage == 50 && !smoke_override.bloom && !smoke_override.outline,
+              smoke_override.particle_percentage == 50 && !smoke_override.bloom,
           "smoke explicit graphics overrides win");
 
     const auto invalid = Parse({"--resolution=1920xbroken", "--frame-cap=90junk", "--frame-cap=1001"});

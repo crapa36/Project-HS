@@ -61,7 +61,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
     RendererOptions options;
     options.vsync = graphics.vsync;
     options.bloom = graphics.bloom;
-    options.outline = graphics.outline;
     options.render_scale_percent = legacy_defaults.render_scale_percent;
     if (graphics.resolution_mode == GraphicsResolutionMode::Manual)
         options.render_scale_percent = static_cast<std::uint32_t>(
@@ -77,7 +76,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
         : graphics.particle_quality == GraphicsQuality::Medium ? VfxQuality::Medium : VfxQuality::High;
     options.anisotropic_filtering = graphics.anisotropic_filtering;
     options.bloom_strength = graphics.bloom_strength;
-    options.outline_width_px = graphics.outline_width_px;
     options.color_grading = graphics.color_grading;
     options.motion_blur = graphics.motion_blur;
     options.adaptive_shading = graphics.adaptive_shading;
@@ -128,7 +126,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
 {
     config.vsync = options.vsync;
     config.bloom = options.bloom;
-    config.outline = options.outline;
     config.render_scale_percent = options.render_scale_percent;
     config.dynamic_resolution = options.dynamic_resolution;
     config.target_render_fps = options.target_render_fps;
@@ -139,7 +136,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
     config.vfx_quality = options.vfx_quality;
     config.anisotropic_filtering = options.anisotropic_filtering;
     config.bloom_strength = options.bloom_strength;
-    config.outline_width_px = options.outline_width_px;
     config.color_grading = options.color_grading;
     config.motion_blur = options.motion_blur;
     config.depth_of_field = options.depth_of_field;
@@ -297,8 +293,6 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.bloom_strength = config.bloom_strength;
     actual.motion_blur = config.motion_blur;
     actual.depth_of_field = config.depth_of_field;
-    actual.outline = config.outline;
-    actual.outline_width_px = config.outline_width_px;
     actual.color_grading = config.color_grading;
     actual.adaptive_shading = config.adaptive_shading;
     actual.particle_quality = requested.particle_quality;

@@ -91,7 +91,7 @@ void HsVirtualShadowRasterClip(float2 pixel, uint pass)
     clip(float4(pixel - origin, origin + 132.0 - pixel));
 }
 
-bool HsVirtualShadowLookupLevel(float3 light, uint level, out float visibility)
+bool HsVirtualShadowLookupLevel(float3 light, uint level, float2 depth_gradient, out float visibility)
 {
     visibility = 1.0;
     const float4 map = HsShadowClipmap(level);
@@ -111,7 +111,8 @@ bool HsVirtualShadowLookupLevel(float3 light, uint level, out float visibility)
     const uint columns = uint(bank.z);
     const int2 origin = int2(page.physical % columns, page.physical / columns) * 132;
     const float2 local = (light.xy - float2(key) * map.x) / map.y;
-    const int2 center = origin + int2(floor(float2(2.0 + local.x, 130.0 - local.y)));
+    const float2 position = float2(2.0 + local.x, 130.0 - local.y);
+    const int2 center = origin + int2(floor(position));
     float sum = 0.0;
     const float receiver_bias = max(depth.z, map.y * 0.35 * depth.y);
     const uint samples = HsShadowMetadata.Load(332u);
@@ -126,12 +127,14 @@ bool HsVirtualShadowLookupLevel(float3 light, uint level, out float visibility)
 #else
             const float caster = max(static_caster, HsShadowDynamicBank.Load(int3(pixel, 0)));
 #endif
-            sum += receiver + receiver_bias >= caster ? 1.0 : 0.0;
+            const float2 delta = (float2(pixel - origin) + 0.5 - position) * float2(map.y, -map.y);
+            const float tap_receiver = receiver - dot(depth_gradient, delta) * depth.y;
+            sum += tap_receiver + receiver_bias >= caster ? 1.0 : 0.0;
         }
     visibility = sum / float(samples);
     return true;
 }
-bool HsVirtualShadowLookupRoot(float3 light, out float visibility)
+bool HsVirtualShadowLookupRoot(float3 light, float2 depth_gradient, out float visibility)
 {
     visibility=1.0;
     const uint4 root=HsShadowMetadata.Load4(416u);
@@ -166,12 +169,14 @@ bool HsVirtualShadowLookupRoot(float3 light, out float visibility)
             caster=max(static_caster,HsShadowRootDynamic.Load(int3(pixel,0)));
 #endif
         }
-        sum+=caster==0.0 || receiver+receiver_bias>=caster ? 1.0 : 0.0;
+        const float2 delta=(float2(pixel)+0.5-position)*float2(extent.z,-extent.z);
+        const float tap_receiver=receiver-dot(depth_gradient,delta)*depth.y;
+        sum+=caster==0.0 || tap_receiver+receiver_bias>=caster ? 1.0 : 0.0;
     }
     visibility=sum/float(samples);
     return true;
 }
-bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out float visibility)
+bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, float2 depth_gradient, out float visibility)
 {
     visibility = 1.0;
     const uint4 identity = HsShadowMetadata.Load4(288u);
@@ -186,7 +191,7 @@ bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out f
         const int2 local = key - window.xy;
         if (any(local < 0) || any(local >= window.z)) continue;
         float value;
-        if (!HsVirtualShadowLookupLevel(light, level, value))
+        if (!HsVirtualShadowLookupLevel(light, level, depth_gradient, value))
         {
             const uint4 root=HsShadowMetadata.Load4(416u);
             if(HsShadowMetadata.Load(344u)==0u && root.w==0u) return false;
@@ -197,13 +202,22 @@ bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out f
         if (level < 2u && edge < 1.0)
         {
             float coarser;
-            if (HsVirtualShadowLookupLevel(light, level + 1u, coarser))
+            if (HsVirtualShadowLookupLevel(light, level + 1u, depth_gradient, coarser))
                 value = lerp(coarser, value, smoothstep(0.0, 1.0, edge));
         }
         visibility = value;
         return true;
     }
-    return HsVirtualShadowLookupRoot(light,visibility);
+    return HsVirtualShadowLookupRoot(light,depth_gradient,visibility);
+}
+bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out float visibility)
+{
+    return HsVirtualShadowLookup(world,stable_id,generation,0.0.xx,visibility);
+}
+bool HsVirtualShadowLookup(float3 world, float2 depth_gradient, out float visibility)
+{
+    const uint4 identity = HsShadowMetadata.Load4(288u);
+    return HsVirtualShadowLookup(world,identity.xy,identity.z,depth_gradient,visibility);
 }
 bool HsVirtualShadowLookup(float3 world, out float visibility)
 {

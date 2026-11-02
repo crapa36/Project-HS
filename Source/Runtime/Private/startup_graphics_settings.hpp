@@ -44,8 +44,6 @@ namespace hs
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetParticlePercentage, config.particle_percentage});
     if (config.bloom_explicit || (config.smoke && !config.graphics_preset))
         requested.graphics.bloom = config.bloom;
-    if (config.outline_explicit || (config.smoke && !config.graphics_preset))
-        requested.graphics.outline = config.outline;
     auto effective = ProjectSettingsDocument(requested);
     if (config.mute_audio) effective.master_volume = 0.0f;
     return effective;

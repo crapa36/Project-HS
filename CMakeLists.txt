@@ -1307,7 +1307,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/subsurface_diffusion.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
@@ -1326,6 +1325,29 @@ hs_add_asset_action(
     ARGS --bsdf-preintegrate --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
         --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}")
 list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BSDF_SHADER_RESULT}")
+set(HS_SSR_SHADER_RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/screen-reflections/result.json")
+hs_add_asset_action(
+    NAME hs_render_screen_reflections
+    BUILDER hs_render_material_shader
+    RESULT "${HS_SSR_SHADER_RESULT}"
+    DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/screen-reflections/result.d"
+    STATIC_INPUTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/hero_material.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_sidecar.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_parameters.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/surface_layout.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/surface_metadata.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/render_binding_contract.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_surface.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/bsdf_metallic_roughness.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/bsdf_layers.hlsli"
+        ${HS_DEFERRED_MATERIAL_INPUTS} ${HS_DXC_TOOL_INPUTS}
+    ARGS --screen-reflections --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+        --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}")
+list(APPEND HS_RENDER_SHADER_RESULTS "${HS_SSR_SHADER_RESULT}")
 # Intrusive developer PS variants are not part of Release/shipping products.
 # Current content generations use the repository's single-config Ninja trees.
 if(NOT HS_SINGLE_CONFIG_RELEASE)
@@ -1346,7 +1368,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/subsurface_diffusion.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
@@ -1839,6 +1860,7 @@ function(hs_add_test_generation name)
     add_custom_target("hs_test_${name}_generation" DEPENDS "${pointer}")
 endfunction()
 hs_add_test_generation(gameplay RESULTS
+    "${HS_BSDF_SHADER_RESULT}"
     ${HS_SIMULATION_FINALIZER_RESULTS}
     ${HS_PRESENTATION_FINALIZER_RESULTS}
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-simulation/result.json"
@@ -1882,6 +1904,7 @@ hs_add_test_generation(environment RESULTS
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/character/monster-materials/result.json"
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/texture/character/monster-materials/result.json")
 hs_add_test_generation(character RESULTS
+    "${HS_BSDF_SHADER_RESULT}"
     "${HS_QUALITY_PROFILES_RESULT}"
     ${HS_CHARACTER_ACTION_RESULTS}
     ${HS_CHARACTER_TEXTURE_RESULTS}

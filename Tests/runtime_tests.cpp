@@ -317,14 +317,14 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
         Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
               "surface frontend rejects unknown and nonstring values");
     }
-    source.config_overrides_json = R"({"graphics_preset":"ultra","width":1920,"height":1080,"vsync":false,"frame_cap":30,"render_scale_percent":75,"shadow_resolution":1024,"particle_percentage":50,"borderless":true,"bloom":false,"outline":false})";
+    source.config_overrides_json = R"({"graphics_preset":"ultra","width":1920,"height":1080,"vsync":false,"frame_cap":30,"render_scale_percent":75,"shadow_resolution":1024,"particle_percentage":50,"borderless":true,"bloom":false})";
     hs::ApplicationConfig explicit_graphics;
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
               hs::ApplyExperimentOverrides(loaded, explicit_graphics) && explicit_graphics.graphics_preset == hs::GraphicsPreset::Ultra &&
               explicit_graphics.resolution_explicit && explicit_graphics.vsync_explicit &&
               explicit_graphics.frame_cap_explicit && explicit_graphics.render_scale_explicit &&
               explicit_graphics.shadow_resolution_explicit && explicit_graphics.particle_percentage_explicit &&
-              explicit_graphics.borderless_explicit && explicit_graphics.bloom_explicit && explicit_graphics.outline_explicit,
+              explicit_graphics.borderless_explicit && explicit_graphics.bloom_explicit,
           "experiment preset preserves explicit field precedence metadata");
     source.config_overrides_json = R"({"graphics_preset":"ultra","pom_quality":"off","volumetric_quality":"off","geometry_frontend":"indexed"})";
     hs::ApplicationConfig ablation;

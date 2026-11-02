@@ -27,7 +27,7 @@ Result ValidateNativeOptions(const Options &options)
     };
     const auto quality = [](auto value, auto maximum) { return value <= maximum; };
     if (options.anisotropic_filtering < 1 || options.anisotropic_filtering > 16 ||
-        !within(options.bloom_strength, 0, 2) || !within(options.outline_width_px, 0, 4) ||
+        !within(options.bloom_strength, 0, 2) ||
         !within(options.sharpening, 0, 1) || !within(options.shadow_distance_m, 20, 500) ||
         !within(options.screen_overlay_intensity, 0, 1) ||
         !quality(options.adaptive_shading, GraphicsAutoToggle::On) ||
@@ -575,7 +575,6 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
                                                    impl_->config.shadow_resolution,
                                                    impl_->config.bloom, width, height,
                                                    UsesInternalResolveTargets(reconstruction),
-                                                   impl_->config.outline,
                                                    impl_->RequiredLightingAuxiliaries(impl_->config)); !result)
     {
         const auto device_reason = impl_->device->GetDeviceRemovedReason();
@@ -789,7 +788,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     const auto recreate_surfaces = capacity != owned_view.state.render_capacity ||
         shadow_resolution != impl_->config.shadow_resolution ||
         UsesInternalResolveTargets(reconstruction) != UsesInternalResolveTargets(owned_view.reconstruction_plan) ||
-        (options.bloom || options.outline) != (impl_->config.bloom || impl_->config.outline) ||
+        options.bloom != impl_->config.bloom ||
         impl_->RequiredLightingAuxiliaries(feature_config) != impl_->RequiredLightingAuxiliaries(impl_->config);
     const auto recreate_pools = recreate_surfaces || options.bloom != impl_->config.bloom;
     const auto adaptive_status = owned_view.adaptive_shading.Status();
@@ -850,7 +849,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     {
         if (auto prepared = impl_->PrepareOptionTargets(targets, target_width, target_height,
             shadow_resolution, options.bloom, owned_view.width, owned_view.height,
-            UsesInternalResolveTargets(reconstruction), options.outline,
+            UsesInternalResolveTargets(reconstruction),
             impl_->RequiredLightingAuxiliaries(feature_config)); !prepared) return prepared;
     }
     else if (recreate_pools)

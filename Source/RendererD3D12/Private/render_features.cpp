@@ -33,7 +33,7 @@ Result CompilePostSubgraphs(const PostSubgraphInputs &inputs,
                          targets.bloom_half_combined, targets.post_a, targets.post_b,
                          targets.back_buffer, targets.temporal_normal,
                          targets.temporal_material, targets.display_linear};
-    candidate.passes.reserve(4 + (inputs.bloom ? 4 : 0) + (inputs.outline ? 1 : 0));
+    candidate.passes.reserve(4 + (inputs.bloom ? 4 : 0));
     const auto next_pass = [&](std::uint32_t id, std::string_view name,
                                std::initializer_list<ResourceVersion> reads,
                                ResourceVersion &destination, bool read_write = false) -> Result {
@@ -99,10 +99,10 @@ Result CompilePostSubgraphs(const PostSubgraphInputs &inputs,
     }
     const bool linear_ui = static_cast<bool>(targets.display_linear.resource);
     const bool identity_fxaa = inputs.fxaa_identity && IsTexture(targets.display_linear);
-    auto &tone_map_target = identity_fxaa && !inputs.outline
+    auto &tone_map_target = identity_fxaa
         ? candidate.outputs.display_linear : candidate.outputs.post_a;
     if (auto added = next_pass(14, "ToneMap", {color}, tone_map_target); !added) return added;
-    if (identity_fxaa && !inputs.outline && inputs.initialize_post_targets)
+    if (identity_fxaa && inputs.initialize_post_targets)
     {
         if (!IsTexture(candidate.outputs.post_a) || candidate.outputs.post_a.ordinal == UINT32_MAX)
             return PostFailure("Post target is invalid or has no next resource version.");
@@ -111,13 +111,6 @@ Result CompilePostSubgraphs(const PostSubgraphInputs &inputs,
         candidate.passes.back().additional_outputs.emplace_back(predecessor, candidate.outputs.post_a);
     }
     color = tone_map_target;
-    if (inputs.outline)
-    {
-        auto &outline_target = identity_fxaa ? candidate.outputs.display_linear : candidate.outputs.post_b;
-        if (auto added = next_pass(15, "Screen-space Outline", {color, inputs.metadata, inputs.depth},
-                                  outline_target); !added) return added;
-        color = outline_target;
-    }
     if (identity_fxaa)
     {
         if (inputs.screen_overlay_upload.resource)

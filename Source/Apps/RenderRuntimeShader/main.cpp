@@ -95,7 +95,6 @@ constexpr std::array kProjectPrograms{
     ProgramOutput{"bloom_upsample_ps.dxil", L"BloomUpsamplePS", L"ps_6_0"},
     ProgramOutput{"bloom_ps.dxil", L"BloomPS", L"ps_6_0"},
     ProgramOutput{"tonemap_ps.dxil", L"ToneMapPS", L"ps_6_0"},
-    ProgramOutput{"outline_ps.dxil", L"OutlinePS", L"ps_6_0"},
     ProgramOutput{"fxaa_ps.dxil", L"FxaaPS", L"ps_6_0"},
     ProgramOutput{"ui_ps.dxil", L"UiPS", L"ps_6_0"},
 };

@@ -97,7 +97,8 @@ void TestLoadSourceAndProjection()
           "first run retains v1 effective defaults");
 
     document.graphics.vsync = false;
-    Check(store.SaveSettingsV2(document).Succeeded(), "write requested v2 settings");
+    const auto saved = store.SaveSettingsV2(document);
+    Check(saved.Succeeded(), std::string("write requested v2 settings: ") + std::string(saved.Message()));
     Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
               loaded_from_file && !document.graphics.vsync,
           "valid primary reports loaded settings");
@@ -471,10 +472,12 @@ void TestMigration()
     old.shadow_resolution = 2048;
     old.particle_percentage = 50;
     old.bloom = false;
-    old.outline = false;
     old.master_volume = 0.3f;
     old.skill_virtual_keys = {'W', 'Q', 'E', 'R'};
     Check(store.SaveSettings(old).Succeeded(), "write valid v1");
+    auto legacy_json = Read(root / "settings.json");
+    legacy_json.insert(legacy_json.find('{') + 1, "\"outline\":false,");
+    Write(root / "settings.json", legacy_json);
     hs::SettingsData old_roundtrip;
     Check(store.LoadSettings(old_roundtrip).Succeeded() &&
               old_roundtrip.width == old.width && old_roundtrip.frame_cap == 120,
@@ -494,7 +497,7 @@ void TestMigration()
                   hs::GraphicsFrameGenerationMode::Off &&
               migrated.graphics.shadow_quality == hs::GraphicsQuality::High &&
               migrated.graphics.particle_quality == hs::GraphicsQuality::Low &&
-              !migrated.graphics.bloom && !migrated.graphics.outline &&
+              !migrated.graphics.bloom &&
               migrated.master_volume == old.master_volume &&
               migrated.skill_virtual_keys == old.skill_virtual_keys,
           "exact v1 migration mappings");
@@ -530,7 +533,7 @@ void TestRemovedGraphicsReadMigration()
     for (const auto gi_token : {"ray_traced", "raytraced", "software_hybrid"})
     {
         const auto legacy = std::string(R"({"schema_version":2,"graphics":{"preset":"ultra_rt","ao_mode":"rtao","gi_mode":")") +
-            gi_token + R"(","gi_quality":"ultra","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
+            gi_token + R"(","gi_quality":"ultra","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"outline":false,"outline_width_px":2.0,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
         Write(root / "settings.json", legacy);
         hs::SettingsDocument loaded;
         bool stored{};
@@ -556,7 +559,7 @@ void TestRemovedGraphicsReadMigration()
         const auto saved = Read(root / "settings.json");
         for (const auto obsolete : {"ultra_rt", "rtao", "ray_traced", "raytraced", "software_hybrid", "gi_quality", "hybrid_rt", "dlss_rr",
                                    "ray_tracing_enabled", "rt_trace_distance_m",
-                                   "neural_ray_reconstruction", "ray_reconstruction_provider"})
+                                   "neural_ray_reconstruction", "ray_reconstruction_provider", "outline", "outline_width_px"})
             Check(!saved.contains(obsolete), "removed controls and modes do not return on serialization");
         Check(saved.contains("future_quality") && saved.contains("future_field") &&
                   store.LoadSettingsV2(loaded) && CorruptCount(root) == 0,

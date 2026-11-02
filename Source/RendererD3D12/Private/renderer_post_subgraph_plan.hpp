@@ -18,7 +18,6 @@ using PostHdrHook = std::function<Result(RenderGraphBuilder &, ResourceVersion, 
 struct PostSubgraphInputs
 {
     bool bloom{};
-    bool outline{};
     ResourceVersion scene_hdr;
     ResourceVersion composite_hdr;
     ResourceVersion depth;
@@ -99,7 +98,7 @@ struct PostSubgraphLayout
     std::array<Pass, 9> passes{};
     PostSubgraphOutputs outputs{};
     std::uint32_t pass_count{};
-    bool bloom{}, outline{}, fxaa_identity{}, initialize_post_targets{};
+    bool bloom{}, fxaa_identity{}, initialize_post_targets{};
     bool pre_bloom{}, pre_tone_map{}, devtools_ui{};
 };
 

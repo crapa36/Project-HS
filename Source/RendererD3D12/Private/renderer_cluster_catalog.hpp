@@ -139,14 +139,14 @@ private:
 
 // Dispatch contract: clear status/demand/count buffers, CountCuts, UAV barrier,
 // PrefixCuts stages 0/1/2 with UAV barriers, then EmitCuts and transition records,
-// refs, both argument arrays, and four command counts for indirect consumption.
+// refs, the selected frontend's argument array, and four command counts for indirect consumption.
 // For N elements, dispatch X=min(ceil(N/64),65535), Y=ceil(ceil(N/64)/65535),
 // Z=1. Count/Emit N=candidate_count; prefix0/2 N=max(candidate_count,
 // output_capacity); prefix1 dispatches one group. The shader flattens the2D
 // dispatch and handles padding without wrapping the32-bit candidate address.
 // Counts/offsets are uint2 per candidate; block sums/offsets are uint2 per64.
 // Emit writes matching existing64B GeometryDrawRecord and16B StaticDrawRef,
-// indexed24B and mesh16B commands for each of four views. GeometryDrawBase must
+// indexed24B or mesh16B commands for each of four views. GeometryDrawBase must
 // reserve record0 and fit the existing30-bit packed pass field. Any status fault
 // zeros all four command counts; failed stage2 also clears their command arrays.
 // Tables, candidates and residency are immutable from Count through Emit.

@@ -3703,6 +3703,32 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         Sequence publish_sequence{};
         RenderSnapshotStorage dynamic_previous(1'024, 256, 4, 0);
         RenderSnapshotStorage dynamic_current(1'024, 256, 4, 0);
+#ifdef HS_DEVELOPMENT_TOOLS
+        const auto append_pickup_probe = [&] {
+            if (!config.vfx_showcase) return;
+            constexpr std::array kinds{PersistentVfxKind::PickupXpIdle, PersistentVfxKind::PickupHealIdle,
+                PersistentVfxKind::PickupMagnetIdle, PersistentVfxKind::PickupRelicIdle};
+            constexpr std::array assets{"particle.pickup.xp.idle", "particle.pickup.heal.idle",
+                "particle.pickup.magnet.idle", "particle.pickup.relic_chest.idle"};
+            constexpr std::array colors{0xFFFFD040u, 0xFF40E060u, 0xFFFF3030u, 0xFFE080FFu};
+            constexpr std::array scales{Float3{.34f,.34f,.34f}, Float3{.26f,.55f,.26f},
+                Float3{.48f,.48f,.48f}, Float3{.40f,.40f,.40f}};
+            for (std::size_t i=0;i<kinds.size();++i)
+            {
+                const float x=-4.5f+3.0f*static_cast<float>(i), z=-3.0f;
+                RenderInstance body{{x,.32f+MeadowGroundHeight({x,z}),z}, i==0?.785398f:0.0f,
+                    scales[i],colors[i],RenderMesh::Pickup,0x5fff000000000001ull+i};
+                PopulateRenderInstanceIdentity(body);
+                dynamic_current.AddInstance(body);
+                PersistentVfxVisual idle{};
+                idle.kind=kinds[i];idle.stable_id=0x6fff000000000001ull+i;
+                idle.position=body.position;idle.yaw=body.yaw;
+                idle.radius=std::max(body.scale.x,body.scale.z);
+                idle.effect_asset=MakeAssetId(assets[i]);idle.entity_render_id=body.stable_id;
+                dynamic_current.AddPersistentVfx(idle);
+            }
+        };
+#endif
         bool has_dynamic_sample{};
         bool has_previous_dynamic_sample{};
         std::vector<DomainSignal> retained_line_signals;
@@ -3784,6 +3810,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.simulation_done.store(true, std::memory_order_release);
                 return;
             }
+#ifdef HS_DEVELOPMENT_TOOLS
+            append_pickup_probe();
+#endif
             configure_dynamic_camera(model);
             now = FixedStepClock::Clock::now();
             clock.Realign(now);
@@ -4218,6 +4247,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             break;
                         }
                     }
+#ifdef HS_DEVELOPMENT_TOOLS
+                    if (project_dynamic) append_pickup_probe();
+#endif
                     if (project_dynamic) ++dynamic_pair_revision;
                     dynamic_current.header.checksum = model.checksum;
                     dynamic_current.header.dynamic_pair_revision = dynamic_pair_revision;
@@ -4741,7 +4773,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 case UiCommandKind::SetShadowResolution:
                 case UiCommandKind::SetParticlePercentage:
                 case UiCommandKind::SetBloom:
-                case UiCommandKind::SetOutline:
                 case UiCommandKind::SetGraphicsSetting:
                 case UiCommandKind::SetVfxScreenOverlayIntensityPercent:
                     graphics_ui_phase.store((ui_command.kind != UiCommandKind::SetGraphicsSetting ||

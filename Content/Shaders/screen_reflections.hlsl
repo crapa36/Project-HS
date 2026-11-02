@@ -369,6 +369,7 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
         float visibility = saturate(closure.ao * ambient);
         uint samples = max(SsrBudget.x, 1u);
         const HsBsdfSamplingContext sampling = HsBsdfPrepareSampling(closure, view);
+        const HsBsdfPdfContext pdfContext = HsBsdfPreparePdf(closure, view);
         [loop] for (uint sampleIndex = 0; sampleIndex < samples; ++sampleIndex)
         {
             HsBsdfSampleResult sample = HsBsdfSamplePrepared(closure, view, sampling,
@@ -380,7 +381,7 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
             if (!SsrTraceRay(g, sample.wi, hitPixel, confidence)) continue;
             float3 diffuse, specular;
             HsBsdfEvaluateComponents(closure, view, sample.wi, diffuse, specular);
-            float pdf = HsBsdfPdf(closure, view, sample.wi);
+            float pdf = HsBsdfPdfPrepared(closure, view, pdfContext, sample.wi);
             if (pdf <= 0.0) continue;
             // Trace the lighting snapshot before replacement, excluding its
             // view-dependent environment specular. There is no SSR feedback.

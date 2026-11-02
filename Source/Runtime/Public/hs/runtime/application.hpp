@@ -36,7 +36,6 @@ struct ApplicationConfig
     bool gpu_validation{};
     bool vsync{true};
     bool bloom{true};
-    bool outline{true};
     bool resize_test{};
     bool borderless{};
     bool character_preview{};
@@ -83,7 +82,6 @@ struct ApplicationConfig
     bool shadow_resolution_explicit{};
     bool particle_percentage_explicit{};
     bool bloom_explicit{};
-    bool outline_explicit{};
     std::uint64_t seed{1};
     Tick maximum_ticks{180};
     BarrierMode barrier_mode{BarrierMode::Automatic};

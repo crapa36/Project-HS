@@ -12,7 +12,7 @@ namespace hs
 struct PresentationGuideResource { ResourceVersion version; ID3D12Resource *resource{}; };
 struct PresentationGuidesInputs
 {
-    // Display-linear Rec.709 after tone map/outline/FXAA, without ANY UI.
+    // Display-linear Rec.709 after tone map/FXAA, without ANY UI.
     // The UI bitmap is D2D/WIC premultiplied encoded sRGB BGRA8.
     PresentationGuideResource display_linear, encoded_ui, depth, motion;
     PresentationGuideResource transparent_depth, transparent_motion, transparent_classification, transparent_metadata;

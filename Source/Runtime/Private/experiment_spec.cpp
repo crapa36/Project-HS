@@ -118,7 +118,7 @@ void ValidateConfigOverrides(const Json &value)
 {
     constexpr std::array allowed{
         "warp",          "validation",          "gpu_validation", "vsync",
-        "bloom",         "outline",             "resize_test",    "borderless",
+        "bloom",                                "resize_test",    "borderless",
         "width",         "height",              "frame_cap",      "render_scale_percent",
         "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
         "capture_hero_work", "capture_hero_work_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
@@ -126,7 +126,7 @@ void ValidateConfigOverrides(const Json &value)
     CheckKeys(value, "config_overrides", allowed, std::array<std::string_view, 0>{});
 
     constexpr std::array boolean_fields{
-        "warp", "validation", "gpu_validation", "vsync", "bloom", "outline",
+        "warp", "validation", "gpu_validation", "vsync", "bloom",
         "resize_test", "borderless", "capture_hero_work", "capture_gpu_timings", "smoke_render_lockstep"};
     for (const auto field : boolean_fields)
     {
@@ -676,7 +676,6 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("gpu_validation", config.gpu_validation);
         boolean("vsync", config.vsync);
         boolean("bloom", config.bloom);
-        boolean("outline", config.outline);
         boolean("resize_test", config.resize_test);
         boolean("borderless", config.borderless);
         boolean("capture_hero_work", config.capture_hero_work);
@@ -743,7 +742,6 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         if (overrides.contains("vsync")) config.vsync_explicit = true;
         if (overrides.contains("borderless")) config.borderless_explicit = true;
         if (overrides.contains("bloom")) config.bloom_explicit = true;
-        if (overrides.contains("outline")) config.outline_explicit = true;
         if (config.capture_hero_work || config.diagnostic_enemy_count)
             config.capture_diagnostics = true;
         if (overrides.contains("barrier_mode"))

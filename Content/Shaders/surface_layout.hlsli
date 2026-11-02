@@ -78,26 +78,7 @@ bool HsSurfaceValid(HsSurfaceSample surface)
     return HsSurfaceValid(surface.depth, surface.metadata);
 }
 
-float HsSurfaceOutlineMask(int2 pixel)
-{
-    pixel = clamp(pixel, int2(0, 0), int2(ScreenSize.xy) - 1);
-    const float depth = SurfaceDepth.Load(int3(pixel, 0));
-    const uint2 metadata = HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(pixel, 0)));
-    return HsSurfaceValid(depth, metadata) && HsSurfaceOutlineGroup(metadata) != 0u ? 1.0 : 0.0;
-}
 
-float HsSampleSurfaceOutlineMask(float2 raster_uv)
-{
-    // Preserve the existing fractional outline footprint while loading integer
-    // metadata exactly. Only the derived group mask is interpolated.
-    const float2 position = raster_uv * ScreenSize.xy - 0.5;
-    const int2 pixel = int2(floor(position));
-    const float2 weight = frac(position);
-    return lerp(lerp(HsSurfaceOutlineMask(pixel),
-                     HsSurfaceOutlineMask(pixel + int2(1, 0)), weight.x),
-                lerp(HsSurfaceOutlineMask(pixel + int2(0, 1)),
-                     HsSurfaceOutlineMask(pixel + int2(1, 1)), weight.x), weight.y);
-}
 
 float3 HsSurfaceWorldPosition(HsSurfaceSample surface)
 {

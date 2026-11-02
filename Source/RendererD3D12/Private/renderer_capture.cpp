@@ -1532,7 +1532,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     struct CommandDiagnostic
     {
         std::uint32_t published{}, nonzero{}, last_nonzero_exclusive{}, outside_prefix_nonzero{};
-        std::uint64_t draw_vertices{};
+        std::uint64_t draw_vertices{}, mesh_groups{};
         std::uint64_t argument_offset{};
     };
     static_assert(kGeometryArgumentStride == 24); // Root constant + DRAW words and padding.
@@ -1545,6 +1545,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         std::size_t status_buffer_index{std::numeric_limits<std::size_t>::max()};
         std::array<std::size_t, 6> command_buffer_indices{};
         std::array<CommandDiagnostic, 5> commands{};
+        bool mesh{};
+        std::uint32_t argument_stride{};
     };
     std::vector<CutCapture> cuts;
     if (cluster_frame)
@@ -1572,6 +1574,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             CutCapture capture;
             capture.ordinal = ordinal;
             capture.cut = &cut;
+            capture.mesh = cut.geometry_frontend_flags == kGeometryMeshEligible;
+            capture.argument_stride = capture.mesh ? 16u : kGeometryArgumentStride;
             std::memcpy(&capture.constants, mapped_constants,
                         sizeof(capture.constants));
             const D3D12_RANGE no_write{};
@@ -1661,8 +1665,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         cut.status_buffer_index = buffers.size();
         buffers.push_back({std::format("cluster_status_{}", cut.ordinal),
                            &cut.cut->status, 0, 0, {}, cut.ordinal});
-        const auto argument_bytes = static_cast<UINT64>(cut.status.committed_records) *
-            kGeometryArgumentStride;
+        const auto argument_bytes = static_cast<UINT64>(cut.status.committed_records) * cut.argument_stride;
         command_readback_bytes += 5 * argument_bytes + 5 * sizeof(std::uint32_t);
         if (command_readback_bytes > 512ull * 1024 * 1024)
             return invalid("Cluster command diagnostic prefixes exceed the 512 MiB capture budget.");
@@ -1674,9 +1677,10 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         {
             cut.command_buffer_indices[view + 1] = buffers.size();
             const auto source_offset = view == 4 ? 0 : view *
-                static_cast<UINT64>(cut.cut->output_capacity) * kGeometryArgumentStride;
+                static_cast<UINT64>(cut.cut->output_capacity) * cut.argument_stride;
             buffers.push_back({std::format("cluster_commands_{}_{}", cut.ordinal, view),
-                               view == 4 ? &cut.cut->retest_draw_commands : &cut.cut->draw_commands,
+                               view == 4 ? (cut.mesh ? &cut.cut->retest_mesh_commands : &cut.cut->retest_draw_commands)
+                                         : (cut.mesh ? &cut.cut->mesh_commands : &cut.cut->draw_commands),
                                0, argument_bytes, {}, cut.ordinal, source_offset});
         }
     }
@@ -1921,10 +1925,11 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             for (std::uint32_t selection = 0; selection < cut.status.committed_records; ++selection)
             {
                 const auto *argument = mapped + arguments.offset +
-                    static_cast<UINT64>(selection) * kGeometryArgumentStride;
-                const auto vertices = ReadU32(argument + 4);
-                const auto instances = ReadU32(argument + 8);
-                if (!vertices || !instances) continue;
+                    static_cast<UINT64>(selection) * cut.argument_stride;
+                const auto x = ReadU32(argument + 4);
+                const auto y = ReadU32(argument + 8);
+                const auto z = cut.mesh ? ReadU32(argument + 12) : 1u;
+                if (!x || !y || !z) continue;
                 const auto active_bit = 1u << (view == 4 ? 0u : static_cast<unsigned>(view));
                 if ((cut.constants.active_view_mask & active_bit) == 0u)
                     return fail_mapped("Cluster command diagnostic emits into an inactive view.");
@@ -1935,7 +1940,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 }
                 ++command.nonzero;
                 command.last_nonzero_exclusive = selection + 1;
-                command.draw_vertices += static_cast<std::uint64_t>(vertices) * instances;
+                if (cut.mesh) command.mesh_groups += static_cast<std::uint64_t>(x) * y * z;
+                else command.draw_vertices += static_cast<std::uint64_t>(x) * y;
             }
         }
     }
@@ -1969,6 +1975,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             constants.generation != cut.cut->generation ||
             constants.generation != impl_->cluster_runtime->generation ||
             constants.output_capacity != cut.cut->output_capacity ||
+            constants.geometry_frontend_flags != cut.cut->geometry_frontend_flags ||
+            (constants.geometry_frontend_flags != 0u && constants.geometry_frontend_flags != kGeometryMeshEligible) ||
             constants.geometry_draw_base != cut.cut->geometry_draw_base ||
             constants_frame_id != cut.cut->actual_frame_id ||
             constants.cluster_ref_base > cluster_ref_capacity ||
@@ -2383,13 +2391,13 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     for (std::size_t index = 0; index < variant_counts.size(); ++index)
         output << (index == 0 ? "" : ", ") << variant_counts[index];
     output << "],\n  \"cluster_command_readback_bytes\": " << command_readback_bytes
-           << ",\n  \"cluster_command_layout\": {\"indexed\": {\"file\": \""
+           << ",\n  \"cluster_command_layout\": {\"schema_version\": 2, \"arguments\": {\"file\": \""
            << json_escape(raw_path("cluster_commands").filename().string())
-           << "\", \"stride\": " << kGeometryArgumentStride << ", \"size\": " << cluster_commands_raw.size()
+           << "\", \"size\": " << cluster_commands_raw.size()
            << "}, \"counts\": {\"file\": \""
            << json_escape(raw_path("cluster_command_counts").filename().string())
            << "\", \"stride\": 20, \"size\": " << cluster_command_counts_raw.size()
-           << "}, \"mesh_arguments_captured\": false}"
+           << "}}"
            << ",\n  \"cluster_commands\": [";
     for (std::size_t index = 0; index < cuts.size(); ++index)
     {
@@ -2407,6 +2415,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                << ", \"failure_flags\": " << cut.status.failure_flags
                << ", \"pixel_contributing_raster_records\": " << used_cluster_records
                << ", \"geometry_frontend_flags\": " << cut.cut->geometry_frontend_flags
+               << ", \"argument_stride\": " << cut.argument_stride
                << ", \"command_counts_offset\": " << index * 5 * sizeof(std::uint32_t)
                << ", \"views\": [";
         for (std::size_t view = 0; view < cut.commands.size(); ++view)
@@ -2414,7 +2423,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             const auto &command = cut.commands[view];
             output << (view ? ", " : "") << "{\"view\": " << view
                    << ", \"argument_offset\": " << command.argument_offset
-                   << ", \"argument_size\": " << static_cast<std::uint64_t>(cut.status.committed_records) * kGeometryArgumentStride
+                   << ", \"argument_size\": " << static_cast<std::uint64_t>(cut.status.committed_records) * cut.argument_stride
                    << ", \"published_count\": " << command.published
                    << ", \"nonzero_count\": " << command.nonzero
                    << ", \"zero_count\": " << command.published - command.nonzero
@@ -2423,12 +2432,13 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                    << ", \"committed_prefix_not_submitted\": " << cut.status.committed_records - command.published
                    << ", \"nonzero_outside_published_prefix\": " << command.outside_prefix_nonzero
                    << ", \"unused_capacity_records_not_inspected\": " << cut.cut->output_capacity - cut.status.committed_records
-                   << ", \"draw_vertex_count_sum\": " << command.draw_vertices << "}";
+                   << ", \"draw_vertex_count_sum\": " << command.draw_vertices
+                   << ", \"mesh_group_count_sum\": " << command.mesh_groups << "}";
         }
         output << "]}";
     }
     output << "\n  ],\n  \"cluster_command_notes\": \"Views 0=main after previous-HZB cull, 1..3=CSM, 4=current-depth retest. "
-              "24-byte vertex-pull arguments are written for both geometry frontends; draw_vertex_count_sum is the vertex-pull argument workload, "
+              "Each catalog uses its selected indexed or mesh stride; draw_vertex_count_sum and mesh_group_count_sum are argument workloads, "
               "not measured VS/MS invocations. Uncommitted allocation tails are neither copied nor inspected.\",\n  \"num_records\": " << used_record_count
            << ",\n  \"record_capacity\": " << raster_capacity
            << ",\n  \"declared_formats\": {\"visibility_ids\": \"DXGI_FORMAT_R32G32_UINT\", "

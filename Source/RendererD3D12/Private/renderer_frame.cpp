@@ -2226,10 +2226,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {
                 gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
                 gpu_ring.shape_extent_speed_min = {geometry.inner_radius,
-                    geometry.outer_radius, geometry.edge_width, 0.0f};
+                    geometry.outer_radius, geometry.edge_width, geometry.mask_strength};
                 gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
                 gpu_ring.modes.x = geometry.spokes;
                 gpu_ring.modes.y = geometry.rings;
+                gpu_ring.modes.z = geometry.mask_slice;
             }
             if (authored_additive_shape)
             {
@@ -2522,7 +2523,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     constants->material_sidecar_info = {sidecar.mask, sidecar.word_count, sidecar.plane_count, 0};
     constants->output_size = {static_cast<float>(owned_view.width), static_cast<float>(owned_view.height),
                              1.0f / owned_view.width, 1.0f / owned_view.height};
-    constants->post_options = {impl_->config.bloom_strength, impl_->config.outline_width_px,
+    constants->post_options = {impl_->config.bloom_strength, 0.0f,
                               impl_->config.color_grading ? 1.0f : 0.0f, impl_->config.sharpening};
     const bool pom_enabled = impl_->config.pom_quality != GraphicsOptionalQuality::Off;
     const auto pom_row = pom_enabled ? static_cast<GraphicsQuality>(static_cast<unsigned>(impl_->config.pom_quality) - 1u) : GraphicsQuality::Low;
@@ -3009,7 +3010,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     cpu_timings.palette_prepare_us = capture_elapsed(palette_prepare_start);
     constants->render_options = {
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
-        impl_->config.outline ? 1.0f : 0.0f,
+        0.0f,
         static_cast<float>(particle_delta_ticks) / 60.0f};
     constants->authored_particle_clock = {static_cast<std::uint32_t>(stateful_target), 0, 0, 0};
     if (!consume_scene_inputs) { gpu_particle_spawn_count = 0; total_particles_to_spawn = 0; }
@@ -4875,10 +4876,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         tone_map_input = alternate_texture_table(
             kToneMapInputDescriptorOffset,
             owned_view.targets.temporal_history[temporal_write_index].resource.Get());
-    auto fxaa_input = texture_table;
-    if (!impl_->config.outline)
-        fxaa_input = alternate_texture_table(kFxaaInputDescriptorOffset,
-                                             owned_view.targets.post_a.resource.Get());
+    auto fxaa_input = alternate_texture_table(kFxaaInputDescriptorOffset,
+                                               owned_view.targets.post_a.resource.Get());
     auto character_table = texture_table;
     character_table.ptr += static_cast<UINT64>(kPostTextureDescriptorCount) *
                            impl_->srv_stride;
@@ -5156,7 +5155,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         use_visibility && !owned_view.visibility_targets_initialized, csm_required,
         has_authored_material_draw, has_masked_material_draw,
         has_static_authored_material_draw, has_static_masked_material_draw,
-        use_native_reconstruction, impl_->config.bloom, impl_->config.outline,
+        use_native_reconstruction, impl_->config.bloom,
         fxaa_identity, !owned_view.view_targets_initialized,
         !typed_screen.empty() && screen_intensity > 0, !entity_surface_frame.Bytes().empty(),
         constants->vfx_decal_count.x != 0,
@@ -5330,7 +5329,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         const bool pre_bloom = impl_->config.motion_blur != GraphicsMotionBlur::Off ||
             impl_->config.depth_of_field;
         const bool pre_tone_map = impl_->config.color_grading;
-        if (!MatchesPostSubgraphShape(impl_->config.bloom, impl_->config.outline, fxaa_identity,
+        if (!MatchesPostSubgraphShape(impl_->config.bloom, fxaa_identity,
                 !owned_view.view_targets_initialized, pre_bloom, pre_tone_map,
                 devtools_ui_hook, saved.post)) return false;
         const bool transparent_guide_state = have_hero_contributors &&
@@ -9122,9 +9121,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             tone_map_input = alternate_texture_table(kToneMapInputDescriptorOffset,
                 reconstruction_outputs.pre_exposed_resource);
     }
-    const auto tone_map_output_rtv = fxaa_identity && !impl_->config.outline
+    const auto tone_map_output_rtv = fxaa_identity
         ? display_linear_rtv : post_a_rtv;
-    const auto outline_output_rtv = fxaa_identity ? display_linear_rtv : post_b_rtv;
     PostPassCallbacks post_callbacks;
     post_callbacks[0] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -9196,25 +9194,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         {
             constexpr float clear[]{0, 0, 0, 0};
             list->ClearRenderTargetView(tone_map_output_rtv, clear, 0, nullptr);
-            if (fxaa_identity && !impl_->config.outline)
+            if (fxaa_identity)
                 list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
         }
         draw_fullscreen_with_table(list, impl_->tone_map_pipeline.Get(), tone_map_output_rtv,
                                    impl_->config.bloom && !impl_->config.color_grading ? texture_table : tone_map_input);
     };
 
-    post_callbacks[6] = [&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_graphics(list);
-        list->RSSetViewports(1, &output_viewport);
-        list->RSSetScissorRects(1, &output_scissor);
-        if (fxaa_identity ? !owned_view.view_targets_initialized : !impl_->config.bloom)
-        {
-            constexpr float clear[] = {0, 0, 0, 0};
-            list->ClearRenderTargetView(outline_output_rtv, clear, 0, nullptr);
-        }
-        draw_fullscreen(list, impl_->outline_pipeline.Get(), outline_output_rtv);
-    };
 
     post_callbacks[7] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -9229,7 +9215,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 list->ClearRenderTargetView(display_linear_rtv, clear, 0, nullptr);
             }
             draw_fullscreen_with_table(list, impl_->fxaa_pipeline.Get(), display_linear_rtv,
-                                       impl_->config.outline ? texture_table : fxaa_input);
+                                       fxaa_input);
         }
         if (screen_overlay_outputs.active)
             owned_view.screen_overlay.Draw(list, frame_slot, display_linear_rtv);
@@ -9252,7 +9238,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
 
     PostSubgraphInputs post_inputs{
-        impl_->config.bloom, impl_->config.outline, hdr_version, scene_work_version,
+        impl_->config.bloom, hdr_version, scene_work_version,
         depth_version, gbuffer_normal_version, gbuffer_metadata_version,
         gbuffer_motion_version, gbuffer_surface_history_version, temporal_read_version, ui_version,
         temporal_normal_read_version, temporal_material_read_version, exposure_read_version,

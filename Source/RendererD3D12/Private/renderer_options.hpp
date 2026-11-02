@@ -15,7 +15,6 @@ struct RendererOptions
     GraphicsAutoToggle adaptive_shading{GraphicsAutoToggle::Auto};
     bool vsync{true};
     bool bloom{true};
-    bool outline{true};
     std::uint32_t render_scale_percent{100};
     bool dynamic_resolution{};
     std::uint32_t target_render_fps{60};
@@ -26,7 +25,6 @@ struct RendererOptions
     VfxQuality vfx_quality{VfxQuality::High};
     std::uint32_t anisotropic_filtering{16};
     float bloom_strength{1.0f};
-    float outline_width_px{1.0f};
     bool color_grading{true};
     GraphicsMotionBlur motion_blur{GraphicsMotionBlur::Off};
     bool depth_of_field{};

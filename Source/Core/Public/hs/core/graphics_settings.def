@@ -48,7 +48,5 @@ HS_GRAPHICS_SETTING(49, Bloom, bloom, bool, Boolean, true, "true", 0, 0, Effects
 HS_GRAPHICS_SETTING(50, BloomStrength, bloom_strength, float, Float, 1.0f, "1", 0, 2, Effects, "graphics.bloom_strength")
 HS_GRAPHICS_SETTING(51, MotionBlur, motion_blur, GraphicsMotionBlur, Enum, GraphicsMotionBlur::Off, "off", 0, 0, Effects, "graphics.motion_blur")
 HS_GRAPHICS_SETTING(52, DepthOfField, depth_of_field, bool, Boolean, false, "false", 0, 0, Effects, "graphics.depth_of_field")
-HS_GRAPHICS_SETTING(53, Outline, outline, bool, Boolean, true, "true", 0, 0, Effects, "graphics.outline")
-HS_GRAPHICS_SETTING(54, OutlineWidthPx, outline_width_px, float, Float, 1.0f, "1", 0, 4, Effects, "graphics.outline_width_px")
 HS_GRAPHICS_SETTING(55, ColorGrading, color_grading, bool, Boolean, true, "true", 0, 0, Effects, "graphics.color_grading")
 HS_GRAPHICS_SETTING(56, AdaptiveShading, adaptive_shading, GraphicsAutoToggle, Enum, GraphicsAutoToggle::Auto, "auto", 0, 0, Effects, "graphics.adaptive_shading")

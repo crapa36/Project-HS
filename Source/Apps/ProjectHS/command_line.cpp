@@ -245,11 +245,6 @@ ApplicationConfig ParseProjectHsArguments(
             config.bloom_explicit = true;
             config.bloom = false;
         }
-        else if (argument == "--no-outline")
-        {
-            config.outline_explicit = true;
-            config.outline = false;
-        }
         else if (argument.starts_with("--generation="))
         {
             config.generation_pointer =

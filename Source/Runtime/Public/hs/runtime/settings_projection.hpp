@@ -39,7 +39,6 @@ namespace hs
     else if (graphics.particle_quality == GraphicsQuality::Medium)
         effective.particle_percentage = 75;
     effective.bloom = graphics.bloom;
-    effective.outline = graphics.outline;
     effective.master_volume = document.master_volume;
     effective.bgm_volume = document.bgm_volume;
     effective.sfx_volume = document.sfx_volume;
@@ -137,11 +136,6 @@ inline void ApplyGraphicsPreset(GraphicsSettings &graphics)
         if (command.value > 1) return std::nullopt;
         token = command.value ? "true" : "false";
         break;
-    case UiCommandKind::SetOutline:
-        edit.graphics_setting = SettingId::Outline;
-        if (command.value > 1) return std::nullopt;
-        token = command.value ? "true" : "false";
-        break;
     default: return std::nullopt;
     }
     if (token.empty())
@@ -200,7 +194,6 @@ inline bool ApplySettingsEdit(SettingsDocument &document, const UiCommand &comma
             : command.value == 75 ? GraphicsQuality::Medium : GraphicsQuality::High;
         break;
     case UiCommandKind::SetBloom: if (command.value > 1) return false; graphics.bloom = command.value != 0; break;
-    case UiCommandKind::SetOutline: if (command.value > 1) return false; graphics.outline = command.value != 0; break;
     case UiCommandKind::SetMasterVolumePercent:
         if (command.value > 100) return false;
         candidate.master_volume = static_cast<float>(command.value) / 100.0f; graphics_edit = false; break;

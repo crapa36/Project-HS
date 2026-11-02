@@ -22,7 +22,6 @@ struct SettingsData
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
     bool bloom{true};
-    bool outline{true};
     float master_volume{1.0f};
     float bgm_volume{1.0f};
     float sfx_volume{1.0f};
@@ -40,7 +39,6 @@ enum class UiCommandKind : std::uint8_t
     SetShadowResolution,
     SetParticlePercentage,
     SetBloom,
-    SetOutline,
     SetMasterVolumePercent,
     SetBgmVolumePercent,
     SetSfxVolumePercent,

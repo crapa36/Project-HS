@@ -151,16 +151,18 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             entry.block_offsets = import(native.cuts[ordinal].block_offsets, "ClusterBlockOffsets");
             entry.demand = import(native.cuts[ordinal].demand, "ClusterPageDemand");
             entry.status = import(native.cuts[ordinal].status, "ClusterCutStatus");
-            entry.draw_commands = import(native.cuts[ordinal].draw_commands, "ClusterDrawCommands");
-            entry.mesh_commands = import(native.cuts[ordinal].mesh_commands, "ClusterMeshCommands");
+            if (cut.geometry_frontend_flags == kGeometryMeshEligible)
+                entry.mesh_commands = import(native.cuts[ordinal].mesh_commands, "ClusterMeshCommands");
+            else entry.draw_commands = import(native.cuts[ordinal].draw_commands, "ClusterDrawCommands");
             entry.command_counts = import(native.cuts[ordinal].command_counts, "ClusterCommandCounts");
             entry.readback = import(native.cuts[ordinal].readback, "ClusterDemandStatusReadback");
             entry.history_bits = import(native.cuts[ordinal].history_bits, "ClusterSelectedMembership");
             entry.history_generations = import(native.cuts[ordinal].history_generations, "ClusterSelectedInstanceGenerations");
             entry.selected_bounds = import(native.cuts[ordinal].selected_bounds, "ClusterSelectedWorldBounds");
             entry.previous_rejected = import(native.cuts[ordinal].previous_rejected, "ClusterPreviousHzbRejects");
-            entry.retest_draw_commands = import(native.cuts[ordinal].retest_draw_commands, "ClusterRetestDrawCommands");
-            entry.retest_mesh_commands = import(native.cuts[ordinal].retest_mesh_commands, "ClusterRetestMeshCommands");
+            if (cut.geometry_frontend_flags == kGeometryMeshEligible)
+                entry.retest_mesh_commands = import(native.cuts[ordinal].retest_mesh_commands, "ClusterRetestMeshCommands");
+            else entry.retest_draw_commands = import(native.cuts[ordinal].retest_draw_commands, "ClusterRetestDrawCommands");
             entry.previous_frame_slot = cut.previous_history_slot;
             auto *previous = cut.previous_history_slot != UINT32_MAX ? &runtime.frames[cut.previous_history_slot] : nullptr;
             auto *previous_cut = previous ? &previous->cuts[ordinal] : nullptr;
@@ -320,8 +322,10 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 if (cut.active)
                 {
                     for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
-                        &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
+                        &cut.selected_bounds, &cut.previous_rejected})
                         buffer->version = count->Write(buffer->version, Access::UnorderedWrite);
+                    auto &retest = cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands;
+                    retest.version = count->Write(retest.version, Access::UnorderedWrite);
                 }
             for (auto &cut : state.cuts)
                 if (cut.active)
@@ -350,8 +354,9 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 // Emit overwrites every published argument; its count excludes the unused tail.
                 const std::array resources{&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
                     &cut.history_bits, &cut.history_generations, &cut.selected_bounds, &cut.previous_rejected,
-                    &cut.retest_draw_commands, &cut.retest_mesh_commands};
-                constexpr std::array<std::uint32_t, 10> slots{0, 4, 5, 10, 12, 13, 14, 15, 16, 17};
+                    cut.geometry_frontend_flags ? &cut.retest_mesh_commands : &cut.retest_draw_commands};
+                const std::array<std::uint32_t, 9> slots{0, 4, 5, 10, 12, 13, 14, 15,
+                    cut.geometry_frontend_flags ? 17u : 16u};
                 for (std::size_t i = 0; i < resources.size(); ++i) clear(ordinal, slots[i], *resources[i]);
                 if (!refs_cleared)
                 {
@@ -367,8 +372,9 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 for (const auto *buffer : {&state.cuts[ordinal].counts,
                     &state.cuts[ordinal].demand, &state.cuts[ordinal].status, &state.cuts[ordinal].command_counts,
                     &state.cuts[ordinal].history_bits, &state.cuts[ordinal].history_generations,
-                    &state.cuts[ordinal].selected_bounds, &state.cuts[ordinal].previous_rejected,
-                    &state.cuts[ordinal].retest_draw_commands, &state.cuts[ordinal].retest_mesh_commands}) context.UavBarrier(buffer->handle);
+                    &state.cuts[ordinal].selected_bounds, &state.cuts[ordinal].previous_rejected}) context.UavBarrier(buffer->handle);
+                auto &cut = state.cuts[ordinal];
+                context.UavBarrier((cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands).handle);
             }
             context.UavBarrier(state.refs.handle);
             list->SetPipelineState(cluster_count_pipeline.Get());
@@ -409,8 +415,8 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                     {
                         prefix->Read(cut.block_offsets.version, Access::UnorderedRead);
                         cut.offsets.version = prefix->ReadWrite(cut.offsets.version, Access::UnorderedWrite);
-                        cut.draw_commands.version = prefix->ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
-                        cut.mesh_commands.version = prefix->ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
+                        auto &commands = cut.mesh_commands.native ? cut.mesh_commands : cut.draw_commands;
+                        commands.version = prefix->ReadWrite(commands.version, Access::UnorderedWrite);
                     }
                 }
             prefix->SetExecute([this, frame_slot, &state, bind, stage](RenderPassContext &context) {
@@ -446,9 +452,11 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 if (!cut.active) continue;
                 emit->Read(cut.counts.version, Access::UnorderedRead);
                 emit->Read(cut.offsets.version, Access::UnorderedRead);
-                for (auto *buffer : {&cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
+                for (auto *buffer : {&cut.status, &cut.command_counts,
                     &cut.history_bits, &cut.history_generations, &cut.selected_bounds})
                     buffer->version = emit->ReadWrite(buffer->version, Access::UnorderedWrite);
+                auto &commands = cut.mesh_commands.native ? cut.mesh_commands : cut.draw_commands;
+                commands.version = emit->ReadWrite(commands.version, Access::UnorderedWrite);
             }
         }
         emit->SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
@@ -497,9 +505,10 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         if (cut.active)
         {
             for (const auto *buffer : {&cut.counts, &cut.offsets, &cut.block_sums, &cut.block_offsets,
-                &cut.demand, &cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
-                &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
+                &cut.demand, &cut.status, &cut.command_counts, &cut.selected_bounds, &cut.previous_rejected})
                 graph.SetFinalAccess(buffer->version, Access::UnorderedWrite);
+            graph.SetFinalAccess((cut.mesh_commands.native ? cut.mesh_commands : cut.draw_commands).version, Access::UnorderedWrite);
+            graph.SetFinalAccess((cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands).version, Access::UnorderedWrite);
             graph.SetFinalAccess(cut.readback.version, Access::CopyDest);
             graph.SetFinalAccess(cut.history_bits.version, Access::ComputeRead);
             graph.SetFinalAccess(cut.history_generations.version, Access::ComputeRead);
@@ -556,22 +565,20 @@ Result D3D12Renderer::Impl::AddClusterOcclusionPass(OwnedView &owner, std::uint3
             if (retest)
             {
                 pass->Read(cut.previous_rejected.version, Access::UnorderedRead);
-                cut.retest_draw_commands.version = pass->Write(cut.retest_draw_commands.version, Access::UnorderedWrite);
-                cut.retest_mesh_commands.version = pass->Write(cut.retest_mesh_commands.version, Access::UnorderedWrite);
+                auto &commands = cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands;
+                commands.version = pass->Write(commands.version, Access::UnorderedWrite);
                 cut.command_counts.version = pass->ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
-                graph.SetFinalAccess(cut.retest_draw_commands.version, Access::UnorderedWrite);
-                graph.SetFinalAccess(cut.retest_mesh_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(commands.version, Access::UnorderedWrite);
                 graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
             }
             else
             {
                 cut.previous_rejected.version = pass->Write(cut.previous_rejected.version, Access::UnorderedWrite);
-                cut.draw_commands.version = pass->ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
-                cut.mesh_commands.version = pass->ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
+                auto &commands = cut.mesh_commands.native ? cut.mesh_commands : cut.draw_commands;
+                commands.version = pass->ReadWrite(commands.version, Access::UnorderedWrite);
                 cut.command_counts.version = pass->ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
                 graph.SetFinalAccess(cut.previous_rejected.version, Access::UnorderedWrite);
-                graph.SetFinalAccess(cut.draw_commands.version, Access::UnorderedWrite);
-                graph.SetFinalAccess(cut.mesh_commands.version, Access::UnorderedWrite);
+                graph.SetFinalAccess(commands.version, Access::UnorderedWrite);
                 graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
             }
         }

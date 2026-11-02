@@ -462,7 +462,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
             {owner.render_width, owner.render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
     if (auto created = create_target(owner.targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                      black, owner.width, owner.height); !created) return created;
-    if (config.bloom || config.outline)
+    if (config.bloom)
         if (auto created = create_target(owner.targets.post_b, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                          black, owner.width, owner.height); !created) return created;
     const bool native_resolve = UsesInternalResolveTargets(owner.reconstruction_plan);
@@ -753,7 +753,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
                                                  bool bloom,
                                                  std::uint32_t output_width,
                                                  std::uint32_t output_height,
-                                                 bool native_resolve, bool outline,
+                                                 bool native_resolve,
                                                  std::array<bool, 2> lighting_auxiliaries)
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
@@ -825,7 +825,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
     if (auto result = PrepareLightingAuxiliaries({&targets.subsurface_diffuse, &targets.environment_specular}, {target_width, target_height}, lighting_auxiliaries); !result) return result;
     if (auto result = color_target(targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                    black, output_width, output_height); !result) return result;
-    if (bloom || outline)
+    if (bloom)
         if (auto result = color_target(targets.post_b, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                        black, output_width, output_height); !result) return result;
     if (native_resolve)

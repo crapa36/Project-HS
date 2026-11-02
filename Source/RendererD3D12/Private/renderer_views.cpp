@@ -337,7 +337,10 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                          (geometry.outer_radius + geometry.edge_width)) > 0.0001f ||
                 !std::isfinite(source.stretch) ||
                 std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
-                geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
+                (geometry.mask_slice != 0xffffffffu && geometry.mask_slice >= 12) ||
+                !std::isfinite(geometry.mask_strength) || geometry.mask_strength < 0.0f ||
+                geometry.mask_strength > 1.0f ||
+                (geometry.mask_slice == 0xffffffffu && geometry.mask_strength != 0.0f) ||
                 geometry.GapCount() != 0))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored polar rune.");
             const float authored_radius = geometry.outer_radius;
@@ -715,7 +718,7 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
             v.reconstruction_plan, native_capacity, v.reconstruction_provider, &config); !r) return r;
     if (auto r = PrepareOptionTargets(v.targets, input.render_capacity.width, input.render_capacity.height,
             config.shadow_resolution, config.bloom, input.output_extent.width, input.output_extent.height,
-            UsesInternalResolveTargets(v.reconstruction_plan), config.outline,
+            UsesInternalResolveTargets(v.reconstruction_plan),
             RequiredLightingAuxiliaries(config)); !r) return r;
     candidate->transient_textures_common = enhanced;
     if (auto r = PrepareUiResources(v.ui, v.width, v.height); !r) return r;

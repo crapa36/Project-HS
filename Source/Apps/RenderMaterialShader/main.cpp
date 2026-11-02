@@ -149,9 +149,13 @@ bool IsHeroTranslucentProgram(const ProgramOutput &program)
     return std::ranges::find(entries, program.entry) != entries.end();
 }
 
+enum class ShaderFamily { Preintegrated, HeroWork, ScreenReflections };
+
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
-                           const fs::path &dxc, bool hero_work = false)
+                           const fs::path &dxc, ShaderFamily family)
 {
+    const bool hero_work = family == ShaderFamily::HeroWork;
+    const bool ssr = family == ShaderFamily::ScreenReflections;
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
             "all paths must be absolute");
     ap::RequireDirectory(source_root);
@@ -160,9 +164,16 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     ap::ActionSpec spec;
     spec.action_id = "render.shader.bsdf-preintegrate";
     spec.recipe_id = "project-hs.render.bsdf-preintegrate";
-    spec.recipe_version = 12;
+    spec.recipe_version = 13;
     spec.namespace_path = "render/shader/bsdf-preintegrate";
-    if (hero_work)
+    if (ssr)
+    {
+        spec.action_id = "render.shader.screen-reflections";
+        spec.recipe_id = "project-hs.render.screen-reflections";
+        spec.recipe_version = 1;
+        spec.namespace_path = "render/shader/screen-reflections";
+    }
+    else if (hero_work)
     {
         spec.action_id = "render.shader.hero-work";
         spec.recipe_id = "project-hs.render.hero-work-ps";
@@ -179,9 +190,11 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     PreparedMaterialInputs materials(source_root);
     const auto generated = DeferredContextInclude(spec, source_root, materials);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
-    const auto hero_context = HeroContextInclude(spec, source_root, materials);
+    const auto hero_context = ssr ? std::string{} : HeroContextInclude(spec, source_root, materials);
     spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json",
                                       source_root / "Schemas/material_graph.schema.json"));
+    if (!ssr)
+    {
     for (const auto *relative : {"Content/Shaders/bsdf_preintegrate.hlsl",
                                  "Content/Shaders/bsdf_metallic_roughness.hlsli",
                                  "Content/Shaders/bsdf_layers.hlsli",
@@ -196,7 +209,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                  "Content/Shaders/material_parameters.hlsli",
                                  "Content/Shaders/deferred_surface.hlsli",
                                  "Content/Shaders/subsurface_diffusion.hlsl",
-                                 "Content/Shaders/screen_reflections.hlsl",
                                  "Content/Shaders/vfx_screen_overlay.hlsl",
                                  "Content/Shaders/adaptive_shading.hlsl",
                                  "Content/Shaders/project_hs.hlsl",
@@ -215,7 +227,24 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                 "Content/Shaders/display_transform.hlsli",
                                 "Content/Shaders/vfx_ribbon.hlsli"})
         spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
-    AddSharedRendererShaderInputs(spec,source_root);
+    }
+    if (ssr)
+    {
+        for (const auto *relative : {"Content/Shaders/screen_reflections.hlsl",
+                                     "Content/Shaders/bsdf_metallic_roughness.hlsli",
+                                     "Content/Shaders/bsdf_layers.hlsli",
+                                     "Content/Shaders/material_surface.hlsli",
+                                     "Content/Shaders/hero_material.hlsli",
+                                     "Content/Shaders/material_sidecar.hlsli",
+                                     "Content/Shaders/material_parameters.hlsli",
+                                     "Content/Shaders/deferred_surface.hlsli",
+                                     "Content/Shaders/surface_layout.hlsli",
+                                     "Content/Shaders/surface_metadata.hlsli",
+                                     "Content/Shaders/render_binding_contract.hlsli"})
+            spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
+        hs::shader_content::AddRenderBindingInputs(spec.inputs, source_root);
+    }
+    else AddSharedRendererShaderInputs(spec,source_root);
     spec.inputs.push_back(ap::HashInput("tool/dxc.exe", dxc));
     for (const auto *library : {"dxcompiler.dll", "dxil.dll"})
         spec.inputs.push_back(ap::HashInput(std::string("tool/") + library,
@@ -264,6 +293,13 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/project_hs.hlsl", L"HeroTransparentGuidePS", L"ps_6_0"},
         ProgramOutput{"render/shader/hero_layer_composite_ps.dxil", "hero_layer_composite_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"HeroLayerCompositePS", L"ps_6_0"}};
+    if (ssr)
+    {
+        std::erase_if(outputs, [](const auto &program) { return !program.id.starts_with("render/shader/ssr_"); });
+        Require(outputs.size() == 5, "screen reflections recipe must contain exactly five SSR entries");
+    }
+    else
+        std::erase_if(outputs, [](const auto &program) { return program.id.starts_with("render/shader/ssr_"); });
     if (hero_work)
     {
         std::erase_if(outputs, [](const auto &program) {
@@ -276,7 +312,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             program.filename.insert(program.filename.size() - 5, "_hero_work");
         }
     }
-    if (!hero_work)
+    if (!hero_work && !ssr)
     {
         for (const auto &program : std::array{
             ProgramOutput{"render/shader/hero_scene_ps.dxil", "hero_scene_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroScenePS", L"ps_6_0"},
@@ -295,14 +331,14 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ap::UpstreamProduct ignored;
             if (result.ActionKeyValue() == ap::ActionKey(spec) &&
                 result.ActionId() == spec.action_id &&
-                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!hero_work))
+                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!hero_work && !ssr))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
                 {
                     valid &= ValidDxilBytes(result.ReadProductBytes(output.id, ignored));
                 }
-                if (!hero_work)
+                if (!hero_work && !ssr)
                 {
                     valid &= result.ReadProductBytes("render/lighting/coated_ggx_dfg.dds", ignored).size() ==
                         148u + 256u * 256u * 8u;
@@ -341,7 +377,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
-        if (!hero_work)
+        if (!hero_work && !ssr)
         {
             const auto dfg = hs::material_content::CookCoatedDfgDds();
             const auto output = stage / "coated_ggx_dfg.dds";
@@ -840,6 +876,7 @@ int wmain(int argc, wchar_t **argv)
     ap::Json action_id = nullptr;
     bool preintegrate = false;
     bool hero_work = false;
+    bool ssr = false;
     bool parameters = false;
     bool decal_surface = false;
     try
@@ -857,6 +894,8 @@ int wmain(int argc, wchar_t **argv)
                 preintegrate = true;
             else if (arg == L"--hero-work" && !hero_work)
                 hero_work = true;
+            else if (arg == L"--screen-reflections" && !ssr)
+                ssr = true;
             else if (arg == L"--decal-surface" && !decal_surface)
                 decal_surface = true;
             else if (arg == L"--parameters" && !parameters)
@@ -875,13 +914,14 @@ int wmain(int argc, wchar_t **argv)
                 throw std::runtime_error("hs_render_material_shader: invalid command line");
         }
         const bool valid_mode =
-            (!hero_work && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
-            (!hero_work && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
-            (!hero_work && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
-            (!hero_work && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
-            (hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
+            (!ssr && !hero_work && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
+            (!ssr && !hero_work && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
+            (!ssr && !hero_work && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
+            (!ssr && !hero_work && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
+            (!ssr && hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty()) ||
+            (ssr && !hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
         Require(valid_mode && !source_root.empty() && !build_root.empty(),
-                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --hero-work | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
+                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --hero-work | --screen-reflections | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
         if (parameters)
         {
             if (hs::material_content::IsAuthoredMaterialName(name) ||
@@ -895,17 +935,23 @@ int wmain(int argc, wchar_t **argv)
             action_id = "render.shader.decal-surface";
             ProduceDecalSurface(source_root.lexically_normal(), build_root.lexically_normal(), dxc.lexically_normal());
         }
+        else if (ssr)
+        {
+            action_id = "render.shader.screen-reflections";
+            ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
+                                  dxc.lexically_normal(), ShaderFamily::ScreenReflections);
+        }
         else if (hero_work)
         {
             action_id = "render.shader.hero-work";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), true);
+                                  dxc.lexically_normal(), ShaderFamily::HeroWork);
         }
         else if (preintegrate)
         {
             action_id = "render.shader.bsdf-preintegrate";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal());
+                                  dxc.lexically_normal(), ShaderFamily::Preintegrated);
         }
         else
         {
@@ -920,7 +966,7 @@ int wmain(int argc, wchar_t **argv)
     {
         ap::ReportFailure("hs_render_material_shader", error.what(),
                           {{"action_id", action_id}, {"name", name},
-                           {"bsdf_preintegrate", preintegrate}, {"hero_work", hero_work},
+                           {"bsdf_preintegrate", preintegrate}, {"hero_work", hero_work}, {"screen_reflections", ssr},
                            {"parameters", parameters}, {"decal_surface", decal_surface},
                            {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)},

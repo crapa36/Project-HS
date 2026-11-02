@@ -279,7 +279,7 @@ constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
     "Forward Transparent/OIT", "OIT Composite", "Temporal Resolve", "Bloom Half Extract",
     "Bloom Quarter Downsample", "Bloom Half Upsample", "Bloom", "ToneMap",
-    "Screen-space Outline", "FXAA", "Game UI", "Depth Pyramid", "Visibility Retest",
+    "Reserved", "FXAA", "Game UI", "Depth Pyramid", "Visibility Retest",
     "GBuffer Retest", "Final Depth Pyramid", "Skin Cache", "UI Upload", "Temporal Initialization"};
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
@@ -873,7 +873,7 @@ struct FrameGraphLayout
         bool dynamic_lod_initialized{}, static_lod_initialized{}, dynamic_lod_prefix{}, static_lod_prefix{};
         bool visibility_target_initialization{}, csm{}, authored_material{}, masked_material{};
         bool static_authored_material{}, static_masked_material{}, native_reconstruction{};
-        bool bloom{}, outline{}, fxaa_identity{}, post_target_initialization{};
+        bool bloom{}, fxaa_identity{}, post_target_initialization{};
         bool screen_overlay_requested{}, entity_surface{}, decal_commands{};
         bool hdr_motion{}, hdr_dof{}, hdr_grade{}, sdk_presentation{}, devtools_ui{};
         bool output_dependency_interval{}, output_ready{};
@@ -1417,7 +1417,7 @@ struct D3D12Renderer::Impl
                                               std::uint32_t shadow_resolution,
                                               bool bloom, std::uint32_t output_width,
                                               std::uint32_t output_height,
-                                              bool native_resolve, bool outline,
+                                              bool native_resolve,
                                               std::array<bool, 2> lighting_auxiliaries);
     [[nodiscard]] Result PrepareOptionPools(
         std::array<TransientResourcePool, kFrameCount> &pools,
@@ -2061,7 +2061,6 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> bloom_upsample_pipeline;
     ComPtr<ID3D12PipelineState> bloom_pipeline;
     ComPtr<ID3D12PipelineState> tone_map_pipeline;
-    ComPtr<ID3D12PipelineState> outline_pipeline;
     ComPtr<ID3D12PipelineState> fxaa_pipeline;
     ComPtr<ID3D12PipelineState> ui_pipeline;
     ComPtr<ID3D12CommandSignature> draw_signature;

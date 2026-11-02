@@ -450,7 +450,7 @@ template <typename T>
 {
     return key == "ray_tracing_enabled" || key == "rt_trace_distance_m" ||
            key == "neural_ray_reconstruction" || key == "ray_reconstruction_provider" ||
-           key == "gi_quality";
+           key == "gi_quality" || key == "outline" || key == "outline_width_px";
 }
 
 [[nodiscard]] bool ParseExtensions(std::string_view text, Json &extensions)
@@ -529,7 +529,6 @@ template <typename T>
             {"shadow_resolution", settings.shadow_resolution},
             {"particle_percentage", settings.particle_percentage},
             {"bloom", settings.bloom},
-            {"outline", settings.outline},
             {"master_volume", settings.master_volume},
             {"bgm_volume", settings.bgm_volume},
             {"sfx_volume", settings.sfx_volume},
@@ -547,7 +546,7 @@ template <typename T>
 
 [[nodiscard]] bool FromJson(const Json &json, SettingsData &settings)
 {
-    if (!json.is_object() || json.size() != 16)
+    if (!json.is_object() || (json.size() != 15 && !(json.size() == 16 && json.contains("outline"))))
     {
         return false;
     }
@@ -564,7 +563,6 @@ template <typename T>
         !ReadUnsigned(json, "shadow_resolution", parsed.shadow_resolution) ||
         !ReadUnsigned(json, "particle_percentage", parsed.particle_percentage) ||
         !ReadBool(json, "bloom", parsed.bloom) ||
-        !ReadBool(json, "outline", parsed.outline) ||
         !ReadVolume(json, "master_volume", parsed.master_volume) ||
         !ReadVolume(json, "bgm_volume", parsed.bgm_volume) ||
         !ReadVolume(json, "sfx_volume", parsed.sfx_volume) ||
@@ -686,7 +684,6 @@ template <typename T>
     migrated.graphics.particle_quality = old.particle_percentage == 50
         ? GraphicsQuality::Low : GraphicsQuality::High;
     migrated.graphics.bloom = old.bloom;
-    migrated.graphics.outline = old.outline;
     migrated.master_volume = old.master_volume;
     migrated.bgm_volume = old.bgm_volume;
     migrated.sfx_volume = old.sfx_volume;

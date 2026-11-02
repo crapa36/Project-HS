@@ -66,6 +66,10 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
         const auto label = hs::GraphicsSettingDisplayLabel(descriptor);
         Check(std::ranges::any_of(label, [](unsigned char byte) { return byte >= 0x80; }),
               "every graphics setting has a Korean display label");
+        if (descriptor.id == hs::SettingId::ColorGrading)
+            Check(label == "색 보정", "color grading retains its label after removed settings");
+        if (descriptor.id == hs::SettingId::AdaptiveShading)
+            Check(label == "적응형 셰이딩", "adaptive shading retains its label after removed settings");
     }
     Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Vsync, "true") == "켜짐" &&
               hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "0") == "제한 없음" &&
@@ -73,8 +77,7 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
               hs::GraphicsSettingDisplayValue(hs::SettingId::ReconstructionProvider, "internal_taau") == "기본 TAA 업스케일링",
           "settings localize values and show meaningful units");
     Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Sharpening, "0.200000003") == "0.2" &&
-              hs::GraphicsSettingDisplayValue(hs::SettingId::BloomStrength, "0.100000001") == "0.1" &&
-              hs::GraphicsSettingDisplayValue(hs::SettingId::OutlineWidthPx, "1.23456789") == "1.235 px",
+              hs::GraphicsSettingDisplayValue(hs::SettingId::BloomStrength, "0.100000001") == "0.1",
           "float display removes binary precision noise and retains three decimal places");
     Check(hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "1000.12500001") == "1000.125 nit" &&
               hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "auto") == "자동" &&

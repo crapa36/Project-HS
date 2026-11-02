@@ -75,7 +75,7 @@ bool SameVersion(ResourceVersion left, ResourceVersion right)
 
 struct PostFixture
 {
-    PostSubgraphInputs inputs{false, false,
+    PostSubgraphInputs inputs{false,
         Texture(1), Texture(2), Texture(3), Texture(4), Texture(5), Texture(6),
         Texture(7), Texture(8), Texture(9)};
     PostSubgraphTargets targets{Texture(10), Texture(11), Texture(12), Texture(13),
@@ -91,33 +91,27 @@ const PostPassPlan &Pass(const PostSubgraphPlan &plan, std::uint32_t id)
 
 void ConfiguredPostTopology()
 {
-    for (const bool enable_bloom : {false, true})
-        for (const bool enable_outline : {false, true})
-        {
+    for (const bool enable_bloom : {false, true})        {
             PostFixture fixture;
             fixture.inputs.bloom = enable_bloom;
-            fixture.inputs.outline = enable_outline;
             PostSubgraphPlan plan;
             Check(CompilePostSubgraphs(fixture.inputs, fixture.targets, plan).Succeeded(), "compile post topology");
-            Check(plan.passes.size() == 4u + (enable_bloom ? 4u : 0u) + (enable_outline ? 1u : 0u),
+            Check(plan.passes.size() == 4u + (enable_bloom ? 4u : 0u),
                   "disabled features omit their actual GPU passes");
             for (std::uint32_t id = 10; id <= 13; ++id)
                 Check((std::ranges::find(plan.passes, id, &PostPassPlan::id) != plan.passes.end()) == enable_bloom,
                       "bloom subgraph is present only when enabled");
-            Check((std::ranges::find(plan.passes, 15u, &PostPassPlan::id) != plan.passes.end()) == enable_outline,
-                  "outline subgraph is present only when enabled");
             const auto tone_input = enable_bloom ? Pass(plan, 13).output : Pass(plan, 9).output;
             Check(Pass(plan, 14).reads.size() == 1 && SameVersion(Pass(plan, 14).reads[0].version, tone_input),
                   "tone mapping consumes bloom output or bypasses to temporal output");
-            const auto aa_input = enable_outline ? Pass(plan, 15).output : Pass(plan, 14).output;
+            const auto aa_input = Pass(plan, 14).output;
             Check(Pass(plan, 16).reads.size() == 1 && SameVersion(Pass(plan, 16).reads[0].version, aa_input),
-                  "FXAA consumes outline output or bypasses to tone mapping");
+                  "FXAA consumes tone mapping output");
             Check(Pass(plan, 17).read_write && SameVersion(Pass(plan, 17).predecessor, Pass(plan, 16).output),
                   "UI loads and blends into the produced back buffer version");
             Check(SameVersion(plan.outputs.temporal, Texture(10, 1)) &&
                   SameVersion(plan.outputs.post_a, Texture(2, 1)) &&
-                  SameVersion(plan.outputs.post_b, Texture(14, static_cast<std::uint32_t>(enable_bloom) +
-                                                             static_cast<std::uint32_t>(enable_outline))) &&
+                  SameVersion(plan.outputs.post_b, Texture(14, static_cast<std::uint32_t>(enable_bloom))) &&
                   SameVersion(plan.outputs.back_buffer, Texture(15, 2)),
                   "post outputs preserve physical ping-pong targets and final versions");
         }
@@ -148,13 +142,10 @@ void ConfiguredPostTopology()
 
 void ExternalPostTopology()
 {
-    for (const bool bloom : {false, true})
-        for (const bool outline : {false, true})
-            for (const bool linear_ui : {false, true})
+    for (const bool bloom : {false, true})            for (const bool linear_ui : {false, true})
             {
                 PostFixture fixture;
                 fixture.inputs.bloom = bloom;
-                fixture.inputs.outline = outline;
                 fixture.inputs.external_temporal = Texture(20, 7);
                 fixture.inputs.normal = {};
                 fixture.inputs.motion = {};
@@ -195,12 +186,9 @@ void ExternalPostTopology()
 }
 
 void IdentityFxaaTopology()
-{
-    for (const bool outline : {false, true})
-        for (const bool overlay : {false, true})
+{        for (const bool overlay : {false, true})
         {
             PostFixture fixture;
-            fixture.inputs.outline = outline;
             fixture.inputs.fxaa_identity = true;
             fixture.targets.display_linear = Texture(21, 3);
             if (overlay)
@@ -212,19 +200,14 @@ void IdentityFxaaTopology()
             Check(CompilePostSubgraphs(fixture.inputs, fixture.targets, plan).Succeeded(),
                   "compile identity FXAA plan");
             const auto &tone_map = Pass(plan, 14);
-            const auto &color_output = outline ? Pass(plan, 15).output : tone_map.output;
-            Check(SameVersion(tone_map.output, outline ? Texture(2, 1) : Texture(21, 4)),
-                  "identity FXAA routes tone map to display linear only without outline");
-            if (outline)
-                Check(SameVersion(Pass(plan, 15).output, Texture(21, 4)) &&
-                          SameVersion(Pass(plan, 15).predecessor, Texture(21, 3)) &&
-                          SameVersion(Pass(plan, 15).reads[0].version, tone_map.output),
-                      "identity FXAA routes outline directly to display linear");
+            const auto &color_output = tone_map.output;
+            Check(SameVersion(tone_map.output, Texture(21, 4)),
+                  "identity FXAA routes tone map to display linear");
             Check(SameVersion(plan.outputs.display_linear,
                               Texture(21, overlay ? 5 : 4)) &&
                       SameVersion(Pass(plan, 17).reads.back().version, plan.outputs.display_linear),
                   "Game UI reads the actual final display-linear version");
-            Check(SameVersion(plan.outputs.post_a, Texture(2, outline ? 1 : 0)) &&
+            Check(SameVersion(plan.outputs.post_a, Texture(2, 0)) &&
                       SameVersion(plan.outputs.post_b, Texture(14, 0)),
                   "identity FXAA preserves unused ping-pong target versions");
             Check(tone_map.additional_outputs.empty(), "steady identity FXAA does not rewrite post A");

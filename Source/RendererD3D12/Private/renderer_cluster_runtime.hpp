@@ -197,6 +197,6 @@ struct ClusterRuntimeState : ClusterViewRuntime
 // CompactDeferred sets RasterRecordBase=UINT32_MAX: u11 binds a valid32B raw
 // status buffer, and no raster record is read or written by the cut kernel.
 // u14 stores each selected cluster's conservative world sphere; u15 marks
-// previous-HZB rejects. u16/u17 contain sparse camera-only retest commands.
+// previous-HZB rejects. The selected u16/u17 contains sparse camera-only retest commands.
 // Main/shadow counts are at bytes0/4/8/12; the retest count is at byte16.
 } // namespace hs

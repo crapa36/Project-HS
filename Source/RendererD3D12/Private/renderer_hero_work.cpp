@@ -613,7 +613,8 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
                     row.shader_counters[17] <= row.shader_counters[2] && row.shader_counters[15] <= row.shader_counters[0] &&
                     std::uint64_t(row.shader_counters[22]) + row.shader_counters[23] == row.shader_counters[21] &&
                     std::uint64_t(row.shader_counters[20]) * 32 == row.shader_counters[21];
-                row.unique_pixels_available = row.layer_rejections_available = row.shader_counters_valid;
+                row.unique_pixels_available = row.shader_counters_valid;
+                row.layer_rejections_available = row.shader_counters_valid && row.phase != static_cast<UINT>(HeroTransparencyPhase::Exit);
                 // Logical evaluator calls are exported; DCE-retained full instruction work and sampled mip remain unavailable.
                 if (!row.shader_counters_valid) ++impl_->status.shader_invalid_samples;
                 ready.push_back(std::move(row));

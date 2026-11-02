@@ -235,12 +235,10 @@ bool DemandRepresentation(ClusterGroup group, float priority)
     }
     return complete;
 }
-float4 WorldSphere(ClusterGroup group, ClusterCandidate candidate, InstanceData instance)
+float4 WorldSphere(ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
+    float scale, float sine_yaw, float cosine_yaw)
 {
-    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
     const float3 local = group.Sphere.xyz * instance.Scale.xyz;
-    float sine_yaw, cosine_yaw;
-    sincos(instance.Yaw, sine_yaw, cosine_yaw);
     const float3 center = instance.Position.xyz + float3(local.x * cosine_yaw + local.z * sine_yaw,
         local.y, -local.x * sine_yaw + local.z * cosine_yaw);
     // The group encloses every cluster in its selected representation. Retain
@@ -249,12 +247,12 @@ float4 WorldSphere(ClusterGroup group, ClusterCandidate candidate, InstanceData 
     const float radius = group.Sphere.w * scale + candidate.DeformationRadius;
     return float4(center, radius);
 }
-uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData instance, out float priority)
+uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
+    float scale, float sine_yaw, float cosine_yaw, out float priority)
 {
-    const float4 sphere = WorldSphere(group, candidate, instance);
+    const float4 sphere = WorldSphere(group, candidate, instance, scale, sine_yaw, cosine_yaw);
     const float3 center = sphere.xyz;
     const float radius = sphere.w;
-    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
     if (!all(isfinite(center)) || !isfinite(radius)) { Fault(FailureCatalog); priority = 0.0; return 0u; }
     uint mask = candidate.ViewMask;
     [unroll] for (uint view = 0u; view < 4u; ++view)
@@ -299,9 +297,9 @@ uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
     return mask;
 }
 bool Refinement(ClusterGroup group, ClusterCandidate candidate, InstanceData instance,
-                out uint mask, out float priority)
+                float scale, float sine_yaw, float cosine_yaw, out uint mask, out float priority)
 {
-    mask = Projection(group, candidate, instance, priority);
+    mask = Projection(group, candidate, instance, scale, sine_yaw, cosine_yaw, priority);
     const bool desired = mask != 0u && group.ChildCount != 0u && priority > 1.0;
     if (!desired) return false;
     bool complete = true;
@@ -328,6 +326,9 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
+    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
+    float sine_yaw, cosine_yaw;
+    sincos(instance.Yaw, sine_yaw, cosine_yaw);
     candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint cache_stride = OutputCapacity / CandidateCount;
     const uint cache_base = CandidateCount * 2u + candidate_index * cache_stride;
@@ -340,7 +341,7 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
         ClusterGroup group;
         if (!GroupValid(id, candidate, group)) return;
         uint mask; float priority;
-        const bool refined = Refinement(group, candidate, instance, mask, priority);
+        const bool refined = Refinement(group, candidate, instance, scale, sine_yaw, cosine_yaw, mask, priority);
         node = refined ? Children[group.FirstChild] : group.NextSubtree;
         if (mask == 0u) continue;
         if (refined) continue;
@@ -415,9 +416,12 @@ void PrefixCuts(uint3 dispatch : SV_DispatchThreadID, uint3 group_id : SV_GroupI
         {
             [unroll] for (uint view = 0u; view < 4u; ++view)
             {
-                IndexedCommands.Store4((view * OutputCapacity + thread_index) * 24u, uint4(0u, 0u, 0u, 0u));
-                IndexedCommands.Store2((view * OutputCapacity + thread_index) * 24u + 16u, uint2(0u, 0u));
-                MeshCommands.Store4((view * OutputCapacity + thread_index) * 16u, uint4(0u, 0u, 0u, 0u));
+                if (GeometryFrontendFlags == 0u)
+                {
+                    IndexedCommands.Store4((view * OutputCapacity + thread_index) * 24u, uint4(0u, 0u, 0u, 0u));
+                    IndexedCommands.Store2((view * OutputCapacity + thread_index) * 24u + 16u, uint2(0u, 0u));
+                }
+                else MeshCommands.Store4((view * OutputCapacity + thread_index) * 16u, uint4(0u, 0u, 0u, 0u));
             }
         }
         return;
@@ -443,7 +447,7 @@ bool SameSelectedHistory(uint cluster_id, ClusterRecord cluster, ClusterCandidat
 }
 
 void EmitCluster(uint selection, uint cluster_id, uint group_id, ClusterGroup group,
-    ClusterRecord cluster, ClusterCandidate candidate, InstanceData instance, uint mask)
+    ClusterRecord cluster, ClusterCandidate candidate, float4 sphere, uint mask)
 {
     if (selection >= CutStatus.Load(20u) || selection >= OutputCapacity || !Resident(cluster.PageSlot))
     {
@@ -465,7 +469,7 @@ void EmitCluster(uint selection, uint cluster_id, uint group_id, ClusterGroup gr
         (SameSelectedHistory(cluster_id, cluster, candidate, page) ? 0u : 0x100000u);
     reference.LodThreshold = 1.0; reference.InstanceGeneration = candidate.InstanceGeneration;
     CutRefs[visible_ref] = reference;
-    SelectedBounds[selection] = WorldSphere(group, candidate, instance);
+    SelectedBounds[selection] = sphere;
     // Membership belongs to the complete transaction. A concurrent Emit fault
     // invalidates its status, so none of these bits can qualify the next frame.
     const uint local_cluster = cluster_id - CatalogClusterBase;
@@ -482,13 +486,19 @@ void EmitCluster(uint selection, uint cluster_id, uint group_id, ClusterGroup gr
     {
         const bool active = (mask & (1u << view)) != 0u;
         const uint pass = (record_id << 2u) | view;
-        const uint indexed_address = (view * OutputCapacity + selection) * 24u;
-        IndexedCommands.Store4(indexed_address, uint4(pass, active ? cluster.IndexCount : 0u, active ? 1u : 0u, 0u));
-        IndexedCommands.Store2(indexed_address + 16u, uint2(0u, 0u));
-        const uint mesh_address = (view * OutputCapacity + selection) * 16u;
-        const uint x = active ? min(cluster.MeshletCount, 65535u) : 0u;
-        const uint y = active ? (cluster.MeshletCount / 65535u + (cluster.MeshletCount % 65535u != 0u ? 1u : 0u)) : 1u;
-        MeshCommands.Store4(mesh_address, uint4(pass, x, y, 1u));
+        if (GeometryFrontendFlags == 0u)
+        {
+            const uint indexed_address = (view * OutputCapacity + selection) * 24u;
+            IndexedCommands.Store4(indexed_address, uint4(pass, active ? cluster.IndexCount : 0u, active ? 1u : 0u, 0u));
+            IndexedCommands.Store2(indexed_address + 16u, uint2(0u, 0u));
+        }
+        else
+        {
+            const uint mesh_address = (view * OutputCapacity + selection) * 16u;
+            const uint x = active ? min(cluster.MeshletCount, 65535u) : 0u;
+            const uint y = active ? (cluster.MeshletCount / 65535u + (cluster.MeshletCount % 65535u != 0u ? 1u : 0u)) : 1u;
+            MeshCommands.Store4(mesh_address, uint4(pass, x, y, 1u));
+        }
     }
 }
 
@@ -500,6 +510,9 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
+    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
+    float sine_yaw, cosine_yaw;
+    sincos(instance.Yaw, sine_yaw, cosine_yaw);
     candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
@@ -530,12 +543,13 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
         {
             Fault(FailureMissingPage | FailureErrorDomain); return;
         }
+        const float4 sphere = WorldSphere(group, candidate, instance, scale, sine_yaw, cosine_yaw);
         for (uint cluster_offset = 0u; cluster_offset < group.ClusterCount; ++cluster_offset)
         {
             ClusterRecord cluster;
             const uint cluster_id = group.FirstCluster + cluster_offset;
             if (!ClusterValid(cluster_id, id, group, cluster)) return;
-            EmitCluster(base.x + count, cluster_id, id, group, cluster, candidate, instance, mask);
+            EmitCluster(base.x + count, cluster_id, id, group, cluster, candidate, sphere, mask);
             ++count;
         }
         const uint end = base.x + count;
@@ -635,7 +649,8 @@ void CullClusters(uint3 dispatch : SV_DispatchThreadID)
     if (selection >= OutputCapacity || selection >= CutStatus.Load(20u) || CutStatus.Load(16u) != 0u) return;
     PreviousRejected[selection] = 0u;
     const uint address = selection * 24u; // Only main-camera commands.
-    const uint2 draw = IndexedCommands.Load2(address + 4u);
+    const uint2 draw = GeometryFrontendFlags == 0u ? IndexedCommands.Load2(address + 4u)
+        : MeshCommands.Load2(selection * 16u + 4u);
     const ClusterInstanceRef reference = CutRefs[ClusterRefBase + selection];
     // Newly selected clusters, reused instance slots and new page versions
     // carry history-reset membership and cannot trust previous depth.
@@ -644,8 +659,8 @@ void CullClusters(uint3 dispatch : SV_DispatchThreadID)
         SphereOccluded(SelectedBounds[selection], OcclusionPreviousViewProjection))
     {
         PreviousRejected[selection] = 1u;
-        IndexedCommands.Store2(address + 4u, uint2(0u, 0u));
-        MeshCommands.Store3(selection * 16u + 4u, uint3(0u, 1u, 1u));
+        if (GeometryFrontendFlags == 0u) IndexedCommands.Store2(address + 4u, uint2(0u, 0u));
+        else MeshCommands.Store3(selection * 16u + 4u, uint3(0u, 1u, 1u));
         return;
     }
     // Prefix1 cleared this count before Emit/Cull. No Fault writer remains;
@@ -664,13 +679,19 @@ void RetestClusters(uint3 dispatch : SV_DispatchThreadID)
     const uint address = record_id * 64u;
     const bool visible = PreviousRejected[selection] != 0u &&
         (OcclusionPhase != 1u || !SphereOccluded(SelectedBounds[selection], OcclusionCurrentViewProjection));
-    const uint index_count = visible ? GeometryDrawRecords.Load(address + 8u) : 0u;
-    const uint meshlet_count = visible ? GeometryDrawRecords.Load(address + 16u) : 0u;
-    RetestIndexedCommands.Store4(selection * 24u, uint4(record_id << 2u, index_count, visible ? 1u : 0u, 0u));
-    RetestIndexedCommands.Store2(selection * 24u + 16u, uint2(0u, 0u));
-    const uint x = min(meshlet_count, 65535u);
-    const uint y = visible ? meshlet_count / 65535u + (meshlet_count % 65535u != 0u ? 1u : 0u) : 1u;
-    RetestMeshCommands.Store4(selection * 16u, uint4(record_id << 2u, x, y, 1u));
+    if (GeometryFrontendFlags == 0u)
+    {
+        const uint index_count = visible ? GeometryDrawRecords.Load(address + 8u) : 0u;
+        RetestIndexedCommands.Store4(selection * 24u, uint4(record_id << 2u, index_count, visible ? 1u : 0u, 0u));
+        RetestIndexedCommands.Store2(selection * 24u + 16u, uint2(0u, 0u));
+    }
+    else
+    {
+        const uint meshlet_count = visible ? GeometryDrawRecords.Load(address + 16u) : 0u;
+        const uint x = min(meshlet_count, 65535u);
+        const uint y = visible ? meshlet_count / 65535u + (meshlet_count % 65535u != 0u ? 1u : 0u) : 1u;
+        RetestMeshCommands.Store4(selection * 16u, uint4(record_id << 2u, x, y, 1u));
+    }
     // Count cleared this word; preserve every live draw and omit only an empty suffix.
     if (visible)
     {

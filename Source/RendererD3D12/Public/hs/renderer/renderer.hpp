@@ -304,7 +304,6 @@ struct RendererConfig
     HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
     bool vsync{true};
     bool bloom{true};
-    bool outline{true};
     bool interpolate{true};
     bool character_preview{};
     std::uint32_t monster_preview_asset{0xFFFFFFFFu};
@@ -333,7 +332,6 @@ struct RendererConfig
     VfxQuality vfx_quality{VfxQuality::High};
     std::uint32_t anisotropic_filtering{16};
     float bloom_strength{1.0f};
-    float outline_width_px{1.0f};
     bool color_grading{true};
     GraphicsMotionBlur motion_blur{GraphicsMotionBlur::Off};
     bool depth_of_field{};

@@ -103,13 +103,14 @@ struct HeroTransparencyLayout
     std::array<ResourceVersion, 4> inputs{};
     ResourceVersion background{};
     std::vector<HeroTransparencySceneRead> peel_reads, scene_reads;
-    std::array<TextureHandle, kHeroTransparencyMaxLayers> front{}, identity{}, exit{};
+    std::array<TextureHandle, kHeroTransparencyMaxLayers> front{}, identity{};
+    TextureHandle exit{};
     std::array<TextureHandle, 2> color{};
     std::array<TextureHandle, 6> guides{};
     TextureHandle overflow{};
     std::array<BufferHandle, kHeroTransparencyMaxLayers> occupancy_results{};
-    std::array<std::uint32_t, kHeroTransparencyMaxLayers> front_pass{}, exit_pass{},
-        copy_pass{}, composite_pass{};
+    std::array<std::uint32_t, kHeroTransparencyMaxLayers> front_pass{}, copy_pass{}, composite_pass{};
+    std::uint32_t exit_pass{};
     std::uint32_t overflow_clear_pass{}, tail_pass{};
     ResourceVersion overflow_version{}, accumulation_version{}, revealage_version{}, corrected_version{};
     HeroWorkRetainedLayout work{};

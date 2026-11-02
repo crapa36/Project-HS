@@ -2711,7 +2711,7 @@ void CaptureUiProjectionFacts(const TickReadView &model,
     word(settings.schema_version); word(settings.width); word(settings.height); word(settings.borderless);
     word(settings.vsync); word(settings.frame_cap); word(settings.render_scale_percent);
     word(settings.shadow_resolution); word(settings.particle_percentage); word(settings.bloom);
-    word(settings.outline); word(settings.master_volume); word(settings.bgm_volume);
+    word(settings.master_volume); word(settings.bgm_volume);
     word(settings.sfx_volume); word(settings.ui_volume);
     for (const auto key : settings.skill_virtual_keys) word(key);
     word(settings.screen_overlay_intensity);

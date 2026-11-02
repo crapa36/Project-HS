@@ -42,7 +42,7 @@ cbuffer FrameConstants : register(b0)
     uint4 MaterialSidecarOffsets[2];
     uint4 MaterialSidecarInfo; // union mask, packed word count, plane count, reserved.
     float4 OutputSize; // Output extent in xy, reciprocal extent in zw.
-    float4 PostOptions; // Bloom strength, outline width in output pixels, grading, sharpening.
+    float4 PostOptions; // Bloom strength, reserved, grading, sharpening.
     float4 MaterialQualityOptions; // POM march/refinement, packed binary16 terrain fade range, screen refraction quality.
     float4 DisplayOptions; // Native HDR enabled, paper white nits, peak nits, encoded DevTools in PostA.
     row_major float4x4 InverseUnjitteredViewProjection;
@@ -1395,10 +1395,10 @@ FullScreenOutput FullScreenVS(uint vertex_id : SV_VertexID)
     return output;
 }
 
-float ShadowVisibility(float3 world)
+float ShadowVisibility(float3 world, float2 depth_gradient)
 {
     float cached_visibility;
-    if (HsVirtualShadowLookup(world, cached_visibility)) return cached_visibility;
+    if (HsVirtualShadowLookup(world, depth_gradient, cached_visibility)) return cached_visibility;
     // Only a CPU-proven complete VSM plan may omit CSM. Never read the old or
     // uncreated atlas in that mode; this guard does not establish coverage.
 #ifndef HS_LOCAL_PROBE_CAPTURE
@@ -1442,6 +1442,10 @@ float ShadowVisibility(float3 world)
         visibility = lerp(visibility, filtered / float(samples), cascade_weights[cascade]);
     }
     return visibility;
+}
+float ShadowVisibility(float3 world)
+{
+    return ShadowVisibility(world, 0.0.xx);
 }
 
 // Shared lighting for opaque family features and transparent jelly bodies.
@@ -1517,6 +1521,27 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
     const HsSurfaceSample surface = HsLoadSurface(input.Uv);
     const bool valid = HsSurfaceValid(surface);
     float3 world = valid ? HsSurfaceWorldPosition(surface) : 0.0;
+    // Compute derivatives before any divergent surface or material branch.
+    const float3 light_position = HsShadowLightPosition(world);
+    const float3 light_dx = ddx_fine(light_position), light_dy = ddy_fine(light_position);
+    const int2 quad = surface.pixel & ~1;
+    // Integer halves remain exact in float derivatives without cross-lane wave reads.
+    const float4 metadata_facts = float4(surface.metadata & 0xffffu, surface.metadata >> 16u);
+    const float4 metadata_dx = ddx_fine(metadata_facts), metadata_dy = ddy_fine(metadata_facts);
+    const float validity = valid ? 1.0f : 0.0f;
+    const float valid_dx = ddx_fine(validity), valid_dy = ddy_fine(validity);
+    const bool coherent = valid && all(quad + 1 < int2(ScreenSize.xy)) &&
+        all(metadata_dx == 0.0) && all(metadata_dy == 0.0) && valid_dx == 0.0 && valid_dy == 0.0;
+    float2 shadow_depth_gradient = 0.0;
+    const float determinant = light_dx.x * light_dy.y - light_dx.y * light_dy.x;
+    const float magnitude = length(light_dx.xy) * length(light_dy.xy);
+    if (coherent && all(isfinite(light_dx)) && all(isfinite(light_dy)) &&
+        isfinite(determinant) && isfinite(magnitude) && magnitude > 0.0 && abs(determinant) > magnitude * 1e-6)
+    {
+        const float2 gradient = float2(light_dx.z * light_dy.y - light_dy.z * light_dx.y,
+            light_dx.x * light_dy.z - light_dy.x * light_dx.z) / determinant;
+        if (all(isfinite(gradient))) shadow_depth_gradient = gradient;
+    }
     const float3 arena = float3(0.035, 0.055, 0.085);
     output.Radiance=float4(arena,1.0);
     if (!valid)
@@ -1551,7 +1576,7 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
         closure.ao *= LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
         const float contact = LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
         float3 diffuse,specular,ambient_specular,ambient_diffuse,local_diffuse,local_specular;
-        EnvironmentLightingComponents(closure,world,ShadowVisibility(world)*contact,-1.0,
+        EnvironmentLightingComponents(closure,world,ShadowVisibility(world,shadow_depth_gradient)*contact,-1.0,
             diffuse,specular,ambient_specular,ambient_diffuse);
         HsDeferredLocalLightingComponents(closure,world,local_diffuse,local_specular);
         diffuse+=local_diffuse;
@@ -1567,7 +1592,7 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
         return output;
     }
     float rim = pow(1.0 - saturate(normal.y), 3.0);
-    float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world)) : 1.0;
+    float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world,shadow_depth_gradient)) : 1.0;
     visibility *= LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
     const float ambient = LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
     HsSurfaceClosure closure=HsMaterialMakeSurfaceClosure(base.rgb,normal,1.0,0.0,ambient,1.0);
@@ -1953,6 +1978,7 @@ struct ParticleOutput
     nointerpolation uint2 GapRange : TEXCOORD14;
     nointerpolation float3 PreviewTiming : TEXCOORD15;
     nointerpolation uint AuthoredBallistic : TEXCOORD16;
+    nointerpolation uint GroundMaskSlice : TEXCOORD17;
 };
 
 static const float3 OctahedronVertices[6] = {
@@ -2091,6 +2117,7 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
     output.GapRange = 0;
     output.PreviewTiming = 0.0;
     output.AuthoredBallistic = particle.Authored.x;
+    output.GroundMaskSlice = 0xffffffffu;
     return output;
 }
 
@@ -2163,6 +2190,7 @@ ParticleOutput GroundRingVS(uint vertex_id : SV_VertexID, uint instance_id : SV_
         ? command.Modes.xy : uint2(0, 0);
     output.PreviewTiming = command.EndColor.xyz;
     output.AuthoredBallistic = 0;
+    output.GroundMaskSlice = is_polar_rune ? command.Modes.z : 0xffffffffu;
     return output;
 }
 
@@ -2226,6 +2254,7 @@ ParticleOutput OwnerMeshVS(uint vertex_id : SV_VertexID, uint instance_id : SV_I
     output.GapRange = 0;
     output.PreviewTiming = 0.0;
     output.AuthoredBallistic = 0;
+    output.GroundMaskSlice = 0xffffffffu;
     return output;
 }
 
@@ -2339,7 +2368,7 @@ cbuffer HeroTransparencyConstants : register(b0, space14)
 };
 Texture2D<float> HeroFrontDepth[4] : register(t0, space14);
 Texture2D<uint2> HeroFrontIdentity[4] : register(t4, space14);
-Texture2D<float> HeroExitDepth[4] : register(t8, space14);
+Texture2D<float4> HeroExitDepth : register(t8, space14);
 Texture2D<float4> HeroLayerBackground : register(t12, space14);
 Texture2D<uint> HeroOverflow : register(t13, space14);
 RWTexture2D<uint> HeroOverflowCounter : register(u0, space14);
@@ -2545,24 +2574,25 @@ uint2 HeroPeelFrontPS(SceneOutput input,bool front:SV_IsFrontFace HS_HERO_WORK_C
     return input.InstanceKey;
 }
 
-void HeroPeelExitPS(SceneOutput input,bool front:SV_IsFrontFace HS_HERO_WORK_COVERAGE)
+float4 HeroPeelExitPS(SceneOutput input,bool front:SV_IsFrontFace HS_HERO_WORK_COVERAGE):SV_Target0
 {
     const HsSceneGradients gradients=RasterSceneGradients(input);
     HS_HERO_WORK_ENTRY(input.Position.xy);
     if(front) { HS_HERO_WORK_COUNT(3u); discard; }
     const int3 pixel=int3(int2(input.Position.xy),0);
-    const uint layer=HeroLayerInfo.x;
-    const float entry=HeroFrontDepth[layer].Load(pixel);
-#ifdef HS_CAPTURE_HERO_WORK
-    if(entry<=0.0) { HsHeroWorkAdd(7u); discard; }
-    if(input.Position.z>=entry) { HsHeroWorkAdd(8u); discard; }
-    if(any(input.InstanceKey!=HeroFrontIdentity[layer].Load(pixel))) { HsHeroWorkAdd(9u); discard; }
-#else
-    if(entry<=0.0 || input.Position.z>=entry ||
-        any(input.InstanceKey!=HeroFrontIdentity[layer].Load(pixel))) discard;
-#endif
+    float4 exits=0.0;
+    [unroll] for(uint layer=0u;layer<4u;++layer)
+    {
+        if(layer>=HeroLayerInfo.y) break;
+        const float entry=HeroFrontDepth[layer].Load(pixel);
+        if(entry>0.0 && input.Position.z<entry &&
+            all(input.InstanceKey==HeroFrontIdentity[layer].Load(pixel)))
+            exits[layer]=input.Position.z;
+    }
+    if(!any(exits>0.0)) discard;
     const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
     HS_HERO_WORK_ACCEPT(input.Position.xy);
+    return exits;
 }
 
 [earlydepthstencil]
@@ -2653,7 +2683,7 @@ float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surf
     if(dot(normal,view)<0.0) normal=-normal;
     const float3 transmitted=refract(-view,normal,front ? 1.0/surface.ior : surface.ior);
     const int3 pixel=int3(int2(input.Position.xy),0);
-    const float exit_depth=HeroExitDepth[layer].Load(pixel);
+    const float exit_depth=HeroExitDepth.Load(pixel)[layer];
     float path=-1.0;
     if(exit_depth>0.0 && dot(transmitted,transmitted)>0.0)
     {
@@ -3149,6 +3179,9 @@ OitOutput ParticlePS(ParticleOutput input)
                                                   edge * 0.35 + aa, spoke_distance)) *
                                 smoothstep(outer * 0.48, outer * 0.58, radius);
             mask = max(ring, spoke * 0.75) * clip_footprint;
+            if (input.GroundMaskSlice != 0xffffffffu)
+                mask *= lerp(1.0, VfxAuthoredMask.Sample(LinearClamp,
+                    float3(input.Uv, input.GroundMaskSlice)), input.RingGeometry.w);
             input.Color = GroundGradient(input,
                 saturate(min(ring_distance, spoke_distance) / max(edge, 0.0001)));
         }
@@ -4200,25 +4233,6 @@ float4 ToneMapPS(FullScreenOutput input) : SV_Target0
     return float4(display_linear, 1.0);
 }
 
-float4 OutlinePS(FullScreenOutput input) : SV_Target0
-{
-    float2 texel = OutputSize.zw * max(PostOptions.y, 0.0);
-    const float2 guide_uv = input.Uv + SurfaceJitterUv.xy;
-    const float center_mask = HsSampleSurfaceOutlineMask(guide_uv);
-    float edge = 0.0;
-    static const float2 offsets[8] = {
-        float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
-        float2(1, 0), float2(-1, 1), float2(0, 1), float2(1, 1)
-    };
-    for (uint index = 0; index < 8; ++index)
-    {
-        const float neighbor_mask = HsSampleSurfaceOutlineMask(guide_uv + offsets[index] * texel);
-        edge = max(edge, abs(center_mask - neighbor_mask));
-    }
-    float3 color = PostA.SampleLevel(LinearClamp, input.Uv, 0).rgb;
-    float outline = RenderOptions.z > 0.5 ? smoothstep(0.1, 0.9, edge) : 0.0;
-    return float4(lerp(color, color * 0.08, outline), 1.0);
-}
 
 float4 FxaaPS(FullScreenOutput input) : SV_Target0
 {

@@ -37,7 +37,7 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
 {
     PostSubgraphLayout next{};
     next.inputs = PostVersions(inputs, targets);
-    next.bloom = inputs.bloom; next.outline = inputs.outline;
+    next.bloom = inputs.bloom;
     next.fxaa_identity = inputs.fxaa_identity;
     next.initialize_post_targets = inputs.initialize_post_targets;
     next.pre_bloom = static_cast<bool>(inputs.pre_bloom);
@@ -131,7 +131,7 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
 bool MatchesPostSubgraphLayout(const PostSubgraphInputs &inputs,
     const PostSubgraphTargets &targets, const PostSubgraphLayout &layout) noexcept
 {
-    if (!MatchesPostSubgraphShape(inputs.bloom, inputs.outline, inputs.fxaa_identity,
+    if (!MatchesPostSubgraphShape(inputs.bloom, inputs.fxaa_identity,
             inputs.initialize_post_targets, static_cast<bool>(inputs.pre_bloom),
             static_cast<bool>(inputs.pre_tone_map), static_cast<bool>(inputs.devtools_ui), layout))
         return false;
@@ -141,12 +141,12 @@ bool MatchesPostSubgraphLayout(const PostSubgraphInputs &inputs,
     return true;
 }
 
-bool MatchesPostSubgraphShape(bool bloom, bool outline, bool fxaa_identity,
+bool MatchesPostSubgraphShape(bool bloom, bool fxaa_identity,
     bool initialize_post_targets, bool pre_bloom, bool pre_tone_map, bool devtools_ui,
     const PostSubgraphLayout &layout) noexcept
 {
     return layout.pass_count && layout.pass_count <= layout.passes.size() &&
-        layout.bloom == bloom && layout.outline == outline &&
+        layout.bloom == bloom &&
         layout.fxaa_identity == fxaa_identity &&
         layout.initialize_post_targets == initialize_post_targets &&
         layout.pre_bloom == pre_bloom && layout.pre_tone_map == pre_tone_map &&

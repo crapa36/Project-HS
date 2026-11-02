@@ -628,6 +628,9 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         auto &cut = native.cuts[ordinal];
         if (cut.readback_pending)
             return ClusterFailure("Cluster demand/status must be consumed before rewriting a frame slot.");
+        const auto frontend = input.constants.geometry_frontend_flags;
+        if (frontend != 0u && frontend != kGeometryMeshEligible)
+            return ClusterFailure("Cluster frontend must select pulling DRAW or Mesh.");
         const auto candidate_capacity = input.max_instance_count;
         const auto output_capacity = capacities[ordinal];
         const auto history_capacity = history_capacities[ordinal];
@@ -638,9 +641,10 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
             static_cast<std::uint64_t>(std::max(cut.history_instance_capacity, history_capacity)) * 4u > UINT32_MAX)
             return ClusterFailure("Cluster persistent membership exceeds32-bit buffer addressing.");
         if (cut.candidate_capacity < candidate_capacity || cut.allocated_output_capacity < output_capacity ||
-            cut.history_instance_capacity < history_capacity)
+            cut.history_instance_capacity < history_capacity || cut.geometry_frontend_flags != frontend)
         {
             ClusterCutBuffers next;
+            next.geometry_frontend_flags = frontend;
             next.candidate_capacity = std::max(cut.candidate_capacity, candidate_capacity);
             next.output_capacity = std::max(cut.allocated_output_capacity, output_capacity);
             // Both structured uint2 and raw-clear descriptors cover the entire allocation.
@@ -670,13 +674,14 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
                 if (auto result = make(*buffer, blocks * 8u); !result) return result;
             if (auto result = make(next.demand, runtime.cpu.pages.size() * 4u); !result) return result;
             if (auto result = make(next.status, sizeof(GpuClusterCutStatus)); !result) return result;
-            if (auto result = make(next.draw_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 96u)); !result) return result;
-            if (auto result = make(next.mesh_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 64u)); !result) return result;
+            auto &commands = frontend ? next.mesh_commands : next.draw_commands;
+            auto &retest_commands = frontend ? next.retest_mesh_commands : next.retest_draw_commands;
+            const std::uint64_t stride = frontend ? 16u : 24u;
+            if (auto result = make(commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * stride * 4u)); !result) return result;
             if (auto result = make(next.command_counts, 32u); !result) return result;
             if (auto result = make(next.selected_bounds, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 16u)); !result) return result;
             if (auto result = make(next.previous_rejected, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 4u)); !result) return result;
-            if (auto result = make(next.retest_draw_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 24u)); !result) return result;
-            if (auto result = make(next.retest_mesh_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 16u)); !result) return result;
+            if (auto result = make(retest_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * stride)); !result) return result;
             if (auto result = make(next.history_bits, history_bytes); !result) return result;
             if (auto result = make(next.history_generations, static_cast<std::uint64_t>(next.history_instance_capacity) * 4u); !result) return result;
             if (auto result = make(next.readback, runtime.cpu.pages.size() * 4u + sizeof(GpuClusterCutStatus), D3D12_HEAP_TYPE_READBACK); !result) return result;
@@ -684,17 +689,15 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
             // command counts, per-view offsets, or complete-cut logical limits.
             next.allocated_output_capacity = static_cast<std::uint32_t>(std::min({
                 next.counts.resource->GetDesc().Width / 8u - 2ull * next.candidate_capacity,
-                next.draw_commands.resource->GetDesc().Width / 96u,
-                next.mesh_commands.resource->GetDesc().Width / 64u,
+                commands.resource->GetDesc().Width / (stride * 4u),
                 next.selected_bounds.resource->GetDesc().Width / 16u,
                 next.previous_rejected.resource->GetDesc().Width / 4u,
-                next.retest_draw_commands.resource->GetDesc().Width / 24u,
-                next.retest_mesh_commands.resource->GetDesc().Width / 16u}));
+                retest_commands.resource->GetDesc().Width / stride}));
             std::uint64_t gpu_bytes{}, staging_bytes{};
             for (const auto *buffer : {&next.counts, &next.offsets, &next.block_sums, &next.block_offsets,
                 &next.demand, &next.status, &next.draw_commands, &next.mesh_commands, &next.command_counts,
                 &next.history_bits, &next.history_generations, &next.selected_bounds, &next.previous_rejected,
-                &next.retest_draw_commands, &next.retest_mesh_commands}) gpu_bytes += buffer->allocation->GetSize();
+                &next.retest_draw_commands, &next.retest_mesh_commands}) if (buffer->allocation) gpu_bytes += buffer->allocation->GetSize();
             for (const auto *buffer : {&next.candidates, &next.constants, &next.occlusion_constants,
                 &next.readback}) staging_bytes += buffer->allocation->GetSize();
             next.residency = RegisterNativeAllocation(ResidencyCategory::Geometry, gpu_bytes, false,
@@ -767,8 +770,6 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
             !visibility_frames[frame_slot].raster_records.resource ||
             (constants.raster_record_base + output_capacity) * 32ull > visibility_frames[frame_slot].raster_records.resource->GetDesc().Width))
             return ClusterFailure("Cluster raster-record interval was not reserved by visibility services.");
-        if (constants.geometry_frontend_flags != 0u && constants.geometry_frontend_flags != kGeometryMeshEligible)
-            return ClusterFailure("Cluster frontend must select pulling DRAW or Mesh.");
         cut.geometry_frontend_flags = constants.geometry_frontend_flags;
         void *mapped{};
         const D3D12_RANGE no_read{};
@@ -873,7 +874,7 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(OwnedView &owner, std::uint
             // Shared geometry/refs/raster scratch may grow without replacing this cut.
             if (!cut.descriptors_initialized || i == 6u || i == 7u || i == 11u)
             {
-                const auto bytes = uavs[i]->resource->GetDesc().Width;
+                const auto bytes = uavs[i]->resource ? uavs[i]->resource->GetDesc().Width : 4u;
                 D3D12_UNORDERED_ACCESS_VIEW_DESC clear_view{};
                 clear_view.Format = DXGI_FORMAT_R32_TYPELESS;
                 clear_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;

@@ -63,8 +63,6 @@ LEGACY_OPTIONS = {
     "bloom_strength": ("shared", ("bloom",), "Strength parameter inside same bloom chain; no exclusive cost."),
     "motion_blur": ("feature", ("motion_blur", "shared_post_guides"), "Dedicated motion blur; nearest guides shared with DOF."),
     "depth_of_field": ("feature", ("depth_of_field", "shared_post_guides"), "Dilation/DOF plus shared nearest guides (including fused CoC); legacy captures may have a separate CoC pass. Shared cost is not additive."),
-    "outline": ("feature", ("outline",), "Dedicated screen-space outline pass."),
-    "outline_width_px": ("shared", ("outline",), "Parameter inside outline pass; no exclusive cost."),
     "color_grading": ("feature", ("color_grading",), "Color grade plus transient LUT initialization."),
     "adaptive_shading": ("shared_policy", ("adaptive", "surface", "ao", "reflections"), "Classification/rate generation is overhead; savings in affected shared passes need a comparison."),
 }
@@ -84,7 +82,7 @@ OPTIONS.update({
 CURRENT_OPTION_KEYS = frozenset(OPTIONS)
 DEPENDENCIES = {
     "ao_quality": "ao_mode", "gi_quality": "gi_mode", "reflection_quality": "reflection_mode",
-    "bloom_strength": "bloom", "outline_width_px": "outline", "frame_generation_multiplier": "frame_generation_mode",
+    "bloom_strength": "bloom", "frame_generation_multiplier": "frame_generation_mode",
     "ray_reconstruction_provider": "neural_ray_reconstruction", "target_render_fps": "dynamic_resolution",
     "dynamic_min_percent": "dynamic_resolution", "dynamic_max_percent": "dynamic_resolution",
     "frame_generation_provider": "frame_generation_mode", "rt_trace_distance_m": "ray_tracing_enabled",
@@ -114,7 +112,6 @@ def pass_feature_group(row):
     if name.startswith("Volumetric"): return "volumetrics"
     if name.startswith("Subsurface"): return "subsurface"
     if name.startswith("Bloom"): return "bloom"
-    if identity == 15: return "outline"
     if name.startswith("Adaptive."): return "adaptive"
     if name.startswith(("LightList", "LtcLut")): return "light_lists"
     if "Frame Generation" in name or name in ("SDK Display Guides", "SDK Undilated Guides"): return "frame_generation_guides"

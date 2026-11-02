@@ -181,7 +181,9 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
             {"blend_enabled", p.blend_enabled}, {"src_blend", p.src_blend}, {"dst_blend", p.dst_blend}, {"blend_op", p.blend_op},
             {"src_blend_alpha", p.src_blend_alpha}, {"dst_blend_alpha", p.dst_blend_alpha}, {"blend_op_alpha", p.blend_op_alpha},
             {"write_mask", p.write_mask}};
-        auto &stored = probe["pipelines"][p.pixel_product];
+        const auto pipeline_key = sample.phase == 1
+            ? p.pixel_product + "#rtv=" + std::to_string(p.rtv_formats[0]) : p.pixel_product;
+        auto &stored = probe["pipelines"][pipeline_key];
         if (!stored.is_null()) check(stored == pipeline, "pipeline metadata changed within fixed probe");
         else stored = std::move(pipeline);
         Json counters = Json::object();
@@ -194,6 +196,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         probe["samples"].push_back({{"completed_frame", sample.completed_frame}, {"tick", sample.tick}, {"view_id", sample.view_id},
             {"phase", sample.phase}, {"layer", sample.layer}, {"contributor", sample.contributor}, {"width", sample.width}, {"height", sample.height},
             {"diagnostic_mode", static_cast<unsigned>(sample.diagnostic_mode)}, {"pixel_product", p.pixel_product},
+            {"pipeline_key", pipeline_key},
             {"source", {{"asset_id", sample.source.asset_id}, {"product", sample.source.product}, {"label", sample.source.label},
                 {"lod", sample.source.lod}, {"material", sample.source.material}, {"candidate_instances", sample.source.candidate_instances},
                 {"geometry_indices", sample.source.geometry_indices}, {"color_format", sample.source.color_format},
@@ -229,6 +232,20 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         check(sample.phase != 3, "retired standalone Guide draw was submitted");
         if (require_layer_transition && (sample.phase <= 1 || sample.phase == 4))
             layer_rows[{sample.completed_frame, sample.view_id, sample.contributor}][sample.phase == 4 ? 2 : sample.phase].insert(sample.layer);
+        if (sample.phase == 1)
+        {
+            check(sample.layer == 0 && !sample.layer_rejections_available && !p.depth_enabled &&
+                p.rtv_count == 1 && (p.rtv_formats[0] == DXGI_FORMAT_R32_FLOAT ||
+                    p.rtv_formats[0] == DXGI_FORMAT_R32G32_FLOAT ||
+                    p.rtv_formats[0] == DXGI_FORMAT_R32G32B32A32_FLOAT) &&
+                p.blend_enabled[0] && p.blend_op[0] == D3D12_BLEND_OP_MAX,
+                "single exit must report a full precision MAX reduction and unavailable per-layer rejections");
+            if (require_layer_transition)
+                check(sample.completed_frame <= 4
+                    ? (p.rtv_formats[0] == DXGI_FORMAT_R32_FLOAT || p.rtv_formats[0] == DXGI_FORMAT_R32G32B32A32_FLOAT)
+                    : p.rtv_formats[0] == DXGI_FORMAT_R32G32B32A32_FLOAT,
+                    "exit format must fit the actual Medium/Ultra layer count");
+        }
         if (sample.phase == 4)
         {
             check(p.depth_enabled && p.depth_func == D3D12_COMPARISON_FUNC_EQUAL &&
@@ -290,8 +307,8 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
             const auto [frame, view, contributor] = key;
             const std::set<std::uint32_t> expected = frame <= 4 ? std::set<std::uint32_t>{0}
                 : std::set<std::uint32_t>{0, 1, 2, 3}; // Existing Medium/Ultra quality rows: one/four layers.
-            check(frame >= 1 && frame <= frames && phases[0] == expected && phases[1] == expected && phases[2] == expected,
-                "front/exit/composite completed layer directory differs from the actual Medium/Ultra fixture contract");
+            check(frame >= 1 && frame <= frames && phases[0] == expected && phases[1] == std::set<std::uint32_t>{0} && phases[2] == expected,
+                "front/composite layer directory or single exit directory differs from the actual Medium/Ultra fixture contract");
             ++groups[frame];
             transition["layer_rows"].push_back({{"completed_frame", frame}, {"view_id", view}, {"contributor", contributor},
                 {"front", phases[0]}, {"exit", phases[1]}, {"composite", phases[2]}});
@@ -1523,7 +1540,6 @@ int main(int argc, char **argv)
                 aa_mode_explicit = true;
             }
             else if (arg == "--no-bloom") config.bloom = false;
-            else if (arg == "--no-outline") config.outline = false;
             else if (arg.starts_with("--resolution="))
             {
                 const auto value = arg.substr(13);
@@ -1550,7 +1566,7 @@ int main(int argc, char **argv)
             frames = 8;
             config.interpolate = config.dynamic_resolution = config.temporal_reconstruction = false;
             config.grid_floor_probe = config.grid_floor_disable_aa = true;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1568,7 +1584,7 @@ int main(int argc, char **argv)
             config.dynamic_resolution = false;
             config.temporal_reconstruction = true;
             config.sharpening = 0;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1584,7 +1600,7 @@ int main(int argc, char **argv)
             if (frames != required_frames) throw std::runtime_error("lighting probe frame count is fixed");
             config.lighting_quality = hs::GraphicsQuality::Ultra;
             config.dynamic_resolution = config.temporal_reconstruction = false;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1610,7 +1626,7 @@ int main(int argc, char **argv)
             config.dynamic_resolution = false;
             config.temporal_reconstruction = true;
             config.sharpening = 0;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1631,7 +1647,6 @@ int main(int argc, char **argv)
                 initial.reconstruction_quality.value = "native";
                 initial.sharpening = config.sharpening;
                 initial.bloom = config.bloom;
-                initial.outline = config.outline;
                 initial.ao_mode = config.ao_mode;
                 initial.gi_mode = config.gi_mode;
                 initial.reflection_mode = config.reflection_mode;
@@ -1651,7 +1666,7 @@ int main(int argc, char **argv)
                 surface_motion_resize_fixture || world_transport_probe || provider_switch_probe)
                 throw std::runtime_error("OIT/camera-basis probes require their own four/six ordinary render frames");
             config.temporal_reconstruction = false;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1718,7 +1733,7 @@ int main(int argc, char **argv)
                 config.gi_mode = hs::GraphicsGiMode::Probe;
             }
             config.temporal_reconstruction = false;
-            config.bloom = config.outline = false;
+            config.bloom = false;
             receipt["hero_work"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "existing-slime-family-preview-count1"}, {"requested_frames", frames},
                 {"mode", HeroWorkModeName(config.hero_work_mode)}, {"exposure_delta_seconds", 1.0f / 60.0f},
                 {"functional_only", true}, {"performance_adoption", false}};
@@ -1777,7 +1792,6 @@ int main(int argc, char **argv)
         {
             config.grid_floor_probe = true;
             config.bloom = false;
-            config.outline = false;
             if (grid_aa_mode == GridAaMode::Fxaa)
                 config.vfx_quality = hs::VfxQuality::Low;
             else if (grid_aa_mode == GridAaMode::Taa)
@@ -1800,7 +1814,7 @@ int main(int argc, char **argv)
         if (residency_streaming_probe)
         {
             config.gi_mode = hs::GraphicsGiMode::Off;
-            config.bloom = config.outline = false;
+            config.bloom = false;
         }
         if (provider_switch_probe)
         {
@@ -1841,7 +1855,6 @@ int main(int argc, char **argv)
                 {"aa", GridAaModeName(grid_aa_mode)},
                 {"aa_disabled", config.grid_floor_disable_aa},
                 {"bloom", config.bloom},
-                {"outline", config.outline},
                 {"camera_motion", camera_motion},
                 {"frames", frames},
                 {"capture_frames", Json::array({1, 9, 17, 25})},
@@ -3639,7 +3652,7 @@ int main(int argc, char **argv)
                     const auto diagnostic = Json::parse(std::ifstream(path));
                     if (!diagnostic.at("execution_valid").get<bool>())
                         throw std::runtime_error("HZB Cluster Retest diagnostic is invalid");
-                    std::uint64_t committed{}, published{}, live{}, vertices{};
+                    std::uint64_t committed{}, published{}, live{}, vertices{}, mesh_groups{};
                     for (const auto &catalog : diagnostic.at("cluster_commands"))
                     {
                         if (catalog.at("frame").get<std::uint64_t>() != frame ||
@@ -3654,17 +3667,25 @@ int main(int argc, char **argv)
                             const auto count = view.at("published_count").get<std::uint64_t>();
                             if (count < view.at("last_nonzero_exclusive").get<std::uint64_t>())
                                 throw std::runtime_error("HZB Cluster Retest suffix excludes a live command");
+                            const auto draw_work = view.at("draw_vertex_count_sum").get<std::uint64_t>();
+                            const auto mesh_work = view.at("mesh_group_count_sum").get<std::uint64_t>();
+                            const bool mesh = catalog.at("geometry_frontend_flags").get<std::uint32_t>() != 0u;
+                            if ((mesh ? draw_work : mesh_work) != 0 ||
+                                (view.at("nonzero_count").get<std::uint64_t>() != 0 && !(mesh ? mesh_work : draw_work)))
+                                throw std::runtime_error("HZB Cluster Retest workload does not match its frontend");
                             published += count;
                             live += view.at("nonzero_count").get<std::uint64_t>();
-                            vertices += view.at("draw_vertex_count_sum").get<std::uint64_t>();
+                            vertices += draw_work;
+                            mesh_groups += mesh_work;
                         }
                     }
-                    if (!committed || !live || !vertices)
+                    if (!committed || !live || !(vertices || mesh_groups))
                         throw std::runtime_error("HZB reveal did not exercise live Cluster Retest draws");
                     receipt["hzb_cluster_retest"] = {
                         {"frame", frame}, {"diagnostic", path.filename().string()},
                         {"committed", committed}, {"published", published},
                         {"nonzero", live}, {"draw_vertex_count_sum", vertices},
+                        {"mesh_group_count_sum", mesh_groups},
                         {"nonzero_outside_published_prefix", 0},
                     };
                 }
@@ -3787,7 +3808,6 @@ int main(int argc, char **argv)
                     hs::GraphicsSettings graphics;
                     graphics.vsync = config.vsync;
                     graphics.bloom = config.bloom;
-                    graphics.outline = config.outline;
                     graphics.resolution_mode = hs::GraphicsResolutionMode::Manual;
                     graphics.manual_scale_percent = 75.0f;
                     graphics.dynamic_resolution = config.dynamic_resolution;

@@ -202,6 +202,7 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
         float n = atan2(dot(projectedNormal, tangent), dot(projectedNormal, view));
         float2 horizon = -1.0;
         float phase = AoRandom(pixel, slice + AoFrameInfo.y * 13u);
+        int2 lastPixel[2] = {g.pixel, g.pixel};
         [loop] for (uint step = 0; step < steps; ++step)
         {
             float s = (float(step) + 0.5 + 0.5 * phase) / float(steps);
@@ -211,6 +212,8 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
                 int2 samplePixel = int2(round(float2(g.pixel) + offset * (side == 0 ? -1.0 : 1.0)));
                 if (any(samplePixel < 0) || any(samplePixel >= int2(AoRenderSize.xy))) continue;
                 if (all(samplePixel == g.pixel)) continue;
+                if (all(samplePixel == lastPixel[side])) continue;
+                lastPixel[side] = samplePixel;
                 float3 otherPosition;
                 if (!AoLoadHorizonPosition(samplePixel, otherPosition)) continue;
                 float3 delta = otherPosition - g.position;

@@ -134,7 +134,7 @@ static_assert(std::is_trivially_copyable_v<UiActionEnvelope>);
     return a.schema_version == b.schema_version && a.width == b.width && a.height == b.height &&
         a.borderless == b.borderless && a.vsync == b.vsync && a.frame_cap == b.frame_cap &&
         a.render_scale_percent == b.render_scale_percent && a.shadow_resolution == b.shadow_resolution &&
-        a.particle_percentage == b.particle_percentage && a.bloom == b.bloom && a.outline == b.outline &&
+        a.particle_percentage == b.particle_percentage && a.bloom == b.bloom &&
         a.master_volume == b.master_volume && a.bgm_volume == b.bgm_volume &&
         a.sfx_volume == b.sfx_volume && a.ui_volume == b.ui_volume &&
         a.skill_virtual_keys == b.skill_virtual_keys &&

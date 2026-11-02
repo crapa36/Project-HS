@@ -181,7 +181,6 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
     HS_SWAP_PIPELINE(bloom_upsample_pipeline);
     HS_SWAP_PIPELINE(bloom_pipeline);
     HS_SWAP_PIPELINE(tone_map_pipeline);
-    HS_SWAP_PIPELINE(outline_pipeline);
     HS_SWAP_PIPELINE(fxaa_pipeline);
     HS_SWAP_PIPELINE(ui_pipeline);
     HS_SWAP_PIPELINE(ribbon_update_pipeline);

@@ -52,7 +52,7 @@ $options = Join-Path $Artifacts "options"
 $generationArgument = "--generation=$GenerationPointer"
 
 function Test-RenderArtifacts([string]$Directory, [int]$ParticleCapacity,
-                              [bool]$Bloom = $true, [bool]$Outline = $true) {
+                              [bool]$Bloom = $true) {
     $required = @(
         "result.json",
         "spec.json",
@@ -125,14 +125,6 @@ function Test-RenderArtifacts([string]$Directory, [int]$ParticleCapacity,
     }
     if (!$Bloom -and $presentBloom.Count -ne 0) {
         throw "Bloom is disabled but passes were emitted: $($presentBloom -join ', ')."
-    }
-    $outlinePass = 'Screen-space Outline'
-    $presentOutline = @($actualPasses | Where-Object { $_ -ceq $outlinePass })
-    if ($Outline -and $presentOutline.Count -ne 1) {
-        throw 'Outline is enabled but Screen-space Outline was not emitted exactly once.'
-    }
-    if (!$Outline -and $presentOutline.Count -ne 0) {
-        throw 'Outline is disabled but Screen-space Outline was emitted.'
     }
     $particleStats = Get-Content (Join-Path $Directory "particle_stats.json") -Raw |
         ConvertFrom-Json
@@ -304,10 +296,10 @@ if ($legacyOnly.Count -ne 0 -or $enhancedOnly.Count -ne 0) {
 }
 
 & $Executable --smoke --smoke-render-lockstep --validation --capture-diagnostics --ticks=180 --barriers=enhanced --resize-test `
-    --render-scale=75 --shadow=2048 --particles=50 --no-bloom --no-outline `
+    --render-scale=75 --shadow=2048 --particles=50 --no-bloom `
     $generationArgument --artifacts=$options
 if ($LASTEXITCODE -ne 0) {
     throw "Stage 1 options smoke failed."
 }
-Test-RenderArtifacts $options 5000 $false $false
+Test-RenderArtifacts $options 5000 $false
 Test-LockstepTimeline $options

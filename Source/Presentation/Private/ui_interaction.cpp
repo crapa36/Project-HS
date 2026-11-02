@@ -60,7 +60,7 @@ std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &descrip
         "표면 입체감 품질", "조명 품질", "그림자 방식", "그림자 품질", "그림자 표시 거리",
         "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식",
         "반사 방식", "반사 품질", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
-        "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도", "외곽선", "외곽선 두께",
+        "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도",
         "색 보정", "적응형 셰이딩"};
     const auto definitions = GraphicsSettingDescriptors();
     const auto found = std::ranges::find(definitions, descriptor.id, &GraphicsSettingDescriptor::id);
@@ -119,7 +119,6 @@ std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
     case SettingId::TextureBudgetMib: return std::string(token) + " MiB";
     case SettingId::ShadowDistanceM: return std::string(token) + " m";
     case SettingId::HdrPaperWhiteNits: case SettingId::HdrPeakNits: return std::string(token) + " nit";
-    case SettingId::OutlineWidthPx: return std::string(token) + " px";
     case SettingId::FrameGenerationMultiplier: case SettingId::AnisotropicFiltering: return std::string(token) + "배";
     default: return std::string(token);
     }
@@ -155,8 +154,7 @@ double NumericStep(SettingId id)
     case SettingId::HdrPeakNits: return 50;
     case SettingId::ManualScalePercent: case SettingId::DynamicMinPercent:
     case SettingId::DynamicMaxPercent: case SettingId::ShadowDistanceM: return 5;
-    case SettingId::Sharpening: case SettingId::BloomStrength:
-    case SettingId::OutlineWidthPx: return .1;
+    case SettingId::Sharpening: case SettingId::BloomStrength: return .1;
     default: return 1;
     }
 }

@@ -569,7 +569,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> bloom_upsample_pixel;
     std::vector<std::byte> bloom_pixel;
     std::vector<std::byte> tone_map_pixel;
-    std::vector<std::byte> outline_pixel;
     std::vector<std::byte> fxaa_pixel;
     std::vector<std::byte> ui_pixel;
     std::vector<std::byte> ribbon_update;
@@ -617,7 +616,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
              std::pair{"bloom_upsample_ps.dxil", &bloom_upsample_pixel},
              std::pair{"bloom_ps.dxil", &bloom_pixel},
              std::pair{"tonemap_ps.dxil", &tone_map_pixel},
-             std::pair{"outline_ps.dxil", &outline_pixel},
              std::pair{"fxaa_ps.dxil", &fxaa_pixel},
              std::pair{"ui_ps.dxil", &ui_pixel},
              std::pair{"ribbon_update_cs.dxil", &ribbon_update},
@@ -1272,8 +1270,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                        bloom_pipeline.ReleaseAndGetAddressOf()},
              std::pair{std::span<const std::byte>(tone_map_pixel),
                        tone_map_pipeline.ReleaseAndGetAddressOf()},
-             std::pair{std::span<const std::byte>(outline_pixel),
-                       outline_pipeline.ReleaseAndGetAddressOf()},
          })
     {
         if (auto pipeline_result = create_post_pipeline(shader, pipeline); !pipeline_result)
@@ -1575,7 +1571,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_bloom_upsample = std::move(bloom_upsample_pipeline);
     auto previous_bloom = std::move(bloom_pipeline);
     auto previous_tone_map = std::move(tone_map_pipeline);
-    auto previous_outline = std::move(outline_pipeline);
     auto previous_fxaa = std::move(fxaa_pipeline);
     auto previous_ui = std::move(ui_pipeline);
     auto previous_ribbon_update = std::move(ribbon_update_pipeline);
@@ -1663,7 +1658,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         bloom_upsample_pipeline = std::move(previous_bloom_upsample);
         bloom_pipeline = std::move(previous_bloom);
         tone_map_pipeline = std::move(previous_tone_map);
-        outline_pipeline = std::move(previous_outline);
         fxaa_pipeline = std::move(previous_fxaa);
         ui_pipeline = std::move(previous_ui);
         ribbon_update_pipeline = std::move(previous_ribbon_update);

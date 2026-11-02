@@ -317,7 +317,6 @@ class GraphicsSettingsCommit
         case UiCommandKind::SetShadowResolution: effective.shadow_resolution = command.value; break;
         case UiCommandKind::SetParticlePercentage: effective.particle_percentage = command.value; break;
         case UiCommandKind::SetBloom: effective.bloom = command.value != 0; break;
-        case UiCommandKind::SetOutline: effective.outline = command.value != 0; break;
         case UiCommandKind::SetMasterVolumePercent: effective.master_volume = command.value / 100.0f; break;
         case UiCommandKind::SetBgmVolumePercent: effective.bgm_volume = command.value / 100.0f; break;
         case UiCommandKind::SetSfxVolumePercent: effective.sfx_volume = command.value / 100.0f; break;

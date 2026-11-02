@@ -44,7 +44,7 @@ int main()
     Check(static_cast<unsigned>(hs::SettingId::AdaptiveShading) == 56,
           "retained persistence IDs are not renumbered around removed settings");
     for (const auto key : {"ray_tracing_enabled", "rt_trace_distance_m",
-                           "neural_ray_reconstruction", "ray_reconstruction_provider"})
+                           "neural_ray_reconstruction", "ray_reconstruction_provider", "outline", "outline_width_px"})
         Check(!hs::ParseGraphicsSettingKey(key), "removed settings have no current descriptor");
     Check(!hs::ParseGraphicsEnumToken<hs::GraphicsPreset>("ultra_rt") &&
               !hs::ParseGraphicsEnumToken<hs::GraphicsAoMode>("rtao") &&
@@ -59,6 +59,9 @@ int main()
     for (unsigned id = 41; id <= 44; ++id)
         Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(id), "true"),
               "removed persisted IDs reject live edits");
+    for (unsigned id : {53u, 54u})
+        Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(id), "true"),
+              "removed outline IDs reject live edits");
     Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(38), "ultra"),
           "removed GI quality setting rejects live edits");
     Check(hs::ParseGraphicsEnumToken<hs::GraphicsResolutionMode>("provider_quality") ==

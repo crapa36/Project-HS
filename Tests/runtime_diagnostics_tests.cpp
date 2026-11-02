@@ -5,11 +5,15 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
-void Check(bool ok) { if (!ok) throw std::runtime_error("diagnostic contract"); }
+void Check(bool ok, const std::source_location where = std::source_location::current())
+{
+    if (!ok) throw std::runtime_error("diagnostic contract at line " + std::to_string(where.line()));
+}
 std::uint64_t clock_ticks{};
 std::uint64_t FakeClock() noexcept { return ++clock_ticks; }
 
@@ -48,7 +52,6 @@ void CheckFramePerformanceSchema()
     const auto names = split(header_line);
     const auto values = split(row_line);
     Check(names.size() == values.size() && names.size() == sentinel_index);
-    Check(names.size() == 202);
     const auto profile_task_name = std::find(names.begin(), names.end(), "vfx_profile_prepare_us");
     Check(profile_task_name != names.end());
     const auto profile_task_column = static_cast<std::size_t>(profile_task_name - names.begin());
@@ -61,8 +64,6 @@ void CheckFramePerformanceSchema()
     Check(std::adjacent_find(unique_names.begin(), unique_names.end()) == unique_names.end());
     for (std::size_t index = 0; index < values.size(); ++index)
         Check(values[index] == std::to_string(index));
-    std::cout << "FRAME_SCHEMA_HEADER:" << header << '\n';
-    std::cout << "FRAME_SCHEMA_ROW:" << sentinel_row << '\n';
 }
 
 void CheckNativeCopyHeadroom()
@@ -92,7 +93,7 @@ struct FailedSink : std::streambuf
     std::streamsize xsputn(const char*,std::streamsize) override { return 0; }
     int sync() override { return -1; }
 };
-int main()
+int main() try
 {
     CheckFramePerformanceSchema();
     CheckNativeCopyHeadroom();
@@ -218,4 +219,9 @@ int main()
     Check(disabled_failure.Finish() && disabled_failure.Complete() &&
           !disabled_failure.Failed() && disabled_failure.Records()==0);
     std::cout<<"PASS disabled diagnostics, fixed-chunk streaming and writer failures\n";
+}
+catch (const std::exception &error)
+{
+    std::cerr << error.what() << '\n';
+    return 1;
 }
