@@ -273,11 +273,14 @@ struct TopologyValues
     };
     struct PassValues
     {
+        struct ExecutionUse { Access incoming{}, outgoing{}; };
         std::uint32_t id{};
         std::string name;
         QueueHint queue{};
         unsigned execution_kind{};
         std::vector<ResourceUse> uses;
+        std::vector<std::uint32_t> execution_resources;
+        std::vector<ExecutionUse> execution_uses;
         QueueHint external_queue{};
         std::vector<ExternalResourceAccess> boundaries;
     };
@@ -423,6 +426,21 @@ struct TopologyValues
             stored.execution_kind = ExecutionKind(p);
             if (p.cached_uses) stored.uses = p.Uses();
             if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
+            stored.execution_resources.reserve(p.Uses().size());
+            if (p.external) stored.execution_uses.reserve(p.Uses().size());
+            for (const auto &use : p.Uses())
+            {
+                stored.execution_resources.push_back(use.predecessor.resource.value - 1);
+                if (p.external)
+                {
+                    PassValues::ExecutionUse fact{use.access, use.access};
+                    for (const auto &boundary : p.external->accesses)
+                        if (boundary.resource.value == use.predecessor.resource.value &&
+                            boundary.resource.kind == use.predecessor.resource.kind)
+                        { fact = {boundary.incoming, boundary.outgoing}; break; }
+                    stored.execution_uses.push_back(fact);
+                }
+            }
             // Owner/provider callbacks can bridge read-only resources through COMMON.
             if (p.external || p.execute_on_owner)
                 for (const auto &use : p.Uses())
@@ -1118,6 +1136,7 @@ struct RenderGraphQueueExecutor::Impl
         std::uint32_t position{};
         std::vector<PlannedBarrier> before, after;
         std::vector<std::uint32_t> dependencies, resources;
+        std::span<const std::uint32_t> pass_resources;
         CompletionSet imported;
         std::vector<std::uint32_t> external_imports;
         std::size_t recorder{};
@@ -1128,9 +1147,11 @@ struct RenderGraphQueueExecutor::Impl
         {
             queue = {}; pass = external_finish = UINT32_MAX; position = 0;
             before.clear(); after.clear(); dependencies.clear();
-            resources.clear();
+            resources.clear(); pass_resources = {};
             imported = {}; external_imports.clear(); recorder = 0; resolve_timestamps = false;
         }
+        [[nodiscard]] std::span<const std::uint32_t> Resources() const noexcept
+        { return pass == UINT32_MAX ? std::span<const std::uint32_t>{resources} : pass_resources; }
     };
     struct ResourceState
     {
@@ -1598,6 +1619,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     }
     const auto include_resource = [&](std::uint32_t batch, std::uint32_t resource) {
         auto &target = batches[batch];
+        // A pass batch already contains each validated use in declaration order.
+        // Only synthesized batches need dynamic membership tracking.
+        if (target.pass != UINT32_MAX) return;
         // Use handles are one-based; every path below converts them to the
         // zero-based index used by g.resources before reaching this helper.
         if (batch_resource_memberships.size() <= batch)
@@ -1662,12 +1686,15 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         batches[index].queue = pass.queue;
         batches[index].pass = index;
         batches[index].position = position;
-        for (const auto &use : pass.Uses())
+        const auto &execution = g.topology.passes[index];
+        batches[index].pass_resources = execution.execution_resources;
+        const auto uses = pass.Uses();
+        for (std::size_t use_index = 0; use_index < uses.size(); ++use_index)
         {
-            const auto resource = use.predecessor.resource.value - 1;
-            const auto *boundary = ExternalAccess(pass, use.predecessor.resource);
-            const auto incoming = boundary ? boundary->incoming : use.access;
-            const auto outgoing = boundary ? boundary->outgoing : use.access;
+            const auto &use = uses[use_index];
+            const auto resource = execution.execution_resources[use_index];
+            const auto incoming = pass.external ? execution.execution_uses[use_index].incoming : use.access;
+            const auto outgoing = pass.external ? execution.execution_uses[use_index].outgoing : use.access;
             auto &state = states[resource];
             const bool shared_read = shared_readers && shareable[resource] && !pass.external && use.reads && !use.writes &&
                 incoming == Access::ComputeRead && outgoing == Access::ComputeRead && pass.queue != QueueHint::Copy;
@@ -2074,7 +2101,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         auto &pending = pending_operations[index];
         pending.operation = g.passes[batch.pass].external;
         pending.queue = static_cast<ID3D12CommandQueue *>(pending.operation->binding.native_queue_owner.get());
-        for (const auto resource : batch.resources)
+        for (const auto resource : batch.Resources())
             pending.resources.emplace_back(static_cast<ID3D12Resource *>(g.resources[resource].native));
         const auto result = impl_->device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                                       IID_PPV_ARGS(&pending.retirement_fence));
@@ -2143,7 +2170,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             retained.bridge.Include(batch.queue, value);
             if (value == UINT64_MAX) retained.bridged = false;
         }
-        for (const auto resource_index : batch.resources)
+        for (const auto resource_index : batch.Resources())
         {
             auto &resource = g.resources[resource_index];
             resource.completion.Include(batch.queue, value);
@@ -2283,7 +2310,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         {
             const auto &submitted_batch = batches[submission_order[position]];
             // Planning is complete; reuse its physical-state scratch for linear publication.
-            for (const auto resource_index : submitted_batch.resources)
+            for (const auto resource_index : submitted_batch.Resources())
                 states[resource_index].physical = g.resources[resource_index].current;
             for (const auto &barrier : submitted_batch.before)
                 g.resources[barrier.resource].current = states[barrier.resource].physical = barrier.after;
@@ -2301,7 +2328,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 if (barrier.operation != BarrierOperation::Release)
                     g.resources[barrier.resource].current = barrier.after;
             }
-            for (const auto resource_index : submitted_batch.resources)
+            for (const auto resource_index : submitted_batch.Resources())
             {
                 auto &resource = g.resources[resource_index];
                 const auto physical = states[resource_index].physical;

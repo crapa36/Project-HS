@@ -29,12 +29,6 @@ RendererFeaturePlan ResolveRendererFeatures(const RendererFeatureRequest &reques
     plan.shadow_mode = request.shadow_mode;
 
     if (request.ao_mode == GraphicsAoMode::Auto) plan.ao_mode = GraphicsAoMode::GTAO;
-    if (request.gi_mode == GraphicsGiMode::SoftwareHybrid && !capabilities.software_gi_consumer)
-    {
-        plan.gi_mode = GraphicsGiMode::Probe;
-        plan.gi_reason = RendererFeatureFallbackReason::ConsumerUnavailable;
-    }
-    plan.software_gi_enabled = plan.gi_mode == GraphicsGiMode::SoftwareHybrid;
     if(request.adaptive_shading==GraphicsAutoToggle::Off)
         plan.adaptive_raster_reason=plan.adaptive_compute_reason=RendererFeatureFallbackReason::RequestedOff;
     else

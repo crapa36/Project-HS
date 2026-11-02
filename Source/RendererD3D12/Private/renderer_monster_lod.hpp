@@ -14,14 +14,6 @@
 
 namespace hs
 {
-[[nodiscard]] inline double MergeActiveGiVoxelSize(double first, double second) noexcept
-{
-    if (!std::isfinite(first) || !std::isfinite(second))
-        return std::numeric_limits<double>::quiet_NaN();
-    if (first == 0.0) return second;
-    return second == 0.0 ? first : std::min(first, second);
-}
-
 struct MonsterLodConsumer
 {
     // The caller supplies every camera, shadow and probe consumer of this
@@ -46,10 +38,9 @@ struct MonsterLodProjectionInputs
     std::span<const LightView> local_lights;
     RenderWorldPosition local_light_scene_origin{};
     std::array<double, 3> csm_world_texels{}, vsm_world_texels{};
-    double finest_gi_voxel_m{}; // From the active SDK context, not config defaults.
     double maximum_error_pixels{}; // Existing geometry quality policy.
     std::uint32_t local_shadow_face_resolution{};
-    bool csm_active{}, vsm_active{}, local_shadows_active{}, gi_active{};
+    bool csm_active{}, vsm_active{}, local_shadows_active{};
     // The caller has enumerated every active view and requested local light.
     // Missing consumers cannot silently qualify a reduced page.
     bool camera_views_complete{}, local_lights_complete{};
@@ -253,13 +244,6 @@ using Vec3 = std::array<double, 3>;
             shadow.focal_pixels = 1.001*double(inputs.local_shadow_face_resolution)/(2.0*tangent);
             prepared.local_lights.push_back(shadow);
         }
-    if (inputs.gi_active)
-        // Half of the finest native SDF voxel is a stricter world-position
-        // budget than the authored raster error policy, without a new setting.
-        if (!std::isfinite(inputs.finest_gi_voxel_m) || inputs.finest_gi_voxel_m <= 0)
-            projection.valid = false;
-        else projection.Include(1.001/inputs.finest_gi_voxel_m,
-            std::min(inputs.maximum_error_pixels,0.5));
     return prepared;
 }
 

@@ -91,14 +91,17 @@ std::size_t MaterialOrdinal(std::string_view name)
 
 #include "material_context_include.hpp"
 
+struct MaterialShaderOptions
+{
+    std::uint32_t sidecar_planes{};
+    bool feedback{}, hero_work{}, hero_translucent_domain{}, terrain_visibility_resolve{};
+};
+
 void RunDxc(const fs::path &dxc, const fs::path &source_root,
             const fs::path &stage, const fs::path &output,
             const fs::path &source, std::wstring_view entry,
             std::wstring_view profile, std::wstring_view define,
-            std::uint32_t sidecar_planes = 0, bool generated_deferred = false,
-            bool feedback = false, bool hero_work = false,
-            bool hero_translucent_domain = false,
-            bool terrain_visibility_resolve = false)
+            MaterialShaderOptions options = {})
 {
     auto diagnostics = output;
     diagnostics += ".diagnostics.txt";
@@ -112,12 +115,11 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
         source.wstring()};
     hs::shader_content::AppendRenderBindingArguments(args);
     if (!define.empty()) args.emplace_back(define);
-    if (generated_deferred) args.emplace_back(L"-DHS_GENERATED_DEFERRED_MATERIALS=1");
-    if (feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
-    if (hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
-    if (hero_translucent_domain) args.emplace_back(L"-DHS_HERO_TRANSLUCENT_DOMAIN_ONLY=1");
-    if (terrain_visibility_resolve) args.emplace_back(L"-DHS_TERRAIN_VISIBILITY_RESOLVE=1");
-    args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(sidecar_planes));
+    if (options.feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
+    if (options.hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
+    if (options.hero_translucent_domain) args.emplace_back(L"-DHS_HERO_TRANSLUCENT_DOMAIN_ONLY=1");
+    if (options.terrain_visibility_resolve) args.emplace_back(L"-DHS_TERRAIN_VISIBILITY_RESOLVE=1");
+    args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(options.sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
     {
@@ -148,7 +150,7 @@ bool IsHeroTranslucentProgram(const ProgramOutput &program)
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
-                           const fs::path &dxc, bool with_brixelizer, bool hero_work = false)
+                           const fs::path &dxc, bool hero_work = false)
 {
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
             "all paths must be absolute");
@@ -174,12 +176,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         spec.inputs.push_back(ap::HashInput("Source/Apps/RenderMaterialShader/coated_dfg_cooker.hpp",
             source_root / "Source/Apps/RenderMaterialShader/coated_dfg_cooker.hpp"));
     }
-    if (with_brixelizer)
-        for (const auto *relative : {"Content/Shaders/brixelizer_common.hlsli", "Content/Shaders/brixelizer_guides.hlsl",
-                                   "Content/Shaders/brixelizer_gi_resolve.hlsl",
-                                   "Content/Shaders/brixelizer_gi_compose.hlsl",
-                                   "Content/Shaders/brixelizer_cache_export.hlsl"})
-            spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
     PreparedMaterialInputs materials(source_root);
     const auto generated = DeferredContextInclude(spec, source_root, materials);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
@@ -290,14 +286,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ProgramOutput{"render/shader/hero_translucent_ps.dxil", "hero_translucent_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroTranslucentPS", L"ps_6_0"}})
             outputs.push_back(program);
     }
-    if (with_brixelizer)
-    {
-        outputs.push_back({"render/shader/brixelizer_guides_cs.dxil", "brixelizer_guides_cs.dxil", "Content/Shaders/brixelizer_guides.hlsl", L"BrixelizerGuidesCS", L"cs_6_6"});
-        outputs.push_back({"render/shader/brixelizer_gi_resolve_cs.dxil", "brixelizer_gi_resolve_cs.dxil", "Content/Shaders/brixelizer_gi_resolve.hlsl", L"BrixelizerGiResolveCS", L"cs_6_6"});
-        outputs.push_back({"render/shader/brixelizer_gi_compose_cs.dxil", "brixelizer_gi_compose_cs.dxil", "Content/Shaders/brixelizer_gi_compose.hlsl", L"BrixelizerGiComposeCS", L"cs_6_6"});
-        outputs.push_back({"render/shader/brixelizer_cache_export_cs.dxil", "brixelizer_cache_export_cs.dxil", "Content/Shaders/brixelizer_cache_export.hlsl", L"BrixelizerCacheExportCS", L"cs_6_6"});
-        outputs.push_back({"render/shader/brixelizer_cache_direct_ps.dxil", "brixelizer_cache_direct_ps.dxil", "Content/Shaders/project_hs.hlsl", L"BrixelizerCacheDirectPS", L"ps_6_6"});
-    }
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
     if (fs::exists(result_path) && fs::exists(result_path.parent_path() / "result.d"))
     {
@@ -343,13 +331,13 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         for (const auto &program : outputs)
         {
             const auto output = stage / program.filename;
-            const bool brixelizer_guides = program.id.starts_with("render/shader/brixelizer_") && program.profile.starts_with(L"cs_");
-            const auto define = (program.id.starts_with("render/shader/hero_") || brixelizer_guides)
+            const auto define = program.id.starts_with("render/shader/hero_")
                 ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
             RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
-                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides,
-                   false, hero_work, IsHeroTranslucentProgram(program));
+                   program.entry, program.profile, define,
+                   {.sidecar_planes = sidecar_layout.plane_count, .hero_work = hero_work,
+                    .hero_translucent_domain = IsHeroTranslucentProgram(program)});
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
@@ -823,9 +811,9 @@ void Produce(std::string_view name, const fs::path &source_root,
             // Terrain's visibility bucket contains only Ground/Dirt and authored meadow ground.
             RunDxc(dxc, source_snapshot, stage, output,
                    program.source_relative, program.entry, program.profile,
-                   L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1", sidecar_layout.plane_count, false,
-                   program.feedback, false, false,
-                   terrain && program.entry == L"SurfaceResolveCS");
+                   L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1",
+                   {.sidecar_planes = sidecar_layout.plane_count, .feedback = program.feedback,
+                    .terrain_visibility_resolve = terrain && program.entry == L"SurfaceResolveCS"});
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(std::string(program.id),
                                                std::string(program.filename), output));
@@ -853,7 +841,6 @@ int wmain(int argc, wchar_t **argv)
     bool preintegrate = false;
     bool hero_work = false;
     bool parameters = false;
-    bool with_brixelizer = false;
     bool decal_surface = false;
     try
     {
@@ -874,8 +861,6 @@ int wmain(int argc, wchar_t **argv)
                 decal_surface = true;
             else if (arg == L"--parameters" && !parameters)
                 parameters = true;
-            else if (arg == L"--with-brixelizer" && !with_brixelizer)
-                with_brixelizer = true;
             else if (arg == L"--name" && name.empty() && ++i < argc)
             {
                 const std::wstring_view value = argv[i];
@@ -895,8 +880,7 @@ int wmain(int argc, wchar_t **argv)
             (!hero_work && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
             (!hero_work && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
             (hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
-        Require(valid_mode && (!with_brixelizer || preintegrate) &&
-                !source_root.empty() && !build_root.empty(),
+        Require(valid_mode && !source_root.empty() && !build_root.empty(),
                 "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --hero-work | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
         if (parameters)
         {
@@ -915,13 +899,13 @@ int wmain(int argc, wchar_t **argv)
         {
             action_id = "render.shader.hero-work";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), false, true);
+                                  dxc.lexically_normal(), true);
         }
         else if (preintegrate)
         {
             action_id = "render.shader.bsdf-preintegrate";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), with_brixelizer);
+                                  dxc.lexically_normal());
         }
         else
         {
@@ -938,7 +922,6 @@ int wmain(int argc, wchar_t **argv)
                           {{"action_id", action_id}, {"name", name},
                            {"bsdf_preintegrate", preintegrate}, {"hero_work", hero_work},
                            {"parameters", parameters}, {"decal_surface", decal_surface},
-                           {"with_brixelizer", with_brixelizer},
                            {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)},
                            {"dependency", {{"dxc", ap::DiagnosticPath(dxc)}}}});

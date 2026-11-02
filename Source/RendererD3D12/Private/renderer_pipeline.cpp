@@ -213,24 +213,10 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     light_range.NumDescriptors = 6;
     light_range.RegisterSpace = 19;
     light_range.OffsetInDescriptorsFromTableStart = kLightListDescriptorOffset - kTemporalTextureDescriptorOffset;
-    const D3D12_DESCRIPTOR_RANGE1 scene_geometry_ranges[]{
-        {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 20,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 20,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 14, 20,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 2},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 20,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 3}};
     const std::array history_geometry_ranges{
         temporal_input_range, geometry_range, surface_range,
         visibility_srv_range, visibility_uav_range, material_parameter_range,
         view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, ambient_range, hero_binding_range, probe_range, light_range,
-        scene_geometry_ranges[0], scene_geometry_ranges[1], scene_geometry_ranges[2], scene_geometry_ranges[3],
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kVirtualShadowDescriptorCount, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -255,15 +241,6 @@ Result D3D12Renderer::Impl::CreateRootSignature()
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLocalShadowDescriptorCount, 0, 27,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kLocalShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 31,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kBrixelizerDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 15, 0, 31,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kBrixelizerDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 9, 0, 31,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kBrixelizerDescriptorOffset - kTemporalTextureDescriptorOffset + 16},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 32,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kTextureFeedbackDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -1268,10 +1245,10 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         return SUCCEEDED(create_result) ? Result::Success()
                                         : HResultFailure("Create post-process PSO", create_result);
     };
-    post.NumRenderTargets = 4;
-    for (const UINT mask : {0u, 1u, 2u, 3u, 7u})
+    post.NumRenderTargets = 3;
+    for (const UINT mask : {0u, 1u, 2u, 3u})
     {
-        for (UINT slot = 0; slot < 3; ++slot)
+        for (UINT slot = 0; slot < 2; ++slot)
             post.RTVFormats[slot + 1] = mask & (1u << slot)
                 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
         if (auto created = create_post_pipeline(deferred_pixel,
@@ -1509,10 +1486,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         return prepared;
     if (auto prepared = PrepareHdrPost(owner, candidate_config, owner.state.render_capacity,
             {owner.width, owner.height}, hdr_post); !prepared) return prepared;
-    SceneGeometryCandidate scene_geometry;
-    if (auto prepared = PrepareSceneGeometry(candidate_config, scene_geometry); !prepared) return prepared;
-    BrixelizerCandidate brixelizer;
-    if (auto prepared = PrepareBrixelizerGi(owner, candidate_config, owner.state.render_active, brixelizer); !prepared) return prepared;
     VirtualShadowCandidate virtual_shadows;
     AdditionalShadowPrepared additional_shadows;
     if (auto prepared = PrepareAdditionalShadows(owner, candidate_config, owner.state.render_capacity,
@@ -1738,11 +1711,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = owner.light_list.Commit(std::move(light_list), completed); !committed)
         { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->scene_geometry.Commit(std::move(scene_geometry), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.brixelizer_gi.Commit(std::move(brixelizer), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        owner.brixelizer_history_valid = false;
         if (auto committed = owner.virtual_shadows.Commit(std::move(virtual_shadows), completed); !committed)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = CommitAdditionalShadows(owner, std::move(additional_shadows)); !committed)

@@ -22,7 +22,7 @@ struct GeometryDemandCell
     std::array<float, 3> minimum, maximum;
     float max_scale;
     bool any_wind;
-    std::vector<std::uint32_t> instances;
+    std::vector<GeometryDemandPoint> points;
 };
 inline std::vector<GeometryDemandCell> BuildGeometryDemandCells(std::span<const GeometryDemandPoint> points)
 {
@@ -35,7 +35,7 @@ inline std::vector<GeometryDemandCell> BuildGeometryDemandCells(std::span<const 
         if (!finite)
         {
             const auto nan = std::numeric_limits<float>::quiet_NaN();
-            cells.push_back({{nan, nan, nan}, {nan, nan, nan}, point.scale, point.wind, {point.instance}});
+            cells.push_back({{nan, nan, nan}, {nan, nan, nan}, point.scale, point.wind, {point}});
             continue;
         }
         std::array<double, 3> key{};
@@ -50,7 +50,7 @@ inline std::vector<GeometryDemandCell> BuildGeometryDemandCells(std::span<const 
         }
         cell.max_scale = std::max(cell.max_scale, std::abs(point.scale));
         cell.any_wind |= point.wind;
-        cell.instances.push_back(point.instance);
+        cell.points.push_back(point);
     }
     return cells;
 }

@@ -195,7 +195,7 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         : "프레임 생성을 켜면 지원하는 배수를 확인합니다");
     status(SettingId::LowLatency, presentation.low_latency_active ? "on" : "off", presentation.fallback_reason);
     status(SettingId::AoMode, std::string(GraphicsEnumToken(lighting.active.ao_mode)), lighting.ao_fallback_reason);
-    status(SettingId::GiMode, std::string(GraphicsEnumToken(lighting.active.gi_mode)), lighting.gi_fallback_reason.empty() ? lighting.software_gi.reason : lighting.gi_fallback_reason);
+    status(SettingId::GiMode, std::string(GraphicsEnumToken(lighting.active.gi_mode)), {});
     status(SettingId::ReflectionMode, std::string(GraphicsEnumToken(lighting.active.reflection_mode)), lighting.reflection_fallback_reason);
     status(SettingId::ShadowMode, std::string(GraphicsEnumToken(lighting.active.shadow_mode)), lighting.shadow_fallback_reason + "; " + lighting.local_shadows.reason);
     const auto &adaptive = lighting.adaptive_shading;

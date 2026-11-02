@@ -1470,7 +1470,7 @@ float3 JellyLighting(float3 base, float3 normal, float3 world, float roughness, 
     const float internal = thickness * (0.05 + 0.15 * saturate(-nl) + charge * 0.45);
     HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(base,normal,roughness,0.0,1.0,1.0);
     surface.normal_is_world=true;
-    return HsDeferredIndirectDiffuse(base*0.30)+base*internal+lerp(base,float3(0.70,0.85,1.0),0.30)*fresnel*0.32+
+    return (base*0.30)+base*internal+lerp(base,float3(0.70,0.85,1.0),0.30)*fresnel*0.32+
         HsLightListEvaluate(surface,world,CameraTime.xyz,visibility,HsLightAllMask,true);
 }
 
@@ -1492,7 +1492,6 @@ struct HsDeferredOutput
     float4 Radiance : SV_Target0;
     float4 SubsurfaceDiffuse : SV_Target1;
     float4 EnvironmentSpecular : SV_Target2;
-    float4 IndirectDiffuse : SV_Target3;
 };
 
 void HsDeferredLocalLightingComponents(HsSurfaceClosure closure, float3 world, float base_fresnel_override,bool world_query,
@@ -1560,7 +1559,6 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
         output.Radiance=float4(diffuse+specular+closure.emission,1.0);
         if(closure.sss_weight>0.0) output.SubsurfaceDiffuse=float4(diffuse,1.0);
         output.EnvironmentSpecular=HsDeferredEnvironmentSpecular(ambient_specular);
-        output.IndirectDiffuse=float4(ambient_diffuse,1.0);
         return output;
     }
     if (model == HsSurfaceModelJelly)
@@ -1574,61 +1572,10 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
     const float ambient = LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
     HsSurfaceClosure closure=HsMaterialMakeSurfaceClosure(base.rgb,normal,1.0,0.0,ambient,1.0);
     closure.normal_is_world=true;
-    float3 color=HsDeferredIndirectDiffuse(base.rgb*(0.35*ambient))+base.rgb*rim*0.22+
+    float3 color=(base.rgb*(0.35*ambient))+base.rgb*rim*0.22+
         HsLightListEvaluate(closure,world,CameraTime.xyz,visibility,HsLightAllMask,false);
     output.Radiance=float4(lerp(arena,color,base.a),1.0);
-    output.IndirectDiffuse=float4(HsDeferredIndirectDiffuse(base.rgb*(0.35*ambient))*base.a,1.0);
     return output;
-}
-
-// Native software GI receives an independent scene-linear light cache seed.
-// Evaluate the same direct lighting and emission as DeferredPS, without its
-// probe diffuse, environment specular, exposure, transparent or post terms.
-float4 BrixelizerCacheDirectPS(FullScreenOutput input) : SV_Target0
-{
-    const HsSurfaceSample surface = HsLoadSurface(input.Uv);
-    const bool valid = HsSurfaceValid(surface);
-    float3 world = valid ? HsSurfaceWorldPosition(surface) : 0.0;
-    if (!valid) return 0.0;
-    const float4 base = GBufferBase.Load(int3(surface.pixel, 0));
-    const uint model = HsSurfaceModel(surface.metadata);
-    const uint hero_ordinal = HsHeroOrdinal(surface.metadata.x);
-    if (model == HsSurfaceModelJelly) return 0.0;
-    if (model != HsSurfaceModelEnvironment && !HsHeroOpaqueOrdinalValid(hero_ordinal))
-    {
-        const float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
-        const float ambient = LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
-        HsSurfaceClosure cel = HsMaterialMakeSurfaceClosure(base.rgb, normal, 1.0, 0.0, ambient, 1.0);
-        cel.normal_is_world = true;
-        float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world)) : 1.0;
-        visibility *= LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
-        float3 diffuse, specular;
-        HsLightListEvaluateComponentsOptical(cel, world, CameraTime.xyz, visibility,
-            HsLightAllMask, false, -1.0, diffuse, specular);
-        return float4(diffuse * base.a, 1.0);
-    }
-#ifdef HS_GENERATED_DEFERRED_MATERIALS
-    HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(surface.pixel));
-#else
-    const float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
-    const float4 material = GBufferMaterial.Load(int3(surface.pixel, 0));
-    HsSurfaceClosure closure = HsMaterialMakeSurfaceClosure(base.rgb, normal,
-        material.r, material.g, material.b, 1.0);
-    closure.normal_is_world = true;
-    closure=HsApplyDecalSurfaceEmission(closure,uint2(surface.pixel));
-#endif
-    if (closure.unlit) return float4(closure.base_color + closure.emission, 1.0);
-    closure.ao *= LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
-    const float contact = LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
-    const float visibility = ShadowVisibility(world) * contact;
-    float3 diffuse, specular;
-    // The directional mask plus local mask is exactly the deferred direct set.
-    HsLightListEvaluateComponentsOptical(closure, world, CameraTime.xyz, visibility,
-        HsLightDirectionalMask, false, -1.0, diffuse, specular);
-    float3 local_diffuse, local_specular;
-    HsDeferredLocalLightingComponents(closure, world, local_diffuse, local_specular);
-    const float coverage = model == HsSurfaceModelEnvironment || HsHeroOpaqueOrdinalValid(hero_ordinal) ? 1.0 : base.a;
-    return float4((diffuse + local_diffuse + closure.emission) * coverage, 1.0);
 }
 
 uint ParticleHash(uint value)
@@ -3518,7 +3465,7 @@ OitOutput ParticlePS(ParticleOutput input)
         }
         HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(input.Color.rgb,normalize(input.Normal),1.0,0.0,1.0,1.0);
         surface.normal_is_world=true;
-        input.Color.rgb=HsDeferredIndirectDiffuse(input.Color.rgb*0.35)+HsLightListEvaluate(surface,input.WorldPosition,
+        input.Color.rgb=(input.Color.rgb*0.35)+HsLightListEvaluate(surface,input.WorldPosition,
             CameraTime.xyz,1.0,HsLightAllMask,true)*0.65;
     }
     clip(alpha - 0.001);
@@ -3590,7 +3537,7 @@ OitOutput OwnerMeshPS(ParticleOutput input)
     HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(base,normal,1.0,0.0,1.0,1.0);
     surface.normal_is_world=true;
     const float3 direct=HsLightListEvaluate(surface,input.WorldPosition,CameraTime.xyz,1.0,HsLightAllMask,true);
-    const float3 color=(HsDeferredIndirectDiffuse(base*0.35)+direct*0.65)*(1.0-0.35*saturate(input.SegmentMetadata.x))+
+    const float3 color=((base*0.35)+direct*0.65)*(1.0-0.35*saturate(input.SegmentMetadata.x))+
         base*fresnel*input.SegmentMetadata.x;
     const float linear_depth = length(input.WorldPosition - CameraTime.xyz);
     const float z = saturate(linear_depth / 180.0);
@@ -4045,7 +3992,7 @@ OitOutput VfxSpriteOitPS(VfxFlashOutput input)
         // Shadow palette colors the scattering; only baked emissive follows the hot gradient.
         const float3 scattering=HsLightListSixWay(input.WorldPosition,right,up,forward,
             positive.rgb,negative.rgb,HsLightAllMask,false);
-        color = (HsDeferredIndirectDiffuse(input.Color.rgb * 0.18) + input.Color.rgb * scattering +
+        color = ((input.Color.rgb * 0.18) + input.Color.rgb * scattering +
                  gradient.rgb * input.Gradient.y * negative.a) * detail;
         // Artistic mask modulates RGB only; baked positive alpha is the smoke silhouette.
         alpha *= positive.a * input.SurfaceData.y;

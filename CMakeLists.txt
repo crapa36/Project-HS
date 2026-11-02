@@ -35,7 +35,6 @@ option(HS_BUILD_RENDER_DATA_TESTS "Build CPU render package tests without conten
 option(HS_BUILD_ASSET_PIPELINE_TESTS "Build portable asset producer and generation tests" OFF)
 option(HS_BUILD_RUNTIME "Build the D3D12 runtime and applications" ON)
 option(HS_BUILD_CONTENT_TOOLS "Build FBX content cooker and content-dependent tests" ON)
-option(HS_WITH_BRIXELIZER "Build the pinned native FidelityFX Brixelizer/GI integration" OFF)
 option(HS_WITH_DIRECTSTORAGE "Build the pinned native DirectStorage 1.3.0 asset IO path" OFF)
 option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
 option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
@@ -403,13 +402,6 @@ if(MSVC)
 endif()
 endif()
 
-if((HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS) AND HS_WITH_BRIXELIZER)
-    # Each SDK compiler invocation is single-threaded; bound independent passes.
-    set_property(GLOBAL APPEND PROPERTY JOB_POOLS hs_brixelizer_shader_compile=2)
-    include(cmake/BrixelizerSdk.cmake)
-    hs_add_brixelizer_sdk()
-endif()
-
 if(HS_BUILD_RUNTIME)
 add_library(
     hs_renderer_d3d12 STATIC
@@ -465,15 +457,12 @@ add_library(
     Source/RendererD3D12/Private/renderer_probe.cpp
     Source/RendererD3D12/Private/renderer_ltc.cpp
     Source/RendererD3D12/Private/renderer_hdr_post.cpp
-    Source/RendererD3D12/Private/renderer_scene_geometry.cpp
     Source/RendererD3D12/Private/renderer_entity_surface.cpp
     Source/RendererD3D12/Private/renderer_decal_surface.cpp
     Source/RendererD3D12/Private/renderer_decal_materials.cpp
     Source/RendererD3D12/Private/renderer_views.cpp
     Source/RendererD3D12/Private/renderer_settings.cpp
     Source/RendererD3D12/Private/renderer_named_animation.cpp
-    Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
-    Source/RendererD3D12/Private/renderer_brixelizer_integration.cpp
     Source/RendererD3D12/Private/renderer_virtual_shadow.cpp
     Source/RendererD3D12/Private/renderer_local_shadow.cpp
     Source/RendererD3D12/Private/renderer_hlod.cpp
@@ -522,15 +511,6 @@ include(cmake/RenderSDKs.cmake)
 hs_configure_render_sdks()
 include(cmake/DirectStorageSdk.cmake)
 hs_configure_directstorage_sdk(hs_renderer_d3d12)
-if(HS_WITH_BRIXELIZER)
-    target_link_libraries(hs_renderer_d3d12 PRIVATE hs_brixelizer_native)
-    set_property(SOURCE
-        Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
-        Source/RendererD3D12/Private/renderer_lighting.cpp
-        APPEND PROPERTY COMPILE_DEFINITIONS HS_WITH_BRIXELIZER=1)
-    set_property(SOURCE Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
-        APPEND PROPERTY INCLUDE_DIRECTORIES "${HS_BRIXELIZER_PRIVATE_INCLUDE}")
-endif()
 target_compile_definitions(
     hs_renderer_d3d12 PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
@@ -1270,7 +1250,7 @@ target_link_libraries(hs_render_runtime_shader PRIVATE
     hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
 target_compile_definitions(hs_render_runtime_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_render_runtime_shader)
-foreach(family IN ITEMS project geometry visibility visibility-classification static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion adaptive-gtao reconstruction-guides sdk-presentation hdr-post light-list scene-geometry virtual-shadow volumetrics scene-hlod local-probe-bake)
+foreach(family IN ITEMS project geometry visibility visibility-classification static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion adaptive-gtao reconstruction-guides sdk-presentation hdr-post light-list virtual-shadow volumetrics scene-hlod local-probe-bake)
     if(family STREQUAL "project")
         set(family_source project_hs.hlsl)
     elseif(family STREQUAL "visibility")
@@ -1296,49 +1276,6 @@ foreach(family IN ITEMS project geometry visibility visibility-classification st
             "--build=${CMAKE_CURRENT_BINARY_DIR}" "--dxc=${HS_DXC}")
     list(APPEND HS_RENDER_SHADER_RESULTS "${family_result}")
 endforeach()
-if(HS_WITH_BRIXELIZER)
-    add_executable(hs_render_brixelizer_shader
-        Source/Apps/RenderBrixelizerShaderPackage/main.cpp
-        ContentSource/Textures/BrixelizerNoise/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp
-    )
-    target_link_libraries(hs_render_brixelizer_shader PRIVATE
-        hs_asset_pipeline hs_core hs_render_data hs_brixelizer_shader_tables nlohmann_json::nlohmann_json bcrypt)
-    target_compile_definitions(hs_render_brixelizer_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    hs_configure_target(hs_render_brixelizer_shader)
-    hs_brixelizer_attach_shader_metadata(hs_render_brixelizer_shader)
-    set(HS_BRIXELIZER_SHADER_RESULT
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/brixelizer/result.json")
-    get_filename_component(HS_BRIXELIZER_CACHE_ROOT "${HS_BRIXELIZER_SDK_ROOT}" DIRECTORY)
-    hs_render_sdk_pin(brixelizer HS_BRIXELIZER_PIN)
-    hs_add_asset_action(NAME hs_render_brixelizer_shader_action
-        BUILDER hs_render_brixelizer_shader
-        RESULT "${HS_BRIXELIZER_SHADER_RESULT}"
-        DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/brixelizer/result.d"
-        STATIC_INPUTS "${HS_BRIXELIZER_PIN}"
-            "${HS_BRIXELIZER_CACHE_ROOT}/source-files.sha256"
-            "${HS_BRIXELIZER_CACHE_ROOT}/sdk-source.zip"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Tools/bootstrap-brixelizer-sdk.ps1"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BrixelizerSdk.cmake"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BrixelizerNative/CMakeLists.txt"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BrixelizerNative/NormalizeShaderDepfile.cmake"
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/BrixelizerNoise/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp"
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt"
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/BrixelizerNoise/README.md"
-        ARGS "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--build=${CMAKE_CURRENT_BINARY_DIR}"
-            "--sdk=${HS_BRIXELIZER_SDK_ROOT}" "--pin=${HS_BRIXELIZER_PIN}")
-    list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BRIXELIZER_SHADER_RESULT}")
-endif()
-set(HS_BRIXELIZER_TRANSPORT_ARGS)
-set(HS_BRIXELIZER_TRANSPORT_INPUTS)
-if(HS_WITH_BRIXELIZER)
-    list(APPEND HS_BRIXELIZER_TRANSPORT_ARGS --with-brixelizer)
-    list(APPEND HS_BRIXELIZER_TRANSPORT_INPUTS
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/brixelizer_common.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/brixelizer_guides.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/brixelizer_gi_resolve.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/brixelizer_gi_compose.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/brixelizer_cache_export.hlsl")
-endif()
 set(HS_BSDF_SHADER_RESULT
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/bsdf-preintegrate/result.json")
 set(HS_AUTHORED_MATERIAL_NAMES
@@ -1376,8 +1313,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/shadow_data.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/temporal_reconstruction.hlsli"
@@ -1388,10 +1323,8 @@ hs_add_asset_action(
         ${HS_DEFERRED_MATERIAL_INPUTS}
         "${HS_GPU_SCENE_TABLES_SOURCE}" ${HS_GEOMETRY_SHADER_SOURCE}
         ${HS_MATERIAL_SURFACE_LIBRARY} ${HS_DXC_TOOL_INPUTS}
-        ${HS_BRIXELIZER_TRANSPORT_INPUTS}
     ARGS --bsdf-preintegrate --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
-        --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}"
-        ${HS_BRIXELIZER_TRANSPORT_ARGS})
+        --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}")
 list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BSDF_SHADER_RESULT}")
 # Intrusive developer PS variants are not part of Release/shipping products.
 # Current content generations use the repository's single-config Ninja trees.
@@ -1419,8 +1352,6 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/shadow_data.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/temporal_reconstruction.hlsli"
@@ -2244,14 +2175,6 @@ if(HS_BUILD_TESTS)
             add_test(NAME rendering.persistent-gpu-scene
                 COMMAND hs_persistent_gpu_scene_tests)
         endif()
-        if(WIN32 AND HS_BUILD_RUNTIME)
-            add_executable(hs_brixelizer_scene_input_tests Tests/brixelizer_scene_input_tests.cpp)
-            target_link_libraries(hs_brixelizer_scene_input_tests PRIVATE hs_renderer_d3d12 hs_render_data)
-            target_include_directories(hs_brixelizer_scene_input_tests PRIVATE Source/RendererD3D12/Private)
-            target_compile_definitions(hs_brixelizer_scene_input_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-            hs_configure_target(hs_brixelizer_scene_input_tests)
-            add_test(NAME rendering.brixelizer-scene-inputs COMMAND hs_brixelizer_scene_input_tests)
-        endif()
         add_executable(hs_render_feature_tests
             Tests/render_feature_tests.cpp
             Source/RendererD3D12/Private/render_features.cpp)
@@ -2587,10 +2510,10 @@ if(HS_BUILD_TESTS)
     set_tests_properties(rendering.grass-history PROPERTIES TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
     add_test(NAME rendering.local-probe-revisions
         COMMAND hs_render_test_runner
-            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json
+            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/local-probe-revisions
             --frames=96 --barriers=enhanced --validation --local-probe-revision-probe
-        BUILD_DEPENDS hs_render_test_runner hs_content_generation)
+        BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
     set_tests_properties(rendering.local-probe-revisions PROPERTIES TIMEOUT 180)
     add_test(NAME rendering.static-shadow-bake
         COMMAND hs_render_test_runner
@@ -3141,10 +3064,6 @@ configure_file(cmake/install_selected_generation.cmake.in
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/install_selected_generation.cmake"
     COMPONENT Runtime)
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)
-if(HS_WITH_BRIXELIZER)
-    install(FILES ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt
-        DESTINATION Licenses RENAME Brixelizer-LICENSE.txt COMPONENT Runtime)
-endif()
 install(CODE
     "set(_hs_release_source_exe \"$<TARGET_FILE:ProjectHS>\")\nset(_hs_release_source_pack \"${CMAKE_CURRENT_BINARY_DIR}/${HS_SHIPPING_PACK_RELATIVE_PATH}\")"
     CONFIGURATIONS Release COMPONENT Runtime)

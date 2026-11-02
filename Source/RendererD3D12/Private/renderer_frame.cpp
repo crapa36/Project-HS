@@ -10,7 +10,6 @@
 #include <DirectXPackedVector.h>
 #include "renderer_post_subgraphs.hpp"
 #include "renderer_named_animation.hpp"
-#include "renderer_brixelizer_scene.hpp"
 #include "renderer_entity_surface.hpp"
 #include "hero_coverage.hpp"
 #include "renderer_vfx_compatibility.hpp"
@@ -787,7 +786,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             lod_shadow_distance * (18.0 / 160.0),
             lod_shadow_distance * (48.0 / 160.0), lod_shadow_distance};
         const double lod_shadow_resolution = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
-        double finest_gi_voxel = owned_view.brixelizer_gi.FinestVoxelSizeMeters();
         bool vsm_active = owned_view.virtual_shadows.AllocatedBytes() != 0;
         bool local_shadows_active = owned_view.local_shadows.AllocatedBytes() != 0;
         // One canonical LOD must satisfy every view's actual native consumers.
@@ -795,7 +793,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         {
             if (view.id == view_input.id) continue;
             const auto &owner = *impl_->owned_views.at(view.id.value);
-            finest_gi_voxel = MergeActiveGiVoxelSize(finest_gi_voxel, owner.brixelizer_gi.FinestVoxelSizeMeters());
             vsm_active |= owner.virtual_shadows.AllocatedBytes() != 0;
             local_shadows_active |= owner.local_shadows.AllocatedBytes() != 0;
         }
@@ -808,11 +805,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {lod_cascade_extents[0] / (32.0 * kVirtualShadowInner),
              lod_cascade_extents[1] / (8.0 * kVirtualShadowInner),
              lod_cascade_extents[2] / (8.0 * kVirtualShadowInner)},
-            finest_gi_voxel,
             impl_->QualityProfileFor(impl_->config.geometry_quality).geometry_screen_error_px,
             impl_->QualityProfileFor(impl_->config.shadow_quality).local_shadow_resolution,
             true, vsm_active, local_shadows_active,
-            active_features.software_gi_enabled, true, true};
+            true, true};
         const auto monster_consumers = PrepareMonsterLodConsumers(monster_projection_inputs);
         prepared_scene.monster_lod_consumers_valid = monster_consumers.baseline.valid;
         prepared_scene.vsm_skin_consumer = vsm_active;
@@ -3113,7 +3109,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     else dynamic_canonical_inputs.clear();
     dynamic_skin_slots.assign(instance_count, std::numeric_limits<std::uint32_t>::max());
     const bool non_view_skin_consumer =
-        active_features.software_gi_enabled || !typed_volumes.empty() ||
+        !typed_volumes.empty() ||
         !prepared_scene.monster_lod_consumers_valid || prepared_scene.vsm_skin_consumer;
     using SkinCullVec = std::array<double, 3>;
     const auto skin_cull_dot = [](SkinCullVec a, SkinCullVec b) {
@@ -4305,7 +4301,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         inputs.view_id = view_input.id;
         inputs.required_receiver_domains=ShadowReceiverCamera;
         inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;
-        // Brixelizer's sun-shadow cache seed uses these same GBuffer surfaces.
         // Only actual world/froxel queries add receiver bounds beyond the camera.
         if(hero_volume_receivers_active||owned_view.volumetrics.AllocatedBytes()!=0)
         { inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld; }
@@ -4415,17 +4410,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::array<float, kEnvironmentMaterialNames.size()> geometry_demand{};
     const float shadow_demand_projection[]{constants->lod_projection.y,
         constants->lod_projection.z, constants->lod_projection.w};
-    const auto accumulate_geometry_demand = [&](const auto &source, std::uint32_t consumers,
-                                                std::uint32_t inside_consumers) {
-        if (!is_environment_mesh(source.mesh)) return;
-        const auto ordinal = environment_mesh_index(source);
-        const auto &coarse = impl_->environment_meshes[ordinal * 3 + 1];
-        const auto scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y),
-                                     std::abs(source.scale.z)});
-        const auto deformation = HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f;
-        const auto radius = impl_->environment_variant_radii[ordinal] * scale + deformation;
-        const auto error = coarse.metadata.geometric_error * scale + 2.0f * deformation;
-        const auto &center = source.position;
+    const auto accumulate_geometry_demand_values = [&](std::size_t ordinal, float center_x, float center_y,
+        float center_z, float scale, bool wind, float variant_radius, float coarse_error,
+        std::uint32_t consumers, std::uint32_t inside_consumers) {
+        const auto deformation = wind ? grass_visibility_radius : 0.0f;
+        const auto radius = variant_radius * scale + deformation;
+        const auto error = coarse_error * scale + 2.0f * deformation;
         for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
         {
             if ((consumers & (1u << consumer)) == 0) continue;
@@ -4437,15 +4427,15 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             bool visible = true;
             if ((inside_consumers & (1u << consumer)) == 0)
                 for (const auto &plane : demand_planes[consumer])
-                    visible = visible && center.x * plane.x + center.y * plane.y +
-                        center.z * plane.z + plane.w >= -radius;
+                    visible = visible && center_x * plane.x + center_y * plane.y +
+                        center_z * plane.z + plane.w >= -radius;
             if (!visible) continue;
             float projected_error{};
             if (consumer == 0)
             {
                 DirectX::XMFLOAT3 view_center{};
                 DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3Transform(
-                    DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
+                    DirectX::XMVectorSet(center_x, center_y, center_z, 1), view));
                 const auto distance = view_center.z - radius - error;
                 if (distance <= constants->lod_options.z)
                     projected_error = constants->lod_options.x * 2.0f;
@@ -4465,18 +4455,32 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             geometry_demand[ordinal] = std::max(geometry_demand[ordinal], projected_error);
         }
     };
+    const auto accumulate_dynamic_geometry_demand = [&](const auto &source, std::uint32_t consumers,
+                                                        std::uint32_t inside_consumers) {
+        if (!is_environment_mesh(source.mesh)) return;
+        const auto ordinal = environment_mesh_index(source);
+        const auto scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y),
+                                     std::abs(source.scale.z)});
+        accumulate_geometry_demand_values(ordinal, source.position.x, source.position.y,
+            source.position.z, scale,
+            HasEnvironmentWind(source.mesh, source.environment_variant),
+            impl_->environment_variant_radii[ordinal],
+            impl_->environment_meshes[ordinal * 3 + 1].metadata.geometric_error,
+            consumers, inside_consumers);
+    };
     const auto all_demand_consumers = (1u << active_view_count) - 1u;
-    for (const auto &source : render_instances) accumulate_geometry_demand(source, all_demand_consumers, 0);
+    for (const auto &source : render_instances) accumulate_dynamic_geometry_demand(source, all_demand_consumers, 0);
     if (static_scene)
         for (std::size_t ordinal = 0; ordinal < cluster_active.size(); ++ordinal)
         {
             if (cluster_active[ordinal]) continue;
+            const auto variant_radius = impl_->environment_variant_radii[ordinal];
+            const auto coarse_error = impl_->environment_meshes[ordinal * 3 + 1].metadata.geometric_error;
             for (const auto &cell : static_draws.geometry_demand_cells[ordinal])
             {
                 const float deformation = cell.any_wind ? grass_visibility_radius : 0.0f;
-                const float radius = impl_->environment_variant_radii[ordinal] * cell.max_scale + deformation;
-                const float error = impl_->environment_meshes[ordinal * 3 + 1].metadata.geometric_error *
-                    cell.max_scale + 2.0f * deformation;
+                const float radius = variant_radius * cell.max_scale + deformation;
+                const float error = coarse_error * cell.max_scale + 2.0f * deformation;
                 std::uint32_t consumers{}, inside_consumers{};
                 for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
                 {
@@ -4492,8 +4496,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 }
                 if (!consumers) continue;
                 // Cells only prune work; the original float calculation still chooses the exact priority.
-                for (const auto instance : cell.instances)
-                    accumulate_geometry_demand(static_scene->instances[instance], consumers, inside_consumers);
+                for (const auto &point : cell.points)
+                    accumulate_geometry_demand_values(ordinal, point.position[0], point.position[1],
+                        point.position[2], point.scale, point.wind,
+                        variant_radius, coarse_error, consumers, inside_consumers);
             }
         }
     for (std::uint32_t ordinal = 0; ordinal < geometry_demand.size(); ++ordinal)
@@ -4551,7 +4557,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         const auto radius = impl_->environment_variant_radii[material] *
             std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)}) +
             (HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f);
-        bool visible = capture_consumer || active_features.software_gi_enabled;
+        bool visible = capture_consumer;
         for (const auto &planes : demand_planes)
         {
             if (visible) break;
@@ -4567,7 +4573,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         // the finest allowed mip for actual visible owners; raster hardware
         // demand comes from real samples. Software GI consumers use software demand.
         demand_material(render_data::EnvironmentGeometryMaterialOrdinal(material), 0, std::bit_cast<UINT>(std::max(geometry_demand[material], 1.0f)),
-            active_features.software_gi_enabled);
+            false);
     };
     for (const auto &source : render_instances) demand_environment_material(source, false);
     if (static_scene)
@@ -4584,7 +4590,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
         {
             const auto id = impl_->material_texture_stream_ids[kTerrainMaterialOrdinal * render_data::kMaterialTextureSlots + slot];
-            if (!id || (impl_->texture_streaming.HardwareBacked(id) && !active_features.software_gi_enabled)) continue;
+            if (!id || impl_->texture_streaming.HardwareBacked(id)) continue;
             const auto logical = impl_->texture_streaming.View(id).logical_description;
             const auto rho = std::max(static_cast<float>(logical.width) * terrain_footprint / 9.0f, 1.0f);
             impl_->texture_streaming.Demand(id, static_cast<std::uint32_t>(std::floor(std::log2(rho))),
@@ -5087,31 +5093,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         active_features.gi_mode == GraphicsGiMode::Probe &&
         active_features.reflection_mode == GraphicsReflectionMode::ScreenSpace &&
         active_features.shadow_mode == GraphicsShadowMode::Raster &&
-        !active_features.software_gi_enabled &&
         active_features.adaptive_compute_enabled && ao_csm_adaptive_status.compute_ready &&
         ao_csm_adaptive_status.usable && owned_view.ambient_occlusion.AdaptiveComputeApplied() &&
         !(owned_view.reconstruction_provider && owned_view.reconstruction_provider->Initialized()) &&
         !impl_->sdk_presentation.IsEnabled() &&
         impl_->sdk_presentation.LatencyOwner() == SdkLatencyOwner::None;
-    std::uint64_t brixelizer_light_epoch{};
-    if (active_features.software_gi_enabled)
-    {
-        brixelizer_light_epoch = impl_->pipeline_revision ^ (impl_->material_parameter_revision * 1099511628211ull);
-        if (const auto digest = RendererProductDigest(impl_->config, "render/lighting/default_probe.rpkg"); !digest.empty())
-            brixelizer_light_epoch ^= MakeAssetId(digest).value;
-        if (const auto history_light_revision = owned_view.brixelizer_gi.HistoryLightRevision();
-            history_light_revision &&
-            (!owned_view.brixelizer_history_valid || view_input.camera_cut || new_session ||
-                !(owned_view.temporal_history_valid || owned_view.hzb_history_valid) ||
-                *history_light_revision != brixelizer_light_epoch))
-        {
-            if (auto drained = impl_->WaitForGpu(); !drained) return drained;
-            if (auto reset = owned_view.brixelizer_gi.ResetHistoryAfterCompletion(
-                    impl_->graph_queue_executor.Completed(), owned_view.state.render_active, new_session); !reset) return reset;
-            owned_view.brixelizer_history_valid = false;
-        }
-        assert(!view_input.camera_cut || !owned_view.brixelizer_gi.HistoryLightRevision());
-    }
     if (constants->vfx_decal_count.x && !owned_view.decal_surface.AllocatedBytes())
     {
         DecalSurfaceCandidate candidate;
@@ -5178,7 +5164,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         impl_->config.color_grading, presented_view && impl_->sdk_presentation.IsEnabled(),
         devtools_ui_hook,
         output_dependency_interval, source_output_ready,
-        active_features.software_gi_enabled, impl_->config.contact_shadows,
+        impl_->config.contact_shadows,
         active_features.adaptive_raster_enabled, active_features.adaptive_compute_enabled,
         overlap_ao_csm,
         active_features.ao_mode, active_features.gi_mode,
@@ -5196,290 +5182,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         geometry_page_slots.push_back(record.page_slot);
     }
     std::ranges::sort(geometry_page_slots);
-    std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
-    record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
-    std::vector<SceneGeometryRecord> software_scene_job_inputs;
-    std::vector<SceneDrawInstance> software_scene_draw_inputs;
-    std::vector<const GeometryPageGpu *> software_scene_pages;
-    struct SoftwareSceneSource
-    {
-        const RenderInstance *source{};
-        const Impl::StaticGpuScene::SoftwareSceneBase *static_base{};
-    };
-    std::vector<SoftwareSceneSource> software_scene_sources;
-    std::shared_ptr<const Impl::StaticGpuScene::SoftwareSceneCache::Rows> software_scene_static_rows;
-    std::array<const GeometryPageGpu *,kGeometryPageCapacity> software_scene_static_pages{};
-    std::size_t software_scene_current_job_count{};
-    SceneGeometryPreparedFrame software_scene_prepared;
-    std::shared_ptr<const SceneGeometryStaticSection> software_scene_static_section;
-    SceneGeometryRecordData scene_shape;
-    std::vector<std::uint32_t> software_scene_page_slots;
-    const auto prepare_software_scene = [&]() -> Result {
-    if (active_features.software_gi_enabled)
-    {
-        const auto append_scene = [&](const RenderInstance &source, const GpuInstance &draw,
-                std::uint32_t stable_slot, std::uint32_t generation, std::uint32_t skin_slot,
-                std::uint16_t selected_lod) -> Result {
-            const bool environment = is_environment_mesh(source.mesh);
-            const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
-            const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
-            const auto geometry_ordinal = environment
-                ? static_cast<std::uint32_t>(environment_mesh_index(source)) : UINT32_MAX;
-            const auto ordinal = environment
-                ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)
-                : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
-            const auto page_slot = environment
-                ? geometry_ordinal * render_data::kEnvironmentGeometryLodCount
-                : source.mesh == RenderMesh::Archer ? kArcherGeometryPage
-                : is_monster(source.mesh)
-                    ? (selected_lod == 0 ? kMonsterGeometryPage +
-                        static_cast<std::uint32_t>(source.mesh) - static_cast<std::uint32_t>(RenderMesh::MonsterMelee)
-                        : kMonsterReducedGeometryPage + 2u *
-                            (static_cast<std::uint32_t>(source.mesh) - static_cast<std::uint32_t>(RenderMesh::MonsterMelee)) +
-                            selected_lod - 1u)
-                    : source.mesh == RenderMesh::EnemyProjectile ? kProjectileGeometryPage
-                        : kProceduralGeometryPage;
-            if (selected_lod >= 3u) return Result::Failure(ErrorCode::InvalidState,
-                "hs_renderer_d3d12", "Software scene monster LOD is invalid.");
-            const auto *page = impl_->FindGeometryPage(page_slot);
-            if (!page || (is_monster(source.mesh) && selected_lod != 0 && page->page_slot != page_slot))
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Software scene candidate has no complete resident geometry page.");
-            const bool masked = environment &&
-                impl_->environment_material_variants[render_data::EnvironmentGeometryMaterialOrdinal(
-                    static_cast<std::uint32_t>(geometry_ordinal))] ==
-                    render_data::EnvironmentMaterialVariant::MaskedTwoSided;
-            const bool builtin = page->page_slot == kProceduralGeometryPage;
-            std::uint32_t flags = hero ? SceneGeometryCachedSkin : 0u;
-            if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
-                flags |= SceneGeometryTwoSided;
-            if (builtin) flags |= SceneGeometryBuiltin;
-            if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant)))
-                flags |= SceneGeometryDeformed;
-            if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
-            const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
-                2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
-                0u, sizeof(Vertex), page->vertex_count, 0u, stable_slot, generation,
-                skin_slot, static_cast<std::uint32_t>(source.mesh), ordinal, flags};
-            const SceneDrawInstance instance{draw.position, draw.scale, draw.color, draw.mesh,
-                draw.yaw, draw.padding};
-            if (environment && !hero)
-            {
-                const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-                    ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-                const auto domain = ClassifyBrixelizerDomain(capabilities,
-                    (flags & SceneGeometryTwoSided) != 0, (flags & SceneGeometryTransmissive) != 0);
-                if (domain != BrixelizerGeometryDomain::Opaque &&
-                    domain != BrixelizerGeometryDomain::AuthoredCoverage)
-                {
-                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
-                    auto &count = domain == BrixelizerGeometryDomain::UnsupportedMasked
-                        ? excluded_masked_count
-                        : domain == BrixelizerGeometryDomain::UnsupportedThin
-                            ? excluded_thin_count : excluded_translucent_count;
-                    return AddBrixelizerExcludedCount(count, page->submeshes.size());
-                }
-            }
-            software_scene_job_inputs.push_back(job);
-            software_scene_draw_inputs.push_back(instance);
-            software_scene_pages.push_back(page);
-            software_scene_sources.push_back({&source, nullptr});
-            return Result::Success();
-        };
-        std::vector<bool> included(persistent_instances.size());
-        for (std::size_t index = 0; index < render_instances.size(); ++index)
-        {
-            const auto &reference = dynamic_draw_refs[index];
-            if (included[reference.instance_index]) continue;
-            included[reference.instance_index] = true;
-            if (auto appended = append_scene(render_instances[index],
-                    persistent_instances[reference.instance_index], reference.instance_index,
-                    reference.instance_generation, dynamic_skin_slots[index],
-                    ordered_monster_lods[index]); !appended) return appended;
-        }
-        if (static_scene && impl_->static_gpu_scene)
-        {
-            auto &cache = impl_->static_gpu_scene->software_scene;
-            bool page_shape_changed{};
-            if(cache.rows)
-                for(const auto &shape:cache.rows->page_shapes)
-                {
-                    const auto *page=impl_->FindGeometryPage(shape.page_slot);
-                    if(!page||page->generation!=shape.generation||page->vertex_count!=shape.vertex_count||
-                        page->index_count!=shape.index_count||page->submeshes.size()!=shape.submesh_count||
-                        page->storage.resource.Get()!=shape.resource||page->storage.allocation!=shape.allocation||
-                        page->offsets!=shape.offsets||page->source_digest!=shape.source_digest)
-                    {page_shape_changed=true;break;}
-                    software_scene_static_pages[shape.page_slot]=page;
-                }
-            const bool rebuild = !cache.rows || cache.rows->source!=static_scene || !cache.valid || page_shape_changed || cache.foliage_density != foliage_density ||
-                cache.material_layouts != impl_->material_surface_layouts ||
-                cache.material_variants != impl_->environment_material_variants;
-            if (rebuild)
-            {
-                auto next_rows=std::make_shared<Impl::StaticGpuScene::SoftwareSceneCache::Rows>();
-                next_rows->source=static_scene;
-                next_rows->bases.reserve(static_scene->instances.size());
-                std::array<bool,kGeometryPageCapacity> page_shape_seen{};
-                std::array<bool,kGeometryPageCapacity> included_page_seen{};
-                for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
-                {
-                    const auto &source = static_scene->instances[index];
-                    if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
-                    const bool environment = is_environment_mesh(source.mesh);
-                    const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
-                    const auto geometry_ordinal = environment
-                        ? static_cast<std::uint32_t>(environment_mesh_index(source)) : UINT32_MAX;
-                    const auto ordinal = environment
-                        ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)
-                        : source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch
-                            ? kTerrainMaterialOrdinal : UINT32_MAX;
-                    const auto page_slot = environment
-                        ? geometry_ordinal * render_data::kEnvironmentGeometryLodCount
-                        : source.mesh == RenderMesh::Archer ? kArcherGeometryPage
-                        : is_monster(source.mesh)
-                            ? kMonsterGeometryPage + static_cast<std::uint32_t>(source.mesh) -
-                                static_cast<std::uint32_t>(RenderMesh::MonsterMelee)
-                        : source.mesh == RenderMesh::EnemyProjectile ? kProjectileGeometryPage
-                            : kProceduralGeometryPage;
-                    const auto variant_ordinal = environment
-                        ? render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal) : UINT32_MAX;
-                    const bool masked = environment && variant_ordinal <
-                            impl_->environment_material_variants.size() &&
-                        impl_->environment_material_variants[variant_ordinal] ==
-                            render_data::EnvironmentMaterialVariant::MaskedTwoSided;
-                    std::uint32_t flags = hero ? SceneGeometryCachedSkin : 0u;
-                    if (masked || source.mesh == RenderMesh::TreeCanopy || source.mesh == RenderMesh::Grass)
-                        flags |= SceneGeometryTwoSided;
-                    if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
-                    const auto *page=impl_->FindGeometryPage(page_slot);
-                    if(!page)return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
-                        "Software scene candidate has no complete resident geometry page.");
-                    if(page_slot>=page_shape_seen.size())return Result::Failure(ErrorCode::InvalidState,
-                        "hs_renderer_d3d12","Static software scene page exceeds admitted page capacity.");
-                    software_scene_static_pages[page_slot]=page;
-                    if(!page_shape_seen[page_slot])
-                    {
-                        page_shape_seen[page_slot]=true;
-                        next_rows->page_shapes.push_back({page_slot,page->generation,page->vertex_count,
-                            page->index_count,static_cast<std::uint32_t>(page->submeshes.size()),
-                            page->storage.resource.Get(),page->storage.allocation,page->offsets,page->source_digest});
-                    }
-                    const bool builtin=page->page_slot==kProceduralGeometryPage;
-                    auto record_flags=flags;
-                    if(builtin)record_flags|=SceneGeometryBuiltin;
-                    if(!hero&&(builtin||HasEnvironmentWind(source.mesh,source.environment_variant)))
-                        record_flags|=SceneGeometryDeformed;
-                    auto domain = BrixelizerGeometryDomain::Opaque;
-                    if (environment && !hero)
-                    {
-                        const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-                            ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-                        domain = ClassifyBrixelizerDomain(capabilities,
-                            (flags & SceneGeometryTwoSided) != 0,
-                            (flags & SceneGeometryTransmissive) != 0);
-                    }
-                    const GpuInstance draw{{source.position.x,
-                        source.position.y + (environment ? 0.0f : source.scale.y * 0.5f),
-                        source.position.z, 0}, {source.scale.x, source.scale.y, source.scale.z, 1},
-                        source.color_rgba, static_cast<std::uint32_t>(source.mesh) |
-                        (environment ? kEnvironmentMeshFlag : 0u) |
-                        (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u),
-                        source.yaw, environment && source.mesh != RenderMesh::MeadowSurface
-                            ? 0.0f : std::bit_cast<float>(source.environment_seed)};
-                    SceneGeometryRecord geometry{1u+page->page_slot*kGeometryBuffersPerPage,
-                        2u+page->page_slot*kGeometryBuffersPerPage,0u,page->index_count,0u,
-                        sizeof(Vertex),page->vertex_count,0u,
-                        0x80000000u|static_cast<std::uint32_t>(index),
-                        impl_->static_gpu_scene->instance_generation,UINT32_MAX,
-                        static_cast<std::uint32_t>(source.mesh),ordinal,record_flags};
-                    SceneDrawInstance draw_instance{draw.position,draw.scale,draw.color,
-                        draw.mesh,draw.yaw,draw.padding};
-                    (void)FoldStaticBuiltinTerrainShape(geometry,draw_instance);
-                    const bool included_domain=domain==BrixelizerGeometryDomain::Opaque||
-                        domain==BrixelizerGeometryDomain::AuthoredCoverage;
-                    if(included_domain)
-                    {
-                        if(auto appended=AppendSceneGeometryStaticRow(next_rows->section,geometry,draw_instance);!appended)
-                            return appended;
-                        Impl::StaticGpuScene::SoftwareSceneBase row{index, page_slot};
-                        DirectX::XMStoreFloat4x4(&row.world,
-                            DirectX::XMMatrixScaling(draw_instance.scale.x, draw_instance.scale.y, draw_instance.scale.z) *
-                            DirectX::XMMatrixRotationY(draw_instance.yaw) * DirectX::XMMatrixTranslation(
-                                draw_instance.position.x, draw_instance.position.y, draw_instance.position.z));
-                        row.yaw_sine = std::sin(draw_instance.yaw);
-                        row.yaw_cosine = std::cos(draw_instance.yaw);
-                        next_rows->bases.push_back(std::move(row));
-                        const auto actual_slot=page->page_slot;
-                        if(actual_slot>=included_page_seen.size())return Result::Failure(ErrorCode::InvalidState,
-                            "hs_renderer_d3d12","Software scene page slot exceeds the admitted geometry-page capacity.");
-                        if(!included_page_seen[actual_slot])
-                        {included_page_seen[actual_slot]=true;next_rows->included_page_slots.push_back(actual_slot);}
-                    }
-                    else
-                    {
-                        if(auto valid=ValidateSceneGeometryRecord(geometry,draw_instance);!valid)return valid;
-                        auto &count=domain==BrixelizerGeometryDomain::UnsupportedMasked
-                            ? next_rows->excluded_masked : domain==BrixelizerGeometryDomain::UnsupportedThin
-                                ? next_rows->excluded_thin : next_rows->excluded_translucent;
-                        if(auto counted=AddBrixelizerExcludedCount(count,page->submeshes.size());!counted)return counted;
-                    }
-                }
-                cache.rows=std::move(next_rows);
-                cache.material_layouts = impl_->material_surface_layouts;
-                cache.material_variants = impl_->environment_material_variants;
-                cache.foliage_density = foliage_density;
-                cache.valid = true;
-            }
-            const auto rows=cache.rows;
-            software_scene_static_section=std::shared_ptr<const SceneGeometryStaticSection>(rows,&rows->section);
-            software_scene_static_rows=rows;
-            if(auto counted=AddBrixelizerExcludedCount(excluded_masked_count,rows->excluded_masked);!counted)return counted;
-            if(auto counted=AddBrixelizerExcludedCount(excluded_thin_count,rows->excluded_thin);!counted)return counted;
-            if(auto counted=AddBrixelizerExcludedCount(excluded_translucent_count,rows->excluded_translucent);!counted)return counted;
-        }
-    }
-    if (!software_scene_job_inputs.empty()||
-        (software_scene_static_section&&software_scene_static_section->GeometryCount() != 0))
-    {
-        software_scene_current_job_count=software_scene_job_inputs.size();
-        if (auto prepared = impl_->scene_geometry.PrepareFrame(
-                std::move(software_scene_job_inputs), std::move(software_scene_draw_inputs),
-                software_scene_static_section,frame_slot,
-                impl_->graph_queue_executor.Completed(), software_scene_prepared);
-            !prepared) return prepared;
-        scene_shape = *software_scene_prepared.RecordData();
-    }
-    std::array<bool, kGeometryPageCapacity> software_scene_page_seen{};
-    software_scene_page_slots.reserve(software_scene_pages.size());
-    for (const auto *page : software_scene_pages)
-    {
-        if (page->page_slot >= software_scene_page_seen.size())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Software scene page slot exceeds the admitted geometry-page capacity.");
-        if (software_scene_page_seen[page->page_slot]) continue;
-        software_scene_page_seen[page->page_slot] = true;
-        software_scene_page_slots.push_back(page->page_slot);
-    }
-    if(software_scene_static_rows)
-        for(const auto slot:software_scene_static_rows->included_page_slots)
-        {
-            if(slot>=software_scene_page_seen.size())
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Software scene page slot exceeds the admitted geometry-page capacity.");
-            if(!software_scene_page_seen[slot])
-            {software_scene_page_seen[slot]=true;software_scene_page_slots.push_back(slot);}
-        }
-    std::ranges::sort(software_scene_page_slots);
-    return Result::Success();
-    };
     Result local_shadow_prepare_result = Result::Success();
-    Result local_shadow_submit_result = Result::Success();
-    Result local_shadow_join_result = Result::Success();
-    std::exception_ptr local_shadow_submit_exception;
-    std::exception_ptr local_shadow_join_exception;
-    std::exception_ptr software_scene_prepare_exception;
-    bool local_shadow_task_attempted{};
     if (local_shadow_planned)
     {
         if (!static_shadow_batch)
@@ -5498,69 +5201,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         local_shadow_input.draw = [](RenderPassContext &, const LocalShadowOutputs &,
                                      std::span<const VirtualShadowDrawBatch>) { return Result::Success(); };
         local_shadow_input.declare_material_sampling = [](PassBuilder &) {};
-        const bool independent_software_scene_work = active_features.software_gi_enabled &&
-            ((static_scene && impl_->static_gpu_scene && !static_scene->instances.empty()) ||
-                !render_instances.empty());
-        const auto &executor = impl_->config.task_executor;
-        if (independent_software_scene_work && executor.submit && executor.join)
-        {
-            local_shadow_task_attempted = true;
-            try
-            {
-                auto submitted = executor.submit([&] {
-                    const auto task_start = capture_clock();
-                    local_shadow_prepare_result = owned_view.local_shadows.PrepareFrameRecordData(
-                        local_shadow_input, local_shadow_plan);
-                    cpu_timings.graph_local_shadow_task_us = capture_elapsed(task_start);
-                });
-                if (!submitted) local_shadow_submit_result = std::move(submitted);
-            }
-            catch (...)
-            {
-                // A throwing submit callback may have admitted the task before throwing.
-                local_shadow_submit_exception = std::current_exception();
-            }
-        }
-        else
-        {
-            local_shadow_prepare_result = owned_view.local_shadows.PrepareFrameRecordData(
-                local_shadow_input, local_shadow_plan);
-        }
+        local_shadow_prepare_result = owned_view.local_shadows.PrepareFrameRecordData(
+            local_shadow_input, local_shadow_plan);
     }
     record_graph_resource_detail(cpu_timings.graph_local_shadow_prepare_us);
-    if (!local_shadow_task_attempted && !local_shadow_prepare_result)
+    if (!local_shadow_prepare_result)
         return local_shadow_prepare_result;
-    Result software_scene_prepare_result = Result::Success();
-    try
-    {
-        software_scene_prepare_result = prepare_software_scene();
-    }
-    catch (...)
-    {
-        software_scene_prepare_exception = std::current_exception();
-    }
-    record_graph_resource_detail(cpu_timings.graph_software_scene_prepare_us);
-    if (local_shadow_task_attempted)
-    {
-        try
-        {
-            local_shadow_join_result = impl_->config.task_executor.join();
-        }
-        catch (...)
-        {
-            local_shadow_join_exception = std::current_exception();
-        }
-    }
-    if (local_shadow_join_exception) std::rethrow_exception(local_shadow_join_exception);
-    if (local_shadow_submit_exception) std::rethrow_exception(local_shadow_submit_exception);
-    if (!local_shadow_prepare_result) return local_shadow_prepare_result;
-    if (!local_shadow_submit_result) return local_shadow_submit_result;
-    if (!local_shadow_join_result) return local_shadow_join_result;
-    if (software_scene_prepare_exception) std::rethrow_exception(software_scene_prepare_exception);
-    if (!software_scene_prepare_result) return software_scene_prepare_result;
-    const auto software_scene_job_count = software_scene_prepared.GeometryCount();
-    // Join wait belongs to shadow preparation, not the independent scene work.
-    record_graph_resource_detail(cpu_timings.graph_local_shadow_prepare_us);
     bool direct_contract_failed{};
     const auto shape_of = [&](AllocationResource *resource) {
         FrameGraphLayout::ResourceShape shape;
@@ -5596,7 +5242,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             &owned_view.targets.depth, &owned_view.targets.shadow, &owned_view.targets.gbuffer_base, &owned_view.targets.gbuffer_normal,
             &owned_view.targets.gbuffer_metadata, &owned_view.targets.gbuffer_material, &owned_view.targets.gbuffer_motion,
             &owned_view.targets.gbuffer_surface_history, &owned_view.targets.hdr_color, &owned_view.targets.subsurface_diffuse,
-            &owned_view.targets.environment_specular, &owned_view.targets.indirect_diffuse,
+            &owned_view.targets.environment_specular,
             &owned_view.targets.oit_accumulation, &owned_view.targets.oit_revealage, &owned_view.targets.post_a, &owned_view.targets.post_b,
             &owned_view.targets.scene_work, &owned_view.targets.display_linear, &owned_view.targets.composite_hdr,
             &owned_view.exposure_histogram, &owned_view.initial_exposure,
@@ -5627,9 +5273,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (auto &stream : impl_->environment_geometry_streams)
         if (stream.upload_pending) append_shape(&stream.candidate.storage);
     for (const auto page_slot : geometry_page_slots)
-        if (const auto *page = impl_->FindGeometryPage(page_slot))
-            append_shape(&const_cast<GeometryPageGpu *>(page)->storage);
-    for (const auto page_slot : software_scene_page_slots)
         if (const auto *page = impl_->FindGeometryPage(page_slot))
             append_shape(&const_cast<GeometryPageGpu *>(page)->storage);
     };
@@ -5836,17 +5479,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (auto &saved : impl_->graph_layouts)
     {
         if (!saved.handle || !saved.certified_imports || saved.early != early_key ||
-            saved.geometry_page_slots != geometry_page_slots ||
-            saved.software_scene_page_slots != software_scene_page_slots)
+            saved.geometry_page_slots != geometry_page_slots)
             continue;
         if (!matches_direct_shapes(saved.direct_import_shapes) ||
-            (software_scene_job_count==0
-                ? saved.scene_geometry.valid && saved.scene_geometry.record.record_count != 0
-                : !saved.scene_geometry.valid ||
-                    saved.scene_geometry.record.frame_slot != scene_shape.frame_slot ||
-                    (saved.scene_geometry.record.deformed_position_bytes != 0) !=
-                        (scene_shape.deformed_position_bytes != 0) ||
-                    saved.scene_geometry.record.import_widths != scene_shape.import_widths) ||
             !impl_->texture_streaming.MatchesLayout(1000, saved.texture_streaming) ||
             !impl_->texture_feedback.MatchesLayout(frame_slot, 1200, 1201, saved.texture_feedback) ||
             !owned_view.light_list.MatchesLayout(saved.light_list) ||
@@ -5947,278 +5582,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         source_candidate = nullptr;
     }
     record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
-    std::vector<SoftwareSceneGeometry> brixelizer_geometries;
-    std::span<const SoftwareSceneGeometry> brixelizer_geometry_prefix;
-    std::vector<BrixelizerGeometryVersions> brixelizer_prefix_versions;
-    std::vector<BrixelizerSceneInstance> brixelizer_instances;
-    std::shared_ptr<const BrixelizerImmutableSceneSection> brixelizer_immutable_section;
-    BrixelizerGeometryLookup brixelizer_geometry_lookup;
-    struct BrixelizerFrameOwners
-    {
-        std::shared_ptr<const void> generation;
-        std::shared_ptr<const void> scene;
-        std::vector<Microsoft::WRL::ComPtr<D3D12MA::Allocation>> allocations;
-    };
-    std::shared_ptr<BrixelizerFrameOwners> brixelizer_frame_owners;
-    std::vector<std::shared_ptr<const void>> brixelizer_owners;
-    std::unordered_set<D3D12MA::Allocation *> brixelizer_backing;
-    std::span<const std::size_t> brixelizer_static_leaf_jobs;
-    std::vector<std::size_t> brixelizer_current_leaf_jobs;
-    if (active_features.software_gi_enabled)
-    {
-        brixelizer_frame_owners = std::make_shared<BrixelizerFrameOwners>();
-        brixelizer_frame_owners->generation = impl_->resident_generation_lease;
-        brixelizer_frame_owners->scene = software_scene_prepared.Owner();
-        brixelizer_owners.push_back(brixelizer_frame_owners);
-    }
-    const auto retain_brixelizer_allocation = [&](const AllocationResource &backing) {
-        if (!backing.allocation || !brixelizer_backing.insert(backing.allocation).second) return;
-        brixelizer_frame_owners->allocations.emplace_back(backing.allocation);
-    };
-    auto *const prepared_positions = software_scene_prepared.PositionResource();
-    const auto software_scene_page_for_job = [&](std::size_t index) -> const GeometryPageGpu & {
-        if(index<software_scene_current_job_count)return *software_scene_pages[index];
-        const auto &base=software_scene_static_rows->bases[index-software_scene_current_job_count];
-        assert(software_scene_static_pages[base.page_slot]);
-        return *software_scene_static_pages[base.page_slot];
-    };
-    const auto software_scene_source_for_job = [&](std::size_t index) -> SoftwareSceneSource {
-        if(index<software_scene_current_job_count)return software_scene_sources[index];
-        const auto &base=software_scene_static_rows->bases[index-software_scene_current_job_count];
-        return {&software_scene_static_rows->source->instances[base.source_index],&base};
-    };
-    const auto append_brixelizer_job = [&](std::size_t index, BrixelizerGeometryLookup &lookup,
-        std::vector<SoftwareSceneGeometry> &geometries, std::vector<BrixelizerSceneInstance> &instances,
-        std::vector<std::size_t> &leaf_jobs) -> Result {
-        SceneGeometryRecord job_scratch{};
-        const auto &job = software_scene_prepared.GeometryAt(index,job_scratch);
-        const auto &draw = software_scene_prepared.InstanceAt(index);
-        const auto &page = software_scene_page_for_job(index);
-        const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
-        const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
-        if (!deformed && !skin && !page.brixelizer_position_offset)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Static Brixelizer geometry has no compact position stream.");
-        const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
-            std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
-                persistent_metadata[job.skin_slot].skin_vertex_stride : page.brixelizer_position_offset;
-        if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
-            page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
-            ResourceWidth(frame.skin_cache_vertices)))
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
-        SoftwareSceneGeometry geometry{std::uint64_t(page.page_slot) + 1, page.generation, owned_view.frame_number + 1,
-            deformed ? prepared_positions : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
-            page.storage.resource.Get(), {},
-            ResourceVersion{}, vertex_offset, page.offsets[1], deformed ? 12u :
-                skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : 12u,
-            page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin};
-        // Immutable shared pages retain their revision through frames.
-        if (!deformed && !skin) geometry.current_revision = page.generation;
-        const auto scene_source = software_scene_source_for_job(index);
-        DirectX::XMFLOAT4X4 world;
-        if (scene_source.static_base)
-            world = scene_source.static_base->world;
-        else
-            DirectX::XMStoreFloat4x4(&world, DirectX::XMMatrixScaling(draw.scale.x, draw.scale.y, draw.scale.z) *
-                DirectX::XMMatrixRotationY(draw.yaw) * DirectX::XMMatrixTranslation(draw.position.x, draw.position.y, draw.position.z));
-        const auto material_id = job.environment_ordinal < kAuthoredMaterialNames.size() ? 0x10000000u + job.environment_ordinal : 0x30000000u + job.mesh_id;
-        const SoftwareSceneInstance instance{job.stable_gpu_scene_slot, job.instance_generation,
-            static_cast<std::uint32_t>(index), material_id, 0, page.generation, world};
-        retain_brixelizer_allocation(page.storage);
-        if (skin) retain_brixelizer_allocation(frame.skin_cache_vertices);
-        const auto &source = *scene_source.source;
-        const auto &sphere = page.metadata.bounds.sphere;
-        const float sx = sphere[0] * draw.scale.x, sy = sphere[1] * draw.scale.y, sz = sphere[2] * draw.scale.z;
-        const float sine = scene_source.static_base ? scene_source.static_base->yaw_sine : std::sin(draw.yaw);
-        const float cosine = scene_source.static_base ? scene_source.static_base->yaw_cosine : std::cos(draw.yaw);
-        const float maximum_scale = std::max({std::abs(draw.scale.x), std::abs(draw.scale.y), std::abs(draw.scale.z)});
-        DirectX::XMFLOAT3 center{draw.position.x + cosine * sx + sine * sz, draw.position.y + sy,
-            draw.position.z - sine * sx + cosine * sz};
-        float radius = sphere[3] * maximum_scale;
-        if (skin)
-        {
-            center = {draw.position.x, draw.position.y, draw.position.z};
-            radius = std::max(draw.position.w, std::sqrt(sx*sx + sy*sy + sz*sz) + radius);
-        }
-        if (HasEnvironmentWind(source.mesh, source.environment_variant)) radius += grass_visibility_radius;
-        std::span<const render_data::CharacterMaterialBinding> bindings;
-        if (source.mesh == RenderMesh::Archer) bindings = impl_->archer_material_bindings;
-        else if (is_monster(source.mesh)) bindings = impl_->monster_assets[
-            static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::MonsterMelee)].material_bindings;
-        const auto ordinal = job.environment_ordinal;
-        const auto capabilities = ordinal < kAuthoredMaterialNames.size()
-            ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
-        const auto previous_leaf_count = geometries.size();
-        if (auto appended = AppendBrixelizerLeaf(geometry, instance, page.submeshes,
-                page.brixelizer_submesh_keys, bindings,
-                std::span(impl_->material_surface_layouts).subspan(kAuthoredMaterialNames.size()), capabilities,
-                (job.flags & SceneGeometryTwoSided) != 0,
-                (job.flags & SceneGeometryTransmissive) != 0,
-                {center.x-radius,center.y-radius,center.z-radius},
-                {center.x+radius,center.y+radius,center.z+radius},
-                ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
-                    : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
-                    impl_->material_parameter_revision,
-                lookup,geometries,instances); !appended) return appended;
-        for (auto leaf = previous_leaf_count; leaf < geometries.size(); ++leaf)
-            leaf_jobs.push_back(index);
-        return Result::Success();
-    };
-    std::vector<BrixelizerCurrentSceneRun> brixelizer_current_runs;
-    if (active_features.software_gi_enabled && software_scene_job_count!=0)
-    {
-        using NativeRows = Impl::StaticGpuScene::SoftwareSceneCache::NativeRows;
-        std::shared_ptr<const NativeRows> cached;
-        if (software_scene_static_rows)
-        {
-            auto &cache = impl_->static_gpu_scene->software_scene;
-            if (!cache.native_rows || cache.native_rows->source != software_scene_static_rows ||
-                cache.native_rows->generation_owner != impl_->resident_generation_lease ||
-                cache.native_rows->material_revision != impl_->material_parameter_revision)
-            {
-                auto next = std::make_shared<NativeRows>();
-                next->source = software_scene_static_rows;
-                next->generation_owner = impl_->resident_generation_lease;
-                next->material_revision = impl_->material_parameter_revision;
-                BrixelizerGeometryLookup lookup;
-                std::vector<SoftwareSceneGeometry> geometries;
-                std::vector<BrixelizerSceneInstance> instances;
-                std::vector<std::size_t> leaf_jobs;
-                std::vector<BrixelizerSceneRun> runs;
-                for (std::size_t local = 0; local < software_scene_static_rows->section.GeometryCount(); ++local)
-                {
-                    const auto &row = software_scene_static_rows->section.GeometryAt(local);
-                    if (row.flags & (SceneGeometryDeformed | SceneGeometryCachedSkin)) continue;
-                    if (runs.empty() || runs.back().job_begin + runs.back().job_count != local)
-                        runs.push_back({local, 0, instances.size(), 0});
-                    if (auto appended = append_brixelizer_job(software_scene_current_job_count + local,
-                        lookup, geometries, instances, leaf_jobs); !appended) return appended;
-                    auto &run = runs.back();
-                    ++run.job_count;
-                    run.instance_count = instances.size() - run.instance_begin;
-                }
-                for (auto &job : leaf_jobs) job -= software_scene_current_job_count;
-                next->section = std::make_shared<const BrixelizerImmutableSceneSection>(
-                    std::move(geometries), std::move(instances), std::move(leaf_jobs), std::move(runs),
-                    std::make_shared<const BrixelizerGeometryLookup>(std::move(lookup)));
-                cache.native_rows = std::move(next);
-            }
-            cached = cache.native_rows;
-            brixelizer_immutable_section = cached->section;
-            brixelizer_geometry_prefix=cached->section->Geometries();
-            if(brixelizer_geometry_prefix.size()>UINT32_MAX)
-                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Immutable Brixelizer geometry prefix exceeds native indexing.");
-            brixelizer_geometry_lookup=BrixelizerGeometryLookup{cached->section->GeometryLookup(),
-                static_cast<std::uint32_t>(brixelizer_geometry_prefix.size())};
-            brixelizer_prefix_versions.reserve(brixelizer_geometry_prefix.size());
-            brixelizer_static_leaf_jobs = cached->section->LeafJobs();
-            for (std::size_t leaf = 0; leaf < cached->section->Geometries().size(); ++leaf)
-            {
-                const auto &geometry=brixelizer_geometry_prefix[leaf];
-                brixelizer_prefix_versions.push_back({geometry.vertex_version,geometry.index_version});
-                const auto &page = software_scene_page_for_job(
-                    software_scene_current_job_count + brixelizer_static_leaf_jobs[leaf]);
-                retain_brixelizer_allocation(page.storage);
-            }
-        }
-        std::size_t run_index{}, current_job_begin{}, current_begin{};
-        const auto append_current_range = [&](std::size_t job_end) {
-            if (job_end != current_job_begin)
-                brixelizer_current_runs.push_back({current_job_begin, job_end - current_job_begin,
-                    current_begin, brixelizer_instances.size() - current_begin});
-            current_begin = brixelizer_instances.size();
-        };
-        const auto immutable_runs = cached ? cached->section->Runs() : std::span<const BrixelizerSceneRun>{};
-        for (std::size_t index = 0; index < software_scene_job_count;)
-        {
-            if (run_index < immutable_runs.size() &&
-                index == software_scene_current_job_count + immutable_runs[run_index].job_begin)
-            {
-                append_current_range(index);
-                index += immutable_runs[run_index++].job_count;
-                current_job_begin = index;
-            }
-            else
-            {
-                if (auto appended = append_brixelizer_job(index, brixelizer_geometry_lookup,
-                    brixelizer_geometries, brixelizer_instances, brixelizer_current_leaf_jobs); !appended) return appended;
-                ++index;
-            }
-        }
-        append_current_range(software_scene_job_count);
-    }
-    const auto brixelizer_geometry_count = [&] { return brixelizer_geometry_prefix.size()+brixelizer_geometries.size(); };
-    const auto brixelizer_leaf_job = [&](std::size_t leaf) {
-        return leaf < brixelizer_static_leaf_jobs.size()
-            ? software_scene_current_job_count + brixelizer_static_leaf_jobs[leaf]
-            : brixelizer_current_leaf_jobs[leaf - brixelizer_static_leaf_jobs.size()];
-    };
-    const auto set_brixelizer_versions = [&](std::size_t index,ResourceVersion vertex,ResourceVersion indices) {
-        if(index<brixelizer_geometry_prefix.size())brixelizer_prefix_versions[index]={vertex,indices};
-        else {auto &geometry=brixelizer_geometries[index-brixelizer_geometry_prefix.size()];
-            geometry.vertex_version=vertex;geometry.index_version=indices;}
-    };
-    const auto brixelizer_leaf_key = [&](std::size_t leaf) {
-        const auto job_index = brixelizer_leaf_job(leaf);
-        SceneGeometryRecord job_scratch{};
-        const auto &job=software_scene_prepared.GeometryAt(job_index,job_scratch);
-        return std::pair{software_scene_page_for_job(job_index).page_slot,
-            job.flags &
-                (SceneGeometryDeformed | SceneGeometryCachedSkin)};
-    };
-    if (source_candidate && active_features.software_gi_enabled)
-    {
-        const auto &reads = source_candidate->brixelizer.record.geometry_reads;
-        const auto &saved_keys = source_candidate->brixelizer_leaf_reads;
-        if (reads.size() != saved_keys.size() * 2u)
-        {
-            source_candidate = nullptr;
-        }
-        else
-            for (std::size_t leaf = 0; leaf < brixelizer_geometry_count(); ++leaf)
-            {
-                const auto key = brixelizer_leaf_key(leaf);
-                const auto found = std::lower_bound(saved_keys.begin(), saved_keys.end(), key,
-                    [](const FrameGraphLayout::BrixelizerLeafRead &entry, const auto &value) {
-                        return entry.key < value;
-                    });
-                if (found == saved_keys.end() || found->key != key)
-                {
-                    source_candidate = nullptr;
-                    break;
-                }
-                const auto old_leaf = found->read_pair;
-                set_brixelizer_versions(leaf,reads[old_leaf * 2u].version,reads[old_leaf * 2u + 1u].version);
-            }
-    }
-    BrixelizerSceneInputs native_scene;
-    BrixelizerPreparedScene brixelizer_prepared;
-    if (active_features.software_gi_enabled)
-    {
-        native_scene.geometries = {brixelizer_geometry_prefix,brixelizer_geometries,brixelizer_prefix_versions};
-        native_scene.current_instances = brixelizer_instances;
-        native_scene.current_runs = brixelizer_current_runs;
-        native_scene.immutable_section = brixelizer_immutable_section;
-        native_scene.static_job_base = software_scene_current_job_count;
-        native_scene.excluded_masked_count = excluded_masked_count;
-        native_scene.excluded_thin_count = excluded_thin_count;
-        native_scene.excluded_translucent_count = excluded_translucent_count;
-        native_scene.sdf_center = lod_eye; native_scene.frame_slot = frame_slot;
-        native_scene.frame_index = owned_view.frame_number; native_scene.scene_revision = impl_->pipeline_revision + 1;
-        native_scene.completed = impl_->graph_queue_executor.Completed(); native_scene.owners = brixelizer_owners;
-    }
-    record_graph_resource_detail(cpu_timings.graph_resource_brixelizer_input_us);
-    if (active_features.software_gi_enabled)
-    {
-        if (auto prepared = owned_view.brixelizer_gi.PrepareFrameRecordData(std::move(native_scene), brixelizer_prepared); !prepared)
-            return prepared;
-        if (source_candidate && !MatchesBrixelizerGraphLayout(
-                brixelizer_prepared.Record(), source_candidate->brixelizer))
-        {
-            source_candidate = nullptr;
-        }
-    }
-    record_graph_resource_detail(cpu_timings.graph_resource_brixelizer_prepare_us);
     std::optional<std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1>> capture_pages;
     std::vector<LocalProbeSceneRead> capture_reads;
     bool local_probe_prepared{};
@@ -6313,24 +5676,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     {
         pending_graph_layout.early = early_key;
         pending_graph_layout.geometry_page_slots = geometry_page_slots;
-        pending_graph_layout.software_scene_page_slots = software_scene_page_slots;
-        pending_graph_layout.brixelizer_leaf_reads.reserve(brixelizer_geometry_count());
-        for (std::size_t leaf = 0; leaf < brixelizer_geometry_count(); ++leaf)
-            pending_graph_layout.brixelizer_leaf_reads.push_back({brixelizer_leaf_key(leaf), leaf});
-        std::ranges::sort(pending_graph_layout.brixelizer_leaf_reads,
-            [](const auto &left, const auto &right) {
-                return left.key != right.key ? left.key < right.key
-                                             : left.read_pair < right.read_pair;
-            });
-#ifndef NDEBUG
-        for (std::size_t index = 1; index < pending_graph_layout.brixelizer_leaf_reads.size(); ++index)
-        {
-            const auto &previous = pending_graph_layout.brixelizer_leaf_reads[index - 1];
-            const auto &current = pending_graph_layout.brixelizer_leaf_reads[index];
-            if (previous.key == current.key)
-                assert(previous.read_pair < current.read_pair);
-        }
-#endif
         // Provider preparation may have replaced direct resources after a rejected candidate.
         collect_direct_shapes();
         pending_graph_layout.direct_import_shapes = impl_->graph_direct_shapes_scratch;
@@ -6710,8 +6055,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         ? import_texture(owned_view.targets.subsurface_diffuse, initial_color_access, "SubsurfaceDiffuse") : TextureHandle{};
     const auto environment_specular = owned_view.targets.environment_specular.resource
         ? import_texture(owned_view.targets.environment_specular, initial_color_access, "EnvironmentSpecular") : TextureHandle{};
-    const auto indirect_diffuse = owned_view.targets.indirect_diffuse.resource
-        ? import_texture(owned_view.targets.indirect_diffuse, initial_color_access, "IndirectDiffuse") : TextureHandle{};
     const auto oit_accumulation = import_texture(owned_view.targets.oit_accumulation, initial_color_access, "OitAccumulation");
     const auto oit_revealage = import_texture(owned_view.targets.oit_revealage, initial_color_access, "OitRevealage");
     const auto post_a = import_texture(owned_view.targets.post_a, initial_color_access, "PostA");
@@ -6864,7 +6207,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     auto *opaque_hdr_resource = owned_view.targets.hdr_color.resource.Get();
     auto subsurface_diffuse_version = impl_->graph.Version(subsurface_diffuse);
     auto environment_specular_version = impl_->graph.Version(environment_specular);
-    auto indirect_diffuse_version = impl_->graph.Version(indirect_diffuse);
     auto distortion_vectors_version = impl_->graph.Version(distortion_vectors);
     auto oit_accumulation_version = impl_->graph.Version(oit_accumulation);
     auto oit_revealage_version = impl_->graph.Version(oit_revealage);
@@ -8317,13 +7659,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         Impl::OwnedView &view;
         FrameContext &frame;
         CompletionSet completion;
-        bool ambient{}, reconstruction{}, diffusion{}, reflections{}, transparency{}, probe{}, ltc{}, hdr_post{}, lights{}, scene_geometry{}, shadows{};
-        bool local_probes{}, volumetrics{}, presentation{}, local_shadows{}, brixelizer{}, screen_overlay{}, adaptive{}, decal_surface{};
+        bool ambient{}, reconstruction{}, diffusion{}, reflections{}, transparency{}, probe{}, ltc{}, hdr_post{}, lights{}, shadows{};
+        bool local_probes{}, volumetrics{}, presentation{}, local_shadows{}, screen_overlay{}, adaptive{}, decal_surface{};
         std::shared_ptr<const StaticRenderScene> probe_scene;
         render_data::SceneProbeRevisions probe_revisions;
         ~PendingFrameEffects()
         {
-            if (!ambient && !reconstruction && !diffusion && !reflections && !transparency && !probe && !ltc && !hdr_post && !lights && !scene_geometry && !shadows && !local_probes && !volumetrics && !presentation && !local_shadows && !brixelizer && !screen_overlay && !adaptive && !decal_surface) return;
+            if (!ambient && !reconstruction && !diffusion && !reflections && !transparency && !probe && !ltc && !hdr_post && !lights && !shadows && !local_probes && !volumetrics && !presentation && !local_shadows && !screen_overlay && !adaptive && !decal_surface) return;
             frame.completion.Merge(completion);
             if (decal_surface)
                 (void)view.decal_surface.CompleteSubmission(renderer.graph, completion, false);
@@ -8351,13 +7693,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 (void)view.screen_overlay.CompleteSubmission(renderer.graph, completion, false);
             if (lights)
                 (void)view.light_list.CompleteSubmission(renderer.graph, completion, false);
-            if (scene_geometry)
-                (void)renderer.scene_geometry.CompleteSubmission(renderer.graph, completion, false);
-            if (brixelizer)
-            {
-                (void)view.brixelizer_gi.CompleteSubmission(renderer.graph, completion, false);
-                view.brixelizer_history_valid = false;
-            }
             if (shadows)
                 (void)view.virtual_shadows.CompleteSubmission(renderer.graph, completion, false);
             if (local_shadows)
@@ -8766,143 +8101,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         : impl_->texture_feedback.AddDecodePass(impl_->graph, frame_slot,
             1201, feedback_bindings, &pending_graph_layout.texture_feedback);
     if (!decode_feedback) return decode_feedback;
-    SceneGeometryOutputs scene_geometry_outputs;
-    std::vector<SceneShaderRead> scene_reads;
-    const auto make_scene_bindings = [&](std::uint32_t table_offset) -> SceneFrameTableBuilder {
-        return [&, table_offset](D3D12_CPU_DESCRIPTOR_HANDLE suffix, std::uint32_t count,
-                SceneShaderBinder &binder) -> Result {
-            if (count != kSceneGeometryDescriptorCount || !suffix.ptr)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid scene geometry descriptor suffix.");
-            auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            destination.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
-                table_offset) * impl_->srv_stride;
-            auto source = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            source.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
-                kTemporalTextureDescriptorOffset) * impl_->srv_stride;
-            impl_->device->CopyDescriptorsSimple(kSceneFrameTableCount, destination, source,
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            auto scene_destination = destination;
-            scene_destination.ptr += static_cast<SIZE_T>(kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset) * impl_->srv_stride;
-            impl_->device->CopyDescriptorsSimple(kSceneGeometryDescriptorCount, scene_destination, suffix,
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-            auto table = texture_table;
-            table.ptr += static_cast<UINT64>(table_offset) * impl_->srv_stride;
-            binder = [&, table](ID3D12GraphicsCommandList *list) -> Result {
-                bind_surface_compute(list);
-                list->SetComputeRootDescriptorTable(32, table);
-                list->SetComputeRootDescriptorTable(26, distortion_table);
-                list->SetComputeRootShaderResourceView(34, dynamic_instance_base);
-                return Result::Success();
-            };
-            return Result::Success();
-        };
-    };
-    if (active_features.software_gi_enabled)
-    {
-        const auto add_read = [&](ResourceVersion version, ID3D12Resource *resource) {
-            if (resource && std::ranges::none_of(scene_reads, [&](const auto &read) { return read.resource == resource; }))
-                scene_reads.push_back({version, resource, Access::ComputeRead});
-        };
-        add_read(material_parameter_version, impl_->material_parameters.resource.Get());
-        add_read(hero_binding_version, impl_->hero_material_bindings_gpu.resource.Get());
-        add_read(impl_->graph.Version(import_buffer(frame.upload, Access::ComputeRead, "SceneFrameConstants")),
-            frame.upload.resource.Get());
-        add_read(dynamic_instances_version, dynamic_scene.resource.Get());
-        if (entity_surface_noise_version.resource)
-        {
-            add_read(entity_surface_noise_version, impl_->vfx_noise_volume.resource.Get());
-            add_read(entity_surface_gradient_version, impl_->vfx_gradient.resource.Get());
-            add_read(entity_surface_stbn_version, impl_->vfx_stbn_scalar.resource.Get());
-        }
-        for (std::size_t i = 0; i < light_outputs.resources.size(); ++i)
-        {
-            const std::array versions{light_outputs.lights, light_outputs.ranges,
-                light_outputs.inline_indices, light_outputs.spill_indices};
-            add_read(versions[i], light_outputs.resources[i]);
-        }
-        add_read(probe_outputs.irradiance, probe_outputs.irradiance_resource);
-        for (const auto &[version, resource] : {
-                std::pair{local_probe_outputs.radiance, local_probe_outputs.radiance_resource},
-                std::pair{local_probe_outputs.prefiltered, local_probe_outputs.prefiltered_resource},
-                std::pair{local_probe_outputs.irradiance, local_probe_outputs.irradiance_resource},
-                std::pair{local_probe_outputs.first_hit_distance, local_probe_outputs.distance_resource},
-                std::pair{local_probe_outputs.records, local_probe_outputs.record_resource}})
-            if (resource) scene_reads.push_back({version, resource, Access::AllShaderRead});
-        for (const auto &[version, resource] : {
-                std::pair{probe_outputs.radiance, probe_outputs.radiance_resource},
-                std::pair{probe_outputs.prefiltered, probe_outputs.prefiltered_resource},
-                std::pair{impl_->graph.Version(environment_brdf_lut), impl_->environment_brdf_lut.resource.Get()},
-                std::pair{ltc_outputs.matrix, ltc_outputs.matrix_resource},
-                std::pair{ltc_outputs.amplitude, ltc_outputs.amplitude_resource}})
-            if (resource) scene_reads.push_back({version, resource, Access::AllShaderRead});
-        if (have_skinned_instances) add_read(skin_cache_version, frame.skin_cache_vertices.resource.Get());
-        const auto add_texture = [&](AllocationResource &texture) {
-            if (texture.resource && std::ranges::none_of(scene_reads, [&](const auto &read) { return read.resource == texture.resource.Get(); }))
-                scene_reads.push_back({impl_->graph.Version(import_texture(texture, Access::AllShaderRead, "SceneMaterialTexture")),
-                    texture.resource.Get(), Access::AllShaderRead});
-        };
-        for (const auto &binding : texture_bindings)
-            add_read(binding.sampled, impl_->texture_streaming.View(binding.texture).resource);
-        add_read(texture_metadata, static_cast<ID3D12Resource *>(impl_->graph.Resolve(texture_metadata.resource)));
-        for (auto *texture : {&impl_->archer_diffuse, &impl_->archer_normal, &impl_->monster_basecolor,
-                &impl_->monster_emissive, &impl_->monster_ram, &impl_->family_diffuse, &impl_->family_normal}) add_texture(*texture);
-
-
-        const auto job_count = software_scene_job_count;
-        std::array<ResourceVersion, kGeometryPageCapacity> scene_versions_by_slot{};
-        for (const auto page_slot : software_scene_page_slots)
-        {
-            const auto *page = impl_->FindGeometryPage(page_slot);
-            if (!page) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Software GI canonical page disappeared after preflight.");
-            const auto version = impl_->graph.Version(import_buffer(
-                const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "SceneCanonicalGeometry"));
-            add_read(version, page->storage.resource.Get());
-            scene_versions_by_slot[page_slot]=version;
-        }
-        if (job_count!=0)
-        {
-            const SceneGeometryInputs scene_inputs{scene_reads,
-                make_scene_bindings(kSceneGeometryTableOffset), frame_slot,
-                impl_->graph_queue_executor.Completed()};
-            const auto registered_scene_geometry = restored_graph
-                ? impl_->scene_geometry.BindRetainedPrepared(impl_->graph, scene_inputs,
-                    software_scene_prepared, pending_graph_layout.scene_geometry, scene_geometry_outputs)
-                : impl_->scene_geometry.RegisterPrepared(impl_->graph, scene_inputs,
-                    software_scene_prepared, scene_geometry_outputs, &pending_graph_layout.scene_geometry);
-            if (!registered_scene_geometry) return registered_scene_geometry;
-            pending_effects.scene_geometry = true;
-            for (std::size_t leaf = 0; leaf < brixelizer_geometry_count(); ++leaf)
-            {
-                const auto job_index = brixelizer_leaf_job(leaf);
-                SceneGeometryRecord job_scratch{};
-                const auto &job = software_scene_prepared.GeometryAt(job_index,job_scratch);
-                const auto page_slot=software_scene_page_for_job(job_index).page_slot;
-                if(page_slot>=scene_versions_by_slot.size()||!scene_versions_by_slot[page_slot].resource)
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                        "Software GI page version is missing after preflight.");
-                const auto page_version=scene_versions_by_slot[page_slot];
-                const auto vertex_version = (job.flags & SceneGeometryDeformed) ? scene_geometry_outputs.positions
-                    : (job.flags & SceneGeometryCachedSkin) ? skin_cache_version : page_version;
-                set_brixelizer_versions(leaf,vertex_version,page_version);
-            }
-        }
-    }
     const auto texture_guide = [&](ResourceVersion version) {
         return AmbientOcclusionGuide{version, version.resource
             ? static_cast<ID3D12Resource *>(impl_->graph.Resolve(version.resource)) : nullptr};
-    };
-    const auto register_software_gi_scene = [&]() -> Result {
-        BrixelizerSceneOutputs native_scene_outputs;
-        pending_effects.brixelizer = true;
-        const auto registered = restored_graph
-            ? owned_view.brixelizer_gi.RegisterScene(impl_->graph, std::move(brixelizer_prepared), native_scene_outputs,
-                nullptr, &pending_graph_layout.brixelizer)
-            : owned_view.brixelizer_gi.RegisterScene(impl_->graph, std::move(brixelizer_prepared), native_scene_outputs,
-                &pending_graph_layout.brixelizer);
-        if (!registered) return registered;
-        return Result::Success();
     };
     ambient_constants.previous_depth_parameters = previous_view_valid
         ? owned_view.previous_projection_depth
@@ -9001,7 +8202,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         hdr_version = lighting_layout.outputs[0];
         subsurface_diffuse_version = lighting_layout.outputs[1];
         environment_specular_version = lighting_layout.outputs[2];
-        indirect_diffuse_version = lighting_layout.outputs[3];
     }
     else
     {
@@ -9029,27 +8229,23 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             subsurface_diffuse_version = lighting_pass->Write(subsurface_diffuse_version, Access::RenderTarget);
         if (environment_specular_version.resource)
             environment_specular_version = lighting_pass->Write(environment_specular_version, Access::RenderTarget);
-        if (indirect_diffuse_version.resource)
-            indirect_diffuse_version = lighting_pass->Write(indirect_diffuse_version, Access::RenderTarget);
         lighting_layout.outputs = {hdr_version, subsurface_diffuse_version,
-            environment_specular_version, indirect_diffuse_version};
+            environment_specular_version};
     }
     const auto raw_hdr_version = hdr_version;
     lighting_pass->SetExecuteChecked([&](RenderPassContext &context) -> Result {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_graphics(list);
         constexpr float clear[] = {0, 0, 0, 0};
-        const std::array targets{hdr_rtv, rtv_at(kLightingAuxRtvOffset), rtv_at(kLightingAuxRtvOffset + 1),
-            rtv_at(kLightingAuxRtvOffset + 2)};
+        const std::array targets{hdr_rtv, rtv_at(kLightingAuxRtvOffset), rtv_at(kLightingAuxRtvOffset + 1)};
         list->ClearRenderTargetView(hdr_rtv, clear, 0, nullptr);
         const std::array auxiliary_resources{owned_view.targets.subsurface_diffuse.resource.Get(),
-            owned_view.targets.environment_specular.resource.Get(), owned_view.targets.indirect_diffuse.resource.Get()};
+            owned_view.targets.environment_specular.resource.Get()};
         for (std::size_t index = 0; index < auxiliary_resources.size(); ++index)
             if (auxiliary_resources[index]) list->ClearRenderTargetView(targets[index + 1], clear, 0, nullptr);
         list->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, nullptr);
         const auto auxiliary_mask = static_cast<unsigned>(auxiliary_resources[0] != nullptr) |
-            (static_cast<unsigned>(auxiliary_resources[1] != nullptr) << 1) |
-            (static_cast<unsigned>(auxiliary_resources[2] != nullptr) << 2);
+            (static_cast<unsigned>(auxiliary_resources[1] != nullptr) << 1);
         list->SetPipelineState(impl_->deferred_pipeline[auxiliary_mask].Get());
         list->SetGraphicsRootDescriptorTable(5, texture_table);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -9059,120 +8255,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         list->DrawInstanced(3, 1, 0, 0);
         return Result::Success();
     });
-    BrixelizerLightingOutputs brixelizer_lighting;
-    UINT brixelizer_bank{};
-    const SceneFrameTableBuilder make_brixelizer_bindings = [&](D3D12_CPU_DESCRIPTOR_HANDLE suffix,
-            UINT count, SceneShaderBinder &binder) -> Result {
-        if (!suffix.ptr || count != kBrixelizerDescriptorCount || brixelizer_bank >= 4)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid software GI descriptor stage bank.");
-        const auto offset = kBrixelizerFrameTableOffset + brixelizer_bank++ * kSceneFrameTableCount;
-        auto destination = local_probe_inputs.frame_srv_base; destination.ptr += offset * impl_->srv_stride;
-        auto source = local_probe_inputs.frame_srv_base; source.ptr += kTemporalTextureDescriptorOffset * impl_->srv_stride;
-        impl_->device->CopyDescriptorsSimple(kSceneFrameTableCount, destination, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        destination.ptr += (kBrixelizerDescriptorOffset - kTemporalTextureDescriptorOffset) * impl_->srv_stride;
-        impl_->device->CopyDescriptorsSimple(count, destination, suffix, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        auto table = texture_table; table.ptr += UINT64(offset) * impl_->srv_stride;
-        binder = [&, table](ID3D12GraphicsCommandList *list) -> Result {
-            bind_surface_compute(list); list->SetComputeRootDescriptorTable(32, table); return Result::Success();
-        };
-        return Result::Success();
-    };
-    struct SoftwareGiBackingRead { ResourceVersion version; Access access; };
-    std::vector<SoftwareGiBackingRead> software_gi_backing;
-    if (active_features.software_gi_enabled)
-    {
-        const auto append = [&](ResourceVersion version, Access access) {
-            if (version.resource) software_gi_backing.push_back({version, access});
-        };
-        append(shadow_version, Access::ShaderRead);
-        append(material_parameter_version, Access::ShaderRead);
-        if (decal_surface_outputs.active) append(decal_surface_outputs.emission.version, Access::ShaderRead);
-        if (local_shadow_outputs.resources[0])
-            for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
-                    local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
-                append(version, Access::AllShaderRead);
-        if (local_probe_outputs.record_resource)
-            for (const auto version : {local_probe_outputs.radiance, local_probe_outputs.prefiltered,
-                    local_probe_outputs.irradiance, local_probe_outputs.first_hit_distance, local_probe_outputs.records})
-                append(version, Access::AllShaderRead);
-        if (virtual_shadow_outputs.resources[0])
-            for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
-                    virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
-                append(version, Access::ShaderRead);
-        if(virtual_shadow_outputs.root_static.resource)
-            append(virtual_shadow_outputs.root_static,Access::ShaderRead);
-        if(virtual_shadow_outputs.root_dynamic.resource)
-            append(virtual_shadow_outputs.root_dynamic,Access::ShaderRead);
-        for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
-                light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
-                ltc_outputs.matrix, ltc_outputs.amplitude}) append(version, Access::ShaderRead);
-        if (auto registered = register_software_gi_scene(); !registered) return registered;
-        std::vector<SceneShaderRead> cache_reads;
-        const auto append_cache_read = [&](AmbientOcclusionGuide guide, Access access = Access::ShaderRead) {
-            const auto existing = std::ranges::find_if(cache_reads, [&](const auto &read) {
-                return read.version.resource.value == guide.version.resource.value &&
-                    read.version.resource.kind == guide.version.resource.kind &&
-                    read.version.ordinal == guide.version.ordinal;
-            });
-            if (existing == cache_reads.end()) cache_reads.push_back({guide.version, guide.resource, access});
-            else if (existing->access != access) existing->access = Access::AllShaderRead;
-        };
-        for (const auto version : {gbuffer_base_version, gbuffer_normal_version,
-                gbuffer_metadata_version, gbuffer_material_version, depth_version,
-                // This dependency places the seed after the real DeferredLight pass.
-                indirect_diffuse_version})
-            append_cache_read(texture_guide(version));
-        for (const auto &read : software_gi_backing)
-            append_cache_read(texture_guide(read.version), read.access);
-        for (const auto &read : scene_reads)
-            // This pass evaluates the shared closure in the pixel shader.
-            append_cache_read({read.version,read.resource},
-                read.access == Access::ComputeRead ? Access::AllShaderRead : read.access);
-        for (UINT plane=0;plane<impl_->material_sidecar_layout.plane_count;++plane)
-            append_cache_read(texture_guide(material_sidecar_versions[plane]));
-        if (ambient_outputs.ao.resource) append_cache_read(texture_guide(ambient_outputs.ao));
-        if (ambient_outputs.contact.resource) append_cache_read(texture_guide(ambient_outputs.contact));
-        BrixelizerCacheInjectionInputs cache;
-        cache.reads=cache_reads;
-        cache.bind_graphics=[&](ID3D12GraphicsCommandList *list) -> Result {
-            bind_graphics(list); list->SetGraphicsRootDescriptorTable(5,texture_table); return Result::Success();
-        };
-        cache.render_active=owned_view.state.render_active; cache.frame_slot=frame_slot;
-        cache.owners=brixelizer_owners;
-        AmbientOcclusionGuide cache_injection;
-        if (auto registered=owned_view.brixelizer_gi.RegisterCacheInjection(impl_->graph,cache,cache_injection);!registered) return registered;
-        BrixelizerLightingInputs native;
-        native.depth=texture_guide(depth_version); native.normal=texture_guide(gbuffer_normal_version);
-        native.metadata=texture_guide(gbuffer_metadata_version); native.motion=texture_guide(gbuffer_motion_version);
-        native.base=texture_guide(gbuffer_base_version); native.material=texture_guide(gbuffer_material_version);
-        native.sidecar_plane_count=impl_->material_sidecar_layout.plane_count;
-        for(UINT plane=0;plane<native.sidecar_plane_count;++plane)
-            native.sidecars[plane]=texture_guide(material_sidecar_versions[plane]);
-        native.cache_injection=cache_injection; native.fallback_diffuse=texture_guide(indirect_diffuse_version);
-        native.environment_specular=texture_guide(environment_specular_version);
-        native.subsurface_diffuse=texture_guide(subsurface_diffuse_version);
-        native.environment_cube=texture_guide(probe_outputs.radiance);
-        native.reads=scene_reads; native.make_bindings=make_brixelizer_bindings;
-        native.restore_bindings=[&](ID3D12GraphicsCommandList *list) -> Result {bind_surface_compute(list);return Result::Success();};
-        native.render_active=owned_view.state.render_active; native.frame_slot=frame_slot;
-        native.frame_index=owned_view.frame_number; native.light_revision=brixelizer_light_epoch;
-        native.completed=impl_->graph_queue_executor.Completed(); native.owners=brixelizer_owners;
-        native.camera=owned_view.sdk_camera;
-        DirectX::XMStoreFloat4x4(&native.camera.projection,projection*DirectX::XMMatrixTranslation(jitter_x,jitter_y,0));
-        DirectX::XMStoreFloat4x4(&native.camera.inverse_projection,DirectX::XMMatrixInverse(nullptr,DirectX::XMLoadFloat4x4(&native.camera.projection)));
-        native.camera.previous_view=owned_view.brixelizer_history_valid ? previous_sdk_camera.view : native.camera.view;
-        const auto previous_native_projection=owned_view.brixelizer_history_valid
-            ? DirectX::XMLoadFloat4x4(&previous_sdk_camera.projection) * DirectX::XMMatrixTranslation(
-                2.0f*constants->surface_jitter_uv.z,-2.0f*constants->surface_jitter_uv.w,0)
-            : DirectX::XMLoadFloat4x4(&native.camera.projection);
-        DirectX::XMStoreFloat4x4(&native.camera.previous_projection,previous_native_projection);
-        native.camera.reset_history=false; // native history was recreated only after a proved drain
-        BrixelizerConstants native_constants;
-        native_constants.inverse_view_projection=camera_relative_inverse_view_projection;
-        native_constants.jitter_uv=constants->surface_jitter_uv;
-        native_constants.world_origin={lod_eye.x,lod_eye.y,lod_eye.z,0};
-        if(auto registered=owned_view.brixelizer_gi.RegisterLighting(impl_->graph,native,native_constants,brixelizer_lighting);!registered) return registered;
-    }
     SubsurfaceConstants diffusion_constants;
     diffusion_constants.inverse_view_projection = camera_relative_inverse_view_projection;
     diffusion_constants.quality_options.x = impl_->QualityProfileFor(impl_->config.material_quality).subsurface_half_samples;
@@ -9184,9 +8266,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         {depth_version, owned_view.targets.depth.resource.Get()},
         {gbuffer_normal_version, surface_normal_resource},
         {gbuffer_metadata_version, owned_view.targets.gbuffer_metadata.resource.Get()},
-        brixelizer_lighting.adjusted_subsurface.resource
-            ? SubsurfaceGuide{brixelizer_lighting.adjusted_subsurface.version, brixelizer_lighting.adjusted_subsurface.resource}
-            : SubsurfaceGuide{subsurface_diffuse_version, owned_view.targets.subsurface_diffuse.resource.Get()},
+        SubsurfaceGuide{subsurface_diffuse_version, owned_view.targets.subsurface_diffuse.resource.Get()},
         {hdr_version, opaque_hdr_resource}, {material_parameter_version, impl_->material_parameters.resource.Get()},
         owned_view.state.render_active, frame_slot, impl_->graph_queue_executor.Completed()};
     SubsurfaceOutputs diffusion_outputs;
@@ -9203,16 +8283,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         opaque_hdr_resource = diffusion_outputs.corrected_resource;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE opaque_hdr_srv = diffusion_outputs.corrected_srv;
-    if (active_features.software_gi_enabled)
-    {
-        BrixelizerCompositeInputs native;
-        native.hdr=texture_guide(hdr_version);native.make_bindings=make_brixelizer_bindings;
-        native.render_active=owned_view.state.render_active;native.frame_slot=frame_slot;native.owners=brixelizer_owners;
-        // Lighting registration retains the exact delta/environment versions.
-        BrixelizerTexture composed;
-        if(auto registered=owned_view.brixelizer_gi.RegisterComposite(impl_->graph,native,composed);!registered) return registered;
-        hdr_version=composed.version;opaque_hdr_resource=composed.resource;opaque_hdr_srv=composed.srv;
-    }
     ScreenReflectionsConstants reflection_constants;
     reflection_constants.inverse_view_projection = camera_relative_inverse_view_projection;
     // Camera-relative reconstruction requires a translation-free view matrix.
@@ -9231,9 +8301,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     reflection_inputs.motion = {gbuffer_motion_version, owned_view.targets.gbuffer_motion.resource.Get()};
     reflection_inputs.surface_history = {gbuffer_surface_history_version, owned_view.targets.gbuffer_surface_history.resource.Get()};
     reflection_inputs.opaque_hdr = {hdr_version, opaque_hdr_resource};
-    reflection_inputs.environment_specular = brixelizer_lighting.specular.resource
-        ? ScreenReflectionResource{brixelizer_lighting.specular.version,brixelizer_lighting.specular.resource}
-        : ScreenReflectionResource{environment_specular_version,owned_view.targets.environment_specular.resource.Get()};
+    reflection_inputs.environment_specular = {environment_specular_version,owned_view.targets.environment_specular.resource.Get()};
     reflection_inputs.material_parameters = {material_parameter_version, impl_->material_parameters.resource.Get()};
     reflection_inputs.sidecar_plane_count = impl_->material_sidecar_layout.plane_count;
     for (std::uint32_t plane = 0; plane < reflection_inputs.sidecar_plane_count; ++plane)
@@ -9296,7 +8364,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 inputs.compact_shadow.atlas_scale_offset[cascade] = constants->shadow_atlas_scale_offset[cascade];
             }
         }
-        inputs.make_bindings = [&](D3D12_CPU_DESCRIPTOR_HANDLE suffix, std::uint32_t count, SceneShaderBinder &binder) -> Result {
+        inputs.make_bindings = [&](D3D12_CPU_DESCRIPTOR_HANDLE suffix, std::uint32_t count, VolumetricShaderBinder &binder) -> Result {
             if (count != kVolumetricDescriptorCount || !suffix.ptr)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid volumetric descriptor suffix.");
             auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
@@ -10459,7 +9527,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         impl_->graph.SetFinalAccess(material_sidecar_versions[plane], Access::ShaderRead);
     impl_->graph.SetFinalAccess(hdr_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(raw_hdr_version, Access::ShaderRead);
-    for (const auto version : {subsurface_diffuse_version, environment_specular_version, indirect_diffuse_version})
+    for (const auto version : {subsurface_diffuse_version, environment_specular_version})
         if (version.resource) impl_->graph.SetFinalAccess(version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_accumulation_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_revealage_version, Access::ShaderRead);
@@ -10898,20 +9966,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     }
 
 
-    if (pending_effects.scene_geometry)
-    {
-        pending_effects.scene_geometry = false;
-        if (auto completed = impl_->scene_geometry.CompleteSubmission(impl_->graph,
-                submitted_completion, true); !completed) return completed;
-    }
-
-
-
-    if (pending_effects.brixelizer)
-    {
-        if (auto completed = owned_view.brixelizer_gi.CompleteSubmission(impl_->graph,submitted_completion,true); !completed) return completed;
-        pending_effects.brixelizer=false;owned_view.brixelizer_history_valid=true;
-    }
     if (pending_effects.shadows)
     {
         if (auto completed = owned_view.virtual_shadows.CompleteSubmission(impl_->graph,

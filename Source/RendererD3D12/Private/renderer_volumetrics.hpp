@@ -4,12 +4,18 @@
 #include "renderer_light_list.hpp"
 #include "renderer_virtual_shadow.hpp"
 #include "renderer_local_shadow.hpp"
-#include "renderer_scene_geometry.hpp"
 #include <hs/core/graphics_settings.hpp>
 #include <hs/render_data/vfx_volume_input.hpp>
+#include <cstddef>
+#include <functional>
+#include <string_view>
+#include <vector>
 
 namespace hs
 {
+using VolumetricShaderBinder = std::function<Result(ID3D12GraphicsCommandList *)>;
+using VolumetricFrameTableBuilder = std::function<Result(D3D12_CPU_DESCRIPTOR_HANDLE, std::uint32_t, VolumetricShaderBinder &)>;
+using VolumetricShaderReader = std::function<Result(std::string_view, std::vector<std::byte> &)>;
 // Volume descriptor block, space24: b0 at0, t0..13 at1..14, u0..8 at15..23,
 // hero metadata t14 at24, actual STBN Texture2DArray t15 at25,
 // authored RGBA8 Texture3D t16 at26.
@@ -113,7 +119,7 @@ struct VolumetricInputs
     CompletionSet completed;
     VolumetricRevisions revisions;
     bool reset_history{};
-    SceneFrameTableBuilder make_bindings; // Builds the compact volume table and retains input table leases.
+    VolumetricFrameTableBuilder make_bindings; // Builds the compact volume table and retains input table leases.
 };
 struct VolumetricTexture
 {
@@ -164,7 +170,7 @@ class VolumetricSystem
     // Off performs no native allocations, shader reads, or PSO creation.
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,
         GraphicsOptionalQuality,const render_data::QualityProfile &,ViewExtent capacity,std::uint32_t frame_slots,std::uint32_t max_volumes,
-        const SceneShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
+        const VolumetricShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
         bool hero_enabled=false) const;
     [[nodiscard]] Result Commit(VolumetricCandidate &&,const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &,const VolumetricInputs &,VolumetricOutputs &,

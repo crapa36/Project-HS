@@ -273,26 +273,18 @@ int main()
     {
         RendererFeaturePlan plan;
         plan.reflection_mode = GraphicsReflectionMode::Off;
-        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, false, false},
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, false},
             "probe lighting without consumers has no auxiliary attachments");
-        Check(LightingAuxiliaryTargets(plan, true) == std::array{true, false, false},
+        Check(LightingAuxiliaryTargets(plan, true) == std::array{true, false},
             "authored subsurface keeps its diffuse attachment");
         plan.reflection_mode = GraphicsReflectionMode::ScreenSpace;
-        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, true, false},
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, true},
             "SSR retains only its environment fallback");
         plan.reflection_mode = GraphicsReflectionMode::Off;
-        plan.software_gi_enabled = true;
-        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
-            "software GI retains all backing signals");
-        Check(!EffectiveDynamicResolution(true, plan),
-            "requested DRS is ineffective while software GI owns a fixed extent");
         Check(!EffectiveDynamicResolution(false, plan),
-            "requested DRS off remains ineffective with software GI");
-        plan.software_gi_enabled = false;
-        Check(!EffectiveDynamicResolution(false, plan),
-            "requested DRS off stays off when software GI is inactive");
+            "requested DRS off stays off");
         Check(EffectiveDynamicResolution(true, plan),
-            "qualified DRS request is effective when software GI is inactive");
+            "qualified DRS request remains effective");
         ConfiguredPostTopology();
         ExternalPostTopology();
         IdentityFxaaTopology();

@@ -80,6 +80,8 @@ struct alignas(16) BakeConstants
 };
 bool ValidRevisions(render_data::SceneProbeRevisions r)
 { return r.environment && r.material && r.light && r.static_layout; }
+bool BakedRevisionsMatch(render_data::SceneProbeRevisions a,render_data::SceneProbeRevisions b)
+{ return a.environment==b.environment && a.material==b.material && a.static_layout==b.static_layout; }
 LocalProbeCaptureView CaptureView(const std::shared_ptr<const StaticRenderScene> &scene,
     render_data::SceneProbeRevisions revisions,const render_data::SceneProbeRecord &probe,
     std::uint32_t index,std::uint32_t face,std::uint32_t edge)
@@ -362,6 +364,8 @@ Result LocalProbeSystem::PrepareCapture(const ShaderReader &reader,const Complet
     auto s=impl_->storage;
     if(!s || !s->usable || impl_->pending.graph)
         return Failure(ErrorCode::InvalidState,"Local probe capture preparation requires usable idle storage.");
+    if(s->package_baked)
+        return Failure(ErrorCode::InvalidState,"Baked local probes cannot be recaptured; use a layout package.");
     if(s->capture_ready) return Result::Success();
     if(!s->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState,"Local probe capture preparation requires all previous readers to finish.");
@@ -585,6 +589,14 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         if(s->capture_completion.IsSatisfiedBy(in.completed))
         {plan.scene.reset();plan.revisions={};plan.capture_first=0;plan.bake_submitted=false;}
     }
+    const bool package_match=s->package_baked&&!s->capture_ready&&
+        BakedRevisionsMatch(s->description.revisions,in.revisions);
+    if(package_match&&plan.scene==in.scene&&
+        (plan.capture_first==s->probes.size()*6||s->capture_completion.IsSatisfiedBy(in.completed)))
+    {
+        plan.revisions=in.revisions;
+        plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
+    }
     if(plan.scene!=in.scene||plan.revisions!=in.revisions)
     {
         plan.published=false;
@@ -592,11 +604,11 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         {
             plan.scene=in.scene;plan.revisions=in.revisions;
             plan.capture_first=0;plan.bake_submitted=false;
-            if(s->package_baked&&!s->capture_ready&&s->description.revisions==in.revisions)
+            if(package_match)
                 plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
         }
     }
-    const bool package_sample_ready=s->package_baked&&!s->capture_ready&&s->description.revisions==in.revisions&&
+    const bool package_sample_ready=package_match&&
         plan.capture_first==s->probes.size()*6&&!plan.bake_submitted;
     if(package_sample_ready&&s->uploaded&&s->completion.IsSatisfiedBy(in.completed)&&
         s->capture_completion.IsSatisfiedBy(in.completed))
@@ -909,8 +921,7 @@ bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticR
     const auto &s=impl_->storage;
     if(!s || !s->usable || !scene) return false;
     if(!s->capture_ready && !s->completion.IsSatisfiedBy(completed)) return false;
-    if(s->package_baked&&!s->capture_ready&&s->description.revisions==revisions)
-        return false;
+    if(s->package_baked&&!s->capture_ready) return false;
     if(s->scene!=scene || s->revisions!=revisions)
     {
         if(!s->capture_completion.IsSatisfiedBy(completed)) return false;

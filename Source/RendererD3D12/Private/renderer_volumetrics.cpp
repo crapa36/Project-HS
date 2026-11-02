@@ -269,7 +269,7 @@ struct VolumetricStorage
     struct Slot
     {
         CompletionSet completion;
-        SceneShaderBinder binder;
+        VolumetricShaderBinder binder;
         std::vector<ComPtr<ID3D12Resource>> reads;
     };
     ComPtr<ID3D12Device> device;
@@ -434,7 +434,7 @@ std::uint64_t VolumetricCandidate::AllocatedBytes()const noexcept
 std::uint64_t VolumetricSystem::AllocatedBytes()const noexcept
 {return impl_->storage?impl_->storage->Bytes():0;}
 Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
-    GraphicsOptionalQuality quality,const render_data::QualityProfile &profile,ViewExtent capacity,UINT frames,UINT maxVolumes,const SceneShaderReader &reader,
+    GraphicsOptionalQuality quality,const render_data::QualityProfile &profile,ViewExtent capacity,UINT frames,UINT maxVolumes,const VolumetricShaderReader &reader,
     VolumetricCandidate &candidate,RendererPipelineCache *cache,bool heroEnabled)const
 {
     const bool enabled=quality!=GraphicsOptionalQuality::Off;const Budget budget=enabled?Budget{profile.froxel_stride,profile.froxel_slices,profile.volumetric_area_samples}:Budget{};
@@ -748,7 +748,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     noiseVolume.Texture3D.MipLevels=1;
     s->device->CreateShaderResourceView(p.heroes_state.empty()?nullptr:in.hero_noise_volume.resource,
                                         &noiseVolume,s->Cpu(p.slot,26));
-    SceneShaderBinder binder;if(auto result=in.make_bindings(s->Cpu(p.slot,0),kVolumetricDescriptorCount,binder);!result)return result;
+    VolumetricShaderBinder binder;if(auto result=in.make_bindings(s->Cpu(p.slot,0),kVolumetricDescriptorCount,binder);!result)return result;
     if(!binder)return Fail(ErrorCode::InvalidArgument,"Volumetric frame table builder returned no compute binder.");
     lease.binder=binder;
     auto retain=[&](ID3D12Resource *resource){if(resource&&std::none_of(lease.reads.begin(),lease.reads.end(),[&](const auto &r){return r.Get()==resource;}))lease.reads.emplace_back(resource);};

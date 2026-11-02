@@ -47,7 +47,6 @@ struct RendererOptions
     GraphicsOptionalQuality refraction_quality{GraphicsOptionalQuality::Medium};
     GraphicsOptionalQuality volumetric_quality{GraphicsOptionalQuality::Medium};
     GraphicsGiMode gi_mode{GraphicsGiMode::Probe};
-    GraphicsQuality gi_quality{GraphicsQuality::Medium};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
     GraphicsQuality shadow_quality{GraphicsQuality::Medium};
     bool temporal_reconstruction{true};

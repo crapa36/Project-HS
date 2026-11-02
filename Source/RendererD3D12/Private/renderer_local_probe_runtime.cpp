@@ -310,6 +310,7 @@ struct LocalProbeCaptureState
     ComPtr<ID3D12PipelineState> procedural_shadow;
     ComPtr<ID3D12PipelineState> sky;
     rd::SceneProbeRevisions baseline;
+    rd::SceneProbePayload payload;
     std::vector<rd::SceneProbeRecord> probes;
     std::string scene_generation,input_identity;
     Identities environment,material_products;
@@ -730,7 +731,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
             "Active local probes need native owners, pipeline cache and selected/resident scene Generations");
         const auto bytes=ReadProduct(config,kProduct); const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct)); });
         auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
-        capture->baseline=package.description.revisions; capture->probes=package.probes;
+        capture->baseline=package.description.revisions; capture->payload=package.payload; capture->probes=package.probes;
         capture->scene_generation=scene_generation;
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
@@ -891,6 +892,27 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             capture->revision_material_quality=material_quality;
             capture->material_revision_facts_valid=true;
         }
+        const auto material_identity=capture->material_revision_identity;
+        if(capture->derived_material_identity!=material_identity)
+        {
+            auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
+            capture->derived_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
+            capture->derived_material_identity=material_identity;
+        }
+        if(capture->layout_revision_identity!=capture->layout_identity)
+        {
+            const Identities layout_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
+                {"native/immutable-static-scene",capture->layout_identity}};
+            capture->derived_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs);
+            capture->layout_revision_identity=capture->layout_identity;
+        }
+        if(capture->payload==rd::SceneProbePayload::Baked)
+        {
+            out=capture->derived_revisions;
+            out.environment=capture->baseline.environment;
+            out.light=capture->baseline.light;
+            return Result::Success();
+        }
         const auto &light_direction=in.frame_constants->light_direction_intensity;
         const auto &light_color=in.frame_constants->light_color;
         const std::array frame_lighting{std::bit_cast<std::uint32_t>(light_direction.x),
@@ -918,7 +940,6 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             capture->revision_frame_lighting=frame_lighting;
             capture->light_revision_facts_valid=true;
         }
-        const auto material_identity=capture->material_revision_identity;
         const bool shadow_inputs_changed=layout_owner_changed||light_inputs_changed||material_inputs_changed||
             capture->shadow_identity.empty();
         if(shadow_inputs_changed)
@@ -951,13 +972,6 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
             capture->light_revision_identity=lights.Finish();
         }
-        // Generation products are immutable; fold them again only when actual native inputs change.
-        if(capture->derived_material_identity!=material_identity)
-        {
-            auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
-            capture->derived_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
-            capture->derived_material_identity=material_identity;
-        }
         const auto light_identity=capture->light_revision_identity;
         if(capture->derived_light_identity!=light_identity)
         {
@@ -965,13 +979,6 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
                 {"native/authoritative-light-view",light_identity}};
             capture->derived_revisions.light=Revision(rd::SceneProbeRevisionDomain::Light,light_inputs);
             capture->derived_light_identity=light_identity;
-        }
-        if(capture->layout_revision_identity!=capture->layout_identity)
-        {
-            const Identities layout_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
-                {"native/immutable-static-scene",capture->layout_identity}};
-            capture->derived_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs);
-            capture->layout_revision_identity=capture->layout_identity;
         }
         out=capture->derived_revisions;
         out.environment=capture->baseline.environment;

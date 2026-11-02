@@ -24,7 +24,6 @@ struct RendererFeatureCapabilities
     RendererFeatureHardware hardware;
     // Explicit availability of integrated consumers, including their native
     // prerequisites. Keep absent consumers false.
-    bool software_gi_consumer{};
     bool adaptive_raster_consumer{}, adaptive_compute_consumer{};
 };
 
@@ -52,31 +51,24 @@ struct RendererFeaturePlan
     GraphicsGiMode gi_mode{GraphicsGiMode::Probe};
     GraphicsReflectionMode reflection_mode{GraphicsReflectionMode::ScreenSpace};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
-    bool software_gi_enabled{};
     bool adaptive_raster_enabled{}, adaptive_compute_enabled{};
     RendererFeatureFallbackReason adaptive_raster_reason{RendererFeatureFallbackReason::None};
     RendererFeatureFallbackReason adaptive_compute_reason{RendererFeatureFallbackReason::None};
     RendererFeatureFallbackReason ao_reason{RendererFeatureFallbackReason::None};
-    RendererFeatureFallbackReason gi_reason{RendererFeatureFallbackReason::None};
     RendererFeatureFallbackReason reflection_reason{RendererFeatureFallbackReason::None};
     RendererFeatureFallbackReason shadow_reason{RendererFeatureFallbackReason::None};
 };
 
-// Software GI owns a fixed render extent. Preserve the user's DRS request in
-// settings, but report and execute DRS only when that extent constraint allows it.
 [[nodiscard]] constexpr bool EffectiveDynamicResolution(bool requested,
-    const RendererFeaturePlan &plan) noexcept
+    const RendererFeaturePlan &) noexcept
 {
-    return requested && !plan.software_gi_enabled;
+    return requested;
 }
 
-// Preserve the complete native/software transport input contract, even without SSS materials.
-[[nodiscard]] constexpr std::array<bool, 3> LightingAuxiliaryTargets(
+[[nodiscard]] constexpr std::array<bool, 2> LightingAuxiliaryTargets(
     const RendererFeaturePlan &plan, bool have_subsurface) noexcept
 {
-    const bool transport = plan.software_gi_enabled;
-    return {have_subsurface || transport,
-        plan.reflection_mode != GraphicsReflectionMode::Off || transport, transport};
+    return {have_subsurface, plan.reflection_mode != GraphicsReflectionMode::Off};
 }
 
 // Pure resolution of validated raster/software requests; Auto AO uses GTAO.

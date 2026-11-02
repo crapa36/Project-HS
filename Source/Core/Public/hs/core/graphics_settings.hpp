@@ -20,7 +20,7 @@ enum class GraphicsQuality : std::uint8_t { Low, Medium, High, Ultra };
 enum class GraphicsOptionalQuality : std::uint8_t { Off, Low, Medium, High, Ultra };
 enum class GraphicsShadowMode : std::uint8_t { Raster };
 enum class GraphicsAoMode : std::uint8_t { Off, Auto, GTAO };
-enum class GraphicsGiMode : std::uint8_t { Off, Probe, SoftwareHybrid };
+enum class GraphicsGiMode : std::uint8_t { Off, Probe };
 enum class GraphicsReflectionMode : std::uint8_t { Off, Probe, ScreenSpace };
 enum class GraphicsAutoToggle : std::uint8_t { Off, Auto, On };
 enum class GraphicsMotionBlur : std::uint8_t { Off, Low, High };

@@ -783,19 +783,6 @@ int main()
         Check(!hs::GeometryPageLayout({76,13,64,28},page_offsets,page_bytes),"unaligned raw payload is rejected");
         Check(!hs::GeometryPageLayout({UINT32_MAX-3ull,4,4,4},page_offsets,page_bytes),
             "packed offset overflow is rejected before allocation");
-        std::array<std::byte, 3 * 76> vertices{};
-        for (std::size_t index = 0; index < vertices.size(); ++index)
-            vertices[index] = std::byte(index % 251);
-        std::array<std::byte, 3 * 12> sdf_positions{};
-        Check(hs::WriteGeometryPositionStream(sdf_positions, vertices, 76),
-            "Brixelizer position extraction must accept the canonical vertex page");
-        for (std::size_t vertex = 0; vertex < 3; ++vertex)
-            for (std::size_t byte = 0; byte < 12; ++byte)
-                Check(sdf_positions[vertex * 12 + byte] == vertices[vertex * 76 + byte],
-                    "Brixelizer positions must retain each canonical vertex position");
-        Check(!hs::WriteGeometryPositionStream(std::span(sdf_positions).first(24), vertices, 76) &&
-              !hs::WriteGeometryPositionStream(sdf_positions, vertices, 12),
-            "position extraction must reject mismatched stream shapes");
         std::puts("Persistent GPU scene slot tests passed.");
         return 0;
     }

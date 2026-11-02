@@ -348,8 +348,8 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets(OwnedView &view)
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareLightingAuxiliaries(std::array<AllocationResource *, 3> targets,
-    ViewExtent capacity, std::array<bool, 3> required)
+Result D3D12Renderer::Impl::PrepareLightingAuxiliaries(std::array<AllocationResource *, 2> targets,
+    ViewExtent capacity, std::array<bool, 2> required)
 {
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -389,7 +389,6 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     owner.targets.hdr_color.Reset();
     owner.targets.subsurface_diffuse.Reset();
     owner.targets.environment_specular.Reset();
-    owner.targets.indirect_diffuse.Reset();
     owner.targets.oit_accumulation.Reset();
     owner.targets.oit_revealage.Reset();
     owner.targets.post_a.Reset();
@@ -459,7 +458,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
             return created;
         }
     }
-    if (auto created = PrepareLightingAuxiliaries({&owner.targets.subsurface_diffuse, &owner.targets.environment_specular, &owner.targets.indirect_diffuse},
+    if (auto created = PrepareLightingAuxiliaries({&owner.targets.subsurface_diffuse, &owner.targets.environment_specular},
             {owner.render_width, owner.render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
     if (auto created = create_target(owner.targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                      black, owner.width, owner.height); !created) return created;
@@ -521,7 +520,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(kFrameCount + kLightingAuxRtvOffset) * rtv_stride;
-    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get(), owner.targets.indirect_diffuse.resource.Get()})
+    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get()})
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -755,7 +754,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
                                                  std::uint32_t output_width,
                                                  std::uint32_t output_height,
                                                  bool native_resolve, bool outline,
-                                                 std::array<bool, 3> lighting_auxiliaries)
+                                                 std::array<bool, 2> lighting_auxiliaries)
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
     D3D12MA::ALLOCATION_DESC allocation{};
@@ -823,8 +822,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
          })
          if (auto result = color_target(*resource, format, clear); !result) return result;
 
-    if (auto result = PrepareLightingAuxiliaries({&targets.subsurface_diffuse, &targets.environment_specular,
-            &targets.indirect_diffuse}, {target_width, target_height}, lighting_auxiliaries); !result) return result;
+    if (auto result = PrepareLightingAuxiliaries({&targets.subsurface_diffuse, &targets.environment_specular}, {target_width, target_height}, lighting_auxiliaries); !result) return result;
     if (auto result = color_target(targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                    black, output_width, output_height); !result) return result;
     if (bloom || outline)
@@ -903,7 +901,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
     swap(current.gbuffer_motion, targets.gbuffer_motion); swap(current.gbuffer_surface_history, targets.gbuffer_surface_history);
     swap(current.material_sidecars, targets.material_sidecars); swap(current.hdr_color, targets.hdr_color);
     swap(current.subsurface_diffuse, targets.subsurface_diffuse); swap(current.environment_specular, targets.environment_specular);
-    swap(current.indirect_diffuse, targets.indirect_diffuse); swap(current.oit_accumulation, targets.oit_accumulation);
+    swap(current.oit_accumulation, targets.oit_accumulation);
     swap(current.oit_revealage, targets.oit_revealage); swap(current.post_a, targets.post_a); swap(current.post_b, targets.post_b);
     swap(current.scene_work, targets.scene_work); swap(current.display_linear, targets.display_linear);
     swap(current.composite_hdr, targets.composite_hdr); swap(current.temporal_history, targets.temporal_history);
@@ -981,7 +979,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kLightingAuxRtvOffset) * rtv_stride;
-    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get(), owner.targets.indirect_diffuse.resource.Get()})
+    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get()})
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
         view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;

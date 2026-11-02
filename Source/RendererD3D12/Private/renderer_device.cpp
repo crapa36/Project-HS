@@ -253,7 +253,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         texture_options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
     texture_streaming_capabilities.packed_mip_arrays = texture_streaming_capabilities.tiled_resources &&
         texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
-    feature_capabilities.software_gi_consumer = QueryBrixelizerNativeSupport(device.Get()).supported;
     // Concrete DeferredLight pixel and adaptive GTAO consumers are integrated;
     // selected-generation product and actual native admission remain separate.
     feature_capabilities.adaptive_raster_consumer = true;
@@ -1032,15 +1031,13 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     // the existing waited frame-bank leases and immutable pass suffixes.
     constexpr std::array cbv_offsets{
         kViewDescriptorOffset + 9,
-        kSceneGeometryDescriptorOffset, kVolumetricDescriptorOffset, kBrixelizerDescriptorOffset,
+        kVolumetricDescriptorOffset,
         kDecalSurfaceDescriptorOffset + kDecalSurfaceCbvOffset};
     struct UavRange { UINT offset, count; };
     constexpr std::array uav_ranges{
         UavRange{kVisibilityUavDescriptorOffset, kVisibilityUavDescriptorCount},
         UavRange{kViewDescriptorOffset + 7, 2},
-        UavRange{kSceneGeometryDescriptorOffset + 3, 1},
         UavRange{kVolumetricDescriptorOffset + 15, 9},
-        UavRange{kBrixelizerDescriptorOffset + 16, 9},
         UavRange{kTextureFeedbackDescriptorOffset + 1, kTextureFeedbackBindingCount},
         UavRange{kDecalSurfaceDescriptorOffset + kDecalSurfaceUavOffset, kDecalSurfaceUavCount}};
     D3D12_UNORDERED_ACCESS_VIEW_DESC empty_uav{};
@@ -1048,7 +1045,6 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     empty_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     empty_uav.Buffer.NumElements = 1;
     const auto heap_start = heap->GetCPUDescriptorHandleForHeapStart();
-    static_assert((kViewSkinDescriptorOffset - kBrixelizerFrameTableOffset) % kSceneFrameTableCount == 0);
     for (UINT frame = 0; frame < count / kTextureDescriptorCount; ++frame)
     {
         const auto frame_offset = static_cast<SIZE_T>(frame) * kTextureDescriptorCount;
@@ -1109,13 +1105,6 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
             for (UINT index = 0; index < range.count; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));
 
-        // Geometry/GI retain root32; volume owns its compact typed table.
-        device->CopyDescriptorsSimple(kSceneFrameTableCount, cpu(kSceneGeometryTableOffset),
-            cpu(kTemporalTextureDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        for (UINT offset = kBrixelizerFrameTableOffset; offset < kViewSkinDescriptorOffset;
-             offset += kSceneFrameTableCount)
-            device->CopyDescriptorsSimple(kSceneFrameTableCount, cpu(offset),
-                cpu(kTemporalTextureDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         device->CopyDescriptorsSimple(kVolumetricDescriptorCount, cpu(kVolumetricFrameTableOffset),
             cpu(kVolumetricDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         for (const auto &copy : kVolumetricFrameInputCopies)

@@ -154,16 +154,8 @@ struct RendererCharacterAnimationClip
 struct RendererLightingStatus
 {
     RendererLightingModes requested, active;
-    std::string ao_fallback_reason, gi_fallback_reason, reflection_fallback_reason, shadow_fallback_reason;
+    std::string ao_fallback_reason, reflection_fallback_reason, shadow_fallback_reason;
     RendererLocalShadowStatus local_shadows;
-    struct SoftwareGiStatus
-    {
-        bool compiled{}, supported{}, enabled{}, native_ready{}, faulted{};
-        std::uint32_t static_instances{}, dynamic_instances{}, unsupported_masked{}, unsupported_thin{}, excluded_translucent{};
-        std::uint32_t physical_cascades{};
-        std::uint64_t allocated_bytes{}, scratch_bytes{};
-        std::string reason;
-    } software_gi;
     struct AdaptiveStatus
     {
         GraphicsAutoToggle requested{GraphicsAutoToggle::Auto};
@@ -223,7 +215,7 @@ struct RendererPsoCacheStats
 // operations are nested subsets, including overlaps. Neither measures driver/GPU busy time.
 enum class RendererStartupStep : std::uint8_t
 {
-    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, HeroTransparency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, SceneGeometry, BrixelizerGi, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
+    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, HeroTransparency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupStep::Count)> kRendererStartupStepNames{
     "quality_profiles",
@@ -257,8 +249,6 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererS
     "ltc_lut",
     "screen_overlay",
     "hdr_post",
-    "scene_geometry",
-    "brixelizer_gi",
     "light_list",
     "volumetrics",
     "local_probes",
@@ -365,7 +355,6 @@ struct RendererConfig
     GraphicsOptionalQuality refraction_quality{GraphicsOptionalQuality::Medium};
     GraphicsOptionalQuality volumetric_quality{GraphicsOptionalQuality::Medium};
     GraphicsGiMode gi_mode{GraphicsGiMode::Probe};
-    GraphicsQuality gi_quality{GraphicsQuality::Medium};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
     GraphicsQuality shadow_quality{GraphicsQuality::Medium};
     bool temporal_reconstruction{true};
@@ -469,9 +458,8 @@ struct RendererCpuTimings
     // Worker wall interval overlaps software-scene preparation; do not sum it with the main-thread slices.
     std::uint64_t graph_local_shadow_task_us{};
     // Main-thread software-scene preparation includes any wait when joining local-shadow work.
-    std::uint64_t graph_resource_scene_hlod_us{}, graph_software_scene_prepare_us{};
-    std::uint64_t graph_resource_brixelizer_input_us{};
-    std::uint64_t graph_resource_brixelizer_prepare_us{}, graph_resource_layout_remainder_us{};
+    std::uint64_t graph_resource_scene_hlod_us{};
+    std::uint64_t graph_resource_layout_remainder_us{};
     // Capture-only nested wall intervals; do not add to the outer stage totals.
     // The first three belong to scene_prepare_us; the rest to constants_upload_us.
     std::uint64_t retained_vfx_us{}, ribbon_prepare_us{}, particle_spawn_prepare_us{};

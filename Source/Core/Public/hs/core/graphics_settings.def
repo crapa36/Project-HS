@@ -38,7 +38,6 @@ HS_GRAPHICS_SETTING(34, ContactShadows, contact_shadows, bool, Boolean, true, "t
 HS_GRAPHICS_SETTING(35, AoMode, ao_mode, GraphicsAoMode, Enum, GraphicsAoMode::GTAO, "gtao", 0, 0, Lighting, "graphics.ao_mode")
 HS_GRAPHICS_SETTING(36, AoQuality, ao_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Lighting, "graphics.ao_quality")
 HS_GRAPHICS_SETTING(37, GiMode, gi_mode, GraphicsGiMode, Enum, GraphicsGiMode::Probe, "probe", 0, 0, Lighting, "graphics.gi_mode")
-HS_GRAPHICS_SETTING(38, GiQuality, gi_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Lighting, "graphics.gi_quality")
 HS_GRAPHICS_SETTING(39, ReflectionMode, reflection_mode, GraphicsReflectionMode, Enum, GraphicsReflectionMode::ScreenSpace, "screen_space", 0, 0, Lighting, "graphics.reflection_mode")
 HS_GRAPHICS_SETTING(40, ReflectionQuality, reflection_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Lighting, "graphics.reflection_quality")
 HS_GRAPHICS_SETTING(45, TransparencyQuality, transparency_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Effects, "graphics.transparency_quality")

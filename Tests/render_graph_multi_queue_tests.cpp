@@ -274,11 +274,27 @@ void RunBakedProbePreparation(Fixture &fixture)
     Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe readers");
     Check(!service.NativeCaptureRequired(scene, description.revisions, fixture.executor.Completed()),
         "matching baked profile must not request a runtime recapture after upload");
-    Check(!service.PrepareCapture(unavailable_shader, {}).Succeeded() && shader_reads == 0,
-        "capture upgrade ignored in-flight reader completion");
-    Check(!service.PrepareCapture(unavailable_shader, fixture.executor.Completed()).Succeeded() && shader_reads == 1,
-        "capture upgrade did not preserve native shader failure");
-    Check(service.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(), "reset failed probe capture upgrade");
+    auto changed = published_inputs;
+    changed.completed = fixture.executor.Completed();
+    ++changed.revisions.light;
+    hs::LocalProbeFramePlan changed_plan;
+    Check(!service.NativeCaptureRequired(scene, changed.revisions, changed.completed) &&
+        service.PrepareFrameRecordData(changed, changed_plan).Succeeded() && changed_plan.current &&
+        changed_plan.published && !changed_plan.capture_count,
+        "light changes must preserve baked publication without capture");
+    for (auto member : {&rd::SceneProbeRevisions::environment, &rd::SceneProbeRevisions::material,
+            &rd::SceneProbeRevisions::static_layout})
+    {
+        auto mismatch = changed;
+        ++(mismatch.revisions.*member);
+        hs::LocalProbeFramePlan mismatch_plan;
+        Check(!service.NativeCaptureRequired(scene, mismatch.revisions, mismatch.completed) &&
+            service.PrepareFrameRecordData(mismatch, mismatch_plan).Succeeded() && !mismatch_plan.published &&
+            !mismatch_plan.capture_count, "incompatible baked inputs must fall back without capture");
+    }
+    Check(!service.PrepareCapture(unavailable_shader, fixture.executor.Completed()).Succeeded() && shader_reads == 0,
+        "baked package must not upgrade to a capture");
+    Check(service.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(), "reset baked probe");
     struct Compiler
     {
         HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
@@ -346,6 +362,7 @@ void RunBakedProbePreparation(Fixture &fixture)
             output.assign(begin, begin + code->GetBufferSize());
             return hs::Result::Success();
         };
+    const auto layout_bytes = rd::BuildSceneProbePackage(id, dependencies, description, probes);
     D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
     const bool enhanced = SUCCEEDED(fixture.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12,
         &options, sizeof(options))) && options.EnhancedBarriersSupported;
@@ -357,7 +374,7 @@ void RunBakedProbePreparation(Fixture &fixture)
     for (const auto mode : {hs::BarrierMode::Legacy, hs::BarrierMode::Enhanced})
     {
         if (mode == hs::BarrierMode::Enhanced && !enhanced) continue;
-        Check(service.Prepare(fixture.device.Get(), fixture.allocator, bytes, unavailable_shader, candidate).Succeeded(),
+        Check(service.Prepare(fixture.device.Get(), fixture.allocator, layout_bytes, state_shader, candidate).Succeeded(),
             "prepare recapture fixture");
         Check(service.Commit(std::move(candidate), fixture.executor.Completed()).Succeeded(), "commit recapture fixture");
         auto capture_inputs = inputs;
@@ -372,8 +389,7 @@ void RunBakedProbePreparation(Fixture &fixture)
                 ++capture_inputs.revisions.light;
                 capture_inputs.capture_identity[0] = std::byte{1};
                 Check(service.NativeCaptureRequired(scene, capture_inputs.revisions, capture_inputs.completed),
-                    "stale baked probe did not request capture");
-                Check(service.PrepareCapture(state_shader, capture_inputs.completed).Succeeded(), "upgrade baked probe for capture");
+                    "layout probe did not request capture");
             }
             if (step == 2) capture_inputs.capture_identity[0] = std::byte{2};
             capture_inputs.max_cube_views = step == 1 ? 1 : step == 2 ? 5 : step == 3 ? 1 : 0;

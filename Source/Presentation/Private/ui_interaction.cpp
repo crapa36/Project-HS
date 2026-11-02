@@ -58,7 +58,7 @@ std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &descrip
         "프레임 생성 모드", "프레임 생성 배수", "입력 지연 줄이기", "텍스처 품질",
         "텍스처 메모리 한도", "이방성 필터링", "모델 품질", "식생 품질", "재질 품질",
         "표면 입체감 품질", "조명 품질", "그림자 방식", "그림자 품질", "그림자 표시 거리",
-        "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식", "간접 조명 품질",
+        "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식",
         "반사 방식", "반사 품질", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
         "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도", "외곽선", "외곽선 두께",
         "색 보정", "적응형 셰이딩"};
@@ -85,7 +85,7 @@ std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
         {"directsr", "DirectSR"}, {"fixed", "고정 배수"},
         {"dynamic", "동적 배수"}, {"raster", "기본 그림자"},
         {"gtao", "화면 기반 음영 (GTAO)"},
-        {"probe", "미리 계산한 조명"}, {"software_hybrid", "소프트웨어 혼합"},
+        {"probe", "미리 계산한 조명"},
         {"screen_space", "화면 기반 반사"}};
     for (const auto &[value, label] : values) if (token == value) return std::string(label);
     std::string display_number;

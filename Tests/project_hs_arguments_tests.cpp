@@ -208,7 +208,7 @@ void TestStartupGraphicsAuthority()
     Check(ultra_smoke.width == 1280 && ultra_smoke.height == 720 && !ultra_smoke.vsync &&
               ultra_smoke.frame_cap == 0 && requested.graphics.shadow_quality == hs::GraphicsQuality::Ultra &&
               requested.graphics.particle_quality == hs::GraphicsQuality::Ultra &&
-              requested.graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid,
+              requested.graphics.gi_mode == hs::GraphicsGiMode::Probe,
           "smoke display defaults keep explicit Ultra quality intent");
 
     requested = StronglyDifferentSettings();

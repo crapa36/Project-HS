@@ -89,7 +89,7 @@ inline void ApplyGraphicsPreset(GraphicsSettings &graphics)
 #include <hs/core/graphics_settings.def>
 #undef HS_GRAPHICS_SETTING
     graphics.ao_mode = GraphicsAoMode::GTAO;
-    graphics.gi_mode = preset == GraphicsPreset::Ultra ? GraphicsGiMode::SoftwareHybrid : GraphicsGiMode::Probe;
+    graphics.gi_mode = GraphicsGiMode::Probe;
     graphics.reflection_mode = preset == GraphicsPreset::Low ? GraphicsReflectionMode::Probe : GraphicsReflectionMode::ScreenSpace;
     graphics.shadow_mode = GraphicsShadowMode::Raster;
     if (preset == GraphicsPreset::Low) graphics.volumetric_quality = GraphicsOptionalQuality::Off;

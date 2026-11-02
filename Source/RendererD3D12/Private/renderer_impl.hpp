@@ -62,8 +62,6 @@
 #include "renderer_ltc.hpp"
 #include "renderer_hdr_post.hpp"
 #include "renderer_screen_overlay.hpp"
-#include "renderer_scene_geometry.hpp"
-#include "renderer_brixelizer_gi.hpp"
 #include "renderer_virtual_shadow.hpp"
 #include "renderer_local_shadow.hpp"
 #include "renderer_volumetrics.hpp"
@@ -228,23 +226,19 @@ constexpr std::uint32_t kViewDescriptorCount = 13;
 constexpr std::uint32_t kHeroBindingDescriptorOffset = kViewDescriptorOffset + kViewDescriptorCount;
 constexpr std::uint32_t kProbeDescriptorOffset = kHeroBindingDescriptorOffset + 1;
 constexpr std::uint32_t kLightListDescriptorOffset = kProbeDescriptorOffset + 3;
-constexpr std::uint32_t kSceneGeometryDescriptorOffset = kLightListDescriptorOffset + 6;
-constexpr std::uint32_t kVirtualShadowDescriptorOffset = kSceneGeometryDescriptorOffset + kSceneGeometryDescriptorCount;
+constexpr std::uint32_t kVirtualShadowDescriptorOffset = kLightListDescriptorOffset + 6;
 constexpr std::uint32_t kLocalProbeDescriptorOffset = kVirtualShadowDescriptorOffset + kVirtualShadowDescriptorCount;
 constexpr std::uint32_t kVolumetricDescriptorOffset = kLocalProbeDescriptorOffset + 5;
 constexpr std::uint32_t kHlodDescriptorOffset = kVolumetricDescriptorOffset + kVolumetricDescriptorCount;
 constexpr std::uint32_t kLocalShadowDescriptorOffset = kHlodDescriptorOffset + 2;
-constexpr std::uint32_t kBrixelizerDescriptorOffset = kLocalShadowDescriptorOffset + kLocalShadowDescriptorCount;
-constexpr std::uint32_t kTextureFeedbackDescriptorOffset = kBrixelizerDescriptorOffset + kBrixelizerDescriptorCount;
+constexpr std::uint32_t kTextureFeedbackDescriptorOffset = kLocalShadowDescriptorOffset + kLocalShadowDescriptorCount;
 constexpr std::uint32_t kVfxScreenReadDescriptorOffset = kTextureFeedbackDescriptorOffset + kTextureFeedbackDescriptorCount;
 constexpr std::uint32_t kEntitySurfaceNoiseDescriptorOffset = kVfxScreenReadDescriptorOffset + 1;
 constexpr std::uint32_t kDecalSurfaceDescriptorOffset = kEntitySurfaceNoiseDescriptorOffset + 1;
 constexpr std::uint32_t kHeroTransparencyDescriptorOffset = kDecalSurfaceDescriptorOffset + kDecalSurfaceDescriptorCount;
 constexpr std::uint32_t kSceneFrameTableCount = kHeroTransparencyDescriptorOffset - kTemporalTextureDescriptorOffset;
-constexpr std::uint32_t kSceneGeometryTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
-constexpr std::uint32_t kVolumetricFrameTableOffset = kSceneGeometryTableOffset + kSceneFrameTableCount;
-constexpr std::uint32_t kBrixelizerFrameTableOffset = kVolumetricFrameTableOffset + kVolumetricFrameDescriptorCount;
-constexpr std::uint32_t kViewSkinDescriptorOffset = kBrixelizerFrameTableOffset + 4 * kSceneFrameTableCount;
+constexpr std::uint32_t kVolumetricFrameTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
+constexpr std::uint32_t kViewSkinDescriptorOffset = kVolumetricFrameTableOffset + kVolumetricFrameDescriptorCount;
 constexpr std::uint32_t kTextureDescriptorCount = kViewSkinDescriptorOffset + 4;
 struct VolumetricFrameInputCopy { std::uint32_t target, source, count; };
 constexpr std::array kVolumetricFrameInputCopies{
@@ -277,7 +271,7 @@ constexpr std::uint32_t kMaterialSidecarRtvOffset = kVisibilityRtvOffset + 2;
 constexpr std::uint32_t kViewRtvOffset = kMaterialSidecarRtvOffset + 2;
 constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
-constexpr std::uint32_t kLightingAuxRtvCount = 3;
+constexpr std::uint32_t kLightingAuxRtvCount = 2;
 constexpr std::uint32_t kOutputRtvOffset = kLightingAuxRtvOffset + kLightingAuxRtvCount;
 constexpr std::uint32_t kRtvBankStride = kOutputRtvOffset + kFrameCount;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
@@ -391,7 +385,6 @@ struct GeometryPageGpu
     std::array<std::byte, 32> source_digest{};
     AllocationResource storage;
     std::array<std::uint64_t,4> offsets{}, sizes{};
-    std::uint64_t brixelizer_position_offset{};
     ResidencyTicket residency;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_INDEX_BUFFER_VIEW index_view{};
@@ -406,11 +399,10 @@ struct GeometryPageGpu
     std::uint32_t generation{1};
     render_data::GeometryMetadata metadata;
     std::vector<render_data::GeometrySubmesh> submeshes;
-    std::vector<std::uint64_t> brixelizer_submesh_keys;
 
     void Reset() noexcept
     {
-        storage.Reset(); offsets={}; sizes={}; brixelizer_position_offset=0;
+        storage.Reset(); offsets={}; sizes={};
         residency = {};
         vertex_view = {}; index_view = {};
         raster_index_offset = 0;
@@ -419,7 +411,6 @@ struct GeometryPageGpu
         generation = 1;
         metadata = {};
         submeshes.clear();
-        brixelizer_submesh_keys.clear();
         source_asset = {}; source_product.clear(); source_digest = {};
     }
 };
@@ -834,7 +825,7 @@ struct RetestGraphLayout
 struct LightingGraphLayout
 {
     std::uint32_t pass_index{};
-    std::array<ResourceVersion, 4> outputs{};
+    std::array<ResourceVersion, 3> outputs{};
 };
 
 struct SurfacePassGraphLayout
@@ -886,7 +877,7 @@ struct FrameGraphLayout
         bool screen_overlay_requested{}, entity_surface{}, decal_commands{};
         bool hdr_motion{}, hdr_dof{}, hdr_grade{}, sdk_presentation{}, devtools_ui{};
         bool output_dependency_interval{}, output_ready{};
-        bool software_gi{}, contact_shadows{}, adaptive_raster{}, adaptive_compute{}, overlap_ao_csm{};
+        bool contact_shadows{}, adaptive_raster{}, adaptive_compute{}, overlap_ao_csm{};
         GraphicsAoMode ao_mode{};
         GraphicsGiMode gi_mode{};
         GraphicsReflectionMode reflection_mode{};
@@ -897,15 +888,7 @@ struct FrameGraphLayout
     RenderGraphBuilder::PlanHandle handle{};
     std::uint64_t last_used{};
     bool certified_imports{true};
-    std::vector<std::uint32_t> geometry_page_slots, software_scene_page_slots;
-    // Sorted by key, then original leaf read-pair index. Duplicate keys retain
-    // the old first-match behavior through the smallest read_pair.
-    struct BrixelizerLeafRead
-    {
-        std::pair<std::uint32_t, std::uint32_t> key;
-        std::size_t read_pair{};
-    };
-    std::vector<BrixelizerLeafRead> brixelizer_leaf_reads;
+    std::vector<std::uint32_t> geometry_page_slots;
     std::vector<ResourceShape> direct_import_shapes;
     std::vector<ImportSlot> imports;
     std::vector<PassSlot> passes;
@@ -956,8 +939,6 @@ struct FrameGraphLayout
     ReconstructionGuidesLayout reconstruction_guides;
     PresentationGuidesLayout presentation_guides;
     PresentationTagLayout presentation_tag;
-    SceneGeometryGraphLayout scene_geometry;
-    BrixelizerGraphLayout brixelizer;
 };
 
 // CPU/device discovery for one output extent. No SDK or device object is
@@ -974,7 +955,7 @@ struct NativeGraphicsCapabilitySnapshot
     ViewExtent output{};
     std::array<Admission, 7> dlss_quality{}, fsr_quality{}, xess_quality{}, dsr_quality{};
     Admission dlss_sr{}, fsr_sr{}, xess_sr{}, directsr{};
-    Admission fsr_fg{}, dlss_fg{}, reflex{}, xell_fg{}, xell_standalone{}, intel_fg{}, software_gi{};
+    Admission fsr_fg{}, dlss_fg{}, reflex{}, xell_fg{}, xell_standalone{}, intel_fg{};
     std::uint32_t dlss_fg_maximum_multiplier{};
     std::uint32_t dlss_fg_minimum_dimension{};
     std::uint32_t xess_fg_maximum_generated_frames{};
@@ -1072,7 +1053,7 @@ struct D3D12Renderer::Impl
         AllocationResource visibility_ids, visibility_front_face, visibility_pixels,
             visibility_counts, visibility_dispatch_args;
         AllocationResource hdr_color, oit_accumulation, oit_revealage;
-        AllocationResource subsurface_diffuse, environment_specular, indirect_diffuse;
+        AllocationResource subsurface_diffuse, environment_specular;
         AllocationResource post_a, post_b;
         std::array<AllocationResource, 2> temporal_history;
         std::array<AllocationResource, 2> temporal_normal_history, temporal_material_history;
@@ -1151,7 +1132,6 @@ struct D3D12Renderer::Impl
         HeroTransparencySystem hero_transparency;
         HdrPostSystem hdr_post;
         ScreenOverlaySystem screen_overlay;
-        BrixelizerGiSystem brixelizer_gi;
         VirtualShadowSystem virtual_shadows;
         LocalShadowSystem local_shadows;
         VolumetricSystem volumetrics;
@@ -1202,7 +1182,7 @@ struct D3D12Renderer::Impl
         std::uint32_t exposure_read_index{}, temporal_read_index{}, hzb_read_index{};
         bool exposure_initialized{}, view_targets_initialized{}, temporal_history_valid{},
             temporal_targets_initialized{}, hzb_history_valid{}, material_sidecars_initialized{},
-            visibility_targets_initialized{}, transient_textures_common{}, brixelizer_history_valid{};
+            visibility_targets_initialized{}, transient_textures_common{};
         std::chrono::steady_clock::time_point exposure_sample_time{}, render_submission_time{};
         DirectX::XMFLOAT4X4 previous_view_projection{}, previous_unjittered_view_projection{};
         DirectX::XMFLOAT4 previous_projection_depth{};
@@ -1252,46 +1232,6 @@ struct D3D12Renderer::Impl
     };
     struct StaticGpuScene
     {
-        struct SoftwareSceneBase
-        {
-            std::size_t source_index{};
-            std::uint32_t page_slot{};
-            DirectX::XMFLOAT4X4 world{};
-            float yaw_sine{}, yaw_cosine{};
-        };
-        struct SoftwareSceneCache
-        {
-            struct PageShape
-            {
-                std::uint32_t page_slot{},generation{},vertex_count{},index_count{},submesh_count{};
-                ID3D12Resource *resource{};
-                D3D12MA::Allocation *allocation{};
-                std::array<std::uint64_t,4> offsets{};
-                std::array<std::byte,32> source_digest{};
-            };
-            struct Rows
-            {
-                std::shared_ptr<const StaticRenderScene> source;
-                std::vector<SoftwareSceneBase> bases;
-                SceneGeometryStaticSection section;
-                std::vector<PageShape> page_shapes;
-                std::vector<std::uint32_t> included_page_slots;
-                std::uint32_t excluded_masked{},excluded_thin{},excluded_translucent{};
-            };
-            struct NativeRows
-            {
-                std::shared_ptr<const Rows> source;
-                std::shared_ptr<const void> generation_owner;
-                std::shared_ptr<const BrixelizerImmutableSceneSection> section;
-                std::uint64_t material_revision{};
-            };
-            std::shared_ptr<const Rows> rows;
-            std::shared_ptr<const NativeRows> native_rows;
-            std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_layouts{};
-            std::array<render_data::EnvironmentMaterialVariant, kAuthoredMaterialNames.size()> material_variants{};
-            float foliage_density{};
-            bool valid{};
-        };
         struct RefTable
         {
             std::shared_ptr<const std::vector<GpuStaticDrawRef>> cpu;
@@ -1301,7 +1241,6 @@ struct D3D12Renderer::Impl
         };
         std::shared_ptr<const StaticRenderScene> source;
         StaticDrawData draws;
-        SoftwareSceneCache software_scene;
         std::shared_ptr<RefTable> refs;
         std::vector<std::shared_ptr<RefTable>> retired_refs;
         bool refs_dirty{};
@@ -1469,9 +1408,9 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreateSwapChainAndTargets(OwnedView &view);
     [[nodiscard]] Result CreateDepthAndShadow(OwnedView &view);
     [[nodiscard]] Result CreatePostProcessTargets(OwnedView &view);
-    [[nodiscard]] std::array<bool, 3> RequiredLightingAuxiliaries(const RendererConfig &) const noexcept;
-    [[nodiscard]] Result PrepareLightingAuxiliaries(std::array<AllocationResource *, 3>,
-        ViewExtent, std::array<bool, 3>);
+    [[nodiscard]] std::array<bool, 2> RequiredLightingAuxiliaries(const RendererConfig &) const noexcept;
+    [[nodiscard]] Result PrepareLightingAuxiliaries(std::array<AllocationResource *, 2>,
+        ViewExtent, std::array<bool, 2>);
     [[nodiscard]] Result PrepareOptionTargets(OptionTargets &targets,
                                               std::uint32_t target_width,
                                               std::uint32_t target_height,
@@ -1479,7 +1418,7 @@ struct D3D12Renderer::Impl
                                               bool bloom, std::uint32_t output_width,
                                               std::uint32_t output_height,
                                               bool native_resolve, bool outline,
-                                              std::array<bool, 3> lighting_auxiliaries);
+                                              std::array<bool, 2> lighting_auxiliaries);
     [[nodiscard]] Result PrepareOptionPools(
         std::array<TransientResourcePool, kFrameCount> &pools,
         std::uint32_t target_width, std::uint32_t target_height, bool bloom,
@@ -1585,8 +1524,6 @@ struct D3D12Renderer::Impl
         ViewExtent output_extent, HdrPostCandidate &) const;
     [[nodiscard]] Result PrepareScreenOverlay(const RendererConfig &, ViewExtent,
         ScreenOverlayCandidate &) const;
-    [[nodiscard]] Result PrepareSceneGeometry(const RendererConfig &, SceneGeometryCandidate &) const;
-    [[nodiscard]] Result PrepareBrixelizerGi(const OwnedView &, const RendererConfig &, ViewExtent, BrixelizerCandidate &) const;
     [[nodiscard]] Result PrepareVirtualShadows(const OwnedView &, const RendererConfig &, ViewExtent, VirtualShadowCandidate &) const;
     struct AdditionalShadowPrepared { LocalShadowCandidate local; };
     [[nodiscard]] Result PrepareAdditionalShadows(const OwnedView &, const RendererConfig &, ViewExtent, AdditionalShadowPrepared &) const;
@@ -1957,7 +1894,6 @@ struct D3D12Renderer::Impl
     std::unique_ptr<ClusterRuntimeState> cluster_runtime;
     LightingProbeSystem lighting_probe;
     LtcLutSystem ltc_lut;
-    SceneGeometrySystem scene_geometry;
     LocalProbeRuntime local_probes;
     std::unique_ptr<HlodRuntime> hlod_runtime;
     std::vector<VolumetricVolume> volumetric_media;
@@ -2115,7 +2051,7 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> ribbon_add_pipeline;
     ComPtr<ID3D12PipelineState> ribbon_oit_pipeline;
     // Auxiliary bits: SSS=1, environment specular=2, indirect diffuse=4; valid masks 0,1,2,3,7.
-    std::array<ComPtr<ID3D12PipelineState>, 8> deferred_pipeline;
+    std::array<ComPtr<ID3D12PipelineState>, 4> deferred_pipeline;
     ComPtr<ID3D12PipelineState> composite_pipeline;
     ComPtr<ID3D12PipelineState> temporal_pipeline;
     ComPtr<ID3D12PipelineState> pre_exposure_pipeline;

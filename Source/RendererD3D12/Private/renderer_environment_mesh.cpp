@@ -621,10 +621,6 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         std::uint64_t upload_size{}; std::array<std::uint64_t, 4> offsets{};
         if (!GeometryPageLayout(sizes, offsets, upload_size))
             return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Streamed geometry allocation size overflow.");
-        const auto position_bytes = std::uint64_t(metadata.vertex_count) * 3u * sizeof(float);
-        if (position_bytes > UINT32_MAX - upload_size)
-            return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Streamed Brixelizer position size overflow.");
-        upload_size += position_bytes;
         const auto resident_description = BufferDescription(upload_size);
         const auto resident_size = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_size);

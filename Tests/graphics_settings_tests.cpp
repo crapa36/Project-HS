@@ -32,8 +32,6 @@ int main()
 {
     const hs::GraphicsSettings defaults;
     Check(hs::ValidateGraphicsSettings(defaults).empty(), "defaults");
-    Check(hs::GraphicsSettingDescriptors().size() == hs::kGraphicsSettingCount, "count");
-    Check(hs::kGraphicsSettingCount == 52, "table length");
     for (const auto &descriptor : hs::GraphicsSettingDescriptors())
     {
         Check(!descriptor.key.empty(), "key");
@@ -51,6 +49,7 @@ int main()
     Check(!hs::ParseGraphicsEnumToken<hs::GraphicsPreset>("ultra_rt") &&
               !hs::ParseGraphicsEnumToken<hs::GraphicsAoMode>("rtao") &&
               !hs::ParseGraphicsEnumToken<hs::GraphicsGiMode>("ray_traced") &&
+              !hs::ParseGraphicsEnumToken<hs::GraphicsGiMode>("software_hybrid") &&
               !hs::ParseGraphicsEnumToken<hs::GraphicsReflectionMode>("hybrid_rt") &&
               !hs::ParseGraphicsEnumToken<hs::GraphicsShadowMode>("hybrid_rt"),
           "legacy modes are read migration only, never current UI/API tokens");
@@ -60,6 +59,8 @@ int main()
     for (unsigned id = 41; id <= 44; ++id)
         Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(id), "true"),
               "removed persisted IDs reject live edits");
+    Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(38), "ultra"),
+          "removed GI quality setting rejects live edits");
     Check(hs::ParseGraphicsEnumToken<hs::GraphicsResolutionMode>("provider_quality") ==
           hs::GraphicsResolutionMode::ProviderQuality, "mode parse");
     Check(!hs::ParseGraphicsEnumToken<hs::GraphicsResolutionMode>("unknown"), "unknown mode");

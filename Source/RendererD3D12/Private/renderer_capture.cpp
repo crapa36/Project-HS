@@ -1093,7 +1093,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         first_texture = false;
     }
     metadata_output << "],\n";
-    constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular", "indirect_diffuse"};
+    constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular"};
     const auto *captured_frame = impl_->SubmittedFrame(owner);
     metadata_output << std::format("  \"grass\": {{\"pixels\": {}, \"historical_pixels\": {}, \"moving_pixels\": {}, \"max_motion_pixels\": {}}},\n",
         grass_pixels, historical_grass_pixels, moving_grass_pixels, grass_motion_max_pixels);
@@ -1126,8 +1126,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             impl_->active_view_id.value, impl_->owned_views.at(impl_->active_view_id.value)->frame_number, history_current);
     }
     else metadata_output << "  \"temporal_inputs\": null,\n";
-    const std::array auxiliary_resources{&owner.targets.subsurface_diffuse, &owner.targets.environment_specular,
-        &owner.targets.indirect_diffuse};
+    const std::array auxiliary_resources{&owner.targets.subsurface_diffuse, &owner.targets.environment_specular};
     metadata_output << "  \"auxiliary_targets\": [\n";
     for (std::size_t index = 0; index < auxiliary_resources.size(); ++index)
     {

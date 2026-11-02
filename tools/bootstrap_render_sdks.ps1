@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('xess', 'streamline', 'fsr', 'directsr', 'brixelizer', 'directstorage')][string]$Sdk = 'xess',
+    [ValidateSet('xess', 'streamline', 'fsr', 'directsr', 'directstorage')][string]$Sdk = 'xess',
     [switch]$Offline,
     [switch]$PrintPath
 )
@@ -268,21 +268,7 @@ try {
     try { $mutexHeld = $bootstrapMutex.WaitOne([TimeSpan]::FromMinutes(10)) }
     catch [System.Threading.AbandonedMutexException] { $mutexHeld = $true }
     if (!$mutexHeld) { throw 'Timed out waiting for renderer SDK bootstrap.' }
-    if ($Sdk -eq 'brixelizer') {
-        if ($entry.release -cne '1.1.4' -or
-            $entry.commit -cne 'c6efa6bf7f2027b3ec94f28578bb5965eabb9e55' -or
-            $entry.archive_sha256 -cne 'b5bba71656e18f4c813fda4eb364dcb5e9b8491efd6abb66fdc8a2b530bfcedd' -or
-            $entry.source_manifest_sha256 -cne '1f5bf0cb5a2541626c66546b0a22ac410c747fb6273c65bf3f8c6d54e9bb2761') {
-            throw 'Brixelizer lock differs from the pinned SDK bootstrap contract.'
-        }
-        $resolved = & (Join-Path $PSScriptRoot 'bootstrap-brixelizer-sdk.ps1') -Offline:$Offline -PrintPath
-        if (!$resolved -or !(Test-Path -LiteralPath $resolved -PathType Container)) {
-            throw 'Pinned Brixelizer SDK bootstrap returned no verified installation.'
-        }
-    }
-    else {
-        $resolved = Invoke-SdkBootstrap
-    }
+    $resolved = Invoke-SdkBootstrap
     if ($nugetPin) {
         [xml]$metadata = Get-Content -LiteralPath (Join-Path $resolved ($entry.package_id + '.nuspec')) -Raw
         if ($metadata.package.metadata.id -cne $entry.package_id -or $metadata.package.metadata.version -cne $entry.release) {

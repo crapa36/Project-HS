@@ -1,7 +1,6 @@
 #include "renderer_impl.hpp"
 #include <hs/render_data/volumetric_medium.hpp>
 #include <hs/render_data/material_ir.hpp>
-#include <hs/renderer/brixelizer_shaders.hpp>
 #include <bit>
 #include <map>
 #include <set>
@@ -72,34 +71,6 @@ Result D3D12Renderer::Impl::CommitVolumetrics(OwnedView &owner, VolumetricPrepar
 RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &request) const noexcept
 {
     auto available = feature_capabilities;
-    for (const auto id : {"render/shader/scene_geometry_cs.dxil", "render/shader/brixelizer_guides_cs.dxil",
-            "render/shader/brixelizer_gi_resolve_cs.dxil", "render/shader/brixelizer_cache_export_cs.dxil",
-            "render/shader/brixelizer_gi_compose_cs.dxil", "render/shader/brixelizer_cache_direct_ps.dxil"})
-        available.software_gi_consumer = available.software_gi_consumer && (request.product_paths.contains(id) || FindRendererBulk(request, id));
-#if HS_WITH_BRIXELIZER
-    if (available.software_gi_consumer &&
-        request.gi_mode == GraphicsGiMode::SoftwareHybrid)
-    {
-        // Validate the exact pinned official permutation table once per query;
-        // lookup does not read or allocate any native context/shader storage.
-        try
-        {
-            static const auto products = [] {
-                std::vector<std::string> ids;
-                  if (!brixelizer_native::EnumerateShaderProducts([&](std::string_view id) {
-                        ids.emplace_back(id);return true;
-                    })) ids.clear();
-                for(UINT noise=0;noise<16;++noise)ids.push_back("render/texture/brixelizer_noise_"+std::to_string(noise)+".rpkg");
-                return ids;
-            }();
-            available.software_gi_consumer = products.size() == 748 && std::ranges::all_of(products,
-                [&](const auto &id) {return (request.product_paths.contains(id) || FindRendererBulk(request, id));});
-        }
-        catch (...) { available.software_gi_consumer = false; }
-    }
-#else
-    available.software_gi_consumer = false;
-#endif
     available.adaptive_raster_consumer = available.adaptive_raster_consumer &&
         (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
         (request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_rate_cs.dxil"));
@@ -109,7 +80,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
     return ResolveRendererFeatures({request.ao_mode,
         request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
 }
-std::array<bool, 3> D3D12Renderer::Impl::RequiredLightingAuxiliaries(const RendererConfig &request) const noexcept
+std::array<bool, 2> D3D12Renderer::Impl::RequiredLightingAuxiliaries(const RendererConfig &request) const noexcept
 {
     const bool have_subsurface = std::ranges::any_of(material_surface_layouts, [](const auto &layout) {
         return (layout.capability_mask & static_cast<std::uint32_t>(
@@ -225,17 +196,6 @@ Result D3D12Renderer::Impl::CommitAdditionalShadows(OwnedView &owner, Additional
     const auto completed = graph_queue_executor.Completed();
     if (auto result = owner.local_shadows.Commit(std::move(candidate.local), completed); !result) return result;
     return Result::Success();
-}
-Result D3D12Renderer::Impl::PrepareSceneGeometry(const RendererConfig &candidate_config,
-    SceneGeometryCandidate &geometry) const
-{
-    const auto read_shader = [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
-        RendererAssetSource path;
-        if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
-        return ReadBinary(path, bytes);
-    };
-    return scene_geometry.Prepare(device.Get(), allocator, root_signature.Get(),
-        ResolveFeatures(candidate_config).software_gi_enabled, kFrameCount, read_shader, geometry);
 }
 Result D3D12Renderer::Impl::PrepareLightingProbe(const RendererConfig &candidate_config,
     LightingProbeCandidate &candidate) const

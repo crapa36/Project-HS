@@ -1087,7 +1087,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     "{{\"settings_generation\":{},\"pipeline_revision\":{},"
                     "\"requested\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
                     "\"active\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"fallback\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                    "\"fallback\":{{\"ao\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
                     "\"reconstruction\":{{\"requested\":\"{}\",\"active\":\"{}\",\"availability\":\"{}\"}},"
                     "\"pso_cache\":{{\"library\":{},\"mesh_library\":{},\"hits\":{},\"misses\":{},\"native_creates\":{},"
                     "\"store_failures\":{},\"load_failures\":{},\"io_failures\":{},\"discarded_files\":{}}}}}\n",
@@ -1096,7 +1096,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     GraphicsEnumToken(lighting.requested.reflection_mode), GraphicsEnumToken(lighting.requested.shadow_mode),
                     GraphicsEnumToken(lighting.active.ao_mode), GraphicsEnumToken(lighting.active.gi_mode),
                     GraphicsEnumToken(lighting.active.reflection_mode), GraphicsEnumToken(lighting.active.shadow_mode),
-                    lighting.ao_fallback_reason, lighting.gi_fallback_reason, lighting.reflection_fallback_reason,
+                    lighting.ao_fallback_reason, lighting.reflection_fallback_reason,
                     lighting.shadow_fallback_reason, reconstruction.requested_provider.value,
                     reconstruction.effective_provider.value, reconstruction.requested_availability,
                     cache.library_supported, cache.mesh_library_supported, cache.hits, cache.misses, cache.native_creates,

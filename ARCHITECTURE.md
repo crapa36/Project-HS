@@ -144,21 +144,15 @@ Animation updates share the existing actual-dynamic invalidation used by project
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
 
-The optional Brixelizer integration keeps FidelityFX headers private. Its build
-producer links the full pinned SDK shader tables and emits immutable binding
-metadata. Runtime links that metadata and reads DXIL from selected content;
-The SDK license uses the source namespace, outside GPU resources; existing Action
-receipts own producer provenance without a duplicate content product.
-Resident whole-LOD geometry pages own their stable SDF submesh keys. Native scene
-expansion consumes those keys in authored submesh order; frame-scoped resources,
-versions, deformation and instance transforms remain current-frame inputs.
-Software GI prepares canonical geometry records, draws and deformation offsets
-once in the waited SceneGeometry slot. GI input construction borrows that prepared
-view and retains its position allocation lease; graph registration consumes the
-same records with current read versions and bindings. The move-only preparation
-token abandons unregistered CPU data. Accepted registration transfers that data
-to the existing pending submission until recording has joined; GPU allocation
-owners and completion remain independent of those CPU arrays.
+Indirect lighting uses the existing baked SceneProbe package: spatial SH diffuse
+irradiance and prefiltered reflection probes with the global environment fallback.
+Dynamic lights and emissive effects do not update indirect lighting. Direct lights,
+dynamic shadows and screen-space reflections remain independent. There is no SDF
+scene, native GI SDK, GI history, or dedicated direct-light injection pass. Geometry
+pages contain the raster streams and index suffix without an SDK position copy.
+Saved dynamic-GI settings migrate to Probe at the settings read boundary.
+Only layout-only developer/bake inputs permit capture; baked packages remain
+read-only across light changes and use global fallback for incompatible static data.
 Visibility pixel classification is a separate runtime shader family. Count,
 prefix and scatter share variant decoding with material resolve through a small
 include; classification-only edits do not invalidate authored material shaders.
@@ -423,8 +417,7 @@ The renderer owns bounded coarse staging and GPU seeding, while Apps own atomic
 publication. Incompatible sun/grid/layout or reloaded materials/pipelines use
 the realtime path. A per-view CPU plan admits omission of the full CSM producer
 only when baked supply, all receiver domains and current coarse-page command
-capacity are guaranteed. Otherwise the actual CSM remains registered. Software
-GI's direct-light seed samples the current GBuffer receiver domain. Active hero
+capacity are guaranteed. Otherwise the actual CSM remains registered. Active hero
 volumes and allocated froxels add world receivers; disabled volumetrics add no
 hero-volume receiver bounds. CPU policy and completed GPU publication are
 separate diagnostics.

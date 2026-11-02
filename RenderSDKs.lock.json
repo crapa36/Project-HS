@@ -32,50 +32,6 @@
       ],
       "redistribution": "Deploy the selected x64 runtime DLLs together with all pinned license and notice files; the SDK archive remains a development prerequisite."
     },
-    "brixelizer": {
-      "release": "1.1.4",
-      "commit": "c6efa6bf7f2027b3ec94f28578bb5965eabb9e55",
-      "repository": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
-      "distribution_kind": "source_build",
-      "archive_uri": "https://codeload.github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/zip/c6efa6bf7f2027b3ec94f28578bb5965eabb9e55",
-      "archive_filename": "sdk-source.zip",
-      "archive_prefix": "FidelityFX-SDK-c6efa6bf7f2027b3ec94f28578bb5965eabb9e55/",
-      "archive_sha256": "b5bba71656e18f4c813fda4eb364dcb5e9b8491efd6abb66fdc8a2b530bfcedd",
-      "source_manifest_sha256": "1f5bf0cb5a2541626c66546b0a22ac410c747fb6273c65bf3f8c6d54e9bb2761",
-      "archive_sha256_verification": "cached exact-commit source archive and deterministic complete SDK file manifest; native shader products are derived by the pinned SDK compiler",
-      "platform": "windows-x64",
-      "minimum_shader_model": "6.6",
-      "effect_versions": {
-        "brixelizer": "1.0.0",
-        "brixelizer_gi": "1.0.1"
-      },
-      "native_shader_configuration": {
-        "raw_passes": 31,
-        "raw_permutation_keys": 4,
-        "gi_passes": 19,
-        "gi_permutation_keys": 32,
-        "compiler_threads": 1,
-        "compiler_job_pool": 2
-      },
-      "noise_source": {
-        "path": "ContentSource/Textures/BrixelizerNoise/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp",
-        "sdk_path": "sdk/src/components/sssr/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp",
-        "sha256": "cd464cc9c931b0b28fde5d42e83a31275ff9d5025482af73bb629f67ab373170",
-        "license_path": "ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt",
-        "license_sha256": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
-      },
-      "headers": [
-        "sdk/include/FidelityFX/host/ffx_brixelizer.h",
-        "sdk/include/FidelityFX/host/ffx_brixelizergi.h"
-      ],
-      "libraries": [],
-      "runtime": [],
-      "notices": [
-        "LICENSE.txt"
-      ],
-      "documents": [],
-      "redistribution": "Only selected compiled DXIL products and the SDK license enter Generation distribution; source archives and developer compiler inputs remain local prerequisites."
-    },
     "directsr": {
       "release": "1.715.1-preview",
       "package_id": "Microsoft.Direct3D.D3D12",

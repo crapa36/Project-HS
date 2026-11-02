@@ -527,17 +527,17 @@ void TestRemovedGraphicsReadMigration()
 {
     const auto root = NewRoot("removed-graphics-migration");
     hs::SaveStore store(root);
-    for (const auto gi_token : {"ray_traced", "raytraced"})
+    for (const auto gi_token : {"ray_traced", "raytraced", "software_hybrid"})
     {
         const auto legacy = std::string(R"({"schema_version":2,"graphics":{"preset":"ultra_rt","ao_mode":"rtao","gi_mode":")") +
-            gi_token + R"(","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
+            gi_token + R"(","gi_quality":"ultra","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
         Write(root / "settings.json", legacy);
         hs::SettingsDocument loaded;
         bool stored{};
         Check(store.LoadSettingsV2(loaded, &stored) && stored &&
                   loaded.graphics.preset == hs::GraphicsPreset::Ultra &&
                   loaded.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
-                  loaded.graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid &&
+                  loaded.graphics.gi_mode == hs::GraphicsGiMode::Probe &&
                   loaded.graphics.reflection_mode == hs::GraphicsReflectionMode::ScreenSpace &&
                   loaded.graphics.shadow_mode == hs::GraphicsShadowMode::Raster,
               "removed graphics modes migrate to supported non-RT modes");
@@ -554,7 +554,7 @@ void TestRemovedGraphicsReadMigration()
               "read migration preserves other graphics/audio/keys/unknown data without rewriting source");
         Check(store.SaveSettingsV2(loaded).Succeeded(), "save migrated settings");
         const auto saved = Read(root / "settings.json");
-        for (const auto obsolete : {"ultra_rt", "rtao", "ray_traced", "raytraced", "hybrid_rt", "dlss_rr",
+        for (const auto obsolete : {"ultra_rt", "rtao", "ray_traced", "raytraced", "software_hybrid", "gi_quality", "hybrid_rt", "dlss_rr",
                                    "ray_tracing_enabled", "rt_trace_distance_m",
                                    "neural_ray_reconstruction", "ray_reconstruction_provider"})
             Check(!saved.contains(obsolete), "removed controls and modes do not return on serialization");
@@ -656,7 +656,7 @@ void TestFullGraphicsTransactions()
               controller.Requested().graphics.bloom &&
               controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "ultra")) &&
               controller.Requested().graphics.preset == hs::GraphicsPreset::Ultra &&
-              controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid &&
+              controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::Probe &&
               controller.Requested().graphics.shadow_mode == hs::GraphicsShadowMode::Raster &&
               controller.Requested().graphics.pom_quality == hs::GraphicsOptionalQuality::Ultra &&
               controller.Requested().graphics.frame_limit_fps == 120 &&
@@ -671,7 +671,7 @@ void TestFullGraphicsTransactions()
     invalid.graphics_token.fill('x');
     Check(!controller.EditGraphics(invalid), "unterminated token never truncated");
     Check(controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "low")) &&
-              controller.EditGraphics(GraphicsCommand(hs::SettingId::GiQuality, "high")),
+              controller.EditGraphics(GraphicsCommand(hs::SettingId::ReflectionQuality, "high")),
           "coalesced preset and later field edit");
     Check(controller.EditImmediate({hs::UiCommandKind::SetMasterVolumePercent, 40}) &&
               first->graphics->reconstruction_provider.value == immutable_provider &&
@@ -681,7 +681,7 @@ void TestFullGraphicsTransactions()
               hs::GraphicsSettingsCommit::AckOutcome::Applied &&
               controller.Requested().graphics.preset == hs::GraphicsPreset::Custom &&
               controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::Probe &&
-              controller.Requested().graphics.gi_quality == hs::GraphicsQuality::High &&
+              controller.Requested().graphics.reflection_quality == hs::GraphicsQuality::High &&
               controller.Requested().master_volume == 0.4f,
           "follow-ups preserve actual serial order and immediate audio");
     const auto preset_followup = controller.NextRequest();

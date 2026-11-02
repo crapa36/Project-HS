@@ -68,43 +68,73 @@ float3 TerrainParallaxFootprint(float2 dx, float2 dy, uint layer,
     return float3(ray,pomWeight);
 }
 
-float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment_wrap,
-    float2 uv, float2 dx, float2 dy, uint layer, float2 ray, float pomWeight,
-    uint steps, uint refinementSteps, uint height_slot, HsTextureGradState height_state)
+struct TerrainCellSample
 {
-    // Disabled/subpixel POM performs no height lookup. Authored height remains
-    // sampled separately for material layer blending.
-    [branch] if(pomWeight<=0) return uv;
-    float depth=0,previous=0; float2 start=uv;
-    [loop] for(uint j=0;j<steps;++j)
+    uint rotation;
+    float2 start, uv, dx, dy, ray;
+    float depth, previous;
+    bool active;
+};
+
+TerrainCellSample TerrainPrepareCell(float2 baseUv,float2 baseDx,float2 baseDy,
+    uint seed,float3 parallax)
+{
+    TerrainCellSample cell;
+    cell.rotation=TerrainHash(seed)&3;
+    float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
+    cell.start=TerrainRotate(baseUv,cell.rotation)+offset;
+    cell.uv=cell.start;
+    cell.dx=TerrainRotate(baseDx,cell.rotation);
+    cell.dy=TerrainRotate(baseDy,cell.rotation);
+    cell.ray=TerrainRotate(parallax.xy,cell.rotation);
+    cell.depth=0;cell.previous=0;cell.active=true;
+    return cell;
+}
+
+void TerrainParallaxCells(Texture2DArray<float4> height, SamplerState environment_wrap,
+    uint layer, float pomWeight, uint height_slot, HsTextureGradState height_state,
+    inout TerrainCellSample x,inout TerrainCellSample y,inout TerrainCellSample z)
+{
+    // Disabled/subpixel POM performs no height lookup.
+    [branch] if(pomWeight<=0) return;
+    [loop] for(uint j=0;j<HS_MATERIAL_POM_STEPS;++j)
     {
-        if(depth>=1-HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(uv,layer),dx,dy,height_state).r) break;
-        previous=depth; depth+=1.0/steps; uv=start-ray*depth;
+        float hx=0,hy=0,hz=0;
+        [branch] if(x.active) hx=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(x.uv,layer),x.dx,x.dy,height_state).r;
+        [branch] if(y.active) hy=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(y.uv,layer),y.dx,y.dy,height_state).r;
+        [branch] if(z.active) hz=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(z.uv,layer),z.dx,z.dy,height_state).r;
+        if(x.active) { if(x.depth>=1-hx) x.active=false; else { x.previous=x.depth;x.depth+=1.0/HS_MATERIAL_POM_STEPS;x.uv=x.start-x.ray*x.depth; } }
+        if(y.active) { if(y.depth>=1-hy) y.active=false; else { y.previous=y.depth;y.depth+=1.0/HS_MATERIAL_POM_STEPS;y.uv=y.start-y.ray*y.depth; } }
+        if(z.active) { if(z.depth>=1-hz) z.active=false; else { z.previous=z.depth;z.depth+=1.0/HS_MATERIAL_POM_STEPS;z.uv=z.start-z.ray*z.depth; } }
+        if(!x.active && !y.active && !z.active) break;
     }
-    [loop] for(uint k=0;k<refinementSteps;++k)
+    [loop] for(uint k=0;k<HS_MATERIAL_POM_REFINEMENT_STEPS;++k)
     {
-        float mid=(previous+depth)*0.5; float2 trial=start-ray*mid;
-        if(mid>=1-HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(trial,layer),dx,dy,height_state).r) depth=mid;
-        else previous=mid;
+        float mx=(x.previous+x.depth)*0.5,my=(y.previous+y.depth)*0.5,mz=(z.previous+z.depth)*0.5;
+        float2 tx=x.start-x.ray*mx,ty=y.start-y.ray*my,tz=z.start-z.ray*mz;
+        float hx=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(tx,layer),x.dx,x.dy,height_state).r;
+        float hy=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(ty,layer),y.dx,y.dy,height_state).r;
+        float hz=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(tz,layer),z.dx,z.dy,height_state).r;
+        if(mx>=1-hx) x.depth=mx;else x.previous=mx;
+        if(my>=1-hy) y.depth=my;else y.previous=my;
+        if(mz>=1-hz) z.depth=mz;else z.previous=mz;
     }
-    return start-ray*((previous+depth)*0.5*pomWeight);
+    x.uv=x.start-x.ray*((x.previous+x.depth)*0.5*pomWeight);
+    y.uv=y.start-y.ray*((y.previous+y.depth)*0.5*pomWeight);
+    z.uv=z.start-z.ray*((z.previous+z.depth)*0.5*pomWeight);
 }
 
 HsMaterialTerrainResult TerrainSample(
     Texture2DArray<float4> gaussian, Texture2DArray<float4> surface,
     Texture2DArray<float4> normal, Texture2DArray<float4> detail,
     Texture2DArray<float4> height, SamplerState environment_wrap,
-    float2 baseUv, float2 baseDx, float2 baseDy, uint layer, uint seed,
-    float3 parallax, bool detail_enabled, float detail_weight,
+    TerrainCellSample cell, uint layer, bool detail_enabled, float detail_weight,
     uint gaussian_slot, uint surface_slot, uint normal_slot, uint detail_slot, uint height_slot,
     HsTextureGradState gaussian_state, HsTextureGradState surface_state,
     HsTextureGradState normal_state, HsTextureGradState detail_state,
     HsTextureGradState height_state)
 {
-    uint rotation=TerrainHash(seed)&3; float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
-    float2 uv=TerrainRotate(baseUv,rotation)+offset, dx=TerrainRotate(baseDx,rotation),dy=TerrainRotate(baseDy,rotation);
-    uv=TerrainParallaxUv(height,environment_wrap,uv,dx,dy,layer,TerrainRotate(parallax.xy,rotation),parallax.z,
-        HS_MATERIAL_POM_STEPS,HS_MATERIAL_POM_REFINEMENT_STEPS,height_slot,height_state);
+    uint rotation=cell.rotation;float2 uv=cell.uv,dx=cell.dx,dy=cell.dy;
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
     m.base_color=HsTextureSampleGradPrepared(gaussian,gaussian_slot,environment_wrap,float3(uv,layer),dx,dy,gaussian_state).rgb;
     float2 ra=HsTextureSampleGradPrepared(surface,surface_slot,environment_wrap,float3(uv,layer),dx,dy,surface_state).rg; m.roughness=ra.x;m.ao=ra.y;
@@ -170,9 +200,13 @@ HsMaterialTerrainResult TerrainLayer(
     float3 w=float3(1-f.x-f.y,f.x,f.y);
     if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);w=float3(f.x+f.y-1,1-f.x,1-f.y);}
     w=w*w*(3-2*w);w/=max(w.x+w.y+w.z,1e-5);
-    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(a,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
-    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(b,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
-    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(c,seed),parallax,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+    TerrainCellSample cellX=TerrainPrepareCell(uv,dx,dy,TerrainCell(a,seed),parallax);
+    TerrainCellSample cellY=TerrainPrepareCell(uv,dx,dy,TerrainCell(b,seed),parallax);
+    TerrainCellSample cellZ=TerrainPrepareCell(uv,dx,dy,TerrainCell(c,seed),parallax);
+    TerrainParallaxCells(height,environment_wrap,layer,parallax.z,height_slot,height_state,cellX,cellY,cellZ);
+    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellX,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellY,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellZ,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     float3 gaussian_value=0.5+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-0.5)*rsqrt(dot(w,w));
     float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*2048*2048,1e-8));
     // Decode with the mip actually available to the Gaussian sample, including streaming fallback.

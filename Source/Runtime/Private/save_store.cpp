@@ -387,7 +387,7 @@ template <typename T>
         }
         else if constexpr (std::is_same_v<T, GraphicsGiMode>)
         {
-            if (token == "ray_traced" || token == "raytraced") token = "software_hybrid";
+            if (token == "ray_traced" || token == "raytraced" || token == "software_hybrid") token = "probe";
         }
         else if constexpr (std::is_same_v<T, GraphicsReflectionMode>)
         {
@@ -449,7 +449,8 @@ template <typename T>
 [[nodiscard]] bool RemovedGraphicsSettingKey(std::string_view key) noexcept
 {
     return key == "ray_tracing_enabled" || key == "rt_trace_distance_m" ||
-           key == "neural_ray_reconstruction" || key == "ray_reconstruction_provider";
+           key == "neural_ray_reconstruction" || key == "ray_reconstruction_provider" ||
+           key == "gi_quality";
 }
 
 [[nodiscard]] bool ParseExtensions(std::string_view text, Json &extensions)

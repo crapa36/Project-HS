@@ -57,12 +57,6 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     LightListCandidate lights;
     HS_PREPARE(next.PrepareLightList(owner, cfg, capacity, lights));
     HS_PREPARE(candidate_owner.light_list.Commit(std::move(lights), unused));
-    SceneGeometryCandidate geometry;
-    HS_PREPARE(next.PrepareSceneGeometry(cfg, geometry));
-    HS_PREPARE(next.scene_geometry.Commit(std::move(geometry), unused));
-    BrixelizerCandidate brixelizer;
-    HS_PREPARE(next.PrepareBrixelizerGi(owner, cfg, owner.state.render_active, brixelizer));
-    HS_PREPARE(candidate_owner.brixelizer_gi.Commit(std::move(brixelizer), unused));
     VirtualShadowCandidate virtual_shadow;
     HS_PREPARE(next.PrepareVirtualShadows(owner, cfg, capacity, virtual_shadow));
     HS_PREPARE(candidate_owner.virtual_shadows.Commit(std::move(virtual_shadow), unused));
@@ -124,9 +118,6 @@ void D3D12Renderer::Impl::SwapResidentServices(Impl &next) noexcept
     decal_parameter_counts.swap(next.decal_parameter_counts);
     decal_parameter_layouts.swap(next.decal_parameter_layouts);
     HS_SWAP_VIEW_SERVICE(light_list);
-    HS_SWAP_SERVICE(scene_geometry);
-    HS_SWAP_VIEW_SERVICE(brixelizer_gi);
-    std::swap(owner.brixelizer_history_valid, candidate_owner.brixelizer_history_valid);
     HS_SWAP_VIEW_SERVICE(virtual_shadows);
     HS_SWAP_VIEW_SERVICE(local_shadows);
     HS_SWAP_VIEW_SERVICE(volumetrics);
@@ -229,7 +220,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         for (auto &retained : unresolved_resident_candidates)
         {
             if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return drained;
-            if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
             for (auto &[id, owner] : retained->owned_views)
                 if (auto retired = ResetOwnedViewAfterCompletion(*owner); !retired) return retired;
             retained->resident_utility_submissions.clear();
@@ -276,7 +266,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     const bool replace_auxiliaries = next_auxiliaries != RequiredLightingAuxiliaries(config);
     if (replace_auxiliaries)
         if (auto prepared = next->PrepareLightingAuxiliaries({&candidate_owner.targets.subsurface_diffuse,
-                &candidate_owner.targets.environment_specular, &candidate_owner.targets.indirect_diffuse}, main_owner.state.render_capacity,
+                &candidate_owner.targets.environment_specular}, main_owner.state.render_capacity,
                 next_auxiliaries); !prepared) return reject(prepared);
     if (replace_sidecars)
         if (auto prepared = next->PrepareMaterialSidecars(candidate_owner.targets.material_sidecars,
@@ -303,7 +293,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     for (auto &retained : unresolved_resident_candidates)
     {
         if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return reject(drained);
-        if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
         for (auto &[id, owner] : retained->owned_views)
             if (auto retired = ResetOwnedViewAfterCompletion(*owner); !retired) return reject(retired);
         retained->resident_utility_submissions.clear();
@@ -323,7 +312,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     {
         std::swap(main_owner.targets.subsurface_diffuse, candidate_owner.targets.subsurface_diffuse);
         std::swap(main_owner.targets.environment_specular, candidate_owner.targets.environment_specular);
-        std::swap(main_owner.targets.indirect_diffuse, candidate_owner.targets.indirect_diffuse);
         for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
             WriteOptionTargetDescriptors(main_owner, frame);
     }
@@ -367,8 +355,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
             unresolved_resident_candidates.push_back(std::move(next));
             return false;
         };
-        if (!retain_on_failure(next->scene_geometry.ResetAfterCompletion(completed),
-                "Adopted resident generation; old scene geometry cleanup retained.\n")) return Result::Success();
         for (auto &[id, owner] : next->owned_views)
             if (!retain_on_failure(ResetOwnedViewAfterCompletion(*owner),
                     "Adopted resident generation; old view service cleanup retained.\n")) return Result::Success();

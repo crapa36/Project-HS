@@ -102,7 +102,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
     options.refraction_quality = graphics.refraction_quality;
     options.volumetric_quality = graphics.volumetric_quality;
     options.gi_mode = graphics.gi_mode;
-    options.gi_quality = graphics.gi_quality;
     options.shadow_mode = graphics.shadow_mode;
     options.shadow_quality = graphics.shadow_quality;
     options.temporal_reconstruction = graphics.reconstruction_provider.value != "off";
@@ -163,7 +162,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
     config.refraction_quality = options.refraction_quality;
     config.volumetric_quality = options.volumetric_quality;
     config.gi_mode = options.gi_mode;
-    config.gi_quality = options.gi_quality;
     config.shadow_mode = options.shadow_mode;
     config.shadow_quality = options.shadow_quality;
     config.temporal_reconstruction = options.temporal_reconstruction;
@@ -290,7 +288,6 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.ao_mode = lighting.active.ao_mode;
     actual.ao_quality = config.ao_quality;
     actual.gi_mode = lighting.active.gi_mode;
-    actual.gi_quality = config.gi_quality;
     actual.reflection_mode = lighting.active.reflection_mode;
     actual.reflection_quality = config.reflection_quality;
     actual.transparency_quality = config.transparency_quality;
@@ -641,9 +638,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         const auto fg_probe = xess_fg.Probe(impl_->device.Get(), 1, xess_fg_cap);
         auto intel_fg = Both(QueryAdmission(fg_probe, xess_fg.Availability(), xess_fg.FailureReason()), xell_fg);
 
-        const auto brixelizer = QueryBrixelizerNativeSupport(impl_->device.Get());
-        const auto software_gi = brixelizer.supported ? available :
-            brixelizer.compiled ? unsupported : CapabilityAdmission{false, GraphicsCapabilityReason::Unavailable};
         discovered.dlss_quality = dlss_quality;
         discovered.fsr_quality = fsr_quality;
         discovered.xess_quality = xess_quality;
@@ -658,7 +652,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         discovered.xell_fg = xell_fg;
         discovered.xell_standalone = xell_standalone;
         discovered.intel_fg = intel_fg;
-        discovered.software_gi = software_gi;
         discovered.dlss_fg_maximum_multiplier = sl_fg_cap.maximum_multiplier;
         discovered.dlss_fg_minimum_dimension = sl_fg_cap.minimum_dimension;
         discovered.dlss_fg_vsync_supported = sl_fg_cap.vsync_supported;
@@ -755,8 +748,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         fg_requested == "auto" ? Either(reflex, xell_standalone) : reflex);
     for (const auto token : {"off", "auto", "gtao"}) option("ao", token, available);
     for (const auto token : {"off", "probe"}) option("gi", token, available);
-    option("gi", "software_hybrid", native.software_gi);
-    AddProvider(view, GraphicsProviderId{"brixelizer"}, native.software_gi.available, native.software_gi.reason);
     for (const auto token : {"off", "probe", "screen_space"}) option("reflection", token, available);
     option("shadow", "raster", available);
     option("adaptive_shading", "off", available);

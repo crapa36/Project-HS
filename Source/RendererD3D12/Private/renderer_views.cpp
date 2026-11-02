@@ -749,7 +749,7 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     SubsurfaceCandidate diffusion; ScreenReflectionsCandidate reflections;
     HeroTransparencyCandidate transparency; HdrPostCandidate hdr; ScreenOverlayCandidate overlay;
     DecalSurfaceCandidate decals;
-    LightListCandidate lights; BrixelizerCandidate brixelizer;
+    LightListCandidate lights;
     VirtualShadowCandidate shadows; AdditionalShadowPrepared additional; VolumetricPrepared volume;
     if (auto r = PrepareAdaptiveShading(v, config, capacity, adaptive); !r) return r;
     if (auto r = PrepareAmbientOcclusion(v, config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
@@ -759,7 +759,6 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = PrepareScreenOverlay(config, capacity, overlay); !r) return r;
     if (auto r = PrepareLightList(v, config, capacity, lights); !r) return r;
     if (auto r = PrepareDecalSurface(config, capacity, decal_work, decals); !r) return r;
-    if (auto r = PrepareBrixelizerGi(v, config, input.render_active, brixelizer); !r) return r;
     if (auto r = PrepareVirtualShadows(v, config, capacity, shadows); !r) return r;
     if (auto r = PrepareAdditionalShadows(v, config, capacity, additional); !r) return r;
     if (auto r = PrepareVolumetrics(v, config, capacity, volume); !r) return r;
@@ -772,7 +771,6 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = v.screen_overlay.Commit(std::move(overlay), completed); !r) return r;
     if (auto r = v.light_list.Commit(std::move(lights), completed); !r) return r;
     if (auto r = v.decal_surface.Commit(std::move(decals), completed); !r) return r;
-    if (auto r = v.brixelizer_gi.Commit(std::move(brixelizer), completed); !r) return r;
     if (auto r = v.virtual_shadows.Commit(std::move(shadows), completed); !r) return r;
     if (auto r = v.local_shadows.Commit(std::move(additional.local), completed); !r) return r;
     if (auto r = v.volumetrics.Commit(std::move(volume.service), completed); !r) return r;
@@ -829,7 +827,6 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = RetireHeroTransparency(view.hero_transparency); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = view.brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.virtual_shadows.Commit(VirtualShadowCandidate{}, graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.local_shadows.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.volumetrics.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
@@ -1133,7 +1130,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         if (active_changed) { owned_view.hzb_history_valid = false; owned_view.targets.hzb_layout = MakeHzbLayout(owned_view.render_width, owned_view.render_height); }
         if (view.camera_cut)
         {
-            owned_view.temporal_history_valid = false; owned_view.hzb_history_valid = false; owned_view.brixelizer_history_valid = false;
+            owned_view.temporal_history_valid = false; owned_view.hzb_history_valid = false;
             owned_view.exposure_initialized = false; owned_view.previous_origins_valid = false;
             owned_view.previous_skin_deformation.reset(); owned_view.previous_instances.reset(); owned_view.skin_history.Clear();
             owned_view.ambient_occlusion.ResetHistory(); owned_view.screen_reflections.ResetHistory();
@@ -1175,7 +1172,6 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         auto &failed_view = *impl_->owned_views.at(attempted_view->id.value);
         failed_view.temporal_history_valid = false;
         failed_view.hzb_history_valid = false;
-        failed_view.brixelizer_history_valid = false;
         failed_view.previous_origins_valid = false;
         failed_view.previous_skin_deformation.reset();
         failed_view.previous_instances.reset();

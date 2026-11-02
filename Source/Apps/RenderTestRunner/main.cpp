@@ -440,20 +440,9 @@ Json LightingStatusReceipt(const hs::RendererLightingStatus &status)
         {"active", LightingModesReceipt(status.active)},
         {"fallback", {
             {"ao", status.ao_fallback_reason},
-            {"gi", status.gi_fallback_reason},
             {"reflection", status.reflection_fallback_reason},
             {"shadow", status.shadow_fallback_reason},
         }},
-        {"software_gi", {{"compiled", status.software_gi.compiled}, {"supported", status.software_gi.supported},
-            {"enabled", status.software_gi.enabled}, {"native_ready", status.software_gi.native_ready},
-            {"faulted", status.software_gi.faulted}, {"static_instances", status.software_gi.static_instances},
-            {"dynamic_instances", status.software_gi.dynamic_instances},
-            {"unsupported_masked", status.software_gi.unsupported_masked},
-            {"unsupported_thin", status.software_gi.unsupported_thin},
-            {"excluded_translucent", status.software_gi.excluded_translucent},
-            {"physical_cascades", status.software_gi.physical_cascades},
-            {"allocated_bytes", status.software_gi.allocated_bytes}, {"scratch_bytes", status.software_gi.scratch_bytes},
-            {"reason", status.software_gi.reason}}},
         {"local_shadows", {{"enabled", status.local_shadows.enabled},
             {"requested_lights", status.local_shadows.requested_lights}, {"selected_lights", status.local_shadows.selected_lights},
             {"unsupported_lights", status.local_shadows.unsupported_lights}, {"budget_lights", status.local_shadows.budget_lights},
@@ -1408,7 +1397,6 @@ int main(int argc, char **argv)
         bool camera_basis_probe{};
         bool light_list_probe{};
         bool lighting_auxiliary_probe{};
-        bool software_gi_probe{};
         bool require_multi_queue{};
         bool require_transient_aliasing{};
         bool grid_floor_probe{};
@@ -1503,7 +1491,6 @@ int main(int argc, char **argv)
             else if (arg == "--camera-basis-probe") camera_basis_probe = true;
             else if (arg == "--light-list-probe") light_list_probe = true;
             else if (arg == "--lighting-auxiliary-probe") lighting_auxiliary_probe = true;
-            else if (arg == "--software-gi-probe") software_gi_probe = world_transport_probe = true;
             else if (arg == "--grid-floor-probe") grid_floor_probe = true;
             else if (arg == "--owned-view-probe") owned_view_probe = true;
             else if (arg == "--provider-switch-probe") provider_switch_probe = true;
@@ -1685,12 +1672,6 @@ int main(int argc, char **argv)
             config.reflection_mode = hs::GraphicsReflectionMode::ScreenSpace;
             config.volumetric_quality = hs::GraphicsOptionalQuality::Medium;
         }
-        if (software_gi_probe)
-        {
-            config.gi_mode = hs::GraphicsGiMode::SoftwareHybrid;
-            config.gi_quality = hs::GraphicsQuality::Low;
-            config.dynamic_resolution = false;
-        }
         if (static_shadow_bake_only && !static_shadow_bake_probe)
             throw std::runtime_error("--static-shadow-bake-only requires --static-shadow-bake-probe");
         if (static_shadow_bake_probe)
@@ -1842,7 +1823,6 @@ int main(int argc, char **argv)
             : dynamic_lod_skin_growth_probe ? "dynamic-lod-skin-growth-v1"
             : gpu_lod_probe ? "gpu-lod-probe-v1"
              : residency_streaming_probe ? "residency-streaming-v3"
-              : software_gi_probe ? "software-gi-world-v1"
             : world_transport_probe ? "world-transport-v1"
             : static_shadow_bake_probe ? "static-shadow-bake-v1"
             : gameplay_scene ? "gameplay-arena-v1"
@@ -3119,7 +3099,6 @@ int main(int argc, char **argv)
                     Require(renderer.Resize(config.width + (frame == 13 ? 64 : 0),
                                             config.height + (frame == 13 ? 32 : 0)));
                 auto main_view = renderer.MainViewInput(pair.current.camera);
-                if (software_gi_probe && frame == 8) main_view.camera_cut = true;
                 std::vector<hs::VfxEntitySurfaceCommand> entity_surfaces;
                 if (entity_surface_probe)
                 {
@@ -3436,8 +3415,8 @@ int main(int argc, char **argv)
                     std::ifstream input(artifacts / capture);
                     const auto diagnostic = Json::parse(input);
                     const auto &targets = diagnostic.at("auxiliary_targets");
-                    if (targets.at(1).at("present").get<bool>() != (frame % 2 == 0) ||
-                        targets.at(2).at("present").get<bool>() ||
+                    if (targets.size() != 2 ||
+                        targets.at(1).at("present").get<bool>() != (frame % 2 == 0) ||
                         (frame > 1 && targets.at(0).at("present") != receipt["lighting_auxiliaries"]
                             ["frames"].front().at("targets").at(0).at("present")) ||
                         (frame > 1 && renderer.GetGraphicsSettingsStatus().state != hs::SettingsApplyState::Applied &&
@@ -3827,7 +3806,6 @@ int main(int argc, char **argv)
                     graphics.reflection_mode = config.reflection_mode;
                     graphics.reflection_quality = config.reflection_quality;
                     graphics.gi_mode = config.gi_mode;
-                    graphics.gi_quality = config.gi_quality;
                     graphics.shadow_mode = config.shadow_mode;
                     graphics.volumetric_quality = config.volumetric_quality;
                     graphics.reconstruction_provider = config.reconstruction_request
@@ -4094,24 +4072,6 @@ int main(int argc, char **argv)
             if (!observed["required_passes_complete"].get<bool>())
                 throw std::runtime_error(
                     "world transport did not complete volumetrics, SSR, local-probe sample readiness and accepted-layout HLOD in GPU history");
-        }
-        if (software_gi_probe)
-        {
-            const auto status = renderer.GetLightingStatus();
-            const auto seen = [&](std::uint32_t id, std::string_view name) {
-                return std::ranges::any_of(world_gpu_history, [&](const auto &sample) {
-                    return sample.second.valid && HasGpuPass(sample.second, id, name);
-                });
-            };
-            const bool executed = seen(261, "BrixelizerSdfUpdate") && seen(262, "BrixelizerNativeGi") &&
-                seen(263, "BrixelizerMaterialResolve") && seen(266, "BrixelizerCacheDirectDiffuseEmission");
-            receipt["software_gi_probe"] = {{"native_passes_present", executed},
-                {"active", status.active.gi_mode == hs::GraphicsGiMode::SoftwareHybrid}};
-            if (status.software_gi.compiled && status.software_gi.supported &&
-                (!status.software_gi.enabled || !status.software_gi.native_ready || status.software_gi.faulted ||
-                 !status.software_gi.allocated_bytes ||
-                 !(status.software_gi.static_instances + status.software_gi.dynamic_instances) || !executed))
-                throw std::runtime_error("supported software GI did not register real SDF geometry and execute native cache/GI/material passes");
         }
         receipt["gpu_passes"] = Json::array();
         for (const auto &pass : gpu_timings.passes)

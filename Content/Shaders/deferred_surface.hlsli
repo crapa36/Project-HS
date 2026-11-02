@@ -15,14 +15,6 @@ HsSurfaceClosure HsApplyDecalSurfaceEmission(HsSurfaceClosure closure,uint2 acti
     return closure;
 }
 
-// Compatibility material paths retain their artist-authored ambient diffuse
-// baseline; callers retain their separate direct lighting, rim/emission and
-// unlit terms.
-float3 HsDeferredIndirectDiffuse(float3 radiance)
-{
-    return radiance;
-}
-
 // This auxiliary is exactly the environment-specular term included in opaque
 // lighting. SSR subtracts it once before composing its replacement.
 float4 HsDeferredEnvironmentSpecular(float3 ambient_specular)

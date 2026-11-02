@@ -173,8 +173,6 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"hdr_post_grade_cs.dxil", L"HdrPostGradeCS", L"cs_6_0"}};
     static constexpr std::array light_list_programs{
         ProgramOutput{"light_list_cs.dxil", L"BuildLightLists", L"cs_6_0"}};
-    static constexpr std::array scene_geometry_programs{
-        ProgramOutput{"scene_geometry_cs.dxil", L"SceneGeometryCS", L"cs_6_0"}};
     static constexpr std::array virtual_shadow_programs{
         ProgramOutput{"virtual_shadow_init_cs.dxil", L"InitCS", L"cs_6_0"},
         ProgramOutput{"virtual_shadow_feedback_cs.dxil", L"FeedbackCS", L"cs_6_0"},
@@ -217,7 +215,6 @@ std::span<const ShaderFamily> ShaderFamilies()
         ShaderFamily{"sdk-presentation", "Content/Shaders/sdk_presentation.hlsl", presentation_programs},
         ShaderFamily{"hdr-post", "Content/Shaders/hdr_post.hlsl", hdr_post_programs},
         ShaderFamily{"light-list", "Content/Shaders/light_list.hlsl", light_list_programs},
-        ShaderFamily{"scene-geometry", "Content/Shaders/scene_geometry.hlsl", scene_geometry_programs},
         ShaderFamily{"virtual-shadow", "Content/Shaders/virtual_shadow.hlsl", virtual_shadow_programs},
         ShaderFamily{"volumetrics", "Content/Shaders/volumetrics.hlsl", volumetric_programs},
         ShaderFamily{"scene-hlod", "Content/Shaders/scene_hlod.hlsl", hlod_programs},

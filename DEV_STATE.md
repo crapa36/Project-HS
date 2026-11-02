@@ -1,156 +1,117 @@
-# DEV_STATE
+# Current technical state
 
-AI implementation continuity only. Original main, HEAD
-ffef538a760228341ed244307c338ab5e0a6af86 plus uncommitted changes; no commit/push.
-The prior directive goal remains incomplete. Current item dispositions and exact
-check/source/PE receipts: Build/structure-slim-20261101/disposition.md and
-verification-phase1.json through verification-phase17.json.
+Working main b23c78ea31023a3c3cb7d71274d2a13ade261b30 plus dirty phase18 changes.
+Active work is incomplete. Root owns Build/structure-slim-20261101 continuity,
+source integration and the sole Ninja/GPU workload. No commit/push or branch.
 
-## Contracts
+## Static GI replacement in progress
 
-Windows only. Public module layering/OFF-OFF,60Hz,strictFP/RNG,Debug/Od/asserts/
-checked iterators,renderer_frame/Ob2,1080pUltra100%200,translucent slimes,four Hero
-layers and authored sampling quality remain. Preserve binding/range/alias/queue
-completion,accepted-prefix/old-reader leases and separate CPU activation/native
-mutation/Main Present receipts. Release excludes developer diagnostics; DRS/FG
-control timing remains. No generic manager/registry,per-frame verification hash,
-new runner or repeated broad gate. Root owns one Ninja/one GPU workload; no edits
-while Ninja runs. Agents Luna/high or Terra/high,no Sol.
+The selected product contract is baked static indirect lighting, using the existing
+SceneProbe SH diffuse and prefiltered reflection package. Dynamic light/emission
+bounce and dynamic indirect occlusion are removed. Direct lights, dynamic shadows,
+SSR, environment reflection fallback, translucent slimes and four Hero layers stay.
+Brixelizer/SDF scene, history, cache injection, dedicated direct-diffuse seed pass,
+SDK producer/bootstrap/lock/build/install paths and GI-only tests are removed.
+Raster geometry no longer appends an SDK float3 position stream. Deferred lighting
+has three outputs with two optional auxiliary targets (SSS and environment specular).
+Core GI modes are Off/Probe; saved software_hybrid/ray_traced migrate to Probe.
+Obsolete gi_quality is ignored on load. Runtime/native submission lifetimes remain.
+Debug production is built. Static shadow/probe official closure and the existing settings/architecture/native boundaries now pass; qualification details below.
 
-## Current phase17 checkpoint
+## Other phase18 changes and scoped evidence
 
-Receipts:verification-phase17.json;phase17/research-and-decision.md,
-owner-analysis.json,foreground-analysis.json,latest-foreground-profile.md andCSV.
-FinalC++renderer_frame337836a...;hs_experiment SHA256b2fe6d44.../FNV2c563c3e8eef429e.
-Originalmain+prior dirty preserved;no commit/push. No ownedNinja/GPU workload.
+- Existing compiled topology retains immutable execution resource membership and
+  external-pass boundary facts. Ordinary Execute batches borrow those lists;
+  synthetic batches still collect current resources. Native bindings, state,
+  alias/shared-reader/fence and partial-submit rules remain current. Full retained
+  dependency/barrier planning and compatible command-list grouping are unfinished.
+- Geometry demand cells retain admitted static point facts, while streamed coarse
+  error/radius and grass wind allowance remain live. Existing independent-reference
+  cases check cached payloads and demand equivalence. Added point payload is about
+  20B per static instance versus indices; actual process RAM was not measured.
+- Exact independent POM-ray interleaving candidate is active in material_terrain.
+  Same PE/matched official bake fixed300 surface check completed before GI removal:
+  all 8 SurfaceResolve boundary resources are byte-identical; events/render/particle
+  facts match. 27/37 raw/DDS files match; downstream OIT/exposure/temporal/HDR differ
+  with the old NativeGI path, not attributed to POM. No foreground adoption claim.
+- Pre-removal Debug batch and existing CPU instance-order/graph-validation plus
+  hardware single/multiqueue graph checks passed. These do not qualify the later
+  static-GI migration. Receipt: phase18/source-freeze.json and binary.json.
 
-Static GI leafindices borrow the existingimmutable section;onlycurrenttail owns
-indices,withprevious prefix/tail order andlategraphversions. Oneframe owner keeps
-generation/scene andComPtr<D3D12MA::Allocation> foractualdeduplicatedbackings. It
-replacesper-allocationcontrolblocks andN-elementowner-vectorcopies. Nativebuffer/
-slot consumers alreadyretainedthewholeownerset;collectiveretention remains.
-ResolveQueryData mergesonlyactualconsecutiveselectedpairs onsamequeue;holes/base,
-separateheaps/readbacks andlast-producerdependency remain. Realcapturedorder
-implies118->25calls(analytical,notGPUtimeproof). ExistingGBVmultiqueuecasepasses
-consecutive1/2,gap4,base4 andindependentCompute/Copy;CPUsceneinputpasses.
+## Latest measured frame evidence (old NativeGI checkpoint)
 
-CurrentDebugproductionlinksPASS;ownerGI21normalvalidationPASS/errors0. Initialfull
-GI-GBVrunwasabortedinNVIDIAshadercompilation;notapass. ExistingmultiqueueGBVvalid.
-SelectedMSVC14.44/Od unchanged;PDB C1902 inrestrictedexecution requiredsamecommand
-withnormalWindowsauthority,notcompilerflags/PDBdeletion. Restoredshader'soldmtime
-wasrefreshedbeforeofficialcook/bake,closingmissedNinjadependency.
+phase17/foreground2400: Debug /Od, 1080p Ultra100%, 200 enemies, timing ON,
+validation OFF, RTX4080 driver32.0.16.2101; 1326/1326 foreground frames. Warm1067:
+35.544FPS, 1%low26.801, interval28.1341ms, p9532.4299, p9934.7285.
+GPU output dependency envelope27.8821ms; marker union26.6239, uncovered1.2582ms.
+HeroComposite4layers3.810, SurfaceResolve3.442, NativeGI2.365, GTAO1.490ms means.
+CPU graph_build5.232, record2.384, submit2.075, plan2.013ms are nested wall times,
+not additive CPU busy. Gameplay1.099ms per60Hz tick. CPU submitted before previous
+GPU output ready1013/1067; frame/skin GPU wait4.675ms mean. GPU is the primary
+average limiter here; full shader utilization and causal GPU critical path unknown.
+FPS matches Present-return cadence. Interval = prior render26.0433 + adapter1.1244
++ capture/log0.9562 + residual0.0102ms. Inside-render residual0.3657ms is already
+inside render. Legacy critical-path-valid0 is uncomputed in SourceOutputReady mode,
+not invalid measured passes. Join rows by view_id + actual source frame identity.
+These are NOT static-GI FPS or evidence that the 60FPS target has been met.
 
-Offscreenlockstep300same02ddproducts:graph_buildmeans5.201/5.122->5.005ms,
-p956.332/6.155->6.072;record2.305/2.324->2.173ms. Scopedobservations,nofullFPSgain.
-Trackedlivemax925300096B/retiring0 unchanged,notprocessRAM. Events/render/particle
-facts match,27/36opaque/GBuffer/AO/etcrawhashesmatch;scene_work/OIT/exposure/
-temporal/composite9differences remainunresolvedandunattributed.
+## Preserved implemented contracts
 
-LatestactualPresent/nonlockstep2400tick:1326/1326foreground,1080Ultra100%200,
-translucency4layers,timingON/validationOFF;GPUcoverage/draincomplete/invalid0.
-Warmtick301..2100 has1067frames:35.54FPS,1%low26.80;intervalmean28.134ms,
-p9532.430,p9934.729. GPUtopgroupmeansHeroComposite4layers3.810,SurfaceResolve3.442,
-NativeGI2.365,GTAO1.490;CPUgraph_build5.232,record2.384,submit2.075,plan2.013ms.
-CPUelapsed/nested/wait andGPUqueueoverlaparenotadditive. GPUcriticalpathtotalhas
-0validsamples,threadCPUbusy unmeasured. Gameplaytick1.099ms/60Hz tick. Thislive
-workload cannotbeA/Bcomparedwithoffscreenlockstep300.
+Runtime normalizes explicit frame/view inputs once. Immutable UI draw content is
+retained independently of raster target/layout and Main Present/click acceptance.
+VFX PairFacts masks and borrowed sealed recipes avoid repeated copies and scans;
+dynamic payload/range checks and activation/native/Present ACK boundaries remain.
+Gameplay preserves60Hz, strictFP, RNG/iteration order and checksum semantics; no-op
+UI restores checksum dirtiness only after normal return. Cosmetic links live in
+Runtime with stable DomainSignal.sequence/lifetimes. Public module boundaries and
+Runtime OFF/ContentTools OFF builds remain requirements. Release omits diagnostic
+recording/replay/CSV/PIX/debug helpers; later changes have not been Release-built.
+Texture feedback keeps bank snapshots and SSE2 valid-row reduction/scalar tail.
+Queue-local timestamp storage/resolve intervals preserve independent completion.
+Static baked VSM/coarse coverage and precise CSM fallback remain separate.
 
-POMinterleavingcandidateimprovedtargetmean/p95intwoA/Bpairs,butwholeworkload/tail
-anddownstreamidentityunqualified;allnewshadercodeexactlyremoved. Smallpatch/data
-retained,rejected1b1242Generationremovedunderexclusiveleases. Finalofficial8e76b984...
-contains3639productdigestsexactlyequalto02dd;default9750unchanged. EarlierAO
-prepared-inverseWconsumer andlight-query-first changesremainwiththeir24GBV/6HDR
-receipts;rawfallback/producerchecksremain. No quality/samplecut/publicAPI/runner.
-NativeGIactual-consumer/history/finalHDR variability and60FPS/fullgoal remainopen.
-Next:Hero/Peel/SurfaceResolve/GI/GTAO andCPUgraphbuild/record/submit/compiletails;
-submitelapsed canincludedriverwait,sodonotlabelitpureCPUcompute.
+## Next integration and remaining work
 
-## Current implementation
+Finish stale-source/dependency audit, then one cohesive Debug build and matching
+official shader/shadow/probe content closure. Run existing settings/architecture,
+relevant native smoke/lighting/probe/graph checks and actual200 workload only after
+source freeze. No Ninja during edits and no EXE relink while live. Existing full
+workflow/Release receipts do not cover this migration; no Linux run is intended.
+Default runtime-full still9750a33d..., simulation content85a0f257edd1ce70. Phase18
+candidate7ae09e09 contains pre-removal products and cannot qualify static GI.
 
-- Render normalizes frame/time/UI once,then passes explicit frame/view inputs.
-  Hidden frame pointers/raw HLOD re-Prepare removed. Auxiliary-only first views
-  consume births once. Immutable UiDrawContent is the sole internal UI input;
-  layouts survive raster-target changes,bitmap/Present/click contracts remain.
-- Sealed SceneGeometry has one resolver. GI uses typed immutable sections,ordered
-  current runs and a consuming preparation token. Warm planning skips immutable
-  revalidation; registration refreshes late-bound geometry graph versions.
-- Static SDF reads packed12-byte positions appended once to each page allocation:
-  the SDK encoded old76-byte Vertex stride in6bits and incorrectly read12. Raster
-  ABI,skin36/deformed12 and native owners remain. Residency includes added bytes;
-  SDK admission rejects unrepresentable strides.
-- GI defaults8Mi references/16Ki bricks,triangle storage64MiB. Actual SDK scratch,
-  adapter available+live budget and completion-based retirement remain. Disabled
-  hero volumes no longer request unused World shadow coverage.
-- GI camera cuts invalidate outer view history before RenderView. Reset
-  tests actual internal GI history as well,so that invalidation cannot skip SDK
-  reset. Same-extent drained reset retains screen allocations/descriptors/graph
-  state,recreates SDK GI,retains SDF,and releases completed refs/scratch once
-  before admission. Reset rejects prepared frames/pending graph/incomplete uses.
-  Existing SoftwareGI fixture cuts on frame8;requested21/actual20frames passed
-  GPU-validation configuration,execution_valid=true,validation_errors0. A single
-  optional history-revision accessor now avoids copying Status/reason each warm
-  frame. That final value-access change compiled;long GPU check not repeated.
-- Static GI Rows now hold only admitted included jobs plus checked excluded
-  counts and unique page slots. Warm frames borrow them directly;removed static
-  per-job page/source suffix arrays and per-job ResourceVersion copies. Requested
-  page identities still detect fallback/residency changes;native imports use the
-  actual resolved slots. Late slot versions use one bounded array. Wind/skin,
-  late-bound reads,canonical leaf order and strong GPU allocation owners remain.
-- Corrected existing CPU scopes: software-scene preparation excludes the parallel
-  shadow join;shadow preparation includes setup/join wait. Worker task timing is
-  separate and overlaps. CSV columns unchanged;runtime metadata states meaning.
-- Runtime owns snapshot/status VFX births before one frozen native batch. Shared
-  PairFacts masks/previous lookup replace repeated scene copies/coverage scans.
-  Fixed Fresnel/mesh recipes are sealed borrowed RenderData views; dynamic command
-  data stays separate. Actual live resource/payload checks remain. Distinct-time
-  event birth/display grouping and activation/native/Present ACKs remain.
-- Cosmetic links moved from Gameplay to Runtime presentation retention,with stable
-  DomainSignal.sequence,8/11/9tick lifetime,audio/checksum/session semantics.
-  Five eager Gameplay states are values beneath its unchanged heap pimpl;
-  TickFixed unused delta removed,scheduled-action facts counted once,and no-op UI
-  restores prior checksum dirtiness only after normal return.
-- Shared post Add-or-Bind/topology comparison and admitted native guide contracts
-  replace duplicate setup. Loose/packed asset sources are disjoint. Feedback
-  reuses per-bank view snapshots and SSE2 reduces valid row bytes with scalar tail.
-- Settings normalize edits once; save failure retains applied graphics/unsaved
-  status. Real out-of-line settings/generation leafs fix header leakage/COFF
-  overflow without /bigobj. Full-only clock storage compiles out of Release.
+Continue measured Hero Exit4-to-one MAX-depth reduction (design only), full retained
+execution planning and GPU UI replacement. Conditional terrain representation,
+whole-LOD/instancing and fixed-shadow candidates require concrete consumer/quality
+contracts. No generic registry/cache/VM or duplicate verification managers. POM
+foreground control/candidate comparison must use the new static-GI representation.
+Old NativeGI history variance is an issue of a removed feature, not a proven fix.
+Preserve phase9/original crash evidence; retire completed raw/caches after compact
+receipts. Do not alter/fabricate Generation manifests, Action results or product IDs.
 
-## Verification scope and unresolved work
+## Latest phase18 qualification at stop
 
-Phases1-3 linked Debug/Release production and relevant existing CPU leaves;
-settings,VFX,gameplay,graph,pack,architecture checks passed. Later changes linked
-Debug only;earlier Release receipts do not cover them. Phase17 links current ProjectHS/hs_experiment/RenderTestRunner and existing
-hardware single/multiqueue tests;current CPU/native/replay checks are scoped above.
-Current200/fixed-Hero/native checks are scoped above. Earlier phase10 CPU/CLI receipts remain
-for unchanged inputs only. Latestforegroundandper-pass evidenceis phase17above.
-No fullworkflow,unchangedCPU suite,Release orLinux rerun. DirectStorage remains disabled by the pinned build.
+Normal and GPU-validation explicit Layout probe bakes complete; GBV20frames and
+empty error log. First native attempt failed because removal shifted positional
+DXC flags, enabling HS_CAPTURE_HERO_WORK in normal translucent pixel shaders and
+accessing unbound root UAV4. Fixed with named MaterialShaderOptions; actual normal
+Peel DXIL omits the counter UAV and diagnostic variant retains it. Temporary host
+validation flags are removed. Normal bake target exits0. Existing multiqueue GBV,
+6affected CPU checks and native Layout revision/auxiliary2 checks pass (settings
+atomic-save test required normal Windows permissions). Native revision fixture
+now explicitly consumes Layout test-render, not immutable Baked runtime-full.
 
-Corrected-input200enemy1800frame validationON/timingOFF qualification returned all
-source-valid SDF records below provisioned caps:static refs7347546/bricks10604,
-dynamic refs3285426/bricks590,allocation peak1306471936B,scratch242246144B. Last3
-physical visits pending;not all-source/other-content proof. Temporary counters
-removed. See sdf-after-fix/analysis and its source receipts.
+Official selected candidate scope runtime-full-phase18-static-gi ->
+decc8f408a5b6850cc68257e68f63a9b8bdbf8355af9cc26ebe358af0797e998.
+Default runtime-full9750 remains unchanged. Runtime PE FNV54990505f4e27d23/SHA
+82f011d3964d50b9a857147f34ce954e445086485132654afbcad4bcf71eb835.
+First present2400 run exits0/valid,1502frames/no device loss, but all background:
+its39.66FPS/warm1190 must not be used for fair foreground comparison. Second
+attempt exits0; window activation returned failure and latest rows background.
+ComputerUse kernel reset immediately; no active owned benchmark/Ninja sessions.
 
-Official full producer closure candidate5b5f5bc9dace0e1e1b564a7390b37059643b961024ccf9f8eb7090e9898271e5
-combines terrain/shared BSDF/Resolve:85DXIL+local-probe SPB1 changed. Existing GPU
-BSDF prepared/raw7,coatedIBL72,Fresnel14 passes. Probe numeric difference<=2.98e-8.
-Static DXIL size/instruction counts are not frame-time evidence. Default9750a33dc4e29081ffb464b2dce7a37ea9776018e9947ee092815ccece73fe05
-still selected;simulation content85a0f257edd1ce70. No fabricated old action result,
-overlay/manual manifest or tolerance relaxation. Raw GI/consumed prior/internal
-cache/SDF variability remains unresolved;do not attribute it to harmless randomness
-or call shader candidate quality accepted.
-
-Next:continue measured graphics/GI preparation and graph compile-miss tails.
-Do not add another shader/bake Action solely from coarse compile logs:probe-shadow
-16products and static-shadow574upstreams/outputs match prior5b5f;producer executable
-identity is intentionally in ActionKey. Preserve that rebuild defense.
-Hero fixture exposure input is now fixed;do not generalize its exact final PNG
-comparison to unresolved native GI/whole workload quality.
-Continue constants/graphics work from actual counters.
-Archer palette lookup repeats were reviewed,but248us scope includes sampling and
-actual key count is unobserved;do not add another map on that evidence alone.
-Keep distinct baked coarse VSM/full-resolution snapped CSM and separate full-rate
-GI seed vs Tier2VRS deferred evaluation unless actual equal-quality benefit is
-proved. Host-cap streaming/UI/frozen no-op reviews already found old defects fixed;
-do not recreate those tasks or add duplicate validation/manager layers.
+Remaining: valid foreground profile; low-level OFF/OFF gate after module/settings
+migration; obsolete SDK/build/cache cleanup; final receipt/default adoption review.
+Remove stale runtime_capture cpu_scopes text for deleted software-scene scope in
+application.cpp:786 in the next implementation batch. No throughput claim/60FPS
+completion. Full retained executor, HeroExit4->1 and remaining directives incomplete.

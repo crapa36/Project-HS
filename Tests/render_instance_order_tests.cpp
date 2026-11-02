@@ -399,16 +399,19 @@ void TestGeometryDemandCells()
         {{0, 0, 30}, 1, 1, true}, {{1, 2, 31}, 3, 2, false},
         {{0, 0, 30}, std::numeric_limits<float>::infinity(), 3, false}};
     auto cells = BuildGeometryDemandCells(points);
-    Check(cells.size() == 3 && cells[0].instances == Order{0} &&
-        cells[1].instances == Order({1, 2}) && cells[1].max_scale == 3 && cells[1].any_wind &&
-        cells[2].instances == Order{3}, "demand cell membership/negative coordinate/fallback");
+    Check(cells.size() == 3 && cells[0].points.size() == 1 && cells[0].points[0].instance == 0 &&
+        cells[1].points.size() == 2 && cells[1].points[0].instance == 1 && cells[1].points[1].instance == 2 &&
+        cells[1].points[1].position == points[2].position && cells[1].points[1].scale == points[2].scale &&
+        cells[1].points[1].wind == points[2].wind && cells[1].max_scale == 3 && cells[1].any_wind &&
+        cells[2].points.size() == 1 && cells[2].points[0].instance == 3,
+        "demand cells retain ordered static point payload/negative coordinate/fallback");
     struct Plane { float x, y, z, w; };
     const std::array planes{Plane{1,0,0,8}, Plane{-1,0,0,8}, Plane{0,0,1,-1}};
     float view[4][4]{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
     Check(ClassifyGeometryDemandCell(cells[2], 1, planes) == GeometryDemandCellVisibility::Partial &&
         std::isinf(GeometryDemandCellErrorUpperBound(cells[2], 1, 1, view, 1000, .1f)),
         "invalid inputs must remain unprunable");
-    const GeometryDemandCell near_cell{{0, 0, .05f}, {1, 1, .05f}, 1, false, {0, 1}};
+    const GeometryDemandCell near_cell{{0, 0, .05f}, {1, 1, .05f}, 1, false, {}};
     Check(std::isinf(GeometryDemandCellErrorUpperBound(near_cell, 0, 0, view, 1000, .1f)),
         "zero error still requires the near-branch fallback");
     std::mt19937 random(931);
@@ -426,7 +429,7 @@ void TestGeometryDemandCells()
             points.push_back({position, positive(random), i, (i & 1) != 0});
         }
         cells = BuildGeometryDemandCells(points);
-        Check(std::ranges::any_of(cells, [](const auto &cell) { return cell.instances.size() >= 10; }),
+        Check(std::ranges::any_of(cells, [](const auto &cell) { return cell.points.size() >= 10; }),
             "generated scene must exercise multi-member AABBs");
         const float angle = coordinate(random), c = std::cos(angle), s = std::sin(angle);
         view[0][0] = c; view[0][2] = s; view[2][0] = -s; view[2][2] = c;
@@ -445,11 +448,15 @@ void TestGeometryDemandCells()
             const auto visibility = ClassifyGeometryDemandCell(cell, radius, planes);
             const double bound = GeometryDemandCellErrorUpperBound(cell, radius, error, view, 1000, .1f);
             bounds.push_back(bound);
-            for (const auto id : cell.instances)
+            for (const auto &point : cell.points)
             {
-                const auto &p = points[id].position;
-                const float point_radius = catalog_radius * points[id].scale + (points[id].wind ? wind_margin : 0);
-                const float point_error = catalog_error * points[id].scale;
+                const auto id = point.instance;
+                const auto &source_point = points[id];
+                Check(point.position == source_point.position && point.scale == source_point.scale &&
+                    point.wind == source_point.wind, "demand cell point payload must match original input");
+                const auto &p = source_point.position;
+                const float point_radius = catalog_radius * source_point.scale + (source_point.wind ? wind_margin : 0);
+                const float point_error = catalog_error * source_point.scale;
                 bool outside = false, inside = true;
                 for (const auto &plane : planes)
                 {
@@ -484,7 +491,7 @@ void TestGeometryDemandCells()
             float pruned{};
             for (std::size_t cell = 0; cell < cells.size(); ++cell)
                 if (bounds[cell] > pruned)
-                    for (const auto id : cells[cell].instances) pruned = std::max(pruned, reference[id]);
+                    for (const auto &point : cells[cell].points) pruned = std::max(pruned, reference[point.instance]);
             Check(std::bit_cast<std::uint32_t>(direct) == std::bit_cast<std::uint32_t>(pruned),
                 "cell pruning changed the exact demand maximum");
         }

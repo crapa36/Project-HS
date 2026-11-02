@@ -45,8 +45,7 @@ Result ValidateNativeOptions(const Options &options)
         !quality(options.refraction_quality, GraphicsOptionalQuality::Ultra) ||
         !quality(options.volumetric_quality, GraphicsOptionalQuality::Ultra) ||
         !quality(options.motion_blur, GraphicsMotionBlur::High) ||
-        !quality(options.gi_mode, GraphicsGiMode::SoftwareHybrid) ||
-        !quality(options.gi_quality, GraphicsQuality::Ultra) ||
+        !quality(options.gi_mode, GraphicsGiMode::Probe) ||
         !quality(options.shadow_mode, GraphicsShadowMode::Raster) ||
         !quality(options.shadow_quality, GraphicsQuality::Ultra) ||
         options.target_render_fps < 30 || options.target_render_fps > 240 ||
@@ -276,15 +275,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     if (auto committed = MeasureStartupStep(RendererStartupStep::ScreenOverlay, [&] { return main_view.screen_overlay.Commit(std::move(screen_overlay),
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
-    SceneGeometryCandidate scene_geometry;
-    if (auto prepared = MeasureStartupStep(RendererStartupStep::SceneGeometry, [&] { return impl_->PrepareSceneGeometry(impl_->config, scene_geometry); }); !prepared) return prepared;
-    BrixelizerCandidate brixelizer;
-    if (auto prepared = MeasureStartupStep(RendererStartupStep::BrixelizerGi, [&] { return impl_->PrepareBrixelizerGi(main_view, impl_->config, main_view.state.render_active, brixelizer); }); !prepared) return prepared;
-    if (auto committed = MeasureStartupStep(RendererStartupStep::SceneGeometry, [&] { return impl_->scene_geometry.Commit(std::move(scene_geometry),
-            impl_->graph_queue_executor.Completed()); }); !committed) return committed;
-    if (auto committed = MeasureStartupStep(RendererStartupStep::BrixelizerGi, [&] { return main_view.brixelizer_gi.Commit(std::move(brixelizer),
-            impl_->graph_queue_executor.Completed()); }); !committed) return committed;
-    main_view.brixelizer_history_valid = false;
     LightListCandidate light_list;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::LightList, [&] { return impl_->PrepareLightList(main_view, impl_->config, main_view.state.render_capacity, light_list); }); !prepared)
         return prepared;
@@ -570,10 +560,6 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     if (auto prepared = impl_->PrepareDecalSurface(impl_->config, capacity, false, decal_surface); !prepared) return prepared;
     LightListCandidate light_list;
     if (auto prepared = impl_->PrepareLightList(owned_view, impl_->config, capacity, light_list); !prepared) return prepared;
-    SceneGeometryCandidate scene_geometry;
-    if (auto prepared = impl_->PrepareSceneGeometry(impl_->config, scene_geometry); !prepared) return prepared;
-    BrixelizerCandidate brixelizer;
-    if (auto prepared = impl_->PrepareBrixelizerGi(owned_view, impl_->config, reconstruction.render_active, brixelizer); !prepared) return prepared;
     VirtualShadowCandidate virtual_shadows;
     if (auto prepared = impl_->PrepareVirtualShadows(owned_view, impl_->config, capacity,
             virtual_shadows); !prepared) return prepared;
@@ -732,12 +718,6 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = owned_view.light_list.Commit(std::move(light_list),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->scene_geometry.Commit(std::move(scene_geometry),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.brixelizer_gi.Commit(std::move(brixelizer),
-            impl_->graph_queue_executor.Completed()); !committed)
-    { impl_->initialized = false; return committed; }
-    owned_view.brixelizer_history_valid = false;
     if (auto committed = owned_view.virtual_shadows.Commit(std::move(virtual_shadows),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(additional_shadows)); !committed) return committed;
@@ -930,19 +910,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LightListCandidate light_list;
     if (recreate_light_list)
         if (auto prepared = impl_->PrepareLightList(owned_view, feature_config, capacity, light_list); !prepared) return prepared;
-    const bool recreate_scene_geometry = next_features.software_gi_enabled != previous_features.software_gi_enabled;
-    SceneGeometryCandidate scene_geometry;
-    if (recreate_scene_geometry)
-        if (auto prepared = impl_->PrepareSceneGeometry(feature_config, scene_geometry); !prepared) return prepared;
-    const bool recreate_brixelizer = next_features.software_gi_enabled != previous_features.software_gi_enabled ||
-        (next_features.software_gi_enabled && (options.gi_quality != impl_->config.gi_quality ||
-            reconstruction.render_active != owned_view.state.render_active || replace_provider));
-    BrixelizerCandidate brixelizer;
-    if (recreate_brixelizer)
-        if (auto prepared = impl_->PrepareBrixelizerGi(owned_view, feature_config, reconstruction.render_active, brixelizer); !prepared) return prepared;
-    // Apply inherits the selected product maps unchanged. Product adoption
-    // prepares this service through ReloadPipeline; only quality/capacity can
-    // alter its allocation here because both requested shadow modes use it.
+    // Product adoption prepares shadows through ReloadPipeline; quality and capacity alter allocation here.
     const bool recreate_virtual_shadows = capacity != owned_view.state.render_capacity ||
         options.shadow_quality != impl_->config.shadow_quality ||
         options.shadow_mode != impl_->config.shadow_mode;
@@ -983,7 +951,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (!presentation_recreated)
         if (auto display = impl_->ApplyDisplayOptions(options); !display) return display;
     if (previous_hdr != owned_view.display_state.hdr_active) owned_view.temporal_history_valid = false;
-    if (change_texture_policy || recreate_pools || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_scene_geometry || recreate_brixelizer || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface)
+    if (change_texture_policy || recreate_pools || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface)
         if (auto drained = impl_->WaitForGpu(); !drained) return drained;
     if (replace_provider)
     {
@@ -1024,15 +992,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (recreate_local_probes)
         if (auto committed = impl_->local_probes.Commit(std::move(local_probes),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_scene_geometry)
-        if (auto committed = impl_->scene_geometry.Commit(std::move(scene_geometry),
-                impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_brixelizer)
-    {
-        if (auto committed = owned_view.brixelizer_gi.Commit(std::move(brixelizer),
-                impl_->graph_queue_executor.Completed()); !committed) return committed;
-        owned_view.brixelizer_history_valid = false;
-    }
     if (recreate_virtual_shadows)
         if (auto committed = owned_view.virtual_shadows.Commit(std::move(virtual_shadows),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
@@ -1059,7 +1018,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         reconstruction.effective_provider != owned_view.reconstruction_plan.effective_provider ||
         reconstruction.effective_quality != owned_view.reconstruction_plan.effective_quality)
         owned_view.temporal_history_valid = false;
-    if (next_features.software_gi_enabled || !next_dynamic_resolution ||
+    if (!next_dynamic_resolution ||
         next_dynamic_resolution != previous_dynamic_resolution ||
         (next_dynamic_resolution && (options.dynamic_min_percent != impl_->config.dynamic_min_percent ||
             options.dynamic_max_percent != impl_->config.dynamic_max_percent)) || replace_provider)
@@ -1086,7 +1045,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         options.pom_quality != impl_->config.pom_quality)
     {
         owned_view.temporal_history_valid = false;
-        owned_view.brixelizer_history_valid = false;
     }
     feature_config.temporal_reconstruction = owned_view.reconstruction_plan.temporal_enabled;
     feature_config.render_scale_percent = render_scale;
@@ -1312,8 +1270,6 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
         return "consumer_unavailable";
     };
     const auto local = main_view.local_shadows.Status();
-    const auto software = main_view.brixelizer_gi.Status();
-    const auto software_support = QueryBrixelizerNativeSupport(impl_->device.Get());
     const auto adaptive = main_view.adaptive_shading.Status();
     const auto adaptive_reason = [&](bool ready, RendererFeatureFallbackReason fallback) {
         if (request.adaptive_shading == GraphicsAutoToggle::Off) return std::string("requested_off");
@@ -1324,15 +1280,9 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
     };
     RendererLightingStatus status{{request.ao_mode, request.gi_mode, request.reflection_mode, request.shadow_mode},
         {plan.ao_mode, plan.gi_mode, plan.reflection_mode, plan.shadow_mode},
-        reason(plan.ao_reason), reason(plan.gi_reason), reason(plan.reflection_reason), reason(plan.shadow_reason),
+        reason(plan.ao_reason), reason(plan.reflection_reason), reason(plan.shadow_reason),
         {local.enabled, local.requested_lights, local.selected_lights, local.unsupported_lights,
             local.budget_lights, local.overflow_lights, local.allocated_bytes, local.reason},
-        {software_support.compiled, software_support.supported, software.enabled, software.native_ready, software.faulted,
-            software.static_instances, software.dynamic_instances, software.unsupported_masked, software.unsupported_thin,
-            software.excluded_translucent, software.physical_cascades, software.gpu_bytes, software.scratch_bytes,
-            !software_support.supported ? std::string(software_support.reason) :
-            request.gi_mode == GraphicsGiMode::SoftwareHybrid && !plan.software_gi_enabled
-                ? "Selected Generation is missing required native software GI products." : software.reason},
         {request.adaptive_shading, plan.adaptive_raster_enabled, plan.adaptive_compute_enabled,
             adaptive.raster_ready, adaptive.compute_ready, adaptive.raster_applied,
             main_view.ambient_occlusion.AdaptiveComputeApplied(), adaptive.usable,
@@ -1490,8 +1440,6 @@ Result D3D12Renderer::Shutdown()
     if (auto cleared = impl_->lighting_probe.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     if (auto cleared = impl_->ltc_lut.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->scene_geometry.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     impl_->volumetric_media.clear();
     impl_->archer_named_animations = {};
