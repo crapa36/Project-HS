@@ -61,9 +61,6 @@ Result D3D12Renderer::Impl::PrepareViewTargets(OptionTargets &targets,
                                   output_width, output_height); !result)
             return result;
     }
-    if (auto result = create(targets.scene_work, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                              capacity_width, capacity_height); !result)
-        return result;
     if (auto result = create(targets.display_linear, DXGI_FORMAT_R16G16B16A16_FLOAT,
                               output_width, output_height); !result)
         return result;
@@ -73,23 +70,11 @@ Result D3D12Renderer::Impl::PrepareViewTargets(OptionTargets &targets,
 
 Result D3D12Renderer::Impl::PrepareExposureResources(OwnedView &owner)
 {
-    // Build the complete initial set before publishing it. Resizes replace view
-    // textures only, preserving these buffers and the adaptation read index.
-    std::array<AllocationResource, 2> values;
-    AllocationResource histogram;
-    AllocationResource initial;
+    AllocationResource value, initial;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    for (auto &value : values)
-        if (auto result = CreateAllocation(value, allocation,
-                BufferDescription(2 * sizeof(float), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-                D3D12_RESOURCE_STATE_COPY_DEST); !result)
-            return result;
-    if (auto result = CreateAllocation(histogram, allocation,
-            BufferDescription(256 * sizeof(std::uint32_t),
-                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS); !result)
-        return result;
+    if (auto result = CreateAllocation(value, allocation, BufferDescription(2 * sizeof(float)),
+            D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     constexpr std::array initial_values{1.0f, 1.0f};
     if (auto result = CreateAllocation(initial, allocation,
@@ -104,22 +89,17 @@ Result D3D12Renderer::Impl::PrepareExposureResources(OwnedView &owner)
     initial.resource->Unmap(0, &written);
 
     using std::swap;
-    swap(owner.exposure_values, values);
-    swap(owner.exposure_histogram, histogram);
+    swap(owner.exposure_value, value);
     swap(owner.initial_exposure, initial);
-    owner.exposure_read_index = 0;
     owner.exposure_initialized = false;
-    // The first frame graph copies the immutable upload into both values. No
+    // The first frame graph copies the immutable upload into the value. No
     // command submission or blocking startup upload occurs in resource creation.
     return Result::Success();
 }
 
 void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t frame,
                                               std::uint32_t read_history,
-                                              std::uint32_t write_history,
-                                              std::uint32_t exposure_read,
-                                              std::uint32_t exposure_write,
-                                              D3D12_GPU_VIRTUAL_ADDRESS exposure_cb_gpu_address) noexcept
+                                              std::uint32_t write_history) noexcept
 {
     // Both guide targets have stable RTV slots; read/write indices select the
     // shader history and the frame's target bindings independently.
@@ -217,7 +197,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
     // registration replaces it with immutable tables after this slot is waited.
     auto null_table = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     null_table.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount +
-        kHeroTransparencyDescriptorOffset) * srv_stride;
+        kLayeredTranslucencyDescriptorOffset) * srv_stride;
     device->CreateConstantBufferView(nullptr, null_table);
     null_table.ptr += srv_stride;
     for (std::uint32_t index = 0; index < 21; ++index)
@@ -251,7 +231,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
         create_rtv(history.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
     for (auto &history : owner.targets.temporal_material_history)
         create_rtv(history.resource.Get(), DXGI_FORMAT_R32G32_UINT);
-    create_rtv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_rtv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     create_rtv(owner.targets.display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     create_rtv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
@@ -269,10 +249,10 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
     };
     create_texture_srv(owner.targets.temporal_normal_history[read_history].resource.Get(), DXGI_FORMAT_R16G16_SNORM);
     create_texture_srv(owner.targets.temporal_material_history[read_history].resource.Get(), DXGI_FORMAT_R32G32_UINT);
-    create_texture_srv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     create_texture_srv(owner.targets.display_linear.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     create_texture_srv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_texture_srv(owner.targets.scene_work.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    create_texture_srv(owner.targets.composite_hdr.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
     D3D12_SHADER_RESOURCE_VIEW_DESC exposure_srv{};
     exposure_srv.Format = DXGI_FORMAT_UNKNOWN;
@@ -280,28 +260,11 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
     exposure_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     exposure_srv.Buffer.NumElements = 2;
     exposure_srv.Buffer.StructureByteStride = sizeof(float);
-    device->CreateShaderResourceView(owner.exposure_values[exposure_read].resource.Get(),
+    device->CreateShaderResourceView(owner.exposure_value.resource.Get(),
                                      &exposure_srv, descriptor);
     descriptor.ptr += srv_stride;
-    D3D12_UNORDERED_ACCESS_VIEW_DESC buffer_uav{};
-    buffer_uav.Format = DXGI_FORMAT_UNKNOWN;
-    buffer_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    buffer_uav.Buffer.NumElements = 2;
-    buffer_uav.Buffer.StructureByteStride = sizeof(float);
-    device->CreateUnorderedAccessView(owner.exposure_values[exposure_write].resource.Get(),
-                                      nullptr, &buffer_uav, descriptor);
-    descriptor.ptr += srv_stride;
-    buffer_uav.Buffer.NumElements = 256;
-    buffer_uav.Buffer.StructureByteStride = sizeof(std::uint32_t);
-    device->CreateUnorderedAccessView(owner.exposure_histogram.resource.Get(), nullptr,
-                                      &buffer_uav, descriptor);
-    descriptor.ptr += srv_stride;
-    D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
-    cbv.BufferLocation = exposure_cb_gpu_address;
-    cbv.SizeInBytes = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-    device->CreateConstantBufferView(exposure_cb_gpu_address ? &cbv : nullptr, descriptor);
     // Keep the native table's ambient views at offsets 11/12.
-    descriptor.ptr += 2u * srv_stride;
+    descriptor.ptr += 4u * srv_stride;
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);
     InitializeFrameSamplerDescriptors(frame);

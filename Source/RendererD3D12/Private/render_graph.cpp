@@ -1,3 +1,4 @@
+#include <hs/jobs/task_system.hpp>
 #include "render_graph.hpp"
 #include "render_graph_validation.hpp"
 #include "render_graph_membership.hpp"
@@ -1553,9 +1554,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     impl_->stats.transient_block_count = static_cast<std::uint32_t>(counted_blocks.size());
     impl_->stats.alias_activation_count = g.alias_plan.alias_activation_count;
     impl_->stats.transient_bytes_without_aliasing = g.alias_plan.transient_bytes_without_aliasing;
-    const auto *tasks = options ? options->task_executor : nullptr;
-    if (tasks && (!tasks->submit || !tasks->join))
-        return fail("RenderGraph recording executor requires both submit and join callbacks.");
+    auto *tasks = options ? options->task_system : nullptr;
     // Copy queues can own both buffer and texture COPY_SOURCE/COPY_DEST work.
     // Cross-queue texture ownership follows the same Common release/acquire
     // protocol as buffers; Legacy copy lists rely on Common promotion/decay,
@@ -2057,14 +2056,18 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     Result dispatch = Result::Success();
     if (tasks)
     {
+        auto group = tasks->CreateTaskGroup();
         try
         {
             for (std::uint32_t index = 0; index < batches.size(); ++index)
             {
                 if (batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner)
                     continue;
-                dispatch = tasks->submit([&, index] { record(index); });
-                if (!dispatch) break;
+                if (!group.Submit([&, index](std::stop_token) { record(index); }))
+                {
+                    dispatch = fail("RenderGraph recording task submission rejected.");
+                    break;
+                }
                 ++impl_->stats.record_jobs;
             }
             // Submit every worker list before owner-only SDK recording can block dispatch.
@@ -2077,7 +2080,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         // join is mandatory even after a rejected/throwing submit. All lambda
         // captures remain alive here, before any command list is submitted.
         Result joined = Result::Success();
-        try { joined = tasks->join(); }
+        try { joined = group.Wait(); }
         catch (...) { joined = fail("RenderGraph recording task join threw."); }
         if (!dispatch) return dispatch;
         if (!joined) return joined;

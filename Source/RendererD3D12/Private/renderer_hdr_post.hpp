@@ -20,7 +20,7 @@ struct HdrPostSettings
 {
     GraphicsMotionBlur motion_blur{GraphicsMotionBlur::Off};
     bool depth_of_field{}, color_grading{};
-    float focus_distance_m{10.0f}, focal_length_m{0.05f}, f_number{2.8f};
+    float focal_length_m{0.05f}, f_number{2.8f};
     float sensor_width_m{0.036f}, max_coc_pixels{12.0f};
     DirectX::XMFLOAT4 grade_lift{0, 0, 0, 0};
     DirectX::XMFLOAT4 grade_contrast{1, 1, 1, 0};
@@ -35,7 +35,7 @@ struct alignas(16) HdrPostConstants
     DirectX::XMFLOAT4 camera_forward{};
     DirectX::XMFLOAT4 render_size{}, output_size{}, jitter_uv{};
     DirectX::XMFLOAT4 frame_parameters{}; // Actual render dt seconds, history valid, shutter ratio, grade sharpening.
-    DirectX::XMFLOAT4 lens{}; // Focus distance, focal length, f-number, sensor width, all metres except f-number.
+    DirectX::XMFLOAT4 lens{}; // Per-view target distance, focal length, f-number, sensor width; metres except f-number.
     DirectX::XMFLOAT4 grade_lift{}, grade_contrast{}, grade_gain{};
     DirectX::XMFLOAT4 effect_parameters{}; // Max CoC radius pixels, log shaper range, reference frame dt, shutter degrees.
     DirectX::XMUINT4 options{}; // Motion taps, transparent guides enabled, LUT edge, DoF enabled.

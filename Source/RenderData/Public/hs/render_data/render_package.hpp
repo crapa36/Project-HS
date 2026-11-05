@@ -3,7 +3,6 @@
 #include <hs/render_data/render_view_input.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/render_data/ui_draw_content.hpp>
-#include <hs/render_data/render_scene_ref.hpp>
 #include <hs/render_data/devtools_frame_data.hpp>
 #include <hs/render_data/vfx_decal_input.hpp>
 #include <hs/render_data/vfx_distortion_input.hpp>
@@ -53,28 +52,28 @@ struct RenderVfxFrameInput
     VfxVolumeInputs volumes;
     VfxScreenInputs screen;
     VfxEntitySurfaceInputs entity_surfaces;
-    // Unspecified preserves legacy snapshot-tick stepping.
-    std::optional<RenderVfxWorldBatch> world_batch;
+    RenderVfxWorldBatch world_batch;
     // Borrowed with the other frame spans; commands address slices by index.
     std::span<const float> distortion_gap_angles;
     std::span<const float> ground_gap_angles;
 };
-// Borrowed frame package: the caller keeps snapshot leases and all spans alive
-// until Render returns. One common scene is rendered sequentially into views;
-// only Main presents. No generated presentation advances this render package.
-struct RenderFrameInput
+struct RenderDisplaySample
+{
+    std::chrono::steady_clock::time_point time;
+    float interpolation;
+};
+
+// The caller retains snapshot leases and borrowed spans until Render returns.
+// Display time, UI content and native VFX identity are fixed before submission.
+struct RenderPackage
 {
     std::span<const RenderViewInput> views;
     RenderSnapshotPair snapshots;
     RenderVfxFrameInput vfx;
     DevToolsFrameData devtools;
-    std::span<const UiModel> ui;
-    // Optional immutable owner enables renderer cache hits without pointer/size identity.
-    std::shared_ptr<const UiDrawContent> ui_draw_content;
-    bool override_ui{};
-    std::optional<std::chrono::nanoseconds> simulation_time;
+    // The owner, including an empty UI, is selected by the producer.
+    std::shared_ptr<const UiDrawContent> ui_draw_content{EmptyUiDrawContent()};
     std::optional<float> delta_seconds;
-    std::optional<RenderSceneRef> scene;
     std::optional<float> screen_overlay_intensity;
     // Offline lockstep: complete prior GPU work and await admitted asset reads
     // so publication boundaries depend on frames rather than wall-clock speed.
@@ -82,6 +81,6 @@ struct RenderFrameInput
     std::uint64_t ui_packet_generation{};
     // Capture before preparing effects so all package consumers sample one clock.
     // Views do not retime this explicit sample; discontinuities reset their history.
-    std::optional<std::chrono::steady_clock::time_point> sample_time;
+    std::optional<RenderDisplaySample> display_sample;
 };
 } // namespace hs

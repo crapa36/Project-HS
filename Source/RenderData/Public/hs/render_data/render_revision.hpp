@@ -18,5 +18,7 @@ struct RendererRevisionBulk
     std::string_view product_id;
     std::uint32_t bulk_index{};
 };
+[[nodiscard]] bool IsTerrainSurfaceProduct(std::string_view product_id);
+[[nodiscard]] bool IsTerrainSurfaceSectionProduct(std::string_view product_id);
 [[nodiscard]] bool IsRendererMaterialRevisionProduct(std::string_view product_id);
 } // namespace hs::render_data

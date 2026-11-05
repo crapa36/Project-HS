@@ -16,7 +16,7 @@ inline constexpr std::array kRenderBindingDefines{
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_GEOMETRY_PAGE_CAPACITY", render_data::kGeometryPageCapacity},
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_GEOMETRY_BUFFERS_PER_PAGE", render_data::kGeometryBuffersPerPage},
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_AUTHORED_MATERIAL_COUNT", render_data::kAuthoredMaterialNames.size()},
-    std::pair<std::string_view, std::uint32_t>{"HS_RENDER_HERO_MATERIAL_COUNT", render_data::kHeroMaterialNames.size()},
+    std::pair<std::string_view, std::uint32_t>{"HS_RENDER_CHARACTER_MATERIAL_COUNT", render_data::kCharacterMaterialNames.size()},
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT", render_data::kEnvironmentMaterialNames.size()},
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT", render_data::kEnvironmentGeometryLodCount},
     std::pair<std::string_view, std::uint32_t>{"HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT", render_data::kMaterialTextureSlots},

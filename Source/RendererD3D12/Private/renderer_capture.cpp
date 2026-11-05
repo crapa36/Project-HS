@@ -16,6 +16,7 @@
 
 namespace hs
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
 FrameContext *D3D12Renderer::Impl::SubmittedFrame(const OwnedView &owner) noexcept
 {
     if (owner.last_submitted_frame_slot >= kFrameCount || !owner.last_submitted_frame_id) return nullptr;
@@ -748,8 +749,6 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"composite_hdr", &owner.targets.composite_hdr,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"scene_work", &owner.targets.scene_work,
-                       DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"oit_accumulation", &owner.targets.oit_accumulation,
                        DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
         SurfaceCapture{"oit_revealage", &owner.targets.oit_revealage,
@@ -773,13 +772,22 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     append_diagnostic("temporal_previous", &owner.targets.temporal_history[history_previous]);
     append_diagnostic("temporal_normal_previous", &owner.targets.temporal_normal_history[history_previous]);
     append_diagnostic("temporal_material_previous", &owner.targets.temporal_material_history[history_previous]);
-    append_diagnostic("exposure_current", &owner.exposure_values[owner.exposure_read_index]);
-    append_diagnostic("exposure_previous", &owner.exposure_values[1u - owner.exposure_read_index]);
-    append_diagnostic("exposure_histogram", &owner.exposure_histogram);
+    append_diagnostic("exposure_current", &owner.exposure_value);
+    append_diagnostic("exposure_previous", &owner.exposure_value);
     constexpr std::array ao_names{"ao_raw", "ao_resolved", "ao_contact", "ao_history", "ao_previous_history"};
     const auto ao_resources = owner.ambient_occlusion.DiagnosticResources();
     for (std::size_t index = 0; index < ao_resources.size(); ++index)
         append_diagnostic(ao_names[index], ao_resources[index]);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (owner.translucency_capture_active)
+    {
+        constexpr std::array names{"translucency_depth", "translucency_motion", "translucency_history",
+            "translucency_classification", "translucency_metadata", "translucency_unpeeled", "translucency_transport", "translucency_color"};
+        const auto resources = owner.hero_transparency.DiagnosticResources();
+        for (std::size_t index = 0; index < resources.size(); ++index)
+            append_diagnostic(names[index], resources[index]);
+    }
+#endif
     const auto adaptive_resources = owner.adaptive_shading.DiagnosticResources();
     append_diagnostic("adaptive_density", adaptive_resources[0]);
     append_diagnostic("adaptive_rate", adaptive_resources[1]);
@@ -1079,6 +1087,18 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         light_resources.capacity.width, light_resources.capacity.height,
         light_resources.frame_slot_count, light_resources.frame_slot);
     metadata_output << std::format("  \"decal_surface_active\": {},\n", owner.decal_surface_active);
+    metadata_output << "  \"terrain_surface_pages\": " << (impl_->terrain_pages.resource ? "true" : "false") << ",\n";
+    const auto probe_revision = impl_->local_probes.RevisionDiagnostics();
+    const auto write_probe_revision = [&](const char *name, const render_data::SceneProbeRevisions &value) {
+        metadata_output << std::format("    \"{}\": {{\"environment\": \"{}\", \"material\": \"{}\", "
+            "\"light\": \"{}\", \"static_layout\": \"{}\"}},\n", name,
+            value.environment, value.material, value.light, value.static_layout);
+    };
+    metadata_output << "  \"local_probe_revisions\": {\n";
+    write_probe_revision("baseline", probe_revision.baseline);
+    write_probe_revision("compatibility", probe_revision.compatibility);
+    metadata_output << std::format("    \"material_parameter_revision\": {}\n  }},\n",
+        probe_revision.material_parameter_revision);
     metadata_output << "  \"terrain_texture_mips\": [";
     bool first_texture = true;
     for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
@@ -1191,13 +1211,26 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         D3D12_RESOURCE_STATES native_state{};
         D3D12_BARRIER_SYNC native_sync{};
         D3D12_BARRIER_ACCESS native_access{};
+        UINT64 source_offset{};
+        bool upload{};
     };
     std::array buffers{
         BufferCapture{"geometry_records", &frame.geometry_draw_records},
         BufferCapture{"static_visible_refs", &frame.static_visible_refs},
         BufferCapture{"dynamic_visible_refs", &frame.dynamic_visible_refs},
         BufferCapture{"static_retest_refs", &frame.static_retest_refs},
+        BufferCapture{"static_draw_args", &frame.static_draw_args},
+        BufferCapture{"dynamic_draw_args", &frame.dynamic_draw_args},
+        BufferCapture{"static_rejected_args", &frame.static_rejected_args},
+        BufferCapture{"static_retest_args", &frame.static_retest_args},
+        BufferCapture{"visibility_ranges", &frame.upload},
     };
+    constexpr UINT64 range_bytes = (kGpuVisibilityBucketCount + 1) * sizeof(GpuStaticVisibilityRange);
+    buffers.back().source_offset = frame.visibility_range_offset;
+    buffers.back().size = 3 * range_bytes;
+    buffers.back().upload = true;
+    if (frame.visibility_active_views != 1 && frame.visibility_active_views != 4)
+        return contract_failure("Geometry diagnostic active visibility view count is invalid.");
     constexpr auto copy_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
     constexpr auto copy_sync = D3D12_BARRIER_SYNC_COPY;
     constexpr auto copy_access = D3D12_BARRIER_ACCESS_COPY_SOURCE;
@@ -1208,7 +1241,7 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         if (!buffer.resource->resource)
             return contract_failure(std::format(
                 "Geometry diagnostic resource {} has no native resource.", buffer.name));
-        switch (buffer.resource->graph_access)
+        if (!buffer.upload) switch (buffer.resource->graph_access)
         {
         case Access::CopyDest:
             buffer.native_state = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -1231,13 +1264,22 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
             buffer.native_sync = D3D12_BARRIER_SYNC_COMPUTE_SHADING;
             buffer.native_access = D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
             break;
+        case Access::IndirectArgs:
+            buffer.native_state = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+            buffer.native_sync = D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
+            buffer.native_access = D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+            break;
         default:
             return contract_failure(std::format(
                 "Geometry diagnostic resource {} has unsupported graph access {}.", buffer.name,
                 static_cast<unsigned>(buffer.resource->graph_access)));
         }
-        buffer.size = buffer.resource->resource->GetDesc().Width;
-        if (buffer.size == 0 || (index != 0 && buffer.size % sizeof(GpuStaticDrawRef) != 0))
+        const auto capacity = buffer.resource->resource->GetDesc().Width;
+        if (!buffer.upload) buffer.size = index >= 4 && index <= 7
+            ? kGpuVisibilityBucketCount * (index <= 5 ? frame.visibility_active_views : 1u) * kGeometryArgumentStride
+            : capacity;
+        if (buffer.source_offset > capacity || buffer.size > capacity - buffer.source_offset ||
+            buffer.size == 0 || (index >= 1 && index <= 3 && buffer.size % sizeof(GpuStaticDrawRef) != 0))
             return contract_failure(std::format(
                 "Geometry diagnostic resource {} has an invalid byte capacity.", buffer.name));
         if (index == 0 && buffer.size < used_records * sizeof(renderer_detail::GpuGeometryDrawRecord))
@@ -1266,12 +1308,14 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         return HResultFailure("Reset geometry diagnostic list", result);
     for (const auto &buffer : buffers)
     {
-        impl_->TransitionBuffer(buffer.resource->resource.Get(), buffer.native_state, copy_state,
-                                buffer.native_sync, copy_sync, buffer.native_access, copy_access);
+        if (!buffer.upload)
+            impl_->TransitionBuffer(buffer.resource->resource.Get(), buffer.native_state, copy_state,
+                                    buffer.native_sync, copy_sync, buffer.native_access, copy_access);
         impl_->command_list->CopyBufferRegion(readback.resource.Get(), buffer.offset,
-                                               buffer.resource->resource.Get(), 0, buffer.size);
-        impl_->TransitionBuffer(buffer.resource->resource.Get(), copy_state, buffer.native_state,
-                                copy_sync, buffer.native_sync, copy_access, buffer.native_access);
+                                               buffer.resource->resource.Get(), buffer.source_offset, buffer.size);
+        if (!buffer.upload)
+            impl_->TransitionBuffer(buffer.resource->resource.Get(), copy_state, buffer.native_state,
+                                    copy_sync, buffer.native_sync, copy_access, buffer.native_access);
     }
     result = impl_->command_list->Close();
     if (FAILED(result))
@@ -1338,6 +1382,10 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         std::uint32_t physical_lod{};
         std::uint32_t base{};
         std::uint32_t count{};
+        std::uint32_t index_count{};
+        std::uint32_t first_index{};
+        std::uint32_t meshlet_count{};
+        std::uint32_t flags{};
         float local_error{};
         std::uint32_t ref_source{};
         std::vector<RefDiagnostic> refs;
@@ -1376,6 +1424,10 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         record.page = read_u32_at(bytes, 0);
         record.base = read_u32_at(bytes, 20);
         record.count = read_u32_at(bytes, 24);
+        record.index_count = read_u32_at(bytes, offsetof(renderer_detail::GpuGeometryDrawRecord, index_count));
+        record.first_index = read_u32_at(bytes, offsetof(renderer_detail::GpuGeometryDrawRecord, first_index));
+        record.meshlet_count = read_u32_at(bytes, offsetof(renderer_detail::GpuGeometryDrawRecord, meshlet_count));
+        record.flags = read_u32_at(bytes, offsetof(renderer_detail::GpuGeometryDrawRecord, flags));
         record.mesh = read_u32_at(bytes, 48);
         record.generation = read_u32_at(bytes, 40);
         record.physical_lod = read_u32_at(bytes, 44);
@@ -1416,6 +1468,15 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         }
         records.push_back(std::move(record));
     }
+    for (std::size_t index = 4; index < buffers.size(); ++index)
+    {
+        const auto name = path.filename().string() + "." + buffers[index].name + ".bin";
+        std::ofstream binary(path.parent_path() / name, std::ios::binary | std::ios::trunc);
+        binary.write(reinterpret_cast<const char *>(mapped + buffers[index].offset),
+                     static_cast<std::streamsize>(buffers[index].size));
+        binary.close();
+        if (!binary) return fail_mapped(std::format("Could not write geometry diagnostic file {}.", name));
+    }
     D3D12_RANGE no_write{};
     readback.resource->Unmap(0, &no_write);
 
@@ -1425,10 +1486,29 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
     output << std::format(
         "{{\n  \"schema_version\": 1,\n  \"used_record_count\": {},\n"
         "  \"record_bytes\": {},\n  \"visible_ref_stride\": {},\n"
+        "  \"visibility_commands\": {{\"format\": \"little-endian 24-byte GPU indirect command\", "
+        "\"view_id\": {}, \"bucket_count\": {}, \"active_views\": {}, \"draw_bank_count\": {}, \"retest_bank_count\": 1, "
+        "\"command_stride\": {}, \"draw_command_count\": {}, \"retest_command_count\": {}, "
+        "\"range_format\": \"little-endian 8 uint32: begin,count,index_count,argument_stride,draw_record_base,meshlet_count,flags,reserved\", "
+        "\"range_stride\": {}, \"range_count_per_set\": {}, \"range_sets\": [\"static\", \"dynamic\", \"retest\"], "
+        "\"range_flag_masks\": {{\"mesh_eligible\": {}, \"lod_family\": {}, \"empty_source\": {}, \"static_source\": {}}}, "
+        "\"static_draw_args\": {}, \"dynamic_draw_args\": {}, \"static_rejected_args\": {}, "
+        "\"static_retest_args\": {}, \"visibility_ranges\": {}}},\n"
         "  \"visible_ref_counts\": {{\"static\": {}, \"dynamic\": {}, "
         "\"static_retest\": {}, \"static_input\": {}, "
         "\"dynamic_input\": {}}},\n  \"records\": [\n",
         used_records, sizeof(renderer_detail::GpuGeometryDrawRecord), sizeof(GpuStaticDrawRef),
+        impl_->active_view_id.value, kGpuVisibilityBucketCount, frame.visibility_active_views,
+        frame.visibility_active_views, kGeometryArgumentStride,
+        kGpuVisibilityBucketCount * frame.visibility_active_views, kGpuVisibilityBucketCount,
+        sizeof(GpuStaticVisibilityRange),
+        kGpuVisibilityBucketCount + 1,
+        kVisibilityMeshEligible, kVisibilityLodFamily, kVisibilityEmptySource, kVisibilityStaticSource,
+        JsonString(path.filename().string() + ".static_draw_args.bin"),
+        JsonString(path.filename().string() + ".dynamic_draw_args.bin"),
+        JsonString(path.filename().string() + ".static_rejected_args.bin"),
+        JsonString(path.filename().string() + ".static_retest_args.bin"),
+        JsonString(path.filename().string() + ".visibility_ranges.bin"),
         source_counts[1], source_counts[2], source_counts[3], source_counts[4], source_counts[5]);
     for (std::size_t index = 0; index < records.size(); ++index)
     {
@@ -1436,9 +1516,11 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
         output << std::format(
             "    {{\"id\": {}, \"view\": {}, \"mesh\": {}, \"page\": {}, "
             "\"gen\": {}, \"physicalLOD\": {}, \"base\": {}, \"count\": {}, "
+            "\"index_count\": {}, \"first_index\": {}, \"meshlet_count\": {}, \"flags\": {}, "
             "\"localerror\": {}, \"refsource\": {}, \"visible_refs\": [",
             record.id, record.view, record.mesh, record.page, record.generation,
-            record.physical_lod, record.base, record.count, record.local_error,
+            record.physical_lod, record.base, record.count,
+            record.index_count, record.first_index, record.meshlet_count, record.flags, record.local_error,
             record.ref_source);
         for (std::size_t ref_index = 0; ref_index < record.refs.size(); ++ref_index)
         {
@@ -2336,7 +2418,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 std::size_t binding_matches{};
                 for (const auto &candidate : bindings)
                     if (candidate.slot == submesh->material_index &&
-                        candidate.domain == render_data::HeroMaterialDomain::Opaque)
+                        candidate.domain == render_data::CharacterMaterialDomain::Opaque)
                     {
                         binding = &candidate;
                         ++binding_matches;
@@ -2345,7 +2427,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     return invalid(std::format(
                         "Classified hero pixel {} material slot {} does not resolve to exactly one opaque binding.",
                         pixel, submesh->material_index));
-                if (binding->hero_ordinal >= kHeroMaterialNames.size())
+                if (binding->hero_ordinal >= kCharacterMaterialNames.size())
                     return invalid(std::format(
                         "Classified hero pixel {} has invalid opaque hero ordinal {}.",
                         pixel, binding->hero_ordinal));
@@ -2453,6 +2535,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     return Result::Success();
 }
 
+#endif
+
 Result D3D12Renderer::Capture(const CaptureRequest &request)
 {
     if (!impl_->initialized)
@@ -2478,6 +2562,7 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Capture kind is invalid.");
     }
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if(request.kind==CaptureKind::SceneProbePackage)
     {
         if(request.view_id!=kMainRenderViewId)
@@ -2517,6 +2602,12 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         }
         return Result::Success();
     }
+#else
+    if(request.kind==CaptureKind::SceneProbePackage) return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Scene probe export requires the offline baker.");
+#endif
+#if !defined(HS_DEVELOPMENT_TOOLS)
+    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Image and diagnostic capture require a development build.");
+#else
     if (request.view_id != kMainRenderViewId &&
         !impl_->owned_views.contains(request.view_id.value))
     {
@@ -2579,6 +2670,7 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         break;
     }
     return restore(std::move(result));
+#endif
 }
 
 

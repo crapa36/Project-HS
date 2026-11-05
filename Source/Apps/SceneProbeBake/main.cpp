@@ -5,7 +5,7 @@
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/scene_probe.hpp>
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/jobs/task_system.hpp>
 #include "../Common/world_transport_scene.hpp"
@@ -110,18 +110,7 @@ void BakeSceneProbe(const hs::SelectedGeneration &generation, const std::filesys
     window.Create();
     config.window = window.handle;
     hs::TaskSystem recording_workers(4);
-    auto recording_group = recording_workers.CreateTaskGroup();
-    config.task_executor.submit = [&](std::function<void()> record) {
-        const bool accepted = recording_group.Submit(
-            [record = std::move(record)](std::stop_token) { record(); });
-        return accepted ? hs::Result::Success() :
-            hs::Result::Failure(hs::ErrorCode::TaskFailed, "hs_scene_probe_bake", "Could not submit recording task.");
-    };
-    config.task_executor.join = [&] {
-        auto joined = recording_group.Wait();
-        recording_group = recording_workers.CreateTaskGroup();
-        return joined;
-    };
+    config.task_system = &recording_workers;
     auto startup_font = ReadDeveloperFont();
     config.font_bytes = startup_font;
     hs::D3D12Renderer renderer;
@@ -185,8 +174,10 @@ void BakeSceneProbe(const hs::SelectedGeneration &generation, const std::filesys
         current[0].position.x = static_cast<float>(frame % 60) / 60.f;
         pair.current.instances = current;
         auto view = renderer.MainViewInput(pair.current.camera);
-        const hs::RenderFrameInput render_input{.views = std::span(&view, 1), .snapshots = pair,
-            .wait_for_streaming = true};
+        const hs::RenderPackage render_input{.views = std::span(&view, 1), .snapshots = pair,
+            .vfx = {.world_batch = {pair.current.header.session_id, pair.current.header.tick, frame}},
+            .wait_for_streaming = true,
+            .display_sample = hs::RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
         Require(renderer.Render(render_input, frame_result));
         if (!frame_result.vfx_world_step_submitted || frame_result.vfx_world_tick != frame ||
             frame_result.vfx_world_session_id != pair.current.header.session_id)

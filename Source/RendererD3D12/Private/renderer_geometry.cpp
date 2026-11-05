@@ -25,20 +25,20 @@ Result D3D12Renderer::Impl::BeginGeometryDrawRecords(std::uint32_t frame_slot)
                 D3D12_RESOURCE_STATE_GENERIC_READ); !result) return result;
         frame.geometry_draw_records = std::move(records);
         frame.geometry_draw_records_upload = std::move(upload);
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Buffer.NumElements = static_cast<UINT>(bytes / 4);
+        view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        descriptor.ptr += static_cast<SIZE_T>(frame_slot * kTextureDescriptorCount +
+                                             kGeometryDescriptorOffset) * srv_stride;
+        device->CreateShaderResourceView(frame.geometry_draw_records.resource.Get(), &view, descriptor);
     }
     frame.geometry_draw_records_cpu.clear();
     frame.geometry_draw_records_cpu.reserve(kGeometryDrawRecordCapacity);
     frame.geometry_draw_records_cpu.emplace_back();
-    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-    view.Format = DXGI_FORMAT_R32_TYPELESS;
-    view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    view.Buffer.NumElements = static_cast<UINT>(bytes / 4);
-    view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-    auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    descriptor.ptr += static_cast<SIZE_T>(frame_slot * kTextureDescriptorCount +
-                                         kGeometryDescriptorOffset) * srv_stride;
-    device->CreateShaderResourceView(frame.geometry_draw_records.resource.Get(), &view, descriptor);
     return Result::Success();
 }
 

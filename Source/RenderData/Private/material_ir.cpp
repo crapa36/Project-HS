@@ -1219,7 +1219,7 @@ std::string ContextExpression(const OptimizedGraph &graph, const MaterialGraph &
         return "HsMaterialTangentToWorld(" + input(0) + ", " + input(1) + ", " + input(2) + ")";
     case MaterialOp::TerrainStochastic:
     {
-        std::string result = "HsMaterialTerrainStochastic(";
+        std::string result = "HsMaterialTerrainPage(";
         for (std::size_t slot = 0; slot < 6; ++slot)
         {
             if (slot) result += ", ";
@@ -1557,7 +1557,7 @@ void ValidateEnvironmentMaterialGraph(const MaterialGraph &graph)
     (void)ValidateMaterialGraph(graph, graph.kind);
 }
 
-void ValidateHeroMaterialGraph(const MaterialGraph &graph)
+void ValidateCharacterMaterialGraph(const MaterialGraph &graph)
 {
     ValidateHeroDomain(graph);
     (void)ValidateMaterialGraph(graph, graph.kind);
@@ -1957,7 +1957,7 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
     return result + "}\n";
 }
 
-std::string EmitHeroMaterialContextHlsl(const MaterialGraph &graph,
+std::string EmitCharacterMaterialContextHlsl(const MaterialGraph &graph,
     std::string_view surface_function, std::string_view opacity_function)
 {
     ValidateHeroDomain(graph);
@@ -1972,11 +1972,11 @@ std::string EmitHeroMaterialContextHlsl(const MaterialGraph &graph,
         }
     }
     Require(surface_function != opacity_function, "hero material function names must differ");
-    return EmitHeroMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Hero),
+    return EmitCharacterMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Hero),
                                       surface_function, opacity_function);
 }
 
-std::string EmitHeroMaterialContextHlsl(const PreparedMaterial &material,
+std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     std::string_view surface_function, std::string_view opacity_function)
 {
     const auto &graph = material.impl_->graph;

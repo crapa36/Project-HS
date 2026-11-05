@@ -19,8 +19,8 @@ namespace
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSrvCount = 17, kUavCount = 6, kDescriptorCount = kSrvCount + kUavCount, kConstantStride = 256;
 std::atomic<std::uint64_t> g_reconstruction_guide_generation{};
-constexpr std::array<std::string_view, 2> kShaderProducts{
-    "render/shader/reconstruction_guides_cs.dxil", "render/shader/reconstruction_pre_exposure_cs.dxil"};
+constexpr std::array<std::string_view, 1> kShaderProducts{
+    "render/shader/reconstruction_guides_cs.dxil"};
 Result GuideFailure(ErrorCode code, std::string message)
 {
     return Result::Failure(code, "hs_renderer_reconstruction_guides", std::move(message));
@@ -85,9 +85,9 @@ struct ReconstructionGuidesTargets
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>, 2> pipelines;
+    std::array<ComPtr<ID3D12PipelineState>, 1> pipelines;
     ComPtr<ID3D12DescriptorHeap> descriptors, export_descriptors;
-    AllocationResource constants, motion, responsive, exposure, raw_output, pre_exposed, depth, composition;
+    AllocationResource constants, motion, responsive, exposure, raw_output, depth, composition;
     std::byte *mapped{};
     ViewExtent render_capacity, output_extent;
     std::uint32_t frame_slot_count{}, descriptor_stride{};
@@ -144,20 +144,22 @@ ReconstructionGuidesSystem::~ReconstructionGuidesSystem() = default;
 std::uint64_t ReconstructionGuidesCandidate::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 std::uint64_t ReconstructionGuidesSystem::AllocatedBytes() const noexcept { return impl_->targets ? impl_->targets->bytes : 0; }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 AllocationResource ReconstructionGuidesSystem::RetainPreExposedOutput() const
 {
     AllocationResource retained;
     const auto storage = impl_->targets;
-    if (!storage || !storage->pre_exposed.resource || !storage->pre_exposed.allocation)
+    if (!storage || !storage->raw_output.resource || !storage->raw_output.allocation)
         return retained;
-    retained.resource = storage->pre_exposed.resource;
-    retained.allocation = storage->pre_exposed.allocation;
+    retained.resource = storage->raw_output.resource;
+    retained.allocation = storage->raw_output.allocation;
     retained.allocation->AddRef();
-    retained.graph_access = storage->pre_exposed.graph_access;
-    retained.graph_queue = storage->pre_exposed.graph_queue;
-    retained.graph_completion = storage->pre_exposed.graph_completion;
+    retained.graph_access = storage->raw_output.graph_access;
+    retained.graph_queue = storage->raw_output.graph_queue;
+    retained.graph_completion = storage->raw_output.graph_completion;
     return retained;
 }
+#endif
 
 Result ReconstructionGuidesSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     ViewExtent capacity, ViewExtent output, std::uint32_t frameSlots, const ShaderReader &readShader,
@@ -175,8 +177,7 @@ Result ReconstructionGuidesSystem::Prepare(ID3D12Device *device, D3D12MA::Alloca
         std::tuple{&next->depth, capacity, DXGI_FORMAT_R32_FLOAT},
         std::tuple{&next->responsive, capacity, DXGI_FORMAT_R8_UNORM},
         std::tuple{&next->exposure, ViewExtent{1, 1}, DXGI_FORMAT_R32_FLOAT},
-        std::tuple{&next->raw_output, output, DXGI_FORMAT_R16G16B16A16_FLOAT},
-        std::tuple{&next->pre_exposed, output, DXGI_FORMAT_R16G16B16A16_FLOAT}})
+        std::tuple{&next->raw_output, output, DXGI_FORMAT_R16G16B16A16_FLOAT}})
     {
         if (auto created = CreateTexture(device, allocator, extent, format, *target); !created) return created;
         next->bytes += target->allocation->GetSize();
@@ -229,7 +230,7 @@ Result ReconstructionGuidesSystem::Prepare(ID3D12Device *device, D3D12MA::Alloca
     D3D12_SHADER_RESOURCE_VIEW_DESC exportView{};
     exportView.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; exportView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     exportView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; exportView.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(next->pre_exposed.resource.Get(), &exportView,
+    device->CreateShaderResourceView(next->raw_output.resource.Get(), &exportView,
                                    next->export_descriptors->GetCPUDescriptorHandleForHeapStart());
     D3D12MA::ALLOCATION_DESC uploadAllocation{}; uploadAllocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC upload{};
@@ -279,7 +280,7 @@ bool ReconstructionGuidesSystem::MatchesLayout(const ReconstructionGuidesInputs 
         in.surface_history.version,in.composite_hdr.version,in.opaque_hdr.version,
         in.exposure.version,in.transparency_revealage.version,in.transparent_depth.version,
         in.transparent_motion.version,in.transparent_history.version,in.transparent_classification.version,
-        in.transparent_metadata.version,in.transparent_overflow.version,in.transparent_transport.version,
+        in.transparent_metadata.version,in.transparent_unpeeled_fragment_count.version,in.transparent_transport.version,
         in.screen_overlay_alpha.version};
     for(std::size_t i=0;i<current.size();++i)
         if((i<8||(i<15&&layout.transparent_guides)||(i==15&&layout.screen_overlay))&&
@@ -319,19 +320,19 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
             inputs.exposure.version,inputs.transparency_revealage.version,inputs.transparent_depth.version,
             inputs.transparent_motion.version,inputs.transparent_history.version,
             inputs.transparent_classification.version,inputs.transparent_metadata.version,
-            inputs.transparent_overflow.version,inputs.transparent_transport.version,
+            inputs.transparent_unpeeled_fragment_count.version,inputs.transparent_transport.version,
             inputs.screen_overlay_alpha.version};}
     if(retained)
     {
         if(!MatchesLayout(inputs,bool(external),providerName,*retained))
             return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction topology changed.");
         for(UINT i=0;i<retained->imports.size();++i)
-            if((i<6||retained->composition)&&
+            if((i<5||retained->composition)&&
                 (!retained->imports[i]||retained->imports[i].kind!=ResourceKind::Texture||
                     retained->imports[i].value>graph.ResourceCount()))
                 return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction import slot changed.");
-        for(UINT i=0;i<3;++i)
-            if(!graph.BindPass(retained->pass_indices[i],i==0?49u:(i==1?9u:51u)))
+        for(UINT i=0;i<2;++i)
+            if(!graph.BindPass(retained->pass_indices[i],i==0?49u:9u))
                 return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction pass changed.");
     }
     const auto active = inputs.render_active;
@@ -350,12 +351,12 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
         inputs.exposure.resource->GetDesc().Width < 2 * sizeof(float))
         return GuideFailure(ErrorCode::InvalidArgument, "Reconstruction requires the current/previous exposure float buffer.");
     if (inputs.transparent_guides_enabled &&
-        (!FitsTexture(inputs.transparent_depth, active, DXGI_FORMAT_R32_FLOAT) ||
+        (!FitsDepth(inputs.transparent_depth, active) ||
          !FitsTexture(inputs.transparent_motion, active, DXGI_FORMAT_R16G16_FLOAT) ||
          !FitsTexture(inputs.transparent_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
          !FitsTexture(inputs.transparent_classification, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
          !FitsTexture(inputs.transparent_metadata, active, DXGI_FORMAT_R32G32_UINT) ||
-         !FitsTexture(inputs.transparent_overflow, active, DXGI_FORMAT_R32_UINT) ||
+         !FitsTexture(inputs.transparent_unpeeled_fragment_count, active, DXGI_FORMAT_R32_UINT) ||
          !FitsTexture(inputs.transparent_transport, active, DXGI_FORMAT_R16G16_FLOAT)))
         return GuideFailure(ErrorCode::InvalidArgument, "Transparent reconstruction guides require matching active textures and formats.");
     if (!std::isfinite(constants.jitter_uv.x) || !std::isfinite(constants.jitter_uv.y) ||
@@ -389,19 +390,19 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
     storage->Srv(inputs.frame_slot, 11, inputs.transparent_guides_enabled ? inputs.transparent_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT);
     storage->Srv(inputs.frame_slot, 12, inputs.transparent_guides_enabled ? inputs.transparent_classification.resource : nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Srv(inputs.frame_slot, 13, inputs.transparent_guides_enabled ? inputs.transparent_metadata.resource : nullptr, DXGI_FORMAT_R32G32_UINT);
-    storage->Srv(inputs.frame_slot, 14, inputs.transparent_guides_enabled ? inputs.transparent_overflow.resource : nullptr, DXGI_FORMAT_R32_UINT);
+    storage->Srv(inputs.frame_slot, 14, inputs.transparent_guides_enabled ? inputs.transparent_unpeeled_fragment_count.resource : nullptr, DXGI_FORMAT_R32_UINT);
     storage->Srv(inputs.frame_slot, 15, inputs.transparent_guides_enabled ? inputs.transparent_transport.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
     storage->Srv(inputs.frame_slot, 16, inputs.screen_overlay_alpha.resource, DXGI_FORMAT_R8_UNORM);
     storage->Uav(inputs.frame_slot, 0, storage->motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->responsive.resource.Get(), DXGI_FORMAT_R8_UNORM);
     storage->Uav(inputs.frame_slot, 2, storage->exposure.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-    storage->Uav(inputs.frame_slot, 3, storage->pre_exposed.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    storage->Uav(inputs.frame_slot, 3, storage->raw_output.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Uav(inputs.frame_slot, 4, storage->depth.resource.Get(), DXGI_FORMAT_R32_FLOAT);
     storage->Uav(inputs.frame_slot, 5, storage->composition.resource.Get(), DXGI_FORMAT_R8_UNORM);
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.slot = inputs.frame_slot;
     for(auto *allocation:{&storage->motion,&storage->depth,&storage->responsive,
-            &storage->exposure,&storage->raw_output,&storage->pre_exposed,&storage->composition})
+            &storage->exposure,&storage->raw_output,&storage->composition})
         if(allocation->resource)
             if(auto certified=allocation->EnsureNativeContract(storage->device.Get());!certified)
                 return certified;
@@ -423,7 +424,6 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
     auto responsive = import(storage->responsive, "Reconstruction.Responsive");
     auto exposure = import(storage->exposure, "Reconstruction.Exposure");
     auto raw = import(storage->raw_output, "Reconstruction.RawOutput");
-    auto preExposed = import(storage->pre_exposed, "Reconstruction.PreExposedOutput");
     ResourceVersion composition;
     if (storage->composition.resource) composition = import(storage->composition, "Reconstruction.CompositionCoverage");
     if(!imports_valid)return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction binding changed.");
@@ -451,7 +451,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
         guides.Read(guide.version, Access::ComputeRead);
     if (!retained&&inputs.transparent_guides_enabled)
         for (const auto &guide : {inputs.transparent_depth, inputs.transparent_motion, inputs.transparent_history,
-             inputs.transparent_classification, inputs.transparent_metadata, inputs.transparent_overflow,
+             inputs.transparent_classification, inputs.transparent_metadata, inputs.transparent_unpeeled_fragment_count,
              inputs.transparent_transport})
             guides.Read(guide.version, Access::ComputeRead);
     motion=retained?retained->outputs[2]:guides.Write(motion,Access::UnorderedWrite);
@@ -512,16 +512,10 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
                 });
         });
     }
-    if(layout)layout->pass_indices[2]=graph.PassCount();
-    auto preExposure=retained?*graph.BindPass(retained->pass_indices[2],51):
-        graph.AddPass(51,"Reconstruction PreExposure",QueueHint::Direct);
-    if(!retained){preExposure.Read(raw,Access::ComputeRead);preExposure.Read(inputs.exposure.version,Access::ComputeRead);}
-    preExposed=retained?retained->outputs[0]:preExposure.Write(preExposed,Access::UnorderedWrite);
-    preExposure.SetExecuteChecked(execute(1, storage->output_extent));
-    outputs = {preExposed, raw, motion, responsive, exposure, depth, composition, storage->pre_exposed.resource.Get(),
+    outputs = {raw, raw, motion, responsive, exposure, depth, composition, storage->raw_output.resource.Get(),
                storage->export_descriptors->GetCPUDescriptorHandleForHeapStart(), storage->depth.resource.Get(),
                storage->motion.resource.Get(), storage};
-    if(layout)layout->outputs={preExposed,raw,motion,responsive,exposure,depth,composition};
+    if(layout)layout->outputs={raw,raw,motion,responsive,exposure,depth,composition};
     impl_->pending = std::move(pending);
     return Result::Success();
 }

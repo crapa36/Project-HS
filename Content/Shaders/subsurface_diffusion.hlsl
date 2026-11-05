@@ -8,7 +8,7 @@ cbuffer SubsurfaceConstants : register(b0, space13)
     row_major float4x4 SssInverseViewProjection;
     float4 SssRenderSize;
     uint4 SssMaterialParameterBases[4];
-    uint4 SssHeroMaterialParameterBases[2];
+    uint4 SssCharacterMaterialParameterBases[2];
     uint4 SssQualityOptions; // x: maximum half-kernel samples.
 };
 Texture2D<float> SssDepth : register(t0, space13);
@@ -60,7 +60,7 @@ HsSurfaceClosure SssLoadProfile(uint material)
     }
     else if(hero<7u && hero!=5u)
     {
-        ctx.parameter_base=SssHeroMaterialParameterBases[hero/4u][hero%4u];
+        ctx.parameter_base=SssCharacterMaterialParameterBases[hero/4u][hero%4u];
         profile=HsHeroApplyDeferredLayers(profile,ctx,hero);
     }
     return profile;

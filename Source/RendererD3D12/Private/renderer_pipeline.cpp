@@ -19,7 +19,7 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
     RendererConfig &selected) const
 {
     selected = request;
-    if (request.packed_content) selected.selected_texture_feedback = false;
+    selected.selected_texture_feedback = false;
     if (!texture_streaming_capabilities.sampler_feedback || !texture_streaming_capabilities.tiled_resources)
         return Result::Success();
     // Resolve both physical variants before enabling compiled-pack selection.
@@ -33,13 +33,13 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
             const auto feedback = "render/shader/" + std::string(name) + "_" + std::string(family) + "_feedback.dxil";
             if (request.packed_content)
             {
-                if (!FindRendererBulk(selected, baseline) || !FindRendererBulk(selected, feedback))
+                if (!FindCanonicalRendererBulk(selected, baseline) || !FindCanonicalRendererBulk(selected, feedback))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                         "Selected feedback shader or its baseline has no compiled bulk: " + feedback);
                 continue;
             }
             RendererAssetSource path;
-            if (auto resolved = ResolveRendererAsset(request, feedback, path); !resolved) return resolved;
+            if (auto resolved = ResolveRendererAsset(selected, feedback, path); !resolved) return resolved;
             if (path.IsPacked())
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Loose feedback shader resolved to a packed source: " + path.Describe(feedback));
@@ -48,11 +48,9 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
                 !selected.product_digests.contains(baseline))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Selected feedback shader or its baseline has no immutable product identity: " + feedback);
-            selected.product_paths.at(baseline) = std::move(path.Loose().path);
-            selected.product_digests.at(baseline) = digest->second;
         }
     }
-    if (request.packed_content) selected.selected_texture_feedback = true;
+    selected.selected_texture_feedback = true;
     return Result::Success();
 }
 Result D3D12Renderer::Impl::CreateRootSignature()
@@ -124,9 +122,14 @@ Result D3D12Renderer::Impl::CreateRootSignature()
                            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     geometry_range.OffsetInDescriptorsFromTableStart =
         kGeometryDescriptorOffset - kTemporalTextureDescriptorOffset;
+    auto terrain_page_range = material_texture_range;
+    terrain_page_range.NumDescriptors = kTerrainPageDescriptorCount;
+    terrain_page_range.RegisterSpace = 42;
+    terrain_page_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    terrain_page_range.OffsetInDescriptorsFromTableStart = kTerrainPageDescriptorOffset - kPostTextureDescriptorCount;
     const std::array ranges{character_range, monster_pbr_range, environment_range,
                             gradient_range, ribbon_detail_range, impact_range, smoke_range,
-                            material_texture_range};
+                            material_texture_range, terrain_page_range};
 
     D3D12_DESCRIPTOR_RANGE1 curve_range = impact_range;
     curve_range.NumDescriptors = 1;
@@ -190,13 +193,6 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     exposure_srv_range.NumDescriptors = 2;
     exposure_srv_range.RegisterSpace = 10;
     exposure_srv_range.OffsetInDescriptorsFromTableStart += 5;
-    D3D12_DESCRIPTOR_RANGE1 exposure_uav_range = exposure_srv_range;
-    exposure_uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    exposure_uav_range.OffsetInDescriptorsFromTableStart += 2;
-    D3D12_DESCRIPTOR_RANGE1 exposure_cbv_range = exposure_uav_range;
-    exposure_cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-    exposure_cbv_range.NumDescriptors = 1;
-    exposure_cbv_range.OffsetInDescriptorsFromTableStart += 2;
     D3D12_DESCRIPTOR_RANGE1 ambient_range = view_range;
     ambient_range.NumDescriptors = 2;
     ambient_range.BaseShaderRegister = 5;
@@ -216,7 +212,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     const std::array history_geometry_ranges{
         temporal_input_range, geometry_range, surface_range,
         visibility_srv_range, visibility_uav_range, material_parameter_range,
-        view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, ambient_range, hero_binding_range, probe_range, light_range,
+        view_range, exposure_srv_range, ambient_range, hero_binding_range, probe_range, light_range,
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kVirtualShadowDescriptorCount, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -561,7 +557,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> visibility_scatter_compute;
     std::vector<std::byte> full_screen_vertex;
     std::vector<std::byte> temporal_pixel;
-    std::vector<std::byte> pre_exposure_pixel, exposure_clear, exposure_build, exposure_reduce;
     std::vector<std::byte> deferred_pixel;
     std::vector<std::byte> composite_pixel;
     std::vector<std::byte> bloom_extract_pixel;
@@ -570,7 +565,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> bloom_pixel;
     std::vector<std::byte> tone_map_pixel;
     std::vector<std::byte> fxaa_pixel;
-    std::vector<std::byte> ui_pixel;
+    std::vector<std::byte> ui_pixel, ui_draw_vs, ui_draw_ps;
     std::vector<std::byte> ribbon_update;
     std::vector<std::byte> ribbon_args;
     std::vector<std::byte> ribbon_vs;
@@ -598,18 +593,14 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
              std::pair{"fresnel_shell_vs.dxil", &fresnel_shell_vertex},
              std::pair{"fresnel_shell_ps.dxil", &fresnel_shell_pixel},
              std::pair{"particle_cs.dxil", &particle_compute},
-             std::pair{"static_visibility_cs.dxil", &static_visibility_compute},
-             std::pair{"visibility_retest_cs.dxil", &visibility_retest_compute},
+             std::pair{"static_visibility_sparse_v2_cs.dxil", &static_visibility_compute},
+             std::pair{"visibility_retest_sparse_v2_cs.dxil", &visibility_retest_compute},
              std::pair{"depth_pyramid_init_cs.dxil", &depth_pyramid_init_compute},
              std::pair{"depth_pyramid_reduce_cs.dxil", &depth_pyramid_reduce_compute},
              std::pair{"skin_cache_cs.dxil", &skin_cache_compute},
              std::pair{"skin_bounds_cs.dxil", &skin_bounds_compute},
              std::pair{"fullscreen_vs.dxil", &full_screen_vertex},
              std::pair{"temporal_ps.dxil", &temporal_pixel},
-             std::pair{"pre_exposure_ps.dxil", &pre_exposure_pixel},
-             std::pair{"exposure_clear_cs.dxil", &exposure_clear},
-             std::pair{"exposure_build_cs.dxil", &exposure_build},
-             std::pair{"exposure_reduce_cs.dxil", &exposure_reduce},
              std::pair{"composite_ps.dxil", &composite_pixel},
              std::pair{"bloom_extract_ps.dxil", &bloom_extract_pixel},
              std::pair{"bloom_downsample_ps.dxil", &bloom_downsample_pixel},
@@ -618,6 +609,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
              std::pair{"tonemap_ps.dxil", &tone_map_pixel},
              std::pair{"fxaa_ps.dxil", &fxaa_pixel},
              std::pair{"ui_ps.dxil", &ui_pixel},
+             std::pair{"ui_draw_vs.dxil", &ui_draw_vs},
+             std::pair{"ui_draw_ps.dxil", &ui_draw_ps},
              std::pair{"ribbon_update_cs.dxil", &ribbon_update},
              std::pair{"ribbon_args_cs.dxil", &ribbon_args},
              std::pair{"ribbon_vs.dxil", &ribbon_vs},
@@ -1181,15 +1174,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     compute.CS = {ribbon_args.data(), ribbon_args.size()};
     result = pipeline_cache.CreateCompute(&compute, IID_PPV_ARGS(&ribbon_args_pipeline));
     if (FAILED(result)) return HResultFailure("Create ribbon args PSO", result);
-    for (auto [shader, target] : {
-            std::pair{std::span<const std::byte>(exposure_clear), exposure_clear_pipeline.ReleaseAndGetAddressOf()},
-            std::pair{std::span<const std::byte>(exposure_build), exposure_build_pipeline.ReleaseAndGetAddressOf()},
-            std::pair{std::span<const std::byte>(exposure_reduce), exposure_reduce_pipeline.ReleaseAndGetAddressOf()}})
-    {
-        compute.CS = {shader.data(), shader.size()};
-        result = pipeline_cache.CreateCompute(&compute, IID_PPV_ARGS(target));
-        if (FAILED(result)) return HResultFailure("Create exposure PSO", result);
-    }
 
     auto ribbon_add = particle;
     ribbon_add.VS = {ribbon_vs.data(), ribbon_vs.size()};
@@ -1258,8 +1242,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
          std::array{
              std::pair{std::span<const std::byte>(composite_pixel),
                        composite_pipeline.ReleaseAndGetAddressOf()},
-             std::pair{std::span<const std::byte>(pre_exposure_pixel),
-                       pre_exposure_pipeline.ReleaseAndGetAddressOf()},
              std::pair{std::span<const std::byte>(bloom_extract_pixel),
                        bloom_extract_pipeline.ReleaseAndGetAddressOf()},
              std::pair{std::span<const std::byte>(bloom_downsample_pixel),
@@ -1298,6 +1280,27 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     {
         return pipeline_result;
     }
+
+    D3D12_ROOT_SIGNATURE_DESC ui_root{static_cast<UINT>(std::size(kUiDrawParameters)), kUiDrawParameters};
+    ComPtr<ID3DBlob> ui_signature, ui_diagnostics;
+    result = D3D12SerializeRootSignature(&ui_root, D3D_ROOT_SIGNATURE_VERSION_1, &ui_signature, &ui_diagnostics);
+    if (FAILED(result)) return HResultFailure("Serialize UI draw root", result);
+    result = device->CreateRootSignature(0, ui_signature->GetBufferPointer(), ui_signature->GetBufferSize(),
+        IID_PPV_ARGS(ui_draw_root.ReleaseAndGetAddressOf()));
+    if (FAILED(result)) return HResultFailure("Create UI draw root", result);
+    if (auto registered = pipeline_cache.RegisterRootSignature(ui_draw_root.Get(),
+            {static_cast<const std::byte *>(ui_signature->GetBufferPointer()), ui_signature->GetBufferSize()});
+        !registered) return registered;
+    post.pRootSignature = ui_draw_root.Get();
+    post.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    post.VS = {ui_draw_vs.data(), ui_draw_vs.size()};
+    auto &ui_blend = post.BlendState.RenderTarget[0];
+    ui_blend.BlendEnable = TRUE;
+    ui_blend.SrcBlend = ui_blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+    ui_blend.DestBlend = ui_blend.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    ui_blend.BlendOp = ui_blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    if (auto created = create_post_pipeline(ui_draw_ps, ui_draw_pipeline.ReleaseAndGetAddressOf()); !created)
+        return created;
 
     D3D12_INDIRECT_ARGUMENT_DESC argument{};
     argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
@@ -1374,7 +1377,7 @@ Result D3D12Renderer::ReloadShaderGeneration(
             return id == "render/material/" + std::string(name) + "/parameters.rpkg";
         };
         return std::ranges::any_of(kAuthoredMaterialNames, matches) ||
-               std::ranges::any_of(kHeroMaterialNames, matches) ||
+               std::ranges::any_of(kCharacterMaterialNames, matches) ||
                std::ranges::any_of(render_data::kDecalMaterialNames, matches);
     };
     for (const auto &[id, previous_digest] : impl_->config.product_digests)
@@ -1562,10 +1565,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_deferred = std::move(deferred_pipeline);
     auto previous_composite = std::move(composite_pipeline);
     auto previous_temporal = std::move(temporal_pipeline);
-    auto previous_pre_exposure = std::move(pre_exposure_pipeline);
-    auto previous_exposure_clear = std::move(exposure_clear_pipeline);
-    auto previous_exposure_build = std::move(exposure_build_pipeline);
-    auto previous_exposure_reduce = std::move(exposure_reduce_pipeline);
     auto previous_bloom_extract = std::move(bloom_extract_pipeline);
     auto previous_bloom_downsample = std::move(bloom_downsample_pipeline);
     auto previous_bloom_upsample = std::move(bloom_upsample_pipeline);
@@ -1573,6 +1572,8 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_tone_map = std::move(tone_map_pipeline);
     auto previous_fxaa = std::move(fxaa_pipeline);
     auto previous_ui = std::move(ui_pipeline);
+    auto previous_ui_draw = std::move(ui_draw_pipeline);
+    auto previous_ui_root = std::move(ui_draw_root);
     auto previous_ribbon_update = std::move(ribbon_update_pipeline);
     auto previous_ribbon_args = std::move(ribbon_args_pipeline);
     auto previous_ribbon_add = std::move(ribbon_add_pipeline);
@@ -1598,9 +1599,9 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_ribbon_signature = std::move(ribbon_draw_signature);
 
     auto result = CreatePipeline(candidate_config);
-    HeroTransparencyCandidate transparency;
+    LayeredTranslucencyCandidate transparency;
     if (result)
-        result = PrepareHeroTransparency(owner, candidate_config, owner.state.render_capacity, transparency);
+        result = PrepareLayeredTranslucency(owner, candidate_config, owner.state.render_capacity, transparency);
     if (result)
         result = CreateEnvironmentBrdfLut(candidate_config, environment_brdf_candidate);
     if (!result)
@@ -1649,10 +1650,6 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         deferred_pipeline = std::move(previous_deferred);
         composite_pipeline = std::move(previous_composite);
         temporal_pipeline = std::move(previous_temporal);
-        pre_exposure_pipeline = std::move(previous_pre_exposure);
-        exposure_clear_pipeline = std::move(previous_exposure_clear);
-        exposure_build_pipeline = std::move(previous_exposure_build);
-        exposure_reduce_pipeline = std::move(previous_exposure_reduce);
         bloom_extract_pipeline = std::move(previous_bloom_extract);
         bloom_downsample_pipeline = std::move(previous_bloom_downsample);
         bloom_upsample_pipeline = std::move(previous_bloom_upsample);
@@ -1660,6 +1657,8 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         tone_map_pipeline = std::move(previous_tone_map);
         fxaa_pipeline = std::move(previous_fxaa);
         ui_pipeline = std::move(previous_ui);
+        ui_draw_pipeline = std::move(previous_ui_draw);
+        ui_draw_root = std::move(previous_ui_root);
         ribbon_update_pipeline = std::move(previous_ribbon_update);
         ribbon_args_pipeline = std::move(previous_ribbon_args);
         ribbon_add_pipeline = std::move(previous_ribbon_add);
@@ -1729,6 +1728,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         WriteEnvironmentBrdfLutDescriptors();
         if (material_parameter_candidate.resource) CommitMaterialParameters();
         ++pipeline_revision;
+        for (auto &[id, view] : owned_views) view->ui_draw_content.fill(nullptr);
         config = std::move(candidate_config);
         for (auto &[view_id, view] : owned_views)
         {

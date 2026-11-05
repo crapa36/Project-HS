@@ -21,7 +21,7 @@ std::array<std::byte,32> PackageDigest(std::span<const std::byte> bytes)
     // Include revision/dependency metadata as well as payloads. Only the digest
     // field itself is omitted, avoiding a second whole-package allocation.
     hs::Sha256Stream digest; digest.Add(bytes.first(160));
-    digest.Add(bytes.subspan(kSceneProbeHeaderStride)); return digest.Finish();
+    digest.Add(bytes.subspan(192)); return digest.Finish();
 }
 void Require(bool valid, std::string_view message)
 {
@@ -92,9 +92,17 @@ bool ValidDependency(std::string_view id)
 }
 std::uint64_t ValidateDescription(const SceneProbeDescription &d, std::span<const std::string> dependencies)
 {
+    const auto &g=d.grid;
+    Require(Finite(g.origin) && Finite(g.spacing),"nonfinite irradiance grid");
+    if(g.dimensions!=std::array<std::uint32_t,3>{})
+    {
+        for(auto n:g.dimensions) Require(n>=2 && n<=64,"invalid irradiance grid dimensions");
+        Require(g.NodeCount()<=256 && g.spacing.x>=.001f && g.spacing.y>=.001f && g.spacing.z>=.001f &&
+            Finite(g.Position(g.NodeCount()-1)), "invalid irradiance grid extent");
+    }
     Require(d.edge>=16 && d.edge<=128 && std::has_single_bit(d.edge) && d.ggx_samples>=64 &&
         d.ggx_samples<=2048 && std::has_single_bit(d.ggx_samples) &&
-        d.blend==SceneProbeBlend::NormalizedInfluenceVisibility, "unsupported bake/blend policy");
+        d.blend==SceneProbeBlend::GridCornersAndReflectionInfluence, "unsupported bake/blend policy");
     Require(d.revisions.environment && d.revisions.material && d.revisions.light && d.revisions.static_layout,
         "missing scene input revision");
     Require(!dependencies.empty() && dependencies.size()<=256, "invalid dependency count");
@@ -224,6 +232,8 @@ std::string DeriveSceneProbeInputIdentity(const SceneProbeDescription &descripti
     };
     auto vector=[&](Float3 value) { floating(value.x); floating(value.y); floating(value.z); };
     bytes(tag);
+    vector(description.grid.origin); vector(description.grid.spacing);
+    for(auto n:description.grid.dimensions) integer(n,4);
     integer(description.edge,4); integer(description.ggx_samples,4);
     integer(static_cast<std::uint32_t>(description.blend),4);
     integer(probes.size());
@@ -267,13 +277,17 @@ std::vector<std::byte> BuildSceneProbePackage(AssetId asset,std::span<const std:
     Require(asset.value && !probes.empty() && probes.size()<=kSceneProbeMaximumCount,"invalid asset/probe count");
     const auto depBytes=ValidateDescription(d,dependencies);
     const auto mips=std::bit_width(d.edge);
-    const bool baked=!bake.radiance.empty() || !bake.prefiltered.empty() || !bake.cosine_sh.empty() || !bake.first_hit_distance.empty();
+    const bool baked=!bake.radiance.empty() || !bake.prefiltered.empty() || !bake.cosine_sh.empty() || !bake.first_hit_distance.empty() || !bake.cells.empty();
     const auto rawCount=Texels(d.edge,1,probes.size()),ggxCount=Texels(d.edge,mips,probes.size());
+    const auto nodes=d.grid.NodeCount();
+    const auto shCount=Mul(nodes?nodes:probes.size(),9);
+    Require(Mul(Texels(d.edge,1,nodes+probes.size()),20)<=kMaximumBytes,"capture exceeds bounded storage");
     Require(!baked || (bake.radiance.size()==rawCount && bake.prefiltered.size()==ggxCount &&
-        bake.cosine_sh.size()==Mul(probes.size(),9) && bake.first_hit_distance.size()==rawCount),"incomplete baked payloads");
+        bake.cosine_sh.size()==shCount && bake.first_hit_distance.size()==(nodes?0:rawCount) && bake.cells.size()==d.grid.CellCount()),"incomplete baked payloads");
     const std::uint64_t rawBytes=baked?Mul(rawCount,16):0,ggxBytes=baked?Mul(ggxCount,16):0,
-        shBytes=baked?Mul(Mul(probes.size(),9),16):0,distanceBytes=baked?Mul(rawCount,4):0;
+        shBytes=baked?Mul(shCount,16):0,distanceBytes=baked&&!nodes?Mul(rawCount,4):0;
     auto total=Add(kSceneProbeHeaderStride,depBytes); total=Add(total,Mul(probes.size(),kSceneProbeRecordStride));
+    total=Add(total,Mul(bake.cells.size(),72));
     for (auto size : {rawBytes,ggxBytes,shBytes,distanceBytes}) total=Add(total,size);
     std::vector<std::byte> bytes(static_cast<std::size_t>(total)); std::copy(kMagic.begin(),kMagic.end(),bytes.begin());
     Put(bytes,8,kSceneProbeVersion,4); Put(bytes,12,1,4); Put(bytes,16,kSceneProbeHeaderStride,4); Put(bytes,20,kSceneProbeRecordStride,4);
@@ -283,6 +297,8 @@ std::vector<std::byte> BuildSceneProbePackage(AssetId asset,std::span<const std:
     Put(bytes,96,dependencies.size(),4); Put(bytes,100,d.environment_dependency,4); Put(bytes,104,d.material_dependency,4);
     Put(bytes,108,d.light_dependency,4); Put(bytes,112,d.static_layout_dependency,4); Put(bytes,120,depBytes,8);
     Put(bytes,128,rawBytes,8); Put(bytes,136,ggxBytes,8); Put(bytes,144,shBytes,8); Put(bytes,152,distanceBytes,8);
+    Put3(bytes,192,d.grid.origin); Put3(bytes,204,d.grid.spacing);
+    for(std::size_t i=0;i<3;++i) Put(bytes,216+4*i,d.grid.dimensions[i],4);
     std::size_t offset=kSceneProbeHeaderStride;
     for (const auto &id : dependencies) { Put(bytes,offset,id.size(),2); offset+=2; std::memcpy(bytes.data()+offset,id.data(),id.size()); offset+=id.size(); }
     std::uint64_t previous=0;
@@ -295,6 +311,14 @@ std::vector<std::byte> BuildSceneProbePackage(AssetId asset,std::span<const std:
         const auto distance=bake.first_hit_distance[i];
         Require(std::isfinite(distance) && distance>=0 && distance<=probes[i/(std::size_t(d.edge)*d.edge*6)].capture_distance,"invalid first-hit distance");
         PutFloat(bytes,offset,distance); offset+=4;
+    }
+    for(const auto &cell:bake.cells)
+    {
+        Require(std::popcount(cell.reflections[0])+std::popcount(cell.reflections[1])<=8,"split irradiance cells or adjust reflection bounds: more than eight overlapping reflection probes");
+        for(auto mask:cell.reachable) bytes[offset++]=std::byte(mask);
+        const auto candidates=std::uint64_t(cell.reflections[0])|(std::uint64_t(cell.reflections[1])<<32);
+        Require(probes.size()==64 || (candidates>>probes.size())==0,"invalid reflection cell index");
+        for(auto mask:cell.reflections) { Put(bytes,offset,mask,4); offset+=4; }
     }
     const auto digest=PackageDigest(bytes);
     std::copy(digest.begin(),digest.end(),bytes.begin()+160); return bytes;
@@ -313,6 +337,8 @@ SceneProbePackageView ReadSceneProbePackage(std::span<const std::byte> bytes,Ass
     const auto count=Get(bytes,44,4),depCount=Get(bytes,96,4),depBytes=Get(bytes,120,8);
     Require(count && count<=kSceneProbeMaximumCount && depCount && depCount<=256 && depBytes<=kMaximumBytes,"invalid counts");
     auto &d=p.description;
+    d.grid.origin=Get3(bytes,192); d.grid.spacing=Get3(bytes,204);
+    for(std::size_t i=0;i<3;++i) d.grid.dimensions[i]=static_cast<std::uint32_t>(Get(bytes,216+4*i,4));
     d.edge=static_cast<std::uint32_t>(Get(bytes,48,4)); d.ggx_samples=static_cast<std::uint32_t>(Get(bytes,56,4));
     d.blend=static_cast<SceneProbeBlend>(Get(bytes,60,4));
     d.revisions={Get(bytes,64,8),Get(bytes,72,8),Get(bytes,80,8),Get(bytes,88,8)};
@@ -331,10 +357,12 @@ SceneProbePackageView ReadSceneProbePackage(std::span<const std::byte> bytes,Ass
     std::uint64_t previous=0;
     for (std::size_t i=0;i<count;++i) { auto record=DecodeRecord(bytes,offset); Require(record.stable_id>previous,"duplicate/unsorted probe identity"); previous=record.stable_id; p.probes.push_back(record); offset+=kSceneProbeRecordStride; }
     const bool baked=p.payload==SceneProbePayload::Baked;
+    const auto nodes=d.grid.NodeCount();
+    Require(Mul(Texels(d.edge,1,nodes+count),20)<=kMaximumBytes,"capture exceeds bounded storage");
     const auto raw=baked?Mul(Texels(d.edge,1,count),16):0,ggx=baked?Mul(Texels(d.edge,std::bit_width(d.edge),count),16):0,
-        sh=baked?Mul(Mul(count,9),16):0,distance=baked?Mul(Texels(d.edge,1,count),4):0;
+        sh=baked?Mul(Mul(nodes?nodes:count,9),16):0,distance=baked&&!nodes?Mul(Texels(d.edge,1,count),4):0;
     Require(Get(bytes,128,8)==raw && Get(bytes,136,8)==ggx && Get(bytes,144,8)==sh && Get(bytes,152,8)==distance &&
-        Add(Add(Add(Add(offset,raw),ggx),sh),distance)==bytes.size(),"payload counts/strides/extent mismatch");
+        Add(Add(Add(Add(Add(offset,raw),ggx),sh),distance),baked?Mul(d.grid.CellCount(),72):0)==bytes.size(),"payload counts/strides/extent mismatch");
     if (baked)
     {
         p.radiance=CubeView(bytes.subspan(offset,static_cast<std::size_t>(raw)),d.edge,1,count,p.dependencies); offset+=static_cast<std::size_t>(raw);
@@ -346,6 +374,15 @@ SceneProbePackageView ReadSceneProbePackage(std::span<const std::byte> bytes,Ass
         {
             const auto value=GetFloat(p.first_hit_distance,at),maximum=p.probes[at/(std::size_t(d.edge)*d.edge*6*4)].capture_distance;
             Require(std::isfinite(value) && value>=0 && value<=maximum,"invalid first-hit-distance payload");
+        }
+        offset+=static_cast<std::size_t>(distance);
+        p.cells.resize(d.grid.CellCount());
+        for(auto &cell:p.cells)
+        {
+            for(auto &mask:cell.reachable) mask=std::to_integer<std::uint8_t>(bytes[offset++]);
+            for(auto &mask:cell.reflections) { mask=static_cast<std::uint32_t>(Get(bytes,offset,4)); offset+=4; }
+            const auto candidates=std::uint64_t(cell.reflections[0])|(std::uint64_t(cell.reflections[1])<<32);
+            Require(std::popcount(candidates)<=8 && (count==64 || (candidates>>count)==0),"invalid reflection cell indices/count");
         }
     }
     return p;

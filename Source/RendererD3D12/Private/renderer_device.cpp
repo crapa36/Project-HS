@@ -12,7 +12,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     config.gpu_validation = false;
     config.capture_timing_stream = false;
     config.capture_gpu_timings = false;
-    config.capture_hero_work = false;
+    config.capture_translucency_diagnostics = false;
 #endif
     validation_status = {};
     validation_status.debug_layer_requested = config.validation;
@@ -1069,6 +1069,13 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
             device->CreateShaderResourceView(nullptr, &view, cpu(offset));
         };
 
+        create_null_texture(kTerrainPageDescriptorOffset,D3D12_SRV_DIMENSION_TEXTURE2DARRAY,DXGI_FORMAT_R8G8B8A8_UNORM);
+        create_null_texture(kTerrainPageDescriptorOffset+2,D3D12_SRV_DIMENSION_TEXTURE2DARRAY,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        D3D12_SHADER_RESOURCE_VIEW_DESC terrain_sections_null{};
+        terrain_sections_null.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+        terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(TerrainSection);
+        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+1));
         constexpr std::array post_table_offsets{
             0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
         for (const auto table_offset : post_table_offsets)
@@ -1113,9 +1120,9 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
 
         // Root table36 has an independent immutable CBV/SRV/UAV table per hero
         // transparency phase, including phases not selected by this frame.
-        for (UINT phase = 0; phase < kHeroTransparencyPhaseCount; ++phase)
+        for (UINT phase = 0; phase < kLayeredTranslucencyPhaseCount; ++phase)
         {
-            const auto offset = kHeroTransparencyDescriptorOffset + phase * kHeroTransparencyTableSize;
+            const auto offset = kLayeredTranslucencyDescriptorOffset + phase * kLayeredTranslucencyTableSize;
             device->CreateConstantBufferView(nullptr, cpu(offset));
             device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(offset + 22));
         }

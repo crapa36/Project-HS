@@ -2,7 +2,7 @@
 
 #include <hs/core/presentation_event.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/render_data/render_instance_lookup.hpp>
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/runtime/vfx_image.hpp>

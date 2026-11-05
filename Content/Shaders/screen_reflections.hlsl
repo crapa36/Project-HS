@@ -46,8 +46,8 @@ cbuffer FrameConstants : register(b0)
     float4 DisplayOptions;
     row_major float4x4 InverseUnjitteredViewProjection;
     float4 LightingOptions;
-    uint4 HeroMaterialParameterBases[2];
-    uint4 HeroMaterialVaryingMasks[2];
+    uint4 CharacterMaterialParameterBases[2];
+    uint4 CharacterMaterialVaryingMasks[2];
     uint4 HeroBindingRanges[7];
     float4 ProbeOptions;
 };
@@ -98,7 +98,8 @@ RWStructuredBuffer<float> SsrClosestDepth : register(u6, space16);
 #include "material_sidecar.hlsli"
 #include "surface_layout.hlsli"
 #include "bsdf_metallic_roughness.hlsli"
-#include "hero_material.hlsli"
+#include "screen_reflection_confidence.hlsli"
+#include "character_material.hlsli"
 #ifdef HS_GENERATED_DEFERRED_MATERIALS
 #include "deferred_materials.generated.hlsli"
 #endif
@@ -217,7 +218,7 @@ SsrGuide SsrLoadGuide(int2 pixel)
     {
         const uint model = HsSurfaceModel(g.metadata);
         g.valid = model == HsSurfaceModelEnvironment ||
-            HsHeroOpaqueOrdinalValid(g.metadata.x - HsHeroMaterialIdBase);
+            HsHeroOpaqueOrdinalValid(g.metadata.x - HsCharacterMaterialIdBase);
     }
     if (g.valid)
     {
@@ -357,8 +358,7 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
 {
     if (any(dispatch.xy >= uint2(SsrTraceSize.xy))) return;
     SsrGuide g = SsrGuideForTrace(dispatch.xy);
-    float3 accumulated = 0.0;
-    float accumulatedConfidence = 0.0;
+    float4 accumulated = 0.0;
     if (g.valid && g.roughness < SsrTraceParameters.w)
     {
         HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(g.pixel));
@@ -389,16 +389,14 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
                                   SsrEnvironmentSpecular.Load(int3(hitPixel, 0)).rgb, 0.0);
             float3 contribution = radiance * specular * (cosine * visibility / pdf);
             if (!all(isfinite(contribution))) continue;
-            accumulated += contribution;
-            accumulatedConfidence += confidence;
+            accumulated += HsSsrContribution(contribution, confidence);
         }
         // Include null VNDF, opposite-sheet and miss samples in the original
         // sampling denominator; resampling or survivor normalization is biased.
         accumulated /= float(samples);
-        accumulatedConfidence /= float(samples);
-        accumulatedConfidence *= 1.0 - smoothstep(SsrTraceParameters.w * 0.8, SsrTraceParameters.w, g.roughness);
+        accumulated *= 1.0 - smoothstep(SsrTraceParameters.w * 0.8, SsrTraceParameters.w, g.roughness);
     }
-    SsrRawOutput[dispatch.xy] = float4(max(accumulated, 0.0), saturate(accumulatedConfidence));
+    SsrRawOutput[dispatch.xy] = float4(max(accumulated.rgb, 0.0), saturate(accumulated.a));
 }
 [numthreads(8, 8, 1)]
 void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
@@ -458,7 +456,7 @@ void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
             float blend = saturate(SsrFilterParameters.z * surfaceHistory.y * weightSum);
             result = lerp(current, history, blend);
             // New offscreen/disoccluded misses immediately restore environment.
-            result.a = min(result.a, current.a);
+            result = HsSsrLimitHistory(result, current.a);
         }
     }
     SsrCurrentRadiance[pixel] = result;
@@ -495,6 +493,6 @@ void ScreenReflectionSpatialCS(uint3 dispatch : SV_DispatchThreadID)
     int3 pixel = int3(dispatch.xy, 0);
     float4 opaque = SsrOpaqueHDR.Load(pixel);
     float3 environment = SsrEnvironmentSpecular.Load(pixel).rgb;
-    float3 replaced = opaque.rgb - environment + lerp(environment, reflection.rgb, saturate(reflection.a));
+    float3 replaced = HsSsrCompose(opaque.rgb, environment, reflection);
     SsrComposed[dispatch.xy] = float4(clamp(replaced, 0.0, 65000.0), opaque.a);
 }

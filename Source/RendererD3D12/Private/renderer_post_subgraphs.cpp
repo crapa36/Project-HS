@@ -8,7 +8,7 @@ namespace hs
 {
 namespace
 {
-std::array<ResourceVersion, 34> PostVersions(const PostSubgraphInputs &in,
+std::array<ResourceVersion, 33> PostVersions(const PostSubgraphInputs &in,
     const PostSubgraphTargets &target)
 {
     return {in.scene_hdr, in.composite_hdr, in.depth, in.normal, in.metadata,
@@ -18,7 +18,7 @@ std::array<ResourceVersion, 34> PostVersions(const PostSubgraphInputs &in,
         in.transparent_guides[2], in.transparent_guides[3], in.transparent_guides[4],
         in.transparent_guides[5], in.transparent_guides[6], in.screen_overlay_alpha,
         in.screen_overlay_upload, in.screen_overlay_gradient,
-        in.reactive_composite_hdr, target.temporal, target.bloom_half,
+        target.temporal, target.bloom_half,
         target.bloom_quarter, target.bloom_half_combined, target.post_a,
         target.post_b, target.back_buffer, target.temporal_normal,
         target.temporal_material, target.display_linear};

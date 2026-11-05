@@ -1,7 +1,7 @@
 #pragma once
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include "runtime_diagnostics.hpp"
-#include <hs/renderer/hero_work.hpp>
+#include <hs/renderer/translucency_diagnostics.hpp>
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
@@ -13,14 +13,14 @@
 namespace hs::runtime_detail
 {
 // Isolated developer capture. It never feeds normal frame policy or asset identity.
-class HeroWorkLog
+class TranslucencyDiagnosticsLog
 {
   public:
-    HeroWorkLog(const std::filesystem::path &directory, DiagnosticClock clock)
-        : directory_(directory), output_(directory / "hero_work.csv", std::ios::binary),
+    TranslucencyDiagnosticsLog(const std::filesystem::path &directory, DiagnosticClock clock)
+        : directory_(directory), output_(directory / "translucency_diagnostics.csv", std::ios::binary),
           lines_(output_, true, Header(), clock) {}
     bool Failed() const noexcept { return !output_ || lines_.Failed(); }
-    void Append(const RendererHeroWorkSample &sample)
+    void Append(const RendererTranslucencyDiagnosticsSample &sample)
     {
         auto found = std::ranges::find_if(pipelines_, [&](const auto &pipeline) { return Same(pipeline, sample.pipeline); });
         const auto pipeline = static_cast<std::size_t>(found - pipelines_.begin());
@@ -59,7 +59,7 @@ class HeroWorkLog
         row += '\n';
         lines_.Append(row);
     }
-    bool Finish(const RendererHeroWorkStatus &status, bool drained)
+    bool Finish(const RendererTranslucencyDiagnosticsStatus &status, bool drained)
     {
         const auto written = lines_.Finish(); output_.close();
         nlohmann::json metadata = nlohmann::json::array();
@@ -76,7 +76,7 @@ class HeroWorkLog
                 {"dsv_format", p.dsv_format}, {"blend_enabled", p.blend_enabled}, {"src_blend", p.src_blend},
                 {"dst_blend", p.dst_blend}, {"blend_op", p.blend_op}, {"src_blend_alpha", p.src_blend_alpha},
                 {"dst_blend_alpha", p.dst_blend_alpha}, {"blend_op_alpha", p.blend_op_alpha}, {"write_mask", p.write_mask}});
-        std::ofstream pipelines(directory_ / "hero_work_pipelines.json", std::ios::binary);
+        std::ofstream pipelines(directory_ / "translucency_diagnostics_pipelines.json", std::ios::binary);
         pipelines << metadata.dump(2) << '\n'; pipelines.close();
         const bool io = written && lines_.Complete() && !output_.fail() && !pipelines.fail();
         const bool native_complete = io && drained && status.enabled && !status.overflowed && status.failed_frames == 0 &&
@@ -92,7 +92,7 @@ class HeroWorkLog
             {"native_stream_complete", native_complete}, {"shader_counter_stream_complete", shader_complete}, {"t01_complete", false},
             {"t01_incomplete_reason", "actual sampled mip and DCE-retained full-evaluator instruction work remain unavailable; logical calls and exact shader-predicate coverage are separate measurements"},
             {"coverage_available", status.samples != 0 && shader_complete},
-            {"shader_counter_names", kHeroWorkShaderCounterNames},
+            {"shader_counter_names", kTranslucencyDiagnosticsShaderCounterNames},
             {"shader_counter_flags", {{"counter_wrap", 1}, {"pixel_out_of_range", 2}}},
             {"shader_counter_semantics", "uint32 atomic events; all raw values retained on invalid; unique bitmaps use atomicOr previous-bit tests per contributor/phase/layer; coverage is shader-entry or accepted-shader-predicate union, not post-depth visible pixels"},
             {"covered_sample_semantics", "countbits(SV_Coverage) at shader entry and accepted predicates; distinct from native occlusion passed samples and raw PSInvocations; actual PSO sample_count is in pipeline metadata"},
@@ -116,7 +116,7 @@ class HeroWorkLog
             {"readback_bytes", status.readback_bytes}, {"query_heap_count", status.query_heap_count}, {"query_count", status.query_count},
             {"query_heap_bytes_available", status.query_heap_bytes_available}, {"mesh_statistics_supported", status.mesh_statistics_supported},
             {"interpretation", "isolated diagnostic; native PS/occlusion counts are not unique pixels, full evaluations or exclusive GPU contribution"}};
-        std::ofstream manifest(directory_ / "hero_work_status.json", std::ios::binary);
+        std::ofstream manifest(directory_ / "translucency_diagnostics_status.json", std::ios::binary);
         manifest << summary.dump(2) << '\n'; manifest.close();
         return complete && !manifest.fail();
     }
@@ -124,7 +124,7 @@ class HeroWorkLog
     static std::string Header()
     {
         std::string header = "completed_frame,tick,view_id,phase,layer,contributor,pipeline,asset_id,product,label,lod,material,candidate_instances,geometry_indices,color_format,data_format,color_mips,data_mips,width,height,execute_indirect_calls,draw_indexed_calls,dispatch_mesh_calls,gpu_begin,gpu_end,gpu_frequency,cpu_begin_qpc,cpu_end_qpc,cpu_qpc_frequency,calibrated_begin_qpc,calibrated_end_qpc,timestamp_valid,calibration_valid,statistics_valid,mesh_statistics_available,occlusion_valid,indirect_arguments_valid,ia_vertices,ia_primitives,vs_invocations,gs_invocations,gs_primitives,clip_invocations,clip_primitives,ps_invocations,hs_invocations,ds_invocations,cs_invocations,as_invocations,ms_invocations,ms_primitives,occlusion_samples,root_constant,index_count_per_instance,instance_count,start_index_location,base_vertex_location_bits,start_instance_location,unique_pixels_available,full_material_evaluations_available,layer_rejections_available,sampled_mip_available,indirect_arguments_in_range,shader_counters_available,shader_counters_valid,shader_counter_flags,shader_bitmap_capacity_pixels,diagnostic_mode";
-        for (const auto *name : kHeroWorkShaderCounterNames) { header += ','; header += name; }
+        for (const auto *name : kTranslucencyDiagnosticsShaderCounterNames) { header += ','; header += name; }
         return header + '\n';
     }
     static std::string Hex(const std::array<std::byte, 32> &bytes)
@@ -134,7 +134,7 @@ class HeroWorkLog
         for (const auto b : bytes) { const auto value = std::to_integer<unsigned>(b); result += digits[value >> 4]; result += digits[value & 15]; }
         return result;
     }
-    static bool Same(const RendererHeroWorkPipeline &a, const RendererHeroWorkPipeline &b)
+    static bool Same(const RendererTranslucencyDiagnosticsPipeline &a, const RendererTranslucencyDiagnosticsPipeline &b)
     {
         const auto fields = [](const auto &p) { return std::tie(p.vertex_product, p.pixel_product, p.vertex_sha256, p.pixel_sha256,
             p.source_requested_flags, p.cull_mode, p.fill_mode, p.depth_func, p.depth_write_mask, p.sample_count, p.sample_mask,
@@ -149,7 +149,7 @@ class HeroWorkLog
     std::filesystem::path directory_;
     std::ofstream output_;
     DiagnosticLog lines_;
-    std::vector<RendererHeroWorkPipeline> pipelines_;
+    std::vector<RendererTranslucencyDiagnosticsPipeline> pipelines_;
     std::uint64_t invalid_argument_samples_{}, invalid_timestamp_samples_{}, uncalibrated_samples_{}, invalid_shader_samples_{};
 };
 }

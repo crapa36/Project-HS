@@ -16,7 +16,7 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSrvCount = 10, kUavCount = 5, kDescriptorCount = 15;
+constexpr std::uint32_t kSrvCount = AoSrvCount, kUavCount = AoUavCount, kDescriptorCount = kSrvCount + kUavCount;
 constexpr std::uint32_t kConstantStride = 512;
 constexpr std::array<std::string_view, 6> kShaderProducts{
     "render/shader/gtao_horizon_cs.dxil", "render/shader/gtao_temporal_cs.dxil",
@@ -240,17 +240,17 @@ Result AmbientOcclusionSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R16_FLOAT, next->contact); !created) return created;
 
     D3D12_DESCRIPTOR_RANGE ranges[3]{};
-    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvCount, 0, 12, 0};
-    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kUavCount, 0, 12, 0};
-    ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 6, 33, 0};
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvCount, AoSrvDepth, kAoRegisterSpace, 0};
+    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kUavCount, AoUavRawOutput, kAoRegisterSpace, 0};
+    ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, kAoAdaptiveRegister, kAoAdaptiveSpace, 0};
     D3D12_ROOT_PARAMETER parameters[4]{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    parameters[0].Descriptor = {0, 12};
-    parameters[1].ParameterType = parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[1].DescriptorTable = {1, &ranges[0]};
-    parameters[2].DescriptorTable = {1, &ranges[1]};
-    parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[3].DescriptorTable={1,&ranges[2]};
+    parameters[AoRootConstants].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[AoRootConstants].Descriptor = {kAoConstantsRegister, kAoRegisterSpace};
+    parameters[AoRootSrvs].ParameterType = parameters[AoRootUavs].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[AoRootSrvs].DescriptorTable = {1, &ranges[0]};
+    parameters[AoRootUavs].DescriptorTable = {1, &ranges[1]};
+    parameters[AoRootAdaptive].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[AoRootAdaptive].DescriptorTable={1,&ranges[2]};
     D3D12_ROOT_SIGNATURE_DESC rootDescription{};
     rootDescription.NumParameters = next->adaptive_compute?4:3; rootDescription.pParameters = parameters;
     ComPtr<ID3DBlob> signature, diagnostics;
@@ -445,25 +445,15 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
     constants.frame_info = {historyValid ? 1u : 0u, static_cast<std::uint32_t>(inputs.frame_index),
                             storage->ao_enabled ? 1u : 0u, storage->contact_enabled ? 1u : 0u};
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
-    storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
-    storage->Srv(inputs.frame_slot, 1, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
-    storage->Srv(inputs.frame_slot, 2, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
-    storage->Srv(inputs.frame_slot, 3, storage->ao_enabled ? inputs.motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(inputs.frame_slot, 4, storage->ao_enabled ? inputs.surface_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT);
-    storage->Srv(inputs.frame_slot, 5, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Srv(inputs.frame_slot, 6, historyValid ? storage->history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Srv(inputs.frame_slot, 7, historyValid ? storage->metadata_history[storage->read_index].resource.Get() : nullptr, DXGI_FORMAT_R32_UINT);
-    storage->Srv(inputs.frame_slot, 8, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Srv(inputs.frame_slot, 9, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32_UINT);
-    storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Uav(inputs.frame_slot, 1, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Uav(inputs.frame_slot, 2, storage->resolved.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-    storage->Uav(inputs.frame_slot, 3, storage->contact.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-    storage->Uav(inputs.frame_slot, 4, storage->metadata_history[writeIndex].resource.Get(), DXGI_FORMAT_R32_UINT);
-    if(storage->adaptive_compute)
-    {
-        storage->Srv(inputs.frame_slot,kDescriptorCount,inputs.adaptive_density.resource,DXGI_FORMAT_R8_UINT);
-    }
+#define HS_AO_WRITE_SRV(name, slot, type, shader, resource, format) storage->Srv(inputs.frame_slot, AoSrv##name, resource, format);
+    HS_AO_SRVS(HS_AO_WRITE_SRV)
+#undef HS_AO_WRITE_SRV
+#define HS_AO_WRITE_UAV(name, slot, type, shader, resource, format) storage->Uav(inputs.frame_slot, AoUav##name, resource, format);
+    HS_AO_UAVS(HS_AO_WRITE_UAV)
+#undef HS_AO_WRITE_UAV
+#define HS_AO_WRITE_ADAPTIVE(name, slot, space, type, shader, resource, format) storage->Srv(inputs.frame_slot, kDescriptorCount, resource, format);
+    if (storage->adaptive_compute) { HS_AO_ADAPTIVE(HS_AO_WRITE_ADAPTIVE) }
+#undef HS_AO_WRITE_ADAPTIVE
 
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.active = aoActive;
@@ -492,17 +482,17 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
             commands->SetDescriptorHeaps(1, heaps);
             commands->SetComputeRootSignature(storage->root.Get());
             commands->SetPipelineState(storage->pipelines[pipeline].Get());
-            commands->SetComputeRootConstantBufferView(0, storage->constants.resource->GetGPUVirtualAddress() + UINT64(slot) * kConstantStride);
-            commands->SetComputeRootDescriptorTable(1, storage->Gpu(slot, 0));
-            commands->SetComputeRootDescriptorTable(2, storage->Gpu(slot, kSrvCount));
-            if (pipeline == 4) commands->SetComputeRootDescriptorTable(3, storage->Gpu(slot, kDescriptorCount));
+            commands->SetComputeRootConstantBufferView(AoRootConstants, storage->constants.resource->GetGPUVirtualAddress() + UINT64(slot) * kConstantStride);
+            commands->SetComputeRootDescriptorTable(AoRootSrvs, storage->Gpu(slot, 0));
+            commands->SetComputeRootDescriptorTable(AoRootUavs, storage->Gpu(slot, kSrvCount));
+            if (pipeline == 4) commands->SetComputeRootDescriptorTable(AoRootAdaptive, storage->Gpu(slot, kDescriptorCount));
             commands->Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
         };
     };
     auto readGuides = [&](PassBuilder &pass) {
-        pass.Read(inputs.depth.version, Access::ComputeRead);
-        pass.Read(inputs.normal.version, Access::ComputeRead);
-        pass.Read(inputs.metadata.version, Access::ComputeRead);
+#define HS_AO_READ(name) pass.Read(HS_AO_GRAPH_##name, Access::ComputeRead);
+        HS_AO_GUIDES(HS_AO_READ)
+#undef HS_AO_READ
     };
     const auto pass_binding = [&](std::size_t index, std::uint32_t id,
         std::string_view name, QueueHint queue) -> std::optional<PassBuilder> {
@@ -528,9 +518,12 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
             auto &prepare = *prepareBinding;
             if (!retained)
             {
-                prepare.Read(inputs.depth.version, Access::ComputeRead);
-                prepare.Read(inputs.metadata.version, Access::ComputeRead);
-                metadata = prepare.Write(metadata, Access::UnorderedWrite);
+#define HS_AO_READ(name) prepare.Read(HS_AO_GRAPH_##name, Access::ComputeRead);
+#define HS_AO_WRITE(name) HS_AO_GRAPH_##name = prepare.Write(HS_AO_GRAPH_##name, Access::UnorderedWrite);
+                HS_AO_PREPARE_READS(HS_AO_READ)
+                HS_AO_PREPARE_WRITES(HS_AO_WRITE)
+#undef HS_AO_READ
+#undef HS_AO_WRITE
             }
             prepare.SetExecute(execute(5, active));
         }
@@ -538,14 +531,18 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         if (!horizonBinding) return AoFailure(ErrorCode::InvalidState, "AO horizon pass is missing.");
         auto &horizon = *horizonBinding;
         if (!retained) readGuides(horizon);
-        if (preparedInverseW && !retained) horizon.Read(metadata, Access::ComputeRead);
+#define HS_AO_READ(name) horizon.Read(HS_AO_GRAPH_##name, Access::ComputeRead);
+#define HS_AO_WRITE(name) HS_AO_GRAPH_##name = horizon.Write(HS_AO_GRAPH_##name, Access::UnorderedWrite);
+        if (preparedInverseW && !retained) { HS_AO_HORIZON_PREPARED(HS_AO_READ) }
         if(storage->adaptive_compute)
         {
-            if (!retained) { horizon.Read(inputs.adaptive_density.version,Access::ComputeRead); raw=horizon.Write(raw,Access::UnorderedWrite); }
+            if (!retained) { HS_AO_HORIZON_ADAPTIVE(HS_AO_READ) HS_AO_HORIZON_WRITES(HS_AO_WRITE) }
             else raw = retained->raw;
             horizon.SetExecute(execute(4,aoActive)); outputs.adaptive_density_used=true;
         }
-        else{raw=retained?retained->raw:horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
+        else { if (retained) raw = retained->raw; else { HS_AO_HORIZON_WRITES(HS_AO_WRITE) } horizon.SetExecute(execute(0,aoActive)); }
+#undef HS_AO_READ
+#undef HS_AO_WRITE
         if (capture) capture->raw = raw;
         auto temporalBinding = pass_binding(passOffset+1,46,"GTAOTemporal",inputs.queue);
         if (!temporalBinding) return AoFailure(ErrorCode::InvalidState, "AO retained temporal pass is missing.");
@@ -553,16 +550,13 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         if (retained) { history = retained->history_output; metadata = retained->metadata; }
         else
         {
-            readGuides(temporal); temporal.Read(raw, Access::ComputeRead);
-            temporal.Read(inputs.motion.version, Access::ComputeRead);
-            temporal.Read(inputs.surface_history.version, Access::ComputeRead);
-            if (historyValid)
-            {
-                temporal.Read(previous, Access::ComputeRead);
-                temporal.Read(previousMetadata, Access::ComputeRead);
-            }
-            history = temporal.Write(history, Access::UnorderedWrite);
-            metadata = temporal.Write(metadata, Access::UnorderedWrite);
+#define HS_AO_READ(name) temporal.Read(HS_AO_GRAPH_##name, Access::ComputeRead);
+#define HS_AO_WRITE(name) HS_AO_GRAPH_##name = temporal.Write(HS_AO_GRAPH_##name, Access::UnorderedWrite);
+            readGuides(temporal); HS_AO_TEMPORAL_READS(HS_AO_READ)
+            if (historyValid) { HS_AO_HISTORY_READS(HS_AO_READ) }
+            HS_AO_TEMPORAL_WRITES(HS_AO_WRITE)
+#undef HS_AO_READ
+#undef HS_AO_WRITE
         }
         if (capture) { capture->history_output = history; capture->metadata = metadata; }
         temporal.SetExecute(execute(1, aoActive));
@@ -570,8 +564,13 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         if (!bilateralBinding) return AoFailure(ErrorCode::InvalidState, "AO retained bilateral pass is missing.");
         auto &bilateral = *bilateralBinding;
         if (retained) resolved = retained->resolved;
-        else { readGuides(bilateral); bilateral.Read(history, Access::ComputeRead);
-            resolved = bilateral.Write(resolved, Access::UnorderedWrite); }
+        else {
+#define HS_AO_READ(name) bilateral.Read(HS_AO_GRAPH_##name, Access::ComputeRead);
+#define HS_AO_WRITE(name) HS_AO_GRAPH_##name = bilateral.Write(HS_AO_GRAPH_##name, Access::UnorderedWrite);
+            readGuides(bilateral); HS_AO_BILATERAL_READS(HS_AO_READ) HS_AO_BILATERAL_WRITES(HS_AO_WRITE)
+#undef HS_AO_READ
+#undef HS_AO_WRITE
+        }
         if (capture) capture->resolved = resolved;
         bilateral.SetExecute(execute(2, active));
         // The next graph imports the same physical histories; record a common
@@ -594,7 +593,11 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         if (!contactBinding) return AoFailure(ErrorCode::InvalidState, "AO retained contact pass is missing.");
         auto &pass = *contactBinding;
         if (retained) contact = retained->contact_output;
-        else { readGuides(pass); contact = pass.Write(contact, Access::UnorderedWrite); }
+        else {
+#define HS_AO_WRITE(name) HS_AO_GRAPH_##name = pass.Write(HS_AO_GRAPH_##name, Access::UnorderedWrite);
+            readGuides(pass); HS_AO_CONTACT_WRITES(HS_AO_WRITE)
+#undef HS_AO_WRITE
+        }
         if (capture) capture->contact_output = contact;
         pass.SetExecute(execute(3, active));
         outputs.contact = contact; outputs.contact_resource = storage->contact.resource.Get();

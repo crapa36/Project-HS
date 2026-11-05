@@ -396,7 +396,6 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     for (auto &history : owner.targets.temporal_history) history.Reset();
     for (auto &history : owner.targets.temporal_normal_history) history.Reset();
     for (auto &history : owner.targets.temporal_material_history) history.Reset();
-    owner.targets.scene_work.Reset();
     owner.targets.display_linear.Reset();
     owner.targets.composite_hdr.Reset();
     for (auto &history : owner.targets.hzb_history) history.Reset();
@@ -478,10 +477,9 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     owner.targets.temporal_normal_history.swap(view_targets.temporal_normal_history);
     owner.targets.temporal_material_history.swap(view_targets.temporal_material_history);
     using std::swap;
-    swap(owner.targets.scene_work, view_targets.scene_work);
     swap(owner.targets.display_linear, view_targets.display_linear);
     swap(owner.targets.composite_hdr, view_targets.composite_hdr);
-    if (!owner.exposure_values[0].resource)
+    if (!owner.exposure_value.resource)
         if (auto created = PrepareExposureResources(owner); !created) return created;
     if (auto created = PrepareMaterialSidecars(owner.targets.material_sidecars, owner.render_width, owner.render_height); !created)
         return created;
@@ -612,8 +610,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
         WriteMaterialSidecarDescriptors(owner, frame);
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index,
-                             owner.exposure_read_index, 1u - owner.exposure_read_index, 0);
+        WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index);
     return Result::Success();
 }
 
@@ -891,8 +888,10 @@ Result D3D12Renderer::Impl::PrepareOptionPools(
 
 void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &targets) noexcept
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     owner.hdr_capture_source.Reset();
     owner.hdr_capture_valid = false;
+#endif
     using std::swap;
     auto &current = owner.targets;
     swap(current.depth, targets.depth); swap(current.shadow, targets.shadow);
@@ -903,7 +902,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
     swap(current.subsurface_diffuse, targets.subsurface_diffuse); swap(current.environment_specular, targets.environment_specular);
     swap(current.oit_accumulation, targets.oit_accumulation);
     swap(current.oit_revealage, targets.oit_revealage); swap(current.post_a, targets.post_a); swap(current.post_b, targets.post_b);
-    swap(current.scene_work, targets.scene_work); swap(current.display_linear, targets.display_linear);
+    swap(current.display_linear, targets.display_linear);
     swap(current.composite_hdr, targets.composite_hdr); swap(current.temporal_history, targets.temporal_history);
     swap(current.temporal_normal_history, targets.temporal_normal_history);
     swap(current.temporal_material_history, targets.temporal_material_history); swap(current.hzb_history, targets.hzb_history);
@@ -1072,8 +1071,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
         device->CreateShaderResourceView(owner.targets.gbuffer_surface_history.resource.Get(), &view, srv);
     }
     WriteMaterialSidecarDescriptors(owner, frame);
-    WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index,
-                         owner.exposure_read_index, 1u - owner.exposure_read_index, 0);
+    WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index);
     D3D12_SHADER_RESOURCE_VIEW_DESC ui_view{};
     ui_view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     ui_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1216,13 +1214,13 @@ Result D3D12Renderer::Impl::CreateGpuData()
             }
             for (const auto &binding : character.material_bindings)
             {
-                const auto name = render_data::kHeroMaterialNames[binding.hero_ordinal];
+                const auto name = render_data::kCharacterMaterialNames[binding.hero_ordinal];
                 const auto &material_id = package.dependencies[binding.dependency_index];
                 RendererAssetSource material_path;
                 if (auto resolved = ResolveRendererAsset(config, material_id, material_path); !resolved) return resolved;
                 std::vector<std::byte> material_bytes;
                 if (auto read = ReadBinary(material_path, material_bytes); !read) return read;
-                const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadHeroMaterialPackage(material_bytes, name); });
+                const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadCharacterMaterialPackage(material_bytes, name); });
                 if (material.domain != binding.domain)
                     throw std::runtime_error("character FBX slot binding disagrees with its material closure domain");
             }

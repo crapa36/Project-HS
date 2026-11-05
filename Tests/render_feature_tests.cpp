@@ -96,6 +96,9 @@ void ConfiguredPostTopology()
             fixture.inputs.bloom = enable_bloom;
             PostSubgraphPlan plan;
             Check(CompilePostSubgraphs(fixture.inputs, fixture.targets, plan).Succeeded(), "compile post topology");
+            Check(std::ranges::count_if(Pass(plan, 9).reads, [&](const auto &read) {
+                return SameVersion(read.version, fixture.inputs.composite_hdr);
+            }) == 1, "temporal resolve reads the composite once for color and reactive mask");
             Check(plan.passes.size() == 4u + (enable_bloom ? 4u : 0u),
                   "disabled features omit their actual GPU passes");
             for (std::uint32_t id = 10; id <= 13; ++id)

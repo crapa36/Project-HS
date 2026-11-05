@@ -230,7 +230,7 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     authoring["characters"]["archer"] = Json::array({
         Json{{"name", "body"}, {"material", "archer_skin"}}});
     const auto selections = cc::PrepareCharacterMaterialSelections(ir, "archer", authoring);
-    const std::array material_domains{cc::CharacterMaterialDomainSelection{0, rd::HeroMaterialDomain::Opaque}};
+    const std::array material_domains{cc::CharacterMaterialDomainSelection{0, rd::CharacterMaterialDomain::Opaque}};
     const auto products = cc::BuildCharacterProducts(ir, "archer", selections, material_domains);
     const auto again = cc::BuildCharacterProducts(ir, "archer", selections, material_domains);
     Check(products.size() == 3 && again.size() == products.size(), "direct product set has a legacy exchange or fabricated LOD");
@@ -310,8 +310,8 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
         layered_selections[1].hero_ordinal == 4,
         "neutral same-slot material identity list changed order or domain-independent ordinals");
     const std::array layered_domains{
-        cc::CharacterMaterialDomainSelection{5, rd::HeroMaterialDomain::Translucent},
-        cc::CharacterMaterialDomainSelection{4, rd::HeroMaterialDomain::Opaque}};
+        cc::CharacterMaterialDomainSelection{5, rd::CharacterMaterialDomain::Translucent},
+        cc::CharacterMaterialDomainSelection{4, rd::CharacterMaterialDomain::Opaque}};
     const auto layered_products = cc::BuildCharacterProducts(ir, "archer", layered_selections, layered_domains);
     const auto &layered_metadata = find(layered_products, "render/character/archer.rpkg");
     const auto decoded_layered = rd::DecodeCharacterMetadataPackage(layered_metadata.bytes,
@@ -319,10 +319,10 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     Check(decoded_layered.material_bindings.size() == 2 &&
         decoded_layered.material_bindings[0].slot == 0 &&
         decoded_layered.material_bindings[0].hero_ordinal == 5 &&
-        decoded_layered.material_bindings[0].domain == rd::HeroMaterialDomain::Translucent &&
+        decoded_layered.material_bindings[0].domain == rd::CharacterMaterialDomain::Translucent &&
         decoded_layered.material_bindings[1].slot == 0 &&
         decoded_layered.material_bindings[1].hero_ordinal == 4 &&
-        decoded_layered.material_bindings[1].domain == rd::HeroMaterialDomain::Opaque,
+        decoded_layered.material_bindings[1].domain == rd::CharacterMaterialDomain::Opaque,
         "neutral same-slot material identities did not encode independent cooked domains");
 
     // A current native Archer product has 11 authored clips; the schema1 import
@@ -342,7 +342,7 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
         rd::MaterialProgramSource{"render/shader/hero_resolve_cs.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
         rd::MaterialProgramSource{"render/shader/hero_shadow_ps.dxil", rd::MaterialProgramKind::HeroShadowPS}};
     linked.push_back({"render/material/archer_skin/material.rpkg", "material.rpkg", {},
-        rd::BuildHeroMaterialPackage("archer_skin", {}, {1, 0}, programs)});
+        rd::BuildCharacterMaterialPackage("archer_skin", {}, {1, 0}, programs)});
     for (const auto *semantic : {"diffuse", "normal"})
     {
         const auto name = "archer_" + std::string(semantic) + "_0";

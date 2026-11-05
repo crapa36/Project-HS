@@ -19,29 +19,10 @@
 namespace hs
 {
 struct AllocationResource;
-// Mirrors b0/space12 in ambient_occlusion.hlsl. Matrices use row-vector HLSL
-// convention. The first inverse transforms jittered NDC directly into view
-// position; world_to_view rotates world normals and light directions.
-struct alignas(16) AmbientOcclusionConstants
-{
-    DirectX::XMFLOAT4X4 inverse_projection{};
-    DirectX::XMFLOAT4X4 world_to_view{};
-    DirectX::XMFLOAT4X4 projection{};
-    DirectX::XMFLOAT4 render_size{};
-    DirectX::XMFLOAT4 ao_size{};
-    DirectX::XMFLOAT4 history_size{};
-    DirectX::XMFLOAT4 previous_depth_parameters{}; // P33,P34,P43,P44.
-    DirectX::XMFLOAT4 jitter_uv{}; // Current xy, previous zw; logical viewport UV.
-    DirectX::XMFLOAT4 gtao_parameters{1.0f, 1.0f, 0.8f, 0.0f}; // Radius, strength, falloff start, 0=general, 1=fast, 2=prepared inverse-W.
-    DirectX::XMFLOAT4 filter_parameters{0.03f, 0.85f, 0.9f, 0.02f}; // Depth, normal, history, bilateral.
-    DirectX::XMFLOAT4 contact_parameters{0.75f, 0.1f, 0.02f, 0.0f}; // Reach, thickness, bias in m.
-    DirectX::XMFLOAT4 toward_light{}; // Normalized world direction toward sun.
-    DirectX::XMUINT4 sample_counts{}; // Slices, steps per side, contact steps, filter radius.
-    DirectX::XMUINT4 frame_info{}; // History valid, frame index, AO enabled, contact enabled.
-};
-static_assert(sizeof(AmbientOcclusionConstants) == 368);
-static_assert(offsetof(AmbientOcclusionConstants, render_size) == 192);
-static_assert(offsetof(AmbientOcclusionConstants, sample_counts) == 336);
+// Shared with the shader; matrices use the row-vector HLSL convention.
+#define HS_AO_NATIVE
+#include "../../../Content/Shaders/ambient_occlusion_abi.hlsli"
+#undef HS_AO_NATIVE
 
 struct AmbientOcclusionGuide
 {

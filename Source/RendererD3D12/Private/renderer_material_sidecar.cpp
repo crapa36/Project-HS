@@ -19,7 +19,7 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(
         for (std::size_t ordinal = 0; ordinal < material_count; ++ordinal)
         {
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
-            const std::string name(hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]
+            const std::string name(hero ? kCharacterMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                         : kAuthoredMaterialNames[ordinal]);
             const auto id = render_data::MaterialProduct(name);
             if (candidate.packed_content || candidate.development_catalog)

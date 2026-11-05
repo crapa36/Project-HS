@@ -21,12 +21,11 @@ bool ExtentValid(ViewExtent e)
 }
 }
 
-Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
+Result D3D12Renderer::Impl::ValidateFrameInput(const RenderPackage &input)
 {
     if (input.views.empty()) return ViewFailure("A render frame requires at least one view.");
-    if (input.vfx.world_batch)
     {
-        const auto &batch = *input.vfx.world_batch;
+        const auto &batch = input.vfx.world_batch;
         if (batch.session != input.snapshots.current.header.session_id ||
             (batch.sequence == 0 && (batch.reset_particle_state ||
                 !input.vfx.particle_spawns.empty() || !input.vfx.effect_lines.empty())))
@@ -117,22 +116,13 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
                 if (!std::isfinite(delta) || std::abs(delta) > std::numeric_limits<float>::max())
                     return ViewFailure("Scene-relative camera/origin exceeds the GPU coordinate domain.");
     }
-    const auto snapshot_scene = input.snapshots.has_current ? input.snapshots.current.static_scene : nullptr;
-    const auto scene = input.scene ? input.scene->lease : snapshot_scene;
-    if (input.scene && snapshot_scene && input.scene->lease != snapshot_scene)
-        return ViewFailure("Frame scene association must retain the snapshot's actual immutable scene lease.");
-    if (input.scene && scene && input.scene->content_generation_id != scene->content_generation_id)
-        return ViewFailure("Frame scene association does not match its actual lease generation.");
-    if (input.scene && scene && input.scene->scene_asset_id.value != scene->scene_asset_id.value)
-        return ViewFailure("Frame scene asset identity does not match its actual immutable lease.");
+    const auto scene = input.snapshots.has_current ? input.snapshots.current.static_scene.get() : nullptr;
     if (scene && !scene->content_generation_id.empty() && scene->content_generation_id != resource_generation_id)
         return ViewFailure("Frame scene generation must match the resident GPU asset generation.");
-    if (input.scene && !input.scene->content_generation_id.empty() && input.scene->content_generation_id != resource_generation_id)
-        return ViewFailure("Frame scene association must match the resident GPU asset generation.");
     return ValidateFramePayload(input);
 }
 
-Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_input)
+Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_input)
 {
     const auto &input = frame_input;
     std::unordered_set<std::uint64_t> fresnel_ids;
@@ -535,7 +525,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         return ViewFailure("Authored VFX upload counts exceed their native index capacity.");
     const RenderSnapshot empty_snapshot{};
     const auto &snapshot = input.snapshots.has_current ? input.snapshots.current : empty_snapshot;
-    const auto static_scene = input.scene ? input.scene->lease : snapshot.static_scene;
+    const auto &static_scene = snapshot.static_scene;
     const auto render_instances = snapshot.instances;
     std::vector<RenderInstance> retained_instances;
     if (!input.vfx.entity_surfaces.empty())
@@ -732,32 +722,20 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
         if (auto r = CreateAllocation(v.offscreen_allocations[i], allocation, desc, D3D12_RESOURCE_STATE_COMMON); !r) return r;
         v.outputs[i] = v.offscreen_allocations[i].resource;
     }
-    for (auto &value : v.exposure_values)
-        if (auto r = CreateAllocation(value, allocation, BufferDescription(2*sizeof(float),
-                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), D3D12_RESOURCE_STATE_COPY_DEST); !r) return r;
-    if (auto r = CreateAllocation(v.exposure_histogram, allocation, BufferDescription(256*sizeof(std::uint32_t),
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), D3D12_RESOURCE_STATE_UNORDERED_ACCESS); !r) return r;
-    allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-    if (auto r = CreateAllocation(v.initial_exposure, allocation, BufferDescription(2*sizeof(float)),
-            D3D12_RESOURCE_STATE_GENERIC_READ); !r) return r;
-    void *mapped{}; const D3D12_RANGE no_read{};
-    const auto map_result = v.initial_exposure.resource->Map(0, &no_read, &mapped);
-    if (FAILED(map_result)) return HResultFailure("Map per-view initial exposure", map_result);
-    constexpr float initial[2]{1,1}; std::memcpy(mapped, initial, sizeof(initial));
-    v.initial_exposure.resource->Unmap(0, nullptr);
+    if (auto r = PrepareExposureResources(v); !r) return r;
     const auto completed = graph_queue_executor.Completed();
     const auto capacity = input.render_capacity;
     AdaptiveShadingCandidate adaptive;
     AmbientOcclusionCandidate ambient;
     SubsurfaceCandidate diffusion; ScreenReflectionsCandidate reflections;
-    HeroTransparencyCandidate transparency; HdrPostCandidate hdr; ScreenOverlayCandidate overlay;
+    LayeredTranslucencyCandidate transparency; HdrPostCandidate hdr; ScreenOverlayCandidate overlay;
     DecalSurfaceCandidate decals;
     LightListCandidate lights;
     VirtualShadowCandidate shadows; AdditionalShadowPrepared additional; VolumetricPrepared volume;
     if (auto r = PrepareAdaptiveShading(v, config, capacity, adaptive); !r) return r;
     if (auto r = PrepareAmbientOcclusion(v, config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
     if (auto r = PrepareSurfaceLighting(v, config, capacity, diffusion, reflections); !r) return r;
-    if (auto r = PrepareHeroTransparency(v, config, capacity, transparency); !r) return r;
+    if (auto r = PrepareLayeredTranslucency(v, config, capacity, transparency); !r) return r;
     if (auto r = PrepareHdrPost(v, config, capacity, input.output_extent, hdr); !r) return r;
     if (auto r = PrepareScreenOverlay(config, capacity, overlay); !r) return r;
     if (auto r = PrepareLightList(v, config, capacity, lights); !r) return r;
@@ -799,11 +777,13 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
 
 void D3D12Renderer::Impl::InvalidateCanonicalDeformationAfterCompletion() noexcept
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     for (auto &[id, view] : owned_views)
     {
         view->hdr_capture_source.Reset();
         view->hdr_capture_valid = false;
     }
+#endif
     skin_cache.Clear();
     for (auto &[id, view] : owned_views)
     {
@@ -827,7 +807,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = view.adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.subsurface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_reflections.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = RetireHeroTransparency(view.hero_transparency); !r) return r;
+    if (auto r = RetireLayeredTranslucency(view.hero_transparency); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.virtual_shadows.Commit(VirtualShadowCandidate{}, graph_queue_executor.Completed()); !r) return r;
@@ -902,7 +882,7 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
     return input;
 }
 
-Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrameResult &frame_result)
+Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameResult &frame_result)
 {
     frame_result.render_history_committed = false;
     // Rejected preflight keeps the last frame evidence, with no new submission receipt.
@@ -928,13 +908,21 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         return Result::Failure(ErrorCode::InvalidState, "hs_render_view", "Renderer is not available for frame submission.");
     CanonicalFrame canonical{source_input};
     auto &input = canonical.input;
-    const auto package_time = input.sample_time.value_or(std::chrono::steady_clock::now());
-    if (input.simulation_time)
+    if (!input.display_sample || !input.ui_draw_content)
+        return ViewFailure("A render package requires its prepared display sample and UI owner.");
+    const auto package_time = input.display_sample->time;
+    const auto alpha = input.display_sample->interpolation;
+    if (!(alpha >= 0.0f && alpha <= 1.0f) || (alpha < 1.0f && !input.snapshots.has_previous))
+        return ViewFailure("Display interpolation requires a finite fraction and a previous snapshot.");
+    if (alpha < 1.0f)
     {
-        input.snapshots.current.header.simulation_time = *input.simulation_time;
-        input.snapshots.current.header.clock.mode = RenderClockMode::Scripted;
+        const auto &previous = input.snapshots.previous.header;
+        const auto &current = input.snapshots.current.header;
+        if (!input.snapshots.has_current || previous.session_id != current.session_id ||
+            previous.clock.epoch != current.clock.epoch || previous.tick >= current.tick ||
+            current.tick - previous.tick != 1 || previous.simulation_time >= current.simulation_time)
+            return ViewFailure("Display interpolation requires adjacent samples from the same session and clock.");
     }
-    auto alpha = RenderSnapshotInterpolation(input.snapshots, package_time, impl_->config.interpolate);
     auto &sample_header = input.snapshots.current.header;
     const auto current_time = sample_header.simulation_time;
     auto display_time = current_time;
@@ -943,21 +931,6 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
         const auto previous_time = input.snapshots.previous.header.simulation_time;
         display_time = previous_time + std::chrono::nanoseconds(static_cast<std::int64_t>(
             static_cast<double>((current_time - previous_time).count()) * alpha));
-        // Explicit package time already owns caller-prepared VFX ages.
-        if (!input.sample_time)
-        {
-            for (const auto &view : input.views)
-            {
-                const auto found = impl_->owned_views.find(view.id.value);
-                if (found == impl_->owned_views.end() || view.camera_cut) continue;
-                const auto &history = *found->second;
-                if (history.has_rendered_sample && history.last_rendered_sample.session_id == sample_header.session_id &&
-                    history.last_rendered_sample.clock.epoch == sample_header.clock.epoch)
-                    display_time = std::min(current_time, std::max(display_time, history.last_rendered_sample.simulation_time));
-            }
-            alpha = static_cast<float>(static_cast<double>((display_time - previous_time).count()) /
-                static_cast<double>((current_time - previous_time).count()));
-        }
     }
     const auto previous_count = input.snapshots.has_previous && alpha < 1.0f
         ? input.snapshots.previous.instances.size() : 0;
@@ -1067,34 +1040,14 @@ Result D3D12Renderer::Render(const RenderFrameInput &source_input, RendererFrame
     const auto saved_identity = main_owner.sdk_frame_identity;
     const auto saved_input_phase = impl_->native_input_phase;
     impl_->active_render_package_id = impl_->render_package_id + 1;
-    if (input.scene) { input.snapshots.current.static_scene = input.scene->lease; input.snapshots.has_current = true; }
-    if (input.override_ui) { input.snapshots.current.ui = input.ui; input.snapshots.has_current = true; }
-    if (input.simulation_time) input.snapshots.has_current = true;
     if (!input.snapshots.has_current) input.snapshots.current = {};
-    input.sample_time = package_time;
-    if (!input.ui_draw_content)
-    {
-        static const auto empty_ui = std::make_shared<const UiDrawContent>();
-        if (input.snapshots.current.ui.empty()) input.ui_draw_content = empty_ui;
-        else
-        {
-            auto content = std::make_shared<UiDrawContent>();
-            content->models.assign(input.snapshots.current.ui.begin(), input.snapshots.current.ui.end());
-            input.ui_draw_content = std::move(content);
-        }
-    }
-    canonical.advance_native_world = !input.vfx.world_batch || input.vfx.world_batch->sequence != 0;
+    input.display_sample = RenderDisplaySample{package_time, alpha};
+    canonical.advance_native_world = input.vfx.world_batch.sequence != 0;
     canonical.native_display_tick = static_cast<double>(input.snapshots.current.header.tick);
-    if (input.vfx.world_batch && input.snapshots.has_previous && alpha < 1.0f)
+    if (input.snapshots.has_previous && alpha < 1.0f)
         canonical.native_display_tick -= 1.0 - alpha;
-    if (!input.vfx.world_batch)
-        input.vfx.world_batch = RenderVfxWorldBatch{input.snapshots.current.header.session_id,
-            input.snapshots.current.header.tick, 0, false};
     if (auto r = impl_->BeginHlodViewPackage(input); !r) return r;
-    input.ui = {};
-    input.override_ui = false;
     input.snapshots.current.ui = {};
-    input.simulation_time.reset();
     input.screen_overlay_intensity = input.screen_overlay_intensity.value_or(impl_->config.screen_overlay_intensity);
     auto &prepared_scene = impl_->prepared_scene_package;
     prepared_scene.ReleaseBorrowed();

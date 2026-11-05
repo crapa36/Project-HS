@@ -21,6 +21,11 @@ namespace hs
 class ShippedContentOwner;
 namespace shipping
 {
+struct ShippingRange
+{
+    std::uint64_t offset{}, size{};
+    std::array<std::byte,32> digest{};
+};
 // Emitted together with the immutable shipping image. The compiled header is
 // trusted; startup compares its exact bytes without parsing domain content.
 struct ShippingImageInfo
@@ -30,6 +35,7 @@ struct ShippingImageInfo
     std::uint64_t content_hash;
     std::uint64_t font_offset{}, font_bytes{};
     std::array<std::byte,32> font_digest{};
+    std::array<ShippingRange,2> vfx{};
 };
 [[nodiscard]] const ShippingImageInfo &ImageInfo() noexcept;
 [[nodiscard]] std::span<const render_data::RendererBulkDescriptor> RendererBulks() noexcept;
@@ -43,6 +49,7 @@ struct ShippingImageInfo
 [[nodiscard]] std::span<const render_data::RendererRevisionBulk> RendererRevisionBulks() noexcept;
 // Bounded startup read; failure preserves the caller buffer.
 [[nodiscard]] Result ReadFont(const ShippedContentOwner &, const ShippingImageInfo &, std::vector<std::byte> &);
+[[nodiscard]] Result ReadRange(const ShippedContentOwner &, const ShippingRange &, std::vector<std::byte> &);
 // Failure leaves output attached to its previously opened file.
 [[nodiscard]] Result OpenImage(const std::filesystem::path &directory,
                                const ShippingImageInfo &expected, ShippedContentOwner &output);

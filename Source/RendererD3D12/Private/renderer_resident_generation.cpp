@@ -36,8 +36,8 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     HS_PREPARE(next.PrepareSurfaceLighting(owner, cfg, capacity, diffusion, reflections));
     HS_PREPARE(candidate_owner.subsurface.Commit(std::move(diffusion), unused));
     HS_PREPARE(candidate_owner.screen_reflections.Commit(std::move(reflections), unused));
-    HeroTransparencyCandidate transparency;
-    HS_PREPARE(next.PrepareHeroTransparency(owner, cfg, capacity, transparency));
+    LayeredTranslucencyCandidate transparency;
+    HS_PREPARE(next.PrepareLayeredTranslucency(owner, cfg, capacity, transparency));
     HS_PREPARE(candidate_owner.hero_transparency.Commit(std::move(transparency), unused));
     LightingProbeCandidate probe;
     HS_PREPARE(next.PrepareLightingProbe(cfg, probe));
@@ -172,10 +172,6 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
     HS_SWAP_PIPELINE(deferred_pipeline);
     HS_SWAP_PIPELINE(composite_pipeline);
     HS_SWAP_PIPELINE(temporal_pipeline);
-    HS_SWAP_PIPELINE(pre_exposure_pipeline);
-    HS_SWAP_PIPELINE(exposure_clear_pipeline);
-    HS_SWAP_PIPELINE(exposure_build_pipeline);
-    HS_SWAP_PIPELINE(exposure_reduce_pipeline);
     HS_SWAP_PIPELINE(bloom_extract_pipeline);
     HS_SWAP_PIPELINE(bloom_downsample_pipeline);
     HS_SWAP_PIPELINE(bloom_upsample_pipeline);
@@ -183,6 +179,8 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
     HS_SWAP_PIPELINE(tone_map_pipeline);
     HS_SWAP_PIPELINE(fxaa_pipeline);
     HS_SWAP_PIPELINE(ui_pipeline);
+    HS_SWAP_PIPELINE(ui_draw_pipeline);
+    HS_SWAP_PIPELINE(ui_draw_root);
     HS_SWAP_PIPELINE(ribbon_update_pipeline);
     HS_SWAP_PIPELINE(ribbon_args_pipeline);
     HS_SWAP_PIPELINE(ribbon_add_pipeline);
@@ -301,7 +299,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     unresolved_resident_candidates.clear();
     resident_utility_submissions.clear();
 
-    if (auto archived = RetireHeroTransparency(main_owner.hero_transparency); !archived) return reject(archived);
+    if (auto archived = RetireLayeredTranslucency(main_owner.hero_transparency); !archived) return reject(archived);
     // No allocation, native preparation or fallible Commit below this boundary.
     PublishResidentAssetDescriptors(*next);
     SwapResidentAssetData(*next);
@@ -323,6 +321,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     }
     if (replace_vfx_execution) particles_initialized = false;
     ++pipeline_revision;
+    for (auto &[id, view] : owned_views) view->ui_draw_content.fill(nullptr);
     ++material_parameter_revision;
     baked_generation_material_revision = material_parameter_revision;
     baked_generation_pipeline_revision = pipeline_revision;
@@ -421,7 +420,7 @@ Result D3D12Renderer::ReloadContentGeneration(
             return id == "render/material/" + std::string(name) + "/parameters.rpkg";
         };
         return std::ranges::any_of(kAuthoredMaterialNames, matches) ||
-               std::ranges::any_of(kHeroMaterialNames, matches) ||
+               std::ranges::any_of(kCharacterMaterialNames, matches) ||
                std::ranges::any_of(render_data::kDecalMaterialNames, matches);
     };
     bool narrow = !sprite_bindings && product_paths.size() == impl_->config.product_paths.size();

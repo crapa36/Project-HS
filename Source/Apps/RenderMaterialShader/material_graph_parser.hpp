@@ -16,7 +16,7 @@ struct MaterialDefinition
 // Content-only JSON parser; RenderData owns the typed graph validation and emitter.
 [[nodiscard]] bool IsEnvironmentMaterialName(std::string_view name);
 [[nodiscard]] bool IsAuthoredMaterialName(std::string_view name);
-[[nodiscard]] bool IsHeroMaterialName(std::string_view name);
+[[nodiscard]] bool IsCharacterMaterialName(std::string_view name);
 [[nodiscard]] bool IsDecalMaterialName(std::string_view name);
 [[nodiscard]] render_data::MaterialGraph ParseDecalMaterialGraph(
     std::string_view name, std::string_view json_text);

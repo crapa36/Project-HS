@@ -184,12 +184,12 @@ float3 EnvironmentSkyRadiance(float3 direction)
         lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),saturate(direction.y*0.5+0.5));
 }
 
-float3 HsSceneProbeRadiance(float3 world,float3 direction,uint count,HsLocalProbeBlend blend)
+float3 HsSceneProbeRadiance(float3 world,float3 direction,HsLocalProbeBlend blend)
 {
 #ifdef HS_LOCAL_PROBE_CAPTURE
     return HsProbeRadiance(direction);
 #else
-    return HsLocalProbeRadiance(world,direction,count,blend);
+    return HsLocalProbeRadiance(world,direction,blend);
 #endif
 }
 float3 HsSceneProbeIrradiance(float3 world,float3 normal)
@@ -212,10 +212,10 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     float base_fresnel_override, bool indirect_diffuse_enabled, bool indirect_specular_enabled,
     out float3 ambient_diffuse, out float3 ambient_specular)
 {
-#ifdef HS_CAPTURE_HERO_WORK
-    HsHeroWorkAdd(19u);
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
+    HsTranslucencyDiagnosticsAdd(19u);
     if(IndirectArguments.Load(28u)!=0u)
-    { HsHeroWorkAdd(26u); ambient_diffuse=0.0; ambient_specular=0.0; return; }
+    { HsTranslucencyDiagnosticsAdd(26u); ambient_diffuse=0.0; ambient_specular=0.0; return; }
 #endif
     float3 v=normalize(view_direction);
     closure=HsBsdfOrientThinSurface(closure,v);
@@ -227,8 +227,8 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     ambient_specular=0.0;
     [branch] if(HsBsdfCanUseCoatedIbl(closure,nv))
     {
-#ifdef HS_CAPTURE_HERO_WORK
-        HsHeroWorkAdd(28u);
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
+        HsTranslucencyDiagnosticsAdd(28u);
 #endif
         const float roughness=saturate(closure.roughness),coat_roughness=saturate(closure.coat_roughness);
         const float lut_no_v=sqrt(saturate(nv));
@@ -271,23 +271,20 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     {
         // Use the existing matched mixture and its exact sample sequence;
         // component separation changes neither PDFs nor null-sample accounting.
-#ifdef HS_CAPTURE_HERO_WORK
-        HsHeroWorkAdd(20u);
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
+        HsTranslucencyDiagnosticsAdd(20u);
         uint valid_work_samples=0u;
 #endif
         const uint sample_count=32u;
 #ifdef HS_LOCAL_PROBE_CAPTURE
-        const uint local_probe_count=0u;
         const HsLocalProbeBlend local_probe_blend=(HsLocalProbeBlend)0;
 #else
-        const uint local_probe_count=ProbeOptions.w>0.0 && ((diffuse_consumed && indirect_diffuse_enabled) || indirect_specular_enabled)
-            ? HsLocalProbeCount() : 0u;
-        const HsLocalProbeBlend local_probe_blend=HsLocalProbePrepareBlend(
-            HsLocalProbeWeights(world,local_probe_count),local_probe_count);
+        const HsLocalProbeBlend local_probe_blend=HsLocalProbePrepareBlend(world,ProbeOptions.w>0.0 && indirect_specular_enabled);
 #endif
         const bool local_diffuse=ProbeOptions.w>0.0 && diffuse_consumed && indirect_diffuse_enabled;
         const bool local_specular=ProbeOptions.w>0.0 && indirect_specular_enabled;
         const bool baseline_needed=!local_specular || (diffuse_consumed && !local_diffuse);
+        const float3 diffuse_field=local_diffuse?HsSceneProbeIrradiance(world,n)*HsBsdfInvPi:0;
         const HsBsdfSamplingContext bsdf_sampling=HsBsdfPrepareSampling(closure,v);
         [loop] for(uint index=0u;index<sample_count;++index)
         {
@@ -296,34 +293,34 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
                 float(HsBsdfReverseBits(index))*2.3283064365386962890625e-10);
             HsBsdfSampleResult sample=HsBsdfSamplePrepared(closure,v,bsdf_sampling,u_lobe,u_dir);
             if(!sample.valid || sample.pdf<=0.0) continue;
-#ifdef HS_CAPTURE_HERO_WORK
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
             ++valid_work_samples;
 #endif
             float3 sample_diffuse,sample_specular;
             HsBsdfEvaluateComponentsOptical(closure,v,sample.wi,base_fresnel_override,sample_diffuse,sample_specular);
             float3 baseline_sky=0.0;
             [branch] if(baseline_needed) baseline_sky=EnvironmentSkyRadiance(sample.wi);
-            const float3 local_sky=local_diffuse || local_specular ?
-                HsSceneProbeRadiance(world,sample.wi,local_probe_count,local_probe_blend) : 0.0;
-            float3 diffuse_sky=local_diffuse ? local_sky : baseline_sky;
+            const float3 local_sky=local_specular ?
+                HsSceneProbeRadiance(world,sample.wi,local_probe_blend) : 0.0;
+            float3 diffuse_sky=local_diffuse ? diffuse_field : baseline_sky;
             float3 specular_sky=local_specular ? local_sky : baseline_sky;
             float3 weight=abs(dot(n,sample.wi))/sample.pdf;
             if(diffuse_consumed)ambient_diffuse+=sample_diffuse*diffuse_sky*weight;
             ambient_specular+=sample_specular*specular_sky*weight;
         }
-#ifdef HS_CAPTURE_HERO_WORK
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
         // Publish per-invocation totals instead of serializing every sample on global atomics.
-        HsHeroWorkAdd(21u,sample_count);
-        HsHeroWorkAdd(22u,valid_work_samples);
-        HsHeroWorkAdd(23u,sample_count-valid_work_samples);
+        HsTranslucencyDiagnosticsAdd(21u,sample_count);
+        HsTranslucencyDiagnosticsAdd(22u,valid_work_samples);
+        HsTranslucencyDiagnosticsAdd(23u,sample_count-valid_work_samples);
 #endif
         float normalization=saturate(closure.ao)/float(sample_count);
         ambient_diffuse*=normalization;
         ambient_specular*=normalization;
         return;
     }
-#ifdef HS_CAPTURE_HERO_WORK
-    HsHeroWorkAdd(24u);
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
+    HsTranslucencyDiagnosticsAdd(24u);
 #endif
     float thinWeight=HsBsdfThinTransmissionWeight(closure);
     if(diffuse_consumed)
@@ -368,17 +365,17 @@ void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure,float3 world
         indirect_diffuse_enabled,indirect_specular_enabled,ambient_diffuse,ambient_specular);
 }
 
-void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float visibility,
+void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 v,
+    uint direct_light_mask, float visibility,
     float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular,
     out float3 ambient_diffuse)
 {
-#ifdef HS_CAPTURE_HERO_WORK
-    HsHeroWorkAdd(25u);
+#ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
+    HsTranslucencyDiagnosticsAdd(25u);
 #endif
-    const float3 v=normalize(CameraTime.xyz-world);
     closure=HsBsdfOrientThinSurface(closure,v);
-    HsLightListEvaluateComponentsOptical(closure,world,CameraTime.xyz,visibility,
-        HsLightDirectionalMask,false,base_fresnel_override,diffuse,specular);
+    HsLightListEvaluateComponentsForView(closure,world,v,visibility,
+        direct_light_mask,false,base_fresnel_override,diffuse,specular);
     EnvironmentIndirectLightingComponents(diffuse_consumed,closure,world,v,base_fresnel_override,
         LightingOptions.z>0.0,LightingOptions.w>0.0,ambient_diffuse,ambient_specular);
     diffuse+=ambient_diffuse;
@@ -389,7 +386,8 @@ void EnvironmentLightingComponents(HsSurfaceClosure closure,float3 world,float v
     float base_fresnel_override,out float3 diffuse,out float3 specular,out float3 ambient_specular,
     out float3 ambient_diffuse)
 {
-    EnvironmentLightingComponents(true,closure,world,visibility,base_fresnel_override,
+    EnvironmentLightingComponents(true,closure,world,normalize(CameraTime.xyz-world),
+        HsLightDirectionalMask,visibility,base_fresnel_override,
         diffuse,specular,ambient_specular,ambient_diffuse);
 }
 

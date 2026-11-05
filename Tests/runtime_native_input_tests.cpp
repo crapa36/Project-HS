@@ -64,6 +64,37 @@ int main()
     input.join();
     simulation.join();
     valid &= !handoff.RequestInput(++token) && !handoff.WaitSimulation(token);
+    hs::NativeInputFrame startup;
+    startup.PresentedSession(7, 1);
+    valid &= startup.WaitPresentedSession(7, 1);
+    std::atomic<bool> cancelled_wait{};
+    std::thread pending([&] { cancelled_wait.store(!startup.WaitPresentedSession(8, 1)); });
+    startup.Cancel();
+    pending.join();
+    valid &= cancelled_wait.load();
+    hs::NativeInputFrame held;
+    std::atomic<bool> held_done{};
+    std::atomic<bool> held_presented{};
+    std::thread held_input([&] {
+        while (!held_done.load())
+        {
+            std::uint64_t current{};
+            if (held.ShouldPump(current) && current) held.Sampled(current);
+            std::this_thread::yield();
+        }
+    });
+    held.PresentedSession(9, 0);
+    std::thread held_simulation([&] { held_presented.store(held.WaitPresentedSession(9, 1)); });
+    held.SetEnabled(true);
+    valid &= held.RequestInput(1) && held.WaitInput(1) &&
+        held.RequestSimulation(1) && held.WaitSimulation(1);
+    valid &= !held_presented.load();
+    held.PresentedSession(9, 1);
+    held_simulation.join();
+    valid &= held_presented.load();
+    held_done.store(true);
+    held.Cancel();
+    held_input.join();
     if (!valid) { std::cerr << "native input catch-up/token lifecycle failed\n"; return 1; }
     std::cout << "Native input: 24/60-tick render gaps, re-enable, zero-tick and cancellation passed.\n";
 }

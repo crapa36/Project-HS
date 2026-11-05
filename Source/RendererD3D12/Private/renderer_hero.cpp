@@ -16,10 +16,10 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
         slots.resize(slots.size() + count, {UINT32_MAX, UINT32_MAX});
         for (const auto &binding : bindings)
         {
-            if (binding.slot >= count || binding.hero_ordinal >= kHeroMaterialNames.size())
+            if (binding.slot >= count || binding.hero_ordinal >= kCharacterMaterialNames.size())
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid native hero material binding.");
             auto &slot = slots[first + binding.slot];
-            if (binding.domain == render_data::HeroMaterialDomain::Opaque)
+            if (binding.domain == render_data::CharacterMaterialDomain::Opaque)
             {
                 slot.x = binding.hero_ordinal;
                 ++opaque_binding_count;
@@ -40,7 +40,7 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
     const auto bytes = slots.size() * sizeof(DirectX::XMUINT2);
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (auto created = CreateAllocation(hero_material_bindings_gpu, allocation, BufferDescription(bytes),
+    if (auto created = CreateAllocation(mesh_material_bindings_gpu, allocation, BufferDescription(bytes),
             D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
     uploads.emplace_back();
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
@@ -52,15 +52,15 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
     if (FAILED(mapped_result)) return HResultFailure("Map hero material binding upload", mapped_result);
     std::memcpy(mapped, slots.data(), bytes);
     uploads.back().resource->Unmap(0, nullptr);
-    list->CopyBufferRegion(hero_material_bindings_gpu.resource.Get(), 0, uploads.back().resource.Get(), 0, bytes);
+    list->CopyBufferRegion(mesh_material_bindings_gpu.resource.Get(), 0, uploads.back().resource.Get(), 0, bytes);
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition = {hero_material_bindings_gpu.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+    barrier.Transition = {mesh_material_bindings_gpu.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
         D3D12_RESOURCE_STATE_COPY_DEST,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
     list->ResourceBarrier(1, &barrier);
-    hero_material_bindings_gpu.graph_access = enhanced ? Access::AllShaderRead : Access::Common;
-    hero_material_bindings_gpu.graph_queue = QueueHint::Direct;
+    mesh_material_bindings_gpu.graph_access = enhanced ? Access::AllShaderRead : Access::Common;
+    mesh_material_bindings_gpu.graph_queue = QueueHint::Direct;
     D3D12_SHADER_RESOURCE_VIEW_DESC view{};
     view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -70,7 +70,7 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
     {
         auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kHeroBindingDescriptorOffset) * srv_stride;
-        device->CreateShaderResourceView(hero_material_bindings_gpu.resource.Get(), &view, handle);
+        device->CreateShaderResourceView(mesh_material_bindings_gpu.resource.Get(), &view, handle);
     }
     return Result::Success();
 }

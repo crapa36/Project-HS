@@ -1,5 +1,6 @@
 #include "renderer_impl.hpp"
 
+#include <bit>
 #include <cassert>
 
 namespace hs
@@ -7,13 +8,7 @@ namespace hs
 
 Result D3D12Renderer::Impl::CreateUiTexture(OwnedView &view)
 {
-    auto result = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&ui_wic_factory));
-    if (FAILED(result)) return HResultFailure("Create WIC UI factory", result);
-    result = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                               ui_d2d_factory.ReleaseAndGetAddressOf());
-    if (FAILED(result)) return HResultFailure("Create Direct2D UI factory", result);
-
+    HRESULT result{};
     ComPtr<IDWriteFactory> base_dwrite_factory;
     result = DWriteCreateFactory(
         DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
@@ -92,141 +87,192 @@ Result D3D12Renderer::Impl::PrepareUiResources(UiResources &resources,
     texture_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     texture_description.SampleDesc.Count = 1;
     texture_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    resources.raster_width = output_width;
-    resources.raster_height = output_height;
-    device->GetCopyableFootprints(&texture_description, 0, 1, 0, &resources.footprint,
-                                  &resources.rows, &resources.row_bytes, &resources.upload_bytes);
-    D3D12MA::ALLOCATION_DESC default_allocation{};
-    default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    D2D1_RENDER_TARGET_PROPERTIES properties{};
-    properties.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
-    properties.pixelFormat = {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED};
-    // WIC/D2D coordinates are raster pixels. The authored logical scale is
-    // applied once while drawing, so monitor DPI is not applied a second time.
-    properties.dpiX = properties.dpiY = 96.0f;
-    properties.minLevel = D2D1_FEATURE_LEVEL_DEFAULT;
-    for (std::size_t frame_index = 0; frame_index < resources.textures.size(); ++frame_index)
-    {
-        if (auto created = CreateAllocation(resources.textures[frame_index], default_allocation,
-                texture_description, D3D12_RESOURCE_STATE_COMMON); !created)
-            return created;
-        HRESULT result{};
-        auto &surface = resources.surfaces[frame_index];
-        result = ui_wic_factory->CreateBitmap(output_width, output_height,
-                                              GUID_WICPixelFormat32bppPBGRA,
-                                              WICBitmapCacheOnLoad, &surface.bitmap);
-        if (SUCCEEDED(result))
-            result = ui_d2d_factory->CreateWicBitmapRenderTarget(
-                surface.bitmap.Get(), properties, &surface.target);
-        if (SUCCEEDED(result))
-            result = surface.target->CreateSolidColorBrush(
-                D2D1_COLOR_F{1, 1, 1, 1}, &surface.brush);
-        if (FAILED(result)) return HResultFailure("Create DirectWrite UI surface", result);
-        surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    }
+    texture_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12MA::ALLOCATION_DESC allocation{};
+    allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    const D3D12_CLEAR_VALUE clear{DXGI_FORMAT_B8G8R8A8_UNORM, {}};
+    for (auto &texture : resources.textures)
+        if (auto created = CreateAllocation(texture, allocation, texture_description,
+                D3D12_RESOURCE_STATE_COMMON, &clear); !created) return created;
     return Result::Success();
 }
 
 void D3D12Renderer::Impl::CommitUiResources(OwnedView &owner, UiResources &resources) noexcept
 {
     // The caller drains GPU users before replacing these view-owned targets.
-    using std::swap;
-    swap(owner.ui.textures, resources.textures);
-    swap(owner.ui.surfaces, resources.surfaces);
-    swap(owner.ui.footprint, resources.footprint);
-    swap(owner.ui.rows, resources.rows);
-    swap(owner.ui.raster_width, resources.raster_width);
-    swap(owner.ui.raster_height, resources.raster_height);
-    swap(owner.ui.row_bytes, resources.row_bytes);
-    swap(owner.ui.upload_bytes, resources.upload_bytes);
-    for (std::size_t index = 0; index < frames.size(); ++index)
-    {
-        owner.ui_initialized[index] = false;
-        owner.ui_draw_content[index].reset();
-        owner.ui_dirty[index] = false;
-    }
-    // Layouts use logical text dimensions and the process font collection; raster target replacement does not invalidate them.
+    resources.text_layouts = std::move(owner.ui.text_layouts);
+    owner.ui = std::move(resources);
+    owner.ui_draw_content.fill(nullptr);
 }
 
-Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
-                                        const std::shared_ptr<const UiDrawContent> &content)
+struct D3D12Renderer::Impl::UiTextRenderer final : IDWriteTextRenderer
 {
-    if (!content)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "UI draw content is required.");
-    const auto &models = content->models;
-    const auto &cached_content = owner.ui_draw_content[frame_index];
-    auto &surface = owner.ui.surfaces[frame_index];
-    if (surface.copy_completion.IsSatisfiedBy(graph_queue_executor.Completed()))
-        surface.completed_version = surface.submitted_version;
-    const auto copy_bitmap = [&]() -> Result {
-        auto &frame = frames[frame_index];
-        // WaitForFrame has retired this slot; views share only its upload scratch.
-        if (!frame.ui_upload.resource || frame.ui_upload_bytes < owner.ui.upload_bytes)
+    Impl &renderer;
+    UiResources &ui;
+    float scale, offset_x, offset_y;
+    D2D1_RECT_F clip;
+    UINT32 color{};
+    std::vector<D2D1_POINT_2F> origins;
+    UiTextRenderer(Impl &renderer, OwnedView &view)
+        : renderer(renderer), ui(view.ui),
+          scale(std::min(float(view.width) / kUiWidth, float(view.height) / kUiHeight)),
+          offset_x((view.width - kUiWidth * scale) * 0.5f),
+          offset_y((view.height - kUiHeight * scale) * 0.5f),
+          clip{0, 0, float(view.width), float(view.height)} {}
+
+    D2D1_RECT_F Pixels(D2D1_RECT_F rect) const
+    {
+        return {rect.left * scale + offset_x, rect.top * scale + offset_y,
+                rect.right * scale + offset_x, rect.bottom * scale + offset_y};
+    }
+
+    void Emit(UiQuad quad, UINT32 page)
+    {
+        if (quad.bounds.right <= quad.bounds.left || quad.bounds.bottom <= quad.bounds.top) return;
+        if (ui.batches.empty() || ui.batches.back().page != page)
+            ui.batches.push_back({page, static_cast<UINT32>(ui.quads.size()), 0});
+        ++ui.batches.back().count;
+        ui.quads.push_back(quad);
+    }
+
+    void Shape(D2D1_RECT_F rect, UINT32 rgba, float radius = 0)
+    {
+        Emit({Pixels(rect), clip, rgba, 0, 0, radius * scale},
+            ui.batches.empty() ? 0 : ui.batches.back().page);
+    }
+
+    HRESULT CacheGlyph(const DWRITE_GLYPH_RUN &run, UINT32 index, float size, UINT8 phase,
+                        DWRITE_MEASURING_MODE mode, UiGlyph &glyph)
+    {
+        DWRITE_GLYPH_RUN single{};
+        single.fontFace = run.fontFace;
+        single.fontEmSize = size;
+        single.glyphCount = 1;
+        single.glyphIndices = &run.glyphIndices[index];
+        single.isSideways = run.isSideways;
+        ComPtr<IDWriteGlyphRunAnalysis> analysis;
+        auto hr = renderer.ui_dwrite_factory->CreateGlyphRunAnalysis(&single, nullptr,
+            DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC, mode, DWRITE_GRID_FIT_MODE_ENABLED,
+            DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, phase * 0.25f, 0, &analysis);
+        if (FAILED(hr)) return hr;
+        constexpr auto a8 = DWRITE_TEXTURE_ALIASED_1x1; // DirectWrite's 1-byte grayscale coverage plane.
+        hr = analysis->GetAlphaTextureBounds(a8, &glyph.bounds);
+        if (FAILED(hr)) return hr;
+        glyph.face = run.fontFace;
+        const auto bytes = static_cast<UINT64>(glyph.bounds.right - glyph.bounds.left) *
+            (glyph.bounds.bottom - glyph.bounds.top);
+        if (!bytes) return S_OK;
+        if (bytes > UINT_MAX - 3) return E_OUTOFMEMORY;
+        const auto storage = (static_cast<UINT32>(bytes) + 3u) & ~3u;
+        if (ui.atlas.empty() || ui.atlas.back().capacity - ui.atlas.back().used < storage)
         {
-            AllocationResource upload;
+            UiAtlasPage page;
+            page.capacity = std::max(256u * 1024u, storage);
             D3D12MA::ALLOCATION_DESC allocation{};
             allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-            if (auto created = CreateAllocation(upload, allocation,
-                    BufferDescription(owner.ui.upload_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created)
-                return created;
-            const D3D12_RANGE no_read{};
-            void *mapped{};
-            const auto mapped_result = upload.resource->Map(0, &no_read, &mapped);
-            if (FAILED(mapped_result)) return HResultFailure("Map UI slot upload", mapped_result);
-            if (frame.ui_upload.resource && frame.ui_mapped) frame.ui_upload.resource->Unmap(0, nullptr);
-            frame.ui_upload = std::move(upload);
-            frame.ui_mapped = static_cast<std::byte *>(mapped);
-            frame.ui_upload_bytes = owner.ui.upload_bytes;
+            if (auto created = renderer.CreateAllocation(page.buffer, allocation, BufferDescription(page.capacity),
+                    D3D12_RESOURCE_STATE_GENERIC_READ); !created) return E_OUTOFMEMORY;
+            ui.atlas.push_back(std::move(page));
         }
-        WICRect rectangle{0, 0, static_cast<INT>(owner.ui.raster_width), static_cast<INT>(owner.ui.raster_height)};
-        ComPtr<IWICBitmapLock> bitmap_lock;
-        auto result = surface.bitmap->Lock(&rectangle, WICBitmapLockRead, &bitmap_lock);
-        UINT stride{}, byte_count{};
-        BYTE *pixels{};
-        if (SUCCEEDED(result)) result = bitmap_lock->GetStride(&stride);
-        if (SUCCEEDED(result)) result = bitmap_lock->GetDataPointer(&byte_count, &pixels);
-        if (FAILED(result)) return HResultFailure("Lock UI pixels", result);
-        for (std::uint32_t row = 0; row < owner.ui.rows; ++row)
-            std::memcpy(frame.ui_mapped + owner.ui.footprint.Offset + row * owner.ui.footprint.Footprint.RowPitch,
-                pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(owner.ui.row_bytes));
-        return Result::Success();
-    };
-    if (surface.bitmap_valid && cached_content == content)
-    {
-        if (surface.completed_version == surface.bitmap_version)
+        auto &page = ui.atlas.back();
+        glyph.page = static_cast<UINT32>(ui.atlas.size() - 1);
+        glyph.offset = page.used;
+        const D3D12_RANGE no_read{};
+        void *mapped{};
+        hr = page.buffer.resource->Map(0, &no_read, &mapped);
+        if (FAILED(hr)) return hr;
+        // Never overwrite bytes referenced by an earlier submitted draw.
+        auto *destination = static_cast<BYTE *>(mapped) + page.used;
+        hr = analysis->CreateAlphaTexture(a8, &glyph.bounds, destination, static_cast<UINT32>(bytes));
+        if (SUCCEEDED(hr))
         {
-            owner.ui_dirty[frame_index] = false;
-            return Result::Success();
+            std::memset(destination + bytes, 0, storage - bytes);
+            page.used += storage;
         }
-        if (auto copied = copy_bitmap(); !copied) return copied;
-        owner.ui_dirty[frame_index] = true;
-        return Result::Success();
+        const D3D12_RANGE written{glyph.offset, page.used};
+        page.buffer.resource->Unmap(0, &written);
+        return hr;
     }
-    // Layouts are independent CPU products: publish each valid creation immediately;
-    // bitmap validity and native copy state remain transactional below.
-    owner.ui.text_layouts.resize(std::max(owner.ui.text_layouts.size(), models.size()));
-    // A failed raster cannot make the old model a valid bitmap on the next retry.
-    surface.bitmap_valid = false;
-    owner.ui_dirty[frame_index] = false;
-    // shortcut: whole-surface raster/upload stays until GR25 proves partial bitmap and native-copy equivalence.
-    surface.target->BeginDraw();
-    surface.target->SetTransform(D2D1_MATRIX_3X2_F{1, 0, 0, 1, 0, 0});
-    surface.target->Clear(D2D1_COLOR_F{0, 0, 0, 0});
-    const auto logical_scale = std::min(static_cast<float>(owner.ui.raster_width) / kUiWidth,
-                                       static_cast<float>(owner.ui.raster_height) / kUiHeight);
-    const auto offset_x = (static_cast<float>(owner.ui.raster_width) - kUiWidth * logical_scale) * 0.5f;
-    const auto offset_y = (static_cast<float>(owner.ui.raster_height) - kUiHeight * logical_scale) * 0.5f;
-    surface.target->SetTransform(D2D1_MATRIX_3X2_F{
-        logical_scale, 0, 0, logical_scale, offset_x, offset_y});
 
-    const auto color_of = [](std::uint32_t packed) {
-        constexpr float inverse_byte = 1.0f / 255.0f;
-        return D2D1_COLOR_F{static_cast<float>(packed & 0xff) * inverse_byte,
-                            static_cast<float>((packed >> 8) & 0xff) * inverse_byte,
-                            static_cast<float>((packed >> 16) & 0xff) * inverse_byte,
-                            static_cast<float>((packed >> 24) & 0xff) * inverse_byte};
-    };
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void *, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE mode,
+            const DWRITE_GLYPH_RUN *run, const DWRITE_GLYPH_RUN_DESCRIPTION *, IUnknown *) override
+    {
+        origins.resize(run->glyphCount);
+        const DWRITE_MATRIX transform{scale, 0, 0, scale, offset_x, offset_y};
+        auto hr = renderer.ui_dwrite_factory->ComputeGlyphOrigins(run, mode, {x,y}, &transform, origins.data());
+        if (FAILED(hr)) return hr;
+        for (UINT32 i = 0; i < run->glyphCount; ++i)
+        {
+            const auto subpixel = std::round((origins[i].x * scale + offset_x) * 4) * 0.25f;
+            const auto left = std::floor(subpixel);
+            const auto phase = static_cast<UINT8>((subpixel - left) * 4);
+            const auto size = run->fontEmSize * scale;
+            const UiResources::GlyphKey key{run->fontFace, size, run->glyphIndices[i], phase, run->isSideways, mode};
+            auto it = ui.glyphs.lower_bound(key);
+            if (it == ui.glyphs.end() || it->first != key)
+            {
+                UiGlyph glyph;
+                hr = CacheGlyph(*run, i, size, phase, mode, glyph);
+                if (FAILED(hr)) return hr;
+                it = ui.glyphs.emplace_hint(it, key, std::move(glyph));
+            }
+            const auto &glyph = it->second;
+            const auto &b = glyph.bounds;
+            const auto top = std::round(origins[i].y * scale + offset_y);
+            Emit({{left + b.left, top + b.top, left + b.right, top + b.bottom},
+                  clip, color, glyph.offset, static_cast<UINT32>(b.right - b.left), 0}, glyph.page);
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void *, FLOAT x, FLOAT y, const DWRITE_UNDERLINE *line, IUnknown *) override
+    {
+        Shape({x, y + line->offset, x + line->width, y + line->offset + line->thickness}, color);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void *, FLOAT x, FLOAT y, const DWRITE_STRIKETHROUGH *line, IUnknown *) override
+    {
+        Shape({x, y + line->offset, x + line->width, y + line->offset + line->thickness}, color);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void *ctx, FLOAT x, FLOAT y, IDWriteInlineObject *object,
+            BOOL sideways, BOOL rtl, IUnknown *effect) override
+    {
+        return object->Draw(ctx, this, x, y, sideways, rtl, effect);
+    }
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void *, BOOL *value) override { *value = FALSE; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void *, FLOAT *value) override { *value = 1; return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void *, DWRITE_MATRIX *value) override
+    {
+        *value = {scale, 0, 0, scale, offset_x, offset_y};
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override
+    {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (id != __uuidof(IUnknown) && id != __uuidof(IDWritePixelSnapping) && id != __uuidof(IDWriteTextRenderer))
+            return E_NOINTERFACE;
+        *out = static_cast<IDWriteTextRenderer *>(this);
+        AddRef();
+        return S_OK;
+    }
+    // Owned by the synchronous IDWriteTextLayout::Draw call.
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+};
+
+Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_index,
+                                         const std::shared_ptr<const UiDrawContent> &content)
+{
+    if (!content) return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "UI draw content is required.");
+    auto &ui = owner.ui;
+    ui.quads.clear();
+    ui.batches.clear();
+    const auto &models = content->models;
+    ui.text_layouts.resize(models.size());
+    UiTextRenderer draw(*this, owner);
+    const auto viewport_clip = draw.clip;
     for (std::size_t model_index = 0; model_index < models.size(); ++model_index)
     {
         const auto &model = models[model_index];
@@ -235,32 +281,19 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
         const D2D1_RECT_F rectangle{model.anchor_pixels.x, model.anchor_pixels.y,
                                     model.anchor_pixels.x + element_width,
                                     model.anchor_pixels.y + element_height};
-        surface.brush->SetColor(color_of(model.color_rgba));
+        draw.clip = viewport_clip;
         switch (model.kind)
         {
-        case UiModel::Kind::Panel:
-            if (element_width > 0 && element_height > 0)
-                surface.target->FillRectangle(rectangle, surface.brush.Get());
-            break;
-        case UiModel::Kind::Button:
-            if (element_width > 0 && element_height > 0)
-            {
-                const D2D1_ROUNDED_RECT rounded{rectangle, 11.0f, 11.0f};
-                surface.target->FillRoundedRectangle(rounded, surface.brush.Get());
-            }
-            break;
+        case UiModel::Kind::Panel: draw.Shape(rectangle, model.color_rgba); break;
+        case UiModel::Kind::Button: draw.Shape(rectangle, model.color_rgba, 11.0f); break;
         case UiModel::Kind::Bar:
-            if (element_width > 0 && element_height > 0)
-            {
-                surface.brush->SetColor(D2D1_COLOR_F{0.02f, 0.025f, 0.035f, 0.72f});
-                surface.target->FillRectangle(rectangle, surface.brush.Get());
-                auto filled = rectangle;
-                filled.right = filled.left +
-                               element_width * std::clamp(model.value, 0.0f, 1.0f);
-                surface.brush->SetColor(color_of(model.color_rgba));
-                surface.target->FillRectangle(filled, surface.brush.Get());
-            }
+        {
+            draw.Shape(rectangle, 0xb8090605u);
+            auto filled = rectangle;
+            filled.right = filled.left + element_width * std::clamp(model.value, 0.0f, 1.0f);
+            draw.Shape(filled, model.color_rgba);
             break;
+        }
         case UiModel::Kind::Text: break;
         }
 
@@ -287,9 +320,7 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                 (element_width > 0 ? element_width - inset_x : kUiWidth - model.anchor_pixels.x),
             model.anchor_pixels.y +
                 (element_height > 0 ? element_height - inset_y : font_size * 1.6f)};
-        surface.brush->SetColor(model.kind == UiModel::Kind::Text
-                                    ? color_of(model.color_rgba)
-                                    : D2D1_COLOR_F{1, 1, 1, 1});
+        draw.color = model.kind == UiModel::Kind::Text ? model.color_rgba : 0xffffffffu;
         const auto text_width = std::max(text_rectangle.right - text_rectangle.left, 1.0f);
         const auto text_height = std::max(text_rectangle.bottom - text_rectangle.top, 1.0f);
         auto &cached_layout = owner.ui.text_layouts[model_index];
@@ -312,7 +343,6 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                 &format);
             if (FAILED(format_result))
             {
-                (void)surface.target->EndDraw();
                 return HResultFailure("Create UI text format", format_result);
             }
             const auto centered_control = model.kind == UiModel::Kind::Button ||
@@ -331,7 +361,6 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
                 text_width, static_cast<float>(kUiHeight), &layout);
             if (FAILED(layout_result))
             {
-                (void)surface.target->EndDraw();
                 return HResultFailure("Create UI text layout", layout_result);
             }
             DWRITE_TEXT_METRICS metrics{};
@@ -366,20 +395,34 @@ Result D3D12Renderer::Impl::RasterizeUi(OwnedView &owner, std::uint32_t frame_in
         auto *draw_layout = cached_layout.layout.Get();
         assert(draw_layout->GetMaxWidth() == text_width &&
                draw_layout->GetMaxHeight() == text_height);
-        surface.target->DrawTextLayout(
-            {text_rectangle.left, text_rectangle.top}, draw_layout, surface.brush.Get(),
-            D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        draw.clip = draw.Pixels({text_rectangle.left, text_rectangle.top,
+            text_rectangle.left + text_width, text_rectangle.top + text_height});
+        const auto hr = draw_layout->Draw(nullptr, &draw, text_rectangle.left, text_rectangle.top);
+        if (FAILED(hr)) return HResultFailure("Prepare UI glyphs", hr);
     }
 
-    const auto draw_result = surface.target->EndDraw();
-    if (FAILED(draw_result)) return HResultFailure("Rasterize UI", draw_result);
-
-    if (auto copied = copy_bitmap(); !copied) return copied;
-    owner.ui.text_layouts.resize(models.size());
-    owner.ui_draw_content[frame_index] = content;
-    owner.ui_dirty[frame_index] = true;
-    ++surface.bitmap_version;
-    surface.bitmap_valid = true;
+    auto &frame = frames[frame_index];
+    const auto bytes = ui.quads.size() * sizeof(UiQuad);
+    if (bytes > UINT_MAX)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "UI draw stream exceeds the native draw range.");
+    if (!frame.ui_upload.resource || frame.ui_upload_bytes < bytes)
+    {
+        const auto capacity = std::max<std::uint64_t>(4096, std::bit_ceil(static_cast<std::uint64_t>(bytes)));
+        AllocationResource upload;
+        D3D12MA::ALLOCATION_DESC allocation{};
+        allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto created = CreateAllocation(upload, allocation, BufferDescription(capacity),
+                D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+        const D3D12_RANGE no_read{};
+        void *mapped{};
+        const auto hr = upload.resource->Map(0, &no_read, &mapped);
+        if (FAILED(hr)) return HResultFailure("Map UI geometry", hr);
+        if (frame.ui_upload.resource && frame.ui_mapped) frame.ui_upload.resource->Unmap(0, nullptr);
+        frame.ui_upload = std::move(upload);
+        frame.ui_mapped = static_cast<std::byte *>(mapped);
+        frame.ui_upload_bytes = capacity;
+    }
+    if (bytes) std::memcpy(frame.ui_mapped, ui.quads.data(), bytes);
     return Result::Success();
 }
 

@@ -78,9 +78,9 @@ bool ValidSettings(const HdrPostSettings &settings)
 {
     if (settings.motion_blur != GraphicsMotionBlur::Off && settings.motion_blur != GraphicsMotionBlur::Low &&
         settings.motion_blur != GraphicsMotionBlur::High) return false;
-    if (GeometryEffects(settings) && (!std::isfinite(settings.focus_distance_m) || !std::isfinite(settings.focal_length_m) ||
+    if (GeometryEffects(settings) && (!std::isfinite(settings.focal_length_m) ||
         !std::isfinite(settings.f_number) || !std::isfinite(settings.sensor_width_m) || !std::isfinite(settings.max_coc_pixels) ||
-        settings.focal_length_m <= 0 || settings.focus_distance_m <= settings.focal_length_m || settings.f_number <= 0 ||
+        settings.focal_length_m <= 0 || settings.f_number <= 0 ||
         settings.sensor_width_m <= 0 || settings.max_coc_pixels <= 0 || settings.max_coc_pixels > 32)) return false;
     return !settings.color_grading || (ValidGrade(settings.grade_lift, false, false) &&
         ValidGrade(settings.grade_contrast, true, false) && ValidGrade(settings.grade_gain, false, true));
@@ -122,7 +122,7 @@ void PopulateConstants(HdrPostConstants &constants, const HdrPostSettings &setti
     constants.frame_parameters.z = GeometryEffects(settings) && constants.frame_parameters.y > 0.0f &&
         constants.frame_parameters.x > 0.0f ? (1.0f / 120.0f) / constants.frame_parameters.x : 0.0f;
     constants.frame_parameters.w = inputs.sharpening;
-    constants.lens = {settings.focus_distance_m, settings.focal_length_m, settings.f_number, settings.sensor_width_m};
+    constants.lens = {constants.lens.x, settings.focal_length_m, settings.f_number, settings.sensor_width_m};
     constants.grade_lift = settings.grade_lift; constants.grade_contrast = settings.grade_contrast;
     constants.grade_gain = settings.grade_gain;
     constants.effect_parameters = {settings.max_coc_pixels, std::log2(65505.0f), 1.0f / 60.0f, 180.0f};
@@ -437,7 +437,7 @@ Result HdrPostSystem::RegisterMotionImpl(RenderGraphBuilder &graph, const HdrPos
     if (!FitsDepth(graph, inputs.depth, inputs.render_active) || !Fits(graph, inputs.motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
         !Fits(graph, inputs.surface_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
         (storage->settings.motion_blur != GraphicsMotionBlur::Off && !Fits(graph, inputs.normal, inputs.render_active, DXGI_FORMAT_R16G16_SNORM)) ||
-        (inputs.transparent_guides_enabled && (!Fits(graph, inputs.transparent_depth, inputs.render_active, DXGI_FORMAT_R32_FLOAT) ||
+        (inputs.transparent_guides_enabled && (!FitsDepth(graph, inputs.transparent_depth, inputs.render_active) ||
             !Fits(graph, inputs.transparent_motion, inputs.render_active, DXGI_FORMAT_R16G16_FLOAT) ||
             !Fits(graph, inputs.transparent_history, inputs.render_active, DXGI_FORMAT_R32G32_FLOAT) ||
             !Fits(graph, inputs.transparent_classification, inputs.render_active, kColor))))
@@ -457,6 +457,9 @@ Result HdrPostSystem::RegisterMotionImpl(RenderGraphBuilder &graph, const HdrPos
         return Failure(ErrorCode::InvalidArgument, "HDR post requires positive render dt for valid motion history and a finite camera forward direction.");
     if (constants.frame_parameters.y > 0 && !std::isfinite((1.0f / 120.0f) / constants.frame_parameters.x))
         return Failure(ErrorCode::InvalidArgument, "HDR post render dt produces a nonfinite shutter ratio.");
+    if (storage->settings.depth_of_field && (!std::isfinite(constants.lens.x) ||
+        constants.lens.x <= storage->settings.focal_length_m))
+        return Failure(ErrorCode::InvalidArgument, "HDR post focus must lie beyond the lens focal length.");
     constants.camera_forward.x /= forwardLength; constants.camera_forward.y /= forwardLength; constants.camera_forward.z /= forwardLength;
     if (auto started = impl_->Begin(graph, inputs,layout?&layout->imports:nullptr,
             retained?&retained->imports:nullptr); !started) return started;

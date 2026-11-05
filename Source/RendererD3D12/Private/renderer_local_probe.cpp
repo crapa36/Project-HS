@@ -9,6 +9,9 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#if defined(HS_OFFLINE_PROBE_BAKER)
+#include <hs/render_data/scene_probe_grid_bake.hpp>
+#endif
 #include <cstring>
 #include <exception>
 #include <numbers>
@@ -82,6 +85,7 @@ bool ValidRevisions(render_data::SceneProbeRevisions r)
 { return r.environment && r.material && r.light && r.static_layout; }
 bool BakedRevisionsMatch(render_data::SceneProbeRevisions a,render_data::SceneProbeRevisions b)
 { return a.environment==b.environment && a.material==b.material && a.static_layout==b.static_layout; }
+#if defined(HS_OFFLINE_PROBE_BAKER)
 LocalProbeCaptureView CaptureView(const std::shared_ptr<const StaticRenderScene> &scene,
     render_data::SceneProbeRevisions revisions,const render_data::SceneProbeRecord &probe,
     std::uint32_t index,std::uint32_t face,std::uint32_t edge)
@@ -97,6 +101,7 @@ LocalProbeCaptureView CaptureView(const std::shared_ptr<const StaticRenderScene>
     XMStoreFloat4x4(&v.world_to_view,view); XMStoreFloat4x4(&v.projection,projection);
     XMStoreFloat4x4(&v.view_projection,view*projection); return v;
 }
+#endif
 } // namespace
 
 struct LocalProbeStorage
@@ -104,24 +109,37 @@ struct LocalProbeStorage
     ComPtr<ID3D12Device> device; ComPtr<D3D12MA::Allocator> allocator;
     render_data::SceneProbeDescription description; std::vector<render_data::SceneProbeRecord> probes;
     std::vector<std::string> dependencies;
-    AllocationResource raw,ggx,sh,distance,records,disabled_records,depth,upload,constants,export_readback;
-    ComPtr<ID3D12DescriptorHeap> exports,bake_descriptors,rtvs,dsv;
+    std::uint32_t reflection_count{};
+    std::size_t sh_bytes{};
+    AllocationResource raw,ggx,sh,distance,records,disabled_records,upload;
+    ComPtr<ID3D12DescriptorHeap> exports;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    AllocationResource depth,constants,export_readback;
+    ComPtr<ID3D12DescriptorHeap> bake_descriptors,rtvs,dsv;
     ComPtr<ID3D12RootSignature> root; std::array<ComPtr<ID3D12PipelineState>,2> pipelines;
+#endif
     CubeUpload raw_upload,ggx_upload,distance_upload;
     std::uint64_t sh_offset{},record_offset{},disabled_offset{},bytes{};
     std::uint64_t generation{};
-    std::uint32_t mip_count{},srv_stride{},rtv_stride{},captured_views{};
+    std::uint32_t mip_count{},srv_stride{};
+    CompletionSet completion;
+    bool uploaded{},package_baked{},usable{true};
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    std::uint32_t rtv_stride{},captured_views{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
     std::array<std::byte,32> capture_identity{};
     std::array<std::byte,32> finished_capture_identity{};
-    CompletionSet completion,capture_completion,bake_completion;
+    CompletionSet capture_completion,bake_completion;
     bool capture_sources_ready{};
-    bool capture_ready{},uploaded{},package_baked{},bake_submitted{},published{},current_request{},usable{true};
+    bool capture_ready{},bake_submitted{},published{},current_request{};
+#endif
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(ID3D12DescriptorHeap *heap,std::uint32_t index,std::uint32_t stride) const
     { auto h=heap->GetCPUDescriptorHandleForHeapStart(); h.ptr+=SIZE_T(index)*stride; return h; }
+#if defined(HS_OFFLINE_PROBE_BAKER)
     D3D12_GPU_DESCRIPTOR_HANDLE Gpu(std::uint32_t index) const
     { auto h=bake_descriptors->GetGPUDescriptorHandleForHeapStart(); h.ptr+=UINT64(index)*srv_stride; return h; }
+#endif
     D3D12_CPU_DESCRIPTOR_HANDLE Export(std::uint32_t index) const { return Cpu(exports.Get(),index,srv_stride); }
 };
 struct LocalProbeSystem::Impl
@@ -131,10 +149,13 @@ struct LocalProbeSystem::Impl
     struct Pending
     {
         const RenderGraphBuilder *graph{}; std::shared_ptr<LocalProbeStorage> storage;
-        std::vector<Import> imports; std::shared_ptr<const StaticRenderScene> scene;
+        std::vector<Import> imports; bool upload{};
+#if defined(HS_OFFLINE_PROBE_BAKER)
+        std::shared_ptr<const StaticRenderScene> scene;
         render_data::SceneProbeRevisions revisions;
         std::array<std::byte,32> capture_identity{};
-        std::uint32_t captured_views{}; bool upload{},finished_bake{};
+        std::uint32_t captured_views{}; bool finished_bake{};
+#endif
     } pending;
 };
 LocalProbeSystem::LocalProbeSystem():impl_(std::make_unique<Impl>()) {}
@@ -142,47 +163,13 @@ LocalProbeSystem::~LocalProbeSystem()=default;
 std::uint64_t LocalProbeCandidate::AllocatedBytes() const noexcept { return storage_?storage_->bytes:0; }
 std::uint64_t LocalProbeSystem::AllocatedBytes() const noexcept { return impl_->storage?impl_->storage->bytes:0; }
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 namespace
 {
 Result PrepareCaptureResources(const std::shared_ptr<LocalProbeStorage> &s,const LocalProbeSystem::ShaderReader &reader)
 {
     auto *device=s->device.Get(); auto *allocator=s->allocator.Get();
     const auto layers=static_cast<std::uint32_t>(s->probes.size()*6),edge=s->description.edge;
-    if(s->package_baked)
-    {
-        // A stale baked image has no live readers before it becomes writable capture storage.
-        for(auto format:{DXGI_FORMAT_R32G32B32A32_FLOAT,DXGI_FORMAT_R32_FLOAT})
-        {
-            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
-            const auto hr=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
-            if(FAILED(hr)) return NativeFailure("Query local probe capture format",hr);
-            if(!(support.Support1&D3D12_FORMAT_SUPPORT1_RENDER_TARGET) ||
-                (format==DXGI_FORMAT_R32G32B32A32_FLOAT && !(support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)))
-                return Failure(ErrorCode::TaskFailed,"Local probe capture format is unavailable.");
-        }
-        s->raw.Reset(); s->ggx.Reset(); s->distance.Reset(); s->sh.Reset();
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,layers,1,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET),s->raw);!r) return r;
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,layers,s->mip_count,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->ggx);!r) return r;
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,layers,1,DXGI_FORMAT_R32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET),s->distance);!r) return r;
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(s->probes.size()*9*16,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->sh);!r) return r;
-        HS_RENDERER_SET_DEBUG_NAME(s->raw.resource.Get(), L"LocalProbe.SceneLinearRawCubeArray"); HS_RENDERER_SET_DEBUG_NAME(s->ggx.resource.Get(), L"LocalProbe.GgxCubeArray");
-        HS_RENDERER_SET_DEBUG_NAME(s->distance.resource.Get(), L"LocalProbe.FirstHitWorldDistance"); HS_RENDERER_SET_DEBUG_NAME(s->sh.resource.Get(), L"LocalProbe.CosineSh9");
-        D3D12_SHADER_RESOURCE_VIEW_DESC cube{}; cube.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
-        cube.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY; cube.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        cube.TextureCubeArray.NumCubes=static_cast<UINT>(s->probes.size()); cube.TextureCubeArray.MipLevels=1;
-        device->CreateShaderResourceView(s->raw.resource.Get(),&cube,s->Export(0));
-        cube.TextureCubeArray.MipLevels=s->mip_count;
-        device->CreateShaderResourceView(s->ggx.resource.Get(),&cube,s->Export(1));
-        D3D12_SHADER_RESOURCE_VIEW_DESC buffer{}; buffer.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
-        buffer.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        buffer.Buffer.NumElements=static_cast<UINT>(s->probes.size()*9); buffer.Buffer.StructureByteStride=16;
-        device->CreateShaderResourceView(s->sh.resource.Get(),&buffer,s->Export(2));
-        D3D12_SHADER_RESOURCE_VIEW_DESC distance{}; distance.Format=DXGI_FORMAT_R32_FLOAT;
-        distance.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY; distance.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        distance.Texture2DArray.ArraySize=layers; distance.Texture2DArray.MipLevels=1;
-        device->CreateShaderResourceView(s->distance.resource.Get(),&distance,s->Export(3));
-        s->uploaded=false;
-    }
     if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,TextureDescription(edge,1,1,DXGI_FORMAT_D32_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL),s->depth);!r) return r;
     std::byte *mapped{}; D3D12_RANGE empty{0,0}; HRESULT hr{};
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
@@ -203,7 +190,7 @@ Result PrepareCaptureResources(const std::shared_ptr<LocalProbeStorage> &s,const
     for(std::uint32_t mip=0;mip<s->mip_count;++mip)
     {
         D3D12_UNORDERED_ACCESS_VIEW_DESC u{}; u.Format=DXGI_FORMAT_R32G32B32A32_FLOAT; u.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        u.Texture2DArray.MipSlice=mip; u.Texture2DArray.ArraySize=layers;
+        u.Texture2DArray.MipSlice=mip; u.Texture2DArray.ArraySize=s->reflection_count*6;
         device->CreateUnorderedAccessView(s->ggx.resource.Get(),nullptr,&u,s->Cpu(s->bake_descriptors.Get(),kBakeSrvCount+2*mip,s->srv_stride));
         u={}; u.ViewDimension=D3D12_UAV_DIMENSION_BUFFER; u.Buffer.NumElements=static_cast<UINT>(s->probes.size()*9); u.Buffer.StructureByteStride=16;
         device->CreateUnorderedAccessView(s->sh.resource.Get(),nullptr,&u,s->Cpu(s->bake_descriptors.Get(),kBakeSrvCount+2*mip+1,s->srv_stride));
@@ -246,6 +233,7 @@ Result PrepareCaptureResources(const std::shared_ptr<LocalProbeStorage> &s,const
 }
 } // namespace
 
+#endif
 Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
     std::span<const std::byte> bytes,const ShaderReader &reader,LocalProbeCandidate &candidate) const
 {
@@ -254,6 +242,9 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
     {
         const auto p=render_data::ReadSceneProbePackage(bytes,MakeAssetId(kProduct));
         const bool baked=p.payload==render_data::SceneProbePayload::Baked;
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+        if(!baked) return Failure(ErrorCode::InvalidArgument,"Runtime requires a baked scene lighting package.");
+#endif
         for(auto format:{DXGI_FORMAT_R32G32B32A32_FLOAT,DXGI_FORMAT_R32_FLOAT})
         {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format}; auto hr=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
@@ -266,14 +257,30 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
         auto s=std::make_shared<LocalProbeStorage>(); s->device=device; s->allocator=allocator;
         s->description=p.description; s->probes=p.probes; s->dependencies=p.dependencies;
         s->mip_count=std::bit_width(p.description.edge); s->package_baked=p.payload==render_data::SceneProbePayload::Baked;
+        s->reflection_count=static_cast<std::uint32_t>(p.probes.size());
+        const auto &grid=p.description.grid;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+        const float capture_distance=std::ranges::max(p.probes,{},&render_data::SceneProbeRecord::capture_distance).capture_distance;
+        if(!baked)
+            for(std::uint32_t i=0;i<grid.NodeCount();++i)
+            {
+                render_data::SceneProbeRecord node;
+                node.position=grid.Position(i);
+                node.capture_distance=capture_distance;
+                s->probes.push_back(node);
+            }
+#endif
+        s->sh_bytes=baked?p.cosine_sh.size()+p.cells.size()*80:s->probes.size()*9*16;
+        const bool grid_baked=baked && grid.NodeCount();
         const auto layers=static_cast<std::uint32_t>(s->probes.size()*6),edge=s->description.edge;
         const auto rawDesc=TextureDescription(edge,layers,1,DXGI_FORMAT_R32G32B32A32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
-        const auto ggxDesc=TextureDescription(edge,layers,s->mip_count,DXGI_FORMAT_R32G32B32A32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
-        const auto distanceDesc=TextureDescription(edge,layers,1,DXGI_FORMAT_R32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
+        const auto ggxDesc=TextureDescription(edge,s->reflection_count*6,s->mip_count,DXGI_FORMAT_R32G32B32A32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+        const auto distanceDesc=TextureDescription(grid_baked?1:edge,grid_baked?1:layers,1,DXGI_FORMAT_R32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,rawDesc,s->raw);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,ggxDesc,s->ggx);!r) return r;
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,distanceDesc,s->distance);!r) return r;
-        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(s->probes.size()*9*16,baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->sh);!r) return r;
+        if(!grid_baked)
+            if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,distanceDesc,s->distance);!r) return r;
+        if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(s->sh_bytes,baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),s->sh);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(s->probes.size()*kLocalProbeGpuRecordStride),s->records);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(kLocalProbeGpuRecordStride),s->disabled_records);!r) return r;
         std::uint64_t end=0;
@@ -281,8 +288,8 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
         {
             end=Footprints(device,rawDesc,0,s->raw_upload);
             end=Footprints(device,ggxDesc,Align(end,D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT),s->ggx_upload);
-            end=Footprints(device,distanceDesc,Align(end,D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT),s->distance_upload);
-            s->sh_offset=Align(end,16); end=s->sh_offset+p.cosine_sh.size();
+            if(!grid_baked) end=Footprints(device,distanceDesc,Align(end,D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT),s->distance_upload);
+            s->sh_offset=Align(end,16); end=s->sh_offset+s->sh_bytes;
         }
         s->record_offset=Align(end,16); s->disabled_offset=s->record_offset+s->probes.size()*kLocalProbeGpuRecordStride;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_UPLOAD,BufferDescription(s->disabled_offset+kLocalProbeGpuRecordStride),s->upload);!r) return r;
@@ -298,10 +305,17 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
                             cube.subresources[i].bytes.data()+std::size_t(y)*cube.subresources[i].row_pitch,cube.subresources[i].row_pitch);
             };
             copy(p.radiance,s->raw_upload); copy(p.prefiltered,s->ggx_upload);
-            for(std::uint32_t layer=0;layer<layers;++layer) for(std::uint32_t y=0;y<edge;++y)
+            if(!grid_baked) for(std::uint32_t layer=0;layer<layers;++layer) for(std::uint32_t y=0;y<edge;++y)
                 std::memcpy(mapped+s->distance_upload.footprints[layer].Offset+std::size_t(y)*s->distance_upload.footprints[layer].Footprint.RowPitch,
                     p.first_hit_distance.data()+(std::size_t(layer)*edge*edge+std::size_t(y)*edge)*4,std::size_t(edge)*4);
-            std::memcpy(mapped+s->sh_offset,p.cosine_sh.data(),p.cosine_sh.size());
+            auto *sh_data=mapped+s->sh_offset;
+            std::memcpy(sh_data,p.cosine_sh.data(),p.cosine_sh.size());
+            for(std::size_t i=0;i<p.cells.size();++i)
+            {
+                auto *cell=sh_data+p.cosine_sh.size()+80*i;
+                std::memcpy(cell,p.cells[i].reachable.data(),64);
+                std::memcpy(cell+64,p.cells[i].reflections.data(),8);
+            }
         }
         for(std::uint32_t i=0;i<s->probes.size();++i)
         {
@@ -310,7 +324,9 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
                 {v.influence_max.x,v.influence_max.y,v.influence_max.z,v.visibility_bias},
                 {v.projection_min.x,v.projection_min.y,v.projection_min.z,v.visibility_fade},
                 {v.projection_max.x,v.projection_max.y,v.projection_max.z,v.capture_distance},
-                {float(s->mip_count-1),float(i),1.0f,float(s->probes.size())},{},{}};
+                {float(s->mip_count-1),float(i),1.0f,float(s->reflection_count)},
+                {grid.origin.x,grid.origin.y,grid.origin.z,grid_baked?float(grid.dimensions[0]+256*grid.dimensions[1]+65536*grid.dimensions[2]):0.f},
+                {grid.spacing.x,grid.spacing.y,grid.spacing.z,float(grid.NodeCount())}};
             std::memcpy(mapped+s->record_offset+std::size_t(i)*kLocalProbeGpuRecordStride,&record,sizeof(record));
         }
         s->upload.resource->Unmap(0,nullptr);
@@ -320,7 +336,7 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
         auto cubeView=[&](ID3D12Resource *resource,DXGI_FORMAT format,std::uint32_t mips,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
             D3D12_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=format; v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
             v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; v.TextureCubeArray.MipLevels=mips;
-            v.TextureCubeArray.NumCubes=static_cast<UINT>(s->probes.size()); device->CreateShaderResourceView(resource,&v,handle);
+            v.TextureCubeArray.NumCubes=mips>1?s->reflection_count:static_cast<UINT>(s->probes.size()); device->CreateShaderResourceView(resource,&v,handle);
         };
         auto bufferView=[&](ID3D12Resource *resource,UINT count,UINT stride,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
             D3D12_SHADER_RESOURCE_VIEW_DESC v{}; v.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
@@ -329,22 +345,28 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
         };
         cubeView(s->raw.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(0));
         cubeView(s->ggx.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT,s->mip_count,s->Export(1));
-        bufferView(s->sh.resource.Get(),static_cast<UINT>(s->probes.size()*9),16,s->Export(2));
+        bufferView(s->sh.resource.Get(),static_cast<UINT>(s->sh_bytes/16),16,s->Export(2));
         auto distanceView=[&](ID3D12Resource *resource,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
             D3D12_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=DXGI_FORMAT_R32_FLOAT; v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; v.Texture2DArray.MipLevels=1;
-            v.Texture2DArray.ArraySize=layers; device->CreateShaderResourceView(resource,&v,handle);
+            v.Texture2DArray.ArraySize=grid_baked?1:layers; device->CreateShaderResourceView(resource,&v,handle);
         };
-        distanceView(s->distance.resource.Get(),s->Export(3));
+        distanceView(grid_baked?nullptr:s->distance.resource.Get(),s->Export(3));
         bufferView(s->records.resource.Get(),static_cast<UINT>(s->probes.size()),kLocalProbeGpuRecordStride,s->Export(4));
         cubeView(nullptr,DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(5)); cubeView(nullptr,DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(6));
         bufferView(nullptr,1,16,s->Export(7)); distanceView(nullptr,s->Export(8));
         bufferView(s->disabled_records.resource.Get(),1,kLocalProbeGpuRecordStride,s->Export(9));
+#if defined(HS_OFFLINE_PROBE_BAKER)
         if(!s->package_baked)
             if(auto ready=PrepareCaptureResources(s,reader);!ready) return ready;
+#endif
         HS_RENDERER_SET_DEBUG_NAME(s->raw.resource.Get(), L"LocalProbe.SceneLinearRawCubeArray"); HS_RENDERER_SET_DEBUG_NAME(s->ggx.resource.Get(), L"LocalProbe.GgxCubeArray");
-        HS_RENDERER_SET_DEBUG_NAME(s->distance.resource.Get(), L"LocalProbe.FirstHitWorldDistance"); HS_RENDERER_SET_DEBUG_NAME(s->sh.resource.Get(), L"LocalProbe.CosineSh9");
-        for(auto *r:{&s->raw,&s->ggx,&s->sh,&s->distance,&s->records,&s->disabled_records,&s->depth,&s->upload,&s->constants}) if(r->allocation) s->bytes+=r->allocation->GetSize();
+        if(s->distance.resource) HS_RENDERER_SET_DEBUG_NAME(s->distance.resource.Get(), L"LocalProbe.FirstHitWorldDistance"); HS_RENDERER_SET_DEBUG_NAME(s->sh.resource.Get(), L"LocalProbe.CosineSh9");
+        for(auto *r:{&s->raw,&s->ggx,&s->sh,&s->distance,&s->records,&s->disabled_records,&s->upload})
+            if(r->allocation) s->bytes+=r->allocation->GetSize();
+#if defined(HS_OFFLINE_PROBE_BAKER)
+        for(auto *r:{&s->depth,&s->constants}) if(r->allocation) s->bytes+=r->allocation->GetSize();
+#endif
         candidate.storage_=std::move(s); return Result::Success();
     }
     catch(const std::exception &e) { return Failure(ErrorCode::InvalidArgument,e.what()); }
@@ -359,6 +381,7 @@ Result LocalProbeSystem::Commit(LocalProbeCandidate &&candidate,const Completion
     impl_->storage=std::move(candidate.storage_); return Result::Success();
 }
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 Result LocalProbeSystem::PrepareCapture(const ShaderReader &reader,const CompletionSet &completed)
 {
     auto s=impl_->storage;
@@ -380,9 +403,16 @@ Result LocalProbeSystem::PrepareCapture(const ShaderReader &reader,const Complet
 }
 
 Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,TransientResourcePool &pool,
-    std::uint32_t frame_slot,BarrierMode barriers,std::vector<std::byte> &package_bytes)
+    std::uint32_t frame_slot,BarrierMode barriers,std::vector<std::byte> &package_bytes,
+    const render_data::SceneProbeRevisions *expected_capture,
+    const render_data::SceneProbeRevisions *compatibility)
 {
     package_bytes.clear(); auto s=impl_->storage;
+    if ((expected_capture == nullptr) != (compatibility == nullptr) ||
+        (expected_capture && (!s || s->revisions != *expected_capture || !ValidRevisions(*compatibility))))
+        return Failure(ErrorCode::InvalidState,"Scene-probe export revisions do not match the current capture.");
+    if(s && s->package_baked && s->description.grid.NodeCount())
+        return Failure(ErrorCode::InvalidState,"Export requires a captured layout. This scene already owns a baked package.");
     if(impl_->pending.graph || !s || !s->usable || !s->current_request || !s->bake_submitted ||
         (!s->package_baked&&s->finished_capture_identity!=s->capture_identity) ||
         !s->scene || s->captured_views!=s->probes.size()*6)
@@ -401,7 +431,7 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
     if(raw_desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || raw_desc.Width!=description.edge || raw_desc.Height!=description.edge ||
         raw_desc.DepthOrArraySize!=layers || raw_desc.MipLevels!=1 || raw_desc.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT || raw_desc.SampleDesc.Count!=1 ||
         ggx_desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || ggx_desc.Width!=description.edge || ggx_desc.Height!=description.edge ||
-        ggx_desc.DepthOrArraySize!=layers || ggx_desc.MipLevels!=s->mip_count || ggx_desc.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT || ggx_desc.SampleDesc.Count!=1 ||
+        ggx_desc.DepthOrArraySize!=s->reflection_count*6 || ggx_desc.MipLevels!=s->mip_count || ggx_desc.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT || ggx_desc.SampleDesc.Count!=1 ||
         sh_desc.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER || sh_desc.Width!=s->probes.size()*9*16 ||
         distance_desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || distance_desc.Width!=description.edge || distance_desc.Height!=description.edge ||
         distance_desc.DepthOrArraySize!=layers || distance_desc.MipLevels!=1 || distance_desc.Format!=DXGI_FORMAT_R32_FLOAT || distance_desc.SampleDesc.Count!=1)
@@ -504,10 +534,10 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
     try
     {
         const auto raw_texels=std::size_t(description.edge)*description.edge*layers;
-        radiance.resize(raw_texels); first_hit_distance.resize(raw_texels);
+        radiance.resize(std::size_t(description.edge)*description.edge*s->reflection_count*6); first_hit_distance.resize(raw_texels);
         std::size_t ggx_texels{};
         for(std::uint32_t mip=0;mip<s->mip_count;++mip)
-            ggx_texels+=std::size_t(layers)*std::max(1u,description.edge>>mip)*std::max(1u,description.edge>>mip);
+            ggx_texels+=std::size_t(s->reflection_count)*6*std::max(1u,description.edge>>mip)*std::max(1u,description.edge>>mip);
         prefiltered.resize(ggx_texels);
         cosine_sh.resize(s->probes.size()*9);
     }
@@ -532,7 +562,7 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
     std::size_t raw_offset{},distance_offset{};
     for(std::uint32_t layer=0;layer<layers;++layer)
     {
-        copy_rgba(raw_upload,layer,description.edge,radiance,raw_offset);
+        if(layer<s->reflection_count*6) copy_rgba(raw_upload,layer,description.edge,radiance,raw_offset);
         const auto &footprint=distance_upload.footprints[layer];
         for(std::uint32_t y=0;y<description.edge;++y)
             std::memcpy(first_hit_distance.data()+distance_offset+y*description.edge,
@@ -540,17 +570,28 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
         distance_offset+=std::size_t(description.edge)*description.edge;
     }
     std::size_t ggx_offset{};
-    for(std::uint32_t layer=0;layer<layers;++layer)
+    for(std::uint32_t layer=0;layer<s->reflection_count*6;++layer)
         for(std::uint32_t mip=0;mip<s->mip_count;++mip)
             copy_rgba(ggx_upload,layer*s->mip_count+mip,std::max(1u,description.edge>>mip),prefiltered,ggx_offset);
     std::memcpy(cosine_sh.data(),mapped+sh_offset,static_cast<std::size_t>(sh_desc.Width));
     D3D12_RANGE no_write{}; s->export_readback.resource->Unmap(0,&no_write);
     s->export_readback.Reset();
-    auto baked_description=description; baked_description.revisions=s->revisions;
+    auto baked_description=description; baked_description.revisions=compatibility ? *compatibility : s->revisions;
     try
     {
+        const auto reflections=std::span(s->probes).first(s->reflection_count);
+        auto sh_payload=std::span<const Float4>(cosine_sh);
+        auto distance_payload=std::span<const float>(first_hit_distance);
+        std::vector<render_data::SceneProbeCell> cells;
+        if(description.grid.NodeCount())
+        {
+            sh_payload=sh_payload.subspan(s->reflection_count*9);
+            const auto node_hits=distance_payload.subspan(std::size_t(s->reflection_count)*6*description.edge*description.edge);
+            cells=render_data::BakeSceneProbeCells(description,reflections,node_hits);
+            distance_payload={};
+        }
         package_bytes=render_data::BuildSceneProbePackage(MakeAssetId(kProduct),s->dependencies,baked_description,
-            s->probes,{radiance,prefiltered,cosine_sh,first_hit_distance});
+            reflections,{radiance,prefiltered,sh_payload,distance_payload,cells});
     }
     catch(const std::exception &error) { return Failure(ErrorCode::InvalidState,error.what()); }
     return Result::Success();
@@ -583,19 +624,24 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
     plan.scene=s->scene;plan.revisions=s->revisions;plan.capture_identity=s->capture_identity;
     plan.capture_first=s->captured_views;plan.bake_submitted=s->bake_submitted;
     plan.published=s->published;
+    if(s->package_baked)
+    {
+        plan.scene=in.scene;plan.revisions=in.revisions;
+        plan.upload=!s->uploaded;
+        plan.published=s->uploaded&&s->upload.graph_completion.IsSatisfiedBy(in.completed)&&in.scene&&
+            BakedRevisionsMatch(s->description.revisions,in.revisions);
+        plan.current=plan.published;
+        plan.bake_submitted=plan.published;
+        plan.capture_first=plan.published?static_cast<std::uint32_t>(s->probes.size()*6):0;
+        plan.finished_bake=plan.published&&!s->bake_submitted;
+        plan.import_cubes=plan.upload||plan.published;
+        plan.valid=true;return Result::Success();
+    }
     if(!in.scene)
     {
         plan.published=false;
         if(s->capture_completion.IsSatisfiedBy(in.completed))
         {plan.scene.reset();plan.revisions={};plan.capture_first=0;plan.bake_submitted=false;}
-    }
-    const bool package_match=s->package_baked&&!s->capture_ready&&
-        BakedRevisionsMatch(s->description.revisions,in.revisions);
-    if(package_match&&plan.scene==in.scene&&
-        (plan.capture_first==s->probes.size()*6||s->capture_completion.IsSatisfiedBy(in.completed)))
-    {
-        plan.revisions=in.revisions;
-        plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
     }
     if(plan.scene!=in.scene||plan.revisions!=in.revisions)
     {
@@ -604,18 +650,9 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         {
             plan.scene=in.scene;plan.revisions=in.revisions;
             plan.capture_first=0;plan.bake_submitted=false;
-            if(package_match)
-                plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
         }
     }
-    const bool package_sample_ready=package_match&&
-        plan.capture_first==s->probes.size()*6&&!plan.bake_submitted;
-    if(package_sample_ready&&s->uploaded&&s->completion.IsSatisfiedBy(in.completed)&&
-        s->capture_completion.IsSatisfiedBy(in.completed))
-    {
-        plan.published=true;plan.bake_submitted=true;plan.finished_bake=true;
-    }
-    if(in.capture_identity_valid&&in.scene&&!package_sample_ready&&plan.scene==in.scene&&plan.revisions==in.revisions&&
+    if(in.capture_identity_valid&&in.scene&&plan.scene==in.scene&&plan.revisions==in.revisions&&
         plan.capture_identity!=in.capture_identity&&s->capture_completion.IsSatisfiedBy(in.completed))
     {
         plan.capture_identity=in.capture_identity;plan.capture_first=0;plan.bake_submitted=false;
@@ -632,8 +669,7 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         (plan.capture_first+plan.capture_count)/6>plan.capture_first/6;
     plan.upload=!s->uploaded;
     plan.import_cubes=plan.upload||plan.capture_count||(plan.published&&plan.current);
-    plan.finished_bake=(plan.upload&&plan.capture_first==total)||
-        (plan.integrate&&plan.capture_first+plan.capture_count==total);
+    plan.finished_bake=plan.integrate&&plan.capture_first+plan.capture_count==total;
     plan.material_sampling=plan.capture_count&&bool(in.draw_static)&&bool(in.declare_material_sampling);
     plan.valid=true;return Result::Success();
 }
@@ -652,6 +688,22 @@ bool LocalProbeSystem::CaptureIdentityPending(const CompletionSet &completed) co
     return s&&s->usable&&s->capture_ready&&s->current_request&&
         (!s->bake_submitted||!s->bake_completion.IsSatisfiedBy(completed));
 }
+#endif
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,LocalProbeFramePlan &plan) const
+{
+    plan={}; const auto &s=impl_->storage;
+    if(!s || !s->usable || impl_->pending.graph)
+        return Failure(ErrorCode::InvalidState,"Baked lighting resources are not ready for recording.");
+    plan.source=&in; plan.storage_generation=s->generation;
+    plan.scene=plan.requested_scene=in.scene; plan.revisions=plan.requested_revisions=in.revisions;
+    plan.completed=in.completed; plan.before_uploaded=s->uploaded; plan.upload=!s->uploaded;
+    plan.published=s->uploaded && s->upload.graph_completion.IsSatisfiedBy(in.completed) && in.scene &&
+        BakedRevisionsMatch(s->description.revisions,in.revisions);
+    plan.current=plan.published; plan.import_cubes=plan.upload || plan.published;
+    plan.valid=true; return Result::Success();
+}
+#endif
 Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInputs &in,LocalProbeOutputs &out)
 {
     LocalProbeFramePlan plan;
@@ -701,9 +753,12 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         plan.sampling_requested!=bool(in.declare_material_sampling)||
         plan.completed.direct!=in.completed.direct||plan.completed.compute!=in.completed.compute||
         plan.completed.copy!=in.completed.copy||
+#if defined(HS_OFFLINE_PROBE_BAKER)
         s->scene!=plan.before_scene||s->revisions!=plan.before_revisions||
         s->captured_views!=plan.before_captured||s->uploaded!=plan.before_uploaded||
-        s->bake_submitted!=plan.before_bake_submitted||s->published!=plan.before_published)
+        s->bake_submitted!=plan.before_bake_submitted||s->published!=plan.before_published||
+#endif
+        s->uploaded!=plan.before_uploaded)
         return Failure(ErrorCode::InvalidState,"Local probe prepared frame record changed before registration.");
     if(retained)
     {
@@ -712,12 +767,12 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         std::array<UINT,9> ids{};UINT count{};
         if(plan.upload)ids[count++]=186;
         for(UINT i=0;i<plan.capture_count;++i)ids[count++]=180+i;
-        if(plan.integrate){ids[count++]=187;ids[count++]=188;}
+        if(plan.integrate){ids[count++]=187;if((plan.capture_first+plan.capture_count)/6<=s->reflection_count)ids[count++]=188;}
         if(count!=retained->pass_count)return Failure(ErrorCode::InvalidState,"Local probe retained pass count changed.");
         for(UINT i=0;i<count;++i)
             if(retained->passes[i].id!=ids[i]||!graph.BindPass(retained->passes[i].index,ids[i]))
                 return Failure(ErrorCode::InvalidState,"Local probe retained pass sequence changed.");
-        const UINT imports=1+(plan.import_cubes?5:0)+(plan.upload?1:0)+(plan.capture_count?1:0);
+        const UINT imports=1+(plan.import_cubes?(s->distance.resource?5:4):0)+(plan.upload?1:0)+(plan.capture_count?1:0);
         for(UINT i=0;i<imports;++i)
             if(!retained->imports[i]||retained->imports[i].value>graph.ResourceCount())
                 return Failure(ErrorCode::InvalidState,"Local probe retained import slot changed.");
@@ -726,10 +781,12 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
             return Failure(ErrorCode::InvalidState,"Local probe metadata import type changed.");
         if(plan.import_cubes)
         {
-            for(auto kind:{ResourceKind::Texture,ResourceKind::Texture,ResourceKind::Buffer,
-                    ResourceKind::Texture,ResourceKind::Buffer})
+            for(auto kind:{ResourceKind::Texture,ResourceKind::Texture,ResourceKind::Buffer})
                 if(retained->imports[import_cursor++].kind!=kind)
                     return Failure(ErrorCode::InvalidState,"Local probe cube import type changed.");
+            if((s->distance.resource && retained->imports[import_cursor++].kind!=ResourceKind::Texture) ||
+                retained->imports[import_cursor++].kind!=ResourceKind::Buffer)
+                return Failure(ErrorCode::InvalidState,"Local probe metadata import type changed.");
         }
         if(plan.upload&&retained->imports[import_cursor++].kind!=ResourceKind::Buffer)
             return Failure(ErrorCode::InvalidState,"Local probe staging import type changed.");
@@ -744,11 +801,16 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         layout->published=plan.published&&plan.current;
         layout->finished_bake=plan.finished_bake;
         layout->scene_reads.assign(in.scene_reads.begin(),in.scene_reads.end());}
-    Impl::Pending pending;pending.graph=&graph;pending.storage=s;pending.finished_bake=plan.finished_bake;
+    Impl::Pending pending;pending.graph=&graph;pending.storage=s;pending.upload=plan.upload;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    pending.finished_bake=plan.finished_bake;
     pending.scene=plan.scene;pending.revisions=plan.revisions;
-    pending.captured_views=plan.capture_first;pending.capture_identity=plan.capture_identity;pending.upload=plan.upload;
+    pending.captured_views=plan.capture_first;pending.capture_identity=plan.capture_identity;
+    if(s->depth.resource)
+        if(auto certified=s->depth.EnsureNativeContract(s->device.Get());!certified)return certified;
+#endif
     for(auto *resource:{&s->disabled_records,&s->raw,&s->ggx,&s->sh,&s->distance,
-            &s->records,&s->upload,&s->depth})
+            &s->records,&s->upload})
         if(resource->resource)
             if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
     UINT import_index{},pass_index{};bool imports_valid=true;
@@ -772,16 +834,19 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
     };
     const auto write=[&](PassBuilder &pass,ResourceVersion v,Access access)
     {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access);};
+#if defined(HS_OFFLINE_PROBE_BAKER)
     const auto writeTexture=[&](PassBuilder &pass,ResourceVersion v,Access access,TextureSubresourceRange range)
     {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access,range);};
     const auto writeBuffer=[&](PassBuilder &pass,ResourceVersion v,Access access,BufferRange range)
     {return retained?ResourceVersion{v.resource,v.ordinal+1}:pass.Write(v,access,range);};
+#endif
     auto disabled=import(s->disabled_records,"LocalProbe.ZeroCountMetadata",true);
     ResourceVersion raw{},ggx{},sh{},distance{},records{},depth{};
     auto importCubes=[&]() {
         if(raw.resource) return;
         raw=import(s->raw,"LocalProbe.RawRadiance",false); ggx=import(s->ggx,"LocalProbe.GgxRadiance",false);
-        sh=import(s->sh,"LocalProbe.CosineSh9",true); distance=import(s->distance,"LocalProbe.FirstHitDistance",false);
+        sh=import(s->sh,"LocalProbe.CosineSh9",true);
+        if(s->distance.resource) distance=import(s->distance,"LocalProbe.FirstHitDistance",false);
         records=import(s->records,"LocalProbe.Records",true);
     };
     if(plan.upload)
@@ -790,7 +855,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         auto pass=make_pass(186,"LocalProbePackageUpload");if(!retained)pass.Read(upload,Access::CopySource);
         records=write(pass,records,Access::CopyDest);disabled=write(pass,disabled,Access::CopyDest);
         if(s->package_baked){raw=write(pass,raw,Access::CopyDest);ggx=write(pass,ggx,Access::CopyDest);
-            sh=write(pass,sh,Access::CopyDest);distance=write(pass,distance,Access::CopyDest);}
+            sh=write(pass,sh,Access::CopyDest);if(distance.resource)distance=write(pass,distance,Access::CopyDest);}
         pass.SetExecuteChecked([s](RenderPassContext &context) {
             auto *c=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList()); if(!c) return Failure(ErrorCode::InvalidState,"Local probe upload requires a native list.");
             c->CopyBufferRegion(s->records.resource.Get(),0,s->upload.resource.Get(),s->record_offset,s->probes.size()*kLocalProbeGpuRecordStride);
@@ -806,13 +871,23 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
                     }
                 };
                 copy(s->raw.resource.Get(),s->raw_upload); copy(s->ggx.resource.Get(),s->ggx_upload); copy(s->distance.resource.Get(),s->distance_upload);
-                c->CopyBufferRegion(s->sh.resource.Get(),0,s->upload.resource.Get(),s->sh_offset,s->probes.size()*9*16);
+                c->CopyBufferRegion(s->sh.resource.Get(),0,s->upload.resource.Get(),s->sh_offset,s->sh_bytes);
             }
             return Result::Success();
         });
+#if defined(HS_OFFLINE_PROBE_BAKER)
         if(plan.finished_bake)pending.finished_bake=true;
+#endif
+    }
+    if(s->package_baked && !plan.upload && s->upload.allocation &&
+        s->upload.graph_completion.IsSatisfiedBy(in.completed))
+    {
+        s->bytes-=s->upload.allocation->GetSize();
+        s->upload.Reset();
+        s->raw_upload={}; s->ggx_upload={}; s->distance_upload={};
     }
     const bool current=plan.current;
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if(plan.capture_count)
     {
         importCubes();depth=import(s->depth,"LocalProbe.CaptureDepth",false);
@@ -821,6 +896,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         {
             const auto flat=plan.capture_first+i,probe=flat/6,face=flat%6;
             auto view=CaptureView(plan.scene,plan.revisions,s->probes[probe],probe,face,s->description.edge);
+            view.irradiance_node=probe>=s->reflection_count;
             view.radiance_resource=s->raw.resource.Get(); view.distance_resource=s->distance.resource.Get(); view.depth_resource=s->depth.resource.Get();
             view.radiance_rtv=s->Cpu(s->rtvs.Get(),flat*2,s->rtv_stride); view.distance_rtv=s->Cpu(s->rtvs.Get(),flat*2+1,s->rtv_stride);
             view.depth_dsv=s->dsv->GetCPUDescriptorHandleForHeapStart();
@@ -863,6 +939,8 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
                 c->SetComputeRootConstantBufferView(0,s->constants.resource->GetGPUVirtualAddress()+constantBase); c->SetComputeRootDescriptorTable(1,s->Gpu(0)); c->SetComputeRootDescriptorTable(2,s->Gpu(kBakeSrvCount));
                 c->Dispatch(9,1,1); return Result::Success();
             });
+            if(finishedProbe<s->reflection_count)
+            {
             auto ggxPass=make_pass(188,"LocalProbeGgxPrefilter");
             if(!retained)ggxPass.Read(raw,Access::ComputeRead,rawRange);
             ggx=writeTexture(ggxPass,ggx,Access::UnorderedWrite,ggxRange);
@@ -876,30 +954,36 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
                     c->Dispatch((e+7)/8,(e+7)/8,6);
                 }
                 return Result::Success();
-            }); pending.finished_bake=pending.captured_views==s->probes.size()*6;
+            });
+            }
+            pending.finished_bake=pending.captured_views==s->probes.size()*6;
         }
     }
+#endif
     if(!retained)graph.SetFinalAccess(disabled,Access::AllShaderRead);
     for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(5+i);
     out.records=disabled; out.record_resource=s->disabled_records.resource.Get(); out.revisions=in.revisions;
     out.edge=s->description.edge; out.mip_count=s->mip_count; out.total_cube_views=static_cast<std::uint32_t>(s->probes.size()*6);
-    out.captured_cube_views=pending.captured_views; out.update_pending=!plan.published;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    out.captured_cube_views=pending.captured_views;
+#endif
+    out.update_pending=!plan.published;
     if(plan.published && current)
     {
         importCubes(); out.radiance=raw; out.prefiltered=ggx; out.irradiance=sh; out.first_hit_distance=distance; out.records=records;
         out.radiance_resource=s->raw.resource.Get(); out.prefiltered_resource=s->ggx.resource.Get(); out.irradiance_resource=s->sh.resource.Get();
         out.distance_resource=s->distance.resource.Get(); out.record_resource=s->records.resource.Get();
         for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(i);
-        out.probe_count=static_cast<std::uint32_t>(s->probes.size()); out.enabled=true; out.update_pending=false;
+        out.probe_count=s->reflection_count; out.enabled=true; out.update_pending=false;
     }
     if(raw.resource)
     {
         // Preserve exact final states of all capture/import resources across
         // bounded updates. They are never exported before full publication.
-        if(pending.finished_bake || plan.published)
+        if(plan.finished_bake || plan.published || (s->package_baked && plan.upload))
         {
             if(!retained){graph.SetFinalAccess(raw,Access::AllShaderRead);graph.SetFinalAccess(ggx,Access::AllShaderRead);
-                graph.SetFinalAccess(sh,Access::AllShaderRead);graph.SetFinalAccess(distance,Access::AllShaderRead);}
+                graph.SetFinalAccess(sh,Access::AllShaderRead);if(distance.resource)graph.SetFinalAccess(distance,Access::AllShaderRead);}
         }
         if(!retained)graph.SetFinalAccess(records,Access::AllShaderRead);
     }
@@ -908,13 +992,16 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
     if(retained&&retained->outputs!=final_versions)
         return Failure(ErrorCode::InvalidState,"Local probe retained output versions changed.");
     if(layout){layout->pass_count=pass_index;layout->outputs=final_versions;}
+#if defined(HS_OFFLINE_PROBE_BAKER)
     s->scene=plan.scene;s->revisions=plan.revisions;s->capture_identity=plan.capture_identity;s->captured_views=plan.capture_first;
     if(in.capture_identity_valid)s->capture_sources_ready=in.capture_sources_ready;
     s->bake_submitted=plan.bake_submitted;s->published=plan.published;
     s->current_request=current;
+#endif
     impl_->pending=std::move(pending); return Result::Success();
 }
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticRenderScene> &scene,
     render_data::SceneProbeRevisions revisions,const CompletionSet &completed) const noexcept
 {
@@ -930,6 +1017,7 @@ bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticR
     return !s->published && !s->bake_submitted && s->captured_views<s->probes.size()*6;
 }
 
+#endif
 Result LocalProbeSystem::CompleteSubmission(const RenderGraphBuilder &graph,const CompletionSet &completion,
     bool success,const std::shared_ptr<const StaticRenderScene> &current_scene,render_data::SceneProbeRevisions current_revisions)
 {
@@ -940,20 +1028,26 @@ Result LocalProbeSystem::CompleteSubmission(const RenderGraphBuilder &graph,cons
     {
         const auto c=graph.ResourceCompletion(item.handle); s->completion.Merge(c); item.allocation->graph_completion.Merge(c); item.allocation->graph_completion.Merge(completion);
         // Zero-count metadata stays readable while a stale cube capture waits for its own users to finish.
+#if defined(HS_OFFLINE_PROBE_BAKER)
         if(item.allocation!=&s->disabled_records) { s->capture_completion.Merge(c); s->capture_completion.Merge(completion); }
+#endif
         if(success) { item.allocation->graph_access=graph.FinalAccess(item.handle); item.allocation->graph_queue=graph.FinalQueue(item.handle); }
     }
+    (void)current_scene; (void)current_revisions;
     if(success)
     {
         if(p.upload) s->uploaded=true;
+#if defined(HS_OFFLINE_PROBE_BAKER)
         if(p.scene==current_scene && p.revisions==current_revisions && p.capture_identity==s->capture_identity)
         {
             s->captured_views=p.captured_views;
-            if(p.finished_bake) { s->bake_submitted=true; s->finished_capture_identity=p.capture_identity; s->bake_completion=s->completion; }
+            if(p.finished_bake) { s->bake_submitted=true; s->finished_capture_identity=p.capture_identity;
+                s->bake_completion=s->package_baked?s->upload.graph_completion:s->completion; }
         }
         else { s->published=false; s->bake_submitted=false; }
+#endif
     }
-    else { s->published=false; s->usable=false; }
+    else s->usable=false;
     p={}; return Result::Success();
 }
 Result LocalProbeSystem::ResetAfterCompletion(const CompletionSet &completed)

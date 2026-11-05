@@ -1,3 +1,4 @@
+#include "../Source/Apps/ContentLinker/vfx_storage_tag.hpp"
 #include "test_generation_paths.hpp"
 #include "vfx_catalog.hpp"
 #include "vfx_light_reference.hpp"
@@ -45,6 +46,18 @@ namespace
 void Check(bool condition, std::string_view message)
 {
     if (!condition) throw std::runtime_error(std::string(message));
+}
+
+hs::VfxImageData LoadShippingVfx()
+{
+    hs::ShippedContentOwner owner;
+    Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), hs::shipping::ImageInfo(), owner).Succeeded(), "open shipping VFX pack");
+    std::array<std::vector<std::byte>, 2> bytes;
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        Check(hs::shipping::ReadRange(owner, hs::shipping::ImageInfo().vfx[i], bytes[i]).Succeeded(), "read verified shipping VFX");
+    hs::VfxImageData image;
+    Check(hs::DecodeVfxImage(bytes[0], bytes[1], image).Succeeded(), "decode shipping VFX");
+    return image;
 }
 
 std::uint32_t Hash32(std::string_view value)
@@ -113,8 +126,31 @@ void TestCompiledVfxImage()
     hs::VfxCatalog loaded,compiled;
     Check(hs::VfxCatalog::Load(test_generation::ProductPath("vfx/particle_effects.hsbin"),
         test_generation::ProductPath("vfx/vfx_program.hsbin"),loaded).Succeeded(),"load independent VFX reference");
-    const auto &image=hs::shipping::Vfx(); const auto &ref=loaded.Image();
-    Check(&image==&hs::shipping::Vfx() && compiled.Bind(image).Succeeded(),"compiled VFX stable identity and admission");
+    {
+        hs::ShippedContentOwner owner;
+        const auto &info = hs::shipping::ImageInfo();
+        Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), info, owner).Succeeded(), "open VFX storage tag fixture");
+        std::array<std::vector<std::byte>, 2> bytes;
+        for (std::size_t i=0; i<bytes.size(); ++i)
+            Check(hs::shipping::ReadRange(owner,info.vfx[i],bytes[i]).Succeeded(), "read VFX storage fixture");
+        const auto tag=hs::shipping::VfxStorageTag(info.vfx);
+        Check(std::equal(tag.begin(),tag.end(),info.header.begin()+56), "header binds actual VFX ranges");
+        Check(bytes[1].size() >= 20 && std::to_integer<unsigned>(bytes[1][16]) <= 1 &&
+            bytes[1][17] == std::byte{} && bytes[1][18] == std::byte{} && bytes[1][19] == std::byte{},
+            "program has supported minimum engine version");
+        hs::VfxImageData original, alternate;
+        Check(hs::DecodeVfxImage(bytes[0],bytes[1],original).Succeeded(), "decode original VFX storage");
+        bytes[1][16] ^= std::byte{1};
+        Check(hs::DecodeVfxImage(bytes[0],bytes[1],alternate).Succeeded(), "decode alternate VFX storage");
+        Check(hs::CanonicalVfxImageBytes(original.View()) == hs::CanonicalVfxImageBytes(alternate.View()),
+            "engine minimum encoding preserves VFX semantics");
+        auto changed=info.vfx; changed[1].digest=hs::Sha256(bytes[1]);
+        Check(hs::shipping::VfxStorageTag(changed)!=tag, "different physical VFX must change header tag");
+    }
+    const auto packed=LoadShippingVfx();
+    const auto image=packed.View(); const auto &ref=loaded.Image();
+    Check(compiled.Bind(image).Succeeded(),"packed VFX admission");
+    Check(hs::CanonicalVfxImageBytes(image)==hs::CanonicalVfxImageBytes(ref),"packed VFX canonical identity matches development loader");
     Check(image.payload_hash==ref.payload_hash && image.sprite_count==ref.sprite_count &&
         image.has_typed_wavefront==ref.has_typed_wavefront && image.has_required_sprite_bindings==ref.has_required_sprite_bindings &&
         image.definitions.size()==ref.definitions.size() && image.emitters.size()==ref.emitters.size(),"compiled VFX identity and extents");
@@ -171,6 +207,8 @@ void TestCompiledVfxImage()
 
 void TestCompiledVfxLightCoverage()
 {
+    const auto packed=LoadShippingVfx();
+    const auto image=packed.View();
     hs::VfxCatalog catalog;
     Check(hs::VfxCatalog::Load(test_generation::ProductPath("vfx/particle_effects.hsbin"),
         test_generation::ProductPath("vfx/vfx_program.hsbin"),catalog).Succeeded(),"load VFX light reference");
@@ -202,7 +240,7 @@ void TestCompiledVfxLightCoverage()
                 const auto reference=hs::runtime_detail::light_reference::BuildVfxTypedLightCommands(
                     program,std::span(&input,1),tick);
                 vfx_light_test::Compare(reference,hs::runtime_detail::BuildVfxTypedLightCommands(
-                    hs::shipping::Vfx(),std::span(&input,1),tick));
+                    image,std::span(&input,1),tick));
             }
         }
         Check(decoded==expected,"compiled VFX light recipe coverage");

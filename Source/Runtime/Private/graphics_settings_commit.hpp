@@ -39,7 +39,10 @@ class GraphicsSettingsCommit
     GraphicsSettingsCommit(SettingsDocument requested, SettingsData effective, bool mute_audio)
         : requested_(std::move(requested)), committed_(requested_), persisted_(requested_),
           effective_(effective), desired_effective_(effective), persisted_effective_(effective),
-          mute_audio_(mute_audio) {}
+          mute_audio_(mute_audio)
+    {
+        if (mute_audio_) effective_.master_volume = desired_effective_.master_volume = 0;
+    }
 
     [[nodiscard]] SettingsData &Effective() noexcept { return effective_; }
     [[nodiscard]] const SettingsData &UiInput() const noexcept { return desired_effective_; }

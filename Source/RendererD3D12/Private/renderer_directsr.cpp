@@ -195,7 +195,7 @@ Result DirectSrReconstruction::Initialize(ID3D12Device *device, ViewExtent outpu
     if (FAILED(hr)) return failed(Native("CreateDSRDevice", hr), hr == E_NOINTERFACE ? ReconstructionAvailability::Unsupported : ReconstructionAvailability::Unavailable);
     const auto count = state->dsr_device->GetNumSuperResVariants();
     if (!count || count > 4096) return failed(Failure(ErrorCode::InvalidState, "The device exposes no valid DirectSR variants."), ReconstructionAvailability::Unsupported);
-    const auto flags = DSR_SUPERRES_CREATE_ENGINE_FLAGS(DSR_SUPERRES_CREATE_ENGINE_FLAG_ALLOW_DRS | DSR_SUPERRES_CREATE_ENGINE_FLAG_AUTO_EXPOSURE);
+    const auto flags = DSR_SUPERRES_CREATE_ENGINE_FLAGS(DSR_SUPERRES_CREATE_ENGINE_FLAG_ALLOW_DRS);
     unsigned best_rank = UINT_MAX; DSR_SUPERRES_SOURCE_SETTINGS selected{}; bool found = false;
     for (UINT index = 0; index < count; ++index)
     {
@@ -236,10 +236,8 @@ Result DirectSrReconstruction::ConfigureAfterCompletion(ViewExtent capacity)
     DSR_SUPERRES_CREATE_ENGINE_PARAMETERS parameters{}; parameters.VariantId = state->variant.VariantId;
     parameters.TargetFormat = parameters.SourceColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
     parameters.SourceDepthFormat = DXGI_FORMAT_R32_FLOAT;
-    // The adapted exposure is GPU-owned. DirectSR performs native HDR exposure
-    // analysis instead of receiving a CPU scalar that cannot match that texture.
-    parameters.ExposureScaleFormat = DXGI_FORMAT_UNKNOWN;
-    parameters.Flags = DSR_SUPERRES_CREATE_ENGINE_FLAGS(DSR_SUPERRES_CREATE_ENGINE_FLAG_ALLOW_DRS | DSR_SUPERRES_CREATE_ENGINE_FLAG_AUTO_EXPOSURE);
+    parameters.ExposureScaleFormat = DXGI_FORMAT_R32_FLOAT;
+    parameters.Flags = DSR_SUPERRES_CREATE_ENGINE_FLAGS(DSR_SUPERRES_CREATE_ENGINE_FLAG_ALLOW_DRS);
     parameters.MaxSourceSize = {capacity.width, capacity.height}; parameters.TargetSize = {state->output.width, state->output.height};
     auto hr = state->dsr_device->CreateSuperResEngine(&parameters, IID_PPV_ARGS(&state->engine));
     if (FAILED(hr)) return Native("CreateSuperResEngine", hr);
@@ -336,7 +334,12 @@ Result DirectSrReconstruction::RegisterExternalImpl(PassBuilder &pass, const Sdk
     if (frame.responsive && (state->variant.Flags & DSR_SUPERRES_VARIANT_FLAG_SUPPORTS_REACTIVE_MASK))
     { if (!resource(frame.responsive, DXGI_FORMAT_R8_UNORM, false)) return Failure(ErrorCode::InvalidArgument, "DirectSR reactive mask has an invalid native format."); }
     else lease->frame.responsive = nullptr;
-    lease->frame.exposure = nullptr; // AUTO_EXPOSURE owns the native CPU/GPU exposure pair.
+    if (!frame.exposure) return Failure(ErrorCode::InvalidArgument, "DirectSR requires the fixed exposure texture.");
+    const auto exposure_desc = frame.exposure->GetDesc();
+    if (exposure_desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || exposure_desc.Format != DXGI_FORMAT_R32_FLOAT ||
+        exposure_desc.Width != 1 || exposure_desc.Height != 1 || exposure_desc.DepthOrArraySize != 1 || exposure_desc.SampleDesc.Count != 1)
+        return Failure(ErrorCode::InvalidArgument, "DirectSR exposure must be a 1x1 R32_FLOAT texture.");
+    lease->resources.emplace_back(frame.exposure);
     for (const auto &boundary : accesses) if (boundary.incoming != Access::Common || boundary.outgoing != Access::Common)
         return Failure(ErrorCode::InvalidArgument, "DirectSR queue boundaries must publish whole-resource COMMON.");
     ExternalQueueBinding binding{std::shared_ptr<void>(state, state->queue.Get()), QueueHint::Compute, lease};

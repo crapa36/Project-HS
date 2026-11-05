@@ -88,6 +88,11 @@ struct LocalShadowInputs
     // Same original leaf superset, geometry records, current SkinCache and common
     // opacity bindings as VirtualShadow. Removed casters retain previous bounds.
     ShadowCasterRange casters;
+    // The owner retains the stable span; increment its nonzero revision for every
+    // change to the span, including advancing previous-caster history. Zero or
+    // an empty owner disables reuse.
+    std::shared_ptr<const void> stable_caster_owner;
+    std::uint64_t stable_caster_revision{};
     std::span<const VirtualShadowDrawGroup> draw_groups;
     std::span<const VirtualShadowNativeRead> native_reads;
     std::vector<std::shared_ptr<const void>> owners; // Placed geometry/material backing, if not renderer-owned.

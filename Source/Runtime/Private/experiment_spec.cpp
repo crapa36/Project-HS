@@ -121,13 +121,13 @@ void ValidateConfigOverrides(const Json &value)
         "bloom",                                "resize_test",    "borderless",
         "width",         "height",              "frame_cap",      "render_scale_percent",
         "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
-        "capture_hero_work", "capture_hero_work_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
+        "capture_translucency_diagnostics", "capture_translucency_diagnostics_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
         "pom_quality", "volumetric_quality", "geometry_frontend", "smoke_render_lockstep"};
     CheckKeys(value, "config_overrides", allowed, std::array<std::string_view, 0>{});
 
     constexpr std::array boolean_fields{
         "warp", "validation", "gpu_validation", "vsync", "bloom",
-        "resize_test", "borderless", "capture_hero_work", "capture_gpu_timings", "smoke_render_lockstep"};
+        "resize_test", "borderless", "capture_translucency_diagnostics", "capture_gpu_timings", "smoke_render_lockstep"};
     for (const auto field : boolean_fields)
     {
         if (value.contains(field))
@@ -175,11 +175,11 @@ void ValidateConfigOverrides(const Json &value)
     one_of("shadow_resolution", {1024, 2048});
     one_of("particle_percentage", {50, 100});
 
-    if (value.contains("capture_hero_work_mode"))
+    if (value.contains("capture_translucency_diagnostics_mode"))
     {
-        const auto mode = String(value.at("capture_hero_work_mode"), "config_overrides.capture_hero_work_mode");
+        const auto mode = String(value.at("capture_translucency_diagnostics_mode"), "config_overrides.capture_translucency_diagnostics_mode");
         if (mode != "full" && mode != "no-environment" && mode != "coverage-only")
-            Invalid("config_overrides.capture_hero_work_mode", "unsupported value");
+            Invalid("config_overrides.capture_translucency_diagnostics_mode", "unsupported value");
     }
 
     if (value.contains("graphics_preset"))
@@ -388,7 +388,16 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
             Invalid("build_hash/content_hash", "must be exactly 16 hexadecimal characters");
         }
 
-        const auto &overrides = root.at("config_overrides");
+        auto &overrides = root.at("config_overrides");
+        for (const auto &[old_name, new_name] : std::array{
+                 std::pair{"capture_hero_work", "capture_translucency_diagnostics"},
+                 std::pair{"capture_hero_work_mode", "capture_translucency_diagnostics_mode"}})
+        {
+            if (!overrides.contains(old_name)) continue;
+            if (overrides.contains(new_name)) Invalid("config_overrides", "old and new diagnostic names cannot both be specified");
+            overrides[new_name] = overrides.at(old_name);
+            overrides.erase(old_name);
+        }
         ValidateConfigOverrides(overrides);
         parsed.config_overrides_json = overrides.dump();
 
@@ -678,7 +687,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("bloom", config.bloom);
         boolean("resize_test", config.resize_test);
         boolean("borderless", config.borderless);
-        boolean("capture_hero_work", config.capture_hero_work);
+        boolean("capture_translucency_diagnostics", config.capture_translucency_diagnostics);
         boolean("capture_gpu_timings", config.capture_gpu_timings);
         boolean("smoke_render_lockstep", config.smoke_render_lockstep);
         if (overrides.contains("graphics_preset"))
@@ -719,13 +728,13 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
             else if (frontend == "visibility") config.surface_frontend = SurfaceFrontend::VisibilityBuffer;
             else Invalid("config_overrides.surface_frontend", "must be compact or visibility");
         }
-        if (overrides.contains("capture_hero_work_mode"))
+        if (overrides.contains("capture_translucency_diagnostics_mode"))
         {
-            const auto mode = overrides.at("capture_hero_work_mode").get<std::string>();
-            if (mode == "full") config.hero_work_mode = HeroWorkDiagnosticMode::Full;
-            else if (mode == "no-environment") config.hero_work_mode = HeroWorkDiagnosticMode::NoEnvironment;
-            else if (mode == "coverage-only") config.hero_work_mode = HeroWorkDiagnosticMode::CoverageOnly;
-            else Invalid("config_overrides.capture_hero_work_mode", "unsupported value");
+            const auto mode = overrides.at("capture_translucency_diagnostics_mode").get<std::string>();
+            if (mode == "full") config.translucency_diagnostics_mode = TranslucencyDiagnosticsMode::Full;
+            else if (mode == "no-environment") config.translucency_diagnostics_mode = TranslucencyDiagnosticsMode::NoEnvironment;
+            else if (mode == "coverage-only") config.translucency_diagnostics_mode = TranslucencyDiagnosticsMode::CoverageOnly;
+            else Invalid("config_overrides.capture_translucency_diagnostics_mode", "unsupported value");
         }
         number("width", config.width);
         number("height", config.height);
@@ -742,7 +751,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         if (overrides.contains("vsync")) config.vsync_explicit = true;
         if (overrides.contains("borderless")) config.borderless_explicit = true;
         if (overrides.contains("bloom")) config.bloom_explicit = true;
-        if (config.capture_hero_work || config.diagnostic_enemy_count)
+        if (config.capture_translucency_diagnostics || config.diagnostic_enemy_count)
             config.capture_diagnostics = true;
         if (overrides.contains("barrier_mode"))
         {

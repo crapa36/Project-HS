@@ -1,6 +1,5 @@
 #include <hs/runtime/vfx_image_io.hpp>
 #include <hs/core/cooked_format.hpp>
-#include "release_vfx_codegen.hpp"
 
 #include <stdexcept>
 
@@ -108,25 +107,6 @@ void TestVfxImageIdentity()
         {.2f,.3f,.4f,.5f},2,17,.1f,.2f,.3f}};
     data.mesh_effect_recipes={{1,{0,1},true}};
     data.mesh_recipes={{1,2,3,4,1,2,5,{.1f,.2f,.3f,.4f},3,.35f,.42f,0}};
-    const auto generated = content::EmitReleaseVfxCpp(data.View());
-    Check(generated.find("kScreenEffectRecipes") != std::string::npos &&
-          generated.find("kScreenRecipes") != std::string::npos &&
-          generated.find("kVolumeEffectRecipes") != std::string::npos &&
-          generated.find("kVolumeRecipes") != std::string::npos &&
-          generated.find("kEntitySurfaceEffectRecipes") != std::string::npos &&
-          generated.find("kEntitySurfaceRecipes") != std::string::npos &&
-          generated.find("kEffectLookupById") != std::string::npos &&
-          generated.find("kRibbonWakeRecipes") != std::string::npos &&
-          generated.find("kRibbonFixedRecipes") != std::string::npos &&
-          generated.find("kRibbonProjectileSources") != std::string::npos &&
-          generated.find("kRibbonCancelRecipes") != std::string::npos &&
-          generated.find("kRibbonLinkOutputRecipes") != std::string::npos &&
-          generated.find("kRibbonEventEffectRecipes") != std::string::npos &&
-          generated.find("kRibbonEventSources") != std::string::npos &&
-          generated.find("kRibbonEventOutputs") != std::string::npos &&
-          generated.find("kFresnelRecipes") != std::string::npos);
-    Check(generated.find("kMeshRecipes") != std::string::npos);
-
     const auto baseline = CanonicalVfxImageBytes(data.View());
     Check(baseline.size() > 31 && baseline[28] == std::byte{4} &&
         baseline[29] == std::byte{0} && baseline[30] == std::byte{0} && baseline[31] == std::byte{0});

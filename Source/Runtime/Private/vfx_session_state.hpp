@@ -9,7 +9,7 @@
 #include "vfx_event_view.hpp"
 #include "vfx_workspace_size.hpp"
 #include "vfx_birth_admission.hpp"
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <algorithm>

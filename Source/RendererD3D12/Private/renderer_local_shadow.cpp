@@ -4,6 +4,7 @@
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -171,10 +172,11 @@ struct LocalShadowFramePlanData
     std::shared_ptr<LocalShadowStorage> storage;
     const LightView *lights{};
     const VirtualShadowCaster *stable_casters{}, *dynamic_casters{};
+    std::shared_ptr<const void> stable_caster_owner;
     const VirtualShadowDrawGroup *groups{};
     std::size_t light_count{}, stable_count{}, dynamic_count{}, group_count{};
     DirectX::XMFLOAT3 camera_position{};
-    std::uint64_t rendered_frame_id{};
+    std::uint64_t rendered_frame_id{}, stable_caster_revision{};
     std::uint32_t frame_slot{};
     std::uint64_t record_generation{};
     bool reset_cache{};
@@ -194,6 +196,8 @@ bool PreparedInputsMatch(const LocalShadowFramePlanData &data,
         data.light_count==in.lights.size()&&
         data.stable_casters==in.casters.stable.data()&&
         data.stable_count==in.casters.stable.size()&&
+        data.stable_caster_owner==in.stable_caster_owner&&
+        data.stable_caster_revision==in.stable_caster_revision&&
         data.dynamic_casters==in.casters.dynamic.data()&&
         data.dynamic_count==in.casters.dynamic.size()&&
         data.groups==in.draw_groups.data()&&data.group_count==in.draw_groups.size()&&
@@ -342,6 +346,14 @@ struct LocalShadowSystem::Impl
         std::vector<LocalShadowStorage::CachedLight> cache;LocalShadowStatus status;
         std::vector<LocalShadowLightReference> light_records;}pending;
     LocalShadowStatus status;
+    struct StableClassification
+    {
+        std::shared_ptr<const void> owner;
+        std::uint64_t revision{};
+        std::size_t count{}, groups{};
+        std::vector<std::vector<std::size_t>> buckets;
+        std::vector<std::size_t> changed;
+    } stable;
 };
 LocalShadowSystem::LocalShadowSystem():impl_(std::make_unique<Impl>()){}
 LocalShadowSystem::~LocalShadowSystem()=default;
@@ -454,21 +466,42 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     {
         if(in.casters.size()>s->profile.max_casters||group_count>s->profile.max_draw_groups)
             return Failure(ErrorCode::InvalidArgument,"Local shadow caster/draw capacity is invalid.");
+        auto &stable=impl_->stable;
+        if(!in.stable_caster_owner||!in.stable_caster_revision||stable.owner!=in.stable_caster_owner||
+            stable.revision!=in.stable_caster_revision||stable.count!=in.casters.stable.size()||stable.groups!=group_count)
+        {
+            Impl::StableClassification next;
+            next.owner=in.stable_caster_owner;next.revision=in.stable_caster_revision;
+            next.count=in.casters.stable.size();next.groups=group_count;next.buckets.resize(group_count*2);
+            for(std::size_t index=0;index<in.casters.stable.size();++index)
+            {
+                const auto &c=in.casters.stable[index];
+                if((c.present&&(!Sphere(c.current_bounds)||c.draw_group>=group_count))||
+                    (c.previous_present&&!Sphere(c.previous_bounds)))
+                    return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
+                const bool current_static=StaticCaster(c),previous_static=StaticCaster(c,true);
+                if(Changed(c,current_static,previous_static)&&(current_static||previous_static))
+                    next.changed.push_back(index);
+                if(c.present) next.buckets[(current_static?0u:1u)*group_count+c.draw_group].push_back(index);
+            }
+            stable=std::move(next);
+        }
+        if(!in.reset_cache&&s->initialized) for(const auto index:stable.changed)
+        {
+            const auto &c=in.casters.stable[index];
+            changed_static.push_back({&c,StaticCaster(c),StaticCaster(c,true)});
+        }
         std::vector<std::size_t> bucket_counts(group_count*2);
-        for(const auto &c:in.casters)
+        for(std::size_t bucket=0;bucket<bucket_counts.size();++bucket) bucket_counts[bucket]=stable.buckets[bucket].size();
+        for(const auto &c:in.casters.dynamic)
         {
             if((c.present&&(!Sphere(c.current_bounds)||c.draw_group>=group_count))||
                 (c.previous_present&&!Sphere(c.previous_bounds)))
                 return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
             const bool current_static=StaticCaster(c),previous_static=StaticCaster(c,true);
             if(!in.reset_cache&&s->initialized&&Changed(c,current_static,previous_static)&&
-                (current_static||previous_static))
-                changed_static.push_back({&c,current_static,previous_static});
-            if(c.present)
-            {
-                const auto bucket=(current_static?0u:1u)*group_count+c.draw_group;
-                ++bucket_counts[bucket];
-            }
+                (current_static||previous_static)) changed_static.push_back({&c,current_static,previous_static});
+            if(c.present) ++bucket_counts[(current_static?0u:1u)*group_count+c.draw_group];
         }
         bucket_offsets.resize(bucket_counts.size()+1);
         for(std::size_t bucket=0;bucket<bucket_counts.size();++bucket)
@@ -476,11 +509,15 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
         std::vector<std::size_t> bucket_cursors(bucket_offsets.begin(),bucket_offsets.end()-1);
         ordered_casters.resize(bucket_offsets.back());
         // Stable scatter preserves the legacy caster sequence inside each layer/group.
-        for(const auto &caster:in.casters)if(caster.present)
+        for(std::size_t bucket=0;bucket<stable.buckets.size();++bucket)
+            for(const auto index:stable.buckets[bucket]) ordered_casters[bucket_cursors[bucket]++]=&in.casters.stable[index];
+        for(const auto &caster:in.casters.dynamic)if(caster.present)
         {
             const auto bucket=(StaticCaster(caster)?0u:1u)*group_count+caster.draw_group;
             ordered_casters[bucket_cursors[bucket]++]=&caster;
         }
+        for(std::size_t bucket=0;bucket<bucket_cursors.size();++bucket)
+            assert(bucket_cursors[bucket]==bucket_offsets[bucket+1]);
     }
     auto data=std::make_shared<LocalShadowFramePlanData>();
     data->source=&in;data->storage=s;
@@ -490,6 +527,8 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     data->record_generation=++native_frame.record_generation;
     data->lights=in.lights.data();data->light_count=in.lights.size();
     data->stable_casters=in.casters.stable.data();data->stable_count=in.casters.stable.size();
+    data->stable_caster_owner=in.stable_caster_owner;
+    data->stable_caster_revision=in.stable_caster_revision;
     data->dynamic_casters=in.casters.dynamic.data();data->dynamic_count=in.casters.dynamic.size();
     data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
     data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;

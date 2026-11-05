@@ -85,7 +85,7 @@ Result ResolveResidentClosure(const RendererConfig &config,
             pending.push_back(render_data::MaterialProduct(name));
         for (const auto name : kAuthoredMaterialNames)
             pending.push_back("render/material/" + std::string(name) + "/parameters.rpkg");
-        for (const auto name : kHeroMaterialNames)
+        for (const auto name : kCharacterMaterialNames)
         {
             pending.push_back("render/material/" + std::string(name) + "/material.rpkg");
             pending.push_back("render/material/" + std::string(name) + "/parameters.rpkg");
@@ -499,6 +499,13 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(vfx_fracture_decals);
     HS_SWAP_RESIDENT(vfx_organic_decals);
     HS_SWAP_RESIDENT(vfx_curve_lut);
+    HS_SWAP_RESIDENT(terrain_sections);
+    HS_SWAP_RESIDENT(static_terrain_sections);
+    HS_SWAP_RESIDENT(terrain_scene);
+    HS_SWAP_RESIDENT(terrain_page_residency);
+    HS_SWAP_RESIDENT(terrain_pipeline_revision);
+    HS_SWAP_RESIDENT(terrain_pages);
+    HS_SWAP_RESIDENT(terrain_section_buffer);
     HS_SWAP_RESIDENT(environment_textures);
     HS_SWAP_RESIDENT(environment_texture_ids);
     HS_SWAP_RESIDENT(environment_texture_descriptions);
@@ -524,7 +531,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(material_parameter_candidate_slots);
     HS_SWAP_RESIDENT(material_parameter_bases);
     HS_SWAP_RESIDENT(material_parameter_layouts);
-    HS_SWAP_RESIDENT(hero_material_bindings_gpu);
+    HS_SWAP_RESIDENT(mesh_material_bindings_gpu);
     HS_SWAP_RESIDENT(hero_binding_ranges);
     HS_SWAP_RESIDENT(environment_brdf_lut);
 #undef HS_SWAP_RESIDENT
@@ -540,7 +547,7 @@ void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate)
         Range{kPostTextureDescriptorCount, environment_first + kEnvironmentTextureCount - kPostTextureDescriptorCount},
         Range{vfx_first, kVfxDistortionDescriptorOffset - vfx_first},
         Range{kVfxDistortionDescriptorOffset + 1u, kBloomTextureDescriptorOffset - kVfxDistortionDescriptorOffset - 1u},
-        Range{kMaterialTextureDescriptorOffset, kMaterialTextureDescriptorCount},
+        Range{kMaterialTextureDescriptorOffset, kMaterialTextureDescriptorCount + kTerrainPageDescriptorCount},
         Range{kGeometryDescriptorOffset + 1u, kGeometryDescriptorCount - 1u},
         Range{kMaterialParameterDescriptorOffset, 1u},
         Range{kHeroBindingDescriptorOffset, 1u}};

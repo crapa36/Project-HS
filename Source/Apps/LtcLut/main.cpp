@@ -6,6 +6,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -13,6 +14,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 
 namespace
@@ -248,8 +250,8 @@ std::vector<std::byte> Bake(rd::LtcLutDescription source)
     // Heitz et al., SIGGRAPH 2016: normalized LTC fit then inverse-transform
     // emitter geometry. This independently implemented fit uses the project's
     // uncorrelated Smith model, not downloaded reference fit coefficients.
-    for(std::uint32_t y=0;y<edge;++y)
-    {
+    std::vector<std::exception_ptr> errors(edge);
+    const auto fit_row=[&](std::uint32_t y) {
         const double coordinate=double(y)/(edge-1),noV=std::max(double(rd::kLtcNdotVEndpoint),1-coordinate*coordinate);
         const Vec3 view{std::sqrt(std::max(0.0,1-noV*noV)),0,noV}; Parameters previous{};
         for(std::uint32_t reverse=0;reverse<edge;++reverse)
@@ -264,7 +266,17 @@ std::vector<std::byte> Bake(rd::LtcLutDescription source)
             const double energy=std::min(quadrature.energy,1.0),schlick=std::min(quadrature.schlick,energy);
             amplitudes[offset]={float(energy),float(schlick),0,0};
         }
+    };
+    const auto worker_count=std::min(edge,std::max(1u,std::thread::hardware_concurrency()));
+    {
+        std::vector<std::jthread> workers; workers.reserve(worker_count);
+        for(std::uint32_t worker=0;worker<worker_count;++worker)
+            workers.emplace_back([&,worker] {
+                for(std::uint32_t y=worker;y<edge;y+=worker_count)
+                    try { fit_row(y); } catch(...) { errors[y]=std::current_exception(); }
+            });
     }
+    for(const auto &error:errors) if(error) std::rethrow_exception(error);
     return rd::BuildLtcLutPackage(hs::MakeAssetId(kProduct),{},source,matrices,amplitudes);
 }
 void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)

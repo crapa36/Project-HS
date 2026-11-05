@@ -3,7 +3,7 @@
 #include <hs/core/sha256.hpp>
 #include "../Source/RendererD3D12/Private/renderer_packed_assets.hpp"
 #include "../Source/RendererD3D12/Private/renderer_hlod_scene.hpp"
-#include "../Source/RendererD3D12/Private/renderer_hero_work_math.hpp"
+#include "../Source/RendererD3D12/Private/renderer_translucency_diagnostics_math.hpp"
 #include "../Source/RendererD3D12/Private/renderer_instance_order.hpp"
 #include "../Source/RendererD3D12/Private/renderer_monster_lod.hpp"
 #include <hs/render_data/material_schema.hpp>
@@ -14,6 +14,7 @@
 #include <hs/render_data/character_descriptor.hpp>
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/terrain_surface.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
 #include <hs/render_data/geometry_descriptor.hpp>
 #include <hs/render_data/vfx_mesh_descriptor.hpp>
@@ -498,8 +499,8 @@ void TestMaterialDescriptors()
         const std::array hero_programs{rd::MaterialProgramSource{ids[0],rd::MaterialProgramKind::HeroScenePS},
             rd::MaterialProgramSource{ids[1],rd::MaterialProgramKind::HeroVisibilityPS},
             rd::MaterialProgramSource{ids[2],rd::MaterialProgramKind::HeroSurfaceResolveCS},rd::MaterialProgramSource{ids[3],rd::MaterialProgramKind::HeroShadowPS}};
-        const auto hero_bytes=rd::BuildHeroMaterialPackage(name,parameters,surface,hero_programs);
-        const auto hero=rd::ReadHeroMaterialPackage(hero_bytes,name);
+        const auto hero_bytes=rd::BuildCharacterMaterialPackage(name,parameters,surface,hero_programs);
+        const auto hero=rd::ReadCharacterMaterialPackage(hero_bytes,name);
         if(name=="monster_pbr") for(const auto *suffix:{"monster_basecolor","monster_emissive","monster_ram"}) {
             rd::TextureDescriptor texture{};texture.asset_id=hs::MakeAssetId("render/texture/"+std::string(suffix)+".rpkg");
             texture.description={512,512,1,10,std::string_view(suffix)=="monster_ram"?rd::kTextureFormatBc7:rd::kTextureFormatBc7Srgb};textures.push_back(texture);
@@ -513,10 +514,10 @@ void TestMaterialDescriptors()
     }
     const std::array translucent_program{rd::MaterialProgramSource{
         "render/shader/hero_translucent_ps.dxil", rd::MaterialProgramKind::HeroTranslucentPS}};
-    const auto translucent_package = rd::BuildHeroMaterialPackage("slime_body", parameters,
+    const auto translucent_package = rd::BuildCharacterMaterialPackage("slime_body", parameters,
         {257u, 0u}, translucent_program);
-    Require(rd::ReadHeroMaterialPackage(translucent_package, "slime_body").domain ==
-        rd::HeroMaterialDomain::Translucent,
+    Require(rd::ReadCharacterMaterialPackage(translucent_package, "slime_body").domain ==
+        rd::CharacterMaterialDomain::Translucent,
         "Hero package domain was inferred from material name instead of surface/program contract");
     const std::string decal_id="render/material/decal_fracture/material.rpkg";
     const auto compile_decal = [&](std::span<const rd::MaterialParameterDefinition> defaults) {
@@ -1446,7 +1447,7 @@ void TestRenderBindingCompilerContract()
             value("HS_RENDER_GEOMETRY_BUFFERS_PER_PAGE")==rd::kGeometryBuffersPerPage &&
             rd::kGeometryDescriptorCount==1+rd::kGeometryPageCapacity*rd::kGeometryBuffersPerPage &&
             value("HS_RENDER_AUTHORED_MATERIAL_COUNT")==rd::kAuthoredMaterialNames.size() &&
-            value("HS_RENDER_HERO_MATERIAL_COUNT")==rd::kHeroMaterialNames.size() &&
+            value("HS_RENDER_CHARACTER_MATERIAL_COUNT")==rd::kCharacterMaterialNames.size() &&
             value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")==rd::kEnvironmentMaterialNames.size() &&
             value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==rd::kEnvironmentGeometryLodCount &&
             value("HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT")==rd::kMaterialTextureSlots &&
@@ -1455,7 +1456,7 @@ void TestRenderBindingCompilerContract()
             "compiler binding definitions diverged from the public catalog");
     Require(value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")*value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==105 &&
             value("HS_RENDER_AUTHORED_MATERIAL_COUNT")*value("HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT")==96 &&
-            1+value("HS_RENDER_AUTHORED_MATERIAL_COUNT")+value("HS_RENDER_HERO_MATERIAL_COUNT")==24,
+            1+value("HS_RENDER_AUTHORED_MATERIAL_COUNT")+value("HS_RENDER_CHARACTER_MATERIAL_COUNT")==24,
             "existing geometry, feedback or visibility ABI changed");
 }
 
@@ -1653,18 +1654,18 @@ void TestAuthoredTerrainMaterial()
         rd::kAuthoredMaterialNames.begin());
     const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, ordinal);
     Require(hlsl.find("#include \"material_terrain.hlsli\"") != std::string::npos &&
-            hlsl.find("HsMaterialTerrainStochastic(") != std::string::npos &&
+            hlsl.find("HsMaterialTerrainPage(") != std::string::npos &&
+            hlsl.find(", ctx.uv)") != std::string::npos &&
             hlsl.find("HsMaterialTexture5") != std::string::npos &&
             hlsl.find("ctx.mesh") != std::string::npos &&
             hlsl.find("ctx.seed") != std::string::npos &&
-            hlsl.find(", ctx.uv)") != std::string::npos &&
             hlsl.find("ctx.view_direction") != std::string::npos &&
             hlsl.find("MaterialParameters[ctx.parameter_base + 1]") != std::string::npos &&
             hlsl.find("result.normal_is_world = true") != std::string::npos,
             "terrain HLSL context evaluator or resource ABI missing");
     std::size_t evaluations = 0;
-    for (std::size_t at = hlsl.find("HsMaterialTerrainStochastic("); at != std::string::npos;
-         at = hlsl.find("HsMaterialTerrainStochastic(", at + 1))
+    for (std::size_t at = hlsl.find("HsMaterialTerrainPage("); at != std::string::npos;
+         at = hlsl.find("HsMaterialTerrainPage(", at + 1))
         ++evaluations;
     Require(evaluations == 1, "terrain aggregate was emitted more than once");
 
@@ -1821,11 +1822,11 @@ void TestSurfaceClosure()
             "prepared environment context emitter changed generated source");
     const auto hero_prepared = rd::PrepareMaterial(constant_closures,
         rd::MaterialPreparationDomain::Hero);
-    Require(rd::EmitHeroMaterialContextHlsl(constant_closures, "HsHeroSurface", "HsHeroOpacity") ==
-            rd::EmitHeroMaterialContextHlsl(hero_prepared, "HsHeroSurface", "HsHeroOpacity"),
+    Require(rd::EmitCharacterMaterialContextHlsl(constant_closures, "HsHeroSurface", "HsHeroOpacity") ==
+            rd::EmitCharacterMaterialContextHlsl(hero_prepared, "HsHeroSurface", "HsHeroOpacity"),
             "prepared hero context emitter changed generated source");
     bool preserved_hero_name_error = false;
-    try { (void)rd::EmitHeroMaterialContextHlsl(constant_closures, "!", "HsHeroOpacity"); }
+    try { (void)rd::EmitCharacterMaterialContextHlsl(constant_closures, "!", "HsHeroOpacity"); }
     catch (const std::invalid_argument &error)
     {
         preserved_hero_name_error = std::string_view(error.what()).find("invalid hero material function name") !=
@@ -2472,7 +2473,7 @@ void TestCharacterPackage()
         "render/geometry/character/test.rpage",
         "render/material/archer_skin/material.rpkg"};
     const std::array production_bindings{rd::CharacterMaterialBinding{
-        0, 1, 0, rd::HeroMaterialDomain::Opaque}};
+        0, 1, 0, rd::CharacterMaterialDomain::Opaque}};
     const auto production=rd::BuildCharacterMetadataPackage(
         asset,production_deps,source,gm,production_bindings);
     const auto character_metadata=rd::DecodeCharacterMetadataPackage(production,asset);
@@ -2494,7 +2495,7 @@ void TestCharacterPackage()
     rd::MaterialDescriptor descriptor_material;
     descriptor_material.asset_id = hs::MakeAssetId(production_deps[1]);
     descriptor_material.kind = rd::MaterialKind::Hero;
-    descriptor_material.domain = rd::HeroMaterialDomain::Opaque;
+    descriptor_material.domain = rd::CharacterMaterialDomain::Opaque;
     const std::array descriptor_materials{descriptor_material};
     auto compiled_character = rd::CompileCharacterDescriptor(production, production_view, character_metadata,
         0, descriptor_bulks, descriptor_pages, descriptor_materials);
@@ -2585,16 +2586,16 @@ void TestCharacterPackage()
         production_binding->bytes, production_view.dependencies, source.material_count);
     Require(decoded_bindings.size() == 1 && decoded_bindings[0].slot == 0 &&
             decoded_bindings[0].dependency_index == 1 && decoded_bindings[0].hero_ordinal == 0 &&
-            decoded_bindings[0].domain == rd::HeroMaterialDomain::Opaque,
+            decoded_bindings[0].domain == rd::CharacterMaterialDomain::Opaque,
             "production character material binding roundtrip");
     const std::array translucent_character_dependencies{
         std::string("render/material/slime_body/material.rpkg")};
     const std::array translucent_character_binding{rd::CharacterMaterialBinding{
-        0, 0, 5, rd::HeroMaterialDomain::Translucent}};
+        0, 0, 5, rd::CharacterMaterialDomain::Translucent}};
     const auto translucent_bindings = rd::EncodeCharacterMaterialBindings(
         translucent_character_binding, translucent_character_dependencies, 1);
     Require(rd::DecodeCharacterMaterialBindings(translucent_bindings,
-        translucent_character_dependencies, 1)[0].domain == rd::HeroMaterialDomain::Translucent,
+        translucent_character_dependencies, 1)[0].domain == rd::CharacterMaterialDomain::Translucent,
         "standalone translucent character slot was rejected");
     for(const auto&c:view.chunks)if(c.type!=rd::ChunkType::ExpandedVertices){auto found=std::ranges::find(production_view.chunks,c.type,&rd::ChunkView::type);Require(found!=production_view.chunks.end() && std::ranges::equal(found->bytes,c.bytes),"character skeleton scalar bytes changed");}
     Reject([&]{(void)rd::DecodeCharacterMetadataPackage(package,asset);},"production decoder accepted embedded package");
@@ -2637,42 +2638,42 @@ void TestCharacterPackage()
            "cross-chunk bone count mismatch accepted");
 }
 
-void TestHeroWorkRawDecoding()
+void TestTranslucencyDiagnosticsRawDecoding()
 {
-    hs::HeroWorkShaderLayout layout;
-    Require(hs::HeroWorkMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
+    hs::TranslucencyDiagnosticsShaderLayout layout;
+    Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
         layout.contributor_bytes == 512 && layout.phase_bytes == 11264 && layout.total_bytes == 247808,
         "hero two exact bitmaps/header/aligned stride/slot total");
-    Require(hs::HeroWorkMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
-        layout.total_bytes <= hs::kHeroWorkShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
-    Require(!hs::HeroWorkMakeShaderLayout(0, 720, 3, layout) && !hs::HeroWorkMakeShaderLayout(1280, 0, 3, layout) &&
-        !hs::HeroWorkMakeShaderLayout(1280, 720, 0, layout), "hero zero diagnostic dimensions/slots are invalid");
-    Require(!hs::HeroWorkMakeShaderLayout(UINT32_MAX, 2, 1, layout) &&
-        !hs::HeroWorkMakeShaderLayout(1, 1, UINT32_MAX, layout), "hero checked pixel/slot product cannot wrap");
-    Require(!hs::HeroWorkMakeShaderLayout(3840, 2160, 3, layout), "hero exact two-bitmap 4K capture exceeds explicit 512MiB limit");
+    Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
+        layout.total_bytes <= hs::kTranslucencyDiagnosticsShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
+    Require(!hs::TranslucencyDiagnosticsMakeShaderLayout(0, 720, 3, layout) && !hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 0, 3, layout) &&
+        !hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 720, 0, layout), "hero zero diagnostic dimensions/slots are invalid");
+    Require(!hs::TranslucencyDiagnosticsMakeShaderLayout(UINT32_MAX, 2, 1, layout) &&
+        !hs::TranslucencyDiagnosticsMakeShaderLayout(1, 1, UINT32_MAX, layout), "hero checked pixel/slot product cannot wrap");
+    Require(!hs::TranslucencyDiagnosticsMakeShaderLayout(3840, 2160, 3, layout), "hero exact two-bitmap 4K capture exceeds explicit 512MiB limit");
 
     std::uint64_t qpc = 123;
-    Require(hs::HeroWorkCalibrate(1100, 1000, 5000, 100, 1000, qpc) && qpc == 6000,
+    Require(hs::TranslucencyDiagnosticsCalibrate(1100, 1000, 5000, 100, 1000, qpc) && qpc == 6000,
         "hero queue timestamp after calibration anchor");
-    Require(hs::HeroWorkCalibrate(900, 1000, 5000, 100, 1000, qpc) && qpc == 4000,
+    Require(hs::TranslucencyDiagnosticsCalibrate(900, 1000, 5000, 100, 1000, qpc) && qpc == 4000,
         "hero timestamp before anchor must not unsigned-wrap");
-    Require(!hs::HeroWorkCalibrate(0, 1000, 100, 100, 1000, qpc) && qpc == 0,
+    Require(!hs::TranslucencyDiagnosticsCalibrate(0, 1000, 100, 100, 1000, qpc) && qpc == 0,
         "hero negative QPC calibration must be unavailable");
-    Require(!hs::HeroWorkCalibrate(1000, 1000, 5000, 0, 1000, qpc), "hero zero GPU frequency");
-    Require(!hs::HeroWorkCalibrate(1000, 1000, 5000, 100, 0, qpc), "hero zero QPC frequency");
-    Require(!hs::HeroWorkCalibrate(UINT64_MAX, 0, UINT64_MAX, 1, UINT64_MAX, qpc), "hero calibration overflow");
+    Require(!hs::TranslucencyDiagnosticsCalibrate(1000, 1000, 5000, 0, 1000, qpc), "hero zero GPU frequency");
+    Require(!hs::TranslucencyDiagnosticsCalibrate(1000, 1000, 5000, 100, 0, qpc), "hero zero QPC frequency");
+    Require(!hs::TranslucencyDiagnosticsCalibrate(UINT64_MAX, 0, UINT64_MAX, 1, UINT64_MAX, qpc), "hero calibration overflow");
     const std::array<std::uint32_t, 6> indexed{7, 30, 4, 6, UINT32_MAX, 0};
-    Require(hs::HeroWorkIndexedArgumentsValid(indexed, 36, 4), "hero actual indexed argument layout");
+    Require(hs::TranslucencyDiagnosticsIndexedArgumentsValid(indexed, 36, 4), "hero actual indexed argument layout");
     auto invalid = indexed; invalid[1] = 37;
-    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero index-count subtraction underflow");
+    Require(!hs::TranslucencyDiagnosticsIndexedArgumentsValid(invalid, 36, 4), "hero index-count subtraction underflow");
     invalid = indexed; invalid[3] = 7;
-    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero start-index range");
+    Require(!hs::TranslucencyDiagnosticsIndexedArgumentsValid(invalid, 36, 4), "hero start-index range");
     invalid = indexed; invalid[2] = 5;
-    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero visible instance range");
+    Require(!hs::TranslucencyDiagnosticsIndexedArgumentsValid(invalid, 36, 4), "hero visible instance range");
     invalid = indexed; invalid[2] = 0;
-    Require(hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "zero-instance ExecuteIndirect still has copied arguments");
-    Require(hs::kHeroWorkStatisticsOffset + 14 * 8 == hs::kHeroWorkOcclusionOffset &&
-        hs::kHeroWorkOcclusionOffset + 8 == hs::kHeroWorkRowBytes && hs::kHeroWorkRowBytes % 8 == 0,
+    Require(hs::TranslucencyDiagnosticsIndexedArgumentsValid(invalid, 36, 4), "zero-instance ExecuteIndirect still has copied arguments");
+    Require(hs::kTranslucencyDiagnosticsStatisticsOffset + 14 * 8 == hs::kTranslucencyDiagnosticsOcclusionOffset &&
+        hs::kTranslucencyDiagnosticsOcclusionOffset + 8 == hs::kTranslucencyDiagnosticsRowBytes && hs::kTranslucencyDiagnosticsRowBytes % 8 == 0,
         "hero native timestamp/statistics/occlusion readback spans overlap");
 }
 
@@ -3173,6 +3174,89 @@ void TestCharacterBc7CoverageRepair()
 
 void TestTexturePackage()
 {
+    {
+        const auto terrain_asset = hs::MakeAssetId("render/terrain-surface/test.rpkg");
+        const std::vector<std::string> products{"render/terrain/section-z.rpkg", "render/terrain/section-a.rpkg"};
+        const std::array sections{
+            rd::TerrainSurfaceSection{1, 2, -3, 4, 1, 0, 22, 123},
+            rd::TerrainSurfaceSection{-5, 6, 7, 8, 0, 1, 20, 456}};
+        const rd::TextureDescription description{2, 2, 6, 2, rd::kTextureFormatRgba8};
+        std::array<std::byte, 32> identity{};
+        identity[7] = std::byte{0x5a};
+        const auto terrain = rd::BuildTerrainSurfacePackage(terrain_asset, products, sections, description, identity);
+        const auto parsed = rd::ReadTerrainSurfacePackage(terrain, terrain_asset);
+        Require(parsed.sections.size() == 2 && parsed.sections[0].span_x == -3 &&
+            parsed.sections[1].x == -5 && parsed.sections[1].seed == 456 &&
+            parsed.section_products == products && parsed.description.array_size == 6 &&
+            parsed.description.mip_count == 2 && parsed.source_identity == identity &&
+            parsed.layout_version == rd::kTerrainSurfaceLayoutVersion,
+            "terrain ordered sections, source identity and product dependencies roundtrip");
+        identity[7] = std::byte{0x5b};
+        auto compressed = description; compressed.width = compressed.height = 2048;
+        compressed.mip_count = 12; compressed.format = rd::kTextureFormatBc7;
+        const auto compressed_package = rd::BuildTerrainSurfacePackage(
+            terrain_asset, products, sections, compressed, identity);
+        const auto compressed_view = rd::ReadTerrainSurfacePackage(compressed_package, terrain_asset);
+        Require(compressed_view.description.width == 2048 &&
+            compressed_view.description.format == rd::kTextureFormatBc7 &&
+            compressed_view.section_products == products,
+            "compressed terrain shape and section mapping roundtrip");
+        const auto changed_identity = rd::BuildTerrainSurfacePackage(terrain_asset, products, sections, description, identity);
+        Require(rd::ReadTerrainSurfacePackage(changed_identity, terrain_asset).source_identity == identity &&
+            terrain != changed_identity, "terrain source identity byte is preserved");
+        auto malformed = sections;
+        malformed[0].span_x = 0;
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, malformed, description, identity); },
+            "zero terrain span accepted");
+        malformed[0].span_x = std::numeric_limits<float>::quiet_NaN();
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, malformed, description, identity); },
+            "nonfinite terrain span accepted");
+        auto wrong_shape = description; wrong_shape.array_size = 3;
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, sections, wrong_shape, identity); },
+            "terrain section count mismatch accepted");
+        wrong_shape = description; wrong_shape.mip_count = 1;
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, sections, wrong_shape, identity); },
+            "incomplete terrain mip chain accepted");
+        const std::vector<rd::TerrainSurfaceSection> too_many(65, sections[0]);
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, too_many, description, identity); },
+            "overflow terrain section count accepted");
+        const auto admitted = rd::ReadPackage(terrain, terrain_asset);
+        auto table = std::vector<std::byte>(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        table[12] = std::byte{0};
+        const std::array legacy_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto legacy = rd::BuildPackage(terrain_asset, admitted.dependencies, legacy_chunks);
+        const auto legacy_view = rd::ReadTerrainSurfacePackage(legacy, terrain_asset);
+        Require(legacy_view.layout_version == 1 && legacy_view.section_products == products &&
+            legacy_view.source_identity == parsed.source_identity, "legacy terrain surface layout did not decode");
+        table[12] = std::byte{1};
+        const std::array unknown_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto unknown = rd::BuildPackage(terrain_asset, admitted.dependencies, unknown_chunks);
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(unknown, terrain_asset); },
+            "unknown terrain surface layout accepted");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        table[8] = std::byte{0xff}; table[9] = std::byte{0xff};
+        const std::array invalid_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto invalid = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_chunks);
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid, terrain_asset); },
+            "malformed terrain section count accepted");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        table[68 + 2 * 32] = std::byte{0xff};
+        const std::array invalid_indices{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto invalid_mapping = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_indices);
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid_mapping, terrain_asset); },
+            "invalid terrain product index accepted");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        std::fill_n(table.begin() + 68 + 8, 4, std::byte{0});
+        const std::array invalid_span{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto invalid_record = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_span);
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid_record, terrain_asset); },
+            "decoded zero terrain span accepted");
+    }
     const std::string id = "render/texture/test.rpkg";
     const auto asset = hs::MakeAssetId(id);
     const std::vector<std::string> dependencies{"environment/test.dds"};
@@ -3548,7 +3632,7 @@ int main(int argc, char **argv)
         RunNamed("TestCharacterSemanticMips", TestCharacterSemanticMips);
         RunNamed("TestCharacterBc7CoverageRepair", TestCharacterBc7CoverageRepair);
         RunNamed("TestHlodScenePreparation", TestHlodScenePreparation);
-        RunNamed("TestHeroWorkRawDecoding", TestHeroWorkRawDecoding);
+        RunNamed("TestTranslucencyDiagnosticsRawDecoding", TestTranslucencyDiagnosticsRawDecoding);
         RunNamed("TestVirtualShadowGuarantees", TestVirtualShadowGuarantees);
         RunNamed("TestStaticShadowLayout", TestStaticShadowLayout);
         RunNamed("TestStaticShadowArchive", TestStaticShadowArchive);

@@ -70,7 +70,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
         for (std::size_t ordinal = 0; ordinal < material_count; ++ordinal)
         {
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
-            const auto name = hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]
+            const auto name = hero ? kCharacterMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                    : kAuthoredMaterialNames[ordinal];
             const std::string id = "render/material/" +
                 std::string(name) + "/parameters.rpkg";

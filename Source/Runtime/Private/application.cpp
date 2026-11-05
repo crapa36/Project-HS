@@ -1,6 +1,7 @@
 #include <hs/runtime/application.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/runtime/shipping_content.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 #ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/presentation/presentation_catalog_io.hpp>
@@ -18,7 +19,7 @@
 #include "runtime_diagnostics.hpp"
 #include "process_scene.hpp"
 #include "scene_generation_binding.hpp"
-#include "hero_work_log.hpp"
+#include "translucency_diagnostics_log.hpp"
 #include "audio_session.hpp"
 #include "vfx_catalog.hpp"
 #include "vfx_typed_frame_adapter.hpp"
@@ -52,7 +53,7 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/runtime/audio_engine.hpp>
 #ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/runtime/playtest_recording.hpp>
@@ -367,7 +368,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     constexpr bool capture_diagnostics = false;
     constexpr bool validation_enabled = false;
     if (config.smoke || config.smoke_render_lockstep || config.capture_diagnostics ||
-        config.capture_hero_work || config.diagnostic_enemy_count || config.record_playtest ||
+        config.capture_translucency_diagnostics || config.diagnostic_enemy_count || config.record_playtest ||
         config.replay_compare || !config.replay_directory.empty() || config.resize_test ||
         config.monster_preview_asset != 0xFFFFFFFFu || config.boss_vfx_capture != 0xFFFFFFFFu ||
         config.boss_phase2_capture || config.slime_family_preview_count || config.environment_preview ||
@@ -388,10 +389,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
          config.boss_vfx_capture < 3 || config.boss_phase2_capture))
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
             "Diagnostic enemy fixture requires smoke + diagnostics, at most 10000 enemies, and no replay, recording or preview.")};
-    if (config.hero_work_mode > HeroWorkDiagnosticMode::CoverageOnly ||
-        (!config.capture_hero_work && config.hero_work_mode != HeroWorkDiagnosticMode::Full))
+    if (config.translucency_diagnostics_mode > TranslucencyDiagnosticsMode::CoverageOnly ||
+        (!config.capture_translucency_diagnostics && config.translucency_diagnostics_mode != TranslucencyDiagnosticsMode::Full))
         return {Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Hero work diagnostic mode requires its explicit capture flag.")};
-    if (config.capture_hero_work && !config.capture_diagnostics)
+    if (config.capture_translucency_diagnostics && !config.capture_diagnostics)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Hero work capture requires explicit diagnostics.")};
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -471,6 +472,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #ifdef HS_DEVELOPMENT_TOOLS
     const auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
 #endif
+#ifndef HS_DEVELOPMENT_TOOLS
+    VfxImageData shipped_vfx;
+#endif
     VfxCatalog vfx_catalog;
 #ifdef HS_DEVELOPMENT_TOOLS
     if (auto loaded = VfxCatalog::Load(
@@ -478,7 +482,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         !loaded)
         return {loaded};
 #else
-    if (auto bound = vfx_catalog.Bind(shipping::Vfx()); !bound)
+    {
+    std::array<std::vector<std::byte>, 2> vfx_bytes;
+    for (std::size_t i = 0; i < vfx_bytes.size(); ++i)
+        if (auto read = shipping::ReadRange(*shipped_content, shipping::ImageInfo().vfx[i], vfx_bytes[i]); !read)
+            return {read};
+    if (auto loaded = DecodeVfxImage(vfx_bytes[0], vfx_bytes[1], shipped_vfx); !loaded)
+        return {loaded};
+    }
+    if (!shipped_vfx.has_required_sprite_bindings)
+        return {Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Shipping VFX omits required sprite bindings.")};
+    if (auto bound = vfx_catalog.Bind(shipped_vfx.View()); !bound)
         return {bound};
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -519,8 +533,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (!loaded_from_file)
         requested_settings = LegacyDefaultSettingsDocument();
     const auto initial_settings = PrepareStartupGraphicsSettings(requested_settings, config);
+    const bool mute_audio = config.mute_audio || capture_diagnostics || config.environment_preview ||
+        config.character_preview || config.vfx_showcase || config.preview_camera_override;
     GraphicsSettingsCommit settings_commit(std::move(requested_settings),
-                                           initial_settings, config.mute_audio);
+                                           initial_settings, mute_audio);
     SettingsData &settings = settings_commit.Effective();
     ProfileData profile;
     if (auto loaded = save_store.LoadProfile(profile); !loaded)
@@ -661,7 +677,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 ApplySettingsEdit(ui_click_document, *interaction.runtime_command))
             {
                 ui_click_settings = ProjectSettingsDocument(ui_click_document);
-                if (config.mute_audio) ui_click_settings.master_volume = 0;
+                if (mute_audio) ui_click_settings.master_volume = 0;
                 ui_click_model.requested = ui_click_document.graphics;
             }
             std::string_view cue;
@@ -783,7 +799,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     }
     if (capture_clock)
         WriteText(config.artifact_directory / "runtime_capture.json", std::format(
-            "{{\"qpc_frequency\":{},\"audio_startup_us\":{},\"audio_startup_calls\":{},\"audio_startup_detail\":\"aggregate including preload and native initialization\",\"diagnostic_enemy_count\":{},\"scripted_input\":{},\"automatic_spawning\":{},\"capture_checksums\":{},\"cpu_scopes\":\"wall elapsed; nested inclusive; graph_software_scene_prepare excludes parallel shadow join; graph_local_shadow_prepare includes setup/join wait\",\"audio_latency\":\"enqueue to API drain; worker request to verified Ready; XAudio2 latency is SDK estimate\",\"device_kernel_internal_time\":null,\"sleep_probe_requested_ms\":1,\"sleep_probe_begin_qpc\":{},\"sleep_probe_end_qpc\":{},\"sleep_probe_us\":{},\"os_thread_ready_qpc\":null}}\n",
+            "{{\"qpc_frequency\":{},\"audio_startup_us\":{},\"audio_startup_calls\":{},\"audio_startup_detail\":\"aggregate including preload and native initialization\",\"diagnostic_enemy_count\":{},\"scripted_input\":{},\"automatic_spawning\":{},\"capture_checksums\":{},\"cpu_scopes\":\"wall elapsed; nested inclusive; graph_local_shadow_prepare includes setup/join wait\",\"audio_latency\":\"enqueue to API drain; worker request to verified Ready; XAudio2 latency is SDK estimate\",\"device_kernel_internal_time\":null,\"sleep_probe_requested_ms\":1,\"sleep_probe_begin_qpc\":{},\"sleep_probe_end_qpc\":{},\"sleep_probe_us\":{},\"os_thread_ready_qpc\":null}}\n",
             capture_frequency.QuadPart, audio_startup.ticks * task_microseconds, audio_startup.calls,
             config.diagnostic_enemy_count, config.diagnostic_enemy_count != 0, config.diagnostic_enemy_count == 0,
             config.diagnostic_enemy_count == 0 && (config.smoke || config.record_playtest || !config.replay_directory.empty()),
@@ -847,7 +863,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::jthread render_thread([&, render_ports, initial_renderer_settings, startup_graphics](std::stop_token) mutable {
         auto &channels = render_ports;
         SetThreadName(L"HS Render");
-        auto render_tasks = task_system.CreateTaskGroup();
 #ifdef HS_DEVELOPMENT_TOOLS
         auto render_generation = std::make_shared<const SelectedGeneration>(selected_generation);
 #else
@@ -878,18 +893,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
         renderer_config.font_bytes = startup_font;
         renderer_config.display_output = initial_native_output;
-        renderer_config.task_executor.submit = [&](std::function<void()> record) {
-            const bool accepted = render_tasks.Submit(
-                [record = std::move(record)](std::stop_token) { record(); });
-            return accepted ? Result::Success() :
-                Result::Failure(ErrorCode::TaskFailed, "hs_runtime",
-                                "Could not submit render graph recording task.");
-        };
-        renderer_config.task_executor.join = [&] {
-            auto joined = render_tasks.Wait();
-            render_tasks = task_system.CreateTaskGroup();
-            return joined;
-        };
+        renderer_config.task_system = &task_system;
         renderer_config.window = window.Handle();
 #ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.warp = config.warp;
@@ -905,12 +909,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.capture_timing_stream = config.capture_diagnostics;
         renderer_config.capture_gpu_timings = config.capture_gpu_timings;
-        renderer_config.capture_hero_work = config.capture_hero_work;
-        renderer_config.hero_work_mode = config.hero_work_mode;
+        renderer_config.capture_translucency_diagnostics = config.capture_translucency_diagnostics;
+        renderer_config.translucency_diagnostics_mode = config.translucency_diagnostics_mode;
 #else
         renderer_config.capture_timing_stream = false;
         renderer_config.capture_gpu_timings = false;
-        renderer_config.capture_hero_work = false;
+        renderer_config.capture_translucency_diagnostics = false;
 #endif
         renderer_config.frame_generation_allowed = false; // Startup/loading/menu are not gameplay frames.
         renderer_config.interpolate = realtime;
@@ -930,7 +934,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         RendererVfxSpriteBindings initial_sprite_bindings;
         auto initialized = PrepareVfxSpriteBindings(vfx_catalog, initial_sprite_bindings);
 #else
-        const auto &initial_sprite_bindings = shipping::Vfx().sprite_bindings;
+        const auto &initial_sprite_bindings = vfx_catalog.Image().sprite_bindings;
         auto initialized = Result::Success();
 #endif
         renderer_config.bleed_status_sprite = initial_sprite_bindings.bleed_status_sprite;
@@ -1320,10 +1324,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::string gpu_live_row;
 #if defined(HS_DEVELOPMENT_TOOLS)
         bool hero_drain_succeeded{true};
-        std::unique_ptr<runtime_detail::HeroWorkLog> hero_lines;
-        if (config.capture_hero_work)
+        std::unique_ptr<runtime_detail::TranslucencyDiagnosticsLog> hero_lines;
+        if (config.capture_translucency_diagnostics)
         {
-            hero_lines = std::make_unique<runtime_detail::HeroWorkLog>(config.artifact_directory, capture_clock);
+            hero_lines = std::make_unique<runtime_detail::TranslucencyDiagnosticsLog>(config.artifact_directory, capture_clock);
             if (hero_lines->Failed()) record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Could not initialize isolated Hero work capture."));
         }
 #endif
@@ -1411,8 +1415,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             {
                 try
                 {
-                    std::vector<RendererHeroWorkSample> samples;
-                    const auto captured = drain ? renderer.DrainHeroWork(samples) : renderer.ConsumeCompletedHeroWork(samples);
+                    std::vector<RendererTranslucencyDiagnosticsSample> samples;
+                    const auto captured = drain ? renderer.DrainTranslucencyDiagnostics(samples) : renderer.ConsumeCompletedTranslucencyDiagnostics(samples);
                     if (!captured) { hero_drain_succeeded = false; return captured; }
                     for (const auto &sample : samples) hero_lines->Append(sample);
                     if (hero_lines->Failed()) return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Hero work capture write failed.");
@@ -3012,7 +3016,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
                 const std::array views{renderer.MainViewInput(InterpolateRenderCamera(snapshots, sample_alpha))};
-                const RenderFrameInput render_input{
+                const RenderPackage render_input{
                     .views = views,
                     .snapshots = snapshots,
                     .vfx = {
@@ -3039,23 +3043,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     },
                     .devtools = devtools,
                     .ui_draw_content = snapshots.ui_frame
-                        ? snapshots.ui_frame->draw_content : nullptr,
+                        ? snapshots.ui_frame->draw_content : EmptyUiDrawContent(),
                     // Lockstep captures advance presentation by the same fixed
                     // step as simulation, independent of GPU/driver wall time.
                     .delta_seconds = config.smoke_render_lockstep
                         ? std::optional<float>{
                             std::chrono::duration<float>(FixedStepClock::kFixedStep).count()}
                         : std::nullopt,
-                    .scene = snapshots.current.static_scene
-                        ? std::optional<RenderSceneRef>{RenderSceneRef{
-                            snapshots.current.static_scene->scene_asset_id,
-                            snapshots.current.static_scene->content_generation_id,
-                            snapshots.current.static_scene}}
-                        : std::nullopt,
                     .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
                     .wait_for_streaming = config.smoke_render_lockstep,
                     .ui_packet_generation = snapshots.ui_frame ? snapshots.ui_frame->generation : 0,
-                    .sample_time = sample_time,
+                    .display_sample = RenderDisplaySample{sample_time, sample_alpha},
                 };
                 // GPU completion is delayed; offline attribution joins this revision through its own frame ID.
                 // Simulation/input can enter Pause or a menu after this loop's
@@ -3085,6 +3083,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         "Renderer completed VFX inputs without acknowledging the matching world step."));
                     break;
                 }
+                if (frame.presented_ui_packet_generation)
+                    native_input_frame.PresentedSession(snapshots.current.header.session_id, frame.rendered_tick);
 #ifdef HS_DEVELOPMENT_TOOLS
                 if (performance_lines)
                 {
@@ -3317,8 +3317,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         // Shutdown releases query readbacks; retain the last in-flight frames first.
         if (auto drained = drain_gpu_capture(); !drained) record_thread_failure(drained);
 #if defined(HS_DEVELOPMENT_TOOLS)
-        RendererHeroWorkStatus hero_status;
-        if (config.capture_hero_work) hero_status = renderer.HeroWorkStatus();
+        RendererTranslucencyDiagnosticsStatus hero_status;
+        if (config.capture_translucency_diagnostics) hero_status = renderer.TranslucencyDiagnosticsStatus();
 #endif
         RendererLightingStatus::ShadowCacheStatus shadow_cache;
         if (capture_diagnostics) shadow_cache = renderer.GetLightingStatus().shadow_cache;
@@ -3703,32 +3703,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         Sequence publish_sequence{};
         RenderSnapshotStorage dynamic_previous(1'024, 256, 4, 0);
         RenderSnapshotStorage dynamic_current(1'024, 256, 4, 0);
-#ifdef HS_DEVELOPMENT_TOOLS
-        const auto append_pickup_probe = [&] {
-            if (!config.vfx_showcase) return;
-            constexpr std::array kinds{PersistentVfxKind::PickupXpIdle, PersistentVfxKind::PickupHealIdle,
-                PersistentVfxKind::PickupMagnetIdle, PersistentVfxKind::PickupRelicIdle};
-            constexpr std::array assets{"particle.pickup.xp.idle", "particle.pickup.heal.idle",
-                "particle.pickup.magnet.idle", "particle.pickup.relic_chest.idle"};
-            constexpr std::array colors{0xFFFFD040u, 0xFF40E060u, 0xFFFF3030u, 0xFFE080FFu};
-            constexpr std::array scales{Float3{.34f,.34f,.34f}, Float3{.26f,.55f,.26f},
-                Float3{.48f,.48f,.48f}, Float3{.40f,.40f,.40f}};
-            for (std::size_t i=0;i<kinds.size();++i)
-            {
-                const float x=-4.5f+3.0f*static_cast<float>(i), z=-3.0f;
-                RenderInstance body{{x,.32f+MeadowGroundHeight({x,z}),z}, i==0?.785398f:0.0f,
-                    scales[i],colors[i],RenderMesh::Pickup,0x5fff000000000001ull+i};
-                PopulateRenderInstanceIdentity(body);
-                dynamic_current.AddInstance(body);
-                PersistentVfxVisual idle{};
-                idle.kind=kinds[i];idle.stable_id=0x6fff000000000001ull+i;
-                idle.position=body.position;idle.yaw=body.yaw;
-                idle.radius=std::max(body.scale.x,body.scale.z);
-                idle.effect_asset=MakeAssetId(assets[i]);idle.entity_render_id=body.stable_id;
-                dynamic_current.AddPersistentVfx(idle);
-            }
-        };
-#endif
         bool has_dynamic_sample{};
         bool has_previous_dynamic_sample{};
         std::vector<DomainSignal> retained_line_signals;
@@ -3739,6 +3713,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t display_clock_epoch{};
         RenderClockMode display_clock_mode{RenderClockMode::Scripted};
         std::uint64_t dynamic_pair_revision{};
+        std::optional<std::uint64_t> rendered_session_barrier;
+        bool rendered_playing_barrier{};
         std::shared_ptr<const UiFrame> prepared_ui;
         std::vector<std::uint64_t> ui_projection_facts;
         std::array<ActionEdge, 256> action_storage{};
@@ -3810,9 +3786,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.simulation_done.store(true, std::memory_order_release);
                 return;
             }
-#ifdef HS_DEVELOPMENT_TOOLS
-            append_pickup_probe();
-#endif
             configure_dynamic_camera(model);
             now = FixedStepClock::Clock::now();
             clock.Realign(now);
@@ -4247,9 +4220,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             break;
                         }
                     }
-#ifdef HS_DEVELOPMENT_TOOLS
-                    if (project_dynamic) append_pickup_probe();
-#endif
                     if (project_dynamic) ++dynamic_pair_revision;
                     dynamic_current.header.checksum = model.checksum;
                     dynamic_current.header.dynamic_pair_revision = dynamic_pair_revision;
@@ -4390,6 +4360,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 simulation.ClearDomainSignals();
                 channels.completed_tick.store(tick.tick, std::memory_order_release);
                 channels.gameplay_checksum.store(tick.checksum, std::memory_order_release);
+                const bool new_rendered_session = !rendered_session_barrier ||
+                    *rendered_session_barrier != dynamic_current.header.session_id;
+                if (realtime && snapshot_published &&
+                    (new_rendered_session || (tick.phase == SessionPhase::Playing && !rendered_playing_barrier)))
+                {
+                    if (native_token) native_input_frame.Simulated(native_token);
+                    if (!native_input_frame.WaitPresentedSession(dynamic_current.header.session_id, tick.tick)) break;
+                    rendered_session_barrier = dynamic_current.header.session_id;
+                    if (new_rendered_session) rendered_playing_barrier = false;
+                    if (tick.phase == SessionPhase::Playing) rendered_playing_barrier = true;
+                    clock.Realign(FixedStepClock::Clock::now());
+                    simulation_debt = {};
+                    stop_remaining_admitted_steps = true;
+                }
                 if (config.smoke_render_lockstep && !final_smoke_frame)
                 {
                     while (rendered_tick.load(std::memory_order_acquire) < tick.tick &&

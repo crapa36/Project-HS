@@ -208,12 +208,18 @@ TextureDescriptorStorage CompileTextureDescriptor(
     descriptor.bulk_index = bulk_index;
     const auto retain_layout = [&](const auto &view) {
         descriptor.subresources.reserve(view.subresources.size());
-        for (const auto &subresource : view.subresources)
+        for (std::size_t i = 0; i < view.subresources.size(); ++i)
         {
+            const auto &subresource = view.subresources[i];
             const bool has_digest = descriptor.dimension == TextureDimension::Texture2DArray;
+            std::array<std::byte, 32> digest{};
+            // ReadTexturePackage already authenticated these exact metadata digests.
+            if (has_digest)
+                std::copy_n(package.chunks[0].bytes.begin() + kMetadataHeader + i * kRecordStride + 16,
+                    digest.size(), digest.begin());
             descriptor.subresources.push_back({static_cast<std::uint64_t>(subresource.bytes.data() - bytes.data()),
                 subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size()),
-                has_digest ? Sha256(subresource.bytes) : std::array<std::byte, 32>{}, has_digest});
+                digest, has_digest});
         }
     };
     if (magic == 0x31565854) // TXV1

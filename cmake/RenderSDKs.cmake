@@ -18,7 +18,7 @@ function(hs_configure_render_sdks)
         CACHE PATH "Verified AMD FSR SDK directory")
     set(HS_DIRECTSR_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Build/tooling/render-sdks/directsr-1.715.1-preview"
         CACHE PATH "Verified DirectSR preview SDK directory")
-    target_sources(hs_renderer_d3d12 PRIVATE
+    target_sources(hs_renderer_d3d12_common PRIVATE
         Source/RendererD3D12/Private/renderer_xess_fg.cpp
         Source/RendererD3D12/Private/renderer_xell.cpp
         Source/RendererD3D12/Private/renderer_streamline.cpp
@@ -27,30 +27,30 @@ function(hs_configure_render_sdks)
         Source/RendererD3D12/Private/renderer_sdk_presentation.cpp
         Source/RendererD3D12/Private/presentation-guides.cpp)
     foreach(feature IN ITEMS XESS XESS_FG XELL STREAMLINE FSR DIRECTSR)
-        target_compile_definitions(hs_renderer_d3d12 PRIVATE HS_WITH_${feature}=$<BOOL:${HS_WITH_${feature}}>)
+        target_compile_definitions(hs_renderer_d3d12_common PRIVATE HS_WITH_${feature}=$<BOOL:${HS_WITH_${feature}}>)
     endforeach()
     set(enabled)
     if(HS_WITH_DIRECTSR)
         list(APPEND enabled directsr)
         # Bootstrap extracts only directsr.h from this directory. The main
         # renderer continues using the existing Agility 619 D3D12 headers.
-        target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_DIRECTSR_SDK_ROOT}/build/native/include")
+        target_include_directories(hs_renderer_d3d12_common PRIVATE "${HS_DIRECTSR_SDK_ROOT}/build/native/include")
     endif()
     if(HS_WITH_XESS OR HS_WITH_XESS_FG OR HS_WITH_XELL)
         list(APPEND enabled xess)
-        target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_XESS_SDK_ROOT}/inc")
+        target_include_directories(hs_renderer_d3d12_common PRIVATE "${HS_XESS_SDK_ROOT}/inc")
     endif()
     if(HS_WITH_STREAMLINE)
         list(APPEND enabled streamline)
-        target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_STREAMLINE_SDK_ROOT}/include")
-        target_link_libraries(hs_renderer_d3d12 PRIVATE wintrust crypt32)
+        target_include_directories(hs_renderer_d3d12_common PRIVATE "${HS_STREAMLINE_SDK_ROOT}/include")
+        target_link_libraries(hs_renderer_d3d12_common PRIVATE wintrust crypt32)
     endif()
     if(HS_WITH_FSR)
         list(APPEND enabled fsr)
         foreach(component IN ITEMS api upscalers framegeneration)
-            target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_FSR_SDK_ROOT}/Kits/FidelityFX/${component}/include")
+            target_include_directories(hs_renderer_d3d12_common PRIVATE "${HS_FSR_SDK_ROOT}/Kits/FidelityFX/${component}/include")
         endforeach()
-        target_link_libraries(hs_renderer_d3d12 PRIVATE wintrust crypt32)
+        target_link_libraries(hs_renderer_d3d12_common PRIVATE wintrust crypt32)
     endif()
     if(enabled)
         find_program(HS_SDK_POWERSHELL NAMES pwsh powershell REQUIRED)

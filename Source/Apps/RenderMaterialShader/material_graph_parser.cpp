@@ -335,7 +335,7 @@ std::vector<rd::MaterialTextureDefinition> ParseTextures(const Json &root)
         Require(textures.size() == 1, "decal requires one texture declaration");
         rd::ValidateDecalMaterialTextureDefinition(textures.front());
     }
-    else if (!textures.empty() || !IsHeroMaterialName(root.at("id").get<std::string>()))
+    else if (!textures.empty() || !IsCharacterMaterialName(root.at("id").get<std::string>()))
         rd::ValidateMaterialTextureDefinitions(textures);
     return textures;
 }
@@ -347,7 +347,7 @@ std::vector<rd::MaterialSamplerDefinition> ParseSamplers(const Json &root)
         root.at("version") != 6 && root.at("version") != 7) return samplers;
     Require((root.at("samplers").is_array() && !root.at("samplers").empty() &&
              root.at("samplers").size() <= 4) ||
-            (IsHeroMaterialName(root.at("id").get<std::string>()) &&
+            (IsCharacterMaterialName(root.at("id").get<std::string>()) &&
              root.at("samplers").is_array() && root.at("samplers").empty()), "expected one to four samplers");
     for (const auto &definition : root.at("samplers"))
     {
@@ -477,7 +477,7 @@ rd::MaterialGraph LowerLegacyMaterialSamples(rd::MaterialGraph old, const rd::Ro
 static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Json &root,
                                                rd::MaterialGraphKind kind, bool validate)
 {
-    const bool hero = IsHeroMaterialName(name);
+    const bool hero = IsCharacterMaterialName(name);
     const bool decal = kind == rd::MaterialGraphKind::Decal;
     const bool transparent = kind == rd::MaterialGraphKind::Translucent || kind == rd::MaterialGraphKind::HeroRefractive;
     const bool context = root.at("version") == 3 || root.at("version") == 4 ||
@@ -1020,7 +1020,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         else if (kind == rd::MaterialGraphKind::Leaf0) rd::ValidateLeaf0MaterialGraph(graph);
         else if (kind == rd::MaterialGraphKind::Terrain) rd::ValidateTerrainMaterialGraph(graph);
         else if (decal) rd::ValidateDecalMaterialGraph(graph);
-        else if (hero) rd::ValidateHeroMaterialGraph(graph);
+        else if (hero) rd::ValidateCharacterMaterialGraph(graph);
         else rd::ValidateEnvironmentMaterialGraph(graph);
     }
     return graph;
@@ -1043,12 +1043,12 @@ bool IsAuthoredMaterialName(std::string_view name)
 {
     for (const auto candidate : rd::kAuthoredMaterialNames)
         if (name == candidate) return true;
-    return IsHeroMaterialName(name);
+    return IsCharacterMaterialName(name);
 }
 
-bool IsHeroMaterialName(std::string_view name)
+bool IsCharacterMaterialName(std::string_view name)
 {
-    return std::ranges::find(rd::kHeroMaterialNames, name) != rd::kHeroMaterialNames.end();
+    return std::ranges::find(rd::kCharacterMaterialNames, name) != rd::kCharacterMaterialNames.end();
 }
 
 bool IsDecalMaterialName(std::string_view name)
@@ -1079,7 +1079,7 @@ static rd::MaterialGraphKind AuthoredMaterialKind(std::string_view name, const J
     Require(IsAuthoredMaterialName(name), "unknown material name");
     if (name == "terrain") return rd::MaterialGraphKind::Terrain;
     if (IsMaskedEnvironmentMaterial(name)) return rd::MaterialGraphKind::Masked;
-    if (!IsHeroMaterialName(name)) return rd::MaterialGraphKind::Opaque;
+    if (!IsCharacterMaterialName(name)) return rd::MaterialGraphKind::Opaque;
 
     const auto domain = root.at("domain").get<std::string>();
     const auto alpha_mode = root.at("render_flags").at("alpha_mode").get<std::string>();
@@ -1151,9 +1151,9 @@ MaterialDefinition ParseMaterialDefinition(std::string_view name, std::string_vi
         return {material, rd::PrepareMaterial(LowerLegacyMaterialSamples(std::move(graph), material),
             rd::MaterialPreparationDomain::Environment)};
     }
-    auto prepared = rd::PrepareMaterial(std::move(graph), IsHeroMaterialName(name)
+    auto prepared = rd::PrepareMaterial(std::move(graph), IsCharacterMaterialName(name)
         ? rd::MaterialPreparationDomain::Hero : rd::MaterialPreparationDomain::Environment);
-    if (IsHeroMaterialName(name)) return {{}, std::move(prepared)};
+    if (IsCharacterMaterialName(name)) return {{}, std::move(prepared)};
     auto material = material_from_graph(prepared.Graph());
     return {material, std::move(prepared)};
 }

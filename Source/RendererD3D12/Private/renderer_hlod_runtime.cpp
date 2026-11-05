@@ -257,13 +257,12 @@ Result D3D12Renderer::Impl::RetireHlodView(ViewId id)
     return PumpHlodDemand();
 }
 
-Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderFrameInput &input)
+Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input)
 {
     if (!hlod_runtime) return Result::Success();
     auto &runtime = *hlod_runtime;
     const auto session = input.snapshots.has_current ? input.snapshots.current.header.session_id : 0u;
-    const auto scene = input.scene ? input.scene->lease
-        : input.snapshots.has_current ? input.snapshots.current.static_scene : nullptr;
+    const auto scene = input.snapshots.has_current ? input.snapshots.current.static_scene : nullptr;
     // A valid frame package owns participation. Dormant histories remain leased
     // and reusable, while omitted views immediately withdraw IO qualification.
     for (auto &[key, view] : runtime.views)

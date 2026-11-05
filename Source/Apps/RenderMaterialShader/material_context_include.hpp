@@ -31,7 +31,7 @@ std::uint32_t AddSurfaceReflectionInputs(ap::ActionSpec &spec, const fs::path &s
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/surface-reflection", path, bytes));
     };
     for (const auto name : rd::kAuthoredMaterialNames) add(name);
-    for (const auto name : rd::kHeroMaterialNames) add(name);
+    for (const auto name : rd::kCharacterMaterialNames) add(name);
     return mask;
 }
 
@@ -39,15 +39,15 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
                                PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
-        const auto name = rd::kHeroMaterialNames[ordinal];
+        const auto name = rd::kCharacterMaterialNames[ordinal];
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
         const auto &prepared = materials.Get(name).prepared;
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
-        const auto functions = rd::EmitHeroMaterialContextHlsl(prepared,
+        const auto functions = rd::EmitCharacterMaterialContextHlsl(prepared,
             "HsHeroEvaluateSurface_" + std::to_string(ordinal), "HsHeroEvaluateOpacity_" + std::to_string(ordinal));
         if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += functions;
@@ -56,9 +56,9 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
             std::as_bytes(std::span(functions.data(), functions.size()))));
     }
     generated += "HsSurfaceClosure HsHeroEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
-        const auto &prepared = materials.Get(rd::kHeroMaterialNames[ordinal]).prepared;
+        const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
@@ -68,9 +68,9 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
     }
     generated += "    default: return (HsSurfaceClosure)0;\n    }\n}\n";
     generated += "float HsHeroEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
-        const auto &prepared = materials.Get(rd::kHeroMaterialNames[ordinal]).prepared;
+        const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
@@ -104,9 +104,9 @@ std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_
         generated += "    case " + std::to_string(ordinal) +
             "u: return HsMaterialApplyUniformLayers_" + std::to_string(ordinal) + "(base, ctx);\n";
     generated += "    default: return base;\n    }\n}\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
-        const auto name = rd::kHeroMaterialNames[ordinal];
+        const auto name = rd::kCharacterMaterialNames[ordinal];
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
         const auto &prepared = materials.Get(name).prepared;
         const auto function = rd::EmitUniformClosureHlsl(prepared,
@@ -116,7 +116,7 @@ std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_
             std::as_bytes(std::span(function.data(), function.size()))));
     }
     generated += "HsSurfaceClosure HsHeroApplyDeferredLayers(HsSurfaceClosure base, HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
         generated += "    case " + std::to_string(ordinal) + "u: return HsHeroApplyUniformLayers_" + std::to_string(ordinal) + "(base, ctx);\n";
     generated += "    default: return base;\n    }\n}\n";
     return generated;

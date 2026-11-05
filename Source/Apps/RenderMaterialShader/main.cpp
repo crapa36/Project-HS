@@ -94,7 +94,7 @@ std::size_t MaterialOrdinal(std::string_view name)
 struct MaterialShaderOptions
 {
     std::uint32_t sidecar_planes{};
-    bool feedback{}, hero_work{}, hero_translucent_domain{}, terrain_visibility_resolve{};
+    bool feedback{}, translucency_diagnostics{}, hero_translucent_domain{}, terrain_visibility_resolve{}, single_layer_water{};
 };
 
 void RunDxc(const fs::path &dxc, const fs::path &source_root,
@@ -116,9 +116,10 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     hs::shader_content::AppendRenderBindingArguments(args);
     if (!define.empty()) args.emplace_back(define);
     if (options.feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
-    if (options.hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
+    if (options.translucency_diagnostics) args.emplace_back(L"-DHS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1");
     if (options.hero_translucent_domain) args.emplace_back(L"-DHS_HERO_TRANSLUCENT_DOMAIN_ONLY=1");
     if (options.terrain_visibility_resolve) args.emplace_back(L"-DHS_TERRAIN_VISIBILITY_RESOLVE=1");
+    if (options.single_layer_water) args.emplace_back(L"-DHS_SINGLE_LAYER_WATER=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(options.sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
@@ -143,18 +144,19 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
 
 bool IsHeroTranslucentProgram(const ProgramOutput &program)
 {
-    constexpr std::array<std::wstring_view, 6> entries{
-        L"HeroPeelFrontPS", L"HeroPeelExitPS", L"HeroOitTailPS",
-        L"HeroTransparentGuidePS", L"HeroLayerCompositePS", L"HeroTranslucentPS"};
+    constexpr std::array<std::wstring_view, 7> entries{
+        L"LayeredTranslucencyPeelFrontPS", L"LayeredTranslucencyGatherExitDepthPS", L"LayeredTranslucencyAccumulateUnpeeledPS",
+        L"LayeredTranslucencyCompositeFrontPS", L"LayeredTranslucencyCompositeLayerPS", L"HeroTranslucentPS",
+        L"SingleLayerWaterPS"};
     return std::ranges::find(entries, program.entry) != entries.end();
 }
 
-enum class ShaderFamily { Preintegrated, HeroWork, ScreenReflections };
+enum class ShaderFamily { Preintegrated, TranslucencyDiagnostics, ScreenReflections };
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
                            const fs::path &dxc, ShaderFamily family)
 {
-    const bool hero_work = family == ShaderFamily::HeroWork;
+    const bool translucency_diagnostics = family == ShaderFamily::TranslucencyDiagnostics;
     const bool ssr = family == ShaderFamily::ScreenReflections;
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
             "all paths must be absolute");
@@ -164,7 +166,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     ap::ActionSpec spec;
     spec.action_id = "render.shader.bsdf-preintegrate";
     spec.recipe_id = "project-hs.render.bsdf-preintegrate";
-    spec.recipe_version = 13;
+    spec.recipe_version = 14;
     spec.namespace_path = "render/shader/bsdf-preintegrate";
     if (ssr)
     {
@@ -173,12 +175,12 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         spec.recipe_version = 1;
         spec.namespace_path = "render/shader/screen-reflections";
     }
-    else if (hero_work)
+    else if (translucency_diagnostics)
     {
-        spec.action_id = "render.shader.hero-work";
-        spec.recipe_id = "project-hs.render.hero-work-ps";
+        spec.action_id = "render.shader.translucency-diagnostics";
+        spec.recipe_id = "project-hs.render.translucency-diagnostics-ps";
         spec.recipe_version = 1;
-        spec.namespace_path = "render/shader/hero-work";
+        spec.namespace_path = "render/shader/translucency-diagnostics";
     }
     else
     {
@@ -200,7 +202,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                  "Content/Shaders/bsdf_layers.hlsli",
                                  "Content/Shaders/material_surface.hlsli",
                                  "Content/Shaders/material_terrain.hlsli",
-                                 "Content/Shaders/hero_material.hlsli",
+                                 "Content/Shaders/character_material.hlsli",
                                  "Content/Shaders/visibility_buffer.hlsl",
                                  "Content/Shaders/visibility_records.hlsli",
                                  "Content/Shaders/visibility_classification.hlsli",
@@ -231,10 +233,11 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     if (ssr)
     {
         for (const auto *relative : {"Content/Shaders/screen_reflections.hlsl",
+                                     "Content/Shaders/screen_reflection_confidence.hlsli",
                                      "Content/Shaders/bsdf_metallic_roughness.hlsli",
                                      "Content/Shaders/bsdf_layers.hlsli",
                                      "Content/Shaders/material_surface.hlsli",
-                                     "Content/Shaders/hero_material.hlsli",
+                                     "Content/Shaders/character_material.hlsli",
                                      "Content/Shaders/material_sidecar.hlsli",
                                      "Content/Shaders/material_parameters.hlsli",
                                      "Content/Shaders/deferred_surface.hlsli",
@@ -283,16 +286,18 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/project_hs.hlsl", L"SceneVS", L"vs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_current_vs.dxil", "hero_transparency_current_vs.dxil",
                       "Content/Shaders/project_hs.hlsl", L"HeroCurrentVS", L"vs_6_0"},
-        ProgramOutput{"render/shader/hero_peel_front_ps.dxil", "hero_peel_front_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"HeroPeelFrontPS", L"ps_6_0"},
-        ProgramOutput{"render/shader/hero_peel_exit_ps.dxil", "hero_peel_exit_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"HeroPeelExitPS", L"ps_6_0"},
-        ProgramOutput{"render/shader/hero_oit_tail_ps.dxil", "hero_oit_tail_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"HeroOitTailPS", L"ps_6_0"},
-        ProgramOutput{"render/shader/hero_transparent_guide_ps.dxil", "hero_transparent_guide_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"HeroTransparentGuidePS", L"ps_6_0"},
-        ProgramOutput{"render/shader/hero_layer_composite_ps.dxil", "hero_layer_composite_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"HeroLayerCompositePS", L"ps_6_0"}};
+        ProgramOutput{"render/shader/layered_translucency_peel_front_ps.dxil", "layered_translucency_peel_front_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyPeelFrontPS", L"ps_6_0"},
+        ProgramOutput{"render/shader/layered_translucency_gather_exit_depth_ps.dxil", "layered_translucency_gather_exit_depth_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyGatherExitDepthPS", L"ps_6_0"},
+        ProgramOutput{"render/shader/layered_translucency_accumulate_unpeeled_ps.dxil", "layered_translucency_accumulate_unpeeled_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyAccumulateUnpeeledPS", L"ps_6_0"},
+        ProgramOutput{"render/shader/layered_translucency_composite_front_ps.dxil", "layered_translucency_composite_front_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeFrontPS", L"ps_6_0"},
+        ProgramOutput{"render/shader/layered_translucency_composite_layer_ps.dxil", "layered_translucency_composite_layer_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeLayerPS", L"ps_6_0"},
+        ProgramOutput{"render/shader/single_layer_water_ps.dxil", "single_layer_water_ps.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"SingleLayerWaterPS", L"ps_6_0"}};
     if (ssr)
     {
         std::erase_if(outputs, [](const auto &program) { return !program.id.starts_with("render/shader/ssr_"); });
@@ -300,19 +305,19 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     }
     else
         std::erase_if(outputs, [](const auto &program) { return program.id.starts_with("render/shader/ssr_"); });
-    if (hero_work)
+    if (translucency_diagnostics)
     {
         std::erase_if(outputs, [](const auto &program) {
-            return !program.id.starts_with("render/shader/hero_") || !program.profile.starts_with(L"ps_");
+            return !program.id.starts_with("render/shader/layered_translucency_");
         });
         Require(outputs.size() == 5, "hero work recipe must contain exactly the five existing Hero PS entries");
         for (auto &program : outputs)
         {
-            program.id.insert(program.id.size() - 5, "_hero_work");
-            program.filename.insert(program.filename.size() - 5, "_hero_work");
+            program.id.insert(program.id.size() - 5, "_translucency_diagnostics");
+            program.filename.insert(program.filename.size() - 5, "_translucency_diagnostics");
         }
     }
-    if (!hero_work && !ssr)
+    if (!translucency_diagnostics && !ssr)
     {
         for (const auto &program : std::array{
             ProgramOutput{"render/shader/hero_scene_ps.dxil", "hero_scene_ps.dxil", "Content/Shaders/project_hs.hlsl", L"HeroScenePS", L"ps_6_0"},
@@ -331,14 +336,14 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ap::UpstreamProduct ignored;
             if (result.ActionKeyValue() == ap::ActionKey(spec) &&
                 result.ActionId() == spec.action_id &&
-                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!hero_work && !ssr))
+                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!translucency_diagnostics && !ssr))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
                 {
                     valid &= ValidDxilBytes(result.ReadProductBytes(output.id, ignored));
                 }
-                if (!hero_work && !ssr)
+                if (!translucency_diagnostics && !ssr)
                 {
                     valid &= result.ReadProductBytes("render/lighting/coated_ggx_dfg.dds", ignored).size() ==
                         148u + 256u * 256u * 8u;
@@ -361,23 +366,24 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include_path = stage / "deferred_materials.generated.hlsli";
         ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
-        const auto hero_include_path = stage / "hero_materials.generated.hlsli";
+        const auto hero_include_path = stage / "character_materials.generated.hlsli";
         ap::WriteBytes(hero_include_path, std::as_bytes(std::span(hero_context.data(), hero_context.size())));
         std::vector<ap::Product> products;
         for (const auto &program : outputs)
         {
             const auto output = stage / program.filename;
-            const auto define = program.id.starts_with("render/shader/hero_")
-                ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
+            const auto define = program.id.starts_with("render/shader/hero_") || IsHeroTranslucentProgram(program)
+                ? std::wstring_view{L"-DHS_GENERATED_CHARACTER_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
             RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
                    program.entry, program.profile, define,
-                   {.sidecar_planes = sidecar_layout.plane_count, .hero_work = hero_work,
-                    .hero_translucent_domain = IsHeroTranslucentProgram(program)});
+                   {.sidecar_planes = sidecar_layout.plane_count, .translucency_diagnostics = translucency_diagnostics,
+                    .hero_translucent_domain = IsHeroTranslucentProgram(program),
+                    .single_layer_water = program.entry == L"SingleLayerWaterPS"});
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
-        if (!hero_work && !ssr)
+        if (!translucency_diagnostics && !ssr)
         {
             const auto dfg = hs::material_content::CookCoatedDfgDds();
             const auto output = stage / "coated_ggx_dfg.dds";
@@ -643,9 +649,9 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         spec.upstream.push_back(std::move(upstream));
         programs.push_back({id, kind});
     }
-    const auto package = rd::BuildHeroMaterialPackage(name, graph.parameters,
+    const auto package = rd::BuildCharacterMaterialPackage(name, graph.parameters,
         {reflection.capability_mask, reflection.varying_mask}, programs);
-    const auto decoded = rd::ReadHeroMaterialPackage(package, name);
+    const auto decoded = rd::ReadCharacterMaterialPackage(package, name);
     spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/package-interface",
         source_root / ("ContentSource/Materials/" + std::string(name) + ".json"), package));
     const auto result_path = build_root / "Actions" / namespace_path / "result.json";
@@ -684,7 +690,7 @@ void Produce(std::string_view name, const fs::path &source_root,
 {
     Require(hs::material_content::IsAuthoredMaterialName(name),
             "unsupported material name");
-    if (hs::material_content::IsHeroMaterialName(name))
+    if (hs::material_content::IsCharacterMaterialName(name))
     {
         ProduceHero(name, source_root, build_root);
         return;
@@ -779,7 +785,7 @@ void Produce(std::string_view name, const fs::path &source_root,
 
                                   "Content/Shaders/ltc_area.hlsli",
                                  "Content/Shaders/material_surface.hlsli",
-                                 "Content/Shaders/hero_material.hlsli",
+                                 "Content/Shaders/character_material.hlsli",
                                  "Content/Shaders/material_sidecar.hlsli",
                                  "Content/Shaders/deferred_surface.hlsli",
                                  "Content/Shaders/temporal_reconstruction.hlsli",
@@ -875,7 +881,7 @@ int wmain(int argc, wchar_t **argv)
     std::string name;
     ap::Json action_id = nullptr;
     bool preintegrate = false;
-    bool hero_work = false;
+    bool translucency_diagnostics = false;
     bool ssr = false;
     bool parameters = false;
     bool decal_surface = false;
@@ -892,8 +898,8 @@ int wmain(int argc, wchar_t **argv)
                 dxc = argv[i];
             else if (arg == L"--bsdf-preintegrate" && !preintegrate)
                 preintegrate = true;
-            else if (arg == L"--hero-work" && !hero_work)
-                hero_work = true;
+            else if (arg == L"--translucency-diagnostics" && !translucency_diagnostics)
+                translucency_diagnostics = true;
             else if (arg == L"--screen-reflections" && !ssr)
                 ssr = true;
             else if (arg == L"--decal-surface" && !decal_surface)
@@ -914,14 +920,14 @@ int wmain(int argc, wchar_t **argv)
                 throw std::runtime_error("hs_render_material_shader: invalid command line");
         }
         const bool valid_mode =
-            (!ssr && !hero_work && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
-            (!ssr && !hero_work && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
-            (!ssr && !hero_work && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
-            (!ssr && !hero_work && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
-            (!ssr && hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty()) ||
-            (ssr && !hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
+            (!ssr && !translucency_diagnostics && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
+            (!ssr && !translucency_diagnostics && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
+            (!ssr && !translucency_diagnostics && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
+            (!ssr && !translucency_diagnostics && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
+            (!ssr && translucency_diagnostics && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty()) ||
+            (ssr && !translucency_diagnostics && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
         Require(valid_mode && !source_root.empty() && !build_root.empty(),
-                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --hero-work | --screen-reflections | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
+                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --translucency-diagnostics | --screen-reflections | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
         if (parameters)
         {
             if (hs::material_content::IsAuthoredMaterialName(name) ||
@@ -941,11 +947,11 @@ int wmain(int argc, wchar_t **argv)
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
                                   dxc.lexically_normal(), ShaderFamily::ScreenReflections);
         }
-        else if (hero_work)
+        else if (translucency_diagnostics)
         {
-            action_id = "render.shader.hero-work";
+            action_id = "render.shader.translucency-diagnostics";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), ShaderFamily::HeroWork);
+                                  dxc.lexically_normal(), ShaderFamily::TranslucencyDiagnostics);
         }
         else if (preintegrate)
         {
@@ -966,7 +972,7 @@ int wmain(int argc, wchar_t **argv)
     {
         ap::ReportFailure("hs_render_material_shader", error.what(),
                           {{"action_id", action_id}, {"name", name},
-                           {"bsdf_preintegrate", preintegrate}, {"hero_work", hero_work}, {"screen_reflections", ssr},
+                           {"bsdf_preintegrate", preintegrate}, {"translucency_diagnostics", translucency_diagnostics}, {"screen_reflections", ssr},
                            {"parameters", parameters}, {"decal_surface", decal_surface},
                            {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)},

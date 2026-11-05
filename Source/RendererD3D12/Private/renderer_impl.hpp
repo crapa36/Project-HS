@@ -10,9 +10,10 @@
 #include <hs/render_data/material_sidecar.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/terrain_surface.hpp>
 #include <hs/render_data/quality_profiles.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/render_data/ui_draw_content.hpp>
 
 #include "renderer_options.hpp"
@@ -79,7 +80,7 @@
 #ifdef DrawText
 #undef DrawText
 #endif
-#include <d2d1.h>
+#include <dcommon.h>
 #include <d3d12.h>
 #include <dwrite_3.h>
 #include <d3d12sdklayers.h>
@@ -123,7 +124,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #include <utility>
 #include <vector>
 
-#pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 
 namespace hs
@@ -136,8 +136,8 @@ using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kFrameCount = 3;
 constexpr auto &kEnvironmentMaterialNames = render_data::kEnvironmentMaterialNames;
 constexpr auto &kAuthoredMaterialNames = render_data::kAuthoredMaterialNames;
-constexpr auto &kHeroMaterialNames = render_data::kHeroMaterialNames;
-constexpr auto kResidentMaterialCount = kAuthoredMaterialNames.size() + kHeroMaterialNames.size();
+constexpr auto &kCharacterMaterialNames = render_data::kCharacterMaterialNames;
+constexpr auto kResidentMaterialCount = kAuthoredMaterialNames.size() + kCharacterMaterialNames.size();
 constexpr auto kTerrainMaterialOrdinal = render_data::kTerrainMaterialOrdinal;
 constexpr std::uint32_t kVisibilityVariantCount = static_cast<std::uint32_t>(kResidentMaterialCount + 1);
 constexpr std::uint32_t kParticleCount = 10'000;
@@ -206,8 +206,9 @@ constexpr std::uint32_t kMaterialTextureDescriptorCount =
     static_cast<std::uint32_t>(kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots);
 constexpr std::uint32_t kGeometryPageCapacity = render_data::kGeometryPageCapacity;
 constexpr std::uint32_t kGeometryBuffersPerPage = render_data::kGeometryBuffersPerPage;
-constexpr std::uint32_t kGeometryDescriptorOffset =
-    kMaterialTextureDescriptorOffset + kMaterialTextureDescriptorCount;
+constexpr std::uint32_t kTerrainPageDescriptorOffset = kMaterialTextureDescriptorOffset + kMaterialTextureDescriptorCount;
+constexpr std::uint32_t kTerrainPageDescriptorCount = 3;
+constexpr std::uint32_t kGeometryDescriptorOffset = kTerrainPageDescriptorOffset + kTerrainPageDescriptorCount;
 constexpr std::uint32_t kGeometryDescriptorCount =
     1 + kGeometryPageCapacity * kGeometryBuffersPerPage;
 constexpr std::uint32_t kSurfaceDescriptorOffset =
@@ -235,9 +236,9 @@ constexpr std::uint32_t kTextureFeedbackDescriptorOffset = kLocalShadowDescripto
 constexpr std::uint32_t kVfxScreenReadDescriptorOffset = kTextureFeedbackDescriptorOffset + kTextureFeedbackDescriptorCount;
 constexpr std::uint32_t kEntitySurfaceNoiseDescriptorOffset = kVfxScreenReadDescriptorOffset + 1;
 constexpr std::uint32_t kDecalSurfaceDescriptorOffset = kEntitySurfaceNoiseDescriptorOffset + 1;
-constexpr std::uint32_t kHeroTransparencyDescriptorOffset = kDecalSurfaceDescriptorOffset + kDecalSurfaceDescriptorCount;
-constexpr std::uint32_t kSceneFrameTableCount = kHeroTransparencyDescriptorOffset - kTemporalTextureDescriptorOffset;
-constexpr std::uint32_t kVolumetricFrameTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
+constexpr std::uint32_t kLayeredTranslucencyDescriptorOffset = kDecalSurfaceDescriptorOffset + kDecalSurfaceDescriptorCount;
+constexpr std::uint32_t kSceneFrameTableCount = kLayeredTranslucencyDescriptorOffset - kTemporalTextureDescriptorOffset;
+constexpr std::uint32_t kVolumetricFrameTableOffset = kLayeredTranslucencyDescriptorOffset + kLayeredTranslucencyDescriptorsPerFrame;
 constexpr std::uint32_t kViewSkinDescriptorOffset = kVolumetricFrameTableOffset + kVolumetricFrameDescriptorCount;
 constexpr std::uint32_t kTextureDescriptorCount = kViewSkinDescriptorOffset + 4;
 struct VolumetricFrameInputCopy { std::uint32_t target, source, count; };
@@ -273,14 +274,15 @@ constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
 constexpr std::uint32_t kLightingAuxRtvCount = 2;
 constexpr std::uint32_t kOutputRtvOffset = kLightingAuxRtvOffset + kLightingAuxRtvCount;
-constexpr std::uint32_t kRtvBankStride = kOutputRtvOffset + kFrameCount;
+constexpr std::uint32_t kUiRtvOffset = kOutputRtvOffset + kFrameCount;
+constexpr std::uint32_t kRtvBankStride = kUiRtvOffset + 1;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Scene Buffer Upload", "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
-    "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
+    "Static Visibility", "GBuffer+Depth", "Lighting.Deferred", "VFX Distortion Vectors",
     "Forward Transparent/OIT", "OIT Composite", "Temporal Resolve", "Bloom Half Extract",
     "Bloom Quarter Downsample", "Bloom Half Upsample", "Bloom", "ToneMap",
     "Reserved", "FXAA", "Game UI", "Depth Pyramid", "Visibility Retest",
-    "GBuffer Retest", "Final Depth Pyramid", "Skin Cache", "UI Upload", "Temporal Initialization"};
+    "GBuffer Retest", "Final Depth Pyramid", "Skin Cache", "UI Draw", "Temporal Initialization"};
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
@@ -317,18 +319,9 @@ constexpr std::array<const char *, 6> kDebugStatNames{
 
 using Vertex = SkinnedVertex;
 
-struct GpuStaticVisibilityRange
-{
-    std::uint32_t begin{};
-    std::uint32_t count{};
-    std::uint32_t index_count{};
-    std::uint32_t argument_stride{};
-    std::uint32_t draw_record_base{};
-    std::uint32_t meshlet_count{};
-    std::uint32_t flags{};
-    std::uint32_t reserved{};
-};
-static_assert(sizeof(GpuStaticVisibilityRange) == 32);
+#define HS_STATIC_VISIBILITY_NATIVE
+#include "../../../Content/Shaders/static_visibility_abi.hlsli"
+#undef HS_STATIC_VISIBILITY_NATIVE
 
 struct HzbLevelLayout
 {
@@ -566,8 +559,8 @@ struct FrameConstants
     DirectX::XMFLOAT4 display_options;
     DirectX::XMFLOAT4X4 inverse_unjittered_view_projection;
     DirectX::XMFLOAT4 lighting_options;
-    std::array<DirectX::XMUINT4, 2> hero_material_parameter_bases;
-    std::array<DirectX::XMUINT4, 2> hero_material_varying_masks;
+    std::array<DirectX::XMUINT4, 2> character_material_parameter_bases;
+    std::array<DirectX::XMUINT4, 2> character_material_varying_masks;
     std::array<DirectX::XMUINT4, 7> hero_binding_ranges;
     DirectX::XMFLOAT4 probe_options;
     std::array<DirectX::XMFLOAT4, 32> previous_grass_benders;
@@ -584,9 +577,8 @@ struct FrameConstants
 
 constexpr std::uint32_t kDisabledVolumetricConstantsOffset = (sizeof(FrameConstants) + 255u) & ~255u;
 constexpr std::uint32_t kDisabledVolumetricConstantsSize = (sizeof(VolumetricConstants) + 255u) & ~255u;
-constexpr std::uint32_t kExposureConstantsOffset =
+constexpr std::uint32_t kInstanceDataOffset =
     kDisabledVolumetricConstantsOffset + kDisabledVolumetricConstantsSize;
-constexpr std::uint32_t kInstanceDataOffset = kExposureConstantsOffset + 256u;
 static_assert(sizeof(FrameConstants) == 4720);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
 static_assert(offsetof(FrameConstants, lod_clock) == 3008);
@@ -602,19 +594,6 @@ static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 4368);
 static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 4384);
 static_assert(offsetof(FrameConstants, particle_terrain) == 4640);
 static_assert(offsetof(FrameConstants, previous_instance_unjittered_view_projection) == 4656);
-
-struct ExposureConstants
-{
-    std::uint32_t width{}, height{};
-    float delta_seconds{};
-    std::uint32_t reset{};
-    float minimum_log_luminance{-12.0f}, maximum_log_luminance{16.0f};
-    float lower_percentile{0.02f}, upper_percentile{0.98f};
-    float target_grey{0.18f}, minimum{0.0001f}, maximum{64.0f}, adaptation_up{3.0f};
-    float adaptation_down{1.0f};
-    float padding[3]{};
-};
-static_assert(sizeof(ExposureConstants) == 64);
 
 struct GpuParticle
 {
@@ -658,14 +637,26 @@ struct UiTextLayout
     ComPtr<IDWriteTextLayout> layout;
 };
 
-struct UiCpuSurface
+#define HS_UI_DRAW_NATIVE
+#include "../../../Content/Shaders/ui_draw_abi.hlsli"
+#undef HS_UI_DRAW_NATIVE
+
+struct UiAtlasPage
 {
-    bool bitmap_valid{};
-    std::uint64_t bitmap_version{}, submitted_version{}, completed_version{};
-    CompletionSet copy_completion;
-    ComPtr<IWICBitmap> bitmap;
-    ComPtr<ID2D1RenderTarget> target;
-    ComPtr<ID2D1SolidColorBrush> brush;
+    AllocationResource buffer;
+    std::uint32_t used{}, capacity{};
+};
+
+struct UiGlyph
+{
+    ComPtr<IDWriteFontFace> face;
+    RECT bounds{};
+    std::uint32_t page{}, offset{};
+};
+
+struct UiBatch
+{
+    std::uint32_t page{}, first{}, count{};
 };
 
 [[nodiscard]] inline D3D12_RESOURCE_DESC BufferDescription(std::uint64_t size,
@@ -763,12 +754,6 @@ using namespace renderer_detail;
 
 struct StaticShadowBakeFrame;
 
-struct ExposureGraphLayout
-{
-    std::array<std::uint32_t, 4> pass_indices{};
-    ResourceVersion scene_work{}, histogram{}, exposure_write{};
-};
-
 struct FinalGraphLayout
 {
     bool output_dependency_interval{}, output_ready{}, presentation{};
@@ -804,7 +789,7 @@ struct DoubleOutputGraphLayout
 
 struct InitialGraphLayout
 {
-    DoubleOutputGraphLayout exposure;
+    SingleOutputGraphLayout exposure;
     SingleOutputGraphLayout ui;
     std::uint32_t temporal_pass_index{};
     std::array<ResourceVersion, 6> temporal{};
@@ -865,10 +850,10 @@ struct FrameGraphLayout
         std::uint32_t frame_slot{}, render_width{}, render_height{}, output_width{}, output_height{};
         std::uint32_t material_sidecar_planes{};
         bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{}, static_scene_present{};
-        bool exposure_initialization{}, ui_upload{}, temporal_initialization{}, offscreen_initialization{};
+        bool exposure_initialization{}, ui_draw{}, temporal_initialization{}, offscreen_initialization{};
         bool static_scene_upload{}, static_refs_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
         bool separate_previous_instance_scene{};
-        bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{};
+        bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{}, single_layer_water{};
         bool composite_gradient_read{};
         bool dynamic_lod_initialized{}, static_lod_initialized{}, dynamic_lod_prefix{}, static_lod_prefix{};
         bool visibility_target_initialization{}, csm{}, authored_material{}, masked_material{};
@@ -882,7 +867,7 @@ struct FrameGraphLayout
         GraphicsGiMode gi_mode{};
         GraphicsReflectionMode reflection_mode{};
         GraphicsShadowMode shadow_mode{};
-        std::uint32_t geometry_upload_count{}, hero_work_source_mask{};
+        std::uint32_t geometry_upload_count{}, translucency_diagnostics_source_mask{};
         [[nodiscard]] bool operator==(const EarlyKey &) const noexcept = default;
     } early;
     RenderGraphBuilder::PlanHandle handle{};
@@ -897,7 +882,6 @@ struct FrameGraphLayout
     TextureStreamingLayout texture_streaming;
     TextureFeedbackLayout texture_feedback;
     TextureHandle distortion{}, bloom_half{}, bloom_quarter{}, bloom_combined{}, back_buffer{};
-    ExposureGraphLayout exposure;
     InitialGraphLayout initial;
     FinalGraphLayout final;
     FrameUploadGraphLayout upload;
@@ -922,7 +906,7 @@ struct FrameGraphLayout
     ScreenReflectionsLayout reflections;
     ScreenOverlayLayout screen_overlay;
     VolumetricLayout volumetrics;
-    HeroTransparencyLayout hero;
+    LayeredTranslucencyLayout hero;
     PostSubgraphLayout post;
     LightListLayout light_list;
     LtcLutLayout ltc;
@@ -965,7 +949,7 @@ struct NativeGraphicsCapabilitySnapshot
 
 struct D3D12Renderer::CanonicalFrame
 {
-    RenderFrameInput input;
+    RenderPackage input;
     float interpolation{1.0f};
     bool advance_native_world{};
     double native_display_tick{};
@@ -1038,11 +1022,12 @@ struct D3D12Renderer::Impl
     struct UiResources
     {
         std::array<AllocationResource, kFrameCount> textures;
-        std::array<UiCpuSurface, kFrameCount> surfaces;
         std::vector<UiTextLayout> text_layouts;
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-        std::uint32_t rows{}, raster_width{}, raster_height{};
-        std::uint64_t row_bytes{}, upload_bytes{};
+        std::vector<UiAtlasPage> atlas;
+        using GlyphKey = std::tuple<IDWriteFontFace *, float, UINT16, UINT8, BOOL, DWRITE_MEASURING_MODE>;
+        std::map<GlyphKey, UiGlyph> glyphs;
+        std::vector<UiQuad> quads;
+        std::vector<UiBatch> batches;
     };
     struct OptionTargets
     {
@@ -1057,7 +1042,7 @@ struct D3D12Renderer::Impl
         AllocationResource post_a, post_b;
         std::array<AllocationResource, 2> temporal_history;
         std::array<AllocationResource, 2> temporal_normal_history, temporal_material_history;
-        AllocationResource scene_work, display_linear, composite_hdr;
+        AllocationResource display_linear, composite_hdr;
         std::array<AllocationResource, 2> hzb_history;
         HzbLayout hzb_layout{};
         std::array<TransientResourcePool, kFrameCount> transient_pools;
@@ -1116,20 +1101,23 @@ struct D3D12Renderer::Impl
         std::array<NativeResourceContract, kFrameCount> output_contracts{};
         std::array<std::uint64_t, kFrameCount> output_contract_generations{};
         std::array<ID3D12Device *, kFrameCount> output_contract_devices{};
+#if defined(HS_DEVELOPMENT_TOOLS)
         AllocationResource hdr_capture_source;
         ViewExtent hdr_capture_extent;
         bool hdr_capture_valid{}, hdr_capture_pre_exposed{};
         std::uint64_t hdr_capture_submission_id{}, hdr_capture_package_id{}, hdr_capture_snapshot_tick{};
         std::string hdr_capture_source_name{"reconstructed_hdr_before_post"};
-        std::array<AllocationResource, 2> exposure_values;
-        AllocationResource exposure_histogram, initial_exposure;
+#endif
+        AllocationResource exposure_value, initial_exposure;
         std::array<std::shared_ptr<const UiDrawContent>, kFrameCount> ui_draw_content;
-        std::array<bool, kFrameCount> ui_dirty{}, ui_initialized{};
         AmbientOcclusionSystem ambient_occlusion;
         AdaptiveShadingSystem adaptive_shading;
         SubsurfaceSystem subsurface;
         ScreenReflectionsSystem screen_reflections;
-        HeroTransparencySystem hero_transparency;
+        TranslucencySystem hero_transparency;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        bool translucency_capture_active{};
+#endif
         HdrPostSystem hdr_post;
         ScreenOverlaySystem screen_overlay;
         VirtualShadowSystem virtual_shadows;
@@ -1177,9 +1165,11 @@ struct D3D12Renderer::Impl
         std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
+#if defined(HS_DEVELOPMENT_TOOLS)
         std::uint32_t last_submitted_frame_slot{UINT32_MAX};
         std::uint64_t last_submitted_frame_id{};
-        std::uint32_t exposure_read_index{}, temporal_read_index{}, hzb_read_index{};
+#endif
+        std::uint32_t temporal_read_index{}, hzb_read_index{};
         bool exposure_initialized{}, view_targets_initialized{}, temporal_history_valid{},
             temporal_targets_initialized{}, hzb_history_valid{}, material_sidecars_initialized{},
             visibility_targets_initialized{}, transient_textures_common{};
@@ -1204,8 +1194,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ResetOwnedViewAfterCompletion(OwnedView &);
     [[nodiscard]] Result ResetOwnedViewsAfterCompletion();
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
-    [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &);
-    [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &);
+    [[nodiscard]] Result ValidateFrameInput(const RenderPackage &);
+    [[nodiscard]] Result ValidateFramePayload(const RenderPackage &);
 #if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
 #endif
@@ -1428,8 +1418,7 @@ struct D3D12Renderer::Impl
         bool native_resolve);
     [[nodiscard]] Result PrepareExposureResources(OwnedView &view);
     void WriteViewDescriptors(OwnedView &owner, std::uint32_t frame, std::uint32_t history_read,
-        std::uint32_t history_write, std::uint32_t exposure_read, std::uint32_t exposure_write,
-        D3D12_GPU_VIRTUAL_ADDRESS exposure_constants) noexcept;
+        std::uint32_t history_write) noexcept;
     void CommitOptionTargets(OwnedView &owner, OptionTargets &targets) noexcept;
     [[nodiscard]] Result PrepareLodStateBuffer(GpuLodStateBuffer &buffer, std::size_t capacity);
     void CommitLodStateBuffer(GpuLodStateBuffer &buffer);
@@ -1516,8 +1505,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result BuildAdaptiveMaterialPolicies(std::vector<AdaptiveShadingMaterialPolicy> &) const;
     [[nodiscard]] Result PrepareSurfaceLighting(const OwnedView &, const RendererConfig &,
         ViewExtent capacity, SubsurfaceCandidate &, ScreenReflectionsCandidate &) const;
-    [[nodiscard]] Result PrepareHeroTransparency(const OwnedView &, const RendererConfig &,
-        ViewExtent capacity, HeroTransparencyCandidate &) const;
+    [[nodiscard]] Result PrepareLayeredTranslucency(const OwnedView &, const RendererConfig &,
+        ViewExtent capacity, LayeredTranslucencyCandidate &) const;
     [[nodiscard]] Result PrepareLightingProbe(const RendererConfig &, LightingProbeCandidate &) const;
     [[nodiscard]] Result PrepareLtcLut(const RendererConfig &, LtcLutCandidate &) const;
     [[nodiscard]] Result PrepareHdrPost(const OwnedView &, const RendererConfig &, ViewExtent render_capacity,
@@ -1530,7 +1519,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CommitAdditionalShadows(OwnedView &owner, AdditionalShadowPrepared &&);
     [[nodiscard]] Result PrepareLocalProbes(const RendererConfig &, LocalProbeRuntimeCandidate &) const;
     [[nodiscard]] Result AppendHlodPages(ClusterRuntimeState &);
-    [[nodiscard]] Result BeginHlodViewPackage(const RenderFrameInput &);
+    [[nodiscard]] Result BeginHlodViewPackage(const RenderPackage &);
     [[nodiscard]] Result RetireHlodView(ViewId);
     [[nodiscard]] HlodViewRuntime *ActiveHlodView() noexcept;
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
@@ -1625,7 +1614,9 @@ struct D3D12Renderer::Impl
         const GeometryPageGpu &page, const AllocationResource &upload) const;
     [[nodiscard]] const GeometryPageGpu *FindGeometryPage(std::uint32_t page_slot) const noexcept;
     void WriteGeometryPageDescriptors(std::uint32_t frame_slot);
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] FrameContext *SubmittedFrame(const OwnedView &owner) noexcept;
+#endif
     [[nodiscard]] Result BeginGeometryDrawRecords(std::uint32_t frame_slot);
     [[nodiscard]] Result AddGeometryDrawRecord(std::uint32_t frame_slot,
         const GeometryPageGpu &page, std::uint32_t visible_base,
@@ -1643,7 +1634,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareUiResources(UiResources &, std::uint32_t output_width,
                                             std::uint32_t output_height);
     void CommitUiResources(OwnedView &owner, UiResources &) noexcept;
-    [[nodiscard]] Result RasterizeUi(OwnedView &owner, std::uint32_t frame_index,
+    struct UiTextRenderer;
+    [[nodiscard]] Result PrepareUiDraw(OwnedView &owner, std::uint32_t frame_index,
                                        const std::shared_ptr<const UiDrawContent> &content);
     [[nodiscard]] Result CreateAllocation(AllocationResource &output,
                                           const D3D12MA::ALLOCATION_DESC &allocation,
@@ -1845,7 +1837,7 @@ struct D3D12Renderer::Impl
     std::array<std::uint32_t, 2> decal_parameter_bases{}, decal_parameter_candidate_bases{},
         decal_parameter_counts{}, decal_parameter_candidate_counts{};
     std::array<std::string, 2> decal_parameter_layouts{}, decal_parameter_candidate_layouts{};
-    AllocationResource hero_material_bindings_gpu;
+    AllocationResource mesh_material_bindings_gpu;
     std::array<DirectX::XMUINT4, 7> hero_binding_ranges{};
     ComPtr<ID3D12PipelineState> hero_scene_pipeline, hero_visibility_pipeline, hero_shadow_pipeline;
     ComPtr<ID3D12PipelineState> hero_resolve_pipeline, hero_translucent_pipeline;
@@ -1863,6 +1855,25 @@ struct D3D12Renderer::Impl
         AllocationResource texture;
     };
     std::vector<EnvironmentMaterialTextureGpu> environment_material_textures;
+    using TerrainSection = render_data::TerrainSurfaceSection;
+    static_assert(sizeof(TerrainSection)==32);
+    static std::optional<TerrainSection> TerrainSectionFrom(const RenderInstance &);
+    [[nodiscard]] Result TerrainPageSourceIdentity(std::array<std::byte,32> &) const;
+    UINT TerrainSectionIndex(const RenderInstance &) const;
+    void WriteTerrainPageDescriptors() const;
+    struct TerrainPagePreparation;
+    std::shared_ptr<TerrainPagePreparation> pending_terrain_pages;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result BakeTerrainPages(const std::shared_ptr<const StaticRenderScene> &,
+        std::shared_ptr<TerrainPagePreparation> &);
+#endif
+    std::vector<TerrainSection> terrain_sections, static_terrain_sections;
+    std::shared_ptr<const StaticRenderScene> terrain_scene;
+    AllocationResource terrain_pages, terrain_section_buffer;
+    std::uint64_t terrain_pipeline_revision{};
+    ResidencyTicket terrain_page_residency;
+    [[nodiscard]] Result PrepareTerrainPages(const std::shared_ptr<const StaticRenderScene> &,
+        std::span<const RenderInstance>);
     struct EnvironmentMaterialBindingsGpu
     {
         std::array<std::string, render_data::kMaterialTextureSlots> product_ids;
@@ -2007,12 +2018,12 @@ struct D3D12Renderer::Impl
     mutable std::vector<GpuPassTimings> pending_gpu_timings;
     mutable std::size_t pending_gpu_timing_passes{};
     mutable bool gpu_timing_stream_overflowed{};
-    std::vector<RendererHeroWorkSample> hero_work_pending;
-    RendererHeroWorkStatus hero_work_retired;
+    std::vector<RendererTranslucencyDiagnosticsSample> translucency_diagnostics_pending;
+    RendererTranslucencyDiagnosticsStatus translucency_diagnostics_retired;
 #endif
-    [[nodiscard]] Result RetireHeroTransparency(HeroTransparencySystem &);
-    ComPtr<IWICImagingFactory> ui_wic_factory;
-    ComPtr<ID2D1Factory> ui_d2d_factory;
+    [[nodiscard]] Result RetireLayeredTranslucency(TranslucencySystem &);
+    ComPtr<ID3D12RootSignature> ui_draw_root;
+    ComPtr<ID3D12PipelineState> ui_draw_pipeline;
     ComPtr<IDWriteFactory5> ui_dwrite_factory;
     ComPtr<IDWriteInMemoryFontFileLoader> ui_font_loader;
     ComPtr<IDWriteFontCollection1> ui_font_collection;
@@ -2054,8 +2065,6 @@ struct D3D12Renderer::Impl
     std::array<ComPtr<ID3D12PipelineState>, 4> deferred_pipeline;
     ComPtr<ID3D12PipelineState> composite_pipeline;
     ComPtr<ID3D12PipelineState> temporal_pipeline;
-    ComPtr<ID3D12PipelineState> pre_exposure_pipeline;
-    ComPtr<ID3D12PipelineState> exposure_clear_pipeline, exposure_build_pipeline, exposure_reduce_pipeline;
     ComPtr<ID3D12PipelineState> bloom_extract_pipeline;
     ComPtr<ID3D12PipelineState> bloom_downsample_pipeline;
     ComPtr<ID3D12PipelineState> bloom_upsample_pipeline;

@@ -222,7 +222,7 @@ private:
     friend std::string EmitLeaf0MaterialHlsl(const PreparedMaterial &);
     friend std::string EmitEnvironmentMaterialHlsl(const PreparedMaterial &);
     friend std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &, std::size_t);
-    friend std::string EmitHeroMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::string_view);
+    friend std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::string_view);
 };
 
 [[nodiscard]] PreparedMaterial PrepareMaterial(MaterialGraph graph,
@@ -277,7 +277,7 @@ struct ClosureReflection
 void ValidateRock0MaterialGraph(const MaterialGraph &graph);
 void ValidateLeaf0MaterialGraph(const MaterialGraph &graph);
 void ValidateEnvironmentMaterialGraph(const MaterialGraph &graph);
-void ValidateHeroMaterialGraph(const MaterialGraph &graph);
+void ValidateCharacterMaterialGraph(const MaterialGraph &graph);
 void ValidateTerrainMaterialGraph(const MaterialGraph &graph);
 void ValidateDecalMaterialGraph(const MaterialGraph &graph);
 // Emits one typed evaluator and its declared texture at t<texture_register>/space36.
@@ -306,8 +306,8 @@ void ValidateMaterialSampleLayers(const PreparedMaterial &material,
     const PreparedMaterial &material, std::size_t material_ordinal);
 // Shared hero adapter supplies sampled textures/expression/charge in ctx. No
 // texture declarations are emitted; local node names can be concatenated safely.
-[[nodiscard]] std::string EmitHeroMaterialContextHlsl(const MaterialGraph &graph,
+[[nodiscard]] std::string EmitCharacterMaterialContextHlsl(const MaterialGraph &graph,
     std::string_view surface_function, std::string_view opacity_function);
-[[nodiscard]] std::string EmitHeroMaterialContextHlsl(const PreparedMaterial &material,
+[[nodiscard]] std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     std::string_view surface_function, std::string_view opacity_function);
 } // namespace hs::render_data

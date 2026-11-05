@@ -23,14 +23,18 @@ float3 HsProbePrefiltered(float3 worldDirection,float perceptualRoughness)
     return HsProbeGgxCube.SampleLevel(LinearClamp,HsProbeLocalDirection(worldDirection),
         saturate(perceptualRoughness)*ProbeOptions.z).rgb;
 }
-float3 HsProbeIrradiance(float3 worldNormal, float3 kernel)
+void HsProbeShBasis(float3 n, out float basis[9])
 {
-    const float3 n=HsProbeLocalDirection(worldNormal);
-    const float basis[9]={0.28209479177387814,
+    const float values[9]={0.28209479177387814,
         0.4886025119029199*n.y,0.4886025119029199*n.z,0.4886025119029199*n.x,
         1.0925484305920792*n.x*n.y,1.0925484305920792*n.y*n.z,
         0.31539156525252005*(3*n.z*n.z-1),1.0925484305920792*n.x*n.z,
         0.5462742152960396*(n.x*n.x-n.y*n.y)};
+    [unroll] for(uint i=0;i<9;++i) basis[i]=values[i];
+}
+float3 HsProbeIrradiance(float3 worldNormal, float3 kernel)
+{
+    float basis[9]; HsProbeShBasis(HsProbeLocalDirection(worldNormal),basis);
     float3 irradiance=0;
     [unroll] for(uint i=0;i<9;++i)
         irradiance+=HsProbeCosineSh[i].rgb*basis[i]*kernel[i==0?0:i<4?1:2];

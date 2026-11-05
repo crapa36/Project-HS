@@ -166,9 +166,9 @@ std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterial
         Require(rule.is_object() && (rule.contains("material") != rule.contains("materials")),
             "character rule must select material identity or identities");
         const auto append_ordinal = [&](const std::string &name) {
-            const auto found = std::ranges::find(hs::render_data::kHeroMaterialNames, name);
-            Require(found != hs::render_data::kHeroMaterialNames.end(), "unknown selected Hero material " + name);
-            ordinals.push_back(static_cast<std::uint32_t>(found - hs::render_data::kHeroMaterialNames.begin()));
+            const auto found = std::ranges::find(hs::render_data::kCharacterMaterialNames, name);
+            Require(found != hs::render_data::kCharacterMaterialNames.end(), "unknown selected Hero material " + name);
+            ordinals.push_back(static_cast<std::uint32_t>(found - hs::render_data::kCharacterMaterialNames.begin()));
         };
         if (rule.contains("material"))
         {
@@ -193,7 +193,7 @@ std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterial
     result.reserve(ordinals.size());
     for (const auto ordinal : ordinals)
     {
-        const auto name = hs::render_data::kHeroMaterialNames[ordinal];
+        const auto name = hs::render_data::kCharacterMaterialNames[ordinal];
         const std::string namespace_path = "render/shader/" + std::string(name);
         const ap::ActionResultSnapshot producer(build_root, namespace_path);
         Require(producer.ActionId() == "render.shader." + std::string(name),
@@ -201,7 +201,7 @@ std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterial
         const auto material_id = "render/material/" + std::string(name) + "/material.rpkg";
         ap::UpstreamProduct upstream;
         const auto bytes = producer.ReadProductBytes(material_id, upstream);
-        const auto package = hs::render_data::ReadHeroMaterialPackage(
+        const auto package = hs::render_data::ReadCharacterMaterialPackage(
             std::as_bytes(std::span(bytes.data(), bytes.size())), name);
         result.push_back({ordinal, package.domain});
         spec.upstream.push_back(std::move(upstream));

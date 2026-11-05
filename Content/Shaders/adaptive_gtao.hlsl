@@ -1,5 +1,5 @@
 #include "ambient_occlusion.hlsl"
-Texture2D<uint> AdGtaoDensity : register(t6,space33);
+HS_AO_ADAPTIVE(HS_AO_DECLARE_ADAPTIVE)
 groupshared AoGuide AdGtaoGuides[64];
 groupshared uint AdGtaoDensities[64];
 groupshared float4 AdGtaoRaw[64];

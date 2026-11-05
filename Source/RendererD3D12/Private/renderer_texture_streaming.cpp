@@ -583,6 +583,7 @@ void RendererTextureStreaming::Demand(TextureStreamId id, std::uint32_t mip, std
 {
     if (!id || id.value > impl_->textures.size()) return;
     auto &texture = impl_->textures[id.value - 1];
+    if (texture.registration.pinned) return;
     if (!texture.demand_valid || texture.demand_frame != frame)
     { texture.observed_mip = texture.tail_mip; texture.priority = 0; }
     texture.demand_valid = true;
@@ -1789,6 +1790,12 @@ TextureStreamView RendererTextureStreaming::View(TextureStreamId id) const noexc
 bool RendererTextureStreaming::HardwareBacked(TextureStreamId id) const noexcept
 {
     return id && id.value <= impl_->textures.size() && !!impl_->textures[id.value - 1].reserved;
+}
+bool RendererTextureStreaming::NeedsDemand(TextureStreamId id, bool baseline_consumer) const noexcept
+{
+    if (!id || id.value > impl_->textures.size()) return false;
+    const auto &texture = impl_->textures[id.value - 1];
+    return !texture.registration.pinned && (baseline_consumer || !texture.reserved);
 }
 bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
     const TextureStreamingLayout &layout) const noexcept

@@ -14,7 +14,7 @@ struct CharacterMaterialSelection
 struct CharacterMaterialDomainSelection
 {
     std::uint32_t hero_ordinal{};
-    render_data::HeroMaterialDomain domain{};
+    render_data::CharacterMaterialDomain domain{};
 };
 
 struct CharacterProduct

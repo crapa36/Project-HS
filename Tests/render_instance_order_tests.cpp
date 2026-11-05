@@ -408,12 +408,30 @@ void TestGeometryDemandCells()
     struct Plane { float x, y, z, w; };
     const std::array planes{Plane{1,0,0,8}, Plane{-1,0,0,8}, Plane{0,0,1,-1}};
     float view[4][4]{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
-    Check(ClassifyGeometryDemandCell(cells[2], 1, planes) == GeometryDemandCellVisibility::Partial &&
-        std::isinf(GeometryDemandCellErrorUpperBound(cells[2], 1, 1, view, 1000, .1f)),
+    const auto initial_view = PrepareGeometryDemandView(planes, view, 1000, .1f);
+    Check(ClassifyGeometryDemandCell(cells[2], 1, initial_view) == GeometryDemandCellVisibility::Partial &&
+        std::isinf(GeometryDemandCellErrorUpperBound(cells[2], 1, 1, initial_view)),
         "invalid inputs must remain unprunable");
     const GeometryDemandCell near_cell{{0, 0, .05f}, {1, 1, .05f}, 1, false, {}};
-    Check(std::isinf(GeometryDemandCellErrorUpperBound(near_cell, 0, 0, view, 1000, .1f)),
+    const auto built_near = BuildGeometryDemandCells(std::array{GeometryDemandPoint{{0, 0, .05f}, 1, 0, false}});
+    Check(std::isinf(GeometryDemandCellErrorUpperBound(built_near[0], 0, 0, initial_view)),
         "zero error still requires the near-branch fallback");
+    auto invalid_planes = planes;
+    invalid_planes[0].x = std::numeric_limits<float>::quiet_NaN();
+    const auto invalid_view = PrepareGeometryDemandView(invalid_planes, view, 1000, .1f);
+    Check(ClassifyGeometryDemandCell(cells[0], 1, invalid_view) == GeometryDemandCellVisibility::Partial &&
+        ClassifyGeometryDemandCell(near_cell, 1, initial_view) == GeometryDemandCellVisibility::Partial,
+        "invalid prepared planes or unprepared bounds cannot prune");
+    view[0][3] = 1;
+    const auto non_affine = PrepareGeometryDemandView(planes, view, 1000, .1f);
+    Check(std::isinf(GeometryDemandCellErrorUpperBound(cells[0], 1, 1, non_affine)),
+        "non-affine view cannot prune the per-point path");
+    view[0][3] = 0;
+    view[2][0] = std::numeric_limits<float>::infinity();
+    const auto nonfinite_view = PrepareGeometryDemandView(planes, view, 1000, .1f);
+    Check(std::isinf(GeometryDemandCellErrorUpperBound(cells[0], 1, 1, nonfinite_view)),
+        "nonfinite view coefficients cannot prune the per-point path");
+    view[2][0] = 0;
     std::mt19937 random(931);
     std::uniform_real_distribution<float> coordinate(-1000, 1000), positive(0, 10);
     std::uniform_real_distribution<float> within_cell(.25f, 15.75f);
@@ -434,6 +452,7 @@ void TestGeometryDemandCells()
         const float angle = coordinate(random), c = std::cos(angle), s = std::sin(angle);
         view[0][0] = c; view[0][2] = s; view[2][0] = -s; view[2][2] = c;
         view[3][0] = coordinate(random); view[3][1] = coordinate(random); view[3][2] = coordinate(random);
+        const auto prepared_view = PrepareGeometryDemandView(planes, view, 1000, .1f);
         // Reuse the same membership with changed current catalog/grass bounds.
         for (unsigned catalog = 0; catalog < 2; ++catalog)
         {
@@ -445,8 +464,8 @@ void TestGeometryDemandCells()
         {
             const float radius = catalog_radius * cell.max_scale + (cell.any_wind ? wind_margin : 0);
             const float error = catalog_error * cell.max_scale;
-            const auto visibility = ClassifyGeometryDemandCell(cell, radius, planes);
-            const double bound = GeometryDemandCellErrorUpperBound(cell, radius, error, view, 1000, .1f);
+            const auto visibility = ClassifyGeometryDemandCell(cell, radius, prepared_view);
+            const double bound = GeometryDemandCellErrorUpperBound(cell, radius, error, prepared_view);
             bounds.push_back(bound);
             for (const auto &point : cell.points)
             {

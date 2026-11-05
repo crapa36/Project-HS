@@ -12,10 +12,11 @@
 #include <hs/render_data/quality_profiles.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
 #include <hs/render_data/material_descriptor.hpp>
+#include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/character_descriptor.hpp>
 #include <hs/render_data/render_revision.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "view_fixture.hpp"
 #include "static_shadow_bake_probe.hpp"
@@ -25,6 +26,7 @@
 #include <nlohmann/json.hpp>
 #include <Windows.h>
 #include <d3d12.h>
+#include <DirectXPackedVector.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -34,6 +36,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -99,24 +102,24 @@ struct StageBoundaryMarker
     }
 };
 
-const char *HeroWorkModeName(hs::HeroWorkDiagnosticMode mode)
+const char *TranslucencyDiagnosticsModeName(hs::TranslucencyDiagnosticsMode mode)
 {
     switch (mode)
     {
-    case hs::HeroWorkDiagnosticMode::Full: return "full";
-    case hs::HeroWorkDiagnosticMode::NoEnvironment: return "no-environment";
-    case hs::HeroWorkDiagnosticMode::CoverageOnly: return "coverage-only";
+    case hs::TranslucencyDiagnosticsMode::Full: return "full";
+    case hs::TranslucencyDiagnosticsMode::NoEnvironment: return "no-environment";
+    case hs::TranslucencyDiagnosticsMode::CoverageOnly: return "coverage-only";
     }
     return "invalid";
 }
 
-void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &samples,
-    const hs::RendererHeroWorkStatus &status, hs::HeroWorkDiagnosticMode mode,
+void ValidateTranslucencyDiagnosticsProbe(const std::vector<hs::RendererTranslucencyDiagnosticsSample> &samples,
+    const hs::RendererTranslucencyDiagnosticsStatus &status, hs::TranslucencyDiagnosticsMode mode,
     std::uint32_t frames, const hs::Result &drained, Json &receipt, bool require_water = false,
     bool require_layer_transition = false, bool quality_transition_valid = true)
 {
-    auto &probe = receipt["hero_work"];
-    probe["mode"] = HeroWorkModeName(mode);
+    auto &probe = receipt["translucency_diagnostics"];
+    probe["mode"] = TranslucencyDiagnosticsModeName(mode);
     probe["functional_only"] = true;
     probe["performance_adoption"] = false;
     probe["timing_interpretation"] = "Intrusive functional probe under uncontrolled external GPU competition; no FPS, speedup or quality adoption claim.";
@@ -137,7 +140,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         {"known_storage_bytes", status.readback_bytes + status.shader_gpu_bytes + status.shader_readback_bytes + status.shader_zero_upload_bytes},
         {"shader_invalid_samples", status.shader_invalid_samples}, {"shader_clear_commands", status.shader_clear_commands},
         {"shader_copy_commands", status.shader_copy_commands}};
-    probe["counter_names"] = hs::kHeroWorkShaderCounterNames;
+    probe["counter_names"] = hs::kTranslucencyDiagnosticsShaderCounterNames;
     probe["phase_names"] = {"Front", "Exit", "Tail", "Guide", "Composite"};
     probe["pipeline_statistics_order"] = {"IA vertices", "IA primitives", "VS", "GS", "GS primitives", "clip invocations", "clip primitives", "PS", "HS", "DS", "CS", "AS optional", "MS optional", "MS primitives optional"};
     probe["counter_flags"] = {{"uint32_wrap", 1}, {"pixel_out_of_range", 2}};
@@ -159,7 +162,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         for (const auto b : bytes) { const auto n = std::to_integer<unsigned>(b); value += digits[n >> 4]; value += digits[n & 15]; }
         return value;
     };
-    std::array<std::uint64_t, hs::kHeroWorkShaderCounterNames.size()> totals{};
+    std::array<std::uint64_t, hs::kTranslucencyDiagnosticsShaderCounterNames.size()> totals{};
     std::set<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>> identities;
     std::uint64_t shaded_accepted{}, water_accepted{}, water_constructions{}, water_rows{}, fused_rows{}, fused_accepted{};
     std::set<std::tuple<std::uint64_t, std::string, std::uint32_t>> water_sources;
@@ -188,7 +191,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         else stored = std::move(pipeline);
         Json counters = Json::object();
         for (std::size_t index = 0; index < totals.size(); ++index)
-        { counters[hs::kHeroWorkShaderCounterNames[index]] = sample.shader_counters[index]; totals[index] += sample.shader_counters[index]; }
+        { counters[hs::kTranslucencyDiagnosticsShaderCounterNames[index]] = sample.shader_counters[index]; totals[index] += sample.shader_counters[index]; }
         Json statistics = Json::array();
         for (std::size_t index = 0; index < sample.pipeline_statistics.size(); ++index)
             if (sample.statistics_valid && (index < 11 || sample.mesh_statistics_available)) statistics.push_back(sample.pipeline_statistics[index]);
@@ -228,7 +231,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
         check(sample.width && sample.height && pixels <= sample.shader_bitmap_pixels && c[2] <= pixels && c[2] <= c[0] &&
             c[17] <= c[2] && c[17] <= c[15] && c[15] <= c[0], "exact unique pixel/fragment bound");
         check(std::uint64_t(c[20]) * 32 == c[21] && std::uint64_t(c[22]) + c[23] == c[21], "environment32 sample conservation");
-        check(p.pixel_product.ends_with("_hero_work.dxil"), "instrumented shader product identity");
+        check(p.pixel_product.ends_with("_translucency_diagnostics.dxil"), "instrumented shader product identity");
         check(sample.phase != 3, "retired standalone Guide draw was submitted");
         if (require_layer_transition && (sample.phase <= 1 || sample.phase == 4))
             layer_rows[{sample.completed_frame, sample.view_id, sample.contributor}][sample.phase == 4 ? 2 : sample.phase].insert(sample.layer);
@@ -258,7 +261,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
                 constexpr std::array<std::uint32_t, 5> formats{DXGI_FORMAT_R16G16B16A16_FLOAT,
                     DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16_FLOAT};
-                check(p.pixel_product == "render/shader/hero_transparent_guide_ps_hero_work.dxil" &&
+                check(p.pixel_product == "render/shader/layered_translucency_composite_front_ps_translucency_diagnostics.dxil" &&
                     p.rtv_count == formats.size() && p.independent_blend,
                     "nearest composite must report the actual fused guide shader and five-target PSO");
                 for (std::size_t target = 0; target < formats.size(); ++target)
@@ -269,7 +272,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
                     c[15] <= std::uint64_t(c[13]) + c[14],
                     "nearest surface must be evaluated at most once per shader entry");
             }
-            else check(p.pixel_product == "render/shader/hero_layer_composite_ps_hero_work.dxil" && p.rtv_count == 1,
+            else check(p.pixel_product == "render/shader/layered_translucency_composite_layer_ps_translucency_diagnostics.dxil" && p.rtv_count == 1,
                 "farther composites must retain the original single-target product");
             if (sample.layer > 0 && sample.completed_frame < farther_accepted.size())
                 farther_accepted[sample.completed_frame] += c[15];
@@ -321,17 +324,17 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
             transition["farther_accepted_fragments"].push_back({{"completed_frame", frame}, {"accepted", farther_accepted[frame]}});
         }
     }
-    if (mode == hs::HeroWorkDiagnosticMode::Full)
+    if (mode == hs::TranslucencyDiagnosticsMode::Full)
         check(totals[26] == 0 && totals[27] == 0 && totals[19] > 0 && totals[25] > 0 && totals[20] + totals[24] + totals[28] == totals[19],
             "Full environment path or unexpected diagnostic bypass");
-    else if (mode == hs::HeroWorkDiagnosticMode::NoEnvironment)
+    else if (mode == hs::TranslucencyDiagnosticsMode::NoEnvironment)
         check(totals[19] > 0 && totals[25] > 0 && totals[26] == totals[19] && totals[20] == 0 && totals[21] == 0 &&
             totals[22] == 0 && totals[23] == 0 && totals[24] == 0 && totals[27] == 0 && totals[28] == 0, "NoEnvironment bypass relation");
     else
         check(totals[27] == shaded_accepted && totals[27] > 0 && totals[19] == 0 && totals[20] == 0 && totals[21] == 0 &&
             totals[22] == 0 && totals[23] == 0 && totals[24] == 0 && totals[25] == 0 && totals[26] == 0 && totals[28] == 0, "CoverageOnly bypass relation");
     probe["counter_totals"] = Json::object();
-    for (std::size_t index = 0; index < totals.size(); ++index) probe["counter_totals"][hs::kHeroWorkShaderCounterNames[index]] = totals[index];
+    for (std::size_t index = 0; index < totals.size(); ++index) probe["counter_totals"][hs::kTranslucencyDiagnosticsShaderCounterNames[index]] = totals[index];
     probe["lighting_phase_accepted_fragments"] = shaded_accepted;
     probe["water"] = {{"required", require_water}, {"rows", water_rows}, {"accepted_fragments", water_accepted},
         {"analytic_water_constructions", water_constructions}, {"sources", Json::array()}};
@@ -342,7 +345,7 @@ void ValidateHeroWorkProbe(const std::vector<hs::RendererHeroWorkSample> &sample
     probe["coverage"] = {{"mixture32_executed", totals[20] != 0},
         {"coated_prefiltered_executed", totals[28] != 0},
         {"mixture32_reason", totals[20] ? "observed actual branch/sample counters" :
-            mode == hs::HeroWorkDiagnosticMode::Full ? "fixture did not cover this authored branch" : "deliberately bypassed by diagnostic mode"},
+            mode == hs::TranslucencyDiagnosticsMode::Full ? "fixture did not cover this authored branch" : "deliberately bypassed by diagnostic mode"},
         {"uncalibrated_samples", uncalibrated}, {"mesh_statistics_unavailable_samples", mesh_statistics_na},
         {"mesh_statistics_na_reason", "AS/MS native statistics require device support and are not implied by indexed Hero draws"}};
     probe["failures"] = failures;
@@ -808,36 +811,38 @@ Json DiagnosticsReceipt(const hs::RendererDiagnosticsSnapshot &diagnostics)
 }
 
 Json WorldTransportReceipt(const std::map<std::uint64_t, hs::GpuPassTimings> &history,
-                           const hs::RendererSceneProbeBakeStatus &probe_status)
+                           bool sample_ready)
 {
-    constexpr std::array<std::pair<std::uint32_t, std::string_view>, 24> expected{{
+    constexpr std::array<std::pair<std::uint32_t, std::string_view>, 16> expected{{
         {170, "VolumetricDensity"}, {171, "VolumetricLighting"},
         {172, "VolumetricTemporal"}, {173, "VolumetricSpatial"},
         {174, "VolumetricIntegrate"}, {175, "VolumetricResolve"},
         {70, "SSRTrace"}, {71, "SSRTemporal"},
-        {180, "LocalProbeStaticCubeCapture"}, {181, "LocalProbeStaticCubeCapture"},
-        {182, "LocalProbeStaticCubeCapture"}, {183, "LocalProbeStaticCubeCapture"},
-        {184, "LocalProbeStaticCubeCapture"}, {185, "LocalProbeStaticCubeCapture"},
-        {186, "LocalProbePackageUpload"}, {187, "LocalProbeCosineShIntegration"},
-        {188, "LocalProbeGgxPrefilter"},
+        {186, "LocalProbePackageUpload"},
         {190, "HlodUpload"}, {191, "HlodClear"}, {192, "HlodSelect"},
         {193, "HlodEmit"}, {194, "HlodPublish"}, {195, "HlodHistory"},
         {196, "HlodDemandStatusReadback"},
     }};
     Json output{{"completed_frame_history", Json::array()},
                 {"required_passes", Json::array()}, {"layout_accepted", false}};
+    bool runtime_capture_observed = false;
     for (const auto &[frame_id, timings] : history)
     {
         Json passes = Json::array();
         for (const auto &pass : timings.passes)
+        {
+            runtime_capture_observed |= (pass.pass_id >= 180 && pass.pass_id <= 185) ||
+                pass.pass_id == 187 || pass.pass_id == 188;
             passes.push_back({{"pass_id", pass.pass_id}, {"name", pass.name},
                 {"nanoseconds", pass.nanoseconds}, {"measured", pass.measured},
                 {"queue", static_cast<unsigned>(pass.queue)}});
+        }
         output["completed_frame_history"].push_back(
             {{"completed_frame_id", frame_id}, {"passes", std::move(passes)}});
     }
     bool complete = true;
     bool hlod_complete = true;
+    bool package_uploaded = false;
     for (const auto &[pass_id, name] : expected)
     {
         Json observed = Json::array();
@@ -854,14 +859,15 @@ Json WorldTransportReceipt(const std::map<std::uint64_t, hs::GpuPassTimings> &hi
                 }
         complete &= present;
         if (pass_id >= 190) hlod_complete &= present;
+        if (pass_id == 186) package_uploaded = present;
         output["required_passes"].push_back({{"pass_id", pass_id},
             {"name", std::string(name)}, {"present", present},
             {"observed", std::move(observed)}});
     }
-    // This fixture changes the lights, so it must complete native recapture.
-    output["local_probe"] = {{"sample_ready", probe_status.capture_complete},
-        {"capture_sources_ready", probe_status.sources_ready}};
-    complete &= probe_status.capture_complete;
+    output["local_probe"] = {{"sample_ready", sample_ready},
+        {"baked_package_uploaded", package_uploaded},
+        {"runtime_capture_observed", runtime_capture_observed}};
+    complete &= sample_ready && package_uploaded && !runtime_capture_observed;
     output["layout_accepted"] = hlod_complete;
     output["required_passes_complete"] = complete;
     return output;
@@ -1196,6 +1202,99 @@ HzbReferencePixels DecodeHzbReferencePixels(const std::filesystem::path &path)
     return result;
 }
 
+struct WaterSurfaceCapture
+{
+    std::uint64_t pixels{}, history_pixels{}, nonzero_unpeeled{}, changed_color{};
+    std::set<std::pair<std::uint32_t,std::uint32_t>> identities;
+};
+WaterSurfaceCapture ValidateWaterSurface(const std::filesystem::path &path, bool empty)
+{
+    const auto diagnostic = Json::parse(std::ifstream(path));
+    const auto active_width = diagnostic.at("width").get<std::uint32_t>();
+    const auto active_height = diagnostic.at("height").get<std::uint32_t>();
+    struct Image { std::uint32_t width{}, height{}; std::size_t row{}; std::vector<std::byte> bytes; };
+    const auto find = [&](std::string_view name) -> const Json * {
+        for (const auto &resource : diagnostic.at("resources"))
+            if (resource.at("name").get<std::string>() == name) return &resource;
+        return nullptr;
+    };
+    if (empty)
+    {
+        for (const auto *name : {"translucency_depth", "translucency_motion", "translucency_history",
+                "translucency_classification", "translucency_metadata", "translucency_unpeeled",
+                "translucency_transport", "translucency_color"})
+            if (find(name)) throw std::runtime_error("empty water frame retained transparent capture resources");
+        return {};
+    }
+    const auto load = [&](std::string_view name, std::string_view format, std::size_t pixel_bytes) {
+        const auto *entry = find(name);
+        if (!entry || entry->at("format").get<std::string>() != format)
+            throw std::runtime_error("missing or invalid transparent capture format: " + std::string(name));
+        Image result; result.width = entry->at("width").get<std::uint32_t>();
+        result.height = entry->at("height").get<std::uint32_t>();
+        result.row = entry->at("row_size").get<std::size_t>();
+        if (result.width < active_width || result.height < active_height ||
+            result.row != std::size_t(result.width) * pixel_bytes)
+            throw std::runtime_error("invalid transparent capture extent");
+        std::ifstream file(path.parent_path() / entry->at("file").get<std::string>(), std::ios::binary | std::ios::ate);
+        if (!file || file.tellg() != std::streamoff(result.row * result.height))
+            throw std::runtime_error("invalid transparent capture byte count");
+        result.bytes.resize(result.row * result.height); file.seekg(0);
+        file.read(reinterpret_cast<char *>(result.bytes.data()), static_cast<std::streamsize>(result.bytes.size()));
+        if (!file) throw std::runtime_error("could not read transparent capture");
+        return result;
+    };
+    const auto depth = load("translucency_depth", "DXGI_FORMAT_R32_TYPELESS", 4);
+    const auto opaque = load("depth", "DXGI_FORMAT_R32_TYPELESS", 4);
+    const auto color = load("translucency_color", "DXGI_FORMAT_R16G16B16A16_FLOAT", 8);
+    const auto background = load("composite_hdr", "DXGI_FORMAT_R16G16B16A16_FLOAT", 8);
+    const auto motion = load("translucency_motion", "DXGI_FORMAT_R16G16_FLOAT", 4);
+    const auto history = load("translucency_history", "DXGI_FORMAT_R32G32_FLOAT", 8);
+    const auto classification = load("translucency_classification", "DXGI_FORMAT_R16G16B16A16_FLOAT", 8);
+    const auto metadata = load("translucency_metadata", "DXGI_FORMAT_R32G32_UINT", 8);
+    const auto unpeeled = load("translucency_unpeeled", "DXGI_FORMAT_R32_UINT", 4);
+    const auto transport = load("translucency_transport", "DXGI_FORMAT_R16G16_FLOAT", 4);
+    const auto ptr = [](const Image &image, std::uint32_t x, std::uint32_t y, std::size_t pixel_bytes) {
+        return image.bytes.data() + std::size_t(y) * image.row + std::size_t(x) * pixel_bytes;
+    };
+    const auto u32 = [](const std::byte *value) { std::uint32_t result; std::memcpy(&result,value,4); return result; };
+    const auto f32 = [](const std::byte *value) { float result; std::memcpy(&result,value,4); return result; };
+    const auto half = [](const std::byte *value) { std::uint16_t bits; std::memcpy(&bits,value,2);
+        return DirectX::PackedVector::XMConvertHalfToFloat(bits); };
+    WaterSurfaceCapture result;
+    for (std::uint32_t y=0; y<active_height; ++y) for (std::uint32_t x=0; x<active_width; ++x)
+    {
+        const auto *id=ptr(metadata,x,y,8); const auto key=u32(id), generation=u32(id+4);
+        const auto count=u32(ptr(unpeeled,x,y,4));
+        if (count != 0) ++result.nonzero_unpeeled;
+        if (!key) continue;
+        ++result.pixels; result.identities.emplace(key,generation);
+        const auto front=f32(ptr(depth,x,y,4)), behind=f32(ptr(opaque,x,y,4));
+        if (!std::isfinite(front) || !std::isfinite(behind) || !(front > behind) || front > 1.0f)
+            throw std::runtime_error("transparent front is not in front of opaque depth");
+        const auto *m=ptr(motion,x,y,4), *h=ptr(history,x,y,8), *c=ptr(classification,x,y,8), *t=ptr(transport,x,y,4);
+        for (unsigned i=0;i<2;++i)
+            if (!std::isfinite(half(m+2*i)) || !std::isfinite(f32(h+4*i)) || !std::isfinite(half(t+2*i)))
+                throw std::runtime_error("transparent motion/history/transport is nonfinite");
+        for (unsigned i=0;i<4;++i) if (!std::isfinite(half(c+2*i)))
+            throw std::runtime_error("transparent classification is nonfinite");
+        const auto *hdr=ptr(color,x,y,8), *prior=ptr(background,x,y,8);
+        bool changed=false;
+        for (unsigned i=0;i<4;++i)
+        {
+            const auto value=half(hdr+2*i), before=half(prior+2*i);
+            if (!std::isfinite(value) || !std::isfinite(before)) throw std::runtime_error("water HDR is nonfinite");
+            if (i<3 && value != before) changed=true;
+        }
+        if (changed) ++result.changed_color;
+        const auto opacity=half(c+4);
+        if (!(opacity >= 0.0f && opacity <= 1.0f)) throw std::runtime_error("transparent opacity outside range");
+        if (f32(h+4)>0.0f) ++result.history_pixels;
+    }
+    if (!result.pixels) throw std::runtime_error("water capture has no visible transparent pixels");
+    return result;
+}
+
 void ValidateSurfaceDiagnostic(const std::filesystem::path &path,
                                std::uint32_t expected_width, std::uint32_t expected_height,
                                bool require_motion, const char *receipt_name, Json &receipt)
@@ -1220,6 +1319,130 @@ void ValidateSurfaceDiagnostic(const std::filesystem::path &path,
         throw std::runtime_error("surface diagnostic has no nonzero historical motion pixels");
     diagnostic["path"] = path.filename().string();
     receipt["surface_diagnostics"][receipt_name] = std::move(diagnostic);
+}
+
+void ValidateVisibilityCommandCapture(const std::filesystem::path &path,
+    std::span<const hs::RenderInstance> static_instances,
+    std::span<const hs::RenderInstance> dynamic_instances, std::uint32_t frame, Json &receipt)
+{
+    const auto diagnostic = Json::parse(std::ifstream(path));
+    const auto &metadata = diagnostic.at("visibility_commands");
+    const auto &masks = metadata.at("range_flag_masks");
+    const auto mesh_eligible = masks.at("mesh_eligible").get<std::uint32_t>();
+    const auto lod_family = masks.at("lod_family").get<std::uint32_t>();
+    const auto empty_source = masks.at("empty_source").get<std::uint32_t>();
+    const auto static_source = masks.at("static_source").get<std::uint32_t>();
+    if (!mesh_eligible || !lod_family || !empty_source || !static_source ||
+        (mesh_eligible & (lod_family | empty_source | static_source)) ||
+        (lod_family & (empty_source | static_source)) || (empty_source & static_source))
+        throw std::runtime_error("visibility range flag masks are invalid");
+    const auto buckets = metadata.at("bucket_count").get<std::size_t>();
+    const auto views = metadata.at("active_views").get<std::size_t>();
+    const auto expected_views = dynamic_instances.empty() ? 4u : 1u;
+    if (views != expected_views || metadata.at("command_stride") != 24 ||
+        metadata.at("range_stride") != 32 || metadata.at("range_count_per_set") != buckets + 1)
+        throw std::runtime_error("visibility command capture layout mismatch");
+    const auto read = [&](const char *key, std::size_t words) {
+        std::ifstream file(path.parent_path() / metadata.at(key).get<std::string>(), std::ios::binary | std::ios::ate);
+        if (!file || file.tellg() != std::streamoff(words * sizeof(std::uint32_t)))
+            throw std::runtime_error("visibility command capture byte count mismatch");
+        std::vector<std::uint32_t> values(words);
+        file.seekg(0);
+        file.read(reinterpret_cast<char *>(values.data()), static_cast<std::streamsize>(words * sizeof(std::uint32_t)));
+        if (!file) throw std::runtime_error("visibility command capture read failed");
+        return values;
+    };
+    const auto ranges = read("visibility_ranges", 3 * (buckets + 1) * 8);
+    const auto static_draw = read("static_draw_args", buckets * views * 6);
+    const auto dynamic_draw = read("dynamic_draw_args", buckets * views * 6);
+    const auto rejected = read("static_rejected_args", buckets * 6);
+    const auto retest = read("static_retest_args", buckets * 6);
+    const auto &records = diagnostic.at("records");
+    const std::size_t environment_buckets = hs::render_data::kEnvironmentMaterialNames.size() *
+        hs::render_data::kEnvironmentGeometryLodCount;
+    if (environment_buckets >= buckets) throw std::runtime_error("visibility bucket catalog is incomplete");
+    const auto present = [&](std::span<const hs::RenderInstance> instances, std::size_t bucket) {
+        return std::ranges::any_of(instances, [&](const auto &instance) {
+            if (hs::render_data::IsEnvironmentMesh(instance.mesh))
+                return bucket / 3 == hs::render_data::EnvironmentGeometryOrdinal(instance.mesh, instance.environment_variant) &&
+                    bucket < environment_buckets;
+            return instance.mesh == hs::RenderMesh::Archer && bucket == environment_buckets;
+        });
+    };
+    const auto verify = [&](const std::vector<std::uint32_t> &commands, std::size_t set,
+                            std::size_t view_count, bool is_static) {
+        for (std::size_t bucket = 0; bucket < buckets; ++bucket)
+        {
+            const auto *range = ranges.data() + (set * (buckets + 1) + bucket) * 8;
+            const bool expected = present(is_static ? static_instances : dynamic_instances, bucket);
+            if (((range[6] & empty_source) == 0) != expected || range[3] != buckets ||
+                ((range[6] & static_source) != 0) != (is_static && !expected) ||
+                ((range[6] & lod_family) != 0) != (set != 2 && bucket < environment_buckets))
+                throw std::runtime_error("visibility source range disagrees with fixture input");
+            for (std::size_t view = 0; view < view_count; ++view)
+            {
+                const auto *command = commands.data() + (view * buckets + bucket) * 6;
+                if (!expected)
+                {
+                    if (std::any_of(command, command + 6, [](auto value) { return value != 0; }))
+                        throw std::runtime_error("empty source left a nonzero indirect command");
+                    continue;
+                }
+                const auto record_id = command[0] >> 2;
+                if ((command[0] & 3u) != view || record_id != range[4] + view || record_id >= records.size())
+                    throw std::runtime_error("indirect command record/view encoding mismatch");
+                const auto &record = records.at(record_id);
+                if (record.at("id") != record_id || record.at("refsource") != (set == 0 ? 1 : set == 1 ? 2 : 3))
+                    throw std::runtime_error("indirect command refers to the wrong geometry source");
+                const auto mesh = bucket < environment_buckets
+                    ? hs::render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(bucket / 3))
+                    : hs::RenderMesh::Archer;
+                if (record.at("mesh").get<std::uint32_t>() != static_cast<std::uint32_t>(mesh))
+                    throw std::runtime_error("indirect command geometry mesh does not match the input bucket");
+                if (record.at("index_count").get<std::uint32_t>() != range[2] ||
+                    record.at("meshlet_count").get<std::uint32_t>() != range[5] ||
+                    (record.at("flags").get<std::uint32_t>() & mesh_eligible) != (range[6] & mesh_eligible))
+                    throw std::runtime_error("indirect range does not match its geometry record");
+                const auto count = record.at("count").get<std::uint32_t>();
+                if (count > range[1] || command[4] || command[5])
+                    throw std::runtime_error("indirect command count/reserved fields invalid");
+                if ((range[6] & mesh_eligible) != 0)
+                {
+                    const auto groups = std::uint64_t(range[5]) * count;
+                    if (command[1] != std::min<std::uint64_t>(groups, 65535u) ||
+                        command[2] != (groups ? (groups + 65534u) / 65535u : 1u) || command[3] != 1)
+                        throw std::runtime_error("mesh indirect command encoding mismatch");
+                }
+                else if (command[1] != range[2] || command[2] != count ||
+                         command[3] != record.at("first_index").get<std::uint32_t>())
+                    throw std::runtime_error("indexed indirect command encoding mismatch");
+            }
+        }
+    };
+    verify(static_draw, 0, views, true);
+    verify(dynamic_draw, 1, views, false);
+    verify(retest, 2, 1, true);
+    std::uint64_t meadow_rejected{};
+    const auto meadow_begin = hs::render_data::EnvironmentGeometryOrdinal(hs::RenderMesh::MeadowSurface, 0) * 3u;
+    for (std::size_t bucket = 0; bucket < buckets; ++bucket)
+    {
+        const auto *command = rejected.data() + bucket * 6;
+        const auto *range = ranges.data() + bucket * 8;
+        if (!present(static_instances, bucket))
+        {
+            if (std::any_of(command, command + 6, [](auto value) { return value != 0; }))
+                throw std::runtime_error("empty static source left a rejected command");
+        }
+        else if (command[0] || command[1] != range[2] || command[2] > range[1] ||
+                 command[3] || command[4] || command[5])
+            throw std::runtime_error("static rejected command encoding mismatch");
+        if (bucket >= meadow_begin && bucket < meadow_begin + 3u) meadow_rejected += command[2];
+    }
+    if ((frame == 16 || frame == 17 || frame >= 22) && meadow_rejected == 0)
+        throw std::runtime_error("empty dynamic source erased or failed to produce the occluded static meadow command");
+    receipt.push_back({{"capture", path.filename().string()}, {"active_views", views},
+        {"static_instances", static_instances.size()}, {"dynamic_instances", dynamic_instances.size()},
+        {"meadow_rejected", meadow_rejected}});
 }
 
 void ValidateGeometryDiagnostic(const std::filesystem::path &path, const char *receipt_name,
@@ -1402,8 +1625,9 @@ int main(int argc, char **argv)
         std::uint32_t grass_cadence = 60;
         bool timing_stream_probe{};
         bool timing_stream_critical_probe{};
-        bool hero_work_probe{}, hero_work_mode_explicit{}, shadow_transition_probe{}, hero_layer_probe{};
+        bool translucency_diagnostics_probe{}, translucency_diagnostics_mode_explicit{}, shadow_transition_probe{}, hero_layer_probe{};
         bool world_transport_probe{};
+        bool single_layer_water_probe{};
         bool gameplay_scene{};
         bool static_shadow_bake_probe{};
         bool static_shadow_bake_only{};
@@ -1485,19 +1709,20 @@ int main(int argc, char **argv)
                 config.dynamic_resolution = true;
                 config.width = 320; config.height = 180;
             }
-            else if (arg == "--hero-work-probe") hero_work_probe = true;
+            else if (arg == "--translucency-diagnostics-probe") translucency_diagnostics_probe = true;
             else if (arg == "--shadow-transition-probe") shadow_transition_probe = true;
-            else if (arg.starts_with("--hero-work-mode="))
+            else if (arg.starts_with("--translucency-diagnostics-mode="))
             {
-                if (hero_work_mode_explicit) throw std::runtime_error("duplicate hero work mode");
-                hero_work_mode_explicit = true;
-                const auto mode = arg.substr(std::string_view("--hero-work-mode=").size());
-                if (mode == "full") config.hero_work_mode = hs::HeroWorkDiagnosticMode::Full;
-                else if (mode == "no-environment") config.hero_work_mode = hs::HeroWorkDiagnosticMode::NoEnvironment;
-                else if (mode == "coverage-only") config.hero_work_mode = hs::HeroWorkDiagnosticMode::CoverageOnly;
+                if (translucency_diagnostics_mode_explicit) throw std::runtime_error("duplicate hero work mode");
+                translucency_diagnostics_mode_explicit = true;
+                const auto mode = arg.substr(std::string_view("--translucency-diagnostics-mode=").size());
+                if (mode == "full") config.translucency_diagnostics_mode = hs::TranslucencyDiagnosticsMode::Full;
+                else if (mode == "no-environment") config.translucency_diagnostics_mode = hs::TranslucencyDiagnosticsMode::NoEnvironment;
+                else if (mode == "coverage-only") config.translucency_diagnostics_mode = hs::TranslucencyDiagnosticsMode::CoverageOnly;
                 else throw std::runtime_error("hero work mode must be full/no-environment/coverage-only");
             }
             else if (arg == "--world-transport-probe") world_transport_probe = true;
+            else if (arg == "--single-layer-water-probe") single_layer_water_probe = true;
             else if (arg == "--gameplay-scene") gameplay_scene = true;
             else if (arg == "--static-shadow-bake-probe") gameplay_scene = static_shadow_bake_probe = true;
             else if (arg == "--static-shadow-bake-only") static_shadow_bake_only = true;
@@ -1678,6 +1903,18 @@ int main(int argc, char **argv)
             else receipt["camera_basis"] = {{"cameras", {"front", "roll90", "vertical_down"}},
                 {"writers", {"RadialEnergy", "Smoke6Way"}}, {"frames", Json::array()}};
         }
+        if (single_layer_water_probe)
+        {
+            if (!frames_explicit) frames = 15;
+            if (frames != 15) throw std::runtime_error("single-layer water probe requires exactly 15 frames");
+            config.transparency_quality = hs::GraphicsQuality::Ultra;
+            config.refraction_quality = hs::GraphicsOptionalQuality::Ultra;
+            config.temporal_reconstruction = true;
+            config.capture_timing_stream = true;
+            config.motion_blur = hs::GraphicsMotionBlur::Low;
+            config.depth_of_field = true;
+            receipt["single_layer_water"]["frames"] = Json::array();
+        }
         if (world_transport_probe)
         {
             if (!frames_explicit) frames = 32;
@@ -1712,17 +1949,17 @@ int main(int argc, char **argv)
             throw std::runtime_error("material reload candidates must be different pointers");
         if (material_reload_probe && frames < 6)
             throw std::runtime_error("material reload probe requires at least 6 frames");
-        if (hero_work_mode_explicit && !hero_work_probe)
-            throw std::runtime_error("--hero-work-mode requires --hero-work-probe");
-        if (shadow_transition_probe && (!hero_work_probe || !gameplay_scene))
-            throw std::runtime_error("--shadow-transition-probe requires --hero-work-probe --gameplay-scene");
-        if (hero_work_probe)
+        if (translucency_diagnostics_mode_explicit && !translucency_diagnostics_probe)
+            throw std::runtime_error("--translucency-diagnostics-mode requires --translucency-diagnostics-probe");
+        if (shadow_transition_probe && (!translucency_diagnostics_probe || !gameplay_scene))
+            throw std::runtime_error("--shadow-transition-probe requires --translucency-diagnostics-probe --gameplay-scene");
+        if (translucency_diagnostics_probe)
         {
             if (!frames_explicit) frames = 4;
             if (frames > 8 || timing_stream_probe || !grass_history_probe.empty() || !vfx_composition_probe.empty())
                 throw std::runtime_error("Hero work probe requires at most eight isolated ordinary frames");
             if (gameplay_scene && frames != 4) throw std::runtime_error("Hero gameplay/water shadow probe requires exactly four frames");
-            config.capture_hero_work = config.capture_timing_stream = true;
+            config.capture_translucency_diagnostics = config.capture_timing_stream = true;
             hero_layer_probe = !gameplay_scene && frames == 8;
             if (hero_layer_probe) config.preview_camera_override = false; // Use the fixture snapshot's actual camera yaw.
             config.slime_family_preview_count = gameplay_scene ? 0u : 1u; // Preview replaces environment; gameplay must retain authored water.
@@ -1734,11 +1971,11 @@ int main(int argc, char **argv)
             }
             config.temporal_reconstruction = false;
             config.bloom = false;
-            receipt["hero_work"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "existing-slime-family-preview-count1"}, {"requested_frames", frames},
-                {"mode", HeroWorkModeName(config.hero_work_mode)}, {"exposure_delta_seconds", 1.0f / 60.0f},
+            receipt["translucency_diagnostics"] = {{"fixture", gameplay_scene ? "actual-gameplay-meadow-water" : "existing-slime-family-preview-count1"}, {"requested_frames", frames},
+                {"mode", TranslucencyDiagnosticsModeName(config.translucency_diagnostics_mode)}, {"exposure_delta_seconds", 1.0f / 60.0f},
                 {"functional_only", true}, {"performance_adoption", false}};
             if (hero_layer_probe)
-                receipt["hero_work"]["quality_transition"] = {{"request_frame", 5},
+                receipt["translucency_diagnostics"]["quality_transition"] = {{"request_frame", 5},
                     {"frames1_4", "existing Medium refraction/transparency, one layer and original camera"},
                     {"frames5_8", "Ultra refraction/transparency, four layers, camera yaw90/pitch0 for actual transparent overlap"},
                     {"camera_source", "snapshot camera yaw/pitch through MainViewInput; renderer preview_camera_override=false"},
@@ -1770,14 +2007,15 @@ int main(int argc, char **argv)
             throw std::runtime_error("--gpu-lod-probe requires at least 10 frames");
         if (surface_motion_resize_fixture && frames < 7)
             throw std::runtime_error("--surface-motion-resize-probe requires at least 7 frames");
-        if (static_cast<unsigned>(hero_work_probe) + static_cast<unsigned>(persistent_scene_probe) +
+        if (static_cast<unsigned>(translucency_diagnostics_probe) + static_cast<unsigned>(persistent_scene_probe) +
                 static_cast<unsigned>(skin_cache_monster_probe) +
                 static_cast<unsigned>(dynamic_lod_skin_growth_probe) +
                 static_cast<unsigned>(gpu_lod_probe) +
                 static_cast<unsigned>(residency_streaming_probe) +
                 static_cast<unsigned>(surface_motion_resize_fixture) +
                 static_cast<unsigned>(world_transport_probe) +
-                static_cast<unsigned>(gameplay_scene && !hero_work_probe) +
+                static_cast<unsigned>(single_layer_water_probe) +
+                static_cast<unsigned>(gameplay_scene && !translucency_diagnostics_probe) +
                 static_cast<unsigned>(material_reload_probe) +
                 static_cast<unsigned>(owned_view_probe) +
                 static_cast<unsigned>(provider_switch_probe) +
@@ -1831,7 +2069,7 @@ int main(int argc, char **argv)
             config.slime_family_preview_count = 1;
             config.vfx_quality = hs::VfxQuality::Low;
         }
-        receipt["fixture"] = hero_work_probe ? (gameplay_scene ? "hero-work-functional-water-world-v1" : "hero-work-functional-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
+        receipt["fixture"] = translucency_diagnostics_probe ? (gameplay_scene ? "translucency-diagnostics-functional-water-world-v1" : "translucency-diagnostics-functional-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
             ? "persistent-gpu-scene-v2"
             : skin_cache_monster_probe ? "skin-cache-monster-v1"
             : dynamic_lod_skin_growth_probe ? "dynamic-lod-skin-growth-v1"
@@ -1953,13 +2191,13 @@ int main(int argc, char **argv)
         config.product_paths = generation.product_paths;
         config.product_digests = generation.product_digests;
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
-        if (world_transport_probe || owned_view_probe || gameplay_scene)
+        if (world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
             std::filesystem::path product_path;
             Require(generation.Require(config.scene_hlod_product_id, product_path));
             Require(generation.Require("render/lighting/local_probes.spkg", product_path));
-            measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation, 0); });
+            measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation, world_transport_probe ? 1 : 0); });
             receipt[world_transport_probe ? "world_transport" : "owned_view_scene"] = {
                 {"layout_abi", world_scene->layout_abi},
                 {"eligible_static_member_count", world_scene->eligible_static_members.size()},
@@ -2018,19 +2256,7 @@ int main(int argc, char **argv)
         measure("window", [&] { window.Create(config.width, config.height); });
         config.window = window.handle;
         hs::TaskSystem recording_workers(4);
-        auto recording_group = recording_workers.CreateTaskGroup();
-        config.task_executor.submit = [&](std::function<void()> record) {
-            const bool accepted = recording_group.Submit(
-                [record = std::move(record)](std::stop_token) { record(); });
-            return accepted ? hs::Result::Success() :
-                hs::Result::Failure(hs::ErrorCode::TaskFailed, "hs_render_test_runner",
-                                    "Could not submit recording task.");
-        };
-        config.task_executor.join = [&] {
-            auto joined = recording_group.Wait();
-            recording_group = recording_workers.CreateTaskGroup();
-            return joined;
-        };
+        config.task_system = &recording_workers;
         std::vector<hs::render_data::RendererBulkDescriptor> packed_directory;
         std::vector<hs::render_data::TextureDescriptorStorage> packed_texture_storage;
         std::vector<hs::render_data::TextureDescriptor> packed_textures;
@@ -2055,7 +2281,7 @@ int main(int argc, char **argv)
         auto startup_font = ReadDeveloperFont();
         config.font_bytes = startup_font;
         const auto residency_pack_prepare_start = Clock::now();
-        if (residency_streaming_probe)
+        if (residency_streaming_probe || world_transport_probe)
         {
             const auto pack_path = artifacts / "renderer-products-pack.hsp";
             std::ofstream pack(pack_path, std::ios::binary | std::ios::trunc);
@@ -2140,7 +2366,8 @@ int main(int argc, char **argv)
                     offset += bytes;
                     continue;
                 }
-                if (id.starts_with("render/texture/") && id.ends_with(".rpkg"))
+                if ((id.starts_with("render/texture/") && id.ends_with(".rpkg")) ||
+                    hs::render_data::IsTerrainSurfaceSectionProduct(id))
                 {
                     hs::ShippedContentOwner input;
                     Require(hs::ShippedContentOwner::Open(generation.product_paths.at(id), input));
@@ -2420,6 +2647,26 @@ int main(int argc, char **argv)
         occluder.position = {0.0f, 5.0f, -9.25f};
         occluder.scale = {12.0f, 16.0f, 3.0f};
         occluder.color_rgba = 0xff303030u;
+        std::shared_ptr<const hs::StaticRenderScene> visibility_empty_scene, visibility_filled_scene;
+        if (persistent_scene_probe && frames >= 24)
+        {
+            auto visibility_empty = std::make_unique<hs::StaticRenderSceneStorage>();
+            visibility_empty->content_generation_id = generation.id;
+            auto visibility_filled = std::make_unique<hs::StaticRenderSceneStorage>(*visibility_empty);
+            auto static_occluder = second;
+            static_occluder.stable_id = 0x56495301u;
+            static_occluder.position = {0, 0, 3};
+            static_occluder.scale = {6, 6, 6};
+            auto static_meadow = second;
+            static_meadow.stable_id = 0x56495302u;
+            static_meadow.mesh = hs::RenderMesh::MeadowSurface;
+            static_meadow.environment_variant = 0;
+            static_meadow.position = {0, 0, 10};
+            static_meadow.scale = {.04f, .04f, .04f};
+            visibility_filled->instances = {static_occluder, static_meadow};
+            visibility_empty_scene = hs::FreezeStaticRenderScene(std::move(visibility_empty));
+            visibility_filled_scene = hs::FreezeStaticRenderScene(std::move(visibility_filled));
+        }
         std::vector<hs::RenderInstance> previous;
         std::vector<hs::RenderInstance> current =
             grid_floor_probe ? std::vector<hs::RenderInstance>{first}
@@ -2437,7 +2684,7 @@ int main(int argc, char **argv)
             for (auto &source : current) source.revisions = {11, 22, 33, 44};
         hs::RenderSnapshotPair pair;
         pair.has_current = true;
-        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene ? world_scene
+        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
         // fixture terrain/rocks otherwise occlude different pixels after roll.
@@ -2506,7 +2753,8 @@ int main(int argc, char **argv)
         pair.current.camera.yaw_degrees = 0;
         pair.current.camera.pitch_degrees = 22;
         pair.current.camera.distance = dynamic_lod_skin_growth_probe ? 28.0f : 22.0f;
-        if (hero_work_probe && gameplay_scene)
+        std::shared_ptr<const hs::StaticRenderScene> waterless_scene;
+        if ((translucency_diagnostics_probe && gameplay_scene) || single_layer_water_probe)
         {
             const auto water = std::ranges::find_if(world_scene->instances, [](const auto &instance) {
                 return instance.mesh == hs::RenderMesh::MeadowSurface && instance.environment_variant == 1;
@@ -2522,7 +2770,18 @@ int main(int argc, char **argv)
             pair.current.camera.target = {water->position.x + pool->x, water->position.y + level, water->position.z + pool->z};
             pair.current.camera.pitch_degrees = 55;
             pair.current.camera.distance = 7;
-            receipt["hero_work"]["water_camera"] = {{"water_instance_stable_id", water->stable_id},
+            if (single_layer_water_probe)
+            {
+                auto waterless = std::make_unique<hs::StaticRenderSceneStorage>(*world_scene);
+                const auto index = static_cast<std::uint32_t>(water - world_scene->instances.begin());
+                if (std::ranges::any_of(waterless->eligible_static_members, [index](const auto &member) { return member.instance_index == index; }))
+                    throw std::runtime_error("Water-only fixture cannot remove an HLOD-eligible instance");
+                waterless->instances.erase(waterless->instances.begin() + index);
+                for (auto &member : waterless->eligible_static_members)
+                    if (member.instance_index > index) --member.instance_index;
+                waterless_scene = hs::FreezeStaticRenderScene(std::move(waterless));
+            }
+            receipt["translucency_diagnostics"]["water_camera"] = {{"water_instance_stable_id", water->stable_id},
                 {"mesh", static_cast<unsigned>(water->mesh)}, {"variant", water->environment_variant},
                 {"local_pool_center", {pool->x, level, pool->z}}, {"radii", {pool->rx, pool->rz}},
                 {"target", {pair.current.camera.target.x, pair.current.camera.target.y, pair.current.camera.target.z}},
@@ -2540,7 +2799,7 @@ int main(int argc, char **argv)
         std::array<hs::LightView, 3> world_lights{};
         std::vector<hs::LightView> light_list_lights;
         if (static_shadow_bake_probe) pair.current.lights = std::span(&static_shadow_sun, 1);
-        if (hero_work_probe && gameplay_scene)
+        if (translucency_diagnostics_probe && gameplay_scene)
         {
             world_lights[0].stable_id = 0x485753554e000001ull;
             world_lights[0].direction = hs::kEnvironmentSunDirection;
@@ -2548,7 +2807,7 @@ int main(int argc, char **argv)
             world_lights[0].shadow_flags = hs::kLightShadowRequested;
             pair.current.lights = std::span(world_lights).first(1);
         }
-        if (world_transport_probe || local_probe_revision_probe)
+        if (world_transport_probe || local_probe_revision_probe || single_layer_water_probe)
         {
             auto &sun = world_lights[0];
             sun.stable_id = 0x57544c0000000001ull;
@@ -2638,6 +2897,8 @@ int main(int argc, char **argv)
         failure_code = "HS_RENDER_FRAME_FAILED";
         hs::RendererQueueStats queue_totals;
         std::map<std::uint64_t, hs::GpuPassTimings> world_gpu_history;
+        std::array<std::uint64_t, 15> water_submissions{};
+        std::optional<std::pair<std::uint32_t,std::uint32_t>> water_identity;
         std::map<std::uint64_t, hs::GpuPassTimings> provider_gpu_history;
         std::array<std::uint32_t, 3> probe_capture_frames{};
         std::uint64_t observed_probe_frame{};
@@ -2682,7 +2943,7 @@ int main(int argc, char **argv)
             const auto requested = renderer.RequestGraphicsSettings({hero_quality_generation,
                 hs::GraphicsSettingsRequestCause::User, status.requested});
             const auto observed = renderer.GetGraphicsSettingsStatus();
-            receipt["hero_work"]["quality_transition"]["baseline_request"] = {
+            receipt["translucency_diagnostics"]["quality_transition"]["baseline_request"] = {
                 {"before_generation", before.generation}, {"before_state", static_cast<unsigned>(before.state)},
                 {"before_actual_available", before.actual_applied_available}, {"generation", hero_quality_generation},
                 {"succeeded", requested.Succeeded()}, {"error", requested.Succeeded() ? "" : std::string(requested.Message())},
@@ -2775,13 +3036,13 @@ int main(int argc, char **argv)
                     const auto requested = renderer.RequestGraphicsSettings({hero_quality_generation,
                         hs::GraphicsSettingsRequestCause::User, status.requested});
                     const auto observed = renderer.GetGraphicsSettingsStatus();
-                    receipt["hero_work"]["quality_transition"]["request"] = {{"generation", hero_quality_generation},
+                    receipt["translucency_diagnostics"]["quality_transition"]["request"] = {{"generation", hero_quality_generation},
                         {"succeeded", requested.Succeeded()}, {"error", requested.Succeeded() ? "" : std::string(requested.Message())},
                         {"observed_generation", observed.generation}, {"state", static_cast<unsigned>(observed.state)},
                         {"status_error", static_cast<unsigned>(observed.error)}};
                     Require(requested);
                 }
-                if (hero_work_probe && gameplay_scene)
+                if (translucency_diagnostics_probe && gameplay_scene)
                 {
                     world_lights[0].direction = hs::kEnvironmentSunDirection;
                     if (frame == 2) world_lights[0].direction.x += .125f;
@@ -2939,6 +3200,20 @@ int main(int argc, char **argv)
                         current[0].position = occluder.position;
                     else if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer && frame == 11)
                         current[0].position.x = 30.0f;
+                    else if (frames >= 24 && frame >= 15)
+                    {
+                        const bool dynamic_filled = frame >= 18 && frame <= 20;
+                        const bool static_filled = !dynamic_filled;
+                        pair.current.static_scene = static_filled ? visibility_filled_scene : visibility_empty_scene;
+                        current = dynamic_filled ? std::vector<hs::RenderInstance>{second} : std::vector<hs::RenderInstance>{};
+                        world_lights[0] = hs::LightView{};
+                        world_lights[0].stable_id = 1;
+                        world_lights[0].direction = hs::kEnvironmentSunDirection;
+                        world_lights[0].quantity = 50000.0f;
+                        world_lights[0].color = {1, 1, 1};
+                        world_lights[0].shadow_flags = dynamic_filled ? 0 : hs::kLightShadowRequested;
+                        pair.current.lights = std::span(world_lights).first(1);
+                    }
                 }
                 else if (dynamic_lod_skin_growth_probe)
                 {
@@ -2964,7 +3239,8 @@ int main(int argc, char **argv)
                         for (std::uint32_t index = 0; index < 260; ++index)
                         {
                             auto added = gpu_rock;
-                            added.stable_id = 100u + index;
+                            // Keep growth identities disjoint from Scene's 100..114 static owners.
+                            added.stable_id = 0x4c4f440000000000ull + index;
                             added.position = {
                                 static_cast<float>(index % 20u) * .25f - 2.5f,
                                 0.0f,
@@ -3069,7 +3345,7 @@ int main(int argc, char **argv)
                         };
                     }
                 }
-                else if (!world_transport_probe && !persistent_scene_probe)
+                else if (!world_transport_probe && !persistent_scene_probe && !single_layer_water_probe)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                 }
@@ -3107,6 +3383,22 @@ int main(int argc, char **argv)
                     std::erase_if(current, [](const auto &instance) { return instance.stable_id == 0; });
                 if (local_probe_revision_probe && frame == 81)
                     std::erase_if(current, [](const auto &instance) { return instance.stable_id == kShadowHistoryCasterId; });
+                if (single_layer_water_probe)
+                {
+                    const bool mixed = frame >= 4 && frame <= 6;
+                    const bool empty = frame >= 10 && frame <= 12;
+                    pair.current.static_scene = empty ? waterless_scene : world_scene;
+                    current.clear();
+                    if (mixed)
+                    {
+                        hs::RenderInstance slime{};
+                        slime.mesh = hs::RenderMesh::MonsterMelee; slime.stable_id = 0x5741544552534cull;
+                        slime.position = {pair.current.camera.target.x, pair.current.camera.target.y, pair.current.camera.target.z};
+                        slime.scale = {1, 1, 1};
+                        hs::PopulateRenderInstanceIdentity(slime);
+                        current.push_back(slime);
+                    }
+                }
                 pair.current.instances = current;
                 if (!grass_history_probe.empty() && (frame == 13 || frame == 14))
                     Require(renderer.Resize(config.width + (frame == 13 ? 64 : 0),
@@ -3240,18 +3532,20 @@ int main(int argc, char **argv)
                     flash.shape = hs::VfxImpactShape::RadialEnergy; flash.oit = true;
                     oit_flashes.push_back(flash);
                 }
-                const hs::RenderFrameInput render_input{
+                const hs::RenderPackage render_input{
                     .views = std::span(&main_view, 1), .snapshots = pair,
-                    .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces},
+                    .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces,
+                        .world_batch = {pair.current.header.session_id, pair.current.header.tick, frame}},
                     .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
-                        : local_probe_revision_probe || hero_work_probe ? std::optional<float>{1.0f / 60.0f}
+                        : local_probe_revision_probe || translucency_diagnostics_probe ? std::optional<float>{1.0f / 60.0f}
                         : !vfx_composition_probe.empty()
                         ? std::optional<float>{vfx_composition_probe == "auto" || vfx_composition_probe == "switch"
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = entity_surface_probe || world_transport_probe ||
-                        !vfx_composition_probe.empty()};
+                    .wait_for_streaming = entity_surface_probe || world_transport_probe || single_layer_water_probe ||
+                        !vfx_composition_probe.empty(),
+                    .display_sample = hs::RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
                 if (provider_switch_probe)
                 {
                     std::uint64_t input_token{};
@@ -3268,6 +3562,42 @@ int main(int argc, char **argv)
                     });
                 else Require(renderer.Render(render_input, frame_result));
                 rendered_frame_count = frame;
+                if (world_transport_probe && frame == 1)
+                {
+                    const auto path = artifacts / "world-transport-surface.json";
+                    Require(renderer.Capture({.path = path, .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                    const auto diagnostic = Json::parse(std::ifstream(path));
+                    const bool pages = diagnostic.at("terrain_surface_pages").get<bool>();
+                    receipt["world_transport"]["terrain_surface_pages"] = pages;
+                    if (!pages) throw std::runtime_error("Packed world transport did not admit terrain surface pages");
+                }
+                if (single_layer_water_probe)
+                {
+                    if (frame_result.views.size() != 1) throw std::runtime_error("water probe requires one accepted view");
+                    water_submissions[frame - 1] = frame_result.views[0].submission_id;
+                    if (frame == 1 || frame == 3 || frame == 6 || frame == 9 || frame == 12 || frame == 15)
+                    {
+                        const auto name = std::format("single-layer-water-{:02}.json", frame);
+                        Require(renderer.Capture({.path = artifacts / name, .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                        const bool mixed = frame == 6, empty = frame == 12;
+                        const auto observed = ValidateWaterSurface(artifacts / name, empty);
+                        if (!mixed && !empty && (observed.identities.size() != 1 || observed.nonzero_unpeeled || !observed.changed_color))
+                            throw std::runtime_error("water-only frame has foreign identity or unpeeled fragments");
+                        if (frame == 1)
+                        {
+                            water_identity = *observed.identities.begin();
+                            if (observed.history_pixels != 0) throw std::runtime_error("first water frame has unexpected history");
+                        }
+                        if (frame == 3 && !observed.history_pixels)
+                            throw std::runtime_error("settled water has no valid history");
+                        if (mixed && (!water_identity || !observed.identities.contains(*water_identity) || observed.identities.size() < 2))
+                            throw std::runtime_error("mixed water and slime did not both reach transparent output");
+                        receipt["single_layer_water"]["capture_" + std::to_string(frame)] = {
+                            {"file", name}, {"pixels", observed.pixels}, {"historical_pixels", observed.history_pixels},
+                            {"identities", observed.identities.size()}, {"nonzero_unpeeled", observed.nonzero_unpeeled},
+                            {"changed_hdr_pixels", observed.changed_color}};
+                    }
+                }
                 if (residency_streaming_probe && residency_quality_phase < residency_texture_qualities.size())
                 {
                     const auto settings = renderer.GetGraphicsSettingsStatus();
@@ -3336,7 +3666,7 @@ int main(int argc, char **argv)
                         views.push_back({{"submission_id", view.submission_id}, {"view_id", view.rendered_view.id.value},
                             {"camera_position", {view.rendered_view.camera.position.x, view.rendered_view.camera.position.y, view.rendered_view.camera.position.z}},
                             {"camera_target", {view.rendered_view.camera.target.x, view.rendered_view.camera.target.y, view.rendered_view.camera.target.z}}});
-                    receipt["hero_work"]["quality_transition"]["frames"].push_back({{"fixture_frame", frame},
+                    receipt["translucency_diagnostics"]["quality_transition"]["frames"].push_back({{"fixture_frame", frame},
                         {"views", std::move(views)}, {"camera_yaw_degrees", pair.current.camera.yaw_degrees},
                         {"camera_pitch_degrees", pair.current.camera.pitch_degrees},
                         {"request_generation", hero_quality_generation}, {"status_generation", status.generation},
@@ -3347,7 +3677,7 @@ int main(int argc, char **argv)
                         {"actual_transparency_quality", status.actual_applied_available ? Json(static_cast<unsigned>(status.actual_applied.transparency_quality)) : Json(nullptr)},
                         {"actual_refraction_quality", status.actual_applied_available ? Json(static_cast<unsigned>(status.actual_applied.refraction_quality)) : Json(nullptr)}});
                 }
-                if (hero_work_probe && gameplay_scene)
+                if (translucency_diagnostics_probe && gameplay_scene)
                 {
                     const auto shadow = renderer.GetLightingStatus().shadow_cache;
                     if (frame_result.views.size() != 1) throw std::runtime_error("Hero water probe needs one submitted view");
@@ -3384,10 +3714,10 @@ int main(int argc, char **argv)
                             throw std::runtime_error("Repeated timing read republished a completed frame");
                     }
                 }
-                if (!timing_stream_probe && !(hero_work_probe && gameplay_scene))
+                if (!timing_stream_probe && !(translucency_diagnostics_probe && gameplay_scene))
                 {
                     // Keep the completed stream for world transport's one-time passes.
-                    if (world_transport_probe)
+                    if (world_transport_probe || single_layer_water_probe)
                         collect_timing_stream(false);
                     else
                     {
@@ -3642,6 +3972,29 @@ int main(int argc, char **argv)
                     Require(renderer.Capture({.path = artifacts / "hzb_retest.png"}));
                 if (persistent_scene_probe && frame == 9)
                     Require(renderer.Capture({.path = artifacts / "hzb_reference.png"}));
+                if (persistent_scene_probe && frames >= 24 && frame >= 15 &&
+                    config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
+                {
+                    const auto path = artifacts / std::format("visibility-commands-{:02}.json", frame);
+                    Require(renderer.Capture({.path = path, .kind = hs::CaptureKind::GeometryDiagnostics}));
+                    ValidateVisibilityCommandCapture(path, pair.current.static_scene->instances, current, frame,
+                        receipt["visibility_command_cases"]);
+                }
+                if (persistent_scene_probe && frames >= 24 && frame == 14 &&
+                    config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
+                {
+                    const auto path = artifacts / "hzb-empty-slot-reuse.json";
+                    Require(renderer.Capture({.path = path, .kind = hs::CaptureKind::VisibilityDiagnostics}));
+                    const auto diagnostic = Json::parse(std::ifstream(path));
+                    for (const auto &catalog : diagnostic.at("cluster_commands"))
+                        for (const auto &view : catalog.at("views"))
+                            if (view.at("view").get<std::uint32_t>() == 4 &&
+                                (view.at("published_count").get<std::uint64_t>() != 0 ||
+                                 view.at("nonzero_count").get<std::uint64_t>() != 0 ||
+                                 view.at("nonzero_outside_published_prefix").get<std::uint64_t>() != 0))
+                                throw std::runtime_error("Cluster Retest count survived frame 14 slot reuse");
+                    receipt["hzb_cluster_retest"]["empty_after_slot_reuse"] = true;
+                }
                 if (persistent_scene_probe && frame == 11 &&
                     config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
                 {
@@ -3747,9 +4100,13 @@ int main(int argc, char **argv)
                     auxiliary.view_origin = auxiliary.camera.position;
                     std::array preview_views{preview, auxiliary};
                     if (frame == 9) std::swap(preview_views[0], preview_views[1]);
-                    const hs::RenderFrameInput preview_input{
-                        .views = preview_views, .snapshots = preview_pair,
-                        .simulation_time = std::chrono::nanoseconds(10000000000ll + frame * 1000000000ll / 30)};
+                    preview_pair.has_current = true;
+                    preview_pair.current.header.clock.mode = hs::RenderClockMode::Scripted;
+                    preview_pair.current.header.simulation_time =
+                        std::chrono::nanoseconds(10000000000ll + frame * 1000000000ll / 30);
+                    const hs::RenderPackage preview_input{.views = preview_views, .snapshots = preview_pair,
+                        .vfx = {.world_batch = {preview_pair.current.header.session_id, preview_pair.current.header.tick}},
+                        .display_sample = hs::RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
                     hs::RendererFrameResult preview_result;
                     Require(renderer.Render(preview_input, preview_result));
                     if (preview_result.views.size() != preview_views.size())
@@ -3916,7 +4273,7 @@ int main(int argc, char **argv)
             });
             receipt["visibility"] = Json::parse(std::ifstream(artifacts / "visibility.json"));
             receipt["visibility"]["view_id"] = diagnostic_view.value;
-            if (persistent_scene_probe && frames >= 14)
+            if (persistent_scene_probe && frames >= 14 && frames < 24)
             {
                 failure_code = "HS_RENDER_HZB_CLUSTER_RETEST_FAILED";
                 for (const auto &catalog : receipt["visibility"].at("cluster_commands"))
@@ -4051,6 +4408,32 @@ int main(int argc, char **argv)
             if (renderer.LastParticleCount() != 0)
                 throw std::runtime_error("Authored WaveTimer/pickup/bow owners leaked into legacy GPU particles.");
         }
+        if (single_layer_water_probe)
+        {
+            collect_timing_stream(true);
+            for (std::size_t i = 0; i < water_submissions.size(); ++i)
+            {
+                const auto found = timing_stream_history.find(water_submissions[i]);
+                if (found == timing_stream_history.end()) throw std::runtime_error("water probe lost submitted GPU pass timings");
+                const auto &sample = found->second;
+                const auto measured = [&](std::string_view name) {
+                    return std::ranges::any_of(sample.passes, [&](const auto &pass) { return pass.name == name && pass.measured; });
+                };
+                const bool mixed = i >= 3 && i < 6, empty = i >= 9 && i < 12;
+                const bool water = measured("Water.CopyBackground") && measured("Water.SingleLayer");
+                const bool peel = measured("Translucency.PeelFront");
+                const bool exit = measured("Translucency.GatherExitDepth");
+                const bool tail = measured("Translucency.AccumulateUnpeeled");
+                if (!measured("HdrPostNearestGuides") || !measured("HdrPostMotionBlur") ||
+                    !measured("HdrPostDepthOfField"))
+                    throw std::runtime_error("water probe requires active HDR geometry post passes");
+                if (mixed ? (water || !peel || !exit || !tail) : empty ? (water || peel || exit || tail)
+                    : (!water || peel || exit || tail))
+                    throw std::runtime_error("water-only/mixed/empty pass transition mismatch");
+                receipt["single_layer_water"]["frames"].push_back({{"frame",i+1}, {"submission",water_submissions[i]},
+                    {"state",mixed ? "mixed" : empty ? "empty" : "water"}, {"water",water}, {"peel",peel}, {"exit",exit}, {"tail",tail}});
+            }
+        }
         if (world_transport_probe)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_PASSES_FAILED";
@@ -4058,7 +4441,7 @@ int main(int argc, char **argv)
             for (const auto &[frame_id, sample] : timing_stream_history)
                 world_gpu_history.insert_or_assign(frame_id, sample);
             const auto observed = WorldTransportReceipt(world_gpu_history,
-                renderer.GetSceneProbeBakeStatus());
+                renderer.GetSceneProbeBakeStatus().capture_complete);
             receipt["world_transport"].update(observed);
             receipt["world_transport"]["immutable_scene_frames"] = rendered_frame_count;
             receipt["world_transport"]["frame_bound"] = frames;
@@ -4091,7 +4474,7 @@ int main(int argc, char **argv)
                 throw std::runtime_error("HLOD shared-pool admission or complete-leaf fallback contract failed");
             if (!observed["required_passes_complete"].get<bool>())
                 throw std::runtime_error(
-                    "world transport did not complete volumetrics, SSR, local-probe sample readiness and accepted-layout HLOD in GPU history");
+                    "world transport did not complete volumetrics, SSR, baked local-probe readiness without runtime capture, and accepted-layout HLOD");
         }
         receipt["gpu_passes"] = Json::array();
         for (const auto &pass : gpu_timings.passes)
@@ -4147,18 +4530,18 @@ int main(int argc, char **argv)
                     residency_stats.geometry_streaming_requests)
                 throw std::runtime_error("Geometry streaming did not publish and reclaim every requested geometry family.");
         }
-        if (hero_work_probe)
+        if (translucency_diagnostics_probe)
         {
-            failure_code = "HS_RENDER_HERO_WORK_PROBE_FAILED";
-            std::vector<hs::RendererHeroWorkSample> hero_samples;
-            const auto drained = renderer.DrainHeroWork(hero_samples);
+            failure_code = "HS_RENDER_TRANSLUCENCY_DIAGNOSTICS_PROBE_FAILED";
+            std::vector<hs::RendererTranslucencyDiagnosticsSample> hero_samples;
+            const auto drained = renderer.DrainTranslucencyDiagnostics(hero_samples);
             bool shadow_valid = true;
             if (gameplay_scene)
             {
                 collect_timing_stream(true);
                 shadow_valid = ValidateHeroWaterShadowProbe(receipt["hero_water_shadow"], timing_stream_history);
             }
-            ValidateHeroWorkProbe(hero_samples, renderer.HeroWorkStatus(), config.hero_work_mode, frames, drained, receipt, gameplay_scene,
+            ValidateTranslucencyDiagnosticsProbe(hero_samples, renderer.TranslucencyDiagnosticsStatus(), config.translucency_diagnostics_mode, frames, drained, receipt, gameplay_scene,
                 hero_layer_probe, hero_quality_valid);
             if (!shadow_valid) throw std::runtime_error("Hero water shadow policy/producer invariant failed; raw frame receipts retained");
         }

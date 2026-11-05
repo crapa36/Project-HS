@@ -2,17 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://project-hs.local/schemas/scene_probe.schema.json",
   "title": "Project HS static scene spatial probe source v1",
-  "description": "Spatial probe positions and boxes for actual common-material static-scene offscreen cube capture. Local HDR raw/GGX cubes include the global environment through sky once; SH is world-space cosine-convolved SH9 and visibility is independent first-hit world distance. The SPB1 package remains distinct from global LPB1 environment v1. The producer must resolve actual material/light/static-layout inputs and derive nonzero revisions rather than inventing fixed revisions.",
+  "description": "Independent scene-linear cosine-convolved SH9 nodes and box-projected reflection cubes. The SPB2 bake stores visible corner masks per receiver subcell and all overlapping reflection indices per cell.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "id", "environment_product", "color_space", "radiance_unit", "capture", "blend_policy", "revision_policy", "probes", "author_notes"],
+  "required": ["version", "id", "environment_product", "color_space", "radiance_unit", "capture", "blend_policy", "revision_policy", "irradiance_grid", "probes", "author_notes"],
   "properties": {
     "version": {"const": 1},
     "id": {"const": "local_probes"},
     "environment_product": {"const": "render/lighting/default_probe.rpkg"},
     "color_space": {"const": "rec709_linear"},
     "radiance_unit": {"const": "scene_linear_radiance_per_steradian"},
-    "blend_policy": {"const": "normalized_influence_visibility_with_single_environment_baseline"},
+    "blend_policy": {"const": "visible_grid_corners_and_box_reflection_influence"},
     "revision_policy": {"const": "hash_actual_environment_material_light_static_layout_inputs"},
     "capture": {
       "type": "object", "additionalProperties": false,
@@ -26,6 +26,9 @@
         "exclude": {"const": ["dynamic_characters", "dynamic_vfx", "ui", "post", "exposure", "recursive_local_probes"]}
       }
     },
+    "irradiance_grid": {"type":"object","additionalProperties":false,"required":["origin","spacing","dimensions"],
+      "properties":{"origin":{"$ref":"#/$defs/position"},"spacing":{"$ref":"#/$defs/position"},
+        "dimensions":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"integer","minimum":2,"maximum":64}}}},
     "probes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/probe"}},
     "author_notes": {"type": "string", "minLength": 1, "maxLength": 4096}
   },

@@ -16,8 +16,7 @@ struct HsLocalProbeRecord
 TextureCubeArray<float4> HsLocalProbeRawCube : register(t0, space23);
 TextureCubeArray<float4> HsLocalProbeGgxCube : register(t1, space23);
 StructuredBuffer<float4> HsLocalProbeCosineSh : register(t2, space23);
-// Exact first-hit texel lookup avoids mixing a near wall with a far miss.
-Texture2DArray<float> HsLocalProbeDistanceFaces : register(t3, space23);
+// SH9 rows are followed by five float4-sized cell records (packed as uint32).
 StructuredBuffer<HsLocalProbeRecord> HsLocalProbeRecords : register(t4, space23);
 
 uint HsLocalProbeCount()
@@ -26,36 +25,34 @@ uint HsLocalProbeCount()
     if(count==0 || stride!=128) return 0;
     return min(count,(uint)HsLocalProbeRecords[0].parameters.w);
 }
-float HsLocalProbeFirstHit(uint cube,float3 d)
+float HsLocalProbeWeight(HsLocalProbeRecord p,float3 world)
 {
-    const float3 a=abs(d); uint face; float2 uv;
-    if(a.x>=a.y && a.x>=a.z)
-    { face=d.x>=0?0:1; uv=float2(d.x>=0?-d.z:d.z,-d.y)/a.x; }
-    else if(a.y>=a.z)
-    { face=d.y>=0?2:3; uv=float2(d.x,d.y>=0?d.z:-d.z)/a.y; }
-    else { face=d.z>=0?4:5; uv=float2(d.z>=0?d.x:-d.x,-d.y)/a.z; }
-    uint width,height,layers; HsLocalProbeDistanceFaces.GetDimensions(width,height,layers);
-    const uint2 pixel=min((uint2)(saturate(uv*0.5+0.5)*float2(width,height)),uint2(width-1,height-1));
-    return HsLocalProbeDistanceFaces.Load(int4(pixel,cube*6+face,0));
+    const float3 inside=min(world-p.influence_min_fade.xyz,p.influence_max_bias.xyz-world);
+    return p.position_weight.w*smoothstep(0,p.influence_min_fade.w,min(inside.x,min(inside.y,inside.z)));
 }
-float HsLocalProbeWeight(HsLocalProbeRecord p,float3 worldPosition)
+struct HsProbeGridCell
 {
-    if(p.parameters.z==0) return 0;
-    const float3 inside=min(worldPosition-p.influence_min_fade.xyz,p.influence_max_bias.xyz-worldPosition);
-    const float edge=min(inside.x,min(inside.y,inside.z));
-    if(edge<=0) return 0;
-    float weight=p.position_weight.w*smoothstep(0,p.influence_min_fade.w,edge);
-    const float3 delta=worldPosition-p.position_weight.xyz; const float distance=length(delta);
-    if(distance>0)
-    {
-        const float hit=HsLocalProbeFirstHit((uint)p.parameters.y,delta);
-        // Captured sky/miss is fully visible; an actual occluder attenuates
-        // receivers beyond the first hit using authored world-unit bias/fade.
-        if(hit<p.projection_max_capture_distance.w)
-            weight*=1-smoothstep(hit+p.influence_max_bias.w,
-                hit+p.influence_max_bias.w+p.projection_min_visibility_fade.w,distance);
-    }
-    return weight;
+    uint3 dims,cell;
+    uint metadata;
+    float3 fraction;
+    bool inside;
+};
+HsProbeGridCell HsLocateProbeCell(float3 world)
+{
+    HsProbeGridCell c=(HsProbeGridCell)0;
+    const HsLocalProbeRecord header=HsLocalProbeRecords[0];
+    const uint packed=(uint)header.reserved0.w;
+    if(!packed) return c;
+    c.dims=(packed>>uint3(0,8,16))&255u;
+    const float3 q=(world-header.reserved0.xyz)/header.reserved1.xyz;
+    // Extend the lowest layer down to the ground below the capture near plane.
+    c.inside=all(q>=float3(0,-.5,0)) && all(q<=float3(c.dims-1u));
+    const float3 position=clamp(q,0.0,float3(c.dims-1u));
+    c.cell=min(uint3(position),c.dims-2u);
+    c.fraction=position-float3(c.cell);
+    const uint index=c.cell.x+(c.dims.x-1u)*(c.cell.y+(c.dims.y-1u)*c.cell.z);
+    c.metadata=uint(header.reserved1.w)*9u+index*5u;
+    return c;
 }
 float3 HsLocalProbeProjectedDirection(HsLocalProbeRecord p,float3 worldPosition,float3 worldDirection)
 {
@@ -68,141 +65,145 @@ float3 HsLocalProbeProjectedDirection(HsLocalProbeRecord p,float3 worldPosition,
             exit=min(exit,((d[axis]>0?p.projection_max_capture_distance[axis]:p.projection_min_visibility_fade[axis])-worldPosition[axis])/d[axis]);
     return normalize(worldPosition+d*max(exit,0)-p.position_weight.xyz);
 }
-float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal,float3 kernel)
+float3 HsLocalProbeIrradiance(HsProbeGridCell c,float3 normal,float3 kernel)
 {
-    const float3 n=normalize(worldNormal);
-    const float basis[9]={0.28209479177387814,
-        0.4886025119029199*n.y,0.4886025119029199*n.z,0.4886025119029199*n.x,
-        1.0925484305920792*n.x*n.y,1.0925484305920792*n.y*n.z,
-        0.31539156525252005*(3*n.z*n.z-1),1.0925484305920792*n.x*n.z,
-        0.5462742152960396*(n.x*n.x-n.y*n.y)};
-    float3 irradiance=0;
-    [unroll] for(uint coefficient=0;coefficient<9;++coefficient)
-        irradiance+=HsLocalProbeCosineSh[probe*9+coefficient].rgb*basis[coefficient]*kernel[coefficient==0?0:coefficient<4?1:2];
-    return max(irradiance,0);
-}
-float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal)
-{
-    return HsLocalProbeShIrradiance(probe,worldNormal,1.0.xxx);
-}
-float3 HsLocalProbeIrradiance(float3 worldPosition,float3 worldNormal,float3 kernel)
-{
-    const uint count=HsLocalProbeCount(); float total=0; float3 local=0;
-    for(uint i=0;i<count;++i)
-    { const HsLocalProbeRecord p=HsLocalProbeRecords[i]; const float w=HsLocalProbeWeight(p,worldPosition); if(w>0) { total+=w; local+=w*HsLocalProbeShIrradiance((uint)p.parameters.y,worldNormal,kernel); } }
-    const float cover=saturate(total);
-    // A local capture already includes baseline environment. Local weights sum
-    // to cover, and the one global contribution is weighted by 1-cover.
-    return HsProbeIrradiance(worldNormal,kernel)*(1-cover)+(total>0?local*(cover/total):0);
-}
-float3 HsLocalProbeIrradiance(float3 worldPosition,float3 worldNormal)
-{
-    return HsLocalProbeIrradiance(worldPosition,worldNormal,1.0.xxx);
-}
-float3 HsLocalProbePrefiltered(float3 worldPosition,float3 worldDirection,float perceptualRoughness)
-{
-    const uint count=HsLocalProbeCount(); float total=0; float3 local=0;
-    for(uint i=0;i<count;++i)
+    if(!c.inside) return HsProbeIrradiance(normal,kernel);
+    const uint3 sub=min(uint3(c.fraction*4),3u);
+    const uint index=sub.x+4*sub.y+16*sub.z;
+    const uint4 packed=asuint(HsLocalProbeCosineSh[c.metadata+index/16u]);
+    const uint mask=(packed[(index%16u)/4u]>>(8u*(index%4u)))&255u;
+    if(!mask) return 0; // Interior with no reachable samples receives no diffuse sky through walls.
+    float basis[9]; HsProbeShBasis(normalize(normal),basis);
+    [unroll] for(uint k=0;k<9;++k) basis[k]*=kernel[k==0?0:k<4?1:2];
+    float3 irradiance=0; float total=0;
+    [loop] for(uint corner=0;corner<8;++corner)
     {
-        const HsLocalProbeRecord p=HsLocalProbeRecords[i]; const float w=HsLocalProbeWeight(p,worldPosition);
-        if(w>0) { total+=w; local+=w*HsLocalProbeGgxCube.SampleLevel(LinearClamp,
-            float4(HsLocalProbeProjectedDirection(p,worldPosition,worldDirection),p.parameters.y),saturate(perceptualRoughness)*p.parameters.x).rgb; }
+        if(!(mask&(1u<<corner))) continue;
+        const uint3 bit=(corner>>uint3(0,1,2))&1u;
+        const float3 w=lerp(1-c.fraction,c.fraction,float3(bit));
+        const float weight=w.x*w.y*w.z;
+        if(weight==0) continue;
+        const uint3 node=c.cell+bit;
+        const uint row=9u*(node.x+c.dims.x*(node.y+c.dims.y*node.z));
+        float3 value=0;
+        [unroll] for(uint k=0;k<9;++k) value+=basis[k]*HsLocalProbeCosineSh[row+k].rgb;
+        irradiance+=weight*value; total+=weight;
+    }
+    return total>0?max(irradiance/total,0):0;
+}
+float3 HsLocalProbeIrradiance(float3 world,float3 normal,float3 kernel)
+{
+    return HsLocalProbeIrradiance(HsLocateProbeCell(world),normal,kernel);
+}
+float3 HsLocalProbeIrradiance(float3 world,float3 normal)
+{
+    return HsLocalProbeIrradiance(world,normal,1.0.xxx);
+}
+
+// The baker rejects cells containing more than eight candidates, never truncates them.
+struct HsLocalProbeBlend
+{
+    uint count;
+    uint indices[8];
+    float weights[8];
+    float global_weight;
+};
+HsLocalProbeBlend HsLocalProbePrepareBlend(float3 world,HsProbeGridCell c)
+{
+    HsLocalProbeBlend blend=(HsLocalProbeBlend)0;
+    blend.global_weight=1;
+    if(!c.dims.x) return blend;
+    uint2 candidates=asuint(HsLocalProbeCosineSh[c.metadata+4u].xy);
+    float total=0;
+    [unroll] for(uint word=0;word<2;++word)
+    {
+        uint bits=candidates[word];
+        [loop] while(bits)
+        {
+            const uint id=word*32u+firstbitlow(bits); bits&=bits-1u;
+            const float w=HsLocalProbeWeight(HsLocalProbeRecords[id],world);
+            if(w>0)
+            {
+                blend.indices[blend.count]=id; blend.weights[blend.count]=w;
+                ++blend.count; total+=w;
+            }
+        }
     }
     const float cover=saturate(total);
-    return HsProbePrefiltered(worldDirection,perceptualRoughness)*(1-cover)+(total>0?local*(cover/total):0);
+    blend.global_weight=1-cover;
+    [loop] for(uint i=0;i<blend.count;++i) blend.weights[i]*=cover/total;
+    return blend;
+}
+HsLocalProbeBlend HsLocalProbePrepareBlend(float3 world,bool enabled)
+{
+    if(enabled) return HsLocalProbePrepareBlend(world,HsLocateProbeCell(world));
+    HsLocalProbeBlend blend=(HsLocalProbeBlend)0;
+    blend.global_weight=1;
+    return blend;
 }
 void HsLocalProbeEvaluateIbl(float3 world,float3 normal,float3 reflected,float2 roughness,
     bool need_coat,bool need_diffuse,bool local_specular,bool local_diffuse,float3 diffuse_kernel,
     out float3 base,out float3 coat,out float3 diffuse)
 {
-    float3 base_sum=0.0,coat_sum=0.0,diffuse_sum=0.0;
-    float total=0.0;
-    if(local_specular || (need_diffuse && local_diffuse))
+    HsProbeGridCell cell=(HsProbeGridCell)0;
+    if(local_specular || (need_diffuse && local_diffuse)) cell=HsLocateProbeCell(world);
+    diffuse=0;
+    if(need_diffuse) diffuse=local_diffuse?HsLocalProbeIrradiance(cell,normal,diffuse_kernel):HsProbeIrradiance(normal,diffuse_kernel);
+    float3 local_base=0,local_coat=0;
+    float total=0;
+    if(local_specular && cell.dims.x)
     {
-        const uint count=HsLocalProbeCount();
-        [loop] for(uint i=0u;i<count;++i)
+        const uint2 candidates=asuint(HsLocalProbeCosineSh[cell.metadata+4u].xy);
+        [unroll] for(uint word=0;word<2;++word)
         {
-            const HsLocalProbeRecord p=HsLocalProbeRecords[i];
-            const float weight=HsLocalProbeWeight(p,world);
-            if(weight<=0.0)continue;
-            total+=weight;
-            if(local_specular)
+            uint bits=candidates[word];
+            [loop] while(bits)
             {
-                const float3 direction=HsLocalProbeProjectedDirection(p,world,reflected);
-                base_sum+=weight*HsLocalProbeGgxCube.SampleLevel(LinearClamp,
-                    float4(direction,p.parameters.y),roughness.x*p.parameters.x).rgb;
-                if(need_coat)
-                    coat_sum+=weight*HsLocalProbeGgxCube.SampleLevel(LinearClamp,
-                        float4(direction,p.parameters.y),roughness.y*p.parameters.x).rgb;
+                const uint id=word*32u+firstbitlow(bits);bits&=bits-1u;
+                const HsLocalProbeRecord p=HsLocalProbeRecords[id];
+                const float weight=HsLocalProbeWeight(p,world);
+                if(weight>0)
+                {
+                    const float next_total=total+weight;
+                    const float previous_weight=total/next_total,current_weight=weight/next_total;
+                    const float4 dir=float4(HsLocalProbeProjectedDirection(p,world,reflected),id);
+                    local_base=previous_weight*local_base+current_weight*
+                        HsLocalProbeGgxCube.SampleLevel(LinearClamp,dir,roughness.x*p.parameters.x).rgb;
+                    if(need_coat) local_coat=previous_weight*local_coat+current_weight*
+                        HsLocalProbeGgxCube.SampleLevel(LinearClamp,dir,roughness.y*p.parameters.x).rgb;
+                    total=next_total;
+                }
             }
-            if(need_diffuse && local_diffuse)
-                diffuse_sum+=weight*HsLocalProbeShIrradiance((uint)p.parameters.y,normal,diffuse_kernel);
         }
     }
-    const float cover=saturate(total),scale=total>0.0?cover/total:0.0;
-    const float specular_global=local_specular?1.0-cover:1.0;
-    const float diffuse_global=local_diffuse?1.0-cover:1.0;
-    base=local_specular?base_sum*scale:0.0;
-    coat=need_coat && local_specular?coat_sum*scale:0.0;
-    diffuse=need_diffuse && local_diffuse?diffuse_sum*scale:0.0;
-    if(specular_global>0.0)
+    const float coverage=saturate(total);
+    base=0;coat=0;
+    if(coverage<1)
     {
-        base+=HsProbePrefiltered(reflected,roughness.x)*specular_global;
-        if(need_coat)coat+=HsProbePrefiltered(reflected,roughness.y)*specular_global;
+        base=(1-coverage)*HsProbePrefiltered(reflected,roughness.x);
+        if(need_coat) coat=(1-coverage)*HsProbePrefiltered(reflected,roughness.y);
     }
-    if(need_diffuse && diffuse_global>0.0)
-        diffuse+=HsProbeIrradiance(normal,diffuse_kernel)*diffuse_global;
+    // The running convex mean avoids both a candidate array and an unnormalized
+    // HDR sum; the global/local coverage still uses the original total weight.
+    base+=local_base*coverage;
+    if(need_coat) coat+=local_coat*coverage;
 }
-
-float4 HsLocalProbeWeights(float3 worldPosition,uint count)
+float3 HsLocalProbePrefiltered(float3 world,float3 direction,float roughness)
 {
-    float4 weights=0;
-    // Cache the common small set without reserving registers for all 64 probes.
-    [unroll] for(uint i=0u;i<4u;++i)
-        if(i<count) weights[i]=HsLocalProbeWeight(HsLocalProbeRecords[i],worldPosition);
-    return weights;
+    float3 base,coat,diffuse;
+    HsLocalProbeEvaluateIbl(world,0,direction,roughness.xx,false,false,true,false,0,base,coat,diffuse);
+    return base;
 }
-struct HsLocalProbeBlend
+float3 HsLocalProbeRadiance(float3 world,float3 direction,HsLocalProbeBlend blend)
 {
-    float4 weights;
-    float2 normalization; // Global remainder, local scale after raw accumulation.
-};
-HsLocalProbeBlend HsLocalProbePrepareBlend(float4 weights,uint count)
-{
-    HsLocalProbeBlend blend=(HsLocalProbeBlend)0;
-    blend.weights=weights;
-    if(count>4u) return blend;
-    float total=0;
-    [unroll] for(uint i=0u;i<4u;++i)
-        if(i<count && weights[i]>0) total+=weights[i];
-    const float cover=saturate(total);
-    blend.normalization=float2(1-cover,total>0?cover/total:0);
-    return blend;
-}
-float3 HsLocalProbeRadiance(float3 worldPosition,float3 worldDirection,uint count,HsLocalProbeBlend blend)
-{
-    [branch] if(count<=4u)
+    float3 result=0;
+    if(blend.global_weight>0) result=blend.global_weight*HsProbeRadiance(direction);
+    [loop] for(uint i=0;i<blend.count;++i)
     {
-        float3 local=0;
-        [unroll] for(uint i=0u;i<4u;++i)
-            [branch] if(i<count && blend.weights[i]>0)
-            {
-                const HsLocalProbeRecord p=HsLocalProbeRecords[i];
-                local+=blend.weights[i]*HsLocalProbeRawCube.SampleLevel(LinearClamp,
-                    float4(HsLocalProbeProjectedDirection(p,worldPosition,worldDirection),p.parameters.y),0).rgb;
-            }
-        return HsProbeRadiance(worldDirection)*blend.normalization.x+local*blend.normalization.y;
+        const uint id=blend.indices[i];
+        const float4 d=float4(HsLocalProbeProjectedDirection(HsLocalProbeRecords[id],world,direction),id);
+        result+=blend.weights[i]*HsLocalProbeRawCube.SampleLevel(LinearClamp,d,0).rgb;
     }
-    float total=0; float3 local=0;
-    for(uint i=0;i<count;++i)
-    {
-        const HsLocalProbeRecord p=HsLocalProbeRecords[i]; float w;
-        [branch] if(i<4u) w=blend.weights[i];
-        else w=HsLocalProbeWeight(p,worldPosition);
-        if(w>0) { total+=w; local+=w*HsLocalProbeRawCube.SampleLevel(LinearClamp,
-            float4(HsLocalProbeProjectedDirection(p,worldPosition,worldDirection),p.parameters.y),0).rgb; }
-    }
-    const float cover=saturate(total);
-    return HsProbeRadiance(worldDirection)*(1-cover)+(total>0?local*(cover/total):0);
+    return result;
 }
 #endif

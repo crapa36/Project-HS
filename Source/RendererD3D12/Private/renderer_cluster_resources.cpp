@@ -619,6 +619,15 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         runtime.geometry_records_residency[frame_slot] = ticket;
         records.graph_access = Access::UnorderedWrite;
         frame.geometry_draw_records = std::move(records);
+        D3D12_SHADER_RESOURCE_VIEW_DESC record_view{};
+        record_view.Format = DXGI_FORMAT_R32_TYPELESS;
+        record_view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        record_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        record_view.Buffer.NumElements = static_cast<UINT>(frame.geometry_draw_records.resource->GetDesc().Width / 4u);
+        record_view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(frame_slot * kTextureDescriptorCount + kGeometryDescriptorOffset) * srv_stride;
+        device->CreateShaderResourceView(frame.geometry_draw_records.resource.Get(), &record_view, handle);
     }
     std::uint32_t ref_base{};
     for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
@@ -808,15 +817,6 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         ref_base += output_capacity;
         WriteClusterCutDescriptors(owner, frame_slot, ordinal);
     }
-    D3D12_SHADER_RESOURCE_VIEW_DESC records{};
-    records.Format = DXGI_FORMAT_R32_TYPELESS;
-    records.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-    records.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    records.Buffer.NumElements = static_cast<UINT>(frame.geometry_draw_records.resource->GetDesc().Width / 4u);
-    records.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-    auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    handle.ptr += static_cast<SIZE_T>(frame_slot * kTextureDescriptorCount + kGeometryDescriptorOffset) * srv_stride;
-    device->CreateShaderResourceView(frame.geometry_draw_records.resource.Get(), &records, handle);
     return Result::Success();
 }
 

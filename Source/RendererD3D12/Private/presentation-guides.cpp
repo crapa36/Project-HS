@@ -323,7 +323,7 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
         return Failure(ErrorCode::InvalidArgument, "Native presentation needs actual HUDless display-linear RGBA16F, premultiplied encoded BGRA8 UI, undilated UV motion and reversed device Z.");
     const auto slotIndex = input.frame_slot;
     if (input.transparent_guides_enabled &&
-        (!Fits(graph,input.transparent_depth,input.render_active,DXGI_FORMAT_R32_FLOAT) ||
+        (!FitsDepth(graph,input.transparent_depth,input.render_active) ||
          !Fits(graph,input.transparent_motion,input.render_active,DXGI_FORMAT_R16G16_FLOAT) ||
          !Fits(graph,input.transparent_classification,input.render_active,DXGI_FORMAT_R16G16B16A16_FLOAT) ||
          !Fits(graph,input.transparent_metadata,input.render_active,DXGI_FORMAT_R32G32_UINT)))

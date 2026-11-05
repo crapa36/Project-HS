@@ -89,7 +89,8 @@ def analyze(path):
         weights[:] = 0
     report["derived_accepted_footprint_mean"] = float(weights.mean())
     report["derived_rejected_taps"] = rejected
-    scene = load("scene_work", "<f2", 4).astype(float)[:, :, :3]
+    exposure = load("exposure_previous", "<f4", 1).ravel()
+    scene = load("composite_hdr", "<f2", 4).astype(float)[:, :, :3] * exposure[0]
     scene_position = (uv + jitter) * [w, h] - .5
     sb = np.floor(scene_position).astype(int)
     sf = scene_position - sb
@@ -108,7 +109,6 @@ def analyze(path):
         for x in range(-1, 2):
             sample = scene[np.clip(ry+y, 0, h-1), np.clip(rx+x, 0, w-1)]
             low, high = np.minimum(low, sample), np.maximum(high, sample)
-    exposure = load("exposure_previous", "<f4", 1).ravel()
     radiance /= np.maximum(weights[:, None], 1e-12)
     radiance *= exposure[0] / max(float(exposure[1]), 1e-12)
     radiance = np.clip(radiance, low, high)

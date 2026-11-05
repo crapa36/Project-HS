@@ -116,6 +116,10 @@ struct FrameContext
     AllocationResource geometry_draw_records_upload;
     std::vector<renderer_detail::GpuGeometryDrawRecord> geometry_draw_records_cpu;
     std::uint64_t dynamic_input_ref_offset{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::uint64_t visibility_range_offset{};
+    std::uint32_t visibility_active_views{};
+#endif
     std::uint32_t static_input_ref_count{}, dynamic_input_ref_count{};
     std::shared_ptr<const std::vector<GpuStaticDrawRef>> static_input_refs;
     std::vector<GpuSceneSerializedSlot> scene_serialization_scratch;
@@ -157,7 +161,9 @@ struct FrameContext
     std::uint64_t timing_layout_generation{};
     std::uint32_t timing_layout_capacity{};
     std::uint64_t submitted_frame_id{};
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::uint64_t constants_submission_id{};
+#endif
     std::uint32_t submitted_view_id{};
     std::uint64_t auto_fg_cadence_submit_qpc{}, auto_fg_cadence_qpc_frequency{};
     std::uint64_t auto_fg_cadence_sequence{};

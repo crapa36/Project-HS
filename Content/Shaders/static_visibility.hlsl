@@ -64,17 +64,7 @@ struct StaticDrawRef
     uint InstanceGeneration;
 };
 
-struct VisibilityRange
-{
-    uint Begin;
-    uint Count;
-    uint IndexCount;
-    uint ArgumentStride;
-    uint DrawRecordBase;
-    uint MeshletCount;
-    uint Flags;
-    uint Reserved;
-};
+#include "static_visibility_abi.hlsli"
 
 StructuredBuffer<VisibilityRange> Ranges : register(t0, space3);
 StructuredBuffer<float> PreviousHzb : register(t2, space3);
@@ -87,6 +77,18 @@ RWByteAddressBuffer RejectedArgs : register(u3);
 RWByteAddressBuffer GeometryDrawRecords : register(u1, space3);
 RWByteAddressBuffer LodStates : register(u2, space3);
 
+void ClearEmptyGeometryArguments(VisibilityRange range, uint bucket, uint view)
+{
+    const uint offset = (view * range.ArgumentStride + bucket) * 24u;
+    Draws.Store4(offset, uint4(0u, 0u, 0u, 0u));
+    Draws.Store2(offset + 16u, uint2(0u, 0u));
+    if ((range.Flags & HsVisibilityStaticSource) != 0u && view == 0u)
+    {
+        RejectedArgs.Store4(bucket * 24u, uint4(0u, 0u, 0u, 0u));
+        RejectedArgs.Store2(bucket * 24u + 16u, uint2(0u, 0u));
+    }
+}
+
 // Every bucket/view owns a 24-byte slot. Indexed commands are constant+20B;
 // mesh commands are constant+12B and leave the final eight bytes unused.
 void StoreGeometryArguments(VisibilityRange range, uint bucket, uint view, uint count)
@@ -96,7 +98,7 @@ void StoreGeometryArguments(VisibilityRange range, uint bucket, uint view, uint 
     const uint argument_offset = (view * range.ArgumentStride + bucket) * 24u;
     const uint pass_value = (record_id << 2u) | view;
     GeometryDrawRecords.Store(record_offset + 24u, count);
-    if ((range.Flags & 2u) != 0u)
+    if ((range.Flags & HsVisibilityMeshEligible) != 0u)
     {
         const uint groups = range.MeshletCount * count;
         const uint x = min(groups, 65535u);
@@ -537,7 +539,21 @@ void StaticLodFamilyVisibility(uint owner_bucket, uint view, uint thread_id)
 void StaticVisibilityCS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIndex)
 {
     const VisibilityRange range = Ranges[group_id.x];
-    if ((range.Flags & 4u) != 0u)
+    if ((range.Flags & HsVisibilityEmptySource) != 0u)
+    {
+        if ((range.Flags & HsVisibilityLodFamily) != 0u)
+        {
+            if (group_id.x % 3u == 0u && thread_id == 0u)
+            {
+                [unroll] for (uint bucket = 0; bucket < 3u; ++bucket)
+                    ClearEmptyGeometryArguments(Ranges[group_id.x + bucket], group_id.x + bucket, group_id.y);
+            }
+        }
+        else if (thread_id == 0u)
+            ClearEmptyGeometryArguments(range, group_id.x, group_id.y);
+        return;
+    }
+    if ((range.Flags & HsVisibilityLodFamily) != 0u)
     {
         // Family input spans are shared; only the first bucket may consume
         // them. This branch and return are uniform across the entire group.
@@ -634,6 +650,16 @@ void StaticVisibilityCS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIn
 void VisibilityRetestCS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIndex)
 {
     const VisibilityRange range = Ranges[group_id.x];
+    if ((range.Flags & HsVisibilityEmptySource) != 0u)
+    {
+        if (thread_id == 0u)
+        {
+            const uint offset = group_id.x * 24u;
+            Draws.Store4(offset, uint4(0u, 0u, 0u, 0u));
+            Draws.Store2(offset + 16u, uint2(0u, 0u));
+        }
+        return;
+    }
     const uint candidate_count = RejectedArgs.Load(group_id.x * 24u + 8u);
     const uint output_begin = GeometryDrawRecords.Load(range.DrawRecordBase * 64u + 20u);
     if (thread_id == 0) visible_count = 0;

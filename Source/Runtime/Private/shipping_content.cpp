@@ -6,6 +6,16 @@
 
 namespace hs::shipping
 {
+Result ReadRange(const ShippedContentOwner &owner, const ShippingRange &range, std::vector<std::byte> &output)
+{
+    if (!range.size || range.size > std::numeric_limits<std::uint32_t>::max() || range.offset < 64 ||
+        range.offset > owner.Size() || range.size > owner.Size() - range.offset)
+        return Result::Failure(ErrorCode::InvalidArgument, "ShippingImage", "content range is invalid");
+    std::vector<std::byte> bytes(static_cast<std::size_t>(range.size));
+    if (auto result = owner.ReadVerified(range.offset, bytes, range.digest); !result) return result;
+    output = std::move(bytes);
+    return Result::Success();
+}
 Result ReadFont(const ShippedContentOwner &owner, const ShippingImageInfo &info, std::vector<std::byte> &output)
 {
     if (!info.font_bytes || info.font_bytes > std::numeric_limits<std::uint32_t>::max() ||

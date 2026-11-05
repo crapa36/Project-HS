@@ -159,6 +159,15 @@ void TestRequestedEditPreservesUnimplementedFields()
 void TestStartupGraphicsRendererProjection()
 {
     auto requested = hs::LegacyDefaultSettingsDocument();
+    for (const bool muted : {false, true})
+    {
+        const auto startup = hs::ProjectSettingsDocument(requested);
+        hs::GraphicsSettingsCommit audio(requested, startup, muted);
+        Check(audio.Effective().master_volume == (muted ? 0 : startup.master_volume) &&
+                  audio.UiInput().master_volume == audio.Effective().master_volume &&
+                  audio.Requested().master_volume == requested.master_volume,
+              "startup mute reaches the audio engine without changing saved volume intent");
+    }
     requested.graphics.vsync = true;
     requested.graphics.frame_limit_fps = 47;
     requested.graphics.output_extent = hs::GraphicsExtent{3440, 1440};

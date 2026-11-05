@@ -20,7 +20,7 @@ std::string_view Name(std::string_view product) noexcept
     {
         const auto name = product.substr(16, product.size() - 16 - 14);
         if (std::ranges::find(kAuthoredMaterialNames, name) != kAuthoredMaterialNames.end() ||
-            std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() ||
+            std::ranges::find(kCharacterMaterialNames, name) != kCharacterMaterialNames.end() ||
             std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end()) return name;
     }
     if (product == "render/material/terrain.rpkg") return "terrain";
@@ -65,7 +65,7 @@ bool IsMaterialDescriptorProduct(std::string_view product_id) noexcept { return 
 std::string MaterialProduct(std::string_view name)
 {
     Require(std::ranges::find(kAuthoredMaterialNames, name) != kAuthoredMaterialNames.end() ||
-            std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end() ||
+            std::ranges::find(kCharacterMaterialNames, name) != kCharacterMaterialNames.end() ||
             std::ranges::find(kDecalMaterialNames, name) != kDecalMaterialNames.end(),
             "unknown material name");
     if (name == "terrain" || name == "ground_detail") return "render/material/" + std::string(name) + ".rpkg";
@@ -113,10 +113,10 @@ MaterialDescriptorStorage CompileMaterialDescriptor(std::string_view product_id,
         const auto value = std::bit_cast<float>(found->default_words[0]);
         Require(std::isfinite(value) && value >= 0 && value <= maximum, "required float default exceeds bounds");
     };
-    if (std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end())
+    if (std::ranges::find(kCharacterMaterialNames, name) != kCharacterMaterialNames.end())
     {
         result.value.kind = MaterialKind::Hero;
-        const auto hero = ReadHeroMaterialPackage(package, name);
+        const auto hero = ReadCharacterMaterialPackage(package, name);
         result.value.surface = hero.surface;
         result.value.domain = hero.domain;
         for (const auto &entry : hero.programs) program(entry);
@@ -186,7 +186,7 @@ void ValidateMaterialDescriptor(const MaterialDescriptor &value, std::span<const
 {
     Require(value.asset_id.value && value.bulk_index < bulk_assets.size() && bulk_assets[value.bulk_index].value == value.asset_id.value &&
             value.defaults.size() <= 64 && value.kind <= MaterialKind::Decal && !(value.flags & ~3u) &&
-            value.domain <= HeroMaterialDomain::Translucent, "invalid material identity, defaults or flags");
+            value.domain <= CharacterMaterialDomain::Translucent, "invalid material identity, defaults or flags");
     Require(std::isfinite(value.metallic) && value.metallic >= 0 && value.metallic <= 1 &&
             std::isfinite(value.roughness_scale) && value.roughness_scale >= 0 && value.roughness_scale <= 2, "invalid material uniforms");
     if (value.kind != MaterialKind::Decal) Surface(value.surface);
@@ -201,15 +201,15 @@ void ValidateMaterialDescriptor(const MaterialDescriptor &value, std::span<const
         program_mask |= 1u<<kind;
     }
     if (value.kind == MaterialKind::Environment)
-        Require(value.domain == HeroMaterialDomain::Opaque && value.defaults.size() >= 2 &&
+        Require(value.domain == CharacterMaterialDomain::Opaque && value.defaults.size() >= 2 &&
                 program_mask == (value.flags ? ((1u<<2)|(1u<<3)) : (1u<<1)), "environment program domain mismatch");
     else if (value.kind == MaterialKind::Hero)
     {
-        Require(!value.flags && value.textures.empty() && program_mask == (value.domain == HeroMaterialDomain::Translucent ? (1u<<8) : 240u) &&
-                bool(value.surface.capability_mask & 256u) == (value.domain == HeroMaterialDomain::Translucent) &&
-                (value.domain != HeroMaterialDomain::Translucent || !(value.surface.capability_mask & 128u)), "Hero domain or adapter bindings mismatch");
+        Require(!value.flags && value.textures.empty() && program_mask == (value.domain == CharacterMaterialDomain::Translucent ? (1u<<8) : 240u) &&
+                bool(value.surface.capability_mask & 256u) == (value.domain == CharacterMaterialDomain::Translucent) &&
+                (value.domain != CharacterMaterialDomain::Translucent || !(value.surface.capability_mask & 128u)), "Hero domain or adapter bindings mismatch");
     }
-    else Require(!value.flags && value.domain == HeroMaterialDomain::Opaque && value.defaults.size() >= 2 &&
+    else Require(!value.flags && value.domain == CharacterMaterialDomain::Opaque && value.defaults.size() >= 2 &&
                  program_mask == (1u<<9) && value.textures.size() == 1, "decal descriptor shape mismatch");
     std::uint32_t texture_mask{};
     std::vector<MaterialTextureDefinition> definitions;

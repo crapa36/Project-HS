@@ -5,6 +5,7 @@
 #include <hs/render_data/character_animation_extension.hpp>
 #include <hs/render_data/geometry_hierarchy.hpp>
 #include <hs/render_data/scene_hlod.hpp>
+#include <hs/render_data/render_revision.hpp>
 #include <algorithm>
 #include <map>
 #include <optional>
@@ -92,7 +93,7 @@ public:
     }
     static bool NeedsMetadata(std::string_view id) noexcept
     {
-        return id.starts_with("render/") && ((id.ends_with(".rpkg") && !id.starts_with("render/texture/")) ||
+        return !render_data::IsTerrainSurfaceProduct(id) && id.starts_with("render/") && ((id.ends_with(".rpkg") && !id.starts_with("render/texture/")) ||
             id.ends_with(".ghbin") || id.ends_with(".shl1"));
     }
     void AddMetadata(std::string_view id,std::span<const std::byte> bytes)

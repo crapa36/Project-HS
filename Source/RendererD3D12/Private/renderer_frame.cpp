@@ -45,67 +45,12 @@ std::uint64_t ResourceWidth(const AllocationResource &owner) noexcept
     return owner.resource ? owner.resource->GetDesc().Width : 0;
 }
 
-struct ExposureFrameRecordData
-{
-    std::array<std::move_only_function<void(RenderPassContext &)>, 4> record;
-};
-
 std::optional<PassBuilder> FramePass(RenderGraphBuilder &graph, bool restore,
     std::uint32_t &ordinal, std::uint32_t id, std::string_view name, QueueHint queue)
 {
     if (restore) return graph.BindPass(ordinal, id);
     ordinal = graph.PassCount();
     return graph.AddPass(id, name, queue);
-}
-
-Result BuildExposureGraph(RenderGraphBuilder &graph, ResourceVersion composite_hdr,
-                          ResourceVersion exposure_read, ResourceVersion scene_work,
-                          ResourceVersion histogram, ResourceVersion exposure_write,
-                          ExposureFrameRecordData records, ExposureGraphLayout &layout,
-                          bool restore)
-{
-    constexpr std::array ids{33u, 34u, 35u, 36u};
-    constexpr std::array names{"PreExposure", "ExposureHistogramClear",
-                               "ExposureHistogramBuild", "ExposureReduce"};
-    constexpr std::array queues{QueueHint::Direct, QueueHint::Compute,
-                                QueueHint::Compute, QueueHint::Compute};
-    for (std::size_t index = 0; index < ids.size(); ++index)
-    {
-        auto pass = FramePass(graph, restore, layout.pass_indices[index],
-            ids[index], names[index], queues[index]);
-        if (!pass)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Exposure pass does not match the retained graph plan.");
-        if (!restore) switch (index)
-        {
-        case 0:
-            pass->Read(composite_hdr, Access::ShaderRead);
-            pass->Read(exposure_read, Access::ShaderRead);
-            scene_work = pass->Write(scene_work, Access::RenderTarget);
-            break;
-        case 1:
-            histogram = pass->Write(histogram, Access::UnorderedWrite);
-            break;
-        case 2:
-            pass->Read(scene_work, Access::ComputeRead);
-            pass->Read(exposure_read, Access::ComputeRead);
-            histogram = pass->ReadWrite(histogram, Access::UnorderedWrite);
-            break;
-        case 3:
-            pass->Read(exposure_read, Access::ComputeRead);
-            histogram = pass->ReadWrite(histogram, Access::UnorderedWrite);
-            exposure_write = pass->Write(exposure_write, Access::UnorderedWrite);
-            break;
-        }
-        pass->SetExecute(std::move(records.record[index]));
-    }
-    if (!restore)
-    {
-        layout.scene_work = scene_work;
-        layout.histogram = histogram;
-        layout.exposure_write = exposure_write;
-    }
-    return Result::Success();
 }
 
 Result BuildFinalGraph(RenderGraphBuilder &graph, ResourceVersion back_buffer,
@@ -231,6 +176,139 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         bool succeeded{};
         ~GrassHistoryAttempt() { if (!succeeded) state.z = 0.0f; }
     } grass_history_attempt{owned_view.previous_grass_state};
+    auto &prepared_scene = impl_->prepared_scene_package;
+    auto &pose_by_id = prepared_scene.poses_by_id;
+    auto &pose_by_source = prepared_scene.poses_by_source;
+    auto &entity_surface_frame = prepared_scene.entity_surfaces;
+    // The package owns this CPU data; no frame slot is touched until the wait below.
+    (void)measure_stage();
+    const bool prepared_scene_this_view = !prepared_scene.ready;
+    if (prepared_scene_this_view)
+    {
+        auto &prepared_instances = prepared_scene.instances;
+        pose_by_source.resize(snapshots.current.instances.size());
+        pose_by_id.reserve(snapshots.current.poses.size());
+        for (const auto &pose : snapshots.current.poses)
+            if (pose.instance_index < snapshots.current.instances.size())
+            {
+                pose_by_source[pose.instance_index] = &pose;
+                const auto stable_id = snapshots.current.instances[pose.instance_index].stable_id;
+                if (stable_id != 0) pose_by_id.insert_or_assign(stable_id, &pose);
+            }
+        prepared_instances.assign(snapshots.current.instances.begin(), snapshots.current.instances.end());
+        const auto retained_vfx_start = capture_clock();
+        for (const auto &command : typed_entity_surfaces)
+        {
+            if (!command.has_retained_instance || std::ranges::any_of(prepared_instances,
+                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; })) continue;
+            const auto &instance = command.retained_instance;
+            if (instance.stable_id != command.render_instance_id ||
+                instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
+                instance.asset_id.value == 0 || instance.material_id.value == 0 ||
+                (instance.animation_clip_id.value == 0 && !command.has_retained_animation_pose))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                    "Entity surface retention requires its actual boss mesh and captured pose.");
+            prepared_instances.push_back(instance);
+            if (command.has_retained_animation_pose)
+                pose_by_id.insert_or_assign(instance.stable_id, &command.retained_animation_pose);
+        }
+        std::vector<VfxEntitySurfaceCommand> admitted_entity_surfaces;
+        for (const auto &command : typed_entity_surfaces)
+            if (std::ranges::any_of(prepared_instances, [&](const auto &instance) {
+                    return instance.stable_id == command.render_instance_id &&
+                        instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
+                })) admitted_entity_surfaces.push_back(command);
+        if (auto prepared = entity_surface_frame.Build(admitted_entity_surfaces); !prepared) return prepared;
+        cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
+        if (impl_->config.slime_family_preview_count == 0 &&
+            (!typed_ground_spawns.empty() || !typed_mesh_spawns.empty()))
+            FilterRenderInstancesForOwnedVfx(prepared_instances, typed_ground_spawns,
+                typed_mesh_spawns, prepared_scene.vfx_replacements);
+        if (const auto count = impl_->config.slime_family_preview_count; count != 0)
+        {
+            prepared_instances.clear();
+            const auto columns = count == 1 ? 3u : static_cast<std::uint32_t>(std::ceil(std::sqrt(count * 3.0f)));
+            for (std::uint32_t i = 0; i < count * 3; ++i)
+            {
+                const auto row = i / columns, column = i % columns;
+                const auto x = count == 1 ? (static_cast<float>(i) - 1.0f) * 2.5f
+                                          : (static_cast<float>(column) - (columns - 1) * 0.5f) * 1.1f;
+                const auto rows = (count * 3 + columns - 1) / columns;
+                const auto z = count == 1 ? 0.0f : (static_cast<float>(row) - (rows - 1) * 0.5f) * 1.1f;
+                const auto kind = i % 3;
+                const auto scale = kind == 0 ? 1.25f : kind == 1 ? 1.40625f : 1.5625f;
+                RenderInstance preview{};
+                preview.position = {x, 0.0f, z};
+                preview.scale = {scale, scale, scale};
+                preview.color_rgba = 0xffffffffu;
+                preview.mesh = static_cast<RenderMesh>(10 + kind);
+                preview.stable_id = 0x53504c4d00000000ull | static_cast<std::uint64_t>(i + 1);
+                prepared_instances.push_back(preview);
+                if (kind == 2)
+                {
+                    RenderInstance projectile{};
+                    projectile.position = {x - 1.25f, 0.45f, z - 1.5f};
+                    projectile.scale = {.24f, .24f, .8f};
+                    projectile.color_rgba = 0xff60d060u;
+                    projectile.mesh = RenderMesh::EnemyProjectile;
+                    projectile.stable_id =
+                        0x53504c4d00100000ull | static_cast<std::uint64_t>(i + 1);
+                    prepared_instances.push_back(projectile);
+                }
+            }
+        }
+        if (impl_->config.monster_preview_asset < 6 && impl_->config.slime_family_preview_count == 0)
+        {
+            const auto preview_mesh = static_cast<RenderMesh>(
+                static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
+                impl_->config.monster_preview_asset);
+            const auto found = std::ranges::find_if(
+                prepared_instances, [&](const auto &source) { return source.mesh == preview_mesh; });
+            if (found != prepared_instances.end())
+            {
+                auto preview = *found;
+                preview.position = {};
+                preview.yaw = 0.0f;
+                prepared_instances.assign(1, preview);
+            }
+            else
+            {
+                prepared_instances.clear();
+            }
+        }
+        if (impl_->config.environment_preview)
+        {
+            prepared_instances.clear();
+            const auto add = [&](RenderMesh mesh, Float3 position, Float3 scale, std::uint32_t variant) {
+                RenderInstance instance{};
+                instance.mesh = mesh;
+                instance.position = position;
+                instance.scale = scale;
+                instance.environment_variant = variant;
+                instance.environment_seed = 0x4853454eu;
+                prepared_instances.push_back(instance);
+            };
+            for (std::uint32_t variant = 0; variant < 3; ++variant)
+            {
+                const float x = static_cast<float>(variant)*5.0f-5.0f;
+                add(RenderMesh::TreeTrunk, {x,0,0}, {1,1,1}, variant);
+                add(RenderMesh::TreeCanopy, {x,0,0}, {1,1,1}, variant);
+            }
+            for (std::uint32_t variant = 0; variant < 4; ++variant)
+            {
+                const float x = static_cast<float>(variant)*3.0f-4.5f;
+                add(RenderMesh::Rock, {x,0,-5}, {.8f,.8f,.8f}, variant);
+                add(RenderMesh::Grass, {x,0,-8}, {1,1,1}, variant);
+            }
+            for (int z=-5; z<=2; ++z)
+                for (int x=-5; x<=5; ++x)
+                    add(RenderMesh::Ground, {static_cast<float>(x)*2.5f,-.055f,static_cast<float>(z)*2.5f},
+                        {2.5f,.1f,2.5f}, 0);
+        }
+        for (auto &source : prepared_instances) PopulateRenderInstanceIdentity(source);
+
+    }
+    const auto early_scene_prepare_us = measure_stage();
     impl_->asset_io.SetWaitForReads(wait_for_streaming);
     if (wait_for_streaming)
         if (auto waited = impl_->WaitForGpu(); !waited) return waited;
@@ -303,7 +381,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 found->second->completed_gpu_timings = std::move(completed);
         }
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     frame.constants_submission_id = 0;
+#endif
     owned_view.state.view_id = view_input.id.value;
     owned_view.state.metric_generation = impl_->view_configuration_revision;
     const auto active_features = impl_->ResolveFeatures(impl_->config);
@@ -441,7 +521,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
 
     cpu_timings.streaming_us = measure_stage();
     auto snapshot = snapshots.current;
-    const auto &world_batch = *frame_input.vfx.world_batch;
+    const auto &world_batch = frame_input.vfx.world_batch;
     const Tick stateful_target = world_batch.stateful_target;
     const bool world_step_requested = canonical_frame.advance_native_world;
     const double native_display_tick = canonical_frame.native_display_tick;
@@ -487,147 +567,19 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         (world_batch.reset_particle_state ||
          (impl_->particles_initialized && stateful_target < impl_->last_particle_tick)))
         impl_->particles_initialized = false;
-    auto &prepared_scene = impl_->prepared_scene_package;
     const bool reconcile_packet_scene = consume_scene_inputs || !prepared_scene.gpu_slots_ready;
-    auto &pose_by_id = prepared_scene.poses_by_id;
-    auto &pose_by_source = prepared_scene.poses_by_source;
-    auto &entity_surface_frame = prepared_scene.entity_surfaces;
-    const auto now = *frame_input.sample_time;
+    const auto now = frame_input.display_sample->time;
     const auto interpolation = canonical_frame.interpolation;
     const auto is_monster = [](RenderMesh mesh) {
         return mesh >= RenderMesh::MonsterMelee && mesh <= RenderMesh::BossFinal;
     };
     constexpr std::uint32_t kCachedSkinFlag = 0x40000u;
     constexpr std::uint32_t kCachedSkinHistoryFlag = 0x80000u;
-    if (!prepared_scene.ready)
-    {
-        auto &prepared_instances = prepared_scene.instances;
-        pose_by_source.resize(snapshot.instances.size());
-        pose_by_id.reserve(snapshot.poses.size());
-        for (const auto &pose : snapshot.poses)
-            if (pose.instance_index < snapshot.instances.size())
-            {
-                pose_by_source[pose.instance_index] = &pose;
-                const auto stable_id = snapshot.instances[pose.instance_index].stable_id;
-                if (stable_id != 0) pose_by_id.insert_or_assign(stable_id, &pose);
-            }
-        prepared_instances.assign(snapshot.instances.begin(), snapshot.instances.end());
-        const auto retained_vfx_start = capture_clock();
-        for (const auto &command : typed_entity_surfaces)
-        {
-            if (!command.has_retained_instance || std::ranges::any_of(prepared_instances,
-                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; })) continue;
-            const auto &instance = command.retained_instance;
-            if (instance.stable_id != command.render_instance_id ||
-                instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
-                instance.asset_id.value == 0 || instance.material_id.value == 0 ||
-                (instance.animation_clip_id.value == 0 && !command.has_retained_animation_pose))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                    "Entity surface retention requires its actual boss mesh and captured pose.");
-            prepared_instances.push_back(instance);
-            if (command.has_retained_animation_pose)
-                pose_by_id.insert_or_assign(instance.stable_id, &command.retained_animation_pose);
-        }
-        std::vector<VfxEntitySurfaceCommand> admitted_entity_surfaces;
-        for (const auto &command : typed_entity_surfaces)
-            if (std::ranges::any_of(prepared_instances, [&](const auto &instance) {
-                    return instance.stable_id == command.render_instance_id &&
-                        instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
-                })) admitted_entity_surfaces.push_back(command);
-        if (auto prepared = entity_surface_frame.Build(admitted_entity_surfaces); !prepared) return prepared;
-        if (!entity_surface_frame.Bytes().empty() &&
-            (impl_->material_surface_layouts[kAuthoredMaterialNames.size() + 6].varying_mask & 16u) == 0)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Boss surface effects require the actual monster emission sidecar.");
-        cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
-        if (impl_->config.slime_family_preview_count == 0 &&
-            (!typed_ground_spawns.empty() || !typed_mesh_spawns.empty()))
-            FilterRenderInstancesForOwnedVfx(prepared_instances, typed_ground_spawns,
-                typed_mesh_spawns, prepared_scene.vfx_replacements);
-        if (const auto count = impl_->config.slime_family_preview_count; count != 0)
-        {
-            prepared_instances.clear();
-            const auto columns = count == 1 ? 3u : static_cast<std::uint32_t>(std::ceil(std::sqrt(count * 3.0f)));
-            for (std::uint32_t i = 0; i < count * 3; ++i)
-            {
-                const auto row = i / columns, column = i % columns;
-                const auto x = count == 1 ? (static_cast<float>(i) - 1.0f) * 2.5f
-                                          : (static_cast<float>(column) - (columns - 1) * 0.5f) * 1.1f;
-                const auto rows = (count * 3 + columns - 1) / columns;
-                const auto z = count == 1 ? 0.0f : (static_cast<float>(row) - (rows - 1) * 0.5f) * 1.1f;
-                const auto kind = i % 3;
-                const auto scale = kind == 0 ? 1.25f : kind == 1 ? 1.40625f : 1.5625f;
-                RenderInstance preview{};
-                preview.position = {x, 0.0f, z};
-                preview.scale = {scale, scale, scale};
-                preview.color_rgba = 0xffffffffu;
-                preview.mesh = static_cast<RenderMesh>(10 + kind);
-                preview.stable_id = 0x53504c4d00000000ull | static_cast<std::uint64_t>(i + 1);
-                prepared_instances.push_back(preview);
-                if (kind == 2)
-                {
-                    RenderInstance projectile{};
-                    projectile.position = {x - 1.25f, 0.45f, z - 1.5f};
-                    projectile.scale = {.24f, .24f, .8f};
-                    projectile.color_rgba = 0xff60d060u;
-                    projectile.mesh = RenderMesh::EnemyProjectile;
-                    projectile.stable_id =
-                        0x53504c4d00100000ull | static_cast<std::uint64_t>(i + 1);
-                    prepared_instances.push_back(projectile);
-                }
-            }
-        }
-        if (impl_->config.monster_preview_asset < 6 && impl_->config.slime_family_preview_count == 0)
-        {
-            const auto preview_mesh = static_cast<RenderMesh>(
-                static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
-                impl_->config.monster_preview_asset);
-            const auto found = std::ranges::find_if(
-                prepared_instances, [&](const auto &source) { return source.mesh == preview_mesh; });
-            if (found != prepared_instances.end())
-            {
-                auto preview = *found;
-                preview.position = {};
-                preview.yaw = 0.0f;
-                prepared_instances.assign(1, preview);
-            }
-            else
-            {
-                prepared_instances.clear();
-            }
-        }
-        if (impl_->config.environment_preview)
-        {
-            prepared_instances.clear();
-            const auto add = [&](RenderMesh mesh, Float3 position, Float3 scale, std::uint32_t variant) {
-                RenderInstance instance{};
-                instance.mesh = mesh;
-                instance.position = position;
-                instance.scale = scale;
-                instance.environment_variant = variant;
-                instance.environment_seed = 0x4853454eu;
-                prepared_instances.push_back(instance);
-            };
-            for (std::uint32_t variant = 0; variant < 3; ++variant)
-            {
-                const float x = static_cast<float>(variant)*5.0f-5.0f;
-                add(RenderMesh::TreeTrunk, {x,0,0}, {1,1,1}, variant);
-                add(RenderMesh::TreeCanopy, {x,0,0}, {1,1,1}, variant);
-            }
-            for (std::uint32_t variant = 0; variant < 4; ++variant)
-            {
-                const float x = static_cast<float>(variant)*3.0f-4.5f;
-                add(RenderMesh::Rock, {x,0,-5}, {.8f,.8f,.8f}, variant);
-                add(RenderMesh::Grass, {x,0,-8}, {1,1,1}, variant);
-            }
-            for (int z=-5; z<=2; ++z)
-                for (int x=-5; x<=5; ++x)
-                    add(RenderMesh::Ground, {static_cast<float>(x)*2.5f,-.055f,static_cast<float>(z)*2.5f},
-                        {2.5f,.1f,2.5f}, 0);
-        }
-        for (auto &source : prepared_instances) PopulateRenderInstanceIdentity(source);
-        prepared_scene.ready = true;
-    }
+    if (prepared_scene_this_view && !entity_surface_frame.Bytes().empty() &&
+        (impl_->material_surface_layouts[kAuthoredMaterialNames.size() + 6].varying_mask & 16u) == 0)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Boss surface effects require the actual monster emission sidecar.");
+    if (prepared_scene_this_view) prepared_scene.ready = true;
     if (impl_->config.environment_preview)
     {
         snapshot.camera.target = {0,1,0};
@@ -973,6 +925,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                               impl_->config.monster_preview_asset >= 6 &&
                               !impl_->config.environment_preview
         ? snapshot.static_scene : nullptr;
+    if (auto prepared = impl_->PrepareTerrainPages(static_scene, canonical_instances); !prepared) return prepared;
     std::span<const RenderInstance> hlod_static_instances;
     if (auto prepared = impl_->PrepareHlodStaticScene(static_scene, hlod_static_instances); !prepared) return prepared;
     const bool view_scene_changed = owned_view.frame_number != 0 &&
@@ -1090,7 +1043,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u);
                 const auto seed = source.mesh == RenderMesh::Ground ||
                                   source.mesh == RenderMesh::DirtPatch || source.mesh == RenderMesh::MeadowSurface
-                    ? std::bit_cast<float>(source.environment_seed) : 0.0f;
+                    ? std::bit_cast<float>(impl_->TerrainSectionIndex(source)) : 0.0f;
                 const float radius = environment
                     ? impl_->environment_variant_radii[environment_mesh_index(source)] *
                         std::max({std::abs(source.scale.x), std::abs(source.scale.y),
@@ -1313,20 +1266,28 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::array<std::uint32_t, kGpuVisibilityBucketCount> retest_geometry_passes{};
     auto retest_visibility_ranges = visibility_ranges;
     std::array<const GeometryPageGpu *, kGpuVisibilityBucketCount> bucket_pages{};
+    std::array<ID3D12PipelineState *, kGpuVisibilityBucketCount> bucket_pipelines{};
+    std::array<std::uint32_t, kGpuVisibilityBucketCount> bucket_mesh_ids{};
     const auto prepare_geometry_range = [&](GpuStaticVisibilityRange &range,
             const GeometryPageGpu &page, ID3D12PipelineState *pipeline,
             std::size_t stride, std::uint32_t output_begin, std::uint32_t mesh_id,
             std::span<std::uint32_t> passes, std::uint32_t ref_source,
-            bool static_instances = false) -> Result {
+            bool static_instances = false, bool source_absent = false) -> Result {
+        if (source_absent)
+        {
+            // Empty sources still need their own zeroed indirect commands on the GPU.
+            range.flags = kVisibilityEmptySource | (static_instances ? kVisibilityStaticSource : 0u);
+            return Result::Success();
+        }
         range.index_count = page.index_count;
         range.meshlet_count = page.meshlet_count;
-        range.flags = impl_->GeometryUsesMesh(pipeline, page, range.count)
-            ? kGeometryMeshEligible : 0u;
+        const bool mesh_eligible = impl_->GeometryUsesMesh(pipeline, page, range.count);
+        range.flags = mesh_eligible ? kVisibilityMeshEligible : 0u;
         for (std::uint32_t view = 0; view < passes.size(); ++view)
         {
             if (auto result = impl_->AddGeometryDrawRecord(frame_slot, page,
                     static_cast<std::uint32_t>(view * stride + output_begin), range.count,
-                    kGeometryGpuSceneRefs | range.flags |
+                    kGeometryGpuSceneRefs | (mesh_eligible ? kGeometryMeshEligible : 0u) |
                         (static_instances ? kGeometryStaticInstances : 0u),
                     view, mesh_id, passes[view]); !result)
                 return result;
@@ -1367,51 +1328,20 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             : bucket == kArcherVisibilityBucket ? static_cast<std::uint32_t>(RenderMesh::Archer)
             : static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
                   static_cast<std::uint32_t>(monster_bucket < 6 ? monster_bucket : (monster_bucket - 6) / 2);
+        bucket_pipelines[bucket] = pipeline;
+        bucket_mesh_ids[bucket] = mesh_id;
+        const bool static_source_absent = bucket >= kEnvironmentVisibilityBucketCount ||
+            static_environment_ranges[bucket].second == 0;
         if (auto result = prepare_geometry_range(visibility_ranges[bucket], *page,
                 pipeline, visible_ref_stride, static_output_begins[bucket], mesh_id,
-                static_geometry_passes[bucket], 1u, true); !result)
-            return result;
-        if (auto result = prepare_geometry_range(dynamic_visibility_ranges[bucket], *page,
-                pipeline, dynamic_visible_ref_stride, dynamic_output_begins[bucket], mesh_id,
-                dynamic_geometry_passes[bucket], 2u); !result)
+                static_geometry_passes[bucket], 1u, true, static_source_absent); !result)
             return result;
         retest_visibility_ranges[bucket].begin = static_output_begins[bucket];
         if (auto result = prepare_geometry_range(retest_visibility_ranges[bucket], *page,
                 pipeline, 0, static_output_begins[bucket], mesh_id,
-                std::span{&retest_geometry_passes[bucket], 1}, 3u, true); !result)
+                std::span{&retest_geometry_passes[bucket], 1}, 3u, true, static_source_absent); !result)
             return result;
     }
-    // Each family has one candidate owner. Its three records describe complete
-    // resident cuts; aliasing fallback pages are deduplicated by the GPU.
-    for (std::size_t family = 0; family < kEnvironmentMaterialNames.size(); ++family)
-    {
-        std::uint32_t epoch = 2166136261u;
-        const auto hash = [&](std::uint32_t value) { epoch = (epoch ^ value) * 16777619u; };
-        hash(static_cast<std::uint32_t>(family));
-        for (std::size_t lod = 0; lod < 3; ++lod)
-        {
-            const auto &page = *bucket_pages[family * 3 + lod];
-            hash(page.page_slot);
-            hash(page.generation);
-        }
-        for (std::size_t lod = 0; lod < 3; ++lod)
-        {
-            const auto bucket = family * 3 + lod;
-            visibility_ranges[bucket].flags |= 4u;
-            dynamic_visibility_ranges[bucket].flags |= 4u;
-            visibility_ranges[bucket].reserved = epoch;
-            dynamic_visibility_ranges[bucket].reserved = epoch;
-        }
-    }
-    std::uint32_t projectile_geometry_pass{};
-    if (projectile_range.second != 0)
-        if (auto result = impl_->AddGeometryDrawRecord(frame_slot,
-                impl_->gel_projectile_geometry, static_cast<std::uint32_t>(projectile_range.first),
-                static_cast<std::uint32_t>(projectile_range.second), kGeometryGpuSceneRefs |
-                    (impl_->GeometryUsesMesh(impl_->slime_pipeline.Get(), impl_->gel_projectile_geometry,
-                        static_cast<std::uint32_t>(projectile_range.second)) ? kGeometryMeshEligible : 0u),
-                0, static_cast<std::uint32_t>(RenderMesh::EnemyProjectile), projectile_geometry_pass); !result)
-            return result;
     const auto procedural_begin = std::ranges::find_if(
         render_instances, [&](const auto &source) {
             return source.mesh != RenderMesh::Archer && !is_environment_mesh(source.mesh) &&
@@ -1455,6 +1385,44 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
     if (auto result = prepare_builtin(static_ground_range.first, static_ground_range.second,
             true, true, ground_geometry_passes); !result) return result;
+    // Keep static shadow record indices independent of dynamic source membership.
+    for (std::size_t bucket = 0; bucket < kGpuVisibilityBucketCount; ++bucket)
+        if (auto result = prepare_geometry_range(dynamic_visibility_ranges[bucket], *bucket_pages[bucket],
+                bucket_pipelines[bucket], dynamic_visible_ref_stride, dynamic_output_begins[bucket],
+                bucket_mesh_ids[bucket], dynamic_geometry_passes[bucket], 2u, false,
+                dynamic_visibility_ranges[bucket].count == 0); !result)
+            return result;
+    // Each family has one candidate owner. Its three records describe complete
+    // resident cuts; aliasing fallback pages are deduplicated by the GPU.
+    for (std::size_t family = 0; family < kEnvironmentMaterialNames.size(); ++family)
+    {
+        std::uint32_t epoch = 2166136261u;
+        const auto hash = [&](std::uint32_t value) { epoch = (epoch ^ value) * 16777619u; };
+        hash(static_cast<std::uint32_t>(family));
+        for (std::size_t lod = 0; lod < 3; ++lod)
+        {
+            const auto &page = *bucket_pages[family * 3 + lod];
+            hash(page.page_slot);
+            hash(page.generation);
+        }
+        for (std::size_t lod = 0; lod < 3; ++lod)
+        {
+            const auto bucket = family * 3 + lod;
+            visibility_ranges[bucket].flags |= kVisibilityLodFamily;
+            dynamic_visibility_ranges[bucket].flags |= kVisibilityLodFamily;
+            visibility_ranges[bucket].reserved = epoch;
+            dynamic_visibility_ranges[bucket].reserved = epoch;
+        }
+    }
+    std::uint32_t projectile_geometry_pass{};
+    if (projectile_range.second != 0)
+        if (auto result = impl_->AddGeometryDrawRecord(frame_slot,
+                impl_->gel_projectile_geometry, static_cast<std::uint32_t>(projectile_range.first),
+                static_cast<std::uint32_t>(projectile_range.second), kGeometryGpuSceneRefs |
+                    (impl_->GeometryUsesMesh(impl_->slime_pipeline.Get(), impl_->gel_projectile_geometry,
+                        static_cast<std::uint32_t>(projectile_range.second)) ? kGeometryMeshEligible : 0u),
+                0, static_cast<std::uint32_t>(RenderMesh::EnemyProjectile), projectile_geometry_pass); !result)
+            return result;
     if (auto result = prepare_builtin(dynamic_terrain_begin, dynamic_terrain_count,
             false, true, dynamic_terrain_geometry_passes); !result) return result;
     if (auto result = prepare_builtin(procedural_first, procedural_count,
@@ -1789,6 +1757,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 sizeof(dynamic_visibility_ranges));
     std::memcpy(frame.mapped + retest_visibility_range_offset,
                 retest_visibility_ranges.data(), sizeof(retest_visibility_ranges));
+#if defined(HS_DEVELOPMENT_TOOLS)
+    frame.visibility_range_offset = visibility_range_offset;
+#endif
     D3D12MA::ALLOCATION_DESC visibility_allocation{};
     visibility_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     if (!frame.static_visible_refs.resource ||
@@ -1896,7 +1867,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 static_cast<unsigned long long>(snapshot.header.checksum));
     ImGui::Text("Instances: %zu", snapshot.instances.size());
     ImGui::Text("Render entities: %zu", snapshot.instances.size());
-    ImGui::Text("UI models: %zu", snapshot.ui.size());
+    ImGui::Text("UI models: %zu", frame_input.ui_draw_content->models.size());
     ImGui::Text("GPU particles: %u / %u", impl_->last_particle_count,
                 kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) /
                     100u);
@@ -1996,11 +1967,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
 #if defined(HS_DEVELOPMENT_TOOLS)
     auto *const imgui_draw_data = show_devtools ? ImGui::GetDrawData() : nullptr;
 #endif
-    cpu_timings.scene_prepare_us = measure_stage();
-    if (auto result = impl_->RasterizeUi(owned_view, frame_slot, frame_input.ui_draw_content); !result)
-    {
-        return result;
-    }
+    cpu_timings.scene_prepare_us = early_scene_prepare_us + measure_stage();
+    const bool redraw_ui = !owned_view.ui_draw_content[frame_slot] ||
+        owned_view.ui_draw_content[frame_slot] != frame_input.ui_draw_content;
+    if (redraw_ui)
+        if (auto result = impl_->PrepareUiDraw(owned_view, frame_slot, frame_input.ui_draw_content); !result)
+            return result;
     cpu_timings.ui_us = measure_stage();
     const auto instance_count = render_instances.size();
 
@@ -2227,10 +2199,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
                 gpu_ring.shape_extent_speed_min = {geometry.inner_radius,
                     geometry.outer_radius, geometry.edge_width, geometry.mask_strength};
-                gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
+                gpu_ring.end_color = {geometry.progress, geometry.animation_phase,
+                    geometry.mask_slice == 0xffffffffu ? 0.0f : static_cast<float>(geometry.mask_slice + 1), 0.0f};
                 gpu_ring.modes.x = geometry.spokes;
                 gpu_ring.modes.y = geometry.rings;
-                gpu_ring.modes.z = geometry.mask_slice;
             }
             if (authored_additive_shape)
             {
@@ -2502,18 +2474,18 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         constants->material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
     }
     const auto &sidecar = impl_->material_sidecar_layout;
-    for (std::size_t group = 0; group < constants->hero_material_parameter_bases.size(); ++group)
+    for (std::size_t group = 0; group < constants->character_material_parameter_bases.size(); ++group)
     {
         std::array<UINT, 4> bases{}, masks{};
         for (std::size_t lane = 0; lane < bases.size(); ++lane)
-            if (const auto hero = group * 4 + lane; hero < kHeroMaterialNames.size())
+            if (const auto hero = group * 4 + lane; hero < kCharacterMaterialNames.size())
             {
                 const auto ordinal = kAuthoredMaterialNames.size() + hero;
                 bases[lane] = impl_->material_parameter_bases[ordinal];
                 masks[lane] = impl_->material_surface_layouts[ordinal].varying_mask;
             }
-        constants->hero_material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
-        constants->hero_material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
+        constants->character_material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
+        constants->character_material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
     }
     constants->hero_binding_ranges = impl_->hero_binding_ranges;
     constants->probe_options = impl_->lighting_probe.FrameOptions();
@@ -2542,14 +2514,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
 #endif
     DirectX::XMStoreFloat4x4(&constants->inverse_unjittered_view_projection,
                             DirectX::XMMatrixInverse(nullptr, view * projection));
-    ExposureConstants exposure_constants;
-    // Keep the daylight art target after adaptation instead of lifting dark terrain back to 18% grey.
-    exposure_constants.target_grey = 0.12f;
-    exposure_constants.width = owned_view.render_width;
-    exposure_constants.height = owned_view.render_height;
-    exposure_constants.delta_seconds = view_delta_seconds;
-    exposure_constants.reset = new_session || view_input.camera_cut ? 1u : 0u;
-    std::memcpy(frame.mapped + kExposureConstantsOffset, &exposure_constants, sizeof(exposure_constants));
     const auto previous_sdk_camera = owned_view.sdk_camera;
     auto &sdk_camera = owned_view.sdk_camera;
     DirectX::XMStoreFloat4x4(&sdk_camera.view, view);
@@ -2573,7 +2537,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         static_cast<float>(double(previous_sdk_camera.position.z) + (owned_view.previous_scene_origin.z - view_input.scene_origin.z))};
     sdk_camera.near_plane = near_plane; sdk_camera.far_plane = far_plane;
     sdk_camera.vertical_fov_radians = DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees);
-    sdk_camera.delta_seconds = exposure_constants.delta_seconds;
+    sdk_camera.delta_seconds = view_delta_seconds;
     sdk_camera.jitter_pixels[0] = constants->surface_jitter_uv.x * owned_view.render_width;
     sdk_camera.jitter_pixels[1] = constants->surface_jitter_uv.y * owned_view.render_height;
     sdk_camera.reversed_depth = true;
@@ -3261,7 +3225,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             mesh |= kEnvironmentMeshFlag;
         if (source.mesh == RenderMesh::GroundDetail) mesh |= source.environment_variant << 8u;
         float animation_time = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch || source.mesh == RenderMesh::MeadowSurface
-            ? std::bit_cast<float>(source.environment_seed) : 0.0f;
+            ? std::bit_cast<float>(impl_->TerrainSectionIndex(source)) : 0.0f;
         AnimationPoseRef resolved_skin_pose;
         const AnimationPoseRef *skin_pose = nullptr;
         RenderPoseKey pose_key{};
@@ -3755,7 +3719,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::vector<VirtualShadowNativeRead> reads;
     VirtualShadowInputs inputs;
     VirtualShadowFramePlan shadow_plan;
-    bool csm_required = true;
+    bool csm_required = primary_sun != nullptr;
     const bool hero_volume_receivers_active =
         impl_->config.volumetric_quality != GraphicsOptionalQuality::Off && !typed_volumes.empty();
     if ((primary_sun && owned_view.virtual_shadows.AllocatedBytes() != 0) || owned_view.local_shadows.AllocatedBytes() != 0)
@@ -4335,6 +4299,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (csm_required) prepare_cascades();
     const UINT active_view_mask = csm_required ? 15u : 1u;
     const UINT active_view_count = csm_required ? kGpuVisibilityViewCount : 1u;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    frame.visibility_active_views = active_view_count;
+#endif
     record_scene_substage(cpu_timings.scene_shadow_prepare_us);
     // Software streaming demand is independent of GPU draw compaction. Merge
     // camera and cascade error before requesting a family's finer resident page.
@@ -4355,6 +4322,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (std::size_t cascade = 0; cascade + 1 < active_view_count; ++cascade)
         make_demand_planes(cascade + 1, DirectX::XMMatrixTranspose(
             DirectX::XMLoadFloat4x4(&constants->shadow_view_projection[cascade])));
+    std::array<GeometryDemandView, 4> demand_views{};
+    for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+        demand_views[consumer] = PrepareGeometryDemandView(demand_planes[consumer], lod_view.m,
+            constants->lod_projection.x, constants->lod_options.z);
     std::array<std::array<float, 4>, 6> demand_plane_lengths{};
     for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
         for (std::size_t plane = 0; plane < 6; ++plane)
@@ -4486,11 +4457,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
                 {
                     const double upper = consumer == 0
-                        ? GeometryDemandCellErrorUpperBound(cell, radius, error, lod_view.m,
-                            constants->lod_projection.x, constants->lod_options.z)
+                        ? GeometryDemandCellErrorUpperBound(cell, radius, error, demand_views[consumer])
                         : error * shadow_demand_projection[consumer - 1];
                     if (upper <= geometry_demand[ordinal]) continue;
-                    const auto visibility = ClassifyGeometryDemandCell(cell, radius, demand_planes[consumer]);
+                    const auto visibility = ClassifyGeometryDemandCell(cell, radius, demand_views[consumer]);
                     if (visibility == GeometryDemandCellVisibility::Outside) continue;
                     consumers |= 1u << consumer;
                     if (visibility == GeometryDemandCellVisibility::Inside) inside_consumers |= 1u << consumer;
@@ -4509,10 +4479,18 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     std::bit_cast<UINT>(std::max(geometry_demand[ordinal] / constants->lod_options.x, 1.0f)));
                 !requested) return requested;
     record_scene_substage(cpu_timings.scene_geometry_demand_us);
+    const auto material_needs_demand = [&](std::uint32_t material, bool baseline_consumer) {
+        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+            if (impl_->texture_streaming.NeedsDemand(
+                    impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot],
+                    baseline_consumer)) return true;
+        return false;
+    };
+    const bool terrain_needs_demand = material_needs_demand(kTerrainMaterialOrdinal, false);
     // Measure ground UV derivatives through the actual unjittered owned_view. The
     // smallest authored terrain tile is 9m (TerrainTileSize, material_terrain).
     float terrain_footprint = std::numeric_limits<float>::infinity();
-    if (!impl_->config.grid_floor_probe && impl_->environment_textures[0].resource)
+    if (terrain_needs_demand && !impl_->config.grid_floor_probe && impl_->environment_textures[0].resource)
     {
         const auto inverse = DirectX::XMLoadFloat4x4(&constants->inverse_unjittered_view_projection);
         const auto ground_point = [&](float u, float v, DirectX::XMFLOAT3 &point) {
@@ -4544,13 +4522,20 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
         {
             const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
-            if (id && (baseline_consumer || !impl_->texture_streaming.HardwareBacked(id)))
+            if (impl_->texture_streaming.NeedsDemand(id, baseline_consumer))
                 impl_->texture_streaming.Demand(id, mip, priority, owned_view.frame_number);
         }
     };
+#if defined(HS_OFFLINE_PROBE_BAKER)
     const bool capture_demand=static_scene&&impl_->local_probes.AllocatedBytes()&&
         impl_->local_probes.CaptureIdentityPending(completed_streaming);
+#else
+    constexpr bool capture_demand=false;
+#endif
     std::array<bool, kEnvironmentMaterialNames.size()> environment_material_requested{};
+    for (std::size_t material = 0; material < environment_material_requested.size(); ++material)
+        environment_material_requested[material] = !material_needs_demand(
+            render_data::EnvironmentGeometryMaterialOrdinal(static_cast<std::uint32_t>(material)), capture_demand);
     const auto demand_environment_material = [&](const RenderInstance &source, bool capture_consumer) {
         if (!is_environment_mesh(source.mesh)) return;
         const auto material = static_cast<std::uint32_t>(environment_mesh_index(source));
@@ -4591,7 +4576,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
         {
             const auto id = impl_->material_texture_stream_ids[kTerrainMaterialOrdinal * render_data::kMaterialTextureSlots + slot];
-            if (!id || impl_->texture_streaming.HardwareBacked(id)) continue;
+            if (!impl_->texture_streaming.NeedsDemand(id)) continue;
             const auto logical = impl_->texture_streaming.View(id).logical_description;
             const auto rho = std::max(static_cast<float>(logical.width) * terrain_footprint / 9.0f, 1.0f);
             impl_->texture_streaming.Demand(id, static_cast<std::uint32_t>(std::floor(std::log2(rho))),
@@ -4599,11 +4584,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
     if (static_draws.ground_range.second && capture_demand)
         demand_material(kTerrainMaterialOrdinal, 0, 1, true);
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if(capture_demand)
     {
         for(const auto material:impl_->local_probes.CachedCaptureMaterialOrdinals(static_scene,foliage_density))
             demand_material(material,0,1,true);
     }
+#endif
     if (auto result = impl_->texture_streaming.Pump(owned_view.frame_number, completed_streaming,
             impl_->asset_io, impl_->streaming, impl_->residency); !result) return result;
     impl_->PublishEnvironmentMaterialTextures(frame_slot);
@@ -4745,7 +4732,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto oit_revealage_rtv = rtv_at(5);
     const auto post_a_rtv = rtv_at(6);
     const auto post_b_rtv = rtv_at(7);
-    const auto scene_work_rtv = rtv_at(kViewRtvOffset + 4);
     const auto display_linear_rtv = rtv_at(kViewRtvOffset + 5);
     const auto composite_hdr_rtv = rtv_at(kViewRtvOffset + 6);
     const auto gbuffer_material_rtv = rtv_at(8);
@@ -4766,21 +4752,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const std::array temporal_rtvs{temporal_write_rtv,
         rtv_at(kViewRtvOffset + temporal_write_index),
         rtv_at(kViewRtvOffset + 2 + temporal_write_index)};
-    const auto exposure_read_index = owned_view.exposure_read_index;
-    const auto exposure_write_index = exposure_read_index ^ 1u;
-    impl_->WriteViewDescriptors(owned_view, frame_slot, temporal_read_index, temporal_write_index,
-        exposure_read_index, exposure_write_index,
-        frame.upload.resource->GetGPUVirtualAddress() + kExposureConstantsOffset);
-    // Optional fog sampling reads VmCounts even when fog is Off. Replace the
-    // view's null default before descriptor clones; active fog overrides this.
-    constexpr auto disabled_volumetric_offset = kDisabledVolumetricConstantsOffset;
-    constexpr auto disabled_volumetric_size = kDisabledVolumetricConstantsSize;
-    static_assert(disabled_volumetric_offset + disabled_volumetric_size <= kExposureConstantsOffset);
-    static_assert(kExposureConstantsOffset < kInstanceDataOffset);
-    std::memset(frame.mapped + disabled_volumetric_offset, 0, disabled_volumetric_size);
+    impl_->WriteViewDescriptors(owned_view, frame_slot, temporal_read_index, temporal_write_index);
+    static_assert(kDisabledVolumetricConstantsOffset >= sizeof(FrameConstants));
+    static_assert(kDisabledVolumetricConstantsOffset + kDisabledVolumetricConstantsSize <= kInstanceDataOffset);
+    std::memset(frame.mapped + kDisabledVolumetricConstantsOffset, 0, kDisabledVolumetricConstantsSize);
     const D3D12_CONSTANT_BUFFER_VIEW_DESC disabled_volumetric_cbv{
-        frame.upload.resource->GetGPUVirtualAddress() + disabled_volumetric_offset,
-        disabled_volumetric_size};
+        frame.upload.resource->GetGPUVirtualAddress() + kDisabledVolumetricConstantsOffset,
+        kDisabledVolumetricConstantsSize};
     auto volumetric_cbv = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     volumetric_cbv.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
         kVolumetricDescriptorOffset) * impl_->srv_stride;
@@ -4903,7 +4881,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         history_table.ptr += impl_->srv_stride;
         list->SetGraphicsRootDescriptorTable(33, history_table);
         auto hero_table = texture_table;
-        hero_table.ptr += static_cast<UINT64>(kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
+        hero_table.ptr += static_cast<UINT64>(kLayeredTranslucencyDescriptorOffset) * impl_->srv_stride;
         list->SetGraphicsRootDescriptorTable(36, hero_table);
         list->SetGraphicsRootConstantBufferView(15, frame.upload.resource->GetGPUVirtualAddress());
         list->SetGraphicsRootShaderResourceView(25, frame.upload.resource->GetGPUVirtualAddress() + ground_gap_offset);
@@ -4960,7 +4938,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 dynamic_scene.resource.Get(), static_ref_resource, 0,
                 static_cast<std::uint32_t>(static_draw_refs.size()), dynamic_ref_data_offset,
                 static_cast<std::uint32_t>(dynamic_draw_refs.size())); !result) return result;
-    cpu_timings.constants_upload_us = measure_stage();
+    cpu_timings.prepare_render_data_us = measure_stage();
     auto graph_substage_start = capture_clock();
     const auto record_graph_substage = [&](std::uint64_t &duration) {
         if (!impl_->config.capture_timing_stream) return;
@@ -4980,8 +4958,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
         if (has_translucent_hero_binding(asset + 1))
             hero_candidate_count += monster_ranges[asset].second;
-    if (impl_->static_gpu_scene)
-        hero_candidate_count += static_environment_ranges[render_data::kMeadowWaterGeometry * 3].second;
+    const auto translucent_character_count = hero_candidate_count;
+    const auto water_candidate_count = impl_->static_gpu_scene
+        ? static_environment_ranges[render_data::kMeadowWaterGeometry * 3].second : 0;
+    hero_candidate_count += water_candidate_count;
     const auto hero_active = owned_view.state.render_active;
     const D3D12_RECT full_hero_rect{0, 0, static_cast<LONG>(hero_active.width),
         static_cast<LONG>(hero_active.height)};
@@ -5047,27 +5027,29 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto hero_composition_rect = hero_bounds_complete && !hero_all_outside ? hero_rect : full_hero_rect;
     // Explicit work capture retains its diagnostic phases even for an empty raster domain.
 #if defined(HS_DEVELOPMENT_TOOLS)
-    const bool capture_hero_work = impl_->config.capture_hero_work;
+    const bool capture_translucency_diagnostics = impl_->config.capture_translucency_diagnostics;
 #else
-    constexpr bool capture_hero_work = false;
+    constexpr bool capture_translucency_diagnostics = false;
 #endif
     const bool have_hero_contributors = hero_candidate_count != 0 &&
-        (!hero_all_outside || capture_hero_work);
+        (!hero_all_outside || capture_translucency_diagnostics);
+    const bool single_layer_water = have_hero_contributors && water_candidate_count != 0 &&
+        translucent_character_count == 0 && !capture_translucency_diagnostics;
     const bool hero_occupancy_topology = have_hero_contributors && hero_candidate_count <= 2 &&
-        !capture_hero_work;
-    std::uint32_t hero_work_source_mask{};
+        !capture_translucency_diagnostics && !single_layer_water;
+    std::uint32_t translucency_diagnostics_source_mask{};
 #if defined(HS_DEVELOPMENT_TOOLS)
-    if (capture_hero_work && have_hero_contributors)
+    if (capture_translucency_diagnostics && have_hero_contributors)
     {
         if (has_translucent_hero_binding(0) && archer_range.second)
-            hero_work_source_mask |= 1u;
+            translucency_diagnostics_source_mask |= 1u;
         for (std::size_t asset = 0; asset < monster_bucket_ranges.size(); ++asset)
             if (has_translucent_monster_bucket(asset) && monster_bucket_ranges[asset].second)
-                hero_work_source_mask |= 1u << (asset + 1);
+                translucency_diagnostics_source_mask |= 1u << (asset + 1);
         if (impl_->static_gpu_scene)
             for (std::size_t lod = 0; lod < 3; ++lod)
                 if (static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second)
-                    hero_work_source_mask |= 1u << (lod + 19);
+                    translucency_diagnostics_source_mask |= 1u << (lod + 19);
     }
 #endif
     const bool composite_gradient_read = flash_add_count || ground_add_count ||
@@ -5141,12 +5123,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         impl_->material_sidecar_layout.plane_count,
         presented_view, use_visibility, impl_->enhanced, have_skinned_instances,
         previous_skin_frame_valid, static_scene != nullptr,
-        !owned_view.exposure_initialized, owned_view.ui_dirty[frame_slot],
+        !owned_view.exposure_initialized, redraw_ui,
         initialize_temporal_targets, initialize_offscreen_output,
         upload_static_scene, upload_static_refs, upload_dynamic_scene, upload_environment_stream,
         upload_environment_geometry, separate_previous_instance_scene,
         !frame.geometry_draw_records_cpu.empty(),
-        have_hero_contributors, hero_occupancy_topology, capture_hero_work,
+        have_hero_contributors, hero_occupancy_topology, capture_translucency_diagnostics, single_layer_water,
         composite_gradient_read,
         owned_view.dynamic_lod_states.initialized,
         impl_->static_gpu_scene && impl_->static_gpu_scene->lod_states.initialized,
@@ -5170,7 +5152,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         active_features.reflection_mode, active_features.shadow_mode,
         static_cast<std::uint32_t>(std::ranges::count_if(impl_->environment_geometry_streams,
             [](const auto &stream) { return stream.upload_pending; })),
-        hero_work_source_mask};
+        translucency_diagnostics_source_mask};
     std::vector<std::uint32_t> geometry_page_slots;
     std::array<bool, kMonsterReducedGeometryPage + 12u> geometry_page_seen{};
     for (const auto &record : frame.geometry_draw_records_cpu)
@@ -5194,6 +5176,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         local_shadow_input.completed = impl_->graph_queue_executor.Completed();
         local_shadow_input.reset_cache = new_session;
         local_shadow_input.casters = ShadowCasterRange{static_shadow_batch->records, casters};
+        local_shadow_input.stable_caster_owner = static_shadow_batch;
+        local_shadow_input.stable_caster_revision = static_shadow_batch->revision;
         local_shadow_input.draw_groups = groups;
         // Planning uses current lights/casters/groups. Native reads and callbacks
         // are attached to this same object after logical graph slots are known.
@@ -5234,7 +5218,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             &frame.dynamic_draw_args, &frame.ribbon_arguments}) append_shape(resource);
     append_shape(previous_skin_frame ? &previous_skin_frame->skin_cache_vertices : nullptr);
     for (auto *resource : {&impl_->environment_brdf_lut, &impl_->material_parameters,
-            &impl_->hero_material_bindings_gpu, &owned_view.dynamic_lod_states.states,
+            &impl_->mesh_material_bindings_gpu, &owned_view.dynamic_lod_states.states,
             &owned_view.dynamic_lod_states.prefix_source, &impl_->ribbon_history,
             &impl_->ribbon_previous, &impl_->particles, &impl_->particle_dead,
             &impl_->particle_counters, &impl_->indirect_arguments, &dynamic_scene,
@@ -5243,8 +5227,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             &owned_view.targets.gbuffer_surface_history, &owned_view.targets.hdr_color, &owned_view.targets.subsurface_diffuse,
             &owned_view.targets.environment_specular,
             &owned_view.targets.oit_accumulation, &owned_view.targets.oit_revealage, &owned_view.targets.post_a, &owned_view.targets.post_b,
-            &owned_view.targets.scene_work, &owned_view.targets.display_linear, &owned_view.targets.composite_hdr,
-            &owned_view.exposure_histogram, &owned_view.initial_exposure,
+            &owned_view.targets.display_linear, &owned_view.targets.composite_hdr,
+            &owned_view.exposure_value, &owned_view.initial_exposure,
             &owned_view.targets.visibility_ids, &owned_view.targets.visibility_front_face, &owned_view.targets.visibility_pixels,
             &owned_view.targets.visibility_counts, &owned_view.targets.visibility_dispatch_args,
             &impl_->vfx_gradient, &impl_->vfx_noise_volume, &impl_->vfx_stbn_scalar,
@@ -5259,9 +5243,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (auto &resource : owned_view.targets.temporal_history) append_shape(&resource);
     for (auto &resource : owned_view.targets.temporal_normal_history) append_shape(&resource);
     for (auto &resource : owned_view.targets.temporal_material_history) append_shape(&resource);
-    for (auto &resource : owned_view.exposure_values) append_shape(&resource);
     for (auto &resource : owned_view.targets.hzb_history) append_shape(&resource);
     for (auto &resource : owned_view.ui.textures) append_shape(&resource);
+    if (redraw_ui)
+        for (auto &page : owned_view.ui.atlas) append_shape(&page.buffer);
+    append_shape(&impl_->terrain_pages);
+    append_shape(&impl_->terrain_section_buffer);
     append_shape(&visibility_frame.raster_records);
     append_shape(static_scene && impl_->static_gpu_scene ? &impl_->static_gpu_scene->instances : nullptr);
     append_shape(static_scene && impl_->static_gpu_scene && impl_->static_gpu_scene->refs
@@ -5371,15 +5358,18 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
     local_probe_inputs.static_instance_generation = impl_->static_gpu_scene
         ? impl_->static_gpu_scene->instance_generation : 0;
-    local_probe_inputs.material_parameter_revision = impl_->material_parameter_revision;
+    local_probe_inputs.material_parameter_revision =
+        impl_->material_parameter_revision - impl_->baked_generation_material_revision;
     local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
     local_probe_inputs.foliage_density = foliage_density;
     local_probe_inputs.frame_constants = constants;
     local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if (has_static_authored_material_draw)
         local_probe_inputs.declare_material_sampling = [](PassBuilder &) {};
     if (has_static_masked_material_draw)
         local_probe_inputs.declare_shadow_sampling = [](PassBuilder &) {};
+#endif
     std::array<LocalProbePageRevision, kEnvironmentMaterialNames.size() + 1> page_revisions;
     if (capture_source)
     {
@@ -5526,27 +5516,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {
                 continue;
             }
-            HeroTransparencyInputs hero_match;
-            hero_match.opaque_depth.version = saved.hero.inputs[0];
-            hero_match.hdr.version = saved.hero.inputs[1];
-            hero_match.accumulation.version = saved.hero.inputs[2];
-            hero_match.revealage.version = saved.hero.inputs[3];
-            hero_match.use_occupancy_queries = hero_occupancy_topology;
-            hero_match.peel_reads = std::span<const HeroTransparencySceneRead>(saved.hero.peel_reads);
-            hero_match.scene_reads = std::span<const HeroTransparencySceneRead>(saved.hero.scene_reads);
-#if defined(HS_DEVELOPMENT_TOOLS)
-            std::array<HeroWorkContributorInput, HeroWorkRetainedLayout::kMaxContributors> work{};
-            std::size_t work_count{};
-            for (std::uint32_t bit = 0; bit < HeroWorkRetainedLayout::kMaxContributors; ++bit)
-                if (hero_work_source_mask & (1u << bit))
-                {
-                    work[work_count].arguments = saved.hero.work.argument_versions[work_count];
-                    ++work_count;
-                }
-            hero_match.work_contributors = std::span<const HeroWorkContributorInput>(work.data(), work_count);
-#endif
-            if (!owned_view.hero_transparency.MatchesLayout(hero_match,
-                    HeroTransparencyGuide{saved.hero.background, nullptr}, saved.hero))
+            if (!owned_view.hero_transparency.MatchesShape(saved.hero, hero_occupancy_topology,
+                    std::popcount(translucency_diagnostics_source_mask), single_layer_water))
             {
                 continue;
             }
@@ -5581,16 +5552,17 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         source_candidate = nullptr;
     }
     record_graph_resource_detail(cpu_timings.graph_resource_scene_hlod_us);
+#if defined(HS_OFFLINE_PROBE_BAKER)
     std::optional<std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1>> capture_pages;
+#endif
     std::vector<LocalProbeSceneRead> capture_reads;
     bool local_probe_prepared{};
     // Capture texture residency is not final until streaming bindings are assembled;
     // avoid restoring a capture layout whose face count was planned from no mip facts.
-    if(source_candidate&&(local_probe_plan.capture||
-        impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed)))
-    {
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    if(source_candidate&&(local_probe_plan.capture||impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed)))
         source_candidate=nullptr;
-    }
+#endif
     if (source_candidate)
     {
         // The freshly computed revision decision is authoritative. A layout can
@@ -5683,7 +5655,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 "Current allocation owner could not certify its native import shape.");
     }
     std::vector<TextureStreamingGraphBinding> texture_bindings;
-    std::vector<LocalProbeTextureFact> local_probe_texture_facts;
+
     auto copy_queue = std::make_shared<ComPtr<ID3D12CommandQueue>>(
         impl_->graph_queue_executor.NativeQueue(QueueHint::Copy));
     ExternalQueueBinding texture_copy_queue{std::shared_ptr<void>(copy_queue, copy_queue->Get()), QueueHint::Copy, {}};
@@ -5700,6 +5672,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         &graph_resource_arena};
     for (const auto &binding : texture_bindings)
         canonical_textures.emplace(impl_->texture_streaming.View(binding.texture).resource, binding.sampled.resource);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    std::vector<LocalProbeTextureFact> local_probe_texture_facts;
     const bool capture_facts_needed=local_probe_plan.capture||
         impl_->local_probes.CaptureIdentityPending(local_probe_inputs.completed);
     const bool strict_capture=capture_demand&&wait_for_streaming;
@@ -5743,6 +5717,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     }
     local_probe_inputs.texture_facts=local_probe_texture_facts;
     local_probe_inputs.texture_facts_valid=capture_facts_needed;
+#endif
     ResourceVersion texture_metadata;
     const auto imported_feedback = restored_graph
         ? impl_->texture_feedback.BindRetainedMetadata(impl_->graph, frame_slot,
@@ -5758,6 +5733,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             1200, feedback_bindings, &pending_graph_layout.texture_feedback);
     if (!clear_feedback) return clear_feedback;
     ResourceVersion entity_surface_noise_version, entity_surface_gradient_version, entity_surface_stbn_version;
+    ResourceVersion terrain_page_version, terrain_section_version;
     enum class MaterialSampling { Surface, Opacity };
     const auto read_material_sampling = [&](PassBuilder &pass, bool feedback_writer,
                                            MaterialSampling domain = MaterialSampling::Surface,
@@ -5765,6 +5741,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         const bool opacity_only = domain == MaterialSampling::Opacity;
         for (const auto &binding : texture_bindings)
             if (!opacity_only || binding.opacity_sampling) pass.Read(binding.sampled, sampling);
+        if (!opacity_only)
+        {
+            if (terrain_page_version.resource) pass.Read(terrain_page_version, sampling);
+            if (terrain_section_version.resource) pass.Read(terrain_section_version, sampling);
+        }
         pass.Read(texture_metadata, sampling);
         if (entity_surface_noise_version.resource)
         {
@@ -5867,14 +5848,20 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
         return handle;
     };
+    if (impl_->terrain_pages.resource)
+        terrain_page_version = impl_->graph.Version(import_texture(impl_->terrain_pages,
+            Access::Common, "TerrainSurfacePages"));
+    if (impl_->terrain_section_buffer.resource)
+        terrain_section_version = impl_->graph.Version(import_buffer(impl_->terrain_section_buffer,
+            Access::ShaderRead, "TerrainSurfaceSections"));
     TextureHandle environment_stream_texture{};
     const auto environment_brdf_lut = import_texture(
         impl_->environment_brdf_lut, Access::ShaderRead, "EnvironmentBrdfLut");
     const auto material_parameter_buffer = import_buffer(
         impl_->material_parameters, Access::ShaderRead, "MaterialParameters");
     const auto material_parameter_version = impl_->graph.Version(material_parameter_buffer);
-    const auto hero_binding_buffer = import_buffer(impl_->hero_material_bindings_gpu, Access::AllShaderRead,
-        "HeroMaterialBindings");
+    const auto hero_binding_buffer = import_buffer(impl_->mesh_material_bindings_gpu, Access::AllShaderRead,
+        "MeshMaterialBindings");
     const auto hero_binding_version = impl_->graph.Version(hero_binding_buffer);
     if (!entity_surface_frame.Bytes().empty())
     {
@@ -6083,7 +6070,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         "TemporalHistoryWrite") : TextureHandle{};
     const auto view_initial_access = !owned_view.view_targets_initialized && impl_->enhanced
         ? Access::Common : Access::ShaderRead;
-    const auto scene_work = import_texture(owned_view.targets.scene_work, view_initial_access, "SceneWork");
     const auto display_linear = import_texture(owned_view.targets.display_linear, view_initial_access, "DisplayLinear");
     const auto composite_hdr = import_texture(owned_view.targets.composite_hdr, view_initial_access, "CompositeHdr");
     const auto temporal_normal_read = owned_view.targets.temporal_normal_history[temporal_read_index].resource
@@ -6094,11 +6080,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         ? import_texture(owned_view.targets.temporal_material_history[temporal_read_index], view_initial_access, "TemporalMaterialRead") : TextureHandle{};
     const auto temporal_material_write = owned_view.targets.temporal_material_history[temporal_write_index].resource
         ? import_texture(owned_view.targets.temporal_material_history[temporal_write_index], view_initial_access, "TemporalMaterialWrite") : TextureHandle{};
-    const auto exposure_read = import_buffer(owned_view.exposure_values[exposure_read_index],
+    const auto exposure_read = import_buffer(owned_view.exposure_value,
         owned_view.exposure_initialized ? Access::AllShaderRead : Access::CopyDest, "ExposureCurrent");
-    const auto exposure_write = import_buffer(owned_view.exposure_values[exposure_write_index],
-        owned_view.exposure_initialized ? Access::AllShaderRead : Access::CopyDest, "ExposureNext");
-    const auto exposure_histogram = import_buffer(owned_view.exposure_histogram, Access::UnorderedWrite, "ExposureHistogram");
     TextureHandle bloom_half{};
     TextureHandle bloom_quarter{};
     TextureHandle bloom_half_combined{};
@@ -6130,7 +6113,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         pending_graph_layout.bloom_combined = bloom_half_combined;
     }
     const auto ui = import_texture(ui_texture,
-        owned_view.ui_initialized[frame_slot] ? Access::ShaderRead : Access::Common, "UiTexture");
+        owned_view.ui_draw_content[frame_slot] ? Access::ShaderRead : Access::Common, "UiTexture");
     const auto back_buffer = restored_graph ? pending_graph_layout.back_buffer : impl_->graph.ImportTexture(
         {frame_output.Get(),
          output_completion, QueueHint::Direct, {},
@@ -6213,7 +6196,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     auto post_b_version = impl_->graph.Version(post_b);
     auto temporal_read_version = impl_->graph.Version(temporal_read);
     auto temporal_write_version = impl_->graph.Version(temporal_write);
-    auto scene_work_version = impl_->graph.Version(scene_work);
     auto display_linear_version = impl_->graph.Version(display_linear);
     auto composite_hdr_version = impl_->graph.Version(composite_hdr);
     auto *composite_hdr_resource = owned_view.targets.composite_hdr.resource.Get();
@@ -6222,8 +6204,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     auto temporal_material_read_version = impl_->graph.Version(temporal_material_read);
     auto temporal_material_write_version = impl_->graph.Version(temporal_material_write);
     auto exposure_read_version = impl_->graph.Version(exposure_read);
-    auto exposure_write_version = impl_->graph.Version(exposure_write);
-    auto histogram_version = impl_->graph.Version(exposure_histogram);
     auto bloom_half_version = impl_->graph.Version(bloom_half);
     auto bloom_quarter_version = impl_->graph.Version(bloom_quarter);
     auto bloom_half_combined_version = impl_->graph.Version(bloom_half_combined);
@@ -6265,8 +6245,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             initialize = impl_->graph.BindPass(layout.pass_index, 32);
             if (!initialize) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Exposure initialization does not match the retained graph plan.");
-            exposure_read_version = layout.first;
-            exposure_write_version = layout.second;
+            exposure_read_version = layout.output;
         }
         else
         {
@@ -6274,46 +6253,64 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             initialize = impl_->graph.AddPass(32, "ExposureInitialization", QueueHint::Copy);
             initialize->Read(impl_->graph.Version(exposure_upload), Access::CopySource);
             exposure_read_version = initialize->Write(exposure_read_version, Access::CopyDest);
-            exposure_write_version = initialize->Write(exposure_write_version, Access::CopyDest);
-            layout.first = exposure_read_version;
-            layout.second = exposure_write_version;
+            layout.output = exposure_read_version;
         }
         initialize->SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            for (auto &value : owned_view.exposure_values)
-                list->CopyBufferRegion(value.resource.Get(), 0, owned_view.initial_exposure.resource.Get(), 0, 2 * sizeof(float));
+            list->CopyBufferRegion(owned_view.exposure_value.resource.Get(), 0, owned_view.initial_exposure.resource.Get(), 0, 2 * sizeof(float));
         });
     }
 
-    if (owned_view.ui_dirty[frame_slot])
+    if (redraw_ui)
     {
-    auto &layout = pending_graph_layout.initial.ui;
-    std::optional<PassBuilder> ui_upload_pass;
-    if (restored_graph)
-    {
-        ui_upload_pass = impl_->graph.BindPass(layout.pass_index, 23);
-        if (!ui_upload_pass) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "UI upload does not match the retained graph plan.");
-        ui_version = layout.output;
-    }
-    else
-    {
-        layout.pass_index = impl_->graph.PassCount();
-        ui_upload_pass = impl_->graph.AddPass(23, kRenderPassNames[23], QueueHint::Copy);
-        ui_version = ui_upload_pass->Write(ui_version, Access::CopyDest);
-        layout.output = ui_version;
-    }
-    ui_upload_pass->SetExecute([&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = ui_texture.resource.Get();
-        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = frame.ui_upload.resource.Get();
-        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        source.PlacedFootprint = owned_view.ui.footprint;
-        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-    });
+        const auto geometry = import_buffer(frame.ui_upload, Access::ShaderRead, "UiQuads");
+        auto &layout = pending_graph_layout.initial.ui;
+        std::optional<PassBuilder> draw;
+        if (restored_graph)
+        {
+            draw = impl_->graph.BindPass(layout.pass_index, 23);
+            if (!draw) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "UI draw does not match the retained graph plan.");
+            ui_version = layout.output;
+        }
+        else
+        {
+            layout.pass_index = impl_->graph.PassCount();
+            draw = impl_->graph.AddPass(23, kRenderPassNames[23], QueueHint::Direct);
+            draw->Read(impl_->graph.Version(geometry), Access::ShaderRead);
+            ui_version = draw->Write(ui_version, Access::RenderTarget);
+            layout.output = ui_version;
+        }
+        for (auto &page : owned_view.ui.atlas)
+        {
+            const auto buffer = import_buffer(page.buffer, Access::ShaderRead, "UiGlyphAtlas");
+            if (!restored_graph) draw->Read(impl_->graph.Version(buffer), Access::ShaderRead);
+        }
+        const auto ui_rtv = rtv_at(kUiRtvOffset);
+        impl_->device->CreateRenderTargetView(ui_texture.resource.Get(), nullptr, ui_rtv);
+        draw->SetExecute([&, ui_rtv](RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            const float transparent[4]{};
+            list->ClearRenderTargetView(ui_rtv, transparent, 0, nullptr);
+            list->OMSetRenderTargets(1, &ui_rtv, FALSE, nullptr);
+            list->RSSetViewports(1, &output_viewport);
+            list->RSSetScissorRects(1, &output_scissor);
+            list->SetGraphicsRootSignature(impl_->ui_draw_root.Get());
+            list->SetPipelineState(impl_->ui_draw_pipeline.Get());
+            list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            const float extent[]{output_viewport.Width, output_viewport.Height};
+            static_assert(std::size(extent) == kUiDrawParameters[UiRootExtent].Constants.Num32BitValues);
+            list->SetGraphicsRoot32BitConstants(UiRootExtent, static_cast<UINT>(std::size(extent)), extent, 0);
+            const auto quad_address = frame.ui_upload.resource->GetGPUVirtualAddress();
+            for (const auto &batch : owned_view.ui.batches)
+            {
+                list->SetGraphicsRootShaderResourceView(UiRootQuads, quad_address + batch.first * sizeof(UiQuad));
+                const auto atlas = owned_view.ui.atlas.empty() ? quad_address :
+                    owned_view.ui.atlas[batch.page].buffer.resource->GetGPUVirtualAddress();
+                list->SetGraphicsRootShaderResourceView(UiRootAtlas, atlas);
+                list->DrawInstanced(4, batch.count, 0, 0);
+            }
+        });
     }
 
     if (initialize_temporal_targets)
@@ -6947,7 +6944,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         list->SetComputeRootUnorderedAccessView(
             8, frame.static_rejected_args.resource->GetGPUVirtualAddress());
         list->Dispatch(kGpuVisibilityBucketCount, active_view_count, 1);
-        if (dynamic_visibility_ref_count != 0)
+        // Empty ranges clear the frame bank's previous indirect arguments too.
         {
             list->SetComputeRootUnorderedAccessView(22, dynamic_lod_state.states.resource->GetGPUVirtualAddress());
             const std::array<UINT, 2> dynamic_constants{
@@ -7599,7 +7596,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         else
         {
             resolve_layout.pass_index = impl_->graph.PassCount();
-            resolve = impl_->graph.AddPass(30, "SurfaceResolve", QueueHint::Compute);
+            resolve = impl_->graph.AddPass(30, "Material.Resolve", QueueHint::Compute);
             read_material_sampling(*resolve, has_authored_material_draw, MaterialSampling::Surface, Access::ComputeRead);
             impl_->ReadClusterFrame(*resolve, cluster_graph, false);
             impl_->ReadHlodFrame(*resolve, hlod_graph, false);
@@ -7957,30 +7954,36 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     local_probe_inputs.scene = static_scene;
     local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
     local_probe_inputs.static_instance_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0;
-    local_probe_inputs.material_parameter_revision = impl_->material_parameter_revision;
+    local_probe_inputs.material_parameter_revision =
+        impl_->material_parameter_revision - impl_->baked_generation_material_revision;
     local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
     local_probe_inputs.foliage_density = foliage_density;
     local_probe_inputs.frame_constants = constants;
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if (has_static_authored_material_draw)
         local_probe_inputs.declare_material_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, true); };
     if (has_static_masked_material_draw)
         local_probe_inputs.declare_shadow_sampling = [&](PassBuilder &pass) {
             read_material_sampling(pass, true, MaterialSampling::Opacity);
         };
+#endif
     local_probe_inputs.frame_srv_heap = impl_->srv_cpu_heap;
     local_probe_inputs.sampler_heap = impl_->sampler_heap;
     local_probe_inputs.frame_srv_base = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     local_probe_inputs.frame_srv_base.ptr += static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount * impl_->srv_stride;
     local_probe_inputs.sampler_table = sampler_table;
     local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
+#if defined(HS_OFFLINE_PROBE_BAKER)
     local_probe_inputs.bind_graphics = [&](ID3D12GraphicsCommandList *list) { bind_graphics(list); bind_scene_roots(list, false); };
     local_probe_inputs.restore_graphics = [&](ID3D12GraphicsCommandList *list) {
         bind_graphics(list); bind_scene_roots(list, false);
         list->OMSetRenderTargets(surface_target_count, surface_rtvs.data(), FALSE, &dsv);
     };
+#endif
     if (!local_probe_prepared && local_probe_revision_preflight)
         if (auto decided = impl_->local_probes.PrepareFrameDecisionData(
                 local_probe_inputs, local_probe_plan); !decided) return decided;
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if ((!local_probe_prepared || local_probe_plan.capture) &&
         (!local_probe_revision_preflight || local_probe_plan.capture) &&
         impl_->local_probes.AllocatedBytes() != 0 && static_scene && impl_->static_gpu_scene)
@@ -8023,7 +8026,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
         capture_read(frame.upload, false, "ProbeMainBindings");
         capture_read(impl_->material_parameters, false, "ProbeMaterialParameters", material_parameter_version);
-        capture_read(impl_->hero_material_bindings_gpu, false, "ProbeHeroBindings", hero_binding_version);
+        capture_read(impl_->mesh_material_bindings_gpu, false, "ProbeHeroBindings", hero_binding_version);
         capture_read(impl_->environment_brdf_lut, true, "ProbeBrdfLut");
         if (!restored_graph)
         {
@@ -8046,6 +8049,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         local_probe_inputs.pages = *capture_pages;
         local_probe_inputs.scene_reads = capture_reads;
     }
+#endif
     LocalProbeOutputs local_probe_outputs;
     pending_effects.probe_scene = static_scene;
     pending_effects.local_probes = impl_->local_probes.AllocatedBytes() != 0;
@@ -8259,8 +8263,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     diffusion_constants.quality_options.x = impl_->QualityProfileFor(impl_->config.material_quality).subsurface_half_samples;
     std::copy(constants->material_parameter_bases.begin(), constants->material_parameter_bases.end(),
               diffusion_constants.material_parameter_bases);
-    std::copy(constants->hero_material_parameter_bases.begin(), constants->hero_material_parameter_bases.end(),
-              diffusion_constants.hero_material_parameter_bases);
+    std::copy(constants->character_material_parameter_bases.begin(), constants->character_material_parameter_bases.end(),
+              diffusion_constants.character_material_parameter_bases);
     const SubsurfaceInputs diffusion_inputs{
         {depth_version, owned_view.targets.depth.resource.Get()},
         {gbuffer_normal_version, surface_normal_resource},
@@ -8641,13 +8645,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     });
 
     record_graph_substage(cpu_timings.graph_opaque_us);
-    HeroTransparencyOutputs hero_outputs;
-    HeroTransparencyInputs hero_inputs;
-    std::vector<HeroTransparencySceneRead> hero_scene_reads, hero_peel_reads;
+    LayeredTranslucencyOutputs hero_outputs;
+    LayeredTranslucencyInputs hero_inputs;
+    std::vector<LayeredTranslucencySceneRead> hero_scene_reads, hero_peel_reads;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    struct HeroWorkBinding { std::size_t bucket{}; bool immutable{}; };
-    std::vector<HeroWorkContributorInput> hero_work_contributors;
-    std::vector<HeroWorkBinding> hero_work_bindings;
+    struct TranslucencyDiagnosticsBinding { std::size_t bucket{}; bool immutable{}; };
+    std::vector<TranslucencyDiagnosticsContributorInput> translucency_diagnostics_contributors;
+    std::vector<TranslucencyDiagnosticsBinding> translucency_diagnostics_bindings;
 #endif
     // All three water LOD ranges above refer to the same conservative source set.
     // Empty contributors export absent guides; downstream consumers select their opaque path.
@@ -8723,6 +8727,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         // Four occupied layers were common in the dense baseline. Query and
         // resolve only when a small source set can plausibly leave layers empty.
         hero_inputs.use_occupancy_queries = hero_occupancy_topology;
+        hero_inputs.single_layer_water = single_layer_water;
         hero_inputs.accumulation = {oit_accumulation_version, owned_view.targets.oit_accumulation.resource.Get()};
         hero_inputs.revealage = {oit_revealage_version, owned_view.targets.oit_revealage.resource.Get()};
         hero_inputs.accumulation_rtv = oit_accumulation_rtv;
@@ -8735,14 +8740,14 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         hero_inputs.descriptor_source_heap = impl_->srv_cpu_heap.Get();
         hero_inputs.table_cpu = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         hero_inputs.table_cpu.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
-            kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
+            kLayeredTranslucencyDescriptorOffset) * impl_->srv_stride;
         hero_inputs.table_gpu = texture_table;
-        hero_inputs.table_gpu.ptr += static_cast<UINT64>(kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
+        hero_inputs.table_gpu.ptr += static_cast<UINT64>(kLayeredTranslucencyDescriptorOffset) * impl_->srv_stride;
         hero_inputs.descriptor_stride = impl_->srv_stride;
         hero_inputs.scene_reads = hero_scene_reads;
         hero_inputs.peel_reads = hero_peel_reads;
         hero_inputs.draw = [&](ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
-                              HeroTransparencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE table) {
+                              LayeredTranslucencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE table) {
             bind_graphics(list);
             bind_scene_roots(list);
             list->SetGraphicsRootDescriptorTable(36, table);
@@ -8779,16 +8784,16 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             }
         };
 #if defined(HS_DEVELOPMENT_TOOLS)
-        if (capture_hero_work)
+        if (capture_translucency_diagnostics)
         {
             static_assert(kGeometryArgumentStride == 24);
             if (impl_->rendered_submission_count == UINT64_MAX)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
-            hero_work_contributors.reserve(HeroWorkRetainedLayout::kMaxContributors);
-            hero_work_bindings.reserve(HeroWorkRetainedLayout::kMaxContributors);
+            translucency_diagnostics_contributors.reserve(TranslucencyDiagnosticsRetainedLayout::kMaxContributors);
+            translucency_diagnostics_bindings.reserve(TranslucencyDiagnosticsRetainedLayout::kMaxContributors);
             const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
                 const auto &page = *bucket_pages[bucket];
-                HeroWorkContributorInput contributor;
+                TranslucencyDiagnosticsContributorInput contributor;
                 contributor.source.asset_id = page.source_asset.value;
                 contributor.source.product = page.source_product;
                 contributor.source.label = std::move(label);
@@ -8821,8 +8826,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 contributor.arguments = immutable ? static_draw_args_version : dynamic_draw_args_version;
                 contributor.argument_resource = immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
                 contributor.argument_offset = bucket*kGeometryArgumentStride;
-                hero_work_contributors.push_back(std::move(contributor));
-                hero_work_bindings.push_back({bucket,immutable});
+                translucency_diagnostics_contributors.push_back(std::move(contributor));
+                translucency_diagnostics_bindings.push_back({bucket,immutable});
             };
             if (has_translucent_hero_binding(0) && archer_range.second)
                 append_work(kArcherVisibilityBucket, false, static_cast<std::uint32_t>(archer_range.second), "archer");
@@ -8839,15 +8844,15 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     if (static_environment_ranges[bucket].second)
                         append_work(bucket,true,static_cast<std::uint32_t>(static_environment_ranges[bucket].second),"water");
                 }
-            hero_inputs.work_contributors = hero_work_contributors;
+            hero_inputs.work_contributors = translucency_diagnostics_contributors;
             hero_inputs.submitted_frame = impl_->rendered_submission_count+1;
             hero_inputs.tick = snapshot.header.tick;
             hero_inputs.view_id = view_input.id.value;
             hero_inputs.direct_queue = impl_->graph_queue_executor.NativeQueue(QueueHint::Direct);
             hero_inputs.direct_timestamp_frequency = impl_->graph_queue_executor.TimestampFrequency(QueueHint::Direct);
-            hero_inputs.work_draw = [&, bindings=hero_work_bindings](ID3D12GraphicsCommandList *list,
-                ID3D12PipelineState *pipeline, HeroTransparencyPhase, std::uint32_t,
-                D3D12_GPU_DESCRIPTOR_HANDLE table, std::uint32_t contributor, std::uint64_t diagnostic_uav) -> HeroWorkDrawCalls {
+            hero_inputs.work_draw = [&, bindings=translucency_diagnostics_bindings](ID3D12GraphicsCommandList *list,
+                ID3D12PipelineState *pipeline, LayeredTranslucencyPhase, std::uint32_t,
+                D3D12_GPU_DESCRIPTOR_HANDLE table, std::uint32_t contributor, std::uint64_t diagnostic_uav) -> TranslucencyDiagnosticsDrawCalls {
                 const auto binding = bindings.at(contributor);
                 bind_graphics(list);
                 bind_scene_roots(list);
@@ -8943,7 +8948,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto raw_composite_version = composite_hdr_version;
     if (pending_effects.transparency)
     {
-        const HeroTransparencyGuide background{composite_hdr_version, composite_hdr_resource};
+        const LayeredTranslucencyGuide background{composite_hdr_version, composite_hdr_resource};
         const auto registered_composition = restored_graph
             ? owned_view.hero_transparency.BindRetainedComposition(impl_->graph, background,
                 pending_graph_layout.hero, hero_outputs)
@@ -8958,6 +8963,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         auto descriptor = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         descriptor.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
             kViewDescriptorOffset + 4) * impl_->srv_stride;
+        impl_->device->CopyDescriptorsSimple(1, descriptor, hero_outputs.corrected_srv,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        descriptor.ptr -= 2 * impl_->srv_stride;
         impl_->device->CopyDescriptorsSimple(1, descriptor, hero_outputs.corrected_srv,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
@@ -9007,39 +9015,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             impl_->device->CreateShaderResourceView(nullptr, &null_view, target);
         }
     }
-    ExposureFrameRecordData exposure_records;
-    exposure_records.record[0] = [&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_graphics(list);
-        constexpr float clear[]{0, 0, 0, 0};
-        list->ClearRenderTargetView(scene_work_rtv, clear, 0, nullptr);
-        draw_fullscreen(list, impl_->pre_exposure_pipeline.Get(), scene_work_rtv);
-    };
-    exposure_records.record[1] = [&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_compute(list);
-        list->SetPipelineState(impl_->exposure_clear_pipeline.Get());
-        list->Dispatch(1, 1, 1);
-    };
-    exposure_records.record[2] = [&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_compute(list);
-        list->SetPipelineState(impl_->exposure_build_pipeline.Get());
-        list->Dispatch((owned_view.render_width + 15) / 16, (owned_view.render_height + 15) / 16, 1);
-    };
-    exposure_records.record[3] = [&](RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_compute(list);
-        list->SetPipelineState(impl_->exposure_reduce_pipeline.Get());
-        list->Dispatch(1, 1, 1);
-    };
-    if (auto built = BuildExposureGraph(impl_->graph, composite_hdr_version, exposure_read_version,
-            scene_work_version, histogram_version, exposure_write_version,
-            std::move(exposure_records), pending_graph_layout.exposure, restored_graph); !built) return built;
-    scene_work_version = pending_graph_layout.exposure.scene_work;
-    histogram_version = pending_graph_layout.exposure.histogram;
-    exposure_write_version = pending_graph_layout.exposure.exposure_write;
-
     ReconstructionGuidesOutputs reconstruction_outputs;
     const auto reconstruction_guide = [&](ResourceVersion version) {
         return ReconstructionGuideResource{version, version.resource
@@ -9072,7 +9047,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             guides_inputs.transparent_history = reconstruction_guide(hero_outputs.history);
             guides_inputs.transparent_classification = reconstruction_guide(hero_outputs.classification);
             guides_inputs.transparent_metadata = reconstruction_guide(hero_outputs.metadata);
-            guides_inputs.transparent_overflow = reconstruction_guide(hero_outputs.overflow);
+            guides_inputs.transparent_unpeeled_fragment_count = reconstruction_guide(hero_outputs.unpeeled_fragment_count);
             guides_inputs.transparent_transport = reconstruction_guide(hero_outputs.transport);
         }
         guides_inputs.transparent_guides_enabled = pending_effects.transparency;
@@ -9238,14 +9213,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
 
     PostSubgraphInputs post_inputs{
-        impl_->config.bloom, hdr_version, scene_work_version,
+        impl_->config.bloom, hdr_version, composite_hdr_version,
         depth_version, gbuffer_normal_version, gbuffer_metadata_version,
         gbuffer_motion_version, gbuffer_surface_history_version, temporal_read_version, ui_version,
         temporal_normal_read_version, temporal_material_read_version, exposure_read_version,
         reconstruction_outputs.pre_exposed,
         {hero_outputs.depth, hero_outputs.motion, hero_outputs.history,
-         hero_outputs.classification, hero_outputs.metadata, hero_outputs.overflow, hero_outputs.transport}};
-    post_inputs.reactive_composite_hdr = composite_hdr_version;
+         hero_outputs.classification, hero_outputs.metadata, hero_outputs.unpeeled_fragment_count, hero_outputs.transport}};
     post_inputs.fxaa_identity = fxaa_identity;
     post_inputs.initialize_post_targets = !owned_view.view_targets_initialized;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -9308,6 +9282,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         post_inputs.pre_bloom = [&](RenderGraphBuilder &graph, ResourceVersion hdr, ResourceVersion &processed) -> Result {
             HdrPostConstants post_constants;
             post_constants.inverse_jittered_view_projection = camera_relative_inverse_view_projection;
+            post_constants.lens.x = DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(target, eye)));
             post_constants.previous_unjittered_view_projection = constants->previous_unjittered_view_projection;
             DirectX::XMStoreFloat4(&post_constants.camera_forward, direction);
             post_constants.jitter_uv = constants->surface_jitter_uv;
@@ -9522,13 +9497,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             temporal_normal_read_version, temporal_normal_write_version,
             temporal_material_read_version, temporal_material_write_version})
         if (optional_output.resource) impl_->graph.SetFinalAccess(optional_output, Access::ShaderRead);
-    impl_->graph.SetFinalAccess(scene_work_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(composite_hdr_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(raw_composite_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(display_linear_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(exposure_read_version, Access::AllShaderRead);
-    impl_->graph.SetFinalAccess(exposure_write_version, Access::AllShaderRead);
-    impl_->graph.SetFinalAccess(histogram_version, Access::UnorderedWrite);
     // Bloom intermediates have no retained export; their final consumers own their lifetime.
     if (upload_environment_stream)
         impl_->graph.SetFinalAccess(environment_stream_version, Access::AllShaderRead);
@@ -9692,7 +9664,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         execution_options.timestamp_query_slots = frame.timestamp_query_slots.data();
         execution_options.timestamp_query_slot_count = frame.timestamp_query_slots.size();
     }
-    execution_options.task_executor = &impl_->config.task_executor;
+    execution_options.task_system = impl_->config.task_system;
     frame.timing_prior_output_completion = owned_view.timing_source_output_completion;
 #if defined(HS_DEVELOPMENT_TOOLS)
     frame.timing_clock_before = {};
@@ -9729,8 +9701,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         return marked;
     // A new submission may overwrite this view's HDR source. Failed partial
     // work must not expose it as the previously completed image.
+#if defined(HS_DEVELOPMENT_TOOLS)
     owned_view.hdr_capture_valid = false;
     owned_view.hdr_capture_source.Reset();
+#endif
     cpu_timings.descriptors_us = measure_stage();
 #if defined(HS_DEVELOPMENT_TOOLS)
     frame.timing_execute_begin_qpc = RendererDiagnosticsCounter();
@@ -9853,13 +9827,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         frame.timing_prior_output_completion.direct > completed_at_submit.direct;
     owned_view.timing_source_output_completion = impl_->graph.ResourceCompletion(back_buffer);
     world_step_receipt.submitted = consume_scene_inputs && world_step_requested;
-    if (owned_view.ui_dirty[frame_slot])
-    {
-        auto &surface = owned_view.ui.surfaces[frame_slot];
-        assert(surface.bitmap_valid && surface.bitmap_version != 0);
-        surface.submitted_version = surface.bitmap_version;
-        surface.copy_completion = impl_->graph.ResourceCompletion(ui);
-    }
+    if (redraw_ui) owned_view.ui_draw_content[frame_slot] = frame_input.ui_draw_content;
 #if defined(HS_DEVELOPMENT_TOOLS)
     cpu_stage_start = std::chrono::steady_clock::now();
 #endif
@@ -9876,9 +9844,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     // or post-submit service fails. Only rendered submissions advance it.
     impl_->render_package_id = impl_->active_render_package_id;
     frame.submitted_frame_id = ++impl_->rendered_submission_count;
+#if defined(HS_DEVELOPMENT_TOOLS)
     frame.constants_submission_id = frame.submitted_frame_id;
     owned_view.last_submitted_frame_slot = frame_slot;
     owned_view.last_submitted_frame_id = frame.submitted_frame_id;
+#endif
     frame.submitted_view_id = view_input.id.value;
     frame.timing_source_sequence = ++owned_view.timing_source_sequence;
     frame.timing_kind = GpuFrameTimingKind::Unavailable;
@@ -10089,15 +10059,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     impl_->MarkEnvironmentStreamingUse(frame_slot, submitted_completion);
     transient_pool.SetClaimCompletion(submitted_completion);
     frame.timestamps_recorded = collect_gpu_timing;
-    owned_view.ui_initialized[frame_slot] = true;
-    owned_view.ui_dirty[frame_slot] = false;
     impl_->render_session_id = snapshot.header.session_id;
     owned_view.last_presented_index = output_index;
     owned_view.transient_textures_common = false;
     owned_view.material_sidecars_initialized = true;
     owned_view.view_targets_initialized = true;
     owned_view.exposure_initialized = true;
-    owned_view.exposure_read_index = exposure_write_index;
     owned_view.exposure_sample_time = now;
     if (initialize_temporal_targets) owned_view.temporal_targets_initialized = true;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -10181,6 +10148,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         ++view_owner.history_generation;
     }
     view_owner.scene_lease = static_scene;
+#if defined(HS_DEVELOPMENT_TOOLS)
     owned_view.hdr_capture_source = use_sr_reconstruction
         ? owned_view.reconstruction_guides.RetainPreExposedOutput()
         : Impl::RetainViewAllocation(owned_view.targets.temporal_history[temporal_write_index]);
@@ -10190,6 +10158,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     owned_view.hdr_capture_package_id = impl_->active_render_package_id;
     owned_view.hdr_capture_snapshot_tick = snapshot.header.tick;
     owned_view.hdr_capture_valid = static_cast<bool>(owned_view.hdr_capture_source.resource);
+#endif
     owned_view.view_session_id = snapshot.header.session_id;
     if (!use_native_reconstruction) owned_view.temporal_read_index = temporal_write_index;
     owned_view.temporal_history_valid = temporal_enabled;
@@ -10220,6 +10189,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     }
     ++owned_view.frame_number;
     world_step_receipt.history_committed = true;
+    grass_history_attempt.succeeded = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    owned_view.translucency_capture_active = static_cast<bool>(hero_outputs.depth.resource);
+#endif
     cpu_timings.post_submit_us = measure_stage();
 #if defined(HS_DEVELOPMENT_TOOLS)
     const auto present_begin_qpc = presented_view ? RendererDiagnosticsCounter() : 0;
@@ -10255,7 +10228,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         presented_view ? RendererDiagnosticsCounter() : 0, LastQueueStats(), impl_->DiagnosticsMemory(),
         impl_->config.validation, impl_->config.gpu_validation, presented_view, view_input.id.value);
 #endif
-    grass_history_attempt.succeeded = true;
     frame_result = {owned_view.frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)
                     show_devtools && ImGui::GetIO().WantCaptureMouse,

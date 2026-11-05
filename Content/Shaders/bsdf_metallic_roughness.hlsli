@@ -57,11 +57,15 @@ float HsBsdfSmithG1(float no_x, float alpha_squared)
     return 2.0 * no_x / max(no_x + sqrt(alpha_squared + (1.0 - alpha_squared) * no_x * no_x), 0.0001);
 }
 
-float HsBsdfD(float no_h, float alpha)
+float HsBsdfDSquared(float no_h, float alpha_squared)
 {
-    float alpha_squared = alpha * alpha;
     float denominator = no_h * no_h * (alpha_squared - 1.0) + 1.0;
     return alpha_squared / (HsBsdfPi * denominator * denominator);
+}
+
+float HsBsdfD(float no_h, float alpha)
+{
+    return HsBsdfDSquared(no_h, alpha * alpha);
 }
 
 float HsBsdfPow5(float x)
@@ -101,11 +105,27 @@ float3 HsBsdfToWorld(float3 value, float3 tangent, float3 bitangent, float3 norm
     return tangent * value.x + bitangent * value.y + normal * value.z;
 }
 
-float3 HsBsdfBaseEvaluateOpticalPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
-                                         float3 wi, float base_fresnel_override)
+struct HsBsdfGgxView
 {
-    float3 light = normalize(wi);
-    float raw_no_v = dot(normal, view);
+    float no_v, alpha_squared, view_smith_denominator;
+};
+
+HsBsdfGgxView HsBsdfPrepareGgxView(HsSurfaceClosure surface, float3 normal, float3 view)
+{
+    HsBsdfGgxView result;
+    result.no_v = dot(normal, view);
+    float alpha = HsBsdfAlpha(surface);
+    result.alpha_squared = alpha * alpha;
+    result.view_smith_denominator = result.no_v + sqrt(result.alpha_squared +
+        (1.0 - result.alpha_squared) * result.no_v * result.no_v);
+    return result;
+}
+
+float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
+{
+    diffuse = 0.0;
+    float raw_no_v = prepared.no_v;
     float raw_no_l = dot(normal, light);
     if (raw_no_v <= 0.0 || raw_no_l <= 0.0)
     {
@@ -126,10 +146,9 @@ float3 HsBsdfBaseEvaluateOpticalPrepared(HsSurfaceClosure surface, float3 normal
     // For unit directions VoH = LoH = |wo + wi| / 2. Computing it
     // symmetrically preserves reciprocity at grazing angles in float math.
     float vo_h = saturate(0.5 * sqrt(half_vector_length_squared));
-    float alpha = HsBsdfAlpha(surface);
-    float alpha_squared = alpha * alpha;
-    float distribution = HsBsdfD(no_h, alpha);
-    float view_smith_denominator = no_v + sqrt(alpha_squared + (1.0 - alpha_squared) * no_v * no_v);
+    float alpha_squared = prepared.alpha_squared;
+    float distribution = HsBsdfDSquared(no_h, alpha_squared);
+    float view_smith_denominator = prepared.view_smith_denominator;
     float light_smith_denominator = no_l + sqrt(alpha_squared + (1.0 - alpha_squared) * no_l * no_l);
     float metallic = HsBsdfMetallic(surface);
     float3 fresnel = HsBsdfOpticalReflectionFresnel(surface, vo_h, base_fresnel_override);
@@ -141,9 +160,24 @@ float3 HsBsdfBaseEvaluateOpticalPrepared(HsSurfaceClosure surface, float3 normal
     float3 diffuse_transmission =
         (1.0 - HsBsdfSchlickFresnel(HsBsdfF0(surface), no_v)) *
         (1.0 - HsBsdfSchlickFresnel(HsBsdfF0(surface), no_l));
-    float3 diffuse = diffuse_transmission * ((1.0 - metallic) * surface.base_color) * HsBsdfInvPi;
+    diffuse = diffuse_transmission * ((1.0 - metallic) * surface.base_color) * HsBsdfInvPi;
     float3 specular = distribution * fresnel / (view_smith_denominator * light_smith_denominator);
     return diffuse + specular;
+}
+
+float3 HsBsdfBaseEvaluateOpticalComponentsPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, out float3 diffuse)
+{
+    return HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override,
+        HsBsdfPrepareGgxView(surface, normal, view), diffuse);
+}
+
+float3 HsBsdfBaseEvaluateOpticalPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
+                                         float3 wi, float base_fresnel_override)
+{
+    float3 diffuse;
+    return HsBsdfBaseEvaluateOpticalComponentsPrepared(surface, normal, view, normalize(wi),
+        base_fresnel_override, diffuse);
 }
 
 float3 HsBsdfBaseEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)

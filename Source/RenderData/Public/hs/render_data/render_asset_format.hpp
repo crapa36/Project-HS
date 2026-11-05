@@ -82,6 +82,7 @@ enum class ChunkType : std::uint32_t
     QualityProfiles = 44,
     AutoFgCadence = 45,
     GeometryMaterialReference = 46,
+    TerrainSurfaceSections = 47,
     GeometryMetadata = 13,
     GeometryVertices = 14,
     GeometryIndices = 15,

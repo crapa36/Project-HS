@@ -185,14 +185,14 @@ void ValidateCharacterDescriptor(const CharacterDescriptor &value, std::span<con
     {
         const auto &binding = value.material_bindings[i];
         Require(binding.slot < value.material_count && binding.dependency_index < value.dependencies.size() &&
-                binding.hero_ordinal < kHeroMaterialNames.size() && value.materials[i].value < materials.size(), "invalid FBX material binding");
+                binding.hero_ordinal < kCharacterMaterialNames.size() && value.materials[i].value < materials.size(), "invalid FBX material binding");
         const auto &material = materials[value.materials[i].value];
         Require(material.kind == MaterialKind::Hero && material.domain == binding.domain &&
                 material.asset_id.value == value.dependencies[binding.dependency_index].value && material.asset_id.value ==
-                MakeAssetId("render/material/" + std::string(kHeroMaterialNames[binding.hero_ordinal]) + "/material.rpkg").value,
+                MakeAssetId("render/material/" + std::string(kCharacterMaterialNames[binding.hero_ordinal]) + "/material.rpkg").value,
                 "character material identity or domain mismatch");
-        auto &seen = binding.domain == HeroMaterialDomain::Opaque ? opaque : translucent;
-        Require(binding.domain <= HeroMaterialDomain::Translucent && !seen[binding.slot], "duplicate character material domain");
+        auto &seen = binding.domain == CharacterMaterialDomain::Opaque ? opaque : translucent;
+        Require(binding.domain <= CharacterMaterialDomain::Translucent && !seen[binding.slot], "duplicate character material domain");
         seen[binding.slot] = true;
     }
     for (std::size_t slot=0;slot<value.material_count;++slot)

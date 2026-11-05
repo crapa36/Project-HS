@@ -212,9 +212,9 @@ struct Arguments
             {
                 last_write = write;
                 const auto state = heartbeat.value("state", std::string{});
-                // Simulation creates its running heartbeat only after renderer
-                // initialization. Native PSO compilation belongs to startup.
-                if (state == "running" || state == "finished")
+                // First recording can still compile driver/validation shaders.
+                // Tick zero belongs to startup until simulation makes progress.
+                if ((state == "running" && heartbeat.value("tick", std::uint64_t{}) != 0) || state == "finished")
                 {
                     running_heartbeat_started = true;
                     last_progress = std::chrono::steady_clock::now();

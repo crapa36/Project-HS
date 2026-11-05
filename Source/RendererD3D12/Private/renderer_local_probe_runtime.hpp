@@ -57,7 +57,7 @@ struct LocalProbeRuntimeFrameInputs
     std::shared_ptr<const StaticRenderScene> scene;
     std::span<const LightView> lights; // Same authoritative static lights bound below.
     std::uint32_t static_instance_generation{};
-    std::uint64_t material_parameter_revision{}, pipeline_revision{};
+    std::uint64_t material_parameter_revision{}, pipeline_revision{}; // Material overrides since admitted Generation.
     float foliage_density{};
     const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
     std::span<const LocalProbePageRevision> page_revisions;
@@ -90,6 +90,13 @@ struct LocalProbeRuntimeFrameInputs
 };
 
 struct LocalProbeCaptureState;
+#if defined(HS_DEVELOPMENT_TOOLS)
+struct LocalProbeRevisionDiagnostics
+{
+    render_data::SceneProbeRevisions baseline, compatibility;
+    std::uint64_t material_parameter_revision{};
+};
+#endif
 struct LocalProbeRuntimeFramePlan
 {
     const LocalProbeRuntimeFrameInputs *source{};
@@ -161,6 +168,9 @@ class LocalProbeRuntime
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
     [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    [[nodiscard]] LocalProbeRevisionDiagnostics RevisionDiagnostics() const;
+#endif
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.

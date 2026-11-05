@@ -49,6 +49,21 @@ presentation_catalog.hsbin
 
 Use the narrowest existing check that answers the risk introduced by the change.
 
+구조 간소화와 최적화를 우선하고, 관련 수정을 모은 뒤 빌드와 필요한 기존 검사를 묶어서 실행한다.
+변경 위험을 직접 잡지 못하는 중복 테스트·상태 검사·진단 코드는 추가하지 말고 정리한다.
+승인된 불변 계약은 생성·입력 경계에서 확정하고 내부 소비 경로에서 반복 검증하지 않는다.
+렌더 화질은 같은 조건의 실제 화면과 움직임 안정성을 보고 판단한다.
+원본과의 수치 차이는 진단 자료이며, 원본을 자동으로 더 좋은 결과로 간주하지 않는다.
+
+자동 테스트·플레이 테스트·성능 측정은 게임의 모든 출력음을 음소거하여 실행한다.
+기존 실행별 음소거를 사용하고 사용자 저장 오디오 설정은 변경하지 않는다.
+오디오 처리·재생 경로는 실행하되 master 출력만 0으로 설정한다.
+
+성능 비교의 각 실행 직전에 CPU·GPU 외부 부하를 짧게 확인하고 진행 여부를 판단한다.
+외부 게임 등 큰 부하가 있으면 성능 비교를 보류하고, 가능한 구현·기능 검사는 계속한다.
+실행 도중 외부 부하가 커진 결과도 오염된 측정으로 구분하여 성능 채택 근거로 사용하지 않는다.
+사용자의 다른 프로세스를 임의로 종료하지 않는다.
+
 For localized changes, prefer the relevant build/test target before broader workflows.
 
 Keep only tests that detect a distinct product contract. Extend an existing case

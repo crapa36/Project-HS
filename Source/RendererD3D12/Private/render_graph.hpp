@@ -197,7 +197,7 @@ struct ExternalBuffer
 };
 
 class RenderGraphBuilder;
-struct RenderTaskExecutor;
+class TaskSystem;
 struct GpuPassTiming;
 
 struct GraphExecutionOptions
@@ -208,7 +208,7 @@ struct GraphExecutionOptions
     // Optional compiled execution-order to query-pair map; UINT32_MAX skips a pass.
     const std::uint32_t *timestamp_query_slots{};
     std::size_t timestamp_query_slot_count{};
-    const RenderTaskExecutor *task_executor{};
+    TaskSystem *task_system{};
     // Optional capture output in compiled execution order; each recording task owns one element.
     GpuPassTiming *cpu_pass_timings{};
     std::size_t cpu_pass_timing_count{};

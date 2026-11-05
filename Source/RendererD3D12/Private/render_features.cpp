@@ -67,8 +67,7 @@ Result CompilePostSubgraphs(const PostSubgraphInputs &inputs,
                  inputs.motion, inputs.surface_history, inputs.depth, inputs.temporal_history},
                 candidate.outputs.temporal); !added) return added;
         auto &pass = candidate.passes.back();
-        for (const auto version : {inputs.reactive_composite_hdr, inputs.temporal_normal_history,
-                                  inputs.temporal_material_history})
+        for (const auto version : {inputs.temporal_normal_history, inputs.temporal_material_history})
             if (version.resource) pass.reads.push_back({version, Access::ShaderRead});
         if (inputs.exposure.resource) pass.reads.push_back({inputs.exposure, Access::ShaderRead});
         for (const auto guide : inputs.transparent_guides)

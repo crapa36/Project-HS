@@ -74,6 +74,13 @@ void TestShippingImage()
     info.font_digest={std::byte{0x53},std::byte{0x15},std::byte{0x63},std::byte{0xb6},std::byte{0x9e},std::byte{0x24},std::byte{0xdd},std::byte{0xc9},std::byte{0x1d},std::byte{0x9c},std::byte{0x8a},std::byte{0x87},std::byte{0xe2},std::byte{0x9e},std::byte{0x51},std::byte{0xae},std::byte{0xc3},std::byte{0x79},std::byte{0xa3},std::byte{0x6e},std::byte{0x25},std::byte{0xa2},std::byte{0x89},std::byte{0x15},std::byte{0x9e},std::byte{0x00},std::byte{0xed},std::byte{0xca},std::byte{0xf5},std::byte{0xde},std::byte{0x3b},std::byte{0x48}};
     std::vector<std::byte> font;
     Check(hs::shipping::ReadFont(owner,info,font).Succeeded() && font==std::vector<std::byte>(valid.begin()+64,valid.end()), "packed font exact range");
+    hs::shipping::ShippingRange vfx{info.font_offset, info.font_bytes, info.font_digest};
+    std::vector<std::byte> vfx_bytes;
+    Check(hs::shipping::ReadRange(owner,vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"packed VFX range verified");
+    auto invalid_vfx=vfx; invalid_vfx.size=UINT64_MAX;
+    Check(!hs::shipping::ReadRange(owner,invalid_vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"invalid VFX range preserves output");
+    invalid_vfx=vfx; invalid_vfx.digest[0]^=std::byte{1};
+    Check(!hs::shipping::ReadRange(owner,invalid_vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"invalid VFX digest preserves output");
     for (const auto range : {std::pair<std::uint64_t,std::uint64_t>{63,1},{64,0},{335,2},{UINT64_MAX,1},{64,UINT64_MAX}})
     {
         auto invalid=info;invalid.font_offset=range.first;invalid.font_bytes=range.second;

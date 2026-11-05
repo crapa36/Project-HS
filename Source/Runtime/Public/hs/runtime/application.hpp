@@ -3,7 +3,7 @@
 #include <hs/core/result.hpp>
 #include <hs/core/graphics_settings.hpp>
 #include <hs/core/types.hpp>
-#include <hs/renderer/hero_work.hpp>
+#include <hs/renderer/translucency_diagnostics.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -58,8 +58,8 @@ struct ApplicationConfig
     bool capture_diagnostics{}; // Opt in to full performance CSV/NDJSON; ordinary play writes no detailed logs.
     bool capture_gpu_timings{true}; // Diagnostics may record CPU cadence without intrusive GPU queries.
     std::uint32_t diagnostic_enemy_count{}; // Smoke + diagnostics only; zero keeps ordinary spawning.
-    bool capture_hero_work{}; // Isolated developer native-query capture; ordinary performance runs leave false.
-    HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
+    bool capture_translucency_diagnostics{}; // Isolated developer native-query capture; ordinary performance runs leave false.
+    TranslucencyDiagnosticsMode translucency_diagnostics_mode{TranslucencyDiagnosticsMode::Full};
     std::optional<GraphicsPreset> graphics_preset;
     std::optional<SurfaceFrontend> surface_frontend;
     std::optional<GraphicsOptionalQuality> pom_quality;

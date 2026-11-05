@@ -61,7 +61,10 @@ LocalProbeCaptureOutput HsCaptureStaticSurface(SceneOutput input,bool front,bool
     // clips along its axis. Hits beyond the radial bound remain global sky.
     if(distance>TemporalOptions.z) discard;
     const HsSceneGradients gradients=RasterSceneGradients(input);
-    if(!HsSceneCovered(input,front,opaque,gradients,SceneDrawMaterial)) discard;
+    // A signed opaque exit lets the offline baker reject embedded nodes.
+    // Reflection captures retain the authored front-face coverage policy.
+    const bool solid_exit=TemporalOptions.x>0 && opaque && !front;
+    if(!HsSceneCovered(input,front || solid_exit,opaque,gradients,SceneDrawMaterial)) discard;
     const HsMaterialContext context=EnvironmentMaterialContext(input,front,gradients,SceneDrawMaterial);
     HsSurfaceClosure surface=HsMaterialEvaluateSurface(context);
     if(input.Mesh==19u)surface.base_color*=MeadowDryGrassGain(input.EnvironmentStableWorld.xz);
@@ -88,7 +91,7 @@ LocalProbeCaptureOutput HsCaptureStaticSurface(SceneOutput input,bool front,bool
     }
     LocalProbeCaptureOutput output;
     output.Radiance=float4(max(radiance+surface.emission,0.0),1.0);
-    output.FirstHitDistance=distance;
+    output.FirstHitDistance=solid_exit?-distance:distance;
     return output;
 }
 LocalProbeCaptureOutput LocalProbeOpaqueCapturePS(SceneOutput input,bool front : SV_IsFrontFace)

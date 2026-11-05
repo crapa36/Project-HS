@@ -27,9 +27,9 @@ void Require(bool value, const std::string &message)
 
 std::uint32_t HeroOrdinal(const std::string &name)
 {
-    const auto found = std::ranges::find(rd::kHeroMaterialNames, name);
-    Require(found != rd::kHeroMaterialNames.end(), "unknown authored hero material: " + name);
-    return static_cast<std::uint32_t>(found - rd::kHeroMaterialNames.begin());
+    const auto found = std::ranges::find(rd::kCharacterMaterialNames, name);
+    Require(found != rd::kCharacterMaterialNames.end(), "unknown authored hero material: " + name);
+    return static_cast<std::uint32_t>(found - rd::kCharacterMaterialNames.begin());
 }
 
 void AppendMonsterIntervalBounds(rd::MonsterCharacterData &data,const CharacterIR &character,
@@ -425,8 +425,8 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     bool monster_pbr{};
     for (const auto &binding : materials)
     {
-        Require(binding.hero_ordinal < rd::kHeroMaterialNames.size(), "invalid hero material ordinal");
-        const auto name = rd::kHeroMaterialNames[binding.hero_ordinal];
+        Require(binding.hero_ordinal < rd::kCharacterMaterialNames.size(), "invalid hero material ordinal");
+        const auto name = rd::kCharacterMaterialNames[binding.hero_ordinal];
         dependencies.push_back("render/material/" + std::string(name) + "/material.rpkg");
         monster_pbr |= name == "monster_pbr";
     }
@@ -445,7 +445,7 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     std::vector<rd::CharacterMaterialBinding> bindings;
     for (const auto &binding : materials)
     {
-        const auto id = "render/material/" + std::string(rd::kHeroMaterialNames[binding.hero_ordinal]) + "/material.rpkg";
+        const auto id = "render/material/" + std::string(rd::kCharacterMaterialNames[binding.hero_ordinal]) + "/material.rpkg";
         const auto domain = std::ranges::find(material_domains, binding.hero_ordinal,
             &CharacterMaterialDomainSelection::hero_ordinal);
         Require(domain != material_domains.end(), "character material domain was not derived from its upstream package");
@@ -554,9 +554,9 @@ void ValidateCharacterProductBindings(const PreparedCharacterBinding &prepared,
     bool monster_pbr{};
     for (const auto &binding : character.material_bindings)
     {
-        const auto name = rd::kHeroMaterialNames[binding.hero_ordinal];
+        const auto name = rd::kCharacterMaterialNames[binding.hero_ordinal];
         const auto &id = package.dependencies[binding.dependency_index];
-        const auto material = rd::ReadHeroMaterialPackage(bytes(id), name);
+        const auto material = rd::ReadCharacterMaterialPackage(bytes(id), name);
         Require(material.domain == binding.domain, "character material binding disagrees with the cooked closure domain");
         monster_pbr |= name == "monster_pbr";
     }

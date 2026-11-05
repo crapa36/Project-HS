@@ -7,8 +7,8 @@
 
 namespace hs
 {
-enum class HeroWorkDiagnosticMode : std::uint8_t { Full, NoEnvironment, CoverageOnly };
-inline constexpr std::array<const char *, 29> kHeroWorkShaderCounterNames{
+enum class TranslucencyDiagnosticsMode : std::uint8_t { Full, NoEnvironment, CoverageOnly };
+inline constexpr std::array<const char *, 29> kTranslucencyDiagnosticsShaderCounterNames{
     "shader_entries",
     "input_covered_samples",
     "unique_input_pixels",
@@ -41,7 +41,7 @@ inline constexpr std::array<const char *, 29> kHeroWorkShaderCounterNames{
 };
 // Development capture only. Raw hardware counts are not unique pixels, rejected
 // layers, full-material evaluations, or exclusive critical-path contributions.
-struct RendererHeroWorkContributor
+struct RendererTranslucencyDiagnosticsContributor
 {
     std::uint64_t asset_id{};
     std::string product, label; // label is diagnostic, never a semantic asset ID.
@@ -49,7 +49,7 @@ struct RendererHeroWorkContributor
     std::uint32_t lod{}, material{0xFFFFFFFFu}, candidate_instances{}, geometry_indices{};
     std::uint32_t color_format{}, data_format{}, color_mips{}, data_mips{};
 };
-struct RendererHeroWorkPipeline
+struct RendererTranslucencyDiagnosticsPipeline
 {
     std::string vertex_product, pixel_product;
     std::array<std::byte, 32> vertex_sha256{}, pixel_sha256{};
@@ -65,12 +65,12 @@ struct RendererHeroWorkPipeline
     std::uint32_t rtv_count{}, dsv_format{};
     bool compiler_flags_verified_from_binary{};
 };
-struct RendererHeroWorkSample
+struct RendererTranslucencyDiagnosticsSample
 {
     std::uint64_t completed_frame{}, tick{};
     std::uint32_t view_id{}, phase{}, layer{}, contributor{}, width{}, height{};
-    RendererHeroWorkContributor source;
-    RendererHeroWorkPipeline pipeline;
+    RendererTranslucencyDiagnosticsContributor source;
+    RendererTranslucencyDiagnosticsPipeline pipeline;
     std::uint64_t gpu_begin{}, gpu_end{}, gpu_frequency{}, cpu_begin_qpc{}, cpu_end_qpc{}, cpu_qpc_frequency{};
     std::uint64_t calibrated_begin_qpc{}, calibrated_end_qpc{};
     // IA vertices/primitives, VS, GS, GS primitives, clip invocations/primitives,
@@ -82,14 +82,14 @@ struct RendererHeroWorkSample
     bool timestamp_valid{}, calibration_valid{}, statistics_valid{}, mesh_statistics_available{},
         occlusion_valid{}, indirect_arguments_valid{}, indirect_arguments_in_range{};
     // Exact instrumented-shader events, distinct from native PS/occlusion counts.
-    std::array<std::uint32_t, kHeroWorkShaderCounterNames.size()> shader_counters{};
+    std::array<std::uint32_t, kTranslucencyDiagnosticsShaderCounterNames.size()> shader_counters{};
     std::uint32_t shader_counter_flags{}, shader_bitmap_pixels{};
     bool shader_counters_available{}, shader_counters_valid{};
-    HeroWorkDiagnosticMode diagnostic_mode{HeroWorkDiagnosticMode::Full};
+    TranslucencyDiagnosticsMode diagnostic_mode{TranslucencyDiagnosticsMode::Full};
     // Logical evaluator call count is not DCE-retained instruction work.
     bool unique_pixels_available{}, full_material_evaluations_available{}, layer_rejections_available{}, sampled_mip_available{};
 };
-struct RendererHeroWorkStatus
+struct RendererTranslucencyDiagnosticsStatus
 {
     bool enabled{}, overflowed{}, mesh_statistics_supported{};
     // Submission notifications include failed recording/submission attempts;

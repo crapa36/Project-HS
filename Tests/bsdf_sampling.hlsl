@@ -1,4 +1,5 @@
 #include "../Content/Shaders/bsdf_metallic_roughness.hlsli"
+#include "../Content/Shaders/screen_reflection_confidence.hlsli"
 static const float4 ProbeOptions=0;
 SamplerState LinearClamp : register(s0);
 Texture2D<float4> EnvironmentBrdfLut : register(t0);
@@ -48,6 +49,33 @@ float HsProbeMax3(float3 value)
 float HsProbeMaxError(float current, float3 difference)
 {
     return max(current, HsProbeMax3(abs(difference)));
+}
+
+float HsProbeSsrError(uint case_index)
+{
+    float4 reflection = 0.0;
+    float error = 0.0;
+    float3 expected = float3(4.0, 4.0, 4.0);
+    if (case_index == 1u)
+    {
+        reflection = HsSsrContribution(float3(8.0, 8.0, 8.0), 1.0) / 4.0;
+        expected = float3(5.5, 5.5, 5.5);
+    }
+    else if (case_index == 2u)
+    {
+        reflection = HsSsrContribution(float3(8.0, 8.0, 8.0), 0.5);
+        expected = float3(7.0, 7.0, 7.0);
+    }
+    else if (case_index == 3u)
+    {
+        reflection = HsSsrLimitHistory(HsSsrContribution(float3(8.0, 8.0, 8.0), 0.5), 0.0);
+        float4 partial = HsSsrLimitHistory(float4(4.0, 4.0, 4.0, 0.5), 0.25);
+        error = max(HsProbeMax3(abs(partial.rgb - float3(2.0, 2.0, 2.0))), abs(partial.a - 0.25));
+        float4 zero = HsSsrLimitHistory(float4(4.0, 4.0, 4.0, 0.0), 0.0);
+        error = max(error, HsProbeMax3(abs(zero.rgb)));
+    }
+    return max(error, HsProbeMax3(abs(HsSsrCompose(float3(4.0, 4.0, 4.0),
+        float3(2.0, 2.0, 2.0), reflection) - expected)));
 }
 
 float3 HsProbeUniformHemisphere(float2 sample)
@@ -268,6 +296,41 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
         error = HsProbeMaxError(error, raw_diffuse - prepared_diffuse);
         error = HsProbeMaxError(error, raw_specular - prepared_specular);
 
+        // The split diffuse is the attenuated Lambert substrate on either sheet face.
+        HsSurfaceClosure optical = light_surface;
+        optical.solid_transmission_weight = 0.7;
+        const float3 test_light = normalize(index % 4u < 2u ? incident : -incident);
+        const float fresnel_override = (index & 2u) != 0u ? 1.0 : -1.0;
+        float no_view = dot(prepared_normal, prepared_view), no_light = dot(prepared_normal, test_light);
+        float3 expected_diffuse = 0.0;
+        float coat = saturate(optical.coat_weight);
+        float coat_transmission = (1.0-coat*HsBsdfCoatFresnel(no_view))*
+            (1.0-coat*HsBsdfCoatFresnel(abs(no_light)));
+        if (!optical.unlit && no_view > 0.0 && no_light < 0.0)
+            expected_diffuse = HsBsdfThinTransmissionWeight(optical)*HsBsdfThinTransmissionColor(optical)*
+                HsBsdfInvPi*HsBsdfSheenSubstrateScale(optical)*coat_transmission;
+        if (!optical.unlit && no_view > 0.0 && no_light > 0.0)
+        {
+            float3 f0 = HsBsdfF0(optical);
+            expected_diffuse = (1.0-HsBsdfSchlickFresnel(f0,no_view)) *
+                (1.0-HsBsdfSchlickFresnel(f0,no_light)) *
+                ((1.0-HsBsdfMetallic(optical))*optical.base_color)*HsBsdfInvPi;
+            expected_diffuse *= (1.0-HsBsdfThinTransmissionWeight(optical))*
+                HsBsdfSheenSubstrateScale(optical)*coat_transmission;
+        }
+        float3 split_diffuse, split_specular;
+        HsBsdfEvaluateComponentsOpticalPrepared(optical, prepared_view, prepared_normal,
+            flip_normal, test_light, fresnel_override, split_diffuse, split_specular);
+        error = HsProbeMaxError(error, expected_diffuse - split_diffuse);
+        error = max(error, all(isfinite(split_diffuse)) && all(isfinite(split_specular)) &&
+            all(split_diffuse >= 0.0) && all(split_specular >= 0.0) ? 0.0 : 1.0);
+        float3 ordinary_diffuse, ordinary_specular;
+        HsBsdfEvaluateComponentsOpticalPrepared(optical, prepared_view, prepared_normal,
+            flip_normal, test_light, -1.0, ordinary_diffuse, ordinary_specular);
+        error = HsProbeMaxError(error, split_diffuse - ordinary_diffuse);
+        if (fresnel_override == 1.0)
+            error = max(error, HsProbeMax3(max(ordinary_specular - split_specular, 0.0)));
+
         if (index < 2u)
         {
             HsSurfaceClosure base_surface = HsProbeSurface(case_index);
@@ -293,26 +356,6 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
 float HsProbeLobeCoordinate(uint index)
 {
     return frac((float(index) + 0.5) * 0.6180339887498948482);
-}
-
-float HsProbeLocalBlendError(uint case_index)
-{
-    const uint count=case_index==0u?0u:case_index<4u?1u:case_index<6u?4u:5u;
-    const float4 weights=case_index==1u?0:case_index<4u?float4(case_index==2u?.35:1,0,0,0):
-        case_index==4u?float4(.1,.2,.05,.15):float4(.5,1,.25,2);
-    const HsLocalProbeBlend blend=HsLocalProbePrepareBlend(weights,count);
-    float error=max(max(abs(blend.weights.x-weights.x),abs(blend.weights.y-weights.y)),
-        max(abs(blend.weights.z-weights.z),abs(blend.weights.w-weights.w)));
-    // The five-probe path must keep raw cached weights for the generic loop.
-    if(count>4u) return max(error,max(abs(blend.normalization.x),abs(blend.normalization.y)));
-    float total=0; float3 local=0;
-    [loop] for(uint i=0u;i<count;++i)
-        if(weights[i]>0) { total+=weights[i]; local+=weights[i]*float3(i+1u,2u*i+1u,4u-i); }
-    const float3 global=float3(.25,.5,.75);
-    const float cover=saturate(total);
-    const float3 reference=global*(1-cover)+(total>0?local*(cover/total):0);
-    const float3 prepared=global*blend.normalization.x+local*blend.normalization.y;
-    return HsProbeMaxError(error,prepared-reference);
 }
 
 static const uint HsProbeLegacyCaseCount = 7u;
@@ -599,7 +642,7 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
     float pdf_integral = 0.0;
     float valid_count = 0.0;
     float energy = 0.0;
-    float max_error = HsProbeLocalBlendError(case_index);
+    float max_error = case_index < 4u ? HsProbeSsrError(case_index) : 0.0;
     max_error = max(max_error, HsProbePreparedLayeredRegressionError(case_index));
 
     HsBsdfSampleResult below_sample = HsBsdfSample(surface, -normal, 0.0, float2(0.25, 0.75));

@@ -74,19 +74,19 @@ int ProduceSceneProbe(int argc,char **argv)
         ap::RequireDirectory(source); ap::RequireDirectory(build); source=fs::canonical(source); build=fs::canonical(build);
         SelectedGeneration generation; const auto loaded=LoadSelectedGeneration(pointer,generation);
         Require(static_cast<bool>(loaded),std::string(loaded.Message()));
-        Require(generation.product_paths.contains(std::string(kProduct)),"Bake input Generation lacks layout-only SPB1");
+        Require(generation.product_paths.contains(std::string(kProduct)),"Bake input Generation lacks layout-only SPB2");
         const auto layout_path=generation.product_paths.at(std::string(kProduct));
         std::ifstream layout_stream(layout_path,std::ios::binary|std::ios::ate);
-        Require(static_cast<bool>(layout_stream)&&layout_stream.tellg()>0,"Cannot read layout-only SPB1 input");
+        Require(static_cast<bool>(layout_stream)&&layout_stream.tellg()>0,"Cannot read layout-only SPB2 input");
         std::vector<std::byte> layout_bytes(static_cast<std::size_t>(layout_stream.tellg())); layout_stream.seekg(0);
         Require(static_cast<bool>(layout_stream.read(reinterpret_cast<char *>(layout_bytes.data()),static_cast<std::streamsize>(layout_bytes.size()))),
-            "Cannot load layout-only SPB1 input");
+            "Cannot load layout-only SPB2 input");
         const auto layout=rd::ReadSceneProbePackage(layout_bytes,MakeAssetId(kProduct));
-        Require(layout.payload==rd::SceneProbePayload::Layout,"Bake input must be layout-only SPB1");
+        Require(layout.payload==rd::SceneProbePayload::Layout,"Bake input must be layout-only SPB2");
         const auto probe_count=static_cast<std::uint32_t>(layout.probes.size());
 
         ap::ActionSpec spec; spec.action_id=kAction; spec.namespace_path=kNamespace;
-        spec.recipe_id="project-hs.render.scene-probes/native-four-payload"; spec.recipe_version=3;
+        spec.recipe_id="project-hs.render.scene-probes/native-irradiance-grid"; spec.recipe_version=4;
         // The bake layout is an explicit byte input. Its logical product id is
         // also the final baked product id, so it must not be represented as
         // an upstream product of this Action.
@@ -149,7 +149,9 @@ int ProduceSceneProbe(int argc,char **argv)
             Require(static_cast<bool>(baked_stream.read(reinterpret_cast<char *>(baked_bytes.data()),static_cast<std::streamsize>(baked_bytes.size()))),"Cannot read native scene probe output");
             baked_stream.close(); // Windows publication renames the staged ProductSet.
             const auto baked=rd::ReadSceneProbePackage(baked_bytes,MakeAssetId(kProduct));
-            Require(baked.payload==rd::SceneProbePayload::Baked,"Native scene probe output is not four-payload SPB1");
+            Require(baked.payload==rd::SceneProbePayload::Baked && baked.description.grid.NodeCount() &&
+                baked.description.grid.dimensions==layout.description.grid.dimensions &&
+                baked.probes.size()==layout.probes.size(),"Native output is missing the selected baked grid or reflection layout");
             auto product=ap::HashProduct(std::string(kProduct),std::string(kFilename),output);
             product.dependencies=layout.dependencies;
             ap::Publish(build,spec,stage,{std::move(product)});

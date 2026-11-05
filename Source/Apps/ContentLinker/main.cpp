@@ -3,8 +3,8 @@
 #endif
 #include "../AssetPipeline/action.hpp"
 #include "../Content/character_products.hpp"
-#include "../Content/release_vfx_codegen.hpp"
 #include "renderer_identity.hpp"
+#include "vfx_storage_tag.hpp"
 #include "simulation_identity.hpp"
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/presentation/presentation_catalog_io.hpp>
@@ -141,7 +141,7 @@ std::string MaterialSource(std::span<const rd::MaterialDescriptorStorage> materi
         source+="},std::span<const render_data::MaterialParameterSlot>(kMaterialDefaults).subspan("+std::to_string(default_first)+","+std::to_string(m.defaults.size())+"),"+
             "std::span<const render_data::MaterialProgramDescriptor>(kMaterialPrograms).subspan("+std::to_string(program_first)+","+std::to_string(m.programs.size())+"),"+
             "std::span<const render_data::MaterialTextureDescriptor>(kMaterialTextures).subspan("+std::to_string(texture_first)+","+std::to_string(m.textures.size())+"),"+
-            floating(m.metallic)+","+floating(m.roughness_scale)+","+number(m.flags)+","+enumeration("HeroMaterialDomain",m.domain)+",{"+
+            floating(m.metallic)+","+floating(m.roughness_scale)+","+number(m.flags)+","+enumeration("CharacterMaterialDomain",m.domain)+",{"+
             number(m.receivers.model_mask)+","+number(m.receivers.required_surface_flags)+","+number(m.receivers.forbidden_surface_flags)+","+
             enumeration("DecalReceiverNormalFilter",m.receivers.normal_filter)+"}},\n";
         default_first+=m.defaults.size();program_first+=m.programs.size();texture_first+=m.textures.size();
@@ -182,7 +182,7 @@ std::string CharacterSource(std::span<const rd::CharacterDescriptorStorage> char
         const auto c=storage.View();const auto p="kCharacter"+std::to_string(serial++);
         const auto deps=emit("AssetId",p+"Dependencies",c.dependencies,id);
         const auto bindings=emit("render_data::CharacterMaterialBinding",p+"Bindings",c.material_bindings,[&](const auto &b){
-            return "{"+u(b.slot)+","+u(b.dependency_index)+","+u(b.hero_ordinal)+",static_cast<render_data::HeroMaterialDomain>("+u(b.domain)+")}";});
+            return "{"+u(b.slot)+","+u(b.dependency_index)+","+u(b.hero_ordinal)+",static_cast<render_data::CharacterMaterialDomain>("+u(b.domain)+")}";});
         const auto materials=emit("render_data::MaterialHandle",p+"Materials",c.materials,[&](auto x){return "{"+u(x.value)+"}";});
         const auto clips=emit("CharacterClipHeader",p+"Clips",c.clips,[&](const auto &x){return "{static_cast<CharacterAnimationClip>("+u(x.clip)+"),"+
             u(x.looping)+","+u(x.reserved)+","+u(x.first_transform)+","+u(x.frame_count)+","+f(x.duration_seconds)+"}";});
@@ -247,12 +247,15 @@ std::string Header(std::string_view build_id, std::uint64_t file_bytes)
         header[16 + index] = static_cast<char>(value);
     }
     put(48, file_bytes, 8); // Entire pack extent including headerless PCM and font bytes.
-    put(56, 64, 4); // Header extent; reserved bytes 60..63 remain zero.
+    put(56, 64, 4); // Semantic identity keeps the original fixed-header marker.
     return header;
 }
 
 std::string ImageSource(std::string_view header,
-                        std::uint64_t content_hash, std::uint64_t font_offset, std::uint64_t font_bytes, std::string_view font_digest)
+                        std::uint64_t content_hash, std::uint64_t font_offset, std::uint64_t font_bytes, std::string_view font_digest,
+                        const std::array<std::uint64_t,2> &vfx_offsets,
+                        const std::array<std::uint64_t,2> &vfx_sizes,
+                        const std::array<std::string,2> &vfx_digests)
 {
     std::string source =
         "\n#include <hs/runtime/shipping_content.hpp>\n"
@@ -277,7 +280,24 @@ std::string ImageSource(std::string_view header,
         if(index)source+=',';
         source+="std::byte{"+std::to_string(value)+"}";
     }
-    source += "}};\n}\nconst ShippingImageInfo &ImageInfo() noexcept { return kImage; }\n}\n";
+    source += "},{{";
+    for (std::size_t row=0; row<vfx_offsets.size(); ++row)
+    {
+        if (row) source += ',';
+        source += "{" + std::to_string(vfx_offsets[row]) + "ull," + std::to_string(vfx_sizes[row]) + "ull,{";
+        Require(vfx_digests[row].starts_with("sha256:") && vfx_digests[row].size()==71, "invalid VFX digest");
+        for (std::size_t index=0; index<32; ++index)
+        {
+            unsigned value{};
+            const auto begin=vfx_digests[row].data()+7+index*2;
+            const auto [end,error]=std::from_chars(begin,begin+2,value,16);
+            Require(error==std::errc{} && end==begin+2,"invalid VFX digest byte");
+            if (index) source += ',';
+            source += "std::byte{" + std::to_string(value) + "}";
+        }
+        source += "}}";
+    }
+    source += "}}};\n}\nconst ShippingImageInfo &ImageInfo() noexcept { return kImage; }\n}\n";
     return source;
 }
 
@@ -335,7 +355,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     ap::ActionSpec spec;
     spec.action_id = "shipping-image";
     spec.recipe_id = "shipping-image-v1";
-    spec.recipe_version = 17;
+    spec.recipe_version = 18;
     spec.upstream = {presentation_dependency, simulation_dependency, identity_dependency};
     auto rules = std::make_unique<hs::SimulationRules>();
     hs::PresentationCatalog catalog;
@@ -370,7 +390,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     const auto decoded = hs::DecodeVfxImage(Bytes(particle_bytes), Bytes(program_bytes), vfx);
     Require(decoded.Succeeded(), "invalid shipping VFX: " + std::string(decoded.Message()));
     Require(vfx.has_required_sprite_bindings, "shipping VFX omits required status sprite bindings");
-    source += hs::content::EmitReleaseVfxCpp(vfx.View());
+    const std::array<std::string,2> vfx_digests{particles_dependency.digest, program_dependency.digest};
     spec.upstream.push_back(std::move(particles_dependency));
     spec.upstream.push_back(std::move(program_dependency));
     ap::RequireRegularFile(font_path);
@@ -466,6 +486,14 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     spec.upstream.push_back(std::move(audio_pcm_dependency));
     ap::CopyFileBytesTo(font_path,output,font_bytes,font_digest,copy_scratch);
     std::uint64_t extent=64ull+pcm_bytes+font_bytes;
+    const std::array<std::uint64_t,2> vfx_sizes{particle_bytes.size(), program_bytes.size()};
+    Require(vfx_sizes[0] && vfx_sizes[1] && vfx_sizes[0] <= UINT32_MAX && vfx_sizes[1] <= UINT32_MAX,
+        "VFX image exceeds startup read range");
+    Require(vfx_sizes[0] <= UINT64_MAX-extent && vfx_sizes[1] <= UINT64_MAX-extent-vfx_sizes[0], "VFX extent overflow");
+    const std::array<std::uint64_t,2> vfx_offsets{extent, extent+vfx_sizes[0]};
+    write(particle_bytes);
+    write(program_bytes);
+    extent += vfx_sizes[0]+vfx_sizes[1];
     std::string bulk_source="\n#include <hs/render_data/render_bulk.hpp>\nnamespace hs::shipping { namespace {\nconstinit const render_data::RendererBulkDescriptor kRendererBulks[]{\n";
     std::vector<hs::render_data::TextureDescriptorStorage> textures;
     std::vector<rd::GeometryDescriptorStorage> geometries;
@@ -479,7 +507,8 @@ void Link(const fs::path &build_root, const fs::path &font_path,
         write(std::string(static_cast<std::size_t>(aligned-extent),'\0'));
         ap::UpstreamProduct dependency;
         Require(bulk_index<=UINT32_MAX,"renderer bulk index overflow");
-        if(bulk.id.starts_with("render/texture/") && bulk.id.ends_with(".rpkg"))
+        if((bulk.id.starts_with("render/texture/") && bulk.id.ends_with(".rpkg")) ||
+           rd::IsTerrainSurfaceSectionProduct(bulk.id))
         {
             const auto bytes=bulk.snapshot->ReadProductBytes(bulk.id,dependency);
             auto texture=hs::render_data::CompileTextureDescriptor(Bytes(bytes),hs::AssetId{asset},static_cast<std::uint32_t>(bulk_index));
@@ -705,11 +734,16 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     const auto image_digest = ap::Sha256Bytes(semantic.View());
     const auto build_id = image_digest.substr(7);
     const auto action_key = ap::ActionKey(spec);
-    const auto header = Header(build_id, extent);
+    auto header = Header(build_id, extent);
+    const std::array<hs::shipping::ShippingRange,2> vfx_ranges{{
+        {vfx_offsets[0], vfx_sizes[0], hs::Sha256(Bytes(particle_bytes))},
+        {vfx_offsets[1], vfx_sizes[1], hs::Sha256(Bytes(program_bytes))}}};
+    const auto storage_tag = hs::shipping::VfxStorageTag(vfx_ranges);
+    std::memcpy(header.data()+56, storage_tag.data(), storage_tag.size());
     output.seekp(0);write(header);output.flush();Require(bool(output),"cannot flush shipping pack");
     output.close();Require(bool(output),"cannot close shipping pack");
     Require(fs::file_size(temporary)==extent,"staged shipping pack extent differs from its catalog");
-    source += ImageSource(header, content_hash, font_offset, font_bytes, font_digest);
+    source += ImageSource(header, content_hash, font_offset, font_bytes, font_digest, vfx_offsets, vfx_sizes, vfx_digests);
     source += bulk_source;
     const auto shipping = build_root / "Shipping";
     ap::MakeDirectory(shipping);

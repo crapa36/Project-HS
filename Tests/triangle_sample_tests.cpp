@@ -1,7 +1,8 @@
 #include <hs/render_data/triangle_sample.hpp>
-#include <hs/render_data/scene_probe.hpp>
+#include <hs/render_data/scene_probe_grid_bake.hpp>
 #include <hs/core/cooked_format.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -228,10 +229,52 @@ void TestSceneProbeInputIdentity()
     const auto baked=rd::BuildSceneProbePackage(asset,dependencies,baked_description,probes,
         {raw,filtered,sh,distance});
     const auto baked_view=rd::ReadSceneProbePackage(baked,asset);
-    Require(baked_view.payload==rd::SceneProbePayload::Baked,"fixture must contain real four-payload SPB1");
+    Require(baked_view.payload==rd::SceneProbePayload::Baked,"fixture must contain a baked reflection fixture");
     Require(rd::DeriveSceneProbeInputIdentity(baked_view.description,baked_view.probes,
         baked_view.dependencies,inputs)==identity,
         "baked payload bytes and replacement revisions must not affect probe input identity");
+
+    auto grid_description=description;
+    grid_description.grid={{-1,.5f,-1},{2,1,2},{2,2,2}};
+    std::vector<hs::Float4> grid_sh(8*9);
+    grid_sh[7*9]={2,1,.25f,0};
+    rd::SceneProbeCell cell;
+    cell.reachable.fill(0x0f);
+    cell.reachable.back()=0xf0;
+    cell.reflections[0]=1;
+    const auto grid_bytes=rd::BuildSceneProbePackage(asset,dependencies,grid_description,probes,
+        {raw,filtered,grid_sh,{},std::span(&cell,1)});
+    const auto grid=rd::ReadSceneProbePackage(grid_bytes,asset);
+    Require(grid.cosine_sh.size()==grid_sh.size()*sizeof(hs::Float4) && grid.first_hit_distance.empty() &&
+        grid.cells.size()==1 && grid.cells[0].reachable==cell.reachable && grid.cells[0].reflections==cell.reflections,
+        "independent grid SH and subcell wall/reflector masks must survive publication");
+    Require(rd::DeriveSceneProbeInputIdentity(grid.description,grid.probes,dependencies,inputs)!=identity,
+        "grid extent and capture placement must affect semantic identity");
+    bool rejected=false;
+    try { (void)rd::BuildSceneProbePackage(asset,dependencies,grid_description,probes,{raw,filtered,sh,{},std::span(&cell,1)}); }
+    catch(const std::runtime_error &) { rejected=true; }
+    Require(rejected,"a reflection SH set cannot substitute for independent grid samples");
+
+    // Independent analytic scene: a vertical wall bisects the two-metre cell.
+    // Direct each measured intersection to the production mask voxelizer.
+    grid_description.grid={{0,0,0},{2,2,2},{2,2,2}};
+    const auto edge=grid_description.edge;
+    std::vector<float> wall_hits(8*6*edge*edge,100.f);
+    for(unsigned node=0;node<8;++node) for(unsigned face=0;face<6;++face)
+        for(unsigned v=0;v<edge;++v) for(unsigned u=0;u<edge;++u)
+        {
+            const float a=2*(float(u)+.5f)/edge-1,b=2*(float(v)+.5f)/edge-1;
+            const float ray_x=(face==0?1.f:face==1?-1.f:face==5?-a:a)/std::sqrt(1+a*a+b*b);
+            const float hit=(1-grid_description.grid.Position(node).x)/ray_x;
+            if(hit>0) wall_hits[((node*6+face)*edge+v)*edge+u]=hit;
+        }
+    const auto walls=rd::BakeSceneProbeCells(grid_description,probes,wall_hits);
+    Require(walls.size()==1 && walls[0].reflections[0]==1 && walls[0].reachable[20]==0x55 &&
+        walls[0].reachable[23]==0xaa,"irradiance corners must stay on the receiver side of a wall");
+    std::fill_n(wall_hits.begin(),6*edge*edge,-1.f);
+    const auto embedded=rd::BakeSceneProbeCells(grid_description,probes,wall_hits);
+    for(auto mask:embedded[0].reachable)
+        Require(!(mask&1u),"a probe inside an opaque shell cannot illuminate its neighbors");
 
     auto changed=probe; changed.weight=0.5f;
     const std::array changed_probes{changed};

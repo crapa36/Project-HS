@@ -13,15 +13,16 @@ import tempfile
 _spec = importlib.util.spec_from_file_location("hs_graphics_options", Path(__file__).with_name("analyze-graphics-options.py"))
 graphics = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(graphics)
-STAGES = ("adapter", "render", "wait", "streaming", "scene_prepare", "ui", "constants_upload",
+STAGES = ("adapter", "render", "wait", "streaming", "scene_prepare", "ui", "prepare_render_data",
           "graph_build", "graph_prepare", "descriptors", "graph_plan", "graph_record", "graph_submit",
           "post_submit", "present", "diagnostics", "wrapper")
 # Legacy subsets are read only when their columns are present in historical captures.
-SUBSTAGES = {"ray_geometry_register": "graph_build", "ray_omm_prepare_register": "graph_build",
+SUBSTAGES = {"upload_constants": "prepare_render_data", "ray_geometry_register": "graph_build", "ray_omm_prepare_register": "graph_build",
              "ray_scene_register": "graph_build", "graph_prepare_validation": "graph_prepare",
              "graph_prepare_info_key": "graph_prepare", "graph_prepare_compile": "graph_prepare",
              "graph_prepare_transient": "graph_prepare"}
 PHASES = ("main_menu", "playing", "paused", "card_selection", "stat_allocation", "relic_selection", "victory", "defeat", "quit_requested")
+STAGE_LABELS = {"prepare_render_data": "Frame.PrepareRenderData", "upload_constants": "Frame.UploadConstants"}
 
 
 def number(value):
@@ -382,7 +383,7 @@ def analyze(directory):
     settings = {}
     for revision, rows in manifests.items():
         unique = {row["key"]: row for row in rows}
-        if len(rows) != len(unique) or set(unique) not in (graphics.CURRENT_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)) or any(graphics.SETTING_IDS.get(row["key"]) != int(row["setting_id"]) for row in rows):
+        if len(rows) != len(unique) or set(unique) not in (graphics.CURRENT_OPTION_KEYS, graphics.OUTLINE_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)) or any(graphics.SETTING_IDS.get(row["key"]) != int(row["setting_id"]) for row in rows):
             settings_valid = False; issues.append(f"Configuration {revision} lacks a complete current or legacy settings catalog with matching IDs")
         settings[revision] = unique
     frame_data, seen_configs = defaultdict(frame_scope), set()
@@ -412,7 +413,8 @@ def analyze(directory):
                     target["tick_max"] = int(tick) if target["tick_max"] is None else max(target["tick_max"], int(tick))
                 phase = int(row["session_phase"]); target["phases"][PHASES[phase] if 0 <= phase < len(PHASES) else f"unknown:{phase}"] += 1
                 for stage in STAGES:
-                    value = number(row.get(stage + "_us")); target["cpu_stages"][stage].add(value / 1000 if value is not None else None)
+                    column = stage + "_us"
+                    value = number(row.get(column, row.get("constants_upload_us") if stage == "prepare_render_data" else None)); target["cpu_stages"][stage].add(value / 1000 if value is not None else None)
                 for stage in SUBSTAGES:
                     if stage + "_us" in row:
                         value = number(row[stage + "_us"]); target["cpu_substages"][stage].add(value / 1000 if value is not None else None)
@@ -511,6 +513,7 @@ def analyze(directory):
                 value = number(rows[0].get("critical_path_ms")) if rows[0].get("critical_path_valid") == "1" else None
                 critical[scope].add(value)
             for row in rows:
+                row["pass_name"] = graphics.LEGACY_PASS_NAMES.get(row["pass_name"], row["pass_name"])
                 pass_id = int(row["pass_id"])
                 if pass_id in seen: raise ValueError(f"Duplicate GPU pass {pass_id} in completed frame {identity}")
                 seen.add(pass_id)
@@ -543,10 +546,10 @@ def analyze(directory):
     if not frame_data["playing"]["frames"]: option_report["errors"].append("No Playing CPU frames; no option cost can be reported")
     for revision, manifest in sorted(settings.items()):
         scope = f"playing_config:{revision}"; total = gpu_counts[scope]
-        if set(manifest) not in (graphics.CURRENT_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)): continue
+        if set(manifest) not in (graphics.CURRENT_OPTION_KEYS, graphics.OUTLINE_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)): continue
         values = {name: group_result(data, total) for (group_scope, name), data in groups.items() if group_scope == scope}
         options = []
-        catalog = graphics.LEGACY_OPTIONS if graphics.LEGACY_RT_KEYS & manifest.keys() else graphics.OPTIONS
+        catalog = graphics.LEGACY_OPTIONS if graphics.LEGACY_RT_KEYS & manifest.keys() else {**graphics.OPTIONS, **graphics.OUTLINE_OPTIONS}
         for key, row in sorted(manifest.items(), key=lambda item: int(item[1]["setting_id"])):
             kind, links, note = catalog[key]; status = graphics.option_status(row, manifest)
             measured = [name for name in links if values.get(name, {}).get("gpu_work_ms_per_completed_frame")]
@@ -643,7 +646,7 @@ def write_outputs(directory, result):
               f"Playing GPU critical path mean: {fmt(summary['playing_gpu_critical_path_ms']['mean'])} ms; overall {fmt(summary['gpu_critical_path_ms']['mean'])} ms. This is not GPU busy percentage or an FPS estimate.", "",
               "CPU stage wall time (Playing only)", "", "| Stage | Count | Mean ms | Min ms | Max ms |", "|---|---:|---:|---:|---:|"]
     for name, data in sorted(playing["cpu_stage_wall_ms"].items(), key=lambda item: item[1]["mean"] or -1, reverse=True):
-        report.append(f"| {name} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
+        report.append(f"| {STAGE_LABELS.get(name, name)} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
     report += ["", "Qualified source render-ready cadence by phase/configuration/foreground/view", "",
         "Only completed source frames with explicit cadence validity contribute; pass sums, CPU QPC intervals and generated Presents are separate.", "",
         "| Phase | Config | Foreground | View | Samples | p50 / p95 / p99 ms | > target | > 16.67 / 33.33 / 50 ms | Longest > 16.67 ms |",
@@ -662,11 +665,11 @@ def write_outputs(directory, result):
         data = scope["streamline_reported_present"]
         report.append(f"| {scope_name} | {fmt(scope['fps_contiguous_same_phase_config']['fps'])} | {fmt(data['sdk_reported_present_fps'])} | {data['sdk_reported_present_count'] if data['available'] else 'N/A'} | {fmt(data['observed_query_interval_seconds']) if data['available'] else 'N/A'} | {data['observations']} | {data['transition_or_window_observations_excluded']} / {data['invalid_observations']} |")
     for scope_name, scope in (("Playing only", playing), ("overall", overall)):
-        report += ["", f"CPU graph subsets ({scope_name}; included in parent stage)", "",
-            "These values are already inside graph_build/graph_prepare and must not be added to their totals. Unattributed is the per-frame parent minus all named subsets; it may include cleanup after the detailed scopes. Missing older columns remain N/A.", "",
+        report += ["", f"CPU stage subsets ({scope_name}; included in parent stage)", "",
+            "These values are already inside their parent stage and must not be added to its total. Unattributed is the per-frame parent minus all named subsets. Missing columns remain N/A. Historical Frame.UploadConstants measured the removed exposure constant copy.", "",
             "| Parent stage | Subset | Count | Mean ms | Min ms | Max ms |", "|---|---|---:|---:|---:|---:|"]
         for name, data in scope["cpu_stage_subsets_wall_ms"].items():
-            report.append(f"| {data['parent_stage']} | {name} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
+            report.append(f"| {STAGE_LABELS.get(data['parent_stage'], data['parent_stage'])} | {STAGE_LABELS.get(name, name)} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
         for parent, data in sorted(scope["cpu_stage_unattributed_wall_ms"].items()):
             report.append(f"| {parent} | unattributed residual | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
     report += ["", "Session phase / foreground breakdown", "", "| Phase | Foreground | Frames | QPC interval seconds | FPS | GPU critical mean ms |", "|---|---|---:|---:|---:|---:|"]
@@ -676,7 +679,7 @@ def write_outputs(directory, result):
             report.append(f"| {phase['phase']} | {row['foreground']} | {row['frames']} | {fmt(fps['wall_seconds'])} | {fmt(fps['fps'])} | {fmt(row['gpu_critical_path_ms']['mean'])} |")
     report += ["", "CPU stage wall time (overall; dominated by menu time)", "", "| Stage | Count | Mean ms | Min ms | Max ms |", "|---|---:|---:|---:|---:|"]
     for name, data in sorted(overall["cpu_stage_wall_ms"].items(), key=lambda item: item[1]["mean"] or -1, reverse=True):
-        report.append(f"| {name} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
+        report.append(f"| {STAGE_LABELS.get(name, name)} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
     def label(value): return str(value).replace("|", "\\|").replace("\n", " ")
     def amortized(row, prefix=""):
         mean = row.get(prefix + "mean_ms")
@@ -784,7 +787,7 @@ def self_test():
         assert graphics.pass_group(row) == "gi"
         assert graphics.pass_group({**row, "queue": 2}) == "gi_copy_transfer"
     assert "gi" in graphics.OPTIONS["gi_mode"][1]
-    assert "gi" in graphics.OPTIONS["gi_quality"][1]
+    assert "gi" in graphics.LEGACY_OPTIONS["gi_quality"][1]
     assert graphics.pass_group({"pass_id": 4, "pass_name": "GBuffer+Depth", "queue": 0}) == "surface"
     with tempfile.TemporaryDirectory() as temp:
         directory = Path(temp)
@@ -794,8 +797,8 @@ def self_test():
         (directory / "diagnostics.json").write_text('{"complete":true,"io_failed":false}', encoding="utf-8")
         debug_metadata = '{"build_type":"Debug","validation_enabled":true,"gpu_validation_enabled":false}'
         (directory / "capture-session.json").write_text(debug_metadata, encoding="utf-8")
-        manifest = [dict(config_revision=revision, setting_id=index, key=key, requested="true", effective="true", requested_available=-1, native_effective="true", native_reason="")
-                    for revision in (1, 2) for index, key in enumerate(graphics.LEGACY_OPTIONS, 1)]
+        manifest = [dict(config_revision=revision, setting_id=graphics.SETTING_IDS[key], key=key, requested="true", effective="true", requested_available=-1, native_effective="true", native_reason="")
+                    for revision in (1, 2) for key in graphics.LEGACY_OPTIONS]
         write("graphics_settings.csv", manifest)
         old_columns = (
             "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,"
@@ -838,11 +841,28 @@ def self_test():
         summary, options, gpu_times, cpu_times = analyze(directory)
         assert summary["capture_complete"] and summary["gpu_frame_count"] == 4
         assert summary["analysis_status"] == "complete"
+        legacy_frames = [{key: value for key, value in row.items() if key != "prepare_render_data_us"} for row in frames]
+        for row in legacy_frames: row["constants_upload_us"] = 1000
+        write("performance.csv", legacy_frames)
+        assert analyze(directory)[0]["playing"]["cpu_stage_wall_ms"]["prepare_render_data"]["mean"] == 1
+        write("performance.csv", frames)
         current_manifest = [row for row in manifest if row["key"] in graphics.CURRENT_OPTION_KEYS]
         write("graphics_settings.csv", current_manifest)
         current = analyze(directory)
         assert current[0]["analysis_status"] == "complete"
-        assert all(len(c["options"]) == 52 for c in current[1]["configurations"])
+        assert all(len(c["options"]) == len(graphics.CURRENT_OPTION_KEYS) for c in current[1]["configurations"])
+        wrong_ids = [dict(row, setting_id=53) if row["key"] == "color_grading" else row for row in current_manifest]
+        write("graphics_settings.csv", wrong_ids)
+        assert analyze(directory)[0]["analysis_status"] == "partial"
+        write("graphics_settings.csv", current_manifest)
+        outline_manifest = current_manifest + [dict(config_revision=revision, setting_id=graphics.SETTING_IDS[key],
+            key=key, requested="true", effective="true", requested_available=-1, native_effective="true", native_reason="")
+            for revision in (1, 2) for key in graphics.OUTLINE_OPTIONS]
+        write("graphics_settings.csv", outline_manifest)
+        assert analyze(directory)[0]["analysis_status"] == "complete"
+        write("graphics_settings.csv", outline_manifest[:-1])
+        assert analyze(directory)[0]["analysis_status"] == "partial"
+        write("graphics_settings.csv", current_manifest)
         write_outputs(directory, current)
         assert not current[0]["playing"]["cpu_stage_subsets_wall_ms"]
         assert "ray_geometry_register" not in (directory / "REPORT.md").read_text(encoding="utf-8")
@@ -929,7 +949,7 @@ def self_test():
         assert [row["frames"] for row in summary["foreground"]] == [2,2]
         assert all(math.isclose(row["fps_contiguous_same_phase_config"]["fps"], 50) for row in summary["foreground"])
         assert [c["completed_frames"] for c in options["configurations"]] == [2, 2]
-        assert all(len(c["options"]) == 56 for c in options["configurations"])
+        assert all(len(c["options"]) == len(graphics.LEGACY_OPTIONS) for c in options["configurations"])
         copy = next(row for row in gpu_times if row["scope"] == "overall" and row["pass_id"] == 147)
         assert copy["mean_ms"] is None and copy["measured_frames"] == 0
         record = next(row for row in cpu_times if row["scope"] == "overall" and row["pass_id"] == 4)
@@ -1003,12 +1023,12 @@ def self_test():
         text = (directory / "REPORT.md").read_text(encoding="utf-8")
         assert "Per-configuration Playing FPS" in text and "shared work, not isolated option cost" in text
         assert "NVIDIA whole-device context" in text and "GPU-A" in text
-        assert "all 56 graphics options" in text and "Amortized ms / completed frame" in text
+        assert f"all {len(graphics.LEGACY_OPTIONS)} graphics options" in text and "Amortized ms / completed frame" in text
         assert text.index("CPU stage wall time (Playing only)") < text.index("CPU stage wall time (overall")
         for revision in (1,2):
-            section = text.split(f"Config {revision}: all 56 graphics options (Playing)",1)[1]
-            table = section.split("|---|---|---|---|---|---|",1)[1].strip().splitlines()[:56]
-            assert len(table) == 56 and {line.split("|")[1].strip() for line in table} == set(graphics.LEGACY_OPTIONS)
+            section = text.split(f"Config {revision}: all {len(graphics.LEGACY_OPTIONS)} graphics options (Playing)",1)[1]
+            table = section.split("|---|---|---|---|---|---|",1)[1].strip().splitlines()[:len(graphics.LEGACY_OPTIONS)]
+            assert len(table) == len(graphics.LEGACY_OPTIONS) and {line.split("|")[1].strip() for line in table} == set(graphics.LEGACY_OPTIONS)
             assert all(line.split("|")[-2].strip() == "N/A" for line in table)
             geometry_row = next(line for line in table if line.startswith("| geometry_quality |"))
             reconstruction_row = next(line for line in table if line.startswith("| reconstruction_quality |"))
@@ -1022,7 +1042,7 @@ def self_test():
         write("performance.csv", [{**row, "session_phase": 0} for row in frames])
         no_play = analyze(directory)[1]
         assert no_play["errors"] and all(not c["available"] for c in no_play["configurations"])
-        assert sum(len(rows) for rows in no_play["settings_receipts"].values()) == 112
+        assert sum(len(rows) for rows in no_play["settings_receipts"].values()) == 2 * len(graphics.LEGACY_OPTIONS)
         invalid = Stats(); invalid.add(float("nan")); invalid.add(-1)
         assert invalid.result()["mean"] is None
         json.dumps(sparse, allow_nan=False)

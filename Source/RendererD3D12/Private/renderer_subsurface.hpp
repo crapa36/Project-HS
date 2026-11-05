@@ -22,12 +22,12 @@ struct alignas(16) SubsurfaceConstants
     DirectX::XMFLOAT4X4 inverse_view_projection{};
     DirectX::XMFLOAT4 render_size{};
     DirectX::XMUINT4 material_parameter_bases[4]{};
-    DirectX::XMUINT4 hero_material_parameter_bases[2]{};
+    DirectX::XMUINT4 character_material_parameter_bases[2]{};
     DirectX::XMUINT4 quality_options{}; // x: maximum half-kernel samples.
 };
 static_assert(sizeof(SubsurfaceConstants) == 192);
 static_assert(offsetof(SubsurfaceConstants, material_parameter_bases) == 80);
-static_assert(offsetof(SubsurfaceConstants, hero_material_parameter_bases) == 144);
+static_assert(offsetof(SubsurfaceConstants, character_material_parameter_bases) == 144);
 static_assert(offsetof(SubsurfaceConstants, quality_options) == 176);
 
 struct SubsurfaceGuide { ResourceVersion version; ID3D12Resource *resource{}; };

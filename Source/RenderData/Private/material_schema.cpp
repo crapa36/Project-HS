@@ -234,22 +234,22 @@ void ValidateUniformMaterialSurfaceLayout(MaterialSurfaceLayout layout)
             "renderer uniform surface profile cannot consume varying closure sidecars");
 }
 
-std::uint32_t PackHeroMaterialDomainOrdinal(HeroMaterialDomain domain, std::uint32_t ordinal)
+std::uint32_t PackCharacterMaterialDomainOrdinal(CharacterMaterialDomain domain, std::uint32_t ordinal)
 {
-    Require((domain == HeroMaterialDomain::Opaque || domain == HeroMaterialDomain::Translucent) &&
+    Require((domain == CharacterMaterialDomain::Opaque || domain == CharacterMaterialDomain::Translucent) &&
             ordinal <= 65535u, "invalid hero material domain/ordinal");
-    return ordinal | (domain == HeroMaterialDomain::Translucent ? 0x80000000u : 0u);
+    return ordinal | (domain == CharacterMaterialDomain::Translucent ? 0x80000000u : 0u);
 }
 
-HeroMaterialDomain UnpackHeroMaterialDomain(std::uint32_t packed)
+CharacterMaterialDomain UnpackCharacterMaterialDomain(std::uint32_t packed)
 {
     Require((packed & 0x7fff0000u) == 0, "reserved hero material binding bits are nonzero");
-    return (packed & 0x80000000u) != 0 ? HeroMaterialDomain::Translucent : HeroMaterialDomain::Opaque;
+    return (packed & 0x80000000u) != 0 ? CharacterMaterialDomain::Translucent : CharacterMaterialDomain::Opaque;
 }
 
-std::uint32_t UnpackHeroMaterialOrdinal(std::uint32_t packed)
+std::uint32_t UnpackCharacterMaterialOrdinal(std::uint32_t packed)
 {
-    (void)UnpackHeroMaterialDomain(packed);
+    (void)UnpackCharacterMaterialDomain(packed);
     return packed & 0xffffu;
 }
 
@@ -265,16 +265,16 @@ std::vector<std::byte> EncodeCharacterMaterialBindings(
     {
         const auto &binding = bindings[i];
         Require(binding.slot < material_count && binding.dependency_index < dependencies.size() &&
-                binding.hero_ordinal < kHeroMaterialNames.size(), "character material binding is out of bounds");
-        const auto name = kHeroMaterialNames[binding.hero_ordinal];
+                binding.hero_ordinal < kCharacterMaterialNames.size(), "character material binding is out of bounds");
+        const auto name = kCharacterMaterialNames[binding.hero_ordinal];
         Require(dependencies[binding.dependency_index] == "render/material/" + std::string(name) + "/material.rpkg",
                 "character material binding dependency disagrees with authored identity");
-        auto &seen = binding.domain == HeroMaterialDomain::Translucent ? translucent : opaque;
+        auto &seen = binding.domain == CharacterMaterialDomain::Translucent ? translucent : opaque;
         Require(!seen[binding.slot], "duplicate character material slot/domain binding");
         seen[binding.slot] = true;
         Put(bytes, i * 8, binding.slot, 2);
         Put(bytes, i * 8 + 2, binding.dependency_index, 2);
-        Put(bytes, i * 8 + 4, PackHeroMaterialDomainOrdinal(binding.domain, binding.hero_ordinal), 4);
+        Put(bytes, i * 8 + 4, PackCharacterMaterialDomainOrdinal(binding.domain, binding.hero_ordinal), 4);
     }
     for (std::size_t slot = 0; slot < material_count; ++slot)
         Require(opaque[slot] || translucent[slot], "missing character material slot binding");
@@ -292,7 +292,7 @@ std::vector<CharacterMaterialBinding> DecodeCharacterMaterialBindings(
         const auto packed = Get(bytes, offset + 4, 4);
         result.push_back({static_cast<std::uint16_t>(Get(bytes, offset, 2)),
             static_cast<std::uint16_t>(Get(bytes, offset + 2, 2)),
-            UnpackHeroMaterialOrdinal(packed), UnpackHeroMaterialDomain(packed)});
+            UnpackCharacterMaterialOrdinal(packed), UnpackCharacterMaterialDomain(packed)});
     }
     (void)EncodeCharacterMaterialBindings(result, dependencies, material_count);
     return result;
@@ -801,15 +801,15 @@ std::vector<std::byte> BuildDecalMaterialPackage(std::string_view name,
     return package;
 }
 
-HeroMaterialPackageData ReadHeroMaterialPackage(std::span<const std::byte> bytes, std::string_view name)
+CharacterMaterialPackageData ReadCharacterMaterialPackage(std::span<const std::byte> bytes, std::string_view name)
 {
-    Require(std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end(), "unknown hero material name");
-    return ReadHeroMaterialPackage(ReadPackage(bytes, MakeAssetId("render/material/" + std::string(name) + "/material.rpkg")), name);
+    Require(std::ranges::find(kCharacterMaterialNames, name) != kCharacterMaterialNames.end(), "unknown hero material name");
+    return ReadCharacterMaterialPackage(ReadPackage(bytes, MakeAssetId("render/material/" + std::string(name) + "/material.rpkg")), name);
 }
 
-HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std::string_view name)
+CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &package, std::string_view name)
 {
-    Require(std::ranges::find(kHeroMaterialNames, name) != kHeroMaterialNames.end(), "unknown hero material name");
+    Require(std::ranges::find(kCharacterMaterialNames, name) != kCharacterMaterialNames.end(), "unknown hero material name");
     const auto id = "render/material/" + std::string(name) + "/material.rpkg";
     Require(package.asset_id.value == MakeAssetId(id).value, "hero material package identity mismatch");
     Require(package.chunks.size() == 3 && std::ranges::all_of(package.chunks,
@@ -819,19 +819,19 @@ HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std:
         Require(found != package.chunks.end(), "hero material package is missing a mandatory chunk");
         return *found;
     };
-    HeroMaterialPackageData result;
+    CharacterMaterialPackageData result;
     result.dependencies = package.dependencies;
     result.surface = DecodeMaterialSurfaceLayout(find(ChunkType::MaterialSurfaceLayout).bytes);
     result.parameter_layout_hash = DecodeMaterialParameterLayout(find(ChunkType::MaterialParameterLayout).bytes);
     result.programs = DecodeMaterialPrograms(find(ChunkType::MaterialProgram).bytes, package.dependencies);
     result.domain = (result.surface.capability_mask & 256u) != 0 ?
-        HeroMaterialDomain::Translucent : HeroMaterialDomain::Opaque;
+        CharacterMaterialDomain::Translucent : CharacterMaterialDomain::Opaque;
     const bool translucent_program = std::ranges::any_of(result.programs, [](const MaterialProgram &program) {
         return program.kind == MaterialProgramKind::HeroTranslucentPS;
     });
-    Require(translucent_program == (result.domain == HeroMaterialDomain::Translucent) &&
-            ((result.domain == HeroMaterialDomain::Translucent && result.programs.size() == 1) ||
-             (result.domain == HeroMaterialDomain::Opaque && result.programs.size() == 4)),
+    Require(translucent_program == (result.domain == CharacterMaterialDomain::Translucent) &&
+            ((result.domain == CharacterMaterialDomain::Translucent && result.programs.size() == 1) ||
+             (result.domain == CharacterMaterialDomain::Opaque && result.programs.size() == 4)),
             "hero material surface capabilities disagree with its native domain");
     const auto parameter_id = "render/material/" + std::string(name) + "/parameters.rpkg";
     Require(std::ranges::find(package.dependencies, parameter_id) != package.dependencies.end(),
@@ -858,7 +858,7 @@ HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std:
     return result;
 }
 
-std::vector<std::byte> BuildHeroMaterialPackage(std::string_view name,
+std::vector<std::byte> BuildCharacterMaterialPackage(std::string_view name,
     std::span<const MaterialParameterDefinition> parameters, MaterialSurfaceLayout surface,
     std::span<const MaterialProgramSource> programs)
 {
@@ -878,7 +878,7 @@ std::vector<std::byte> BuildHeroMaterialPackage(std::string_view name,
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialParameterLayout), 1, true, layout_bytes, 1, 32},
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout), 1, true, surface_bytes, 1, kMaterialSurfaceLayoutStride}};
     const auto package = BuildPackage(MakeAssetId("render/material/" + std::string(name) + "/material.rpkg"), dependencies, chunks);
-    (void)ReadHeroMaterialPackage(package, name);
+    (void)ReadCharacterMaterialPackage(package, name);
     return package;
 }
 

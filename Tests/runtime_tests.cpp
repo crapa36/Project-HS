@@ -360,27 +360,36 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
               ablation.geometry_frontend == hs::GeometryFrontend::Indexed,
           "missing overrides preserve existing explicit choices");
     hs::ApplicationConfig hero;
-    Check(!hero.capture_hero_work, "isolated Hero work capture defaults off");
-    source.config_overrides_json = "{\"capture_hero_work\":true}";
+    Check(!hero.capture_translucency_diagnostics, "isolated Hero work capture defaults off");
+    source.config_overrides_json = "{\"capture_translucency_diagnostics\":true}";
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
-              hs::ApplyExperimentOverrides(loaded, hero) && hero.capture_hero_work && hero.capture_diagnostics,
+              hs::ApplyExperimentOverrides(loaded, hero) && hero.capture_translucency_diagnostics && hero.capture_diagnostics,
           "Hero work boolean override round trips and reaches Runtime configuration");
-    source.config_overrides_json = "{\"capture_hero_work\":\"true\"}";
+    source.config_overrides_json = "{\"capture_hero_work\":true,\"capture_hero_work_mode\":\"coverage-only\"}";
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              loaded.config_overrides_json.find("capture_hero_work") == std::string::npos &&
+              hs::ApplyExperimentOverrides(loaded, hero) && hero.capture_translucency_diagnostics &&
+              hero.translucency_diagnostics_mode == hs::TranslucencyDiagnosticsMode::CoverageOnly,
+          "legacy diagnostic overrides normalize on load");
+    source.config_overrides_json = "{\"capture_hero_work\":true,\"capture_translucency_diagnostics\":true}";
+    Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+          "conflicting diagnostic override names are rejected");
+    source.config_overrides_json = "{\"capture_translucency_diagnostics\":\"true\"}";
     Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
           "Hero work capture rejects a nonboolean override");
-    Check(hs::ApplicationConfig{}.hero_work_mode == hs::HeroWorkDiagnosticMode::Full,
+    Check(hs::ApplicationConfig{}.translucency_diagnostics_mode == hs::TranslucencyDiagnosticsMode::Full,
           "Hero work shading defaults to the unchanged full path");
     for (const auto &[name, expected] : std::array{
-             std::pair{"full", hs::HeroWorkDiagnosticMode::Full},
-             std::pair{"no-environment", hs::HeroWorkDiagnosticMode::NoEnvironment},
-             std::pair{"coverage-only", hs::HeroWorkDiagnosticMode::CoverageOnly}})
+             std::pair{"full", hs::TranslucencyDiagnosticsMode::Full},
+             std::pair{"no-environment", hs::TranslucencyDiagnosticsMode::NoEnvironment},
+             std::pair{"coverage-only", hs::TranslucencyDiagnosticsMode::CoverageOnly}})
     {
-        source.config_overrides_json = std::string("{\"capture_hero_work\":true,\"capture_hero_work_mode\":\"") + name + "\"}";
+        source.config_overrides_json = std::string("{\"capture_translucency_diagnostics\":true,\"capture_translucency_diagnostics_mode\":\"") + name + "\"}";
         Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
-                  hs::ApplyExperimentOverrides(loaded, hero) && hero.hero_work_mode == expected,
+                  hs::ApplyExperimentOverrides(loaded, hero) && hero.translucency_diagnostics_mode == expected,
               "explicit Hero diagnostic mode round trips without changing its meaning");
     }
-    for (const auto invalid : {"{\"capture_hero_work_mode\":true}", "{\"capture_hero_work_mode\":\"fast\"}"})
+    for (const auto invalid : {"{\"capture_translucency_diagnostics_mode\":true}", "{\"capture_translucency_diagnostics_mode\":\"fast\"}"})
     {
         source.config_overrides_json = invalid;
         Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),

@@ -546,5 +546,4 @@ struct VfxImage
             range.count <= flash_recipes.size() - range.first;
     }
 };
-namespace shipping { [[nodiscard]] const VfxImage &Vfx() noexcept; }
 }

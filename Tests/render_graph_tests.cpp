@@ -8,6 +8,7 @@
 #include "renderer_reflections.hpp"
 #include "renderer_decal_surface.hpp"
 #include "renderer_screen_overlay.hpp"
+#include "renderer_transparency.hpp"
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
 #include <d3d12.h>
@@ -79,6 +80,10 @@ void EmptyFeatureShapes()
     reflection_layout.valid = true;
     Check(!reflections.MatchesShape(reflection_layout, false, 0, false, 0) &&
         !reflections.MatchesLayout({}, reflection_layout), "reflections accepted a shape without targets");
+    hs::TranslucencySystem translucency;
+    hs::LayeredTranslucencyLayout translucency_layout;
+    Check(!translucency.MatchesShape(translucency_layout, false, 0),
+        "translucency accepted a shape without targets");
     hs::DecalSurfaceSystem decals;
     hs::DecalSurfaceLayout decal_layout;
     decal_layout.valid = true;
@@ -88,8 +93,8 @@ void EmptyFeatureShapes()
     Check(!decals.MatchesShape(decal_layout, true), "active decal shape accepted without native targets");
     hs::PostSubgraphLayout post_layout;
     post_layout.pass_count = 1;
-    Check(hs::MatchesPostSubgraphShape(false, false, false, false, false, false, false, post_layout) &&
-        !hs::MatchesPostSubgraphShape(false, false, false, false, true, false, false, post_layout),
+    Check(hs::MatchesPostSubgraphShape(false, false, false, false, false, false, post_layout) &&
+        !hs::MatchesPostSubgraphShape(false, false, false, false, true, false, post_layout),
         "post subgraph shape omitted its hook topology");
     hs::ScreenOverlaySystem overlay;
     hs::ScreenOverlayLayout overlay_layout;

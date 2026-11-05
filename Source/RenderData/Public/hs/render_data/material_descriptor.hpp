@@ -42,7 +42,7 @@ struct MaterialDescriptor
     std::span<const MaterialTextureDescriptor> textures;
     float metallic{}, roughness_scale{1.0f};
     std::uint32_t flags{};
-    HeroMaterialDomain domain{HeroMaterialDomain::Opaque};
+    CharacterMaterialDomain domain{CharacterMaterialDomain::Opaque};
     DecalReceiverPolicy receivers;
 };
 struct MaterialDescriptorStorage

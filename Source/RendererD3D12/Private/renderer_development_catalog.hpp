@@ -2,6 +2,7 @@
 
 #include <hs/renderer/renderer.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/render_revision.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/cooked_format.hpp>
@@ -451,7 +452,8 @@ public:
         result->geometry_views_.resize(result->bulks.size());
         result->character_views_.resize(result->bulks.size());
         for (const auto &[asset, id] : products)
-            if (id.starts_with("render/texture/") && id.ends_with(".rpkg"))
+            if ((id.starts_with("render/texture/") && id.ends_with(".rpkg")) ||
+                render_data::IsTerrainSurfaceSectionProduct(id))
                 result->texture_views_.push_back(result->ProveTexture(asset));
         std::vector<AssetId> bulk_assets;
         bulk_assets.reserve(result->bulks.size());

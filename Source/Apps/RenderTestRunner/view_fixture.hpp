@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hs/render_data/render_frame_input.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -330,7 +330,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .start_size_max = 0.25f,
             .count = 1,
             .seed = 0x51a7u};
-        const RenderFrameInput input{.views = submitted_views, .snapshots = package_snapshots,
+        const RenderPackage input{.views = submitted_views, .snapshots = package_snapshots,
             .vfx = {.particle_spawns = package == 0 ? std::span(&particle_birth, 1) :
                     std::span<const ParticleSpawnCommand>{},
                 .effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
@@ -342,7 +342,8 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 .distortions = admitted_distortions, .decals = admitted,
                 .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
                 .ground_gap_angles = ground_gap_pool},
-            .delta_seconds = 1.0f / 60.0f};
+            .delta_seconds = 1.0f / 60.0f,
+            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
         if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
         if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
             (world.sequence != 0 && (!result.vfx_world_step_submitted ||
@@ -413,13 +414,15 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const auto before = renderer.GetDiagnostics().total_rendered_frames;
             const auto accepted = result;
             auto duplicate = views; duplicate[2].id = duplicate[1].id;
-            const RenderFrameInput duplicate_input{.views = duplicate, .snapshots = snapshots};
+            auto duplicate_input = input;
+            duplicate_input.views = duplicate;
             const auto rejected_duplicate = renderer.Render(duplicate_input, result);
             evidence.duplicate_rejected = !rejected_duplicate && rejected_duplicate.Code() == ErrorCode::InvalidArgument;
             const bool duplicate_preserved = SameRejectedResultEvidence(result, accepted) &&
                 renderer.GetDiagnostics().total_rendered_frames == before;
             auto nonfinite = views; nonfinite[2].view_origin.x = std::numeric_limits<double>::quiet_NaN();
-            const RenderFrameInput nonfinite_input{.views = nonfinite, .snapshots = snapshots};
+            auto nonfinite_input = input;
+            nonfinite_input.views = nonfinite;
             const auto rejected_nonfinite = renderer.Render(nonfinite_input, result);
             evidence.nonfinite_origin_rejected = !rejected_nonfinite && rejected_nonfinite.Code() == ErrorCode::InvalidArgument;
             const bool nonfinite_preserved = SameRejectedResultEvidence(result, accepted) &&
@@ -428,17 +431,27 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             flash.size = flash.lifetime = flash.hdr = 1.0f;
             flash.interpolate_owner_position = true;
             flash.previous_position.x = std::numeric_limits<float>::quiet_NaN();
-            RenderFrameInput bad_flash_input{.views = views, .snapshots = snapshots};
+            auto bad_flash_input = input;
+            bad_flash_input.vfx = {.world_batch = input.vfx.world_batch};
             bad_flash_input.vfx.flashes = std::span(&flash, 1);
             const auto rejected_flash = renderer.Render(bad_flash_input, result);
             evidence.nonfinite_flash_history_rejected = !rejected_flash &&
                 rejected_flash.Code() == ErrorCode::InvalidArgument;
             auto bad_world_input = input;
-            ++bad_world_input.vfx.world_batch->session;
+            ++bad_world_input.vfx.world_batch.session;
             const auto rejected_world = renderer.Render(bad_world_input, result);
             if (rejected_world || rejected_world.Code() != ErrorCode::InvalidArgument ||
                 !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
                 return Failure("A VFX batch from another session must be rejected before any native submission.");
+            for (const auto fraction : {std::numeric_limits<float>::quiet_NaN(), -0.1f, 1.1f})
+            {
+                auto invalid_sample = input;
+                invalid_sample.display_sample->interpolation = fraction;
+                const auto rejected_sample = renderer.Render(invalid_sample, result);
+                if (rejected_sample || rejected_sample.Code() != ErrorCode::InvalidArgument ||
+                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                    return Failure("Invalid display samples must be rejected before native work or output publication.");
+            }
             VfxLightInput bad_light{};
             bad_light.radius = 1.0f;
             bad_light.intensity = std::numeric_limits<float>::quiet_NaN();
@@ -453,8 +466,12 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
             ParticleSpawnCommand bad_selector{};
             bad_selector.mesh_index = 8;
-            std::array<RenderFrameInput, 17> invalid_payloads;
-            for (auto &invalid : invalid_payloads) { invalid.views = views; invalid.snapshots = snapshots; }
+            std::array<RenderPackage, 17> invalid_payloads;
+            for (auto &invalid : invalid_payloads)
+            {
+                invalid = input;
+                invalid.vfx = {.world_batch = input.vfx.world_batch};
+            }
             invalid_payloads[0].vfx.lights = std::span(&bad_light, 1);
             invalid_payloads[1].vfx.decals = std::span(&bad_decal, 1);
             invalid_payloads[2].vfx.particle_spawns = std::span(&bad_ballistic, 1);
@@ -584,13 +601,14 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     // with a real auxiliary submission before testing stale diagnostic rejection.
     const RenderVfxWorldBatch held_world{.session = package_snapshots.current.header.session_id,
         .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1};
-    const RenderFrameInput overwrite{.views = std::span(&views[1], 1), .snapshots = package_snapshots,
+    const RenderPackage overwrite{.views = std::span(&views[1], 1), .snapshots = package_snapshots,
         .vfx = {.ground = package2_ground,
             .ribbons = {std::span(&pooled_ribbon, 1), 1, ribbon_outputs},
             .distortions = package2_distortions, .decals = decals,
             .world_batch = held_world, .distortion_gap_angles = distortion_gap_pool,
             .ground_gap_angles = ground_gap_pool},
-        .delta_seconds = 1.0f / 60.0f};
+        .delta_seconds = 1.0f / 60.0f,
+        .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
     RendererFrameResult overwrite_result;
     if (auto submitted = renderer.Render(overwrite, overwrite_result); !submitted) return submitted;
     if (overwrite_result.views.size() != 1 || overwrite_result.views[0].identity.view_id != kOwnedViewProbePreview ||

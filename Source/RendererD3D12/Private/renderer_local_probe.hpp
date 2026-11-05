@@ -29,6 +29,7 @@ struct LocalProbeCaptureView
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
     std::uint32_t probe_index{}, face{}, edge{};
+    bool irradiance_node{};
     Float3 position{};
     float near_distance{0.05f}, far_distance{};
     // Absolute-world, unjittered LH row-vector camera with reversed depth
@@ -139,7 +140,9 @@ class LocalProbeSystem
     [[nodiscard]] Result Commit(LocalProbeCandidate &&, const CompletionSet &completed);
     [[nodiscard]] Result PrepareCapture(const ShaderReader &, const CompletionSet &completed);
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
-        std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
+        std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes,
+        const render_data::SceneProbeRevisions *expected_capture = nullptr,
+        const render_data::SceneProbeRevisions *compatibility = nullptr);
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeInputs &, LocalProbeOutputs &);
     [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeInputs &,LocalProbeFramePlan &) const;
     [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalProbeInputs &,

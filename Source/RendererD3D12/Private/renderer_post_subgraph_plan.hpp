@@ -35,7 +35,6 @@ struct PostSubgraphInputs
     PostHdrHook pre_bloom, pre_tone_map;
     PostHdrHook devtools_ui;
     ResourceVersion screen_overlay_alpha, screen_overlay_upload, screen_overlay_gradient;
-    ResourceVersion reactive_composite_hdr;
     bool fxaa_identity{};
     bool initialize_post_targets{};
 };
@@ -94,7 +93,7 @@ struct PostSubgraphPlan
 struct PostSubgraphLayout
 {
     struct Pass { std::uint32_t declaration_index{}, id{}; };
-    std::array<ResourceVersion, 34> inputs{};
+    std::array<ResourceVersion, 33> inputs{};
     std::array<Pass, 9> passes{};
     PostSubgraphOutputs outputs{};
     std::uint32_t pass_count{};

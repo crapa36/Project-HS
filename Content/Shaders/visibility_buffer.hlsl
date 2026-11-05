@@ -171,7 +171,7 @@ HsVisibilityOutput HsVisibilityPSImpl(SceneOutput input, bool front,
     if (!HsRasterIdValid(rasterId) || rasterId == 0u || PassValue < 4u)
         clip(-1.0);
     const HsSceneGradients gradients = RasterSceneGradients(input);
-#ifdef HS_GENERATED_HERO_MATERIAL
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
     if (!HsHeroSceneCovered(input, front, gradients))
 #else
     if (!HsSceneCovered(input, front, environmentOpaque, gradients, SceneDrawMaterial))
@@ -222,7 +222,7 @@ HsVisibilityOutput EnvironmentMaskedVisibilityPS(
     return HsVisibilityPSImpl(input, front, false, primitiveId);
 }
 
-#ifdef HS_GENERATED_HERO_MATERIAL
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
 HsVisibilityOutput HeroVisibilityPS(SceneOutput input, bool front : SV_IsFrontFace,
     uint primitiveId : SV_PrimitiveID)
 {
@@ -453,9 +453,9 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
     const HsSceneGradients gradients = HsInterpolateSceneGradients(
         vertex0, vertex1, vertex2, sample);
     const bool front = HsFrontFace[pixel] != 0u;
-#ifdef HS_GENERATED_HERO_MATERIAL
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
     if (variant < HsHeroVisibilityVariantBegin || !HsHeroOpaqueOrdinalValid(variant - HsHeroVisibilityVariantBegin) ||
-        input.MaterialId != HsHeroMaterialIdBase + variant - HsHeroVisibilityVariantBegin) return;
+        input.MaterialId != HsCharacterMaterialIdBase + variant - HsHeroVisibilityVariantBegin) return;
     const GBufferOutput surface = HsHeroEvaluateSceneSurface(input, front, gradients);
 #else
     if (variant >= HsHeroVisibilityVariantBegin) return;
@@ -481,7 +481,7 @@ void SurfaceResolveCS(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
     HsSurfaceResolveImpl(groupId, lane);
 }
 
-#ifdef HS_GENERATED_HERO_MATERIAL
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
 [numthreads(64, 1, 1)]
 void HeroSurfaceResolveCS(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {

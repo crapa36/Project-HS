@@ -13,7 +13,7 @@ struct PresentationGuideResource { ResourceVersion version; ID3D12Resource *reso
 struct PresentationGuidesInputs
 {
     // Display-linear Rec.709 after tone map/FXAA, without ANY UI.
-    // The UI bitmap is D2D/WIC premultiplied encoded sRGB BGRA8.
+    // The UI target is premultiplied encoded sRGB BGRA8.
     PresentationGuideResource display_linear, encoded_ui, depth, motion;
     PresentationGuideResource transparent_depth, transparent_motion, transparent_classification, transparent_metadata;
     ViewExtent render_active;

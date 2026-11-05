@@ -8,7 +8,8 @@ This document describes the module graph enforced by the current build and `Test
                          Core
               ┌──────────┼───────────────┐
               ▼          ▼               ▼
-            Jobs     GameDomain       RenderData
+            Jobs ────────────────────► RendererD3D12
+                         GameDomain       RenderData
                          │                │
                          │                ▼
                          │           RendererD3D12
@@ -44,7 +45,7 @@ failure publication keeps the first error and its fixed-size message.
 | GameRules | Rules independent of mutable simulation state | Core, GameDomain |
 | Gameplay | Deterministic mutable simulation | Core, GameDomain, GameRules |
 | Presentation | Domain/read-model projection and concrete snapshot exchange | Core, GameDomain, RenderData values |
-| RendererD3D12 | Concrete Windows/D3D12 backend | Core, RenderData |
+| RendererD3D12 | Concrete Windows/D3D12 backend | Core, Jobs, RenderData |
 | Runtime | Concrete subsystem composition and orchestration | Core, Jobs, Gameplay, Presentation, AssetManifest, RenderData, RendererD3D12 |
 | Apps | Argument handling and entry-point composition | approved public libraries |
 
@@ -61,12 +62,14 @@ failure publication keeps the first error and its fixed-size message.
 - The unconditional `hs_render_data_values` target depends only on Core. It does
   not pull package codecs, content tools, DXC or native renderer prerequisites into
   low-level builds. Presentation links this value target, not `hs_render_data`.
+- RenderData's `hs_terrain_surface` codec leaf links `hs_render_data` and only its
+  actual consumers; terrain codec edits do not relink unrelated content producers.
 - `hs_runtime_contracts` is a header usage-requirements target for native-free
   Runtime public values/contracts. It exports Runtime/Public and renderer public
   value headers and depends on Core/GameDomain/RenderData values; it neither builds
   nor links the native Runtime/renderer backend, IO, DXC or content products.
   Runtime, content consumers and low-level VFX fixtures inherit it directly.
-- RendererD3D12 must not depend on Jobs, game, presentation, or runtime modules.
+- RendererD3D12 must not depend on game, presentation, or runtime modules.
 - Production modules must not include another module's `Private` headers.
 
 Moving a higher-layer type into Core only to bypass these rules is also a dependency violation. Keep types at the lowest layer that owns their meaning.
@@ -115,7 +118,7 @@ and retain their own parameter layouts and capabilities. Procedural water keeps
 its explicit solid-transmission closure and participates in transparent work.
 
 RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotPair,
-VFX frame inputs and RenderFrameInput. Presentation owns RenderSnapshotExchange;
+VFX frame inputs and RenderPackage. Presentation owns RenderSnapshotExchange;
 Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
 so it has no dependency on Presentation's exchange or producer lifecycle.
 Raw presentation events end at Runtime's VFX/audio translation. The renderer
@@ -144,15 +147,60 @@ Animation updates share the existing actual-dynamic invalidation used by project
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
 
-Indirect lighting uses the existing baked SceneProbe package: spatial SH diffuse
-irradiance and prefiltered reflection probes with the global environment fallback.
-Dynamic lights and emissive effects do not update indirect lighting. Direct lights,
-dynamic shadows and screen-space reflections remain independent. There is no SDF
-scene, native GI SDK, GI history, or dedicated direct-light injection pass. Geometry
-pages contain the raster streams and index suffix without an SDK position copy.
-Saved dynamic-GI settings migrate to Probe at the settings read boundary.
-Only layout-only developer/bake inputs permit capture; baked packages remain
-read-only across light changes and use global fallback for incompatible static data.
+The SPB2 baked lighting package carries world-space cosine-convolved SH9 for
+independent regular-grid nodes, visibility masks for each cell's 4x4x4 receiver
+subcells, and raw/GGX cubes for a separate set of reflection boxes. Offline
+native cubes capture sky, emission and directly lit static surfaces before
+exposure. This supports one static surface bounce. Repeated diffuse transfer
+and dynamic indirect lighting are outside the solver. Runtime blends up to eight
+reachable SH corners and uses a baked list of all overlapping reflection boxes.
+Outside the diffuse grid it uses the global environment. Empty interior
+visibility masks contribute zero local irradiance. Direct lights, dynamic
+shadows and screen-space reflections remain independent.
+The offline probe baker owns native capture, convolution and signed first-hit
+readback. The runtime adapter admits the baked package, uploads, publishes and
+retires its read-only resources. Both consume a shared static scene/material
+revision contract and the same common native rendering code. Saved dynamic-GI
+settings migrate to Probe at the settings read boundary.
+
+Static lighting compatibility uses authored scene/material inputs and local
+material mutations since Generation admission. View quality and capture quality
+do not disable a matching bake. Offline capture still tracks its actual quality
+and exports only the matching completed capture. Immutable baked publication
+waits for its upload producer; retirement waits for every reader.
+
+Shader product maps retain the canonical named path and digest. Feedback selection
+chooses a physical variant at read/bind without overwriting those identities.
+Loose and packed reads use the same selection, while bake compatibility uses the
+canonical products. Admitted reads retain their integrity proof rather than
+rehashing the same shader bytes in each consumer.
+
+Terrain surface production belongs to the offline `hs_terrain_surface_bake` tool.
+It uses the selected world's actual section transforms and seed, and records the
+material/texture/geometry inputs used by the existing page evaluator. TSF1 metadata
+retains ordered section records and a source identity; each section's three planes
+use an ordinary TexturePackage, keeping the existing package size limits. Runtime
+admits matching pages, uploads them, publishes and retires their native resources.
+Missing, incompatible or unaffordable pages select the original terrain evaluator;
+runtime does not create page-bake PSOs or execute the page-production shaders.
+Those two shader products remain in the producer input only. Build provenance is
+kept in Action inputs; runtime product dependencies connect metadata to section
+textures. Producer and consumer share the same source-identity and section values.
+The producer reuses one 2048-square, three-plane RGBA8 working texture per section
+and preserves its color/normal mip filtering before BC7 compression. The three
+compressed planes fit one existing package at approximately the former 1024 RGBA8
+payload size. Surface layout2 keeps color/roughness in plane0, base normal/AO and
+residual depth below the mesh(0..0.05m) in plane1, and four layer weights in plane2.
+Color uses an sRGB view; all other channels use the linear view. Runtime performs
+one residual-height search and samples independent fine normals from the source
+detail layers. Page admission excludes legacy channel layouts; insufficient
+texel density or complete ray/filter support selects the original evaluator.
+Admitted interior samples use the existing anisotropic sampler. Filtered residual
+mips are ordinary appearance levels, not conservative ray-skipping bounds.
+Geometry, collision and grass placement are unchanged. The residual representation
+still requires visual/performance qualification; meso geometry work is incomplete.
+Packed and developer catalogs admit the same section-image products;
+the small TSF1 metadata is not a texture descriptor.
 Visibility pixel classification is a separate runtime shader family. Count,
 prefix and scatter share variant decoding with material resolve through a small
 include; classification-only edits do not invalidate authored material shaders.
@@ -219,6 +267,11 @@ Shipping/content.receipt.json records that provenance separately. HSCONT01 forma
 13-table header layout and exact executable/pack matching remain unchanged.
 Regenerate the pair together when adopting the new content ID algorithm; existing
 runtime-only prebuilt configurations still require their exact matched pair.
+The 64-byte shipping header keeps its semantic content ID at bytes 16..47; bytes
+56..63 bind the two packed VFX offsets, sizes and SHA256 digests via the first
+eight bytes of a domain-separated canonical SHA256. The semantic ID retains
+its original fixed-header marker, independently of that physical storage tag.
+Startup still verifies each full VFX range digest.
 Release audio borrows generated cue rows and owns one preload PCM arena. Generated
 chunk digests cover contiguous preload runs and independent transition tracks;
 only successful verified reads publish ready PCM. Only

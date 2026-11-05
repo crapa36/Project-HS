@@ -24,7 +24,7 @@ hs_check_module(Gameplay "jobs|presentation|asset_manifest|render_data|renderer|
 hs_check_module(Presentation "jobs|game_rules|gameplay|asset_manifest|renderer|runtime")
 hs_check_module(AssetManifest "jobs|game_domain|game_rules|gameplay|presentation|render_data|renderer|runtime")
 hs_check_module(RenderData "jobs|game_domain|game_rules|gameplay|presentation|asset_manifest|renderer|runtime")
-hs_check_module(RendererD3D12 "jobs|game_domain|game_rules|gameplay|presentation|asset_manifest|runtime")
+hs_check_module(RendererD3D12 "game_domain|game_rules|gameplay|presentation|asset_manifest|runtime")
 
 file(GLOB_RECURSE gameplay_files
     "${SOURCE_ROOT}/Source/Gameplay/*.h"
@@ -60,5 +60,7 @@ hs_reject_target_links(hs_gameplay hs_jobs hs_presentation hs_render_data hs_ren
 hs_reject_target_links(hs_gameplay_development hs_jobs hs_presentation hs_render_data hs_render_data_values hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_presentation hs_jobs hs_game_rules hs_gameplay hs_render_data hs_material_compiler hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_environment_layout hs_jobs hs_game_rules hs_gameplay hs_render_data hs_material_compiler hs_renderer_d3d12 hs_runtime)
-hs_reject_target_links(hs_renderer_d3d12 hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_runtime hs_material_compiler)
+foreach(renderer IN ITEMS hs_renderer_d3d12 hs_renderer_d3d12_common hs_baked_lighting_resources hs_probe_baker)
+    hs_reject_target_links(${renderer} hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_runtime hs_material_compiler)
+endforeach()
 hs_reject_target_links(hs_runtime hs_material_compiler hs_gameplay_development)

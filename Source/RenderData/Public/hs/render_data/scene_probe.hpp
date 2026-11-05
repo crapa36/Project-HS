@@ -9,9 +9,9 @@
 
 namespace hs::render_data
 {
-// This is a separate SPB1 package, not a new interpretation of environment LPB1.
-inline constexpr std::uint32_t kSceneProbeVersion = 1;
-inline constexpr std::uint32_t kSceneProbeHeaderStride = 192;
+// This is a separate SPB2 package, not a new interpretation of environment LPB1.
+inline constexpr std::uint32_t kSceneProbeVersion = 2;
+inline constexpr std::uint32_t kSceneProbeHeaderStride = 228;
 inline constexpr std::uint32_t kSceneProbeRecordStride = 128;
 inline constexpr std::uint32_t kSceneProbeMaximumCount = 64;
 inline constexpr std::uint32_t kSceneProbeShCount = 9;
@@ -41,7 +41,7 @@ struct SceneProbeRevisionInput
     std::span<const SceneProbeRevisionInput> inputs);
 
 enum class SceneProbePayload : std::uint32_t { Layout = 1, Baked = 2 };
-enum class SceneProbeBlend : std::uint32_t { NormalizedInfluenceVisibility = 1 };
+enum class SceneProbeBlend : std::uint32_t { GridCornersAndReflectionInfluence = 2 };
 
 struct SceneProbeRecord
 {
@@ -58,12 +58,34 @@ struct SceneProbeRecord
     float capture_distance{100.0f}; // Finite miss sentinel and capture far plane in metres.
 };
 
+// X varies fastest. Independent world-space SH9 captures use linear Rec709
+// before exposure and the real (0,y,z,x,xy,yz,3zz-1,xz,xx-yy) basis.
+// Coefficients already contain the cosine convolution; the receiver applies its BRDF.
+struct SceneIrradianceGrid
+{
+    Float3 origin{}, spacing{};
+    std::array<std::uint32_t,3> dimensions{};
+    std::uint32_t NodeCount() const { return dimensions[0]*dimensions[1]*dimensions[2]; }
+    std::uint32_t CellCount() const { return NodeCount()?(dimensions[0]-1)*(dimensions[1]-1)*(dimensions[2]-1):0; }
+    Float3 Position(std::uint32_t i) const
+    {
+        return {origin.x+spacing.x*(i%dimensions[0]),origin.y+spacing.y*((i/dimensions[0])%dimensions[1]),
+            origin.z+spacing.z*(i/(dimensions[0]*dimensions[1]))};
+    }
+};
+struct SceneProbeCell
+{
+    std::array<std::uint8_t,64> reachable{}; // 4x4x4 receiver subcells, eight visible corner bits each.
+    std::array<std::uint32_t,2> reflections{}; // All overlapping reflection probes.
+};
+
 struct SceneProbeDescription
 {
     std::uint32_t edge{32}; // 16..128, power of two; D3D +X,-X,+Y,-Y,+Z,-Z.
     std::uint32_t ggx_samples{128}; // 64..2048, power of two.
-    SceneProbeBlend blend{SceneProbeBlend::NormalizedInfluenceVisibility};
+    SceneProbeBlend blend{SceneProbeBlend::GridCornersAndReflectionInfluence};
     SceneProbeRevisions revisions;
+    SceneIrradianceGrid grid;
     // Indices into the sorted dependency IDs. These must reference the actual
     // environment, material catalog, light definition and static layout inputs.
     std::uint32_t environment_dependency{}, material_dependency{}, light_dependency{}, static_layout_dependency{};
@@ -79,13 +101,15 @@ struct SceneProbeDescription
 
 struct SceneProbeBakeData
 {
-    // probe-major, D3D face-major. GGX is face-major/mip-minor, including mip0.
+    // Reflection cubes are probe-major and D3D face-major. GGX includes mip0.
+    // Independently captured grid SH is X-major, nine float4 values per node.
     // Scene-linear Rec709, alpha=1, no exposure; local cubes include global
     // environment once through sky/miss and static direct/emissive transport.
     std::span<const Float4> radiance, prefiltered, cosine_sh;
-    // One nonnegative first-hit world distance per raw texel. Miss equals the
+    // Diagnostic layouts without a grid retain one distance per raw texel. Miss equals the
     // corresponding probe's capture_distance. Visibility is not baked into SH.
-    std::span<const float> first_hit_distance;
+    std::span<const float> first_hit_distance; // Reflection-only diagnostic layouts.
+    std::span<const SceneProbeCell> cells;
 };
 
 struct SceneProbePackageView
@@ -95,12 +119,13 @@ struct SceneProbePackageView
     std::vector<std::string> dependencies;
     std::vector<SceneProbeRecord> probes;
     TexturePackageView radiance, prefiltered; // RGBA32F cube arrays, 6*probe_count layers.
-    std::span<const std::byte> cosine_sh; // Explicit LE float4, probe_count*9 records.
+    std::span<const std::byte> cosine_sh; // Explicit LE float4, grid.NodeCount()*9 records for a grid.
+    std::vector<SceneProbeCell> cells;
     std::span<const std::byte> first_hit_distance; // Explicit LE float, raw face order.
 };
 
-// Empty bake spans produce a strictly layout-only package. A baked package must
-// provide all four complete payloads; no replicated environment SH substitute.
+// Empty bake spans produce a layout. A baked grid requires complete reflection
+// cubes, independent node SH and geometry-qualified cell metadata.
 // Header/record fields and float payloads are serialized explicitly little-endian.
 // Dependencies are canonical sorted unique relative product IDs, all four
 // references/revisions are required. Throws std::runtime_error on invalid data.

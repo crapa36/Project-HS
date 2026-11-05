@@ -63,15 +63,14 @@ float HsBsdfAnisotropicSmithDenominator(float3 direction_local, float2 alpha)
     return direction_local.z + sqrt(dot(stretched, stretched) + direction_local.z * direction_local.z);
 }
 
-float3 HsBsdfAnisotropicEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+float3 HsBsdfAnisotropicEvaluateComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
 {
     if (surface.anisotropy == 0.0)
     {
-        return HsBsdfBaseEvaluateOptical(surface, wo, wi, base_fresnel_override);
+        return HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared, diffuse);
     }
-    float3 normal = normalize(surface.normal);
-    float3 view = normalize(wo);
-    float3 light = normalize(wi);
+    diffuse = 0.0;
     float no_v = dot(normal, view);
     float no_l = dot(normal, light);
     float3 half_sum = view + light;
@@ -90,8 +89,22 @@ float3 HsBsdfAnisotropicEvaluateOptical(HsSurfaceClosure surface, float3 wo, flo
     float3 f0 = HsBsdfF0(surface);
     float3 fresnel = HsBsdfOpticalReflectionFresnel(surface, saturate(0.5 * sqrt(half_length_squared)), base_fresnel_override);
     float3 diffuse_transmission = (1.0 - HsBsdfSchlickFresnel(f0, no_v)) * (1.0 - HsBsdfSchlickFresnel(f0, no_l));
-    float3 diffuse = diffuse_transmission * ((1.0 - HsBsdfMetallic(surface)) * surface.base_color) * HsBsdfInvPi;
+    diffuse = diffuse_transmission * ((1.0 - HsBsdfMetallic(surface)) * surface.base_color) * HsBsdfInvPi;
     return diffuse + distribution * fresnel / (view_denominator * light_denominator);
+}
+
+float3 HsBsdfAnisotropicEvaluateComponentsPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, out float3 diffuse)
+{
+    return HsBsdfAnisotropicEvaluateComponentsView(surface, normal, view, light, base_fresnel_override,
+        HsBsdfPrepareGgxView(surface, normal, view), diffuse);
+}
+
+float3 HsBsdfAnisotropicEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
+{
+    float3 diffuse;
+    return HsBsdfAnisotropicEvaluateComponentsPrepared(surface, normalize(surface.normal), normalize(wo),
+        normalize(wi), base_fresnel_override, diffuse);
 }
 
 float3 HsBsdfAnisotropicEvaluate(HsSurfaceClosure surface, float3 wo, float3 wi)
@@ -201,6 +214,26 @@ HsSurfaceClosure HsBsdfCoatSurface(HsSurfaceClosure surface)
 {
     return HsMaterialMakeSurfaceClosure(float3(0.04, 0.04, 0.04), surface.normal,
                                        surface.coat_roughness, 1.0, 1.0, 1.0);
+}
+
+struct HsBsdfDirectView
+{
+    HsBsdfGgxView base, coat;
+    float3 coat_normal, coat_view;
+};
+
+HsBsdfDirectView HsBsdfPrepareDirectView(HsSurfaceClosure surface, float3 view, float3 normal)
+{
+    HsBsdfDirectView result = (HsBsdfDirectView)0;
+    if (surface.anisotropy == 0.0)
+        result.base = HsBsdfPrepareGgxView(surface, normal, view);
+    if (surface.coat_weight > 0.0)
+    {
+        result.coat_normal = normalize(surface.normal);
+        result.coat_view = normalize(view);
+        result.coat = HsBsdfPrepareGgxView(HsBsdfCoatSurface(surface), result.coat_normal, result.coat_view);
+    }
+    return result;
 }
 
 float HsBsdfCoatFresnel(float cosine)
@@ -318,10 +351,10 @@ float4 HsBsdfLayerProbabilities(HsSurfaceClosure surface, float3 view)
     return total > 0.0 ? weights / total : float4(1.0, 0.0, 0.0, 0.0);
 }
 
-float3 HsBsdfEvaluateLayeredOpticalPrepared(HsSurfaceClosure surface, float3 view, float3 normal,
-                                            float3 wi, float base_fresnel_override)
+float3 HsBsdfEvaluateLayeredComponentsView(HsSurfaceClosure surface, float3 view, float3 normal,
+    float3 light, float base_fresnel_override, HsBsdfDirectView prepared, out float3 diffuse)
 {
-    float3 light = normalize(wi);
+    diffuse = 0.0;
     float no_v = dot(normal, view);
     float no_l = dot(normal, light);
     if (no_v <= 0.0 || no_l == 0.0)
@@ -329,10 +362,18 @@ float3 HsBsdfEvaluateLayeredOpticalPrepared(HsSurfaceClosure surface, float3 vie
         return 0.0;
     }
     float transmission = HsBsdfThinTransmissionWeight(surface);
-    float3 substrate = no_l > 0.0
-        ? (1.0 - transmission) * HsBsdfAnisotropicEvaluateOptical(surface, view, light, base_fresnel_override)
-        : transmission * HsBsdfThinTransmissionColor(surface) * HsBsdfInvPi;
-    substrate *= HsBsdfSheenSubstrateScale(surface);
+    float3 substrate;
+    if (no_l > 0.0)
+    {
+        substrate = HsBsdfAnisotropicEvaluateComponentsView(surface, normal, view, light,
+            base_fresnel_override, prepared.base, diffuse);
+        substrate *= 1.0 - transmission;
+        diffuse *= 1.0 - transmission;
+    }
+    else substrate = transmission * HsBsdfThinTransmissionColor(surface) * HsBsdfInvPi;
+    float sheen_scale = HsBsdfSheenSubstrateScale(surface);
+    substrate *= sheen_scale;
+    diffuse *= sheen_scale;
     if (no_l > 0.0 && surface.sheen_weight > 0.0 && any(surface.sheen_color > 0.0))
     {
         substrate += HsBsdfSheenColor(surface) * HsBsdfCharlieEvaluate(surface, view, light);
@@ -343,11 +384,30 @@ float3 HsBsdfEvaluateLayeredOpticalPrepared(HsSurfaceClosure surface, float3 vie
     float coat_transmission = (1.0 - coat_weight * HsBsdfCoatFresnel(no_v))
         * (1.0 - coat_weight * HsBsdfCoatFresnel(abs(no_l)));
     float3 result = substrate * coat_transmission;
+    diffuse *= coat_transmission;
     if (no_l > 0.0 && coat_weight > 0.0)
     {
-        result += coat_weight * HsBsdfBaseEvaluate(HsBsdfCoatSurface(surface), view, light);
+        float3 coat_diffuse;
+        result += coat_weight * HsBsdfBaseEvaluateOpticalComponentsView(HsBsdfCoatSurface(surface),
+            prepared.coat_normal, prepared.coat_view, normalize(light), -1.0, prepared.coat, coat_diffuse);
     }
+    if (no_l < 0.0) diffuse = result;
     return result;
+}
+
+float3 HsBsdfEvaluateLayeredComponentsPrepared(HsSurfaceClosure surface, float3 view, float3 normal,
+    float3 light, float base_fresnel_override, out float3 diffuse)
+{
+    return HsBsdfEvaluateLayeredComponentsView(surface, view, normal, light, base_fresnel_override,
+        HsBsdfPrepareDirectView(surface, view, normal), diffuse);
+}
+
+float3 HsBsdfEvaluateLayeredOpticalPrepared(HsSurfaceClosure surface, float3 view, float3 normal,
+                                            float3 wi, float base_fresnel_override)
+{
+    float3 diffuse;
+    return HsBsdfEvaluateLayeredComponentsPrepared(surface, view, normal, normalize(wi),
+        base_fresnel_override, diffuse);
 }
 
 float3 HsBsdfEvaluateOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override)
@@ -371,50 +431,13 @@ float3 HsBsdfEvaluate(HsSurfaceClosure surface, float3 wo, float3 wi)
     return HsBsdfEvaluateOptical(surface, wo, wi, -1.0);
 }
 
-// Separate the existing reflection BSDF's diffuse substrate from its specular
-// lobes. Skin diffusion must consume only diffuse; coat/sheen/GGX stay sharp.
-void HsBsdfSeparateOpticalComponents(HsSurfaceClosure surface, float3 view, float3 light, float3 normal,
-    float3 total, out float3 diffuse, out float3 specular)
-{
-    float no_v = dot(normal, view), no_l = dot(normal, light);
-    diffuse = 0.0;
-    if (!surface.unlit && no_v > 0.0 && no_l < 0.0)
-    {
-        // The only opposite-hemisphere lobe is cosine thin-sheet diffuse
-        // transmission. It must not enter the reflection replacement target.
-        diffuse = total;
-    }
-    if (!surface.unlit && no_v > 0.0 && no_l > 0.0)
-    {
-        float3 f0 = HsBsdfF0(surface);
-        diffuse = (1.0 - HsBsdfSchlickFresnel(f0, no_v)) *
-            (1.0 - HsBsdfSchlickFresnel(f0, no_l)) *
-            ((1.0 - HsBsdfMetallic(surface)) * surface.base_color) * HsBsdfInvPi;
-        diffuse *= (1.0 - HsBsdfThinTransmissionWeight(surface)) * HsBsdfSheenSubstrateScale(surface);
-        float coat = saturate(surface.coat_weight);
-        diffuse *= (1.0 - coat * HsBsdfCoatFresnel(no_v)) *
-                   (1.0 - coat * HsBsdfCoatFresnel(no_l));
-    }
-    specular = max(total - diffuse, 0.0);
-}
-
-void HsBsdfEvaluateComponentsOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override,
-                              out float3 diffuse, out float3 specular)
-{
-    float3 total = HsBsdfEvaluateOptical(surface, wo, wi, base_fresnel_override);
-    float3 view = normalize(wo), light = normalize(wi);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    HsBsdfSeparateOpticalComponents(surface, view, light, normal, total, diffuse, specular);
-}
-
-// Point/spot lights share this first-stage view and normal preparation. Deeper
-// BSDF entrypoints keep their own normalization stages and per-light wi work.
-void HsBsdfEvaluateComponentsOpticalPrepared(HsSurfaceClosure surface, float3 view, float3 normal,
-    bool flip_thin_normal, float3 wi, float base_fresnel_override,
+// Point/spot lights share prepared view and normal; each light is normalized once.
+void HsBsdfEvaluateComponentsOpticalView(HsSurfaceClosure surface, float3 view, float3 normal,
+    bool flip_thin_normal, float3 wi, float base_fresnel_override, HsBsdfDirectView prepared,
     out float3 diffuse, out float3 specular)
 {
     float3 total = 0.0;
+    diffuse = 0.0;
     HsSurfaceClosure oriented_surface = surface;
     if (flip_thin_normal)
     {
@@ -422,18 +445,37 @@ void HsBsdfEvaluateComponentsOpticalPrepared(HsSurfaceClosure surface, float3 vi
     }
     if (!surface.unlit)
     {
+        float3 light = normalize(wi);
         if (HsBsdfHasLayers(surface))
         {
-            total = HsBsdfEvaluateLayeredOpticalPrepared(
-                oriented_surface, view, normal, wi, base_fresnel_override);
+            total = HsBsdfEvaluateLayeredComponentsView(
+                oriented_surface, view, normal, light, base_fresnel_override, prepared, diffuse);
         }
         else
         {
-            total = HsBsdfBaseEvaluateOpticalPrepared(surface, normal, view, wi, base_fresnel_override);
+            total = HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared.base, diffuse);
         }
     }
-    float3 light = normalize(wi);
-    HsBsdfSeparateOpticalComponents(oriented_surface, view, light, normal, total, diffuse, specular);
+    specular = max(total - diffuse, 0.0);
+}
+
+void HsBsdfEvaluateComponentsOpticalPrepared(HsSurfaceClosure surface, float3 view, float3 normal,
+    bool flip_thin_normal, float3 wi, float base_fresnel_override,
+    out float3 diffuse, out float3 specular)
+{
+    HsSurfaceClosure oriented = surface;
+    if (flip_thin_normal) oriented.normal = -oriented.normal;
+    HsBsdfEvaluateComponentsOpticalView(surface, view, normal, flip_thin_normal, wi, base_fresnel_override,
+        HsBsdfPrepareDirectView(oriented, view, normal), diffuse, specular);
+}
+
+void HsBsdfEvaluateComponentsOptical(HsSurfaceClosure surface, float3 wo, float3 wi, float base_fresnel_override,
+                              out float3 diffuse, out float3 specular)
+{
+    float3 view = normalize(wo);
+    bool flip = HsBsdfThinTransmissionWeight(surface) > 0.0 && dot(surface.normal, view) < 0.0;
+    float3 normal = normalize(flip ? -surface.normal : surface.normal);
+    HsBsdfEvaluateComponentsOpticalPrepared(surface, view, normal, flip, wi, base_fresnel_override, diffuse, specular);
 }
 
 void HsBsdfEvaluateComponents(HsSurfaceClosure surface, float3 wo, float3 wi,

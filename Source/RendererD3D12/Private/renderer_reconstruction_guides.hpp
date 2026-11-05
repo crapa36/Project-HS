@@ -50,7 +50,7 @@ struct ReconstructionGuidesInputs
     CompletionSet completed;
     bool reset_history{};
     ReconstructionGuideResource transparent_depth, transparent_motion, transparent_history;
-    ReconstructionGuideResource transparent_classification, transparent_metadata, transparent_overflow;
+    ReconstructionGuideResource transparent_classification, transparent_metadata, transparent_unpeeled_fragment_count;
     ReconstructionGuideResource transparent_transport;
     bool transparent_guides_enabled{};
     ReconstructionGuideResource screen_overlay_alpha;
@@ -66,10 +66,10 @@ struct ReconstructionGuidesOutputs
 struct ReconstructionGuidesLayout
 {
     std::uint64_t target_generation{};
-    std::array<ResourceHandle,7> imports{};
+    std::array<ResourceHandle,6> imports{};
     std::array<ResourceVersion,7> outputs{};
     std::array<ResourceVersion,16> inputs{};
-    std::array<std::uint32_t,3> pass_indices{}; // 49, 9, 51
+    std::array<std::uint32_t,2> pass_indices{}; // 49, 9
     std::string provider_name;
     bool external{}, transparent_guides{}, screen_overlay{}, composition{};
 };
@@ -121,9 +121,11 @@ class ReconstructionGuidesSystem
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+#if defined(HS_DEVELOPMENT_TOOLS)
     // Retains the current output-resolution pre-exposed HDR allocation and its
     // graph completion/state lease for post-submit capture publication.
     [[nodiscard]] AllocationResource RetainPreExposedOutput() const;
+#endif
     // Called only after all old submissions have reliably completed.
     void SwapState(ReconstructionGuidesSystem &other) noexcept { impl_.swap(other.impl_); }
   private:

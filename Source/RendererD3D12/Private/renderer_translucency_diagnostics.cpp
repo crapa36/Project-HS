@@ -1,4 +1,4 @@
-#include "renderer_hero_work.hpp"
+#include "renderer_translucency_diagnostics.hpp"
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include "d3d12_resources.hpp"
 #include <hs/core/sha256.hpp>
@@ -17,19 +17,19 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr UINT kContributors = kHeroWorkContributors, kPhases = kHeroWorkPhases, kRows = kContributors * kPhases;
-constexpr UINT64 kRowBytes = kHeroWorkRowBytes, kPhaseBytes = kContributors * kRowBytes, kArgumentsBytes = kContributors * 24;
+constexpr UINT kContributors = kTranslucencyDiagnosticsContributors, kPhases = kTranslucencyDiagnosticsPhases, kRows = kContributors * kPhases;
+constexpr UINT64 kRowBytes = kTranslucencyDiagnosticsRowBytes, kPhaseBytes = kContributors * kRowBytes, kArgumentsBytes = kContributors * 24;
 static_assert(sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) == 11 * sizeof(UINT64));
 static_assert(sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS1) == 14 * sizeof(UINT64));
 static_assert(sizeof(UINT) + sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) == 24);
 static_assert(sizeof(std::array<UINT, 6>) == 24);
-static_assert(kHeroWorkStatisticsOffset + sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS1) == kHeroWorkOcclusionOffset);
-static_assert(kHeroWorkOcclusionOffset + sizeof(UINT64) == kRowBytes);
+static_assert(kTranslucencyDiagnosticsStatisticsOffset + sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS1) == kTranslucencyDiagnosticsOcclusionOffset);
+static_assert(kTranslucencyDiagnosticsOcclusionOffset + sizeof(UINT64) == kRowBytes);
 constexpr std::size_t kPendingLimit = 240 * kRows;
-Result Fail(std::string message) { return Result::Failure(ErrorCode::InvalidState, "hs_hero_work", std::move(message)); }
+Result Fail(std::string message) { return Result::Failure(ErrorCode::InvalidState, "hs_translucency_diagnostics", std::move(message)); }
 Result Native(std::string_view what, HRESULT hr)
 {
-    return Result::Failure(ErrorCode::TaskFailed, "hs_hero_work", std::string(what) +
+    return Result::Failure(ErrorCode::TaskFailed, "hs_translucency_diagnostics", std::string(what) +
         " failed (HRESULT " + std::to_string(static_cast<std::int32_t>(hr)) + ").");
 }
 Result Readback(D3D12MA::Allocator *allocator, UINT64 bytes, AllocationResource &out)
@@ -58,14 +58,14 @@ Result ShaderBuffer(D3D12MA::Allocator *allocator, UINT64 bytes, bool upload, Al
     out.graph_access = upload ? Access::CopySource : Access::Common;
     return Result::Success();
 }
-UINT PipelineIndex(HeroTransparencyPhase phase, UINT layer)
+UINT PipelineIndex(LayeredTranslucencyPhase phase, UINT layer)
 {
     // Product3 now shades the nearest composite and writes its six surface guides.
-    return phase == HeroTransparencyPhase::Composite && layer == 0 ? 3u : static_cast<UINT>(phase);
+    return phase == LayeredTranslucencyPhase::Composite && layer == 0 ? 3u : static_cast<UINT>(phase);
 }
 } // namespace
 
-struct HeroWorkCapture::Impl
+struct TranslucencyDiagnosticsCapture::Impl
 {
     struct Slot
     {
@@ -79,8 +79,8 @@ struct HeroWorkCapture::Impl
         std::array<ResourceHandle, kPhases> phase_handles;
         ResourceHandle arguments_handle;
         std::array<bool, kRows> recorded{};
-        std::array<RendererHeroWorkSample, kRows> rows;
-        std::vector<HeroWorkContributorInput> contributors;
+        std::array<RendererTranslucencyDiagnosticsSample, kRows> rows;
+        std::vector<TranslucencyDiagnosticsContributorInput> contributors;
         CompletionSet completion;
         ComPtr<ID3D12CommandQueue> queue;
         std::uint64_t frame{}, tick{}, frequency{};
@@ -89,24 +89,24 @@ struct HeroWorkCapture::Impl
     };
     std::vector<std::unique_ptr<Slot>> slots;
     ComPtr<ID3D12Device> device;
-    std::array<RendererHeroWorkPipeline, 5> pipelines;
-    RendererHeroWorkStatus status;
-    HeroWorkShaderLayout shader_layout;
-    HeroWorkDiagnosticMode mode{};
+    std::array<RendererTranslucencyDiagnosticsPipeline, 5> pipelines;
+    RendererTranslucencyDiagnosticsStatus status;
+    TranslucencyDiagnosticsShaderLayout shader_layout;
+    TranslucencyDiagnosticsMode mode{};
     std::uint64_t qpc_frequency{};
     D3D12_QUERY_TYPE statistics_type{D3D12_QUERY_TYPE_PIPELINE_STATISTICS};
     UINT statistics_bytes{sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS)};
 };
 
-HeroWorkCapture::HeroWorkCapture() : impl_(std::make_unique<Impl>()) {}
-HeroWorkCapture::~HeroWorkCapture() = default;
-Result HeroWorkCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *allocator, std::uint32_t count, ViewExtent capacity, HeroWorkDiagnosticMode mode)
+TranslucencyDiagnosticsCapture::TranslucencyDiagnosticsCapture() : impl_(std::make_unique<Impl>()) {}
+TranslucencyDiagnosticsCapture::~TranslucencyDiagnosticsCapture() = default;
+Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *allocator, std::uint32_t count, ViewExtent capacity, TranslucencyDiagnosticsMode mode)
 {
     if (!device || !allocator || !count || !impl_->slots.empty()) return Fail("Invalid hero capture initialization.");
-    if (!HeroWorkMakeShaderLayout(capacity.width, capacity.height, count, impl_->shader_layout))
+    if (!TranslucencyDiagnosticsMakeShaderLayout(capacity.width, capacity.height, count, impl_->shader_layout))
         return Fail("Hero shader diagnostics exceed the checked 512MiB GPU/readback/zero-upload limit or pixel index range.");
-    static_assert(32 + kHeroWorkShaderCounterNames.size() * 4 <= kHeroWorkShaderHeaderBytes);
-    if (mode > HeroWorkDiagnosticMode::CoverageOnly) return Fail("Invalid hero work diagnostic mode.");
+    static_assert(32 + kTranslucencyDiagnosticsShaderCounterNames.size() * 4 <= kTranslucencyDiagnosticsShaderHeaderBytes);
+    if (mode > TranslucencyDiagnosticsMode::CoverageOnly) return Fail("Invalid hero work diagnostic mode.");
     impl_->mode = mode;
     impl_->status.shader_counters_enabled = true;
     impl_->device = device;
@@ -144,10 +144,10 @@ Result HeroWorkCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *all
         for (UINT phase = 0; phase < kPhases; ++phase)
         {
             if (auto r = ShaderBuffer(allocator, impl_->shader_layout.phase_bytes, false, slot->shader_gpu[phase]); !r) return r;
-            if (auto r = Readback(allocator, kContributors * kHeroWorkShaderHeaderBytes, slot->shader_readbacks[phase]); !r) return r;
+            if (auto r = Readback(allocator, kContributors * kTranslucencyDiagnosticsShaderHeaderBytes, slot->shader_readbacks[phase]); !r) return r;
             impl_->status.shader_gpu_bytes += slot->shader_gpu[phase].allocation->GetSize();
             impl_->status.shader_readback_bytes += slot->shader_readbacks[phase].allocation->GetSize();
-            if (impl_->status.readback_bytes + impl_->status.shader_gpu_bytes + impl_->status.shader_readback_bytes + impl_->status.shader_zero_upload_bytes > kHeroWorkShaderStorageLimit)
+            if (impl_->status.readback_bytes + impl_->status.shader_gpu_bytes + impl_->status.shader_readback_bytes + impl_->status.shader_zero_upload_bytes > kTranslucencyDiagnosticsShaderStorageLimit)
                 return Fail("Actual hero shader diagnostic allocation sizes exceed 512MiB.");
         }
         for (auto *resource : {&slot->arguments, &slot->shader_zero})
@@ -162,7 +162,7 @@ Result HeroWorkCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *all
     }
     return Result::Success();
 }
-void HeroWorkCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc,
+void TranslucencyDiagnosticsCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc,
     std::span<const std::byte> vertex, std::span<const std::byte> pixel, std::string_view product)
 {
     auto &out = impl_->pipelines.at(index);
@@ -170,7 +170,7 @@ void HeroWorkCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELIN
                                     : "render/shader/hero_transparency_current_vs.dxil";
     out.pixel_product = product;
     out.vertex_sha256 = Sha256(vertex); out.pixel_sha256 = Sha256(pixel);
-    out.source_requested_flags = "RenderMaterialShader: -nologo -WX -O3 -Ges; VS vs_6_0 / PS ps_6_0; HS_GENERATED_HERO_MATERIAL=1; HS_CAPTURE_HERO_WORK=1; product/source flags, not binary attestation";
+    out.source_requested_flags = "RenderMaterialShader: -nologo -WX -O3 -Ges; VS vs_6_0 / PS ps_6_0; HS_GENERATED_CHARACTER_MATERIAL=1; HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1; product/source flags, not binary attestation";
     out.cull_mode = desc.RasterizerState.CullMode; out.fill_mode = desc.RasterizerState.FillMode;
     out.front_counter_clockwise = desc.RasterizerState.FrontCounterClockwise != FALSE;
     out.depth_clip_enabled = desc.RasterizerState.DepthClipEnable != FALSE;
@@ -191,8 +191,8 @@ void HeroWorkCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELIN
         out.blend_op_alpha[i] = blend.BlendOpAlpha; out.write_mask[i] = blend.RenderTargetWriteMask;
     }
 }
-Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyInputs &inputs,
-    HeroWorkRetainedLayout *layout)
+Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &graph, const LayeredTranslucencyInputs &inputs,
+    TranslucencyDiagnosticsRetainedLayout *layout)
 {
     if (inputs.frame_slot >= impl_->slots.size() || inputs.work_contributors.size() > kContributors || !inputs.work_draw ||
         !inputs.direct_queue || !inputs.direct_timestamp_frequency || !inputs.submitted_frame)
@@ -233,7 +233,7 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
     std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
     for (UINT contributor = 0; contributor < kContributors; ++contributor)
     {
-        const std::array<UINT, 8> header{kHeroWorkShaderMagic, kHeroWorkShaderVersion, slot.width, slot.height,
+        const std::array<UINT, 8> header{kTranslucencyDiagnosticsShaderMagic, kTranslucencyDiagnosticsShaderVersion, slot.width, slot.height,
             impl_->shader_layout.bitmap_words, impl_->shader_layout.pixels, 0, static_cast<UINT>(impl_->mode)};
         std::memcpy(static_cast<std::byte *>(zero) + contributor * impl_->shader_layout.contributor_bytes, header.data(), sizeof(header));
     }
@@ -244,19 +244,19 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
             return certified;
     slot.shader_zero_handle = graph.ImportBuffer({slot.shader_zero.resource.Get(), slot.shader_zero.graph_completion,
         slot.shader_zero.graph_queue, {}, slot.shader_zero.NativeContract()},
-        slot.shader_zero.graph_access, "HeroWork.ShaderZeroUpload");
+        slot.shader_zero.graph_access, "TranslucencyDiagnostics.ShaderZeroUpload");
     // Query results and visible arguments are separate graph destinations. The
     // graph owns CopySource -> IndirectArgs hazards; no hand-written transitions.
     slot.arguments_handle = graph.ImportBuffer({slot.arguments.resource.Get(), slot.arguments.graph_completion,
         slot.arguments.graph_queue, {}, slot.arguments.NativeContract()},
-        slot.arguments.graph_access, "HeroWork.IndexedArgumentsReadback");
+        slot.arguments.graph_access, "TranslucencyDiagnostics.IndexedArgumentsReadback");
     if (layout)
     {
         layout->zero_upload = slot.shader_zero_handle;
         layout->arguments_readback = slot.arguments_handle;
         layout->argument_copy_pass = graph.PassCount();
     }
-    auto pass = graph.AddPass(118, "HeroWorkCopyIndexedArguments", QueueHint::Direct);
+    auto pass = graph.AddPass(118, "TranslucencyDiagnosticsCopyIndexedArguments", QueueHint::Direct);
     for (std::size_t i = 0; i < slot.contributors.size(); ++i)
     {
         const auto &source = slot.contributors[i];
@@ -280,28 +280,28 @@ Result HeroWorkCapture::Begin(RenderGraphBuilder &graph, const HeroTransparencyI
     });
     return Result::Success();
 }
-void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
-    std::uint32_t index, std::uint32_t phase, HeroWorkRetainedLayout *layout)
+void TranslucencyDiagnosticsCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
+    std::uint32_t index, std::uint32_t phase, TranslucencyDiagnosticsRetainedLayout *layout)
 {
     auto &slot = *impl_->slots.at(index); auto &readback = slot.readbacks.at(phase);
     if (slot.contributors.empty()) return;
     auto &handle = slot.phase_handles.at(phase);
     handle = graph.ImportBuffer({readback.resource.Get(), readback.graph_completion,
         readback.graph_queue, {}, readback.NativeContract()},
-        readback.graph_access, "HeroWork.NativeQueriesReadback");
+        readback.graph_access, "TranslucencyDiagnostics.NativeQueriesReadback");
     if (layout) layout->native_readback[phase] = handle;
     const auto written = pass.Write(graph.Version(handle), Access::CopyDest);
     graph.SetFinalAccess(written, Access::CopyDest);
     auto &gpu = slot.shader_gpu.at(phase); auto &shader_readback = slot.shader_readbacks.at(phase);
     auto &gpu_handle = slot.shader_handles.at(phase);
     gpu_handle = graph.ImportBuffer({gpu.resource.Get(), gpu.graph_completion,
-        gpu.graph_queue, {}, gpu.NativeContract()}, gpu.graph_access, "HeroWork.ShaderCountersBitmap");
+        gpu.graph_queue, {}, gpu.NativeContract()}, gpu.graph_access, "TranslucencyDiagnostics.ShaderCountersBitmap");
     if (layout)
     {
         layout->shader_gpu[phase] = gpu_handle;
         layout->shader_initialize_pass[phase] = graph.PassCount();
     }
-    auto initialize = graph.AddPass(0x48570000u + phase * 2, "HeroWorkInitializeShaderCounters", QueueHint::Direct);
+    auto initialize = graph.AddPass(0x48570000u + phase * 2, "TranslucencyDiagnosticsInitializeShaderCounters", QueueHint::Direct);
     initialize.Read(graph.Version(slot.shader_zero_handle), Access::CopySource);
     const auto initialized = initialize.Write(graph.Version(gpu_handle), Access::CopyDest);
     const auto bytes = impl_->shader_layout.phase_bytes;
@@ -314,13 +314,13 @@ void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
     auto &shader_handle = slot.shader_readback_handles.at(phase);
     shader_handle = graph.ImportBuffer({shader_readback.resource.Get(), shader_readback.graph_completion,
         shader_readback.graph_queue, {}, shader_readback.NativeContract()},
-        shader_readback.graph_access, "HeroWork.ShaderHeaderReadback");
+        shader_readback.graph_access, "TranslucencyDiagnostics.ShaderHeaderReadback");
     if (layout)
     {
         layout->shader_readback[phase] = shader_handle;
         layout->shader_copy_pass[phase] = graph.PassCount();
     }
-    auto resolve = graph.AddPass(0x48570001u + phase * 2, "HeroWorkCopyShaderCounters", QueueHint::Direct);
+    auto resolve = graph.AddPass(0x48570001u + phase * 2, "TranslucencyDiagnosticsCopyShaderCounters", QueueHint::Direct);
     resolve.Read(counted, Access::CopySource);
     const auto resolved = resolve.Write(graph.Version(shader_handle), Access::CopyDest);
     graph.SetFinalAccess(counted, Access::CopySource); graph.SetFinalAccess(resolved, Access::CopyDest);
@@ -328,15 +328,15 @@ void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &graph, PassBuilder &pass,
     resolve.SetExecute([&slot, phase, stride](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         for (std::size_t i = 0; i < slot.contributors.size(); ++i)
-            list->CopyBufferRegion(slot.shader_readbacks[phase].resource.Get(), i * kHeroWorkShaderHeaderBytes,
-                slot.shader_gpu[phase].resource.Get(), i * stride, kHeroWorkShaderHeaderBytes);
+            list->CopyBufferRegion(slot.shader_readbacks[phase].resource.Get(), i * kTranslucencyDiagnosticsShaderHeaderBytes,
+                slot.shader_gpu[phase].resource.Get(), i * stride, kTranslucencyDiagnosticsShaderHeaderBytes);
         slot.shader_copy_recorded[phase] = true;
     });
 }
-Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &graph,
-    const HeroTransparencyInputs &inputs, const HeroWorkRetainedLayout &layout)
+Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &graph,
+    const LayeredTranslucencyInputs &inputs, const TranslucencyDiagnosticsRetainedLayout &layout)
 {
-    static_assert(kContributors == HeroWorkRetainedLayout::kMaxContributors);
+    static_assert(kContributors == TranslucencyDiagnosticsRetainedLayout::kMaxContributors);
     if (inputs.frame_slot >= impl_->slots.size() || layout.contributor_count > kContributors ||
         inputs.work_contributors.size() != layout.contributor_count ||
         !inputs.work_draw || !inputs.direct_queue || !inputs.direct_timestamp_frequency ||
@@ -383,7 +383,7 @@ Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &graph,
     std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
     for (UINT contributor = 0; contributor < kContributors; ++contributor)
     {
-        const std::array<UINT, 8> header{kHeroWorkShaderMagic, kHeroWorkShaderVersion,
+        const std::array<UINT, 8> header{kTranslucencyDiagnosticsShaderMagic, kTranslucencyDiagnosticsShaderVersion,
             slot.width, slot.height, impl_->shader_layout.bitmap_words,
             impl_->shader_layout.pixels, 0, static_cast<UINT>(impl_->mode)};
         std::memcpy(static_cast<std::byte *>(zero) + contributor *
@@ -413,8 +413,8 @@ Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &graph,
     });
     return Result::Success();
 }
-Result HeroWorkCapture::BindRetainedPhase(RenderGraphBuilder &graph, std::uint32_t index,
-    std::uint32_t phase, const HeroWorkRetainedLayout &layout)
+Result TranslucencyDiagnosticsCapture::BindRetainedPhase(RenderGraphBuilder &graph, std::uint32_t index,
+    std::uint32_t phase, const TranslucencyDiagnosticsRetainedLayout &layout)
 {
     if (index >= impl_->slots.size() || phase >= kPhases)
         return Fail("Hero retained phase slot is invalid.");
@@ -460,15 +460,15 @@ Result HeroWorkCapture::BindRetainedPhase(RenderGraphBuilder &graph, std::uint32
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         for (std::size_t contributor = 0; contributor < slot.contributors.size(); ++contributor)
             list->CopyBufferRegion(slot.shader_readbacks[phase].resource.Get(),
-                contributor * kHeroWorkShaderHeaderBytes,
+                contributor * kTranslucencyDiagnosticsShaderHeaderBytes,
                 slot.shader_gpu[phase].resource.Get(), contributor * stride,
-                kHeroWorkShaderHeaderBytes);
+                kTranslucencyDiagnosticsShaderHeaderBytes);
         slot.shader_copy_recorded[phase] = true;
     });
     return Result::Success();
 }
-void HeroWorkCapture::Record(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
-    const HeroTransparencyInputs &inputs, HeroTransparencyPhase semantic, std::uint32_t layer, std::uint32_t phase,
+void TranslucencyDiagnosticsCapture::Record(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
+    const LayeredTranslucencyInputs &inputs, LayeredTranslucencyPhase semantic, std::uint32_t layer, std::uint32_t phase,
     D3D12_GPU_DESCRIPTOR_HANDLE table)
 {
     auto &slot = *impl_->slots.at(inputs.frame_slot);
@@ -485,7 +485,7 @@ void HeroWorkCapture::Record(ID3D12GraphicsCommandList *list, ID3D12PipelineStat
         list->BeginQuery(slot.statistics.Get(), impl_->statistics_type, query);
         list->BeginQuery(slot.occlusion.Get(), D3D12_QUERY_TYPE_OCCLUSION, query);
         LARGE_INTEGER begin{}, end{}; QueryPerformanceCounter(&begin);
-        HeroWorkDrawCalls calls;
+        TranslucencyDiagnosticsDrawCalls calls;
         try { calls = inputs.work_draw(list, pipeline, semantic, layer, table, contributor,
             slot.shader_gpu[phase].resource->GetGPUVirtualAddress() + contributor * impl_->shader_layout.contributor_bytes); }
         catch (...)
@@ -512,7 +512,7 @@ void HeroWorkCapture::Record(ID3D12GraphicsCommandList *list, ID3D12PipelineStat
         slot.recorded[query] = true;
     }
 }
-void HeroWorkCapture::Submitted(const RenderGraphBuilder &graph, std::uint32_t index,
+void TranslucencyDiagnosticsCapture::Submitted(const RenderGraphBuilder &graph, std::uint32_t index,
     const CompletionSet &completion, bool success)
 {
     auto &slot = *impl_->slots.at(index);
@@ -536,7 +536,7 @@ void HeroWorkCapture::Submitted(const RenderGraphBuilder &graph, std::uint32_t i
     slot.pending = true; slot.success = success; ++impl_->status.submitted_frames;
     if (!success) ++impl_->status.failed_frames;
 }
-Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<RendererHeroWorkSample> &output)
+Result TranslucencyDiagnosticsCapture::Collect(const CompletionSet &completed, std::vector<RendererTranslucencyDiagnosticsSample> &output)
 {
     for (auto &owned : impl_->slots)
     {
@@ -554,7 +554,7 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
         { impl_->status.overflowed = true; return Fail("Hero contributor capture exceeded its bounded pending rows; drain every frame."); }
         UINT64 gpuAnchor{}, qpcAnchor{};
         const bool calibration = SUCCEEDED(slot.queue->GetClockCalibration(&gpuAnchor, &qpcAnchor));
-        std::vector<RendererHeroWorkSample> ready;
+        std::vector<RendererTranslucencyDiagnosticsSample> ready;
         ready.reserve(static_cast<std::size_t>(count));
         std::array<std::array<UINT, 6>, kContributors> arguments{};
         void *mapped{}; const D3D12_RANGE argumentRange{0, static_cast<SIZE_T>(slot.contributors.size() * 24)};
@@ -569,8 +569,8 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
         {
             const auto first = slot.recorded.begin() + phase * kContributors;
             if (std::none_of(first, first + kContributors, [](bool value) { return value; })) continue;
-            std::array<std::array<UINT, kHeroWorkShaderHeaderBytes / 4>, kContributors> headers{};
-            const D3D12_RANGE shader_range{0, static_cast<SIZE_T>(slot.contributors.size() * kHeroWorkShaderHeaderBytes)};
+            std::array<std::array<UINT, kTranslucencyDiagnosticsShaderHeaderBytes / 4>, kContributors> headers{};
+            const D3D12_RANGE shader_range{0, static_cast<SIZE_T>(slot.contributors.size() * kTranslucencyDiagnosticsShaderHeaderBytes)};
             auto shader_hr = slot.shader_readbacks[phase].resource->Map(0, &shader_range, &mapped);
             if (FAILED(shader_hr)) { ++impl_->status.shader_invalid_samples; return Native("Map completed hero shader counters", shader_hr); }
             std::memcpy(headers.data(), mapped, shader_range.End);
@@ -592,13 +592,13 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
                 row.timestamp_valid = row.gpu_end >= row.gpu_begin && row.gpu_frequency != 0;
                 row.statistics_valid = row.occlusion_valid = true;
                 row.mesh_statistics_available = impl_->status.mesh_statistics_supported;
-                row.calibration_valid = calibration && HeroWorkCalibrate(row.gpu_begin, gpuAnchor, qpcAnchor,
+                row.calibration_valid = calibration && TranslucencyDiagnosticsCalibrate(row.gpu_begin, gpuAnchor, qpcAnchor,
                     row.gpu_frequency, row.cpu_qpc_frequency, row.calibrated_begin_qpc) &&
-                    HeroWorkCalibrate(row.gpu_end, gpuAnchor, qpcAnchor, row.gpu_frequency,
+                    TranslucencyDiagnosticsCalibrate(row.gpu_end, gpuAnchor, qpcAnchor, row.gpu_frequency,
                         row.cpu_qpc_frequency, row.calibrated_end_qpc);
                 row.indexed_arguments = arguments[contributor];
                 row.indirect_arguments_valid = true; // bytes were copied and read after completed submission
-                row.indirect_arguments_in_range = HeroWorkIndexedArgumentsValid(row.indexed_arguments,
+                row.indirect_arguments_in_range = TranslucencyDiagnosticsIndexedArgumentsValid(row.indexed_arguments,
                     row.source.geometry_indices, row.source.candidate_instances);
                 const auto &header = headers[contributor];
                 std::copy_n(header.begin() + 8, row.shader_counters.size(), row.shader_counters.begin());
@@ -606,7 +606,7 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
                 row.shader_counters_available = true;
                 row.diagnostic_mode = impl_->mode;
                 row.shader_counters_valid = slot.shader_clear_recorded[phase] && slot.shader_copy_recorded[phase] &&
-                    header[0] == kHeroWorkShaderMagic && header[1] == kHeroWorkShaderVersion &&
+                    header[0] == kTranslucencyDiagnosticsShaderMagic && header[1] == kTranslucencyDiagnosticsShaderVersion &&
                     header[2] == slot.width && header[3] == slot.height && header[4] == impl_->shader_layout.bitmap_words &&
                     header[5] == impl_->shader_layout.pixels && header[6] == 0 && header[7] == static_cast<UINT>(impl_->mode) &&
                     row.shader_counters[2] <= std::uint64_t(slot.width) * slot.height &&
@@ -614,7 +614,7 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
                     std::uint64_t(row.shader_counters[22]) + row.shader_counters[23] == row.shader_counters[21] &&
                     std::uint64_t(row.shader_counters[20]) * 32 == row.shader_counters[21];
                 row.unique_pixels_available = row.shader_counters_valid;
-                row.layer_rejections_available = row.shader_counters_valid && row.phase != static_cast<UINT>(HeroTransparencyPhase::Exit);
+                row.layer_rejections_available = row.shader_counters_valid && row.phase != static_cast<UINT>(LayeredTranslucencyPhase::Exit);
                 // Logical evaluator calls are exported; DCE-retained full instruction work and sampled mip remain unavailable.
                 if (!row.shader_counters_valid) ++impl_->status.shader_invalid_samples;
                 ready.push_back(std::move(row));
@@ -627,7 +627,7 @@ Result HeroWorkCapture::Collect(const CompletionSet &completed, std::vector<Rend
     }
     return Result::Success();
 }
-RendererHeroWorkStatus HeroWorkCapture::Status() const
+RendererTranslucencyDiagnosticsStatus TranslucencyDiagnosticsCapture::Status() const
 {
     auto status = impl_->status;
     for (const auto &slot : impl_->slots) if (slot->pending) ++status.pending_frames;
@@ -637,29 +637,29 @@ RendererHeroWorkStatus HeroWorkCapture::Status() const
 #else
 namespace hs
 {
-struct HeroWorkCapture::Impl {};
-HeroWorkCapture::HeroWorkCapture() = default;
-HeroWorkCapture::~HeroWorkCapture() = default;
-Result HeroWorkCapture::Initialize(ID3D12Device *, D3D12MA::Allocator *, std::uint32_t, ViewExtent, HeroWorkDiagnosticMode)
+struct TranslucencyDiagnosticsCapture::Impl {};
+TranslucencyDiagnosticsCapture::TranslucencyDiagnosticsCapture() = default;
+TranslucencyDiagnosticsCapture::~TranslucencyDiagnosticsCapture() = default;
+Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *, D3D12MA::Allocator *, std::uint32_t, ViewExtent, TranslucencyDiagnosticsMode)
 { return Result::Success(); }
-void HeroWorkCapture::Pipeline(std::uint32_t, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &,
+void TranslucencyDiagnosticsCapture::Pipeline(std::uint32_t, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &,
     std::span<const std::byte>, std::span<const std::byte>, std::string_view) {}
-Result HeroWorkCapture::Begin(RenderGraphBuilder &, const HeroTransparencyInputs &, HeroWorkRetainedLayout *)
+Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &, const LayeredTranslucencyInputs &, TranslucencyDiagnosticsRetainedLayout *)
 { return Result::Success(); }
-void HeroWorkCapture::DeclarePhase(RenderGraphBuilder &, PassBuilder &, std::uint32_t, std::uint32_t,
-    HeroWorkRetainedLayout *) {}
-Result HeroWorkCapture::BindRetainedBegin(RenderGraphBuilder &, const HeroTransparencyInputs &,
-    const HeroWorkRetainedLayout &)
+void TranslucencyDiagnosticsCapture::DeclarePhase(RenderGraphBuilder &, PassBuilder &, std::uint32_t, std::uint32_t,
+    TranslucencyDiagnosticsRetainedLayout *) {}
+Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &, const LayeredTranslucencyInputs &,
+    const TranslucencyDiagnosticsRetainedLayout &)
 { return Result::Success(); }
-Result HeroWorkCapture::BindRetainedPhase(RenderGraphBuilder &, std::uint32_t, std::uint32_t,
-    const HeroWorkRetainedLayout &)
+Result TranslucencyDiagnosticsCapture::BindRetainedPhase(RenderGraphBuilder &, std::uint32_t, std::uint32_t,
+    const TranslucencyDiagnosticsRetainedLayout &)
 { return Result::Success(); }
-void HeroWorkCapture::Record(ID3D12GraphicsCommandList *, ID3D12PipelineState *,
-    const HeroTransparencyInputs &, HeroTransparencyPhase, std::uint32_t, std::uint32_t,
+void TranslucencyDiagnosticsCapture::Record(ID3D12GraphicsCommandList *, ID3D12PipelineState *,
+    const LayeredTranslucencyInputs &, LayeredTranslucencyPhase, std::uint32_t, std::uint32_t,
     D3D12_GPU_DESCRIPTOR_HANDLE) {}
-void HeroWorkCapture::Submitted(const RenderGraphBuilder &, std::uint32_t, const CompletionSet &, bool) {}
-Result HeroWorkCapture::Collect(const CompletionSet &, std::vector<RendererHeroWorkSample> &output)
+void TranslucencyDiagnosticsCapture::Submitted(const RenderGraphBuilder &, std::uint32_t, const CompletionSet &, bool) {}
+Result TranslucencyDiagnosticsCapture::Collect(const CompletionSet &, std::vector<RendererTranslucencyDiagnosticsSample> &output)
 { output.clear(); return Result::Success(); }
-RendererHeroWorkStatus HeroWorkCapture::Status() const { return {}; }
+RendererTranslucencyDiagnosticsStatus TranslucencyDiagnosticsCapture::Status() const { return {}; }
 } // namespace hs
 #endif

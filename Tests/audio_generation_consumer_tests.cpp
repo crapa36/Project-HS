@@ -19,7 +19,8 @@ int main(int argc, char **argv)
         if (argc == 6 && std::string_view(argv[1]) == "--hold")
         {
             hs::AudioEngine audio;
-            const hs::SettingsData settings;
+            hs::SettingsData settings;
+            settings.master_volume = 0;
             const auto initialization = audio.Initialize(settings);
             if (!initialization || audio.Status().loaded_cues != 107)
                 throw std::runtime_error("default AudioEngine failed to load selected Generation: " +
@@ -61,7 +62,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("invalid selected audio Generation");
 
         hs::AudioEngine audio;
-        const hs::SettingsData settings;
+        hs::SettingsData settings;
+        settings.master_volume = 0;
         if (const auto result = audio.Initialize(settings, generation.product_paths); !result)
             throw std::runtime_error("AudioEngine rejected selected Generation catalog");
         if (audio.Status().loaded_cues != 107)

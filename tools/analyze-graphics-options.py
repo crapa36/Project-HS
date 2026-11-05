@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 
-# Original 56-option capture schema; read-only compatibility for recordings made before RT removal.
+# Original capture schema; read-only compatibility for recordings made before RT removal.
 LEGACY_OPTIONS = {
     "preset": ("configuration", (), "Quality preset selects several controls; no separate GPU pass."),
     "display_mode": ("presentation", (), "Window/presentation policy; no isolated graph pass."),
@@ -69,17 +69,25 @@ LEGACY_OPTIONS = {
 # Retain legacy RT mappings only to read original captures made before removal.
 LEGACY_RT_KEYS = frozenset(("ray_tracing_enabled", "rt_trace_distance_m", "neural_ray_reconstruction", "ray_reconstruction_provider"))
 SETTING_IDS = {key: index for index, key in enumerate(LEGACY_OPTIONS, 1)}
-OPTIONS = {key: value for key, value in LEGACY_OPTIONS.items() if key not in LEGACY_RT_KEYS}
+# IDs 53 and 54 were retired; persistence IDs after the gap were not renumbered.
+SETTING_IDS.update(color_grading=55, adaptive_shading=56)
+SETTING_IDS.update(outline=53, outline_width_px=54)
+OPTIONS = {key: value for key, value in LEGACY_OPTIONS.items() if key not in LEGACY_RT_KEYS and key != "gi_quality"}
 OPTIONS.update({
     "geometry_quality": ("shared", ("geometry", "surface", "shadows"), "LOD/geometry affects several stages; geometry group is preparation only."),
     "shadow_mode": ("feature", ("shadows",), "Directional/local/virtual shadow work; shared shadow controls reference this same group."),
     "ao_mode": ("feature", ("ao",), "Active GTAO group."),
     "gi_mode": ("feature", ("gi", "shared_probes"), "Active probe/software GI work; probe updates can be shared with reflections."),
-    "gi_quality": ("feature", ("gi", "shared_probes"), "Same GI group; shared probe updates are reported separately."),
     "reflection_mode": ("feature", ("reflections", "shared_probes"), "Active probe/SSR reflection work; shared probe updates are reported separately."),
     "reflection_quality": ("feature", ("reflections", "shared_probes"), "Same reflection group, not an independent additive cost."),
 })
 CURRENT_OPTION_KEYS = frozenset(OPTIONS)
+PREVIOUS_OPTION_KEYS = CURRENT_OPTION_KEYS | {"gi_quality"}
+OUTLINE_OPTIONS = {
+    "outline": ("feature", ("outline",), "Historical screen-space outline pass."),
+    "outline_width_px": ("shared", ("outline",), "Width parameter in the same historical outline pass."),
+}
+OUTLINE_OPTION_KEYS = CURRENT_OPTION_KEYS | OUTLINE_OPTIONS.keys()
 DEPENDENCIES = {
     "ao_quality": "ao_mode", "gi_quality": "gi_mode", "reflection_quality": "reflection_mode",
     "bloom_strength": "bloom", "frame_generation_multiplier": "frame_generation_mode",
@@ -87,11 +95,22 @@ DEPENDENCIES = {
     "dynamic_min_percent": "dynamic_resolution", "dynamic_max_percent": "dynamic_resolution",
     "frame_generation_provider": "frame_generation_mode", "rt_trace_distance_m": "ray_tracing_enabled",
     "hdr_paper_white_nits": "hdr_mode", "hdr_peak_nits": "hdr_mode",
+    "outline_width_px": "outline",
+}
+
+
+LEGACY_PASS_NAMES = {
+    "HeroPeelFront": "Translucency.PeelFront", "HeroPeelExit": "Translucency.GatherExitDepth",
+    "HeroLayerComposite": "Translucency.CompositeLayer", "HeroTransparentGuide": "Translucency.CompositeFront",
+    "HeroOitTail": "Translucency.AccumulateUnpeeled", "HeroCopyBackground": "Translucency.CopyBackground",
+    "HeroClearOverflow": "Translucency.ClearUnpeeledFragmentCount", "SurfaceResolve": "Material.Resolve",
+    "Deferred Cel Lighting": "Lighting.Deferred",
 }
 
 
 def pass_feature_group(row):
-    name, identity = row["pass_name"], int(row["pass_id"])
+    name, identity = LEGACY_PASS_NAMES.get(row["pass_name"], row["pass_name"]), int(row["pass_id"])
+    if name == "Screen-space Outline": return "outline"
     if (name.startswith("RenderCriticalPath") or name == "SourceRenderOutputReady"): return None
     if identity == 169 or name == "RayTransportCompose": return "shared_ray_compose"
     if identity in (2, 177) or name.startswith(("VirtualShadow.", "LocalShadow.", "RayShadow.")): return "shadows"
@@ -108,7 +127,7 @@ def pass_feature_group(row):
     if name == "HdrPostMotionBlur": return "motion_blur"
     if name in ("HdrPostColorGrade", "HdrPostLutInitialize"): return "color_grading"
     if name == "HdrPostNearestGuides": return "shared_post_guides"
-    if name.startswith("Hero"): return "refraction"
+    if name.startswith(("Hero", "Translucency.", "Water.")): return "refraction"
     if name.startswith("Volumetric"): return "volumetrics"
     if name.startswith("Subsurface"): return "subsurface"
     if name.startswith("Bloom"): return "bloom"
@@ -170,11 +189,11 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
     manifests = defaultdict(dict)
     for row in read_csv(directory / "graphics_settings.csv"):
         revision, key = int(row["config_revision"]), row["key"]
-        if key not in LEGACY_OPTIONS: raise ValueError(f"Unclassified setting: {key}")
+        if key not in LEGACY_OPTIONS and key not in OUTLINE_OPTIONS: raise ValueError(f"Unclassified setting: {key}")
         if key in manifests[revision]: raise ValueError("Duplicate setting in configuration revision")
         manifests[revision][key] = row
-    if not manifests or any(set(m) not in (CURRENT_OPTION_KEYS, set(LEGACY_OPTIONS)) for m in manifests.values()):
-        raise ValueError("Each configuration revision must contain all 52 current or 56 legacy settings")
+    if not manifests or any(set(m) not in (CURRENT_OPTION_KEYS, PREVIOUS_OPTION_KEYS, OUTLINE_OPTION_KEYS, set(LEGACY_OPTIONS)) for m in manifests.values()):
+        raise ValueError("Each configuration revision must contain a complete current or recognized legacy settings set")
     frames, selected = {}, set()
     origin = None
     for row in read_csv(directory / "performance.csv"):
@@ -232,7 +251,7 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
                              "passes": [{"id": i, "name": n} for i, n in sorted(names[(revision, group)])]}
         options = []
         manifest = manifests[revision]
-        catalog = LEGACY_OPTIONS if LEGACY_RT_KEYS & manifest.keys() else OPTIONS
+        catalog = LEGACY_OPTIONS if LEGACY_RT_KEYS & manifest.keys() else {**OPTIONS, **OUTLINE_OPTIONS, "gi_quality": LEGACY_OPTIONS["gi_quality"]}
         for key, row in sorted(manifest.items(), key=lambda item: int(item[1]["setting_id"])):
             kind, linked, note = catalog[key]
             status = option_status(row, manifest)
@@ -283,13 +302,17 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
 
 def self_test():
     registry = Path(__file__).resolve().parents[1] / "Source/Core/Public/hs/core/graphics_settings.def"
-    keys = set(re.findall(r"HS_GRAPHICS_SETTING\(\d+,\s*\w+,\s*(\w+),", registry.read_text(encoding="utf-8")))
-    assert keys == CURRENT_OPTION_KEYS, keys ^ CURRENT_OPTION_KEYS
+    registered = {key: int(identity) for identity, key in re.findall(
+        r"HS_GRAPHICS_SETTING\((\d+),\s*\w+,\s*(\w+),", registry.read_text(encoding="utf-8"))}
+    assert registered == {key: SETTING_IDS[key] for key in CURRENT_OPTION_KEYS}
     assert stats([0, 1, 2, 9])["p95"] == 9
     assert stats([]) is None
     try: stats([float("nan")]); assert False
     except ValueError: pass
     assert pass_group({"pass_name": "GBuffer+Depth", "pass_id": "4"}) == "surface"
+    assert pass_group({"pass_name": "HeroPeelFront", "pass_id": "90"}) == "refraction"
+    assert pass_group({"pass_name": "Translucency.PeelFront", "pass_id": "90"}) == "refraction"
+    assert pass_group({"pass_name": "Water.SingleLayer", "pass_id": "102"}) == "refraction"
     assert pass_group({"pass_name": "RenderCriticalPathEnd", "pass_id": "38"}) is None
     assert pass_group({"pass_name": "SourceRenderOutputReady", "pass_id": "38"}) is None
     assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "1000"}) == "texture_streaming"
@@ -349,7 +372,7 @@ def self_test():
         for config in report["configurations"]:
             assert config["gpu_critical_path_ms"]["mean"] == 1
             assert config["ranked_feature_groups"][0]["gpu_work_ms_per_completed_frame"]["mean"] == 2  # Overlap must not replace critical path.
-            assert len(config["options"]) == 56
+            assert len(config["options"]) == len(LEGACY_OPTIONS)
             assert next(o for o in config["options"] if o["key"] == "ao_quality")["cost_status"] == "off"
             assert next(o for o in config["options"] if o["key"] == "pom_quality")["cost_status"] == "shared"
             adaptive = next(o for o in config["options"] if o["key"] == "adaptive_shading")
@@ -365,10 +388,14 @@ def self_test():
             assert measured_groups["shared_post_guides"]["gpu_work_ms_per_completed_frame"]["mean"] == .125
             assert all(group["gpu_work_ms_per_completed_frame"] is None for group in config["copy_transfer_groups"])
             assert {group["group"] for group in config["copy_transfer_groups"]} == {"shadows_copy_transfer", "geometry_copy_transfer", "ui_copy_transfer"}
+        previous_manifest = [row for row in manifest if row["key"] in PREVIOUS_OPTION_KEYS]
+        write("graphics_settings.csv", previous_manifest)
+        previous_report = analyze(directory, warmup=0)
+        assert all(any(o["key"] == "gi_quality" for o in c["options"]) for c in previous_report["configurations"])
         current_manifest = [row for row in manifest if row["key"] in CURRENT_OPTION_KEYS]
         write("graphics_settings.csv", current_manifest)
         current_report = analyze(directory, warmup=0)
-        assert all(len(c["options"]) == 52 for c in current_report["configurations"])
+        assert all(len(c["options"]) == len(CURRENT_OPTION_KEYS) for c in current_report["configurations"])
         assert all(not ({"ray_scene", "shared_ray_compose", "denoising"} & set(o["feature_groups"])) for c in current_report["configurations"] for o in c["options"])
         assert all(not (set(g["option_keys"]) & LEGACY_RT_KEYS) for c in current_report["configurations"] for g in c["ranked_feature_groups"])
         write("graphics_settings.csv", current_manifest[:-1])

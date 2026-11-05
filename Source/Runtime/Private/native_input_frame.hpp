@@ -17,6 +17,8 @@ class NativeInputFrame
     std::condition_variable changed_;
     bool enabled_{}, cancelled_{}, input_parked_{}, simulation_parked_{};
     std::uint64_t input_request_{}, input_sampled_{}, simulation_request_{}, simulation_completed_{};
+    std::uint64_t presented_session_{}, presented_tick_{};
+    bool has_presented_session_{};
     void (*wake_main_)(void *) noexcept{};
     void *wake_context_{};
     void WakeMain() noexcept { if (wake_main_) wake_main_(wake_context_); }
@@ -47,6 +49,34 @@ class NativeInputFrame
     void Cancel()
     {
         std::lock_guard lock(mutex_); cancelled_ = true; changed_.notify_all(); WakeMain();
+    }
+    void PresentedSession(std::uint64_t session, std::uint64_t tick)
+    {
+        std::lock_guard lock(mutex_);
+        presented_session_ = session; presented_tick_ = tick;
+        has_presented_session_ = true; changed_.notify_all();
+    }
+    bool WaitPresentedSession(std::uint64_t session, std::uint64_t minimum_tick)
+    {
+        std::unique_lock lock(mutex_);
+        simulation_parked_ = true;
+        changed_.notify_all();
+        const auto presented = [&] {
+            return has_presented_session_ && presented_session_ == session && presented_tick_ >= minimum_tick;
+        };
+        while (!cancelled_ && !presented())
+        {
+            if (enabled_ && simulation_request_ != simulation_completed_)
+            {
+                simulation_completed_ = simulation_request_;
+                changed_.notify_all();
+            }
+            changed_.wait(lock, [&] { return cancelled_ ||
+                presented() ||
+                (enabled_ && simulation_request_ != simulation_completed_); });
+        }
+        simulation_parked_ = false;
+        return !cancelled_;
     }
     bool RequestInput(std::uint64_t token)
     {

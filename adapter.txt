@@ -1,0 +1,5 @@
+NVIDIA GeForce RTX 4080
+32.0.16.2114
+mesh_shader_supported=1
+geometry_frontend=indexed
+surface_frontend=compact

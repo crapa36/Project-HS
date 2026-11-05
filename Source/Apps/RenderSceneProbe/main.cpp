@@ -67,10 +67,10 @@ Source ParseSource(std::string_view text)
         else if(event==ap::Json::parse_event_t::object_end) objectKeys.pop_back();
         return true;
     });
-    Keys(source,{"version","id","environment_product","color_space","radiance_unit","capture","blend_policy","revision_policy","probes","author_notes"});
+    Keys(source,{"version","id","environment_product","color_space","radiance_unit","capture","blend_policy","revision_policy","irradiance_grid","probes","author_notes"});
     Require(source.at("version")==1 && source.at("id")=="local_probes" && source.at("environment_product")=="render/lighting/default_probe.rpkg" &&
         source.at("color_space")=="rec709_linear" && source.at("radiance_unit")=="scene_linear_radiance_per_steradian" &&
-        source.at("blend_policy")=="normalized_influence_visibility_with_single_environment_baseline" &&
+        source.at("blend_policy")=="visible_grid_corners_and_box_reflection_influence" &&
         source.at("revision_policy")=="hash_actual_environment_material_light_static_layout_inputs","unsupported authored probe convention");
     Require(source.at("author_notes").is_string() && !source.at("author_notes").get_ref<const std::string &>().empty() &&
         source.at("author_notes").get_ref<const std::string &>().size()<=4096,"invalid author notes");
@@ -83,6 +83,12 @@ Source ParseSource(std::string_view text)
     Source result; result.environment=source.at("environment_product").get<std::string>();
     result.description.edge=Integer(capture.at("cube_edge"),16,128);
     result.description.ggx_samples=Integer(capture.at("ggx_samples"),64,2048);
+    const auto &grid=source.at("irradiance_grid");
+    Keys(grid,{"origin","spacing","dimensions"});
+    result.description.grid.origin=Position(grid.at("origin")); result.description.grid.spacing=Position(grid.at("spacing"));
+    const auto &dimensions=grid.at("dimensions");
+    Require(dimensions.is_array() && dimensions.size()==3,"irradiance grid needs three dimensions");
+    for(std::size_t axis=0;axis<3;++axis) result.description.grid.dimensions[axis]=Integer(dimensions[axis],2,64);
     const auto &probes=source.at("probes");
     Require(probes.is_array() && !probes.empty() && probes.size()<=rd::kSceneProbeMaximumCount,"invalid authored probe count");
     std::uint64_t previous=0;

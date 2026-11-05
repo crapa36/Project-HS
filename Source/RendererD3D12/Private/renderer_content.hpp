@@ -227,27 +227,40 @@ inline Result ValidatePackedTextureCatalog(const RendererConfig &config)
     { return Result::Failure(ErrorCode::InvalidArgument, "RendererPack", error.what()); }
 }
 
-inline const render_data::RendererBulkDescriptor *FindRendererBulk(const RendererConfig &config, std::string_view id)
+inline const render_data::RendererBulkDescriptor *FindCanonicalRendererBulk(const RendererConfig &config, std::string_view id)
 {
     const auto entries = config.packed_bulks;
-    const auto find = [&](std::string_view logical) -> const render_data::RendererBulkDescriptor * {
-        const auto asset = MakeAssetId(logical).value;
-        const auto found = std::lower_bound(entries.begin(), entries.end(), asset,
-            [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
-        return found != entries.end() && found->asset_id.value == asset ? &*found : nullptr;
-    };
-    if (config.selected_texture_feedback && id.starts_with("render/shader/") && id.ends_with(".dxil") &&
-        !id.ends_with("_feedback.dxil"))
-        if (const auto *feedback = find(std::string(id.substr(0, id.size() - 5)) + "_feedback.dxil")) return feedback;
-    return find(id);
+    const auto asset = MakeAssetId(id).value;
+    const auto found = std::lower_bound(entries.begin(), entries.end(), asset,
+        [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
+    return found != entries.end() && found->asset_id.value == asset ? &*found : nullptr;
 }
 
-inline Result ResolveRendererAsset(const RendererConfig &config, std::string_view id, RendererAssetSource &output)
+inline std::string EffectiveRendererProductId(const RendererConfig &config, std::string_view id)
 {
+    if (config.selected_texture_feedback && id.starts_with("render/shader/") && id.ends_with(".dxil") &&
+        !id.ends_with("_feedback.dxil"))
+    {
+        auto feedback = std::string(id.substr(0, id.size() - 5)) + "_feedback.dxil";
+        if (config.packed_content ? FindCanonicalRendererBulk(config, feedback) != nullptr :
+            config.product_paths.contains(feedback)) return feedback;
+    }
+    return std::string(id);
+}
+
+inline const render_data::RendererBulkDescriptor *FindRendererBulk(const RendererConfig &config, std::string_view id)
+{
+    return FindCanonicalRendererBulk(config, EffectiveRendererProductId(config, id));
+}
+
+inline Result ResolveRendererAsset(const RendererConfig &config, std::string_view id, RendererAssetSource &output,
+    bool select_feedback = true)
+{
+    const auto logical = select_feedback ? EffectiveRendererProductId(config, id) : std::string(id);
     RendererAssetSource source;
     if (config.packed_content)
     {
-        const auto *bulk = FindRendererBulk(config, id);
+        const auto *bulk = FindCanonicalRendererBulk(config, logical);
         if (!bulk)
             return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing compiled renderer bulk: " + std::string(id));
         source = RendererAssetSource::Packed(config.packed_content, bulk->range);
@@ -255,12 +268,11 @@ inline Result ResolveRendererAsset(const RendererConfig &config, std::string_vie
     else
     {
         std::filesystem::path path;
-        if (auto result = config.ResolveProduct(id, path); !result) return result;
+        if (auto result = config.ResolveProduct(logical, path); !result) return result;
         std::optional<LooseRendererAsset::WholeFileProof> proof;
-        // Developer feedback selection can redirect a shader ID to its variant path.
-        if (config.development_catalog && !id.ends_with(".dxil"))
+        if (config.development_catalog)
         {
-            const auto asset = MakeAssetId(id).value;
+            const auto asset = MakeAssetId(logical).value;
             const auto found = std::lower_bound(config.packed_bulks.begin(), config.packed_bulks.end(), asset,
                 [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
             if (found != config.packed_bulks.end() && found->asset_id.value == asset)
@@ -336,19 +348,20 @@ inline Result ReadRendererMaterialProgram(const RendererConfig &config,
     return source.Read(output);
 }
 
-inline std::string RendererProductDigest(const RendererConfig &config, std::string_view id)
+inline std::string RendererProductDigest(const RendererConfig &config, std::string_view id, bool select_feedback = true)
 {
+    const auto logical = select_feedback ? EffectiveRendererProductId(config, id) : std::string(id);
     if (config.packed_content)
     {
-        const auto *bulk = FindRendererBulk(config, id);
+        const auto *bulk = FindCanonicalRendererBulk(config, logical);
         const std::array<std::byte, 32> *expected = bulk ? &bulk->range.expected_digest : nullptr;
         if (!bulk)
         {
-            const auto asset = MakeAssetId(id).value;
+            const auto asset = MakeAssetId(logical).value;
             const auto entries = config.packed_source_revisions;
             const auto found = std::lower_bound(entries.begin(), entries.end(), asset,
                 [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
-            if (found == entries.end() || found->asset_id.value != asset || found->product_id != id) return {};
+            if (found == entries.end() || found->asset_id.value != asset || found->product_id != logical) return {};
             expected = &found->digest;
         }
         constexpr char hex[] = "0123456789abcdef";
@@ -362,7 +375,7 @@ inline std::string RendererProductDigest(const RendererConfig &config, std::stri
         }
         return digest;
     }
-    const auto found = config.product_digests.find(std::string(id));
+    const auto found = config.product_digests.find(logical);
     return found == config.product_digests.end() ? std::string{} : found->second;
 }
 

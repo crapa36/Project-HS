@@ -232,11 +232,11 @@ class TextureStreamFixture
               "query fixture native texture allocation bytes");
         return info.SizeInBytes;
     }
-    hs::TextureStreamId AddSibling()
+    hs::TextureStreamId AddSibling(bool pinned = false)
     {
         Check(sibling_prepared_ && !sibling_id_, "register prepared sibling texture only once");
 
-        const auto fallback_mip = std::min(4u, description_.mip_count - 1u);
+        const auto fallback_mip = pinned ? 0u : std::min(4u, description_.mip_count - 1u);
         const auto fallback_desc = TextureDescription(description_, fallback_mip);
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -256,6 +256,7 @@ class TextureStreamFixture
         registration.fallback_first_mip = fallback_mip;
         registration.fallback_allocation_bytes = allocation_info.SizeInBytes;
         registration.fallback_graph_access = hs::Access::Common;
+        registration.pinned = pinned;
         Check(streaming_.Register(std::move(registration), residency_, sibling_id_).Succeeded(),
               "register sibling streaming texture in shared manager");
         return sibling_id_;
@@ -913,9 +914,28 @@ void RunTextureStreamingSingleNative(ID3D12Device *device, D3D12MA::Allocator *a
     fixture.Drain();
 }
 
+void RunPinnedTextureDemandNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
+                                  hs::RenderGraphQueueExecutor &executor)
+{
+    TextureStreamFixture fixture(device, allocator, executor, false, true);
+    const auto pinned = fixture.AddSibling(true);
+    const auto view = fixture.Streaming().View(pinned);
+    Check(view.resource && view.resident_min_mip == 0, "pinned texture has complete resident fallback");
+    Check(!fixture.Streaming().NeedsDemand(pinned) && !fixture.Streaming().NeedsDemand(pinned, true),
+          "pinned texture excludes view and baseline demand");
+    Check(fixture.Streaming().NeedsDemand(fixture.Id()), "software streamed texture retains demand");
+    fixture.Pump(pinned, 0);
+    const auto status = fixture.Status(pinned);
+    Check(status.requests == 0 && status.uploads == 0 && status.actual_resident_mip == 0 &&
+          fixture.Streaming().View(pinned).resource == view.resource,
+          "pinned demand creates no streaming work or replacement");
+    fixture.Drain();
+}
+
 void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
                                hs::RenderGraphQueueExecutor &executor)
 {
+    RunPinnedTextureDemandNative(device, allocator, executor);
     RunTextureStreamingSingleNative(device, allocator, executor);
     RunSharedHostBudgetTextureStreamingNative(device, allocator, executor);
     RunCombinedConfiguredBudgetTextureStreamingNative(device, allocator, executor);

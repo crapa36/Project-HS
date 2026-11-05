@@ -148,7 +148,7 @@ bool ValidId(std::string_view id)
     return id.find("..") == std::string_view::npos;
 }
 
-constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference);
+constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections);
 
 bool Known(std::uint32_t type)
 {
@@ -268,6 +268,9 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
         Require(stride == 140 && count == 4 && size == count * stride, "invalid quality profiles chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::AutoFgCadence))
         Require(stride == 12 && count == 1 && size == stride, "invalid Auto FG cadence chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
+        Require(stride == 1 && count >= 104 && count <= 68 + 64 * 36 && size == count,
+                "invalid terrain surface sections chunk");
     else if (type == 13)
         Require(stride == kGeometryMetadataStride && count == 1 && size == stride,
                 "invalid geometry metadata chunk");

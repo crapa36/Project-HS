@@ -4,7 +4,7 @@
 #include <hs/render_data/frame_identity.hpp>
 #include <hs/core/graphics_settings_request.hpp>
 #include <hs/renderer/capture_request.hpp>
-#include <hs/renderer/hero_work.hpp>
+#include <hs/renderer/translucency_diagnostics.hpp>
 #include <hs/render_data/vfx_light_input.hpp>
 #include <hs/render_data/vfx_distortion_input.hpp>
 #include <hs/render_data/vfx_decal_input.hpp>
@@ -47,8 +47,8 @@ namespace hs
 {
 class ShippedContentOwner;
 class RendererDevelopmentCatalog;
-namespace render_data { struct StaticShadowArchiveDescription; }
-struct RenderFrameInput;
+namespace render_data { struct StaticShadowArchiveDescription; struct TerrainSurfaceSection; }
+struct RenderPackage;
 struct ViewId;
 
 
@@ -72,13 +72,7 @@ struct RendererDisplayOutput
 
 
 
-// Runtime owns worker scheduling. Each submission group is joined before graph
-// submission or return, so frame captures and snapshot leases stay valid.
-struct RenderTaskExecutor
-{
-    std::function<Result(std::function<void()>)> submit;
-    std::function<Result()> join;
-};
+class TaskSystem;
 
 struct RendererReconstructionRequest
 {
@@ -215,7 +209,7 @@ struct RendererPsoCacheStats
 // operations are nested subsets, including overlaps. Neither measures driver/GPU busy time.
 enum class RendererStartupStep : std::uint8_t
 {
-    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, HeroTransparency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
+    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, LayeredTranslucency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupStep::Count)> kRendererStartupStepNames{
     "quality_profiles",
@@ -300,8 +294,8 @@ struct RendererConfig
     bool capture_timing_stream{};
     bool capture_gpu_timings{true}; // Full pass timing requires capture_timing_stream too.
     // Intrusive per-contributor native queries/readbacks. Keep false for normal A/B.
-    bool capture_hero_work{};
-    HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
+    bool capture_translucency_diagnostics{};
+    TranslucencyDiagnosticsMode translucency_diagnostics_mode{TranslucencyDiagnosticsMode::Full};
     bool vsync{true};
     bool bloom{true};
     bool interpolate{true};
@@ -395,7 +389,8 @@ struct RendererConfig
     std::span<const render_data::RendererSourceRevision> packed_source_revisions;
     std::span<const render_data::RendererRevisionBulk> packed_revision_bulks;
     bool selected_texture_feedback{};
-    RenderTaskExecutor task_executor;
+    // The task system must outlive the renderer; null records synchronously.
+    TaskSystem *task_system{};
 
     [[nodiscard]] Result ResolveProduct(std::string_view logical_id,
                                         std::filesystem::path &path) const
@@ -435,7 +430,7 @@ struct RenderViewFrameResult
 struct RendererCpuTimings
 {
     std::uint64_t wait_us{}, streaming_us{}, scene_prepare_us{}, ui_us{};
-    std::uint64_t constants_upload_us{}, graph_build_us{}, graph_prepare_us{}, descriptors_us{};
+    std::uint64_t prepare_render_data_us{}, graph_build_us{}, graph_prepare_us{}, descriptors_us{};
     std::uint64_t graph_plan_us{}, graph_record_us{}, graph_submit_us{};
     bool graph_frontend_reused{}; // RestorePlan selected before producer declarations.
     std::uint64_t post_submit_us{}, present_us{}, diagnostics_us{}, wrapper_us{};
@@ -459,7 +454,7 @@ struct RendererCpuTimings
     std::uint64_t graph_resource_scene_hlod_us{};
     std::uint64_t graph_resource_layout_remainder_us{};
     // Capture-only nested wall intervals; do not add to the outer stage totals.
-    // The first three belong to scene_prepare_us; the rest to constants_upload_us.
+    // The first three belong to scene_prepare_us; the rest to prepare_render_data_us.
     std::uint64_t retained_vfx_us{}, ribbon_prepare_us{}, particle_spawn_prepare_us{};
     std::uint64_t typed_vfx_upload_prepare_us{}, particle_upload_prepare_us{}, local_vfx_prepare_us{};
     std::uint64_t palette_prepare_us{}, skin_prepare_us{}, scene_reconcile_us{}, scene_gpu_prepare_us{};
@@ -781,7 +776,7 @@ class D3D12Renderer
     [[nodiscard]] std::uint64_t PipelineRevision() const noexcept;
     void HandleWindowMessage(const NativeWindowMessage &message) noexcept;
     [[nodiscard]] RenderViewInput MainViewInput(const CameraView &) const;
-    [[nodiscard]] Result Render(const RenderFrameInput &, RendererFrameResult &);
+    [[nodiscard]] Result Render(const RenderPackage &, RendererFrameResult &);
     [[nodiscard]] Result Capture(const CaptureRequest &);
     // Offline and synchronous; Initialize is sufficient without a Render call.
     // First publication policy: describe all three levels, bake only coarse level 2.
@@ -797,6 +792,14 @@ class D3D12Renderer
         const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    // Synchronous; both spans are valid only for the duration of the callback.
+    [[nodiscard]] static Result BakeTerrainSurfacePages(const RendererConfig &configuration,
+        const std::shared_ptr<const StaticRenderScene> &scene,
+        const std::function<Result(std::span<const render_data::TerrainSurfaceSection>,
+            render_data::TextureDescription, std::array<std::byte,32>)> &begin,
+        const std::function<Result(std::uint32_t, std::span<const std::byte>)> &section_sink);
+#endif
     [[nodiscard]] Result ReleaseView(ViewId);
 
     [[nodiscard]] Result Shutdown();
@@ -815,9 +818,9 @@ class D3D12Renderer
     // Both replace output, sort by completed frame/view, and explicitly fail on bounded-stream overflow.
     [[nodiscard]] Result ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings> &output);
     [[nodiscard]] Result DrainGpuPassTimings(std::vector<GpuPassTimings> &output);
-    [[nodiscard]] Result ConsumeCompletedHeroWork(std::vector<RendererHeroWorkSample> &output);
-    [[nodiscard]] Result DrainHeroWork(std::vector<RendererHeroWorkSample> &output);
-    [[nodiscard]] RendererHeroWorkStatus HeroWorkStatus() const;
+    [[nodiscard]] Result ConsumeCompletedTranslucencyDiagnostics(std::vector<RendererTranslucencyDiagnosticsSample> &output);
+    [[nodiscard]] Result DrainTranslucencyDiagnostics(std::vector<RendererTranslucencyDiagnosticsSample> &output);
+    [[nodiscard]] RendererTranslucencyDiagnosticsStatus TranslucencyDiagnosticsStatus() const;
     // Cached latest rendered view; reference remains valid until the next renderer mutation.
     [[nodiscard]] const RendererDiagnosticsFrame &LastRenderedFrameDiagnostics() const noexcept;
     [[nodiscard]] RendererQueueStats LastQueueStats() const noexcept;
@@ -843,7 +846,9 @@ class D3D12Renderer
     [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics() const;
 
   private:
-    [[nodiscard]] Result InitializeStaticShadowBake(const RendererConfig &configuration);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result InitializeWorldTransportBake(const RendererConfig &configuration, bool terrain);
+#endif
     [[nodiscard]] Result BakeStaticShadowPagesPrepared(
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,

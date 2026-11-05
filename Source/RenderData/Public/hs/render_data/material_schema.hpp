@@ -116,10 +116,10 @@ inline constexpr std::uint32_t kMeadowWaterGeometry = 34;
 { return ordinal < kGroundDetailGeometryBegin ? static_cast<std::uint32_t>(ordinal) : ordinal == kMeadowGeometryBegin ? kTerrainMaterialOrdinal : kGroundDetailMaterialOrdinal; }
 
 // Separate namespace/ordinals; the environment/terrain ABI above remains fixed.
-inline constexpr std::array<std::string_view, 7> kHeroMaterialNames{
+inline constexpr std::array<std::string_view, 7> kCharacterMaterialNames{
     "archer_skin", "archer_cloth", "archer_cutout", "archer_equipment",
     "slime_features", "slime_body", "monster_pbr"};
-inline constexpr std::uint32_t kHeroMaterialIdBase = 0x20000000u;
+inline constexpr std::uint32_t kCharacterMaterialIdBase = 0x20000000u;
 inline constexpr std::array<std::string_view, 2> kDecalMaterialNames{
     "decal_fracture", "decal_organic"};
 inline constexpr std::uint32_t kDecalShaderBindingAbi = 1;
@@ -134,20 +134,20 @@ struct DecalReceiverPolicy
     friend bool operator==(const DecalReceiverPolicy &, const DecalReceiverPolicy &) = default;
 };
 void ValidateDecalReceiverPolicy(const DecalReceiverPolicy &policy);
-enum class HeroMaterialDomain : std::uint8_t { Opaque, Translucent };
+enum class CharacterMaterialDomain : std::uint8_t { Opaque, Translucent };
 struct CharacterMaterialBinding
 {
     std::uint16_t slot{};
     std::uint16_t dependency_index{};
     std::uint32_t hero_ordinal{};
-    HeroMaterialDomain domain{HeroMaterialDomain::Opaque};
+    CharacterMaterialDomain domain{CharacterMaterialDomain::Opaque};
     friend bool operator==(const CharacterMaterialBinding &, const CharacterMaterialBinding &) = default;
 };
 // Chunk25 v1: LE uint16 slot/dependency, uint32 packed domain/ordinal.
 // Bit31 is Translucent; bits0..15 are ordinal; bits16..30 must be zero.
-[[nodiscard]] std::uint32_t PackHeroMaterialDomainOrdinal(HeroMaterialDomain domain, std::uint32_t ordinal);
-[[nodiscard]] HeroMaterialDomain UnpackHeroMaterialDomain(std::uint32_t packed);
-[[nodiscard]] std::uint32_t UnpackHeroMaterialOrdinal(std::uint32_t packed);
+[[nodiscard]] std::uint32_t PackCharacterMaterialDomainOrdinal(CharacterMaterialDomain domain, std::uint32_t ordinal);
+[[nodiscard]] CharacterMaterialDomain UnpackCharacterMaterialDomain(std::uint32_t packed);
+[[nodiscard]] std::uint32_t UnpackCharacterMaterialOrdinal(std::uint32_t packed);
 [[nodiscard]] std::vector<std::byte> EncodeCharacterMaterialBindings(
     std::span<const CharacterMaterialBinding> bindings, std::span<const std::string> dependencies,
     std::uint32_t material_count);
@@ -248,20 +248,20 @@ inline constexpr std::string_view kLeaf0ShadowShaderProduct =
 [[nodiscard]] std::vector<MaterialProgram> DecodeMaterialPrograms(
     std::span<const std::byte> bytes, std::span<const std::string> dependencies);
 
-struct HeroMaterialPackageData
+struct CharacterMaterialPackageData
 {
     std::vector<std::string> dependencies;
     std::vector<MaterialProgram> programs;
     MaterialSurfaceLayout surface;
     std::string parameter_layout_hash;
-    HeroMaterialDomain domain{};
+    CharacterMaterialDomain domain{};
 };
-[[nodiscard]] std::vector<std::byte> BuildHeroMaterialPackage(std::string_view name,
+[[nodiscard]] std::vector<std::byte> BuildCharacterMaterialPackage(std::string_view name,
     std::span<const MaterialParameterDefinition> parameters, MaterialSurfaceLayout surface,
     std::span<const MaterialProgramSource> programs);
-[[nodiscard]] HeroMaterialPackageData ReadHeroMaterialPackage(
+[[nodiscard]] CharacterMaterialPackageData ReadCharacterMaterialPackage(
     std::span<const std::byte> bytes, std::string_view name);
-[[nodiscard]] HeroMaterialPackageData ReadHeroMaterialPackage(const PackageView &package, std::string_view name);
+[[nodiscard]] CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &package, std::string_view name);
 
 struct DecalMaterialPackageData
 {

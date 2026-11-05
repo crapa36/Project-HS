@@ -1,3 +1,4 @@
+#include <hs/jobs/task_system.hpp>
 #include "renderer_local_probe_runtime.hpp"
 #include "renderer_local_probe_draws.hpp"
 #include "renderer_impl.hpp"
@@ -21,6 +22,7 @@
 
 namespace hs
 {
+#if defined(HS_OFFLINE_PROBE_BAKER)
 Result D3D12Renderer::Impl::CreateStaticShadowBakeGeometry()
 {
     auto &frame = frames[0];
@@ -35,6 +37,7 @@ Result D3D12Renderer::Impl::CreateStaticShadowBakeGeometry()
     return SubmitResidentUtilityUpload(command_list.Get(), frame.allocator.Get(), uploads);
 }
 
+#endif
 namespace
 {
 using Microsoft::WRL::ComPtr;
@@ -44,7 +47,7 @@ constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
 constexpr std::string_view kEnvironment="render/lighting/default_probe.rpkg";
 constexpr UINT kFaceCount=6;
 constexpr UINT kConstantBankCount=kFaceCount+1, kShadowEdge=512;
-constexpr UINT kCaptureSkinDescriptorOffset=renderer_detail::kHeroTransparencyDescriptorOffset+kHeroTransparencyTableSize;
+constexpr UINT kCaptureSkinDescriptorOffset=renderer_detail::kLayeredTranslucencyDescriptorOffset+kLayeredTranslucencyTableSize;
 constexpr UINT kCaptureDescriptorCount=kCaptureSkinDescriptorOffset+2;
 constexpr UINT kConstantsStride=(sizeof(FrameConstants)+255u)&~255u;
 Result Failure(std::string message)
@@ -77,7 +80,9 @@ std::vector<std::byte> ReadProduct(const RendererConfig &config,std::string_view
     std::vector<std::byte> bytes; const auto read=source.Read(bytes,count);
     Require(static_cast<bool>(read),read.Message());
     read_timing.Stop();
-    if(!source.IsPacked()) Require(Hash(bytes)==digest,"Probe/shader digest mismatch: "+std::string(id)); return bytes;
+    if(!source.IsPacked() && !source.HasAdmittedWholeFileProof())
+        Require(Hash(bytes)==digest,"Probe/shader digest mismatch: "+std::string(id));
+    return bytes;
 }
 class Identity
 {
@@ -100,6 +105,7 @@ class Identity
   private:
     hs::Sha256Stream hash_;
 };
+#if defined(HS_OFFLINE_PROBE_BAKER)
 std::array<std::byte,32> CaptureBindingIdentity(std::span<const LocalProbeTextureFact> facts,
     std::span<const LocalProbePageRevision> page_revisions,
     std::span<const LocalProbeCapturePage> pages)
@@ -140,6 +146,7 @@ std::array<std::byte,32> CaptureBindingIdentity(std::span<const LocalProbeTextur
 }
 bool CaptureTexturesReady(std::span<const LocalProbeTextureFact> facts)
 { return std::ranges::all_of(facts,[](const auto &fact){return !fact.logical_id.empty()&&fact.ready;}); }
+#endif
 using Identities=std::map<std::string,std::string>;
 std::uint64_t Revision(rd::SceneProbeRevisionDomain domain,const Identities &values)
 {
@@ -165,6 +172,7 @@ std::uint32_t MaterialOrdinal(const RenderInstance &instance)
     default: throw std::runtime_error("Dynamic/unsupported mesh in immutable local-probe static scene");
     }
 }
+#if defined(HS_OFFLINE_PROBE_BAKER)
 std::uint32_t PageOrdinal(const RenderInstance &instance)
 {
     // All seven detail geometries share material15, but retain distinct complete pages.
@@ -174,6 +182,7 @@ std::uint32_t PageOrdinal(const RenderInstance &instance)
         : static_cast<std::uint32_t>(rd::kEnvironmentMaterialNames.size());
 }
 bool Masked(std::size_t ordinal) { return (ordinal>=3 && ordinal<6) || (ordinal>=10 && ordinal<14); }
+#endif
 void ValidateBounds(const rd::GeometryBounds &bounds)
 {
     for(std::size_t axis=0;axis<3;++axis)
@@ -182,6 +191,7 @@ void ValidateBounds(const rd::GeometryBounds &bounds)
     for(float value:bounds.sphere) Require(std::isfinite(value),"Complete capture page has nonfinite bounding sphere");
     Require(bounds.sphere[3]>=0,"Complete capture page has a negative bounding radius");
 }
+#if defined(HS_OFFLINE_PROBE_BAKER)
 struct StaticShadowView
 {
     LocalProbeCaptureView view;
@@ -292,7 +302,7 @@ void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::
     c.camera_forward_softness={view.world_to_view._13,view.world_to_view._23,view.world_to_view._33,0};
     c.screen_size={float(view.edge),float(view.edge),1.0f/view.edge,1.0f/view.edge}; c.output_size=c.screen_size;
     c.surface_view_origin={0,0,0,0}; c.surface_jitter_uv={0,0,0,0};
-    c.temporal_options={0,0,view.far_distance,view.near_distance};
+    c.temporal_options={view.irradiance_node?1.f:0.f,0,view.far_distance,view.near_distance};
     c.grass_bender_count={0,0,0,0}; c.previous_grass_state={};
     c.vfx_light_count={0,0,0,0}; c.vfx_decal_count={0,0,0,0};
     c.particle_options={0,0,0,0}; c.authored_particle_clock={0,0,0,0}; c.lod_clock={0,0,0,0};
@@ -301,14 +311,24 @@ void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::
     // history, gameplay grass benders, VFX/decal lights and post/display settings.
     c.display_options={0,0,0,0}; c.post_options={0,0,0,0}; c.render_options={0,0,0,0};
 }
+#endif
 } // namespace
 
-struct LocalProbeCaptureState
+#if defined(HS_OFFLINE_PROBE_BAKER)
+struct LocalProbeNativeCapture
 {
     ComPtr<ID3D12Device> device; ComPtr<D3D12MA::Allocator> allocator; ComPtr<ID3D12RootSignature> root;
     std::array<ComPtr<ID3D12PipelineState>,rd::kAuthoredMaterialNames.size()> materials,shadows;
     ComPtr<ID3D12PipelineState> procedural_shadow;
     ComPtr<ID3D12PipelineState> sky;
+};
+
+#endif
+struct LocalProbeCaptureState
+{
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    std::unique_ptr<LocalProbeNativeCapture> native;
+#endif
     rd::SceneProbeRevisions baseline;
     rd::SceneProbePayload payload;
     std::vector<rd::SceneProbeRecord> probes;
@@ -317,18 +337,24 @@ struct LocalProbeCaptureState
     std::shared_ptr<const StaticRenderScene> revision_scene;
     std::uint32_t revision_instance_generation{};
     float revision_foliage_density{};
-    std::string layout_identity,shadow_identity;
+    std::string layout_identity, compatibility_layout_identity;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    std::string shadow_identity;
     StaticShadowView revision_shadow;
-    std::string material_revision_identity, light_revision_identity, layout_revision_identity;
-    std::string derived_material_identity, derived_light_identity;
+    std::string light_revision_identity,derived_light_identity;
     Identity light_identity_prefix;
-    rd::SceneProbeRevisions derived_revisions;
-    std::vector<LocalProbePageRevision> revision_pages;
     std::vector<LightView> revision_lights;
+    std::array<std::uint32_t,8> revision_frame_lighting{};
+    bool light_revision_facts_valid{};
+#endif
+    std::string material_revision_identity,layout_revision_identity,compatibility_material_identity;
+    std::string derived_material_identity;
+    rd::SceneProbeRevisions derived_revisions;
+    rd::SceneProbeRevisions compatibility_revisions;
+    std::vector<LocalProbePageRevision> revision_pages;
     std::uint64_t revision_material_parameter{}, revision_pipeline{};
     std::array<std::uint32_t,3> revision_material_quality{};
-    std::array<std::uint32_t,8> revision_frame_lighting{};
-    bool material_revision_facts_valid{}, light_revision_facts_valid{};
+    bool material_revision_facts_valid{};
 };
 
 namespace
@@ -369,6 +395,7 @@ bool SameLightRevisions(std::span<const LightView> a,std::span<const LightView> 
 }
 }
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 struct LocalProbeCaptureFrame
 {
     std::shared_ptr<LocalProbeCaptureState> capture;
@@ -393,7 +420,7 @@ struct LocalProbeCaptureFrame
     {
         bind(list);
         ID3D12DescriptorHeap *heaps[]{descriptors.Get(),samplers.Get()}; list->SetDescriptorHeaps(2,heaps);
-        list->SetGraphicsRootSignature(capture->root.Get());
+        list->SetGraphicsRootSignature(capture->native->root.Get());
         list->SetGraphicsRootConstantBufferView(15,
             constants.resource->GetGPUVirtualAddress()+UINT64(bank)*kConstantsStride);
         const auto table=[&](UINT offset) {
@@ -412,7 +439,7 @@ struct LocalProbeCaptureFrame
         list->SetGraphicsRootDescriptorTable(30,table(renderer_detail::kBloomTextureDescriptorOffset));
         list->SetGraphicsRootDescriptorTable(32,table(renderer_detail::kTemporalTextureDescriptorOffset));
         list->SetGraphicsRootDescriptorTable(33,table(renderer_detail::kTemporalTextureDescriptorOffset+1));
-        list->SetGraphicsRootDescriptorTable(36,table(renderer_detail::kHeroTransparencyDescriptorOffset));
+        list->SetGraphicsRootDescriptorTable(36,table(renderer_detail::kLayeredTranslucencyDescriptorOffset));
         list->SetGraphicsRootShaderResourceView(34,static_instances->GetGPUVirtualAddress());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
@@ -431,9 +458,9 @@ struct LocalProbeCaptureFrame
                 list->SetGraphicsRoot32BitConstant(6,(parameter_base<<1)|1u,1);
                 previous_ordinal=ordinal;
             }
-            auto *pipeline=(shadow_pass?capture->shadows[ordinal]:capture->materials[ordinal]).Get();
-            if(shadow_pass && capture->procedural_shadow && run.page_ordinal==rd::kEnvironmentMaterialNames.size())
-                pipeline=capture->procedural_shadow.Get();
+            auto *pipeline=(shadow_pass?capture->native->shadows[ordinal]:capture->native->materials[ordinal]).Get();
+            if(shadow_pass && capture->native->procedural_shadow && run.page_ordinal==rd::kEnvironmentMaterialNames.size())
+                pipeline=capture->native->procedural_shadow.Get();
             if(pipeline!=previous_pipeline) { list->SetPipelineState(pipeline); previous_pipeline=pipeline; }
             if(run.page_ordinal!=previous_page)
             {
@@ -477,26 +504,30 @@ struct LocalProbeCaptureFrame
         const UINT defaults[2]{}; list->SetGraphicsRoot32BitConstants(6,2,defaults,0);
         // Background is one global environment contribution. Depth is reversed;
         // geometry replaces it and writes the radial first hit to MRT1.
-        list->SetPipelineState(capture->sky.Get()); list->DrawInstanced(3,1,0,0);
+        list->SetPipelineState(capture->native->sky.Get()); list->DrawInstanced(3,1,0,0);
         std::array<float,16> matrix{}; std::memcpy(matrix.data(),&view.view_projection,sizeof(matrix));
         const auto frustum=MakeLocalProbeFrustum(matrix);
         DrawInstances(list,false,&frustum);
         return Result::Success();
     }
 };
+#endif
 struct LocalProbeRuntime::Impl
 {
     LocalProbeSystem service;
     std::shared_ptr<LocalProbeCaptureState> capture;
     const RenderGraphBuilder *pending_graph{};
+#if defined(HS_OFFLINE_PROBE_BAKER)
     std::shared_ptr<LocalProbeCaptureFrame> pending_frame;
     std::vector<std::shared_ptr<LocalProbeCaptureFrame>> retired_frames;
     std::weak_ptr<const StaticRenderScene> material_scene;
     std::uint32_t material_foliage_density_bits{};
     std::vector<std::uint32_t> material_ordinals;
+#endif
 };
 LocalProbeRuntime::LocalProbeRuntime():impl_(std::make_unique<Impl>()) {}
 LocalProbeRuntime::~LocalProbeRuntime()=default;
+#if defined(HS_OFFLINE_PROBE_BAKER)
 Result LocalProbeRuntime::PrepareCaptureMaterialOrdinals(const std::shared_ptr<const StaticRenderScene> &scene,
     float foliage_density)
 {
@@ -554,7 +585,8 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
     const RendererConfig &config, RendererPipelineCache *pipeline_cache, bool color,
     std::span<const bool> selected={}, INT depth_bias=-800, bool procedural_two_sided=false)
 {
-    auto *root=capture->root.Get();
+    if(!capture || !capture->native) return Failure("Capture pipelines require a layout capture owner.");
+    auto *root=capture->native->root.Get();
     assert(selected.empty() || selected.size()==rd::kAuthoredMaterialNames.size());
     const auto selected_material=[&](std::size_t i) { return selected.empty() || selected[i]; };
     // Each capture owner retains one root/bias variant for its lifetime.
@@ -562,11 +594,11 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
     {
         if(!selected_material(i))continue;
-        needs_material|=color&&!capture->materials[i];
-        needs_shadow|=!capture->shadows[i] ||
-            (procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow);
+        needs_material|=color&&!capture->native->materials[i];
+        needs_shadow|=!capture->native->shadows[i] ||
+            (procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->native->procedural_shadow);
     }
-    const bool needs_sky=color&&!capture->sky;
+    const bool needs_sky=color&&!capture->native->sky;
     if(!needs_material&&!needs_shadow&&!needs_sky)return Result::Success();
     const auto vertex=needs_material||needs_shadow
         ?ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil"):std::vector<std::byte>{};
@@ -602,25 +634,26 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
     {
         if(!selected_material(i)) continue;
-        const bool create_material=color&&!capture->materials[i];
-        const bool create_shadow=!capture->shadows[i];
-        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow;
+        const bool create_material=color&&!capture->native->materials[i];
+        const bool create_shadow=!capture->native->shadows[i];
+        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->native->procedural_shadow;
         if(create_material||create_shadow||create_procedural_shadow) work.push_back(i);
     }
     const auto prepare_material=[&](std::size_t i)->Result
     {
         auto material=p;
         material.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
-        const bool create_material=color&&!capture->materials[i];
-        const bool create_shadow=!capture->shadows[i];
-        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->procedural_shadow;
+        const bool create_material=color&&!capture->native->materials[i];
+        const bool create_shadow=!capture->native->shadows[i];
+        const bool create_procedural_shadow=procedural_two_sided && i==rd::kTerrainMaterialOrdinal && !capture->native->procedural_shadow;
         if(create_material)
         {
             try
             {
                 const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
                 material.PS={pixel.data(),pixel.size()};
-                const auto result=pipeline_cache->CreateGraphics(&material,IID_PPV_ARGS(&capture->materials[i]));
+                material.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+                const auto result=pipeline_cache->CreateGraphics(&material,IID_PPV_ARGS(&capture->native->materials[i]));
                 if(FAILED(result)) return Failure("Create static local-probe material capture PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
             }
             catch(const std::exception &error) { return Failure(error.what()); }
@@ -631,19 +664,19 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
             try
             {
                 const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
-                auto depth=material; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
+                auto depth=material; depth.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
                 for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
                 // Virtual pages use zero constant bias; probes retain their directional bias.
                 depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
                 if(create_shadow)
                 {
-                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i]));
+                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->native->shadows[i]));
                     if(FAILED(result)) return Failure("Create pure-static capture shadow PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
                 }
                 if(create_procedural_shadow)
                 {
                     depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
-                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow));
+                    const auto result=pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->native->procedural_shadow));
                     if(FAILED(result)) return Failure("Create virtual procedural shadow PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
                 }
             }
@@ -653,9 +686,10 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
         return Result::Success();
     };
     std::vector<Result> work_results(work.size(),Result::Success());
-    const auto &executor=config.task_executor;
-    if(work.size()>1 && executor.submit && executor.join)
+    auto *tasks=config.task_system;
+    if(work.size()>1 && tasks)
     {
+        auto group=tasks->CreateTaskGroup();
         std::size_t submitted{};
         Result dispatch=Result::Success();
         for(;submitted<work.size();++submitted)
@@ -663,21 +697,20 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
             try
             {
                 const auto index=submitted;
-                auto accepted=executor.submit([&,index] { work_results[index]=prepare_material(work[index]); });
-                if(!accepted) { dispatch=std::move(accepted); break; }
+                if(!group.Submit([&,index](std::stop_token) { work_results[index]=prepare_material(work[index]); }))
+                { dispatch=Failure("Submit local-probe PSO preparation task rejected."); break; }
             }
             catch(const std::exception &error)
             {
-                ++submitted; // A throwing submit callback may already have accepted the work.
                 dispatch=Failure(std::string("Submit local-probe PSO preparation task: ")+error.what());
                 break;
             }
-            catch(...) { ++submitted; dispatch=Failure("Submit local-probe PSO preparation task failed with an unknown exception."); break; }
+            catch(...) { dispatch=Failure("Submit local-probe PSO preparation task failed with an unknown exception."); break; }
         }
         Result joined=Result::Success();
         if(submitted)
         {
-            try { joined=executor.join(); }
+            try { joined=group.Wait(); }
             catch(const std::exception &error) { joined=Failure(std::string("Join local-probe PSO preparation tasks: ")+error.what()); }
             catch(...) { joined=Failure("Join local-probe PSO preparation tasks failed with an unknown exception."); }
         }
@@ -702,21 +735,22 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
             p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
             p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
             p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
-            const auto result=pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky));
+            const auto result=pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->native->sky));
             if(FAILED(result)) return Failure("Create local-probe global sky capture PSO failed (HRESULT "+std::to_string(std::int32_t(result))+").");
         }
         catch(const std::exception &error) { return Failure(error.what()); }
         catch(...) { return Failure("Create local-probe global sky capture PSO failed with an unknown exception."); }
     }
 #ifndef NDEBUG
-    if(color)assert(capture->sky);
+    if(color)assert(capture->native->sky);
     for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
-        if(selected_material(i))assert((!color||capture->materials[i])&&capture->shadows[i]);
+        if(selected_material(i))assert((!color||capture->native->materials[i])&&capture->native->shadows[i]);
 #endif
     return Result::Success();
 }
 } // namespace
 
+#endif
 Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
     const RendererConfig &config,std::string_view scene_generation,
     LocalProbeRuntimeCandidate &candidate,RendererPipelineCache *pipeline_cache) const
@@ -730,7 +764,16 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
             (config.packed_content || (!config.content_generation_id.empty() && !scene_generation.empty())),
             "Active local probes need native owners, pipeline cache and selected/resident scene Generations");
         const auto bytes=ReadProduct(config,kProduct); const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct)); });
-        auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
+        auto capture=std::make_shared<LocalProbeCaptureState>();
+#if defined(HS_OFFLINE_PROBE_BAKER)
+        if(package.payload!=rd::SceneProbePayload::Baked)
+        {
+            capture->native=std::make_unique<LocalProbeNativeCapture>();
+            capture->native->device=device; capture->native->allocator=allocator; capture->native->root=root;
+        }
+#else
+        Require(package.payload==rd::SceneProbePayload::Baked,"Runtime requires baked scene lighting; cook the selected generation.");
+#endif
         capture->baseline=package.description.revisions; capture->payload=package.payload; capture->probes=package.probes;
         capture->scene_generation=scene_generation;
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
@@ -743,9 +786,9 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         for(const auto &id:package.dependencies)
         {
             RendererAssetSource source;
-            auto digest=RendererProductDigest(config,id);
+            auto digest=RendererProductDigest(config,id,false);
             Require(config.packed_content ? !digest.empty() :
-                static_cast<bool>(ResolveRendererAsset(config,id,source)),"Local package dependency is absent: "+id);
+                static_cast<bool>(ResolveRendererAsset(config,id,source,false)),"Local package dependency is absent: "+id);
             dependency_digests.emplace(id,std::move(digest));
         }
         std::vector<rd::SceneProbeRevisionInput> source_inputs; source_inputs.reserve(package.dependencies.size());
@@ -773,8 +816,10 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
             if(rd::IsLocalProbeMaterialRevisionProduct(id))
                 capture->material_products.emplace(id,digest);
         capture->material_products["scene-probe/semantic-inputs"]=capture->input_identity;
+#if defined(HS_OFFLINE_PROBE_BAKER)
         if(package.payload!=rd::SceneProbePayload::Baked)
             if(auto pipelines=PrepareCapturePipelines(capture,config,pipeline_cache,true);!pipelines) return pipelines;
+#endif
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
             try { output=ReadProduct(config,id); return Result::Success(); }
             catch(const std::exception &error) { return Failure(error.what()); }
@@ -787,11 +832,17 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
 Result LocalProbeRuntime::Commit(LocalProbeRuntimeCandidate &&candidate,const CompletionSet &completed)
 {
     if(!candidate.prepared_ || impl_->pending_graph) return Failure("Local-probe candidate is unprepared or has pending graph work");
+#if defined(HS_OFFLINE_PROBE_BAKER)
     for(const auto &frame:impl_->retired_frames) if(!frame->completion.IsSatisfiedBy(completed)) return Failure("Capture leases are still in flight");
+#endif
     if(candidate.capture_)
     { if(auto committed=impl_->service.Commit(std::move(candidate.service_),completed);!committed) return committed; }
     else if(auto reset=impl_->service.ResetAfterCompletion(completed);!reset) return reset;
-    impl_->capture=std::move(candidate.capture_); impl_->retired_frames.clear(); candidate.prepared_=false;
+    impl_->capture=std::move(candidate.capture_);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    impl_->retired_frames.clear();
+#endif
+     candidate.prepared_=false;
     return Result::Success();
 }
 Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &in,rd::SceneProbeRevisions &out) const
@@ -837,9 +888,9 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             // are not inputs to the sampled static layout. The baked package is
             // adopted across the layout-only/baked Generation boundary, whose
             // product closure and geometry are already hashed below.
-            Identity layout; layout.Text("local-probe.actual-static-scene.v2");
+            Identity layout; layout.Text("local-probe.static-scene-compatibility.v1");
             layout.Integer(in.scene->layout_abi,4);
-            layout.Integer(in.scene->instances.size()); layout.Float(in.foliage_density);
+            layout.Integer(in.scene->instances.size());
             for(const auto &instance:in.scene->instances)
             {
                 (void)MaterialOrdinal(instance); layout.Integer(instance.stable_id); layout.Integer(static_cast<std::uint32_t>(instance.mesh),4);
@@ -848,7 +899,10 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
                 layout.Integer(instance.asset_id.value); layout.Integer(instance.material_id.value);
                 layout.Integer(instance.revisions.transform); layout.Integer(instance.revisions.material); layout.Integer(instance.revisions.content);
             }
-            capture->layout_identity=layout.Finish();
+            auto capture_layout=layout;
+            capture_layout.Float(in.foliage_density);
+            capture->layout_identity=capture_layout.Finish();
+            capture->compatibility_layout_identity=layout.Finish();
             capture->revision_scene=in.scene;
             capture->revision_instance_generation=in.static_instance_generation;
             capture->revision_foliage_density=in.foliage_density;
@@ -862,7 +916,7 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             !SamePageRevisions(capture->revision_pages,page_facts);
         if(material_inputs_changed)
         {
-            Identity material; material.Text("local-probe.actual-material-state.v4");
+            Identity material; material.Text("local-probe.material-compatibility.v2");
             // pipeline_revision is a renderer-wide refresh trigger. Keep it in
             // material_inputs_changed above, but let the scoped product digests
             // below determine whether probe capture semantics actually changed.
@@ -884,8 +938,10 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             for(float value:procedural.bounds.maximum) material.Float(value);
             for(float value:procedural.bounds.sphere) material.Float(value);
             // Static capture evaluates surface lighting, never screen-space refraction (w).
-            material.Float(quality.x); material.Float(quality.y); material.Float(quality.z);
-            capture->material_revision_identity=material.Finish();
+            auto capture_material=material;
+            capture_material.Float(quality.x); capture_material.Float(quality.y); capture_material.Float(quality.z);
+            capture->material_revision_identity=capture_material.Finish();
+            capture->compatibility_material_identity=material.Finish();
             capture->revision_pages.assign(page_facts.begin(),page_facts.end());
             capture->revision_material_parameter=in.material_parameter_revision;
             capture->revision_pipeline=in.pipeline_revision;
@@ -897,6 +953,8 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         {
             auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
             capture->derived_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
+            materials["native/material-and-complete-page-state"]=capture->compatibility_material_identity;
+            capture->compatibility_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
             capture->derived_material_identity=material_identity;
         }
         if(capture->layout_revision_identity!=capture->layout_identity)
@@ -904,15 +962,19 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             const Identities layout_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
                 {"native/immutable-static-scene",capture->layout_identity}};
             capture->derived_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs);
+            const Identities compatibility_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
+                {"native/immutable-static-scene",capture->compatibility_layout_identity}};
+            capture->compatibility_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,compatibility_inputs);
             capture->layout_revision_identity=capture->layout_identity;
         }
         if(capture->payload==rd::SceneProbePayload::Baked)
         {
-            out=capture->derived_revisions;
+            out=capture->compatibility_revisions;
             out.environment=capture->baseline.environment;
             out.light=capture->baseline.light;
             return Result::Success();
         }
+#if defined(HS_OFFLINE_PROBE_BAKER)
         const auto &light_direction=in.frame_constants->light_direction_intensity;
         const auto &light_color=in.frame_constants->light_color;
         const std::array frame_lighting{std::bit_cast<std::uint32_t>(light_direction.x),
@@ -983,6 +1045,9 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         out=capture->derived_revisions;
         out.environment=capture->baseline.environment;
         return Result::Success();
+#else
+        return Failure("Unexpected non-baked lighting package.");
+#endif
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
@@ -993,6 +1058,7 @@ Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameI
     plan.static_instance_generation=in.static_instance_generation;
     plan.material_parameter_revision=in.material_parameter_revision;
     plan.pipeline_revision=in.pipeline_revision;
+#if defined(HS_OFFLINE_PROBE_BAKER)
     plan.light_count=in.lights.size();plan.page_count=in.pages.size();
     plan.scene_read_count=in.scene_reads.size();plan.max_cube_views=in.max_cube_views;
     plan.capture_identity_valid=in.texture_facts_valid;
@@ -1001,20 +1067,24 @@ Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameI
         plan.capture_identity=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages);
         plan.capture_sources_ready=CaptureTexturesReady(in.texture_facts);
     }
+#endif
     if(!impl_->capture)return Result::Success();
     plan.active=true;
     if(!in.scene)return Result::Success();
     if(auto qualified=CurrentRevisions(in,plan.revisions);!qualified)return qualified;
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if(in.max_cube_views>6)return Failure("Capture cube-view budget exceeds six");
     plan.shadow=impl_->capture->revision_shadow.enabled;
     plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed)&&
         (!in.texture_facts_valid||plan.capture_sources_ready);
+#endif
     return Result::Success();
 }
 Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
     LocalProbeRuntimeFramePlan &plan)
 {
     if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
+#if defined(HS_OFFLINE_PROBE_BAKER)
     std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
     if(auto decided=PrepareFrameDecisionData(in,plan);!decided)return decided;
     if(!plan.capture)return Result::Success();
@@ -1038,6 +1108,9 @@ Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInp
         return Result::Success();
     }
     catch(const std::exception &error){return Failure(error.what());}
+#else
+    return PrepareFrameDecisionData(in,plan);
+#endif
 }
 Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,LocalProbeOutputs &out)
 {
@@ -1054,6 +1127,7 @@ Result LocalProbeRuntime::BindRetained(RenderGraphBuilder &graph,const LocalProb
 bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
     const LocalProbeRuntimeFramePlan &plan,const LocalProbeRuntimeLayout &layout) const
 {
+#if defined(HS_OFFLINE_PROBE_BAKER)
     if(plan.source!=&in||plan.scene!=in.scene||plan.active!=layout.active||
         plan.capture!=layout.capture||plan.shadow!=layout.shadow||
         plan.static_instance_generation!=in.static_instance_generation||
@@ -1093,11 +1167,20 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
     LocalProbeFramePlan service_plan;
     return bool(impl_->service.PrepareFrameRecordData(service_input,service_plan))&&
         impl_->service.MatchesLayout(service_input,service_plan,layout.service);
+#else
+    if(plan.source!=&in || plan.scene!=in.scene || plan.active!=layout.active) return false;
+    if(!plan.active) return true;
+    const LocalProbeInputs input{in.scene,plan.revisions,{},{},in.completed,0};
+    LocalProbeFramePlan service_plan;
+    return impl_->service.PrepareFrameRecordData(input,service_plan) &&
+        impl_->service.MatchesLayout(input,service_plan,layout.service);
+#endif
 }
 Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,
     const LocalProbeRuntimeFramePlan &plan,LocalProbeOutputs &out,LocalProbeRuntimeLayout *layout,
     const LocalProbeRuntimeLayout *retained)
 {
+#if defined(HS_OFFLINE_PROBE_BAKER)
     out={};if(!plan.source||plan.source!=&in||plan.scene!=in.scene||
         plan.static_instance_generation!=in.static_instance_generation||
         plan.material_parameter_revision!=in.material_parameter_revision||
@@ -1140,7 +1223,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
     try
     {
         Require(in.config && in.pipeline_cache,"Native probe capture needs the selected pipeline inputs");
-        Require(impl_->capture->sky&&impl_->capture->revision_shadow.enabled==plan.shadow,
+        Require(impl_->capture->native&&impl_->capture->native->sky&&impl_->capture->revision_shadow.enabled==plan.shadow,
             "Local probe prepared capture pipelines or shadow branch changed");
         Require(in.frame_constants && in.static_instances && in.static_version.resource && in.frame_srv_heap && in.sampler_heap &&
             in.frame_srv_base.ptr && in.sampler_table.ptr && in.bind_graphics && in.restore_graphics && !in.scene_reads.empty(),
@@ -1190,7 +1273,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
                 page.index_view.BufferLocation-page.indices->GetGPUVirtualAddress()+page.index_view.SizeInBytes<=page.indices->GetDesc().Width,
                 "Capture page native views escape their retained resources");
         }
-        const auto device=frame->capture->device.Get(); frame->stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        const auto device=frame->capture->native->device.Get(); frame->stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         const auto source_start=in.frame_srv_heap->GetCPUDescriptorHandleForHeapStart().ptr;
         ComPtr<ID3D12Device> source_device;
         Native(in.frame_srv_heap->GetDevice(IID_PPV_ARGS(&source_device)),"Query capture descriptor source device");
@@ -1211,7 +1294,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
             depth.Format=DXGI_FORMAT_R32_TYPELESS; depth.SampleDesc.Count=1; depth.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
             D3D12_CLEAR_VALUE clear{}; clear.Format=DXGI_FORMAT_D32_FLOAT; clear.DepthStencil.Depth=0;
             D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=D3D12_HEAP_TYPE_DEFAULT;
-            Native(frame->capture->allocator->CreateResource(&allocation,&depth,D3D12_RESOURCE_STATE_COMMON,&clear,
+            Native(frame->capture->native->allocator->CreateResource(&allocation,&depth,D3D12_RESOURCE_STATE_COMMON,&clear,
                 &frame->shadow_map.allocation,IID_PPV_ARGS(&frame->shadow_map.resource)),"Allocate private pure-static capture shadow map");
             D3D12_DESCRIPTOR_HEAP_DESC dsv{}; dsv.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; dsv.NumDescriptors=1;
             Native(device->CreateDescriptorHeap(&dsv,IID_PPV_ARGS(&frame->shadow_dsv)),"Create private static capture shadow DSV heap");
@@ -1222,7 +1305,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         D3D12_RESOURCE_DESC buffer{}; buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; buffer.Width=UINT64(kConstantBankCount)*kConstantsStride;
         buffer.Height=1; buffer.DepthOrArraySize=1; buffer.MipLevels=1; buffer.SampleDesc.Count=1; buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=D3D12_HEAP_TYPE_UPLOAD;
-        Native(frame->capture->allocator->CreateResource(&allocation,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,&frame->constants.allocation,
+        Native(frame->capture->native->allocator->CreateResource(&allocation,&buffer,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,&frame->constants.allocation,
             IID_PPV_ARGS(&frame->constants.resource)),"Allocate immutable capture face constants");
         D3D12_RANGE no_read{}; Native(frame->constants.resource->Map(0,&no_read,reinterpret_cast<void **>(&frame->mapped)),"Map capture face constants");
         for(UINT bank=0;bank<kConstantBankCount;++bank)
@@ -1298,12 +1381,29 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         impl_->pending_graph=&graph; impl_->pending_frame=std::move(frame); return Result::Success();
     }
     catch(const std::exception &error) { return Failure(error.what()); }
+#else
+    out={};
+    if(plan.source!=&in || plan.scene!=in.scene || plan.static_instance_generation!=in.static_instance_generation ||
+        plan.material_parameter_revision!=in.material_parameter_revision || plan.pipeline_revision!=in.pipeline_revision)
+        return Failure("Baked lighting publication inputs changed before recording.");
+    if(layout){*layout={};layout->active=plan.active;}
+    if(!plan.active)return Result::Success();
+    if(impl_->pending_graph)return Failure("Baked lighting already has pending graph work.");
+    const LocalProbeInputs input{in.scene,plan.revisions,{},{},in.completed,0};
+    LocalProbeFramePlan service_plan;
+    if(auto ready=impl_->service.PrepareFrameRecordData(input,service_plan);!ready)return ready;
+    const auto registered=retained?impl_->service.BindRetained(graph,input,service_plan,retained->service,out):
+        impl_->service.Register(graph,input,service_plan,out,layout?&layout->service:nullptr);
+    if(registered)impl_->pending_graph=&graph;
+    return registered;
+#endif
 }
 Result LocalProbeRuntime::CompleteSubmission(const RenderGraphBuilder &graph,const CompletionSet &completion,bool success,
     const std::shared_ptr<const StaticRenderScene> &scene,rd::SceneProbeRevisions revisions)
 {
     if(!impl_->capture) return Result::Success();
     if(impl_->pending_graph!=&graph) return Failure("Local-probe completion does not match its registered graph");
+#if defined(HS_OFFLINE_PROBE_BAKER)
     auto frame=std::move(impl_->pending_frame); impl_->pending_graph=nullptr;
     if(frame)
     {
@@ -1311,39 +1411,79 @@ Result LocalProbeRuntime::CompleteSubmission(const RenderGraphBuilder &graph,con
         if(frame->shadow_handle) frame->completion.Merge(graph.ResourceCompletion(frame->shadow_handle));
         impl_->retired_frames.push_back(std::move(frame));
     }
+#else
+    impl_->pending_graph=nullptr;
+#endif
     return impl_->service.CompleteSubmission(graph,completion,success,scene,revisions);
 }
 Result LocalProbeRuntime::ResetAfterCompletion(const CompletionSet &completed)
 {
     if(impl_->pending_graph) return Failure("Cannot reset local-probe runtime with pending graph work");
+#if defined(HS_OFFLINE_PROBE_BAKER)
     for(const auto &frame:impl_->retired_frames) if(!frame->completion.IsSatisfiedBy(completed)) return Failure("Cannot reset in-flight capture bindings");
+#endif
     if(auto reset=impl_->service.ResetAfterCompletion(completed);!reset) return reset;
-    impl_->capture.reset(); impl_->retired_frames.clear(); return Result::Success();
+    impl_->capture.reset();
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    impl_->retired_frames.clear();
+#endif
+    return Result::Success();
 }
+#if defined(HS_OFFLINE_PROBE_BAKER)
 Result LocalProbeRuntime::ExportBakedPackage(RenderGraphQueueExecutor &executor,TransientResourcePool &pool,
     std::uint32_t frame_slot,BarrierMode barriers,std::vector<std::byte> &package_bytes)
 {
     if(impl_->pending_graph) return Failure("Cannot export a scene-probe package with pending graph work");
-    return impl_->service.ExportBakedPackage(executor,pool,frame_slot,barriers,package_bytes);
+    const auto capture=impl_->capture;
+    if(!capture || !capture->revision_scene || !capture->material_revision_facts_valid)
+        return Failure("Cannot export a scene-probe package without qualified capture revisions");
+    auto expected=capture->derived_revisions;
+    expected.environment=capture->baseline.environment;
+    auto compatibility=capture->compatibility_revisions;
+    compatibility.environment=expected.environment;
+    compatibility.light=expected.light;
+    return impl_->service.ExportBakedPackage(executor,pool,frame_slot,barriers,package_bytes,
+        &expected,&compatibility);
 }
+#endif
 std::span<const rd::SceneProbeRecord> LocalProbeRuntime::Probes() const noexcept
 { return impl_->capture?std::span<const rd::SceneProbeRecord>(impl_->capture->probes):std::span<const rd::SceneProbeRecord>{}; }
 rd::SceneProbeRevisions LocalProbeRuntime::BaselineRevisions() const noexcept
 { return impl_->capture?impl_->capture->baseline:rd::SceneProbeRevisions{}; }
+#if defined(HS_DEVELOPMENT_TOOLS)
+LocalProbeRevisionDiagnostics LocalProbeRuntime::RevisionDiagnostics() const
+{
+    LocalProbeRevisionDiagnostics result;
+    if (const auto capture=impl_->capture)
+    {
+        result.baseline=capture->baseline;
+        result.compatibility=capture->compatibility_revisions;
+        result.compatibility.environment=capture->baseline.environment;
+        result.compatibility.light=capture->baseline.light;
+        result.material_parameter_revision=capture->revision_material_parameter;
+    }
+    return result;
+}
+#endif
+#if defined(HS_OFFLINE_PROBE_BAKER)
 LocalProbeBakeStatus LocalProbeRuntime::BakeStatus(const CompletionSet &completed) const noexcept
 { return impl_->service.BakeStatus(completed); }
+#endif
 std::uint64_t LocalProbeRuntime::AllocatedBytes() const noexcept
 {
     auto bytes=impl_->service.AllocatedBytes();
+#if defined(HS_OFFLINE_PROBE_BAKER)
     const auto native_bytes=[](const std::shared_ptr<LocalProbeCaptureFrame> &frame) {
         return (frame->constants.allocation?frame->constants.allocation->GetSize():0) +
             (frame->shadow_map.allocation?frame->shadow_map.allocation->GetSize():0);
     };
     if(impl_->pending_frame) bytes+=native_bytes(impl_->pending_frame);
     for(const auto &frame:impl_->retired_frames) bytes+=native_bytes(frame);
+#endif
     return bytes;
 }
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 // Retained before submission so a failed fence/event cannot release GPU readers.
 struct StaticShadowBakeFrame
 {
@@ -1383,8 +1523,9 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
         auto owner=std::make_shared<StaticShadowBakeFrame>();
         auto frame=std::make_shared<LocalProbeCaptureFrame>(); owner->capture=frame;
         frame->capture=std::make_shared<LocalProbeCaptureState>();
-        frame->capture->device=impl_->device; frame->capture->allocator=impl_->allocator;
-        frame->capture->root=impl_->root_signature; frame->scene=scene; frame->generation=1;
+        frame->capture->native=std::make_unique<LocalProbeNativeCapture>();
+        frame->capture->native->device=impl_->device; frame->capture->native->allocator=impl_->allocator;
+        frame->capture->native->root=impl_->root_signature; frame->scene=scene; frame->generation=1;
         frame->stride=impl_->srv_stride; frame->samplers=impl_->sampler_heap;
         frame->sampler_table=impl_->sampler_heap->GetGPUDescriptorHandleForHeapStart();
         auto *device=impl_->device.Get();
@@ -1704,4 +1845,5 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
+#endif
 } // namespace hs

@@ -408,6 +408,7 @@ struct RenderSnapshotPair
     const auto &current = pair.current.header;
     const auto &previous = pair.previous.header;
     if (!enabled || !pair.has_previous || current.session_id != previous.session_id ||
+        current.clock.epoch != previous.clock.epoch ||
         current.clock.mode != RenderClockMode::RealtimeRunning ||
         current.tick <= previous.tick ||
         current.tick - previous.tick != 1 || current.simulation_time <= previous.simulation_time)

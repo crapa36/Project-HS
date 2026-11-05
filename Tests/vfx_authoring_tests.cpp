@@ -12,7 +12,6 @@
 #include <iterator>
 #include <stdexcept>
 #include <vector>
-void TestReleaseVfxCodegen();
 void TestVfxImageIdentity();
 
 namespace
@@ -228,7 +227,6 @@ int main()
         Reject([&] { hs::content::ValidateVfxTextures(spec, fixture); }, "sRGB data texture accepted");
         Write(target, valid);
         hs::content::ValidateVfxTextures(spec, fixture);
-        TestReleaseVfxCodegen();
         TestVfxImageIdentity();
         std::cout << "vfx authoring contracts passed: references, scope, authority, DDS, deterministic 68-row LUT\n";
         return 0;

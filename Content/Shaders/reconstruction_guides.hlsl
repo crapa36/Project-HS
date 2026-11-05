@@ -19,7 +19,6 @@ Texture2D<float4> GuideComposite : register(t4, space13);
 Texture2D<float4> GuideOpaque : register(t5, space13);
 StructuredBuffer<float> GuideCurrentExposure : register(t6, space13);
 Texture2D<float> GuideRevealage : register(t7, space13);
-Texture2D<float4> GuideRawOutput : register(t8, space13);
 Texture2D<float> GuideTransparentDepth : register(t9, space13);
 Texture2D<float2> GuideTransparentMotion : register(t10, space13);
 Texture2D<float2> GuideTransparentHistory : register(t11, space13);
@@ -31,7 +30,6 @@ Texture2D<float> GuideScreenOverlayAlpha : register(t16, space13);
 RWTexture2D<float2> GuideMotionOutput : register(u0, space13);
 RWTexture2D<unorm float> GuideResponsiveOutput : register(u1, space13);
 RWTexture2D<float> GuideExposureOutput : register(u2, space13);
-RWTexture2D<float4> GuidePreExposedOutput : register(u3, space13);
 RWTexture2D<float> GuideDepthOutput : register(u4, space13);
 RWTexture2D<unorm float> GuideCompositionOutput : register(u5, space13);
 
@@ -133,14 +131,4 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
         GuideCompositionOutput[pixel] = saturate(composition);
     }
     if (all(dispatch.xy == uint2(0, 0))) GuideExposureOutput[uint2(0, 0)] = exposure;
-}
-
-[numthreads(8, 8, 1)]
-void PreExposeReconstructionCS(uint3 dispatch : SV_DispatchThreadID)
-{
-    if (any(dispatch.xy >= uint2(GuideOutputSize.xy))) return;
-    // Native SR preserves input radiometry; downstream post operates on
-    // current pre-exposed radiance. Alpha is color alpha, never engine depth history.
-    float3 color = GuideRawOutput.Load(int3(dispatch.xy, 0)).rgb * GuideCurrentExposure[0];
-    GuidePreExposedOutput[dispatch.xy] = float4(color, 1.0);
 }

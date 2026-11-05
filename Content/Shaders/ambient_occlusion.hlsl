@@ -2,39 +2,7 @@
 // to the active rectangle, independently of texture allocation capacity.
 #include "surface_metadata.hlsli"
 
-cbuffer AmbientOcclusionConstants : register(b0, space12)
-{
-    row_major float4x4 AoInverseProjection;
-    row_major float4x4 AoWorldToView;
-    row_major float4x4 AoProjection;
-    float4 AoRenderSize;
-    float4 AoSize;
-    float4 AoHistorySize;
-    float4 AoPreviousDepthParameters;
-    float4 AoJitterUv;
-    float4 AoParameters;
-    float4 AoFilterParameters;
-    float4 AoContactParameters;
-    float4 AoTowardLight;
-    uint4 AoSampleCounts;
-    uint4 AoFrameInfo;
-};
-
-Texture2D<float> AoDepth : register(t0, space12);
-Texture2D<float2> AoNormal : register(t1, space12);
-Texture2D<uint> AoMetadata : register(t2, space12);
-Texture2D<float2> AoMotion : register(t3, space12);
-Texture2D<float2> AoSurfaceHistory : register(t4, space12);
-Texture2D<float4> AoRaw : register(t5, space12);
-Texture2D<float4> AoPrevious : register(t6, space12);
-Texture2D<uint> AoPreviousMetadata : register(t7, space12);
-Texture2D<float4> AoTemporal : register(t8, space12);
-Texture2D<uint> AoPreparedInverseW : register(t9, space12);
-RWTexture2D<float4> AoRawOutput : register(u0, space12);
-RWTexture2D<float4> AoHistoryOutput : register(u1, space12);
-RWTexture2D<float> AoResolvedOutput : register(u2, space12);
-RWTexture2D<float> AoContactOutput : register(u3, space12);
-RWTexture2D<uint> AoMetadataOutput : register(u4, space12);
+#include "ambient_occlusion_abi.hlsli"
 
 static const float AoPi = 3.14159265358979323846;
 

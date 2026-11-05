@@ -1,3 +1,4 @@
+#include <hs/jobs/task_system.hpp>
 #include "render_graph.hpp"
 #include "render_graph_validation.hpp"
 #include "renderer_local_probe_draws.hpp"
@@ -226,6 +227,27 @@ void RunBakedProbePreparation(Fixture &fixture)
     Check(service.CompleteSubmission(graph, completion, true, scene, initially_unqualified.revisions).Succeeded(),
         "complete baked probe upload submission");
     Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe upload");
+    const auto upload_completed = fixture.executor.Completed();
+    graph.Reset();
+    initially_unqualified.completed = upload_completed;
+    Check(service.Register(graph, initially_unqualified, output).Succeeded() && !output.enabled,
+        "register disabled baked metadata reader");
+    auto disabled_reader = graph.AddPass(188, "ProbeFixture.DisabledMetadataReader", hs::QueueHint::Direct);
+    disabled_reader.Read(output.records, hs::Access::ComputeRead);
+    disabled_reader.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
+    Check(graph.Prepare(pool).Succeeded(), "prepare disabled baked metadata reader");
+    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit disabled baked metadata reader");
+    Check(service.CompleteSubmission(graph, completion, true, scene, initially_unqualified.revisions).Succeeded(),
+        "complete disabled baked metadata reader submission");
+    auto ready_with_pending_reader = inputs;
+    ready_with_pending_reader.completed = upload_completed;
+    hs::LocalProbeFramePlan pending_reader_plan;
+    Check(service.PrepareFrameRecordData(ready_with_pending_reader, pending_reader_plan).Succeeded() &&
+        pending_reader_plan.published && pending_reader_plan.current && !pending_reader_plan.capture_count,
+        "completed baked upload must publish while an unrelated metadata reader remains in flight");
+    Check(!service.ResetAfterCompletion(upload_completed).Succeeded(),
+        "baked publication must retain the later metadata reader for retirement");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait disabled baked metadata reader");
     graph.Reset();
     auto late_match=inputs;
     late_match.completed=fixture.executor.Completed();
@@ -246,15 +268,30 @@ void RunBakedProbePreparation(Fixture &fixture)
     Check(service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported).Succeeded(),
         "late-adopted baked package could not be exported after its completed reader fence");
     Check(exported == bytes, "native four-payload readback changed the baked package");
+    auto wrong_capture = late_match.revisions;
+    ++wrong_capture.material;
+    auto compatibility = late_match.revisions;
+    compatibility.material += 10;
+    compatibility.static_layout += 10;
+    Check(!service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported,
+        &wrong_capture, &compatibility).Succeeded() && exported.empty(),
+        "export accepted compatibility revisions from a different current capture");
+    Check(service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported,
+        &late_match.revisions, &compatibility).Succeeded(), "export with qualified compatibility revisions failed");
+    Check(rd::ReadSceneProbePackage(exported, id).description.revisions == compatibility,
+        "export did not preserve the qualified compatibility revisions");
     graph.Reset();
     auto published_inputs = inputs;
     published_inputs.completed = fixture.executor.Completed();
     published_inputs.max_cube_views = 6;
     Check(service.Register(graph, published_inputs, output).Succeeded() && output.enabled,
         "completed baked probe was not published");
+    auto baked_reader = graph.AddPass(188, "ProbeFixture.BakedReader", hs::QueueHint::Direct);
+    baked_reader.Read(output.radiance, hs::Access::ComputeRead);
+    baked_reader.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
     Check(graph.Prepare(pool).Succeeded(), "prepare baked probe publication");
-    Check(graph.PassCount() == 0,
-        "matching baked probe publication must not schedule native capture or filtering");
+    Check(graph.PassCount() == 1 && graph.CompiledPassName(0) == "ProbeFixture.BakedReader",
+        "matching baked probe publication must only schedule the requested reader");
     for (const auto &[name, resource] : std::array{
             std::pair{"radiance", output.radiance_resource}, std::pair{"prefiltered", output.prefiltered_resource},
             std::pair{"irradiance", output.irradiance_resource}, std::pair{"distance", output.distance_resource}})
@@ -271,6 +308,17 @@ void RunBakedProbePreparation(Fixture &fixture)
     fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit baked probe publication");
     Check(service.CompleteSubmission(graph, completion, true, scene, description.revisions).Succeeded(),
         "complete baked probe publication");
+    auto changed_binding = published_inputs;
+    changed_binding.capture_identity_valid = true;
+    changed_binding.capture_sources_ready = false;
+    changed_binding.capture_identity[0] = std::byte{3};
+    hs::LocalProbeFramePlan binding_plan;
+    Check(service.PrepareFrameRecordData(changed_binding, binding_plan).Succeeded() &&
+        binding_plan.current && binding_plan.published && !binding_plan.capture_count &&
+        service.BakeStatus(changed_binding.completed).capture_complete,
+        "baked lighting must remain ready across capture binding changes and in-flight readers");
+    Check(!service.ResetAfterCompletion(changed_binding.completed).Succeeded(),
+        "baked resources must retain the in-flight reader despite ready status");
     Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe readers");
     Check(!service.NativeCaptureRequired(scene, description.revisions, fixture.executor.Completed()),
         "matching baked profile must not request a runtime recapture after upload");
@@ -428,6 +476,13 @@ void RunBakedProbePreparation(Fixture &fixture)
         const auto completed_before_sample = fixture.executor.Completed();
         Check(service.BakeStatus(completed_before_sample).capture_complete,
             "completed native bake status was not ready before later sampling");
+        for (auto member : {&rd::SceneProbeRevisions::material, &rd::SceneProbeRevisions::static_layout})
+        {
+            auto changed_capture = capture_inputs.revisions;
+            ++(changed_capture.*member);
+            Check(service.NativeCaptureRequired(scene, changed_capture, completed_before_sample),
+                "capture revision changes must invalidate a completed layout capture");
+        }
         graph.Reset();
         capture_inputs.completed = completed_before_sample;
         capture_inputs.max_cube_views = 0;
@@ -609,9 +664,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                         : hs::Result::Success();
                 });
         Check(graph.Prepare(pool).Succeeded(), "prepare independent graph");
-        hs::RenderTaskExecutor tasks;
-        tasks.submit = [](std::function<void()> task) { task(); return hs::Result::Success(); };
-        tasks.join = [] { return hs::Result::Success(); };
+        hs::TaskSystem tasks(2);
         std::vector<hs::GpuPassTiming> cpu_passes;
         for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
             cpu_passes.push_back({graph.CompiledPassId(position),
@@ -645,7 +698,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             options.timestamp_query_slots = query_slots.data();
             options.timestamp_query_slot_count = query_slots.size();
         }
-        options.task_executor = &tasks;
+        options.task_system = &tasks;
         options.cpu_pass_timings = cpu_passes.data();
         options.cpu_pass_timing_count = cpu_passes.size();
         hs::CompletionSet completion;
@@ -687,18 +740,15 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             }
         }
     }
-    enum class Outcome { Success, Reject, Throw, JoinFailure, OwnerFailure };
-    for (const auto outcome : {Outcome::Success, Outcome::Reject, Outcome::Throw,
-                               Outcome::JoinFailure, Outcome::OwnerFailure})
+    enum class Outcome { Success, OwnerFailure };
+    for (const auto outcome : {Outcome::Success, Outcome::OwnerFailure})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(),
               "recording dispatch pool initialize");
         hs::RenderGraphBuilder graph;
-        std::vector<std::jthread> workers;
         std::atomic<std::uint32_t> completed{};
-        std::uint32_t submitted{}, owner_calls{};
-        bool joined{};
+        std::uint32_t owner_calls{};
         const auto owner = std::this_thread::get_id();
         const auto failed = [] {
             return hs::Result::Failure(hs::ErrorCode::TaskFailed, "recording-test", "injected failure");
@@ -714,7 +764,6 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             else
                 pass.SetExecuteOnOwner([&, index](hs::RenderPassContext &) {
                     Check(std::this_thread::get_id() == owner, "owner callback moved to a worker");
-                    Check(submitted == 2, "owner callback blocked later worker dispatch");
                     Check(index == 1 + owner_calls * 2, "owner callback order changed");
                     ++owner_calls;
                     if (outcome == Outcome::Success && index == 1)
@@ -724,24 +773,9 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                 });
         }
         Check(graph.Prepare(pool).Succeeded(), "prepare recording dispatch graph");
-        hs::RenderTaskExecutor tasks;
-        tasks.submit = [&](std::function<void()> task) {
-            if (submitted == 1)
-            {
-                if (outcome == Outcome::Reject) return failed();
-                if (outcome == Outcome::Throw) throw std::runtime_error("injected submit failure");
-            }
-            workers.emplace_back(std::move(task));
-            ++submitted;
-            return hs::Result::Success();
-        };
-        tasks.join = [&] {
-            for (auto &worker : workers) worker.join();
-            joined = true;
-            return outcome == Outcome::JoinFailure ? failed() : hs::Result::Success();
-        };
+        hs::TaskSystem tasks(2);
         hs::GraphExecutionOptions options;
-        options.task_executor = &tasks;
+        options.task_system = &tasks;
         std::vector<hs::GpuPassTiming> cpu_passes;
         for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
             cpu_passes.push_back({graph.CompiledPassId(position),
@@ -754,12 +788,9 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         const auto result = fixture.executor.Execute(graph, 0, barriers, completion, &options);
         const auto execute_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - execute_start).count();
-        const bool dispatch_failed = outcome == Outcome::Reject || outcome == Outcome::Throw;
-        Check(joined && completed == (dispatch_failed ? 1u : 2u),
-              "recording tasks escaped mandatory join");
-        Check(owner_calls == (dispatch_failed ? 0u : 2u),
-              "rejected dispatch ran owner callbacks or successful dispatch omitted them");
-        Check(fixture.executor.LastExecutionStats().record_jobs == submitted,
+        Check(completed == 2, "recording tasks escaped mandatory join");
+        Check(owner_calls == 2, "owner callbacks were omitted");
+        Check(fixture.executor.LastExecutionStats().record_jobs == 2,
               "recording job count includes rejected or owner work");
         Check(result.Succeeded() == (outcome == Outcome::Success),
               "recording dispatch failure was lost");
@@ -1002,11 +1033,9 @@ void RunFinalExports(Fixture &fixture, hs::BarrierMode barriers)
         graph.SetFinalAccess(graph.Version(handles[index]), hs::Access::ShaderRead);
     }
     Check(graph.Prepare(pool).Succeeded(), "prepare independent final exports");
-    hs::RenderTaskExecutor tasks;
-    tasks.submit = [](std::function<void()> task) { task(); return hs::Result::Success(); };
-    tasks.join = [] { return hs::Result::Success(); };
+    hs::TaskSystem tasks(2);
     hs::GraphExecutionOptions options;
-    options.task_executor = &tasks;
+    options.task_system = &tasks;
     hs::CompletionSet completion;
     Check(fixture.executor.Execute(graph, 0, barriers, completion, &options).Succeeded(),
         "execute grouped final exports");

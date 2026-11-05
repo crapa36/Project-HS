@@ -4,6 +4,7 @@
 #include "streaming_manager.hpp"
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
+#include "../Source/Apps/Common/renderer_geometry_catalog.hpp"
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/scene_probe_revision.hpp>
 
@@ -551,6 +552,29 @@ void CheckPackAssetReads(bool native)
     shader_config.selected_texture_feedback = true;
     Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) &&
         output == std::vector<std::byte>(pack_bytes.begin(), pack_bytes.begin() + 4), "dense shader feedback selection differs");
+    {
+        const auto effective_digest = hs::RendererProductDigest(shader_config, shader_id);
+        const auto canonical_digest = hs::RendererProductDigest(shader_config, shader_id, false);
+        hs::RendererAssetSource effective, canonical;
+        Check(effective_digest != canonical_digest &&
+            bool(hs::ResolveRendererAsset(shader_config, shader_id, effective)) &&
+            bool(hs::ResolveRendererAsset(shader_config, shader_id, canonical, false)) &&
+            bool(effective.Read(output)) && hs::Sha256(output) == shader_bulks[1u-base_index].range.expected_digest &&
+            bool(canonical.Read(output)) && hs::Sha256(output) == shader_bulks[base_index].range.expected_digest,
+            "packed feedback selection changed canonical shader identity or selected the wrong bytes");
+        hs::RendererConfig loose;
+        loose.selected_texture_feedback = true;
+        loose.product_paths[shader_id] = path;
+        loose.product_paths[feedback_id] = old_path;
+        loose.product_digests[shader_id] = canonical_digest;
+        loose.product_digests[feedback_id] = effective_digest;
+        Check(bool(hs::ResolveRendererAsset(loose, shader_id, effective)) && effective.Loose().path == old_path &&
+            bool(hs::ResolveRendererAsset(loose, shader_id, canonical, false)) && canonical.Loose().path == path &&
+            hs::RendererProductDigest(loose, shader_id) == effective_digest &&
+            hs::RendererProductDigest(loose, shader_id, false) == canonical_digest &&
+            loose.product_paths.at(shader_id) == path && loose.product_digests.at(shader_id) == canonical_digest,
+            "loose feedback selection changed canonical shader identity or selected the wrong path");
+    }
     shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
     shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
     const auto feedback_index = 1u - base_index;
@@ -613,11 +637,44 @@ void CheckPackAssetReads(bool native)
         shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
         Check(hs::render_data::IsRendererMaterialRevisionProduct(source_id) &&
             hs::render_data::IsRendererMaterialRevisionProduct(shader_id) &&
+            hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface.rpkg") &&
+            hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
+            !hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
             !hs::render_data::IsRendererMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
             "material revision predicate changed domains");
+        Check(hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_0.rpkg") &&
+            hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_12.rpkg") &&
+            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface.rpkg") &&
+            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_.rpkg") &&
+            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_x.rpkg") &&
+            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_1.rpkg.extra"),
+            "terrain section texture classification differs from its product identity");
+        Check(!hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface.rpkg") &&
+            !hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface_section_0.rpkg") &&
+            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/meadow_ground.rpkg") &&
+            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface_section_x.rpkg") &&
+            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/hlod/arena.shl1"),
+            "geometry metadata classifier changed its terrain or legacy product domain");
+        for (const std::string_view terrain_id : {"render/terrain/arena_surface.rpkg",
+                                                  "render/terrain/arena_surface_section_12.rpkg"})
+        {
+            auto terrain_bulk = shader_bulks[base_index];
+            terrain_bulk.asset_id = hs::MakeAssetId(terrain_id);
+            terrain_bulk.range.format = hs::render_data::RenderBulkFormat::Package;
+            const std::array terrain_bulks{terrain_bulk};
+            const std::array terrain_revisions{hs::render_data::RendererRevisionBulk{terrain_id, 0}};
+            auto terrain_config = config;
+            terrain_config.packed_source_revisions = {};
+            terrain_config.packed_bulks = terrain_bulks;
+            terrain_config.packed_revision_bulks = terrain_revisions;
+            Check(bool(hs::ValidatePackedRevisionCatalog(terrain_config)),
+                "terrain surface product rejected from packed revision catalog");
+        }
         Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_capture_source_base_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_capture.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_page_bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_page_mip_cs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_shadow.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_sh_cs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_ggx_cs.dxil") &&
@@ -630,6 +687,12 @@ void CheckPackAssetReads(bool native)
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/environment.rgeo") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("environment/default_probe.spkg") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_probe_capture.dxil") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface.rpkg") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_page_bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_page_mip_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/gtao_horizon_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
             "local-probe material revision scope changed nonshader coverage or admitted unrelated shaders");

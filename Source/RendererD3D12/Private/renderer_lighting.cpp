@@ -288,11 +288,11 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
             if (ordinal == kTerrainMaterialOrdinal && config.grid_floor_probe) eligible = true;
             policies.push_back({0x10000000u + static_cast<std::uint32_t>(ordinal), eligible ? 1u : 0u});
         }
-        for (std::size_t hero = 0; hero < kHeroMaterialNames.size(); ++hero)
+        for (std::size_t hero = 0; hero < kCharacterMaterialNames.size(); ++hero)
             // The current hero package ABI supplies closure/domain bindings but
             // no explicit opacity/frequency policy. A masked opaque binding or
             // advanced closure must never be inferred eligible from its ID.
-            policies.push_back({render_data::kHeroMaterialIdBase + static_cast<std::uint32_t>(hero), 0u});
+            policies.push_back({render_data::kCharacterMaterialIdBase + static_cast<std::uint32_t>(hero), 0u});
         std::ranges::sort(policies, {}, &AdaptiveShadingMaterialPolicy::material_id);
         return Result::Success();
     }
@@ -331,8 +331,8 @@ Result D3D12Renderer::Impl::PrepareSurfaceLighting(const OwnedView &owner, const
     return owner.screen_reflections.Prepare(device.Get(), allocator, capacity, quality, QualityProfileFor(candidate_config.reflection_quality),
         kFrameCount, read_shader, reflections);
 }
-Result D3D12Renderer::Impl::PrepareHeroTransparency(const OwnedView &owner, const RendererConfig &candidate_config,
-    ViewExtent capacity, HeroTransparencyCandidate &candidate) const
+Result D3D12Renderer::Impl::PrepareLayeredTranslucency(const OwnedView &owner, const RendererConfig &candidate_config,
+    ViewExtent capacity, LayeredTranslucencyCandidate &candidate) const
 {
     const bool authored_transmission = std::ranges::any_of(material_surface_layouts, [](const auto &layout) {
         return (layout.capability_mask & static_cast<std::uint32_t>(
@@ -350,6 +350,6 @@ Result D3D12Renderer::Impl::PrepareHeroTransparency(const OwnedView &owner, cons
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
-        }, pipeline_cache, candidate, candidate_config.capture_hero_work, candidate_config.hero_work_mode);
+        }, pipeline_cache, candidate, candidate_config.capture_translucency_diagnostics, candidate_config.translucency_diagnostics_mode);
 }
 } // namespace hs

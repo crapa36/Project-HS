@@ -33,7 +33,7 @@ HsSurfaceClosure HsReflectionDecodeClosure(uint2 metadata,float4 base,float2 pac
     HsMaterialContext ctx = (HsMaterialContext)0;
     uint varying_mask = 0u;
     const uint environment = metadata.x - 0x10000000u;
-    const uint hero = metadata.x - HsHeroMaterialIdBase;
+    const uint hero = metadata.x - HsCharacterMaterialIdBase;
     if (environment < HsAuthoredMaterialCount)
     {
         // The diagnostic grid terrain is produced without authored layers.
@@ -46,9 +46,9 @@ HsSurfaceClosure HsReflectionDecodeClosure(uint2 metadata,float4 base,float2 pac
     }
     else if (HsHeroOpaqueOrdinalValid(hero))
     {
-        ctx.parameter_base = HeroMaterialParameterBases[hero / 4u][hero % 4u];
+        ctx.parameter_base = CharacterMaterialParameterBases[hero / 4u][hero % 4u];
         closure = HsHeroApplyDeferredLayers(closure, ctx, hero);
-        varying_mask = HeroMaterialVaryingMasks[hero / 4u][hero % 4u];
+        varying_mask = CharacterMaterialVaryingMasks[hero / 4u][hero % 4u];
     }
     if (varying_mask != 0u)
     {
