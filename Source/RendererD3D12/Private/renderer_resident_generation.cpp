@@ -38,7 +38,7 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     HS_PREPARE(candidate_owner.screen_reflections.Commit(std::move(reflections), unused));
     LayeredTranslucencyCandidate transparency;
     HS_PREPARE(next.PrepareLayeredTranslucency(owner, cfg, capacity, transparency));
-    HS_PREPARE(candidate_owner.hero_transparency.Commit(std::move(transparency), unused));
+    HS_PREPARE(candidate_owner.translucency.Commit(std::move(transparency), unused));
     LightingProbeCandidate probe;
     HS_PREPARE(next.PrepareLightingProbe(cfg, probe));
     HS_PREPARE(next.lighting_probe.Commit(std::move(probe), unused));
@@ -106,7 +106,7 @@ void D3D12Renderer::Impl::SwapResidentServices(Impl &next) noexcept
     HS_SWAP_VIEW_SERVICE(adaptive_shading);
     HS_SWAP_VIEW_SERVICE(subsurface);
     HS_SWAP_VIEW_SERVICE(screen_reflections);
-    HS_SWAP_VIEW_SERVICE(hero_transparency);
+    HS_SWAP_VIEW_SERVICE(translucency);
     HS_SWAP_SERVICE(lighting_probe);
     HS_SWAP_SERVICE(ltc_lut);
     HS_SWAP_VIEW_SERVICE(hdr_post);
@@ -142,7 +142,7 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
     HS_SWAP_PIPELINE(hero_scene_pipeline);
     HS_SWAP_PIPELINE(hero_visibility_pipeline);
     HS_SWAP_PIPELINE(hero_shadow_pipeline);
-    HS_SWAP_PIPELINE(hero_resolve_pipeline);
+    HS_SWAP_PIPELINE(character_resolve_pipeline);
     HS_SWAP_PIPELINE(hero_translucent_pipeline);
     HS_SWAP_PIPELINE(visibility_pipeline);
     HS_SWAP_PIPELINE(environment_material_visibility_pipelines);
@@ -299,7 +299,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     unresolved_resident_candidates.clear();
     resident_utility_submissions.clear();
 
-    if (auto archived = RetireLayeredTranslucency(main_owner.hero_transparency); !archived) return reject(archived);
+    if (auto archived = RetireLayeredTranslucency(main_owner.translucency); !archived) return reject(archived);
     // No allocation, native preparation or fallible Commit below this boundary.
     PublishResidentAssetDescriptors(*next);
     SwapResidentAssetData(*next);

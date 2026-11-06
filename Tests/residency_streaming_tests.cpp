@@ -673,8 +673,8 @@ void CheckPackAssetReads(bool native)
         Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_capture_source_base_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_capture.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_page_bake_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_page_mip_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/mip_cs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_shadow.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_sh_cs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_ggx_cs.dxil") &&
@@ -686,16 +686,22 @@ void CheckPackAssetReads(bool native)
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/texture/environment/sky.rtex") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/environment.rgeo") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("environment/default_probe.spkg") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/terrain/material.rpkg") &&
+            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/ground_detail/parameters.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/terrain_unrelated/material.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/slime_body/material.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/texture/vfx_masks.rpkg") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/character/enemy_melee.rpage") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_probe_capture.dxil") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface.rpkg") &&
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_page_bake_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_page_mip_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/mip_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/gtao_horizon_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
-            "local-probe material revision scope changed nonshader coverage or admitted unrelated shaders");
+            "local-probe compatibility missed static inputs or included unrelated runtime products");
     }
 
     hs::ResidencyManager residency;
@@ -803,6 +809,12 @@ int main()
 {
     try
     {
+        hs::RendererTextureStreaming texture_working_set;
+        Check(texture_working_set.SetPreferredWorkingSet({}).Succeeded(),
+            "empty preferred texture set was rejected");
+        const std::array invalid_texture_owners{hs::TextureStreamId{1}};
+        Check(!texture_working_set.SetPreferredWorkingSet(invalid_texture_owners),
+            "preferred texture set accepted an unregistered owner");
         hs::EssentialBootstrapAdmission bootstrap;
         Check(bootstrap.Configure(1'000, 400, false), "known bootstrap capacity setup failed");
         Check(bootstrap.HasCapacity(hs::ResidencySegment::Local) &&
@@ -1018,6 +1030,10 @@ int main()
         hs::ResidencyBudgetSnapshot unified_budget{true, 1'000, 0, 0, 0, true, 1'000};
         unified_budget.unified_memory = true;
         unified.UpdateBudget(unified_budget);
+        Check(unified.GpuPressureFacts().budget.unified_memory &&
+              unified.HostAdmissionFacts().budget.unified_memory &&
+              unified.Accounting().budget.unified_memory,
+            "UMA budget topology was not published consistently to consumers");
         Check(pressure_matches_accounting(unified), "UMA GPU pressure facts diverged from accounting");
         {
             hs::ScopedGpuAdmission admission(unified, 500, 400);
@@ -1025,6 +1041,12 @@ int main()
                 unified.Accounting().gpu_reserved_by_segment[1] == 0,
                 "UMA upload reservation was not combined with LOCAL capacity");
         }
+        unified_budget.unified_memory = false;
+        unified.UpdateBudget(unified_budget);
+        Check(!unified.GpuPressureFacts().budget.unified_memory &&
+              !unified.HostAdmissionFacts().budget.unified_memory &&
+              !unified.Accounting().budget.unified_memory,
+            "updated non-UMA budget topology left stale UMA consumer facts");
 
         hs::StreamingManager streaming;
         const auto request = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",

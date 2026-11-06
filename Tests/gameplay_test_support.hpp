@@ -24,6 +24,7 @@ struct TestContent
 };
 
 const TestContent &DefaultContent();
+const hs::SimulationRules &DefaultSimulationRules();
 hs::SimulationRules QuietGameData();
 
 hs::TickResult Tick(hs::GameSimulation &simulation,

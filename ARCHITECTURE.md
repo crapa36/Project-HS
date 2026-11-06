@@ -69,6 +69,14 @@ failure publication keeps the first error and its fixed-size message.
   value headers and depends on Core/GameDomain/RenderData values; it neither builds
   nor links the native Runtime/renderer backend, IO, DXC or content products.
   Runtime, content consumers and low-level VFX fixtures inherit it directly.
+- `hs_renderer_catalog_io` is RenderData's admitted renderer metadata wire codec.
+  It depends only on RenderData/Core, while native allocation and upload remain
+  RendererD3D12 responsibilities. `hs_audio_image_io` similarly owns Runtime's
+  native-free audio metadata decode without initializing an audio device.
+- Runtime's `PreparedContent` retains the opened image and decoded simulation,
+  presentation, audio, VFX and renderer catalog owners for their consumers.
+  Generated C++ supplies only the small image manifest; large tables are bounded
+  binary pack sections shared by development and shipping admission.
 - RendererD3D12 must not depend on game, presentation, or runtime modules.
 - Production modules must not include another module's `Private` headers.
 
@@ -124,6 +132,11 @@ so it has no dependency on Presentation's exchange or producer lifecycle.
 Raw presentation events end at Runtime's VFX/audio translation. The renderer
 frame contains prepared VFX inputs; each view is rendered inside that explicit
 package, with no snapshot-to-package compatibility recursion.
+Development previews are package producers in Runtime and the existing native
+fixtures. They own synthetic scene/pose spans and choose their camera and VFX
+inputs before Render; the renderer does not replace the supplied scene. ImGui
+preview edits return through the existing development-frame/result values for
+the next package, preserving actual previous/current instance transforms.
 Snapshot values/helpers live in render_snapshot_values.hpp; mutable scene/snapshot
 builders live in render_snapshot_storage.hpp. The legacy render_snapshot.hpp
 includes both. Value consumers include values directly so builder changes do not

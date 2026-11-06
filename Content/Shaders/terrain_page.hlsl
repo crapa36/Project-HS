@@ -13,17 +13,21 @@ StructuredBuffer<uint> MeadowControls : register(t7);
 SamplerState Wrap : register(s0);
 SamplerState Clamp : register(s1);
 RWTexture2DArray<float4> Target : register(u0);
-cbuffer Page : register(b0) { HsTerrainSection Section; uint SectionIndex, Edge; };
+cbuffer Page : register(b0) { HsTerrainSection Section; uint PlaneIndex, Edge; };
 
 [numthreads(8,8,1)]
 void BakeCS(uint3 id : SV_DispatchThreadID)
 {
     if(any(id.xy>=Edge)) return;
-    float2 local=((id.xy+.5)/float(Edge)-.5)*Section.span;
+    // Continue this receiver's material outside its geometric boundary, as
+    // helper lanes do. Do not mix a neighbouring draw's mesh or seed.
+    const float apron=float(Edge)/16.0;
+    const float interior=float(Edge)-2*apron;
+    float2 local=((id.xy+.5-apron)/interior-.5)*Section.span;
     float2 c=Section.rotation;
     float2 xAxis=float2(c.x,-c.y), zAxis=c.yx;
     float2 world=Section.center+local.x*xAxis+local.y*zAxis;
-    float2 dx=xAxis*Section.span.x/Edge, dy=zAxis*Section.span.y/Edge;
+    float2 dx=xAxis*Section.span.x/interior, dy=zAxis*Section.span.y/interior;
     float2 controls=0;
     if(Section.mesh==22u) {
         uint packed=MeadowControls[id.y*Edge+id.x];
@@ -32,10 +36,9 @@ void BakeCS(uint3 id : SV_DispatchThreadID)
     HsMaterialTerrainResult m=EnvTerrain(Sources[0],Sources[1],Sources[2],Sources[3],Sources[4],Sources[5],
         Wrap,Clamp,float3(world.x,0,world.y),float3(dx.x,0,dx.y),float3(dy.x,0,dy.y),
         Section.mesh,Section.seed,float3(0,1,0),0,0,1,2,3,4,5,controls);
-    uint slice=SectionIndex*3u;
-    Target[uint3(id.xy,slice)]=float4(HsSrgbEncode(m.base_color),m.roughness);
-    Target[uint3(id.xy,slice+1)]=float4(m.normal.xy*.5+.5,m.ao,saturate(m.residual_depth/.05));
-    Target[uint3(id.xy,slice+2)]=m.layer_weights;
+    if(PlaneIndex==0u) Target[uint3(id.xy,0)]=float4(HsSrgbEncode(m.base_color),m.roughness);
+    else if(PlaneIndex==1u) Target[uint3(id.xy,0)]=float4(m.normal.xy*.5+.5,m.ao,saturate(m.residual_depth/.05));
+    else Target[uint3(id.xy,0)]=m.layer_weights;
 }
 [numthreads(8,8,1)]
 void MipCS(uint3 id : SV_DispatchThreadID)
@@ -43,7 +46,7 @@ void MipCS(uint3 id : SV_DispatchThreadID)
     if(any(id.xy>=Edge)) return;
     float4 value=0;
     float3 normal=0;
-    uint plane=id.z%3u;
+    uint plane=PlaneIndex;
     [unroll] for(uint y=0;y<2;++y) [unroll] for(uint x=0;x<2;++x) {
         float4 s=Previous.Load(int4(id.xy*2+uint2(x,y),id.z,0));
         if(plane==0) s.rgb=HsSrgbDecode(s.rgb);

@@ -1,6 +1,7 @@
 #include <hs/core/shipped_content_owner.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/core/process_info.hpp>
+#include <hs/core/sha256.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/graphics_settings_request.hpp>
@@ -1125,6 +1126,52 @@ bool FilesEqual(const std::filesystem::path &left, const std::filesystem::path &
     return true;
 }
 
+std::pair<std::uint64_t, std::uint64_t> ValidateMaterialReloadShadowDepth(
+    const std::filesystem::path &path, Json &receipt)
+{
+    const auto metadata = Json::parse(std::ifstream(path));
+    const auto &resources = metadata.at("resources");
+    const auto find = [&](std::string_view name) {
+        return std::ranges::find_if(resources, [&](const auto &entry) {
+            return entry.value("name", std::string{}) == name;
+        });
+    };
+    auto selected = find("shadow_atlas");
+    if (selected == resources.end()) selected = find("virtual_shadow_static");
+    if (selected == resources.end() || selected->value("native_format", std::string{}) != "DXGI_FORMAT_R32_TYPELESS")
+        throw std::runtime_error("material reload shadow probe has no captured depth atlas");
+    const auto raw_path = path.parent_path() / selected->at("file").get<std::string>();
+    std::ifstream raw(raw_path, std::ios::binary | std::ios::ate);
+    const auto expected = selected->at("row_size").get<std::uint64_t>() * selected->at("height").get<std::uint64_t>();
+    if (!raw || expected == 0 || expected % sizeof(float) || raw.tellg() != std::streamoff(expected))
+        throw std::runtime_error("material reload shadow depth readback has invalid size");
+    raw.seekg(0);
+    std::array<float, 4096> words{};
+    std::uint64_t visible{};
+    while (raw)
+    {
+        raw.read(reinterpret_cast<char *>(words.data()), sizeof(words));
+        const auto bytes = raw.gcount();
+        if (bytes % sizeof(float)) throw std::runtime_error("truncated shadow depth readback");
+        for (std::streamsize index = 0; index < bytes / sizeof(float); ++index)
+        {
+            const auto depth = words[static_cast<std::size_t>(index)];
+            if (!std::isfinite(depth) || depth < 0.0f || depth > 1.0f)
+                throw std::runtime_error("material reload shadow depth is nonfinite or out of range");
+            visible += depth > 0.0f;
+        }
+    }
+    if (!raw.eof() || visible == 0)
+        throw std::runtime_error("material reload shadow depth contains no rasterized caster");
+    const auto &preparation = metadata.at("static_shadow_preparation");
+    const auto builds = preparation.at("static_membership_builds").get<std::uint64_t>();
+    const auto rebinds = preparation.at("static_binding_rebinds").get<std::uint64_t>();
+    receipt.push_back({{"capture", path.filename().string()}, {"resource", selected->at("name")},
+        {"covered_depth_samples", visible}, {"static_membership_builds", builds},
+        {"static_binding_rebinds", rebinds}});
+    return {builds, rebinds};
+}
+
 struct HzbReferencePixels
 {
     std::uint32_t width{}, height{};
@@ -1606,6 +1653,8 @@ int main(int argc, char **argv)
     try
     {
         hs::RendererConfig config;
+        bool environment_preview = false;
+        bool slime_preview = false;
         config.capture_timing_stream = true;
         config.vsync = false;
         config.interpolate = false;
@@ -1632,6 +1681,7 @@ int main(int argc, char **argv)
         bool static_shadow_bake_probe{};
         bool static_shadow_bake_only{};
         bool local_probe_revision_probe{};
+        bool scene_probe_bake_only{};
         bool oit_overdraw_probe{};
         std::string vfx_composition_probe;
         bool entity_surface_probe{};
@@ -1680,7 +1730,7 @@ int main(int argc, char **argv)
                 config.surface_frontend = hs::SurfaceFrontend::CompactDeferred;
             else if (arg == "--surface=visibility")
                 config.surface_frontend = hs::SurfaceFrontend::VisibilityBuffer;
-            else if (arg == "--environment-preview") config.environment_preview = true;
+            else if (arg == "--environment-preview") environment_preview = true;
             else if (arg == "--persistent-scene-probe") persistent_scene_probe = true;
             else if (arg == "--skin-cache-monster-probe") skin_cache_monster_probe = true;
             else if (arg == "--require-multi-queue") require_multi_queue = true;
@@ -1727,6 +1777,7 @@ int main(int argc, char **argv)
             else if (arg == "--static-shadow-bake-probe") gameplay_scene = static_shadow_bake_probe = true;
             else if (arg == "--static-shadow-bake-only") static_shadow_bake_only = true;
             else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
+            else if (arg == "--scene-probe-bake-only") scene_probe_bake_only = true;
             else if (arg == "--oit-overdraw-probe") oit_overdraw_probe = true;
             else if (arg.starts_with("--vfx-composition-probe=")) vfx_composition_probe = arg.substr(24);
             else if (arg == "--entity-surface-probe") entity_surface_probe = true;
@@ -1820,7 +1871,7 @@ int main(int argc, char **argv)
         }
         if (light_list_probe || lighting_auxiliary_probe)
         {
-            const auto required_frames = light_list_probe ? 6u : 5u;
+            const auto required_frames = light_list_probe ? 7u : 5u;
             if (!frames_explicit) frames = required_frames;
             if (frames != required_frames) throw std::runtime_error("lighting probe frame count is fixed");
             config.lighting_quality = hs::GraphicsQuality::Ultra;
@@ -1831,8 +1882,8 @@ int main(int argc, char **argv)
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
             config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
             if (light_list_probe)
-                receipt["light_list"] = {{"local_counts", {4, 64, 65, 128, 127, 0}},
-                    {"directional_counts", {0, 0, 0, 0, 1, 1}}, {"frames", Json::array()}};
+                receipt["light_list"] = {{"local_counts", {4, 64, 65, 128, 127, 0, 4}},
+                    {"directional_counts", {0, 0, 0, 0, 1, 1, 0}}, {"frames", Json::array()}};
             else receipt["lighting_auxiliaries"]["frames"] = Json::array();
         }
         if (!vfx_composition_probe.empty())
@@ -1926,6 +1977,8 @@ int main(int argc, char **argv)
         }
         if (static_shadow_bake_only && !static_shadow_bake_probe)
             throw std::runtime_error("--static-shadow-bake-only requires --static-shadow-bake-probe");
+        if (scene_probe_bake_only && !local_probe_revision_probe)
+            throw std::runtime_error("--scene-probe-bake-only requires --local-probe-revision-probe");
         if (static_shadow_bake_probe)
         {
             if (!frames_explicit) frames = 3;
@@ -1961,8 +2014,7 @@ int main(int argc, char **argv)
             if (gameplay_scene && frames != 4) throw std::runtime_error("Hero gameplay/water shadow probe requires exactly four frames");
             config.capture_translucency_diagnostics = config.capture_timing_stream = true;
             hero_layer_probe = !gameplay_scene && frames == 8;
-            if (hero_layer_probe) config.preview_camera_override = false; // Use the fixture snapshot's actual camera yaw.
-            config.slime_family_preview_count = gameplay_scene ? 0u : 1u; // Preview replaces environment; gameplay must retain authored water.
+            slime_preview = !gameplay_scene; // Preview replaces environment; gameplay must retain authored water.
             if (shadow_transition_probe)
             {
                 // Dedicated supported-domain functional fixture, never a production quality default.
@@ -1978,7 +2030,7 @@ int main(int argc, char **argv)
                 receipt["translucency_diagnostics"]["quality_transition"] = {{"request_frame", 5},
                     {"frames1_4", "existing Medium refraction/transparency, one layer and original camera"},
                     {"frames5_8", "Ultra refraction/transparency, four layers, camera yaw90/pitch0 for actual transparent overlap"},
-                    {"camera_source", "snapshot camera yaw/pitch through MainViewInput; renderer preview_camera_override=false"},
+                    {"camera_source", "fixture camera yaw/pitch through MainViewInput"},
                     {"frames", Json::array()}};
         }
         if (grid_floor_probe && frames < 25)
@@ -1999,7 +2051,7 @@ int main(int argc, char **argv)
             throw std::runtime_error("Visibility --persistent-scene-probe requires at least 11 frames for live Cluster Retest");
         if (skin_cache_monster_probe && frames < 2)
             throw std::runtime_error("--skin-cache-monster-probe requires at least 2 frames");
-        if (local_probe_revision_probe && frames < 96)
+        if (local_probe_revision_probe && !scene_probe_bake_only && frames < 96)
             throw std::runtime_error("--local-probe-revision-probe requires at least 96 frames");
         if (dynamic_lod_skin_growth_probe && frames < 8)
             throw std::runtime_error("--dynamic-lod-skin-growth-probe requires at least 8 frames");
@@ -2066,7 +2118,7 @@ int main(int argc, char **argv)
         }
         if (skin_cache_monster_probe)
         {
-            config.slime_family_preview_count = 1;
+            slime_preview = true;
             config.vfx_quality = hs::VfxQuality::Low;
         }
         receipt["fixture"] = translucency_diagnostics_probe ? (gameplay_scene ? "translucency-diagnostics-functional-water-world-v1" : "translucency-diagnostics-functional-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
@@ -2116,10 +2168,65 @@ int main(int argc, char **argv)
         hs::SelectedGeneration generation;
         hs::SelectedGeneration material_reload_generation;
         hs::SelectedGeneration material_reload_invalid_generation;
+        hs::render_data::SceneProbeDescription probe_fixture_description;
+        std::vector<hs::render_data::SceneProbeRecord> probe_fixture_records;
         failure_code = "HS_GENERATION_INVALID";
         timings["runner_setup_before_generation"] = StageElapsedMilliseconds(runner_entry);
         LogStageElapsed("runner_setup_before_generation", timings["runner_setup_before_generation"]);
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
+        if (local_probe_revision_probe)
+        {
+            constexpr std::string_view id = "render/lighting/local_probes.spkg";
+            std::filesystem::path source;
+            Require(generation.Require(id, source));
+            std::ifstream input(source, std::ios::binary | std::ios::ate);
+            if (!input || input.tellg() <= 0 || input.tellg() > 256 * 1024 * 1024)
+                throw std::runtime_error("Invalid scene-probe revision fixture source extent");
+            std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+            input.seekg(0);
+            if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+                throw std::runtime_error("Could not read scene-probe revision fixture source");
+            const auto hex = [](std::span<const std::byte> value) {
+                constexpr char digits[] = "0123456789abcdef";
+                std::string result;
+                for (const auto byte : value)
+                {
+                    const auto n = std::to_integer<unsigned>(byte);
+                    result.push_back(digits[n >> 4]); result.push_back(digits[n & 15]);
+                }
+                return result;
+            };
+            const auto source_digest = "sha256:" + hex(hs::Sha256(bytes));
+            if (source_digest != generation.product_digests.at(std::string(id)))
+                throw std::runtime_error("Scene-probe revision fixture source digest differs from its Generation");
+            const auto package = hs::render_data::ReadSceneProbePackage(bytes, hs::MakeAssetId(id));
+            if (package.payload != hs::render_data::SceneProbePayload::Layout || package.probes.empty())
+                throw std::runtime_error("Scene-probe revision fixture requires a layout and reflection probe");
+            auto description = package.description;
+            description.grid.dimensions = {2, 2, 2};
+            const auto fixture = hs::render_data::BuildSceneProbePackage(hs::MakeAssetId(id),
+                package.dependencies, description, std::span(package.probes).first(1));
+            const auto verified = hs::render_data::ReadSceneProbePackage(fixture, hs::MakeAssetId(id));
+            if (verified.payload != hs::render_data::SceneProbePayload::Layout || verified.probes.size() != 1 ||
+                verified.description.grid.NodeCount() != 8 || verified.dependencies != package.dependencies)
+                throw std::runtime_error("Scene-probe revision fixture failed package validation");
+            probe_fixture_description = verified.description;
+            probe_fixture_records = verified.probes;
+            const auto path = artifacts / "local-probe-revision-layout.spkg";
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char *>(fixture.data()), static_cast<std::streamsize>(fixture.size()));
+            output.close();
+            if (!output) throw std::runtime_error("Could not write scene-probe revision fixture");
+            const auto digest = "sha256:" + hex(hs::Sha256(fixture));
+            const auto source_generation_id = generation.id;
+            const auto identity = generation.id + digest;
+            generation.id = hex(hs::Sha256(std::as_bytes(std::span(identity.data(), identity.size()))));
+            generation.product_paths[std::string(id)] = path;
+            generation.product_digests[std::string(id)] = digest;
+            receipt["local_probe_fixture"] = {{"reflection_probes", 1}, {"grid_nodes", description.grid.NodeCount()},
+                {"total_cube_views", (1 + description.grid.NodeCount()) * 6}, {"maximum_cube_views_per_frame", 6},
+                {"source_generation_id", source_generation_id}, {"source_digest", source_digest}, {"fixture_digest", digest}};
+        }
         receipt["generation_id"] = generation.id;
         receipt["generation_scope"] = generation.scope;
         hs::VfxEntitySurfaceCommand entity_surface_template;
@@ -2190,15 +2297,19 @@ int main(int argc, char **argv)
         config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
         config.product_paths = generation.product_paths;
         config.product_digests = generation.product_digests;
+        const bool material_reload_terrain_archive = material_reload_probe &&
+            generation.product_paths.contains("render/terrain/arena_surface.rpkg");
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
-        if (world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe)
+        if (world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe || material_reload_terrain_archive)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
             std::filesystem::path product_path;
-            Require(generation.Require(config.scene_hlod_product_id, product_path));
+            if (!scene_probe_bake_only)
+                Require(generation.Require(config.scene_hlod_product_id, product_path));
             Require(generation.Require("render/lighting/local_probes.spkg", product_path));
-            measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation, world_transport_probe ? 1 : 0); });
-            receipt[world_transport_probe ? "world_transport" : "owned_view_scene"] = {
+            measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation,
+                world_transport_probe || material_reload_terrain_archive || scene_probe_bake_only ? 1 : 0); });
+            if (!material_reload_terrain_archive) receipt[world_transport_probe ? "world_transport" : "owned_view_scene"] = {
                 {"layout_abi", world_scene->layout_abi},
                 {"eligible_static_member_count", world_scene->eligible_static_members.size()},
                 {"static_instance_count", world_scene->instances.size()},
@@ -2244,6 +2355,49 @@ int main(int argc, char **argv)
             // The one-shot API returns success only after owner shutdown and a
             // zero native validation error count. Keep that separate from whether
             // validation was requested or GPU-based validation was enabled.
+            receipt["validation_errors"] = 0;
+            receipt["timings_ms"] = std::move(timings);
+            receipt["execution_valid"] = true;
+            receipt["error_code"] = "";
+            exit_code = 0;
+            return write_receipt();
+        }
+        if (scene_probe_bake_only)
+        {
+            receipt["validation_requested"] = {{"debug_layer", config.validation},
+                {"gpu_based_validation", config.gpu_validation}};
+            failure_code = "HS_RENDER_SCENE_PROBE_BAKE_FAILED";
+            hs::TaskSystem recording_workers(4);
+            config.task_system = &recording_workers;
+            std::vector<std::byte> baked;
+            measure("scene_probe_bake", [&] {
+                Require(hs::D3D12Renderer::BakeSceneProbePackage(config, world_scene, hs::EnvironmentSun(), baked));
+            });
+            const auto package = hs::render_data::ReadSceneProbePackage(
+                baked, hs::MakeAssetId("render/lighting/local_probes.spkg"));
+            const auto &grid = package.description.grid;
+            const auto &expected = probe_fixture_description.grid;
+            const auto equal = [](const auto &a, const auto &b) {
+                return a.x == b.x && a.y == b.y && a.z == b.z;
+            };
+            if (package.payload != hs::render_data::SceneProbePayload::Baked || package.probes.size() != 1 ||
+                probe_fixture_records.size() != 1)
+                throw std::runtime_error("Scene-probe bake did not produce the fixture payload");
+            const auto &probe = package.probes.front();
+            const auto &source = probe_fixture_records.front();
+            if (package.description.edge != probe_fixture_description.edge ||
+                package.description.ggx_samples != probe_fixture_description.ggx_samples ||
+                grid.dimensions != expected.dimensions || !equal(grid.origin, expected.origin) ||
+                !equal(grid.spacing, expected.spacing) || probe.stable_id != source.stable_id ||
+                !equal(probe.position, source.position) || !equal(probe.influence_min, source.influence_min) ||
+                !equal(probe.influence_max, source.influence_max) || !equal(probe.projection_min, source.projection_min) ||
+                !equal(probe.projection_max, source.projection_max) || probe.weight != source.weight ||
+                probe.influence_fade != source.influence_fade || probe.visibility_bias != source.visibility_bias ||
+                probe.visibility_fade != source.visibility_fade || probe.capture_distance != source.capture_distance)
+                throw std::runtime_error("Scene-probe bake did not preserve the fixture shape");
+            receipt["scene_probe_bake"] = {{"bake_only", true}, {"reflection_probes", package.probes.size()},
+                {"grid_nodes", grid.NodeCount()}, {"package_bytes", baked.size()}, {"subsequent_render_frames", 0}};
+            receipt["frames"] = 0;
             receipt["validation_errors"] = 0;
             receipt["timings_ms"] = std::move(timings);
             receipt["execution_valid"] = true;
@@ -2682,9 +2836,16 @@ int main(int argc, char **argv)
         }
         if (persistent_scene_probe)
             for (auto &source : current) source.revisions = {11, 22, 33, 44};
+        if (material_reload_terrain_archive)
+            for (auto instance : scene->instances)
+                if (instance.mesh != hs::RenderMesh::Ground)
+                {
+                    instance.stable_id += 0x4d41540000000000ull;
+                    current.push_back(instance);
+                }
         hs::RenderSnapshotPair pair;
         pair.has_current = true;
-        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe ? world_scene
+        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe || material_reload_terrain_archive ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
         // fixture terrain/rocks otherwise occlude different pixels after roll.
@@ -2901,6 +3062,9 @@ int main(int argc, char **argv)
         std::optional<std::pair<std::uint32_t,std::uint32_t>> water_identity;
         std::map<std::uint64_t, hs::GpuPassTimings> provider_gpu_history;
         std::array<std::uint32_t, 3> probe_capture_frames{};
+        std::array<std::uint64_t, 3> probe_last_capture_frame{};
+        std::array<std::uint32_t, 3> probe_idle_frames{};
+        std::uint32_t probe_light_change_frame{}, probe_scene_change_frame{};
         std::uint64_t observed_probe_frame{};
         std::uint32_t settled_probe_frames{};
         const auto observe_probe_revisions = [&] {
@@ -2911,9 +3075,19 @@ int main(int argc, char **argv)
             const auto capture = std::ranges::any_of(timings.passes, [](const auto &pass) {
                 return pass.name == "LocalProbeStaticCubeCapture" && pass.measured;
             });
-            const auto phase = std::min<std::uint64_t>((observed_probe_frame - 1) / 32, 2);
-            if (capture) ++probe_capture_frames[phase];
-            if (observed_probe_frame >= 24 && observed_probe_frame <= 32 && !capture) ++settled_probe_frames;
+            const auto phase = probe_scene_change_frame && observed_probe_frame >= probe_scene_change_frame ? 2u :
+                probe_light_change_frame && observed_probe_frame >= probe_light_change_frame ? 1u : 0u;
+            if (capture)
+            {
+                ++probe_capture_frames[phase];
+                probe_last_capture_frame[phase] = observed_probe_frame;
+                probe_idle_frames[phase] = 0;
+            }
+            else if (probe_last_capture_frame[phase] &&
+                observed_probe_frame > probe_last_capture_frame[phase] &&
+                renderer.GetSceneProbeBakeStatus().capture_complete)
+                ++probe_idle_frames[phase];
+            if (phase == 0) settled_probe_frames = probe_idle_frames[0];
         };
         std::uint32_t fsr_fg_suppressed{}, fsr_fg_insufficient{}, fsr_fg_generated_evidence_count{};
         bool fsr_fg_callback_observed{}, fsr_fg_generated_evidence{};
@@ -2955,8 +3129,13 @@ int main(int argc, char **argv)
                 {"actual_refraction_quality", observed.actual_applied_available ? Json(static_cast<unsigned>(observed.actual_applied.refraction_quality)) : Json(nullptr)}};
             Require(requested);
         }
+        std::optional<std::pair<std::uint64_t, std::uint64_t>> material_shadow_baseline, material_shadow_previous;
+        std::optional<std::uint64_t> material_terrain_archive_baseline;
+        bool material_reload_changes_terrain{};
         if (material_reload_probe)
         {
+            const auto &baseline = generation.product_digests.at("render/material/terrain/parameters.rpkg");
+            material_reload_changes_terrain = baseline != material_reload_generation.product_digests.at("render/material/terrain/parameters.rpkg");
             receipt["material_reload"] = {
                 {"baseline_generation", generation.id},
                 {"valid_generation", material_reload_generation.id},
@@ -2964,6 +3143,8 @@ int main(int argc, char **argv)
                 {"initial_material_parameter_revision", initial_material_parameter_revision},
                 {"initial_pipeline_revision", initial_pipeline_revision},
                 {"captures", Json::object()},
+                {"terrain_coverage", material_reload_terrain_archive ? "world_archive" : "archive_unavailable"},
+                {"terrain_parameters_changed", material_reload_changes_terrain},
             };
         }
         constexpr std::array residency_texture_qualities{
@@ -3367,9 +3548,18 @@ int main(int argc, char **argv)
                 }
                 observe_world_timings();
                 observe_provider_timings();
-                if (local_probe_revision_probe && frame == 33) world_lights[0].direction.x += 0.2f;
-                if (local_probe_revision_probe && frame == 65)
+                const auto probe_status = local_probe_revision_probe ? renderer.GetSceneProbeBakeStatus()
+                    : hs::RendererSceneProbeBakeStatus{};
+                if (local_probe_revision_probe && !probe_light_change_frame && probe_status.sources_ready &&
+                    probe_status.capture_complete && probe_idle_frames[0])
                 {
+                    probe_light_change_frame = frame;
+                    world_lights[0].direction.x += 0.2f;
+                }
+                if (local_probe_revision_probe && probe_light_change_frame && !probe_scene_change_frame &&
+                    probe_status.sources_ready && probe_status.capture_complete && probe_idle_frames[1])
+                {
+                    probe_scene_change_frame = frame;
                     auto changed = std::make_unique<hs::StaticRenderSceneStorage>(*pair.current.static_scene);
                     changed->layout_abi = 0;
                     changed->eligible_layout_digest = {};
@@ -3379,9 +3569,9 @@ int main(int argc, char **argv)
                     pair.current.static_scene = hs::FreezeStaticRenderScene(std::move(changed));
                     current.push_back(shadow_history_caster);
                 }
-                if (local_probe_revision_probe && frame == 80)
+                if (local_probe_revision_probe && probe_scene_change_frame && frame == probe_scene_change_frame + 15)
                     std::erase_if(current, [](const auto &instance) { return instance.stable_id == 0; });
-                if (local_probe_revision_probe && frame == 81)
+                if (local_probe_revision_probe && probe_scene_change_frame && frame == probe_scene_change_frame + 16)
                     std::erase_if(current, [](const auto &instance) { return instance.stable_id == kShadowHistoryCasterId; });
                 if (single_layer_water_probe)
                 {
@@ -3403,7 +3593,62 @@ int main(int argc, char **argv)
                 if (!grass_history_probe.empty() && (frame == 13 || frame == 14))
                     Require(renderer.Resize(config.width + (frame == 13 ? 64 : 0),
                                             config.height + (frame == 13 ? 32 : 0)));
-                auto main_view = renderer.MainViewInput(pair.current.camera);
+                std::vector<hs::RenderInstance> preview_instances;
+                std::vector<hs::AnimationPoseRef> preview_poses;
+                if (slime_preview)
+                {
+                    for (std::uint32_t i = 0; i < 3; ++i)
+                    {
+                        hs::RenderInstance slime{};
+                        slime.position = {(static_cast<float>(i) - 1) * 2.5f, 0, 0};
+                        const float scale = i == 0 ? 1.25f : i == 1 ? 1.40625f : 1.5625f;
+                        slime.scale = {scale, scale, scale}; slime.color_rgba = 0xffffffffu;
+                        slime.mesh = static_cast<hs::RenderMesh>(10 + i);
+                        slime.stable_id = 0x53504c4d00000000ull | (i + 1);
+                        hs::PopulateRenderInstanceIdentity(slime);
+                        hs::AnimationPoseRef pose{};
+                        pose.instance_index = i; pose.normalized_time = .5f;
+                        preview_poses.push_back(pose); preview_instances.push_back(slime);
+                    }
+                    hs::RenderInstance projectile{};
+                    projectile.position = {1.25f, .45f, -1.5f}; projectile.scale = {.24f, .24f, .8f};
+                    projectile.color_rgba = 0xff60d060u; projectile.mesh = hs::RenderMesh::EnemyProjectile;
+                    projectile.stable_id = 0x53504c4d00100003ull;
+                    hs::PopulateRenderInstanceIdentity(projectile);
+                    preview_instances.push_back(projectile);
+                }
+                if (environment_preview)
+                {
+                    preview_instances.clear(); preview_poses.clear();
+                    const auto add = [&](hs::RenderMesh mesh, hs::Float3 position, hs::Float3 scale, std::uint32_t variant) {
+                        hs::RenderInstance instance{}; instance.mesh = mesh; instance.position = position; instance.scale = scale;
+                        instance.environment_variant = variant; instance.environment_seed = 0x4853454eu;
+                        hs::PopulateRenderInstanceIdentity(instance); preview_instances.push_back(instance);
+                    };
+                    for (std::uint32_t i = 0; i < 3; ++i)
+                    {
+                        const float x = static_cast<float>(i) * 5 - 5;
+                        add(hs::RenderMesh::TreeTrunk, {x,0,0}, {1,1,1}, i);
+                        add(hs::RenderMesh::TreeCanopy, {x,0,0}, {1,1,1}, i);
+                    }
+                    for (std::uint32_t i = 0; i < 4; ++i)
+                    {
+                        const float x = static_cast<float>(i) * 3 - 4.5f;
+                        add(hs::RenderMesh::Rock, {x,0,-5}, {.8f,.8f,.8f}, i);
+                        add(hs::RenderMesh::Grass, {x,0,-8}, {1,1,1}, i);
+                    }
+                    for (int z = -5; z <= 2; ++z)
+                        for (int x = -5; x <= 5; ++x)
+                            add(hs::RenderMesh::Ground, {static_cast<float>(x)*2.5f,-.055f,static_cast<float>(z)*2.5f}, {2.5f,.1f,2.5f}, 0);
+                }
+
+                auto preview_camera = pair.current.camera;
+                if (slime_preview || environment_preview)
+                {
+                    if (environment_preview) { preview_camera.target = {0,1,0}; preview_camera.yaw_degrees = 0; preview_camera.pitch_degrees = 22; preview_camera.distance = 22; }
+                    if (slime_preview) { preview_camera.target = {0,1,0}; preview_camera.distance = 10; }
+                }
+                auto main_view = renderer.MainViewInput(preview_camera);
                 std::vector<hs::VfxEntitySurfaceCommand> entity_surfaces;
                 if (entity_surface_probe)
                 {
@@ -3441,9 +3686,9 @@ int main(int argc, char **argv)
                 }
                 if (light_list_probe)
                 {
-                    constexpr std::array counts{4u, 64u, 65u, 128u, 127u, 0u};
+                    constexpr std::array counts{4u, 64u, 65u, 128u, 127u, 0u, 4u};
                     const auto local_count = counts[frame - 1];
-                    const auto directional_count = frame >= 5 ? 1u : 0u;
+                    const auto directional_count = frame == 5 || frame == 6 ? 1u : 0u;
                     light_list_lights.assign(local_count + directional_count, {});
                     for (std::uint32_t index = 0; index < light_list_lights.size(); ++index)
                     {
@@ -3451,6 +3696,10 @@ int main(int argc, char **argv)
                         light.stable_id = 0x4c4c000000000000ull + light_list_lights.size() - index;
                         light.type = index < directional_count ? hs::LightType::Directional
                             : static_cast<hs::LightType>(1u + index % 4u);
+                        // Frame 5 requests shadows for a radiating sun whose
+                        // direction differs from the authored baked sun.
+                        if (frame == 5 && light.type == hs::LightType::Directional)
+                            light.shadow_flags = hs::kLightShadowRequested;
                         light.unit = light.type == hs::LightType::Directional ? hs::LightUnit::Lux
                             : index % 4u >= 2u ? hs::LightUnit::Luminance : hs::LightUnit::Lumen;
                         light.position = {0, 3, 0}; light.direction = {0, -1, 0};
@@ -3532,8 +3781,26 @@ int main(int argc, char **argv)
                     flash.shape = hs::VfxImpactShape::RadialEnergy; flash.oit = true;
                     oit_flashes.push_back(flash);
                 }
+                auto preview_pair = pair;
+                if (slime_preview || environment_preview)
+                {
+                    preview_pair.current.instances = preview_instances;
+                    preview_pair.current.poses = preview_poses;
+                    preview_pair.current.static_scene.reset();
+                    if (preview_pair.has_previous)
+                    {
+                        preview_pair.previous.instances = preview_instances;
+                        preview_pair.previous.poses = preview_poses;
+                        preview_pair.previous.static_scene.reset();
+                    }
+                }
+                if (slime_preview && !environment_preview &&
+                    (preview_pair.current.instances.size() != 4 || preview_pair.current.poses.size() != 3 ||
+                     preview_pair.current.static_scene || preview_pair.current.instances[2].stable_id == 0 ||
+                     preview_pair.current.poses[2].instance_index != 2))
+                    throw std::runtime_error("slime preview package lost its scene or animation identity");
                 const hs::RenderPackage render_input{
-                    .views = std::span(&main_view, 1), .snapshots = pair,
+                    .views = std::span(&main_view, 1), .snapshots = preview_pair,
                     .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces,
                         .world_batch = {pair.current.header.session_id, pair.current.header.tick, frame}},
                     .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
@@ -3543,7 +3810,7 @@ int main(int argc, char **argv)
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = entity_surface_probe || world_transport_probe || single_layer_water_probe ||
+                    .wait_for_streaming = entity_surface_probe || world_transport_probe || local_probe_revision_probe || single_layer_water_probe ||
                         !vfx_composition_probe.empty(),
                     .display_sample = hs::RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
                 if (provider_switch_probe)
@@ -4111,10 +4378,17 @@ int main(int argc, char **argv)
                     Require(renderer.Render(preview_input, preview_result));
                     if (preview_result.views.size() != preview_views.size())
                         throw std::runtime_error("shared scene package lost a preview view");
+                    bool distinct_slot_and_output = false;
                     for (std::size_t index = 0; index < preview_views.size(); ++index)
+                    {
                         if (preview_result.views[index].identity.view_id != preview_views[index].id ||
                             preview_result.views[index].rendered_view.output_extent != preview_views[index].output_extent)
                             throw std::runtime_error("shared scene package mixed preview identity or extent");
+                        const auto &view = preview_result.views[index];
+                        distinct_slot_and_output |= (view.submission_id - 1) % 3 != (view.rendered_frame - 1) % 3;
+                    }
+                    if (!distinct_slot_and_output)
+                        throw std::runtime_error("preview fixture did not separate output index and submission slot");
                     const auto path = artifacts / std::format("grass-preview-{:03}.json", frame);
                     Require(renderer.Capture({preview.id, path, hs::CaptureKind::SurfaceDiagnostics}));
                     const auto captured = Json::parse(std::ifstream(path));
@@ -4125,6 +4399,11 @@ int main(int argc, char **argv)
                         throw std::runtime_error("preview grass history lost its last successful render state");
                     if (frame == 9 && captured.at("grass").at("max_motion_pixels").get<double>() > 10.0)
                         throw std::runtime_error("grass origin shift produced false motion");
+                    const auto main_timing = renderer.LastGpuPassTimings();
+                    if (frame_result.views.size() != 1 || !main_timing.valid ||
+                        main_timing.view_id != main_view.id.value ||
+                        main_timing.completed_frame_id != frame_result.views.front().submission_id)
+                        throw std::runtime_error("preview submissions changed the main view timing owner");
                     receipt["grass_history"]["preview"][std::to_string(frame)] = state;
                 }
                 if (gpu_lod_probe && (frame == 1 || frame == 3 || frame == 4 ||
@@ -4149,6 +4428,44 @@ int main(int argc, char **argv)
                                       "material-reload-restored.png";
                     Require(renderer.Capture({.path = artifacts / name}));
                     receipt["material_reload"]["captures"][std::to_string(frame)] = name;
+                    if (frame != 5)
+                    {
+                        const auto depth = artifacts / std::format("material-shadow-{:02}.json", frame);
+                        Require(renderer.Capture({.path = depth, .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                        if (material_reload_terrain_archive)
+                        {
+                            const auto diagnostic = Json::parse(std::ifstream(depth));
+                            const bool active = diagnostic.at("terrain_surface_pages").get<bool>();
+                            const auto reads = diagnostic.at("terrain_archive_reads").get<std::uint64_t>();
+                            if (!material_terrain_archive_baseline)
+                            {
+                                if (!active || !reads) throw std::runtime_error("material reload world did not admit terrain pages");
+                                material_terrain_archive_baseline = reads;
+                            }
+                            const bool changed = material_reload_changes_terrain && frame == 4;
+                            const auto expected_reads = *material_terrain_archive_baseline +
+                                (material_reload_changes_terrain && frame == 6 ? 1 : 0);
+                            if (active == changed || reads != expected_reads)
+                                throw std::runtime_error("terrain page admission or archive reads changed unexpectedly during material reload");
+                            receipt["material_reload"]["terrain_observations"].push_back({
+                                {"frame", frame}, {"active", active}, {"archive_reads", reads}});
+                        }
+                        const auto shadow = ValidateMaterialReloadShadowDepth(depth, receipt["material_reload"]["shadow_depth_readbacks"]);
+                        if (!material_shadow_baseline)
+                        {
+                            if (!shadow.first) throw std::runtime_error("material reload shadow membership was not built");
+                            material_shadow_baseline = shadow;
+                        }
+                        else
+                        {
+                            if (shadow.first != material_shadow_baseline->first)
+                                throw std::runtime_error("material reload rebuilt unchanged static shadow membership");
+                            if ((frame == 4 || frame == 6) &&
+                                (!material_shadow_previous || shadow.second <= material_shadow_previous->second))
+                                throw std::runtime_error("material reload did not rebind static shadow records");
+                        }
+                        material_shadow_previous = shadow;
+                    }
                 }
                 if (grid_floor_probe && capture_grid_frames &&
                     (frame == 1 || frame == 9 || frame == 17 || frame == 25))
@@ -4399,9 +4716,13 @@ int main(int argc, char **argv)
                 {"settled_frames_before_change", settled_probe_frames},
                 {"authored_owner_legacy_particles", renderer.LastParticleCount()},
                 {"shadow_history", {{"anonymous_static_casters", 2}, {"anonymous_dynamic_casters", 1},
-                    {"static_removal_and_dynamic_transfer_frame", 65},
-                    {"anonymous_dynamic_removal_frame", 80}, {"named_dynamic_removal_frame", 81}}}};
-            if (settled_probe_frames == 0 || std::ranges::any_of(probe_capture_frames, [](auto count) { return count == 0; }))
+                    {"light_change_frame", probe_light_change_frame},
+                    {"static_removal_and_dynamic_transfer_frame", probe_scene_change_frame},
+                    {"anonymous_dynamic_removal_frame", probe_scene_change_frame ? probe_scene_change_frame + 15 : 0},
+                    {"named_dynamic_removal_frame", probe_scene_change_frame ? probe_scene_change_frame + 16 : 0}}}};
+            if (settled_probe_frames == 0 || !probe_scene_change_frame || rendered_frame_count < probe_scene_change_frame + 16 ||
+                !renderer.GetSceneProbeBakeStatus().capture_complete || !probe_idle_frames[2] ||
+                std::ranges::any_of(probe_capture_frames, [](auto count) { return count == 0; }))
                 throw std::runtime_error("Local probes must settle, then recapture changed lights and a replacement static scene.");
             if (frame_result.static_scene_upload_count != 2)
                 throw std::runtime_error("Shadow history fixture must upload exactly the initial and replacement static scenes.");

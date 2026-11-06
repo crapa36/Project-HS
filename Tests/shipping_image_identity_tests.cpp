@@ -1,4 +1,5 @@
-#include "../Source/Apps/ContentLinker/renderer_identity.hpp"
+#include <hs/render_data/renderer_catalog_identity.hpp>
+#include <hs/render_data/renderer_catalog.hpp>
 
 #include <array>
 #include <cstring>
@@ -164,4 +165,29 @@ void TestShippingRendererIdentity()
     std::swap(atlas.meshes[0], atlas.meshes[1]);
     Check(atlas_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Atlas(b, atlas); }),
           "atlas identity preserves mesh table order");
+
+    const auto product_id = std::string_view{"render/fixture.rpkg"};
+    const std::array catalog_bulks{RendererBulkDescriptor{MakeAssetId(product_id), {16, 192, RenderBulkFormat::Package, {}}}};
+    const std::array catalog_revisions{RendererRevisionBulk{product_id, 0}};
+    const auto source_id = std::string_view{"Content/Shaders/fixture.hlsl"};
+    const std::array source_revisions{RendererSourceRevision{MakeAssetId(source_id), source_id, {}}};
+    TextureDescriptor catalog_texture{};
+    catalog_texture.asset_id = catalog_bulks[0].asset_id;
+    catalog_texture.description = {4, 4, 1, 1, kTextureFormatRgba8};
+    catalog_texture.subresources = texture_layouts_a;
+    const std::array catalog_textures{catalog_texture};
+    RendererCatalogView catalog{};
+    catalog.bulks = catalog_bulks; catalog.textures = catalog_textures;
+    catalog.source_revisions = source_revisions; catalog.revision_bulks = catalog_revisions;
+    const auto encoded = EncodeRendererCatalog(catalog);
+    RendererCatalogData decoded;
+    Check(DecodeRendererCatalog(encoded, 208, decoded).Succeeded(), "renderer catalog round trip admits valid bounded bulk");
+    Check(EncodeRendererCatalog(decoded.View()) == encoded && decoded.View().revision_bulks[0].product_id == product_id &&
+          decoded.View().source_revisions[0].product_id == source_id,
+          "renderer catalog preserves canonical bytes and owned revision names");
+    auto trailing = encoded; trailing.push_back(std::byte{});
+    Check(!DecodeRendererCatalog(trailing, 208, decoded) && EncodeRendererCatalog(decoded.View()) == encoded,
+          "malformed renderer catalog leaves the previous output unchanged");
+    Check(!DecodeRendererCatalog(encoded, 207, decoded) && EncodeRendererCatalog(decoded.View()) == encoded,
+          "renderer catalog rejects bulk beyond packed bytes");
 }

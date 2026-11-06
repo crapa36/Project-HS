@@ -22,6 +22,9 @@
 #include "scene_generation_binding.hpp"
 #include "native_input_frame.hpp"
 #include "camera_pose.hpp"
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include "preview_scene.hpp"
+#endif
 #include "recording_io.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
@@ -273,6 +276,20 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
     source.config_overrides_json = "{\"diagnostic_enemy_count\":10001}";
     Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
           "diagnostic enemy population above the fixture bound is rejected");
+    for (const auto zoom : {15u, 120u})
+    {
+        source.config_overrides_json = std::format("{{\"camera_zoom_percent\":{}}}", zoom);
+        hs::ApplicationConfig camera;
+        Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+                  hs::ApplyExperimentOverrides(loaded, camera) && camera.camera_zoom_percent == zoom,
+              "camera zoom boundary override round trips and applies");
+    }
+    for (const auto zoom : {14u, 121u})
+    {
+        source.config_overrides_json = std::format("{{\"camera_zoom_percent\":{}}}", zoom);
+        Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+              "camera zoom outside supported bounds is rejected");
+    }
     Check(!hs::ApplicationConfig{}.graphics_preset,
           "graphics preset override is absent by default");
     Check(!hs::ApplicationConfig{}.surface_frontend,
@@ -2117,6 +2134,52 @@ void TestCameraPoseContinuity()
           "close camera reaches third person endpoint");
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+void TestPreviewPackageProduction()
+{
+    std::array<hs::RenderInstance, 2> previous{}, current{};
+    previous[1].mesh = hs::RenderMesh::EnemyProjectile;
+    current[0].mesh = hs::RenderMesh::EnemyProjectile;
+    previous[0].mesh = hs::RenderMesh::Archer;
+    previous[0].position.x = 2;
+    current[1].mesh = hs::RenderMesh::Archer;
+    current[1].position.x = 7;
+    hs::RenderSnapshotPair pair{};
+    pair.has_previous = pair.has_current = true;
+    pair.previous.instances = previous;
+    pair.current.instances = current;
+    const auto scene = std::make_shared<hs::StaticRenderScene>();
+    pair.previous.static_scene = pair.current.static_scene = scene;
+    hs::ApplicationConfig config;
+    hs::PreviewEditValues edit;
+    edit.enabled = true;
+    edit.base_time = .37f;
+    hs::runtime_detail::PreviewScene character;
+    character.Prepare(config, edit, pair);
+    Check(pair.previous.instances.data() == previous.data() && pair.current.instances.data() == current.data() &&
+              pair.previous.instances[0].position.x == 2 && pair.current.instances[1].position.x == 7 &&
+              pair.previous.poses.size() == 1 && pair.previous.poses[0].instance_index == 0 &&
+              pair.current.poses.size() == 1 && pair.current.poses[0].instance_index == 1 &&
+              pair.current.poses[0].normalized_time == .37f && pair.current.static_scene == scene,
+          "character preview preserves each sample's transforms, scene and pose index");
+
+    config.slime_family_preview_count = 1;
+    hs::runtime_detail::PreviewScene family;
+    family.Prepare(config, edit, pair);
+    Check(pair.current.instances.size() == 4 && pair.current.poses.size() == 3 &&
+              pair.current.instances[0].stable_id == 0x53504c4d00000001ull &&
+              pair.current.instances[3].stable_id == 0x53504c4d00100003ull &&
+              pair.current.poses[2].instance_index == 2 && !pair.current.static_scene &&
+              !pair.previous.static_scene && pair.previous.instances.data() == pair.current.instances.data(),
+          "family preview supplies its own scene identities and pose indices");
+    config.preview_camera_override = true;
+    config.preview_camera_yaw = 23; config.preview_camera_pitch = 12; config.preview_camera_distance = 14;
+    const auto camera = hs::runtime_detail::PreviewScene::Camera(config, edit, {});
+    Check(camera.target.x == 0 && camera.target.y == 1 && camera.target.z == 0 &&
+              camera.yaw_degrees == 23 && camera.pitch_degrees == 12 && camera.distance == 14,
+          "preview producer supplies the explicit camera");
+}
+#endif
 void TestVfxActiveEffectStoreOwnsPayloadOnce()
 {
     using Profile = hs::runtime_detail::ActiveEffectStore::Profile;
@@ -2687,6 +2750,9 @@ int main()
         TestUiPacketReceiptFollowsExactPresentedFrame();
         TestRendererReceiptsSurviveLaterFailure();
         TestCameraPoseContinuity();
+#if defined(HS_DEVELOPMENT_TOOLS)
+        TestPreviewPackageProduction();
+#endif
         TestDpiWindowCoordinates();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";

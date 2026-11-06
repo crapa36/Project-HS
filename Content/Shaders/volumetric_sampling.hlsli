@@ -3,19 +3,7 @@
 
 // Shared suffix: b0,t0..13,u0..8; hero t14 and actual STBN t15 in space24. Camera matrices
 // are camera-relative row-vector matrices, not the transposed FrameCB ABI.
-cbuffer VolumetricConstants : register(b0,space24)
-{
-    row_major float4x4 VmInverseViewProjection,VmWorldToView,VmPreviousViewProjection,VmPreviousWorldToView;
-    row_major float4x4 VmShadowViewProjection[3];
-    float4 VmShadowAtlasScaleOffset[3];
-    float4 VmRenderSize,VmFroxelSize,VmCapacity,VmPreviousRenderSize,VmPreviousFroxelSize;
-    float4 VmOriginNear,VmPreviousOriginNear,VmDepthRange,VmFilterParameters,VmShadowParameters;
-    uint4 VmShadowIdentity,VmFrameInfo,VmCounts,VmHeroInfo;
-};
-Texture3D<float4> VmFilteredScattering : register(t9,space24);
-Texture3D<float4> VmCumulativeL : register(t10,space24);
-Texture3D<float> VmCumulativeT : register(t11,space24);
-Texture2D<float> VmColumnDepth : register(t13,space24);
+#include "volumetrics_abi.hlsli"
 
 struct HsVolumetricTransport { float3 radiance; float transmittance; };
 HsVolumetricTransport HsVolumetricIdentity()

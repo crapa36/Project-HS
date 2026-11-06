@@ -12,8 +12,19 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kConstantStride = 256;
-constexpr std::array kOutputFormats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_SNORM,
-    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
+constexpr std::array kOutputFormats{
+#define HS_DECAL_FORMAT(name,slot,type,shader,format) format,
+    HS_DECAL_UAVS(HS_DECAL_FORMAT)
+#undef HS_DECAL_FORMAT
+};
+std::array<DecalSurfaceGuide, kDecalSurfaceSrvCount> DecalReads(const DecalSurfaceInputs &input)
+{
+    return {
+#define HS_DECAL_READ(kind,name,slot,type,shader,guide) guide,
+        HS_DECAL_SRVS(HS_DECAL_READ)
+#undef HS_DECAL_READ
+    };
+}
 Result Failure(ErrorCode code, const char *message)
 { return Result::Failure(code, "hs_decal_surface", message); }
 Result Native(const char *operation, HRESULT hr)
@@ -36,7 +47,7 @@ struct DecalSurfaceTargets
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
     ComPtr<ID3D12DescriptorHeap> exports;
-    std::array<AllocationResource, 4> outputs;
+    std::array<AllocationResource, kDecalSurfaceUavCount> outputs;
     AllocationResource constants;
     std::byte *mapped{};
     ViewExtent capacity;
@@ -137,9 +148,12 @@ bool DecalSurfaceSystem::MatchesShape(const DecalSurfaceLayout &layout, bool act
 }
 bool DecalSurfaceSystem::MatchesLayout(const DecalSurfaceInputs &input,const DecalSurfaceLayout &layout)const noexcept
 {
-    return MatchesShape(layout, input.command_count != 0) && (!layout.active || layout.guides==std::array{
-            input.depth.version,input.metadata.version,input.base.version,input.normal.version,input.material.version,
-            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version});
+    if (!MatchesShape(layout, input.command_count != 0)) return false;
+    if (!layout.active) return true;
+    const auto reads = DecalReads(input);
+    for (std::size_t index = 0; index < reads.size(); ++index)
+        if (!(layout.guides[index] == reads[index].version)) return false;
+    return true;
 }
 Result DecalSurfaceSystem::BindRetained(RenderGraphBuilder &graph,const DecalSurfaceInputs &input,
     DecalSurfaceConstants constants,const DecalSurfaceLayout &layout,DecalSurfaceOutputs &output)
@@ -183,8 +197,7 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     if (gradient.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || gradient.DepthOrArraySize != 1 ||
         gradient.SampleDesc.Count != 1 || !gradient.Width || !gradient.Height || gradient.Width > UINT32_MAX)
         return Failure(ErrorCode::InvalidArgument, "Decal gradient must be a nonempty 2D texture.");
-    std::array<DecalSurfaceGuide, 10> reads{input.depth, input.metadata, input.base, input.normal, input.material,
-        input.commands, input.gradient, input.parameters, input.textures[0], input.textures[1]};
+    const auto reads = DecalReads(input);
     for (const auto &guide : reads)
         if (!guide.resource || !guide.version.resource || graph.Resolve(guide.version.resource) != guide.resource)
             return Failure(ErrorCode::InvalidArgument, "Decal guide resource does not match its graph version.");
@@ -225,31 +238,31 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     {
         const auto &guide = reads[index]; const auto d = guide.resource->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (index == 5)
+        if (index == DecalSurfaceSrvCommands)
         {
             srv.Format = DXGI_FORMAT_R32_TYPELESS; srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srv.Buffer.FirstElement = input.command_byte_offset / 4u; srv.Buffer.NumElements = UINT(command_bytes / 4u);
             srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         }
-        else if (index == 7)
+        else if (index == DecalSurfaceSrvParameters)
         {
             srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER; srv.Buffer.NumElements = input.parameter_slot_count;
             srv.Buffer.StructureByteStride = sizeof(render_data::MaterialParameterSlot);
         }
-        else if (index >= 8)
+        else if (index >= DecalSurfaceSrvTexture0)
         {
             srv.Format = d.Format; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             srv.Texture2DArray.MipLevels = d.MipLevels; srv.Texture2DArray.ArraySize = d.DepthOrArraySize;
         }
         else
         {
-            srv.Format = index == 0 ? DXGI_FORMAT_R32_FLOAT : d.Format;
+            srv.Format = index == DecalSurfaceSrvDepth ? DXGI_FORMAT_R32_FLOAT : d.Format;
             srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; srv.Texture2D.MipLevels = 1;
         }
         t->device->CreateShaderResourceView(guide.resource, &srv, cpu(kDecalSurfaceSrvOffset + index));
     }
-    std::array<ResourceHandle, 4> handles;
-    std::array<ResourceVersion, 4> written;
+    std::array<ResourceHandle, kDecalSurfaceUavCount> handles;
+    std::array<ResourceVersion, kDecalSurfaceUavCount> written;
     for (std::uint32_t index = 0; index < handles.size(); ++index)
     {
         auto &target = t->outputs[index];
@@ -295,8 +308,8 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     {
         capture->valid=true;capture->active=true;capture->capacity=t->capacity;
         capture->frame_slots=static_cast<std::uint32_t>(t->slot_completion.size());
-        capture->guides={input.depth.version,input.metadata.version,input.base.version,input.normal.version,input.material.version,
-            input.commands.version,input.parameters.version,input.gradient.version,input.textures[0].version,input.textures[1].version};
+        for (std::size_t index = 0; index < reads.size(); ++index)
+            capture->guides[index] = reads[index].version;
         capture->outputs=handles;capture->written=written;capture->constants=constants_handle;
     }
     return Result::Success();
@@ -322,7 +335,7 @@ Result DecalSurfaceSystem::ResetAfterCompletion(const CompletionSet &completed)
         return Failure(ErrorCode::InvalidState, "Complete and drain all decal Surface queue uses before reset.");
     targets_.reset(); return Result::Success();
 }
-std::array<const AllocationResource *, 4> DecalSurfaceSystem::DiagnosticResources() const noexcept
+std::array<const AllocationResource *, kDecalSurfaceUavCount> DecalSurfaceSystem::DiagnosticResources() const noexcept
 {
     if (!targets_ || !targets_->usable || pending_graph_) return {};
     return {&targets_->outputs[0], &targets_->outputs[1], &targets_->outputs[2], &targets_->outputs[3]};

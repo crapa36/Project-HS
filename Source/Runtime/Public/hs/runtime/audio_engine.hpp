@@ -20,7 +20,11 @@ namespace hs
 {
 
 class ShippedContentOwner;
-namespace audio_detail { struct DeveloperAudioCatalog; }
+namespace audio_detail { struct PreparedAudio; }
+[[nodiscard]] Result PrepareAudio(const AudioImage &, const ShippedContentOwner &,
+                                  std::shared_ptr<audio_detail::PreparedAudio> &);
+[[nodiscard]] Result PrepareAudio(const std::unordered_map<std::string, std::filesystem::path> &,
+                                  std::shared_ptr<audio_detail::PreparedAudio> &);
 
 enum class AudioDeviceState : std::uint8_t
 {
@@ -96,6 +100,9 @@ class AudioEngine
     // Image and backing owner outlive this engine; Shutdown joins pending reads.
     [[nodiscard]] Result Initialize(const SettingsData &settings, const AudioImage &image,
                                     const ShippedContentOwner &owner);
+    [[nodiscard]] Result Initialize(const SettingsData &settings,
+                                    std::shared_ptr<audio_detail::PreparedAudio> prepared,
+                                    std::shared_ptr<const void> owner);
     // Main-thread request; no waiting or disk I/O. Ready means every cue variant is prepared.
     [[nodiscard]] bool PrepareCue(AssetId cue) noexcept;
     [[nodiscard]] AudioCueReadiness RequestCue(AssetId cue) noexcept;
@@ -133,7 +140,7 @@ class AudioEngine
                                              const ResolveAudioPath &resolve_path);
     [[nodiscard]] Result InitializeDevice(const SettingsData &settings);
     [[nodiscard]] Result InitializePlayback(const SettingsData &settings);
-    [[nodiscard]] Result InitializePrepared(const SettingsData &settings, audio_detail::DeveloperAudioCatalog catalog);
+    [[nodiscard]] Result InitializePrepared(const SettingsData &settings, audio_detail::PreparedAudio catalog);
     void RetainGeneration(std::shared_ptr<const void> generation);
 
     struct Impl;

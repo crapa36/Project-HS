@@ -49,7 +49,7 @@ cbuffer FrameConstants : register(b0)
     float4 LightingOptions;
     uint4 CharacterMaterialParameterBases[2];
     uint4 CharacterMaterialVaryingMasks[2];
-    uint4 HeroBindingRanges[7];
+    uint4 CharacterBindingRanges[7];
     float4 ProbeOptions; // cosine/sine yaw, maximum prefiltered LOD, enabled.
     float4 PreviousGrassBenders[32];
     float4 PreviousGrassState; // time, bender count, valid, reserved.
@@ -333,13 +333,13 @@ struct SceneOutput
 
 // The native temporal consumer binds the service's immutable combined table.
 // LodClock.w bit4 selects guide availability, independently of GI/reflections.
-Texture2D<float> HeroGuideDepth : register(t14, space14);
-Texture2D<float2> HeroGuideMotion : register(t15, space14);
-Texture2D<float2> HeroGuideHistory : register(t16, space14);
-Texture2D<float4> HeroGuideClassification : register(t17, space14);
-Texture2D<uint2> HeroGuideMetadata : register(t18, space14);
-Texture2D<uint> UnpeeledFragmentCountGuide : register(t19, space14);
-Texture2D<float2> HeroGuideTransport : register(t20, space14);
+Texture2D<float> TranslucencyGuideDepth : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_DEPTH);
+Texture2D<float2> TranslucencyGuideMotion : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_MOTION);
+Texture2D<float2> TranslucencyGuideHistory : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_HISTORY);
+Texture2D<float4> TranslucencyGuideClassification : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_CLASSIFICATION);
+Texture2D<uint2> TranslucencyGuideMetadata : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_METADATA);
+Texture2D<uint> UnpeeledFragmentCountGuide : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_UNPEELED);
+Texture2D<float2> TranslucencyGuideTransport : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_GUIDE_TRANSPORT);
 
 struct HsSceneGradients
 {
@@ -704,8 +704,8 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         // a character's vertex submaterial index.
         if ((context.geometry.Flags & 16u) == 0u)
             output.MaterialId = environment ? 0x10000000u + HsEnvironmentMaterialOrdinal(context.geometry.PageSlot / HsEnvironmentGeometryLodCount) :
-                (HsHeroAssetIndex(mesh) != HsHeroInvalidOrdinal
-                    ? HsHeroOpaqueMaterialId(mesh, input.Material)
+                (HsCharacterAssetIndex(mesh) != HsCharacterInvalidOrdinal
+                    ? HsCharacterOpaqueMaterialId(mesh, input.Material)
                     : 0x20000000u + (context.geometry.PageSlot << 16u) + input.Material);
         if ((context.geometry.Flags & 32u) != 0u)
             output.MaterialId = context.geometry.Lod;
@@ -798,7 +798,7 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
                                (SceneDrawMaterial & 1u) != 0, true, GeometryShadowPass(instance_id));
 }
 
-SceneOutput HeroCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
+SceneOutput LayeredTranslucencyCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     // Only the nearest composite writes motion guides; other Hero draws need the current pose.
     return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
@@ -975,7 +975,7 @@ float4 SampleFamilyColor(SceneOutput input)
 
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
 HsMaterialContext HsCharacterMaterialContext(SceneOutput input, bool front,
-    HsSceneGradients gradients, uint ordinal)
+    HsSceneGradients gradients, uint ordinal, uint demand)
 {
     HsMaterialContext ctx = (HsMaterialContext)0;
     ctx.uv = input.Uv;
@@ -995,24 +995,36 @@ HsMaterialContext HsCharacterMaterialContext(SceneOutput input, bool front,
     ctx.sampled_ao = 1.0;
     ctx.sampled_alpha = 1.0;
     ctx.sampled_roughness = 0.3;
-    float3 normal = normalize(input.WorldNormal);
-    float3 tangent = input.WorldTangent.xyz - normal * dot(normal, input.WorldTangent.xyz);
-    const float tangent_length_squared = dot(tangent, tangent);
-    tangent = tangent_length_squared > 0.0 ? tangent * rsqrt(tangent_length_squared) : HsBsdfTangent(normal);
-    const float3 bitangent = cross(normal, tangent) * input.WorldTangent.w;
+    const bool need_shading_normal = (demand & HsContextShadingNormal) != 0u;
+    const bool need_tangent = need_shading_normal || (demand & HsContextTangent) != 0u;
+    float3 normal = 0.0;
+    float3 tangent = 0.0;
+    float3 bitangent = 0.0;
+    if (need_tangent || (demand & HsContextNormal) != 0u)
+        normal = normalize(input.WorldNormal);
+    if (need_tangent)
+    {
+        tangent = input.WorldTangent.xyz - normal * dot(normal, input.WorldTangent.xyz);
+        const float tangent_length_squared = dot(tangent, tangent);
+        tangent = tangent_length_squared > 0.0 ? tangent * rsqrt(tangent_length_squared) : HsBsdfTangent(normal);
+        if (need_shading_normal) bitangent = cross(normal, tangent) * input.WorldTangent.w;
+    }
     ctx.normal = normal;
     ctx.tangent = float4(tangent, input.WorldTangent.w);
+    const bool need_color = (demand & (HsContextSampledBaseColor | HsContextSampledAlpha)) != 0u;
+    const bool need_roughness = (demand & HsContextSampledRoughness) != 0u;
     if (input.Mesh == 0u || (input.Mesh >= 10u && input.Mesh <= 12u))
     {
         const bool family = input.Mesh >= 10u;
         const uint slice = family ? input.Mesh - 10u : input.Material;
-        float4 color;
-        float4 normal_map;
+        float4 color = 0.0;
+        float4 normal_map = 1.0;
         if (family)
         {
-            color = SampleFamilyColor(input, gradients);
-            normal_map = FamilyNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
-            if (input.Mesh == 12u)
+            if (need_color) color = SampleFamilyColor(input, gradients);
+            if (need_shading_normal || need_roughness)
+                normal_map = FamilyNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
+            if (need_color && input.Mesh == 12u)
             {
                 const float3 charge_color = input.Charge < 0.5
                     ? lerp(float3(1.0, 0.26, 0.025), float3(1.0, 0.065, 0.012), input.Charge * 2.0)
@@ -1022,40 +1034,54 @@ HsMaterialContext HsCharacterMaterialContext(SceneOutput input, bool front,
         }
         else
         {
-            color = ArcherDiffuse.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
+            if (need_color) color = ArcherDiffuse.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
             // This atlas has no roughness channel; the authored material supplies it.
-            normal_map = float4(ArcherNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy).xyz, 1.0);
+            if (need_shading_normal)
+                normal_map = float4(ArcherNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy).xyz, 1.0);
         }
-        ctx.sampled_base_color = color.rgb;
-        ctx.sampled_alpha = color.a;
-        ctx.sampled_roughness = normal_map.a;
-        float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
-        // Existing family UV.v conversion requires the Blender green-channel flip.
-        if (family) tangent_normal.y = -tangent_normal.y;
-        normal = normalize(tangent * tangent_normal.x + bitangent * tangent_normal.y + normal * tangent_normal.z);
+        if (need_color) { ctx.sampled_base_color = color.rgb; ctx.sampled_alpha = color.a; }
+        if (need_roughness) ctx.sampled_roughness = normal_map.a;
+        if (need_shading_normal)
+        {
+            float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
+            // Existing family UV.v conversion requires the Blender green-channel flip.
+            if (family) tangent_normal.y = -tangent_normal.y;
+            normal = normalize(tangent * tangent_normal.x + bitangent * tangent_normal.y + normal * tangent_normal.z);
+        }
     }
     else if (input.Mesh >= 13u && input.Mesh <= 15u)
     {
-        ctx.sampled_base_color = MonsterBasecolor.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
-        const float3 ram = MonsterRam.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
-        ctx.sampled_roughness = ram.r;
-        ctx.sampled_metallic = ram.b;
-        ctx.sampled_ao = ram.g;
-        ctx.sampled_emission = MonsterEmissive.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+        if (need_color) ctx.sampled_base_color = MonsterBasecolor.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+        if ((demand & (HsContextSampledRoughness | HsContextSampledMetallic | HsContextSampledAo)) != 0u)
+        {
+            const float3 ram = MonsterRam.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+            ctx.sampled_roughness = ram.r;
+            ctx.sampled_metallic = ram.b;
+            ctx.sampled_ao = ram.g;
+        }
+        if ((demand & HsContextSampledEmission) != 0u)
+            ctx.sampled_emission = MonsterEmissive.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
     }
-    ctx.shading_normal = front ? normal : -normal;
+    if (need_shading_normal) ctx.shading_normal = front ? normal : -normal;
     return ctx;
 }
 
-bool HsHeroSceneCovered(SceneOutput input, bool front, HsSceneGradients gradients)
+HsMaterialContext HsCharacterMaterialContext(SceneOutput input, bool front,
+    HsSceneGradients gradients, uint ordinal)
 {
-    const uint ordinal = HsHeroOrdinal(input.MaterialId);
-    if (!front || !HsHeroOpaqueOrdinalValid(ordinal) || HsHeroAssetIndex(input.Mesh) == HsHeroInvalidOrdinal)
-        return false;
-    return HsHeroEvaluateOpacity(HsCharacterMaterialContext(input, front, gradients, ordinal), ordinal) >= HsMaterialOpacityCutoff;
+    return HsCharacterMaterialContext(input, front, gradients, ordinal, ~0u);
 }
 
-HsSurfaceClosure HsHeroClosureToWorld(HsSurfaceClosure surface, HsMaterialContext ctx)
+bool HsCharacterSceneCovered(SceneOutput input, bool front, HsSceneGradients gradients)
+{
+    const uint ordinal = HsCharacterOrdinal(input.MaterialId);
+    if (!front || !HsCharacterOpaqueOrdinalValid(ordinal) || HsCharacterAssetIndex(input.Mesh) == HsCharacterInvalidOrdinal)
+        return false;
+    return HsCharacterEvaluateOpacity(HsCharacterMaterialContext(input, front, gradients, ordinal,
+        HsCharacterOpacityContextDemand(ordinal)), ordinal) >= HsMaterialOpacityCutoff;
+}
+
+HsSurfaceClosure HsCharacterClosureToWorld(HsSurfaceClosure surface, HsMaterialContext ctx)
 {
     if (!surface.normal_is_world)
     {
@@ -1286,10 +1312,10 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
 }
 
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
-GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ctx,
+GBufferOutput HsCharacterEvaluateSceneSurface(SceneOutput input, HsMaterialContext ctx,
     uint ordinal)
 {
-    HsSurfaceClosure surface = HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx, ordinal), ctx);
+    HsSurfaceClosure surface = HsCharacterClosureToWorld(HsCharacterEvaluateSurface(ctx, ordinal), ctx);
     // Use the actual primary surface in both raster and Visibility evaluation.
     const float3 entity_world = HsReconstructSurfaceRelative(
         HsSurfaceRasterUv(int2(input.Position.xy)), input.Position.z) + SurfaceViewOrigin.xyz;
@@ -1334,30 +1360,33 @@ GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ct
     return output;
 }
 
-GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, bool front,
+GBufferOutput HsCharacterEvaluateSceneSurface(SceneOutput input, bool front,
     HsSceneGradients gradients)
 {
-    const uint ordinal = HsHeroOrdinal(input.MaterialId);
-    return HsHeroEvaluateSceneSurface(input,
-        HsCharacterMaterialContext(input, front, gradients, ordinal), ordinal);
+    const uint ordinal = HsCharacterOrdinal(input.MaterialId);
+    return HsCharacterEvaluateSceneSurface(input,
+        HsCharacterMaterialContext(input, front, gradients, ordinal,
+            HsCharacterSurfaceContextDemand(ordinal) | HsContextShadingNormal | HsContextTangent), ordinal);
 }
 
-GBufferOutput HeroScenePS(SceneOutput input, bool front : SV_IsFrontFace)
+GBufferOutput CharacterScenePS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     const HsSceneGradients gradients = RasterSceneGradients(input);
-    const uint ordinal = HsHeroOrdinal(input.MaterialId);
-    if (!front || !HsHeroOpaqueOrdinalValid(ordinal) || HsHeroAssetIndex(input.Mesh) == HsHeroInvalidOrdinal) discard;
-    const HsMaterialContext ctx = HsCharacterMaterialContext(input, front, gradients, ordinal);
-    if (HsHeroEvaluateOpacity(ctx, ordinal) < HsMaterialOpacityCutoff) discard;
-    return HsHeroEvaluateSceneSurface(input, ctx, ordinal);
+    const uint ordinal = HsCharacterOrdinal(input.MaterialId);
+    if (!front || !HsCharacterOpaqueOrdinalValid(ordinal) || HsCharacterAssetIndex(input.Mesh) == HsCharacterInvalidOrdinal) discard;
+    const HsMaterialContext ctx = HsCharacterMaterialContext(input, front, gradients, ordinal,
+        HsCharacterSurfaceContextDemand(ordinal) | HsCharacterOpacityContextDemand(ordinal) |
+        HsContextShadingNormal | HsContextTangent);
+    if (HsCharacterEvaluateOpacity(ctx, ordinal) < HsMaterialOpacityCutoff) discard;
+    return HsCharacterEvaluateSceneSurface(input, ctx, ordinal);
 }
 
-void HeroShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
+void CharacterShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     if(input.Mesh==22u && input.Material==1u) discard;
     HsShadowRasterClip(input.Position.xy, input.RasterDrawRecordId);
     const HsSceneGradients gradients = RasterSceneGradients(input);
-    if (!HsHeroSceneCovered(input, front, gradients)) discard;
+    if (!HsCharacterSceneCovered(input, front, gradients)) discard;
 }
 #endif
 
@@ -1558,8 +1587,8 @@ HsDeferredOutput DeferredPS(FullScreenOutput input)
     float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
     const float4 material = GBufferMaterial.Load(int3(surface.pixel, 0));
     const uint model = HsSurfaceModel(surface.metadata);
-    const uint hero_ordinal=HsHeroOrdinal(surface.metadata.x);
-    if (model == HsSurfaceModelEnvironment || HsHeroOpaqueOrdinalValid(hero_ordinal))
+    const uint hero_ordinal=HsCharacterOrdinal(surface.metadata.x);
+    if (model == HsSurfaceModelEnvironment || HsCharacterOpaqueOrdinalValid(hero_ordinal))
     {
 #ifdef HS_GENERATED_DEFERRED_MATERIALS
         HsSurfaceClosure closure=HsReflectionLoadClosure(uint2(surface.pixel));
@@ -2361,16 +2390,16 @@ OitOutput SlimePS(SceneOutput input)
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
 cbuffer LayeredTranslucencyConstants : register(b0, space14)
 {
-    uint4 HeroLayerInfo; // current layer, layer budget, phase, reserved.
+    uint4 LayeredTranslucencyInfo; // current layer, layer budget, phase, reserved.
 };
-Texture2D<float> HeroFrontDepth[4] : register(t0, space14);
-Texture2D<uint2> HeroFrontIdentity[4] : register(t4, space14);
-Texture2D<float4> HeroExitDepth : register(t8, space14);
-Texture2D<float4> HeroLayerBackground : register(t12, space14);
-Texture2D<uint> UnpeeledFragmentCount : register(t13, space14);
+Texture2D<float> LayeredTranslucencyFrontDepth[4] : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_FRONT_DEPTH);
+Texture2D<uint2> LayeredTranslucencyFrontIdentity[4] : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_FRONT_IDENTITY);
+Texture2D<float4> LayeredTranslucencyExitDepth : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_EXIT);
+Texture2D<float4> LayeredTranslucencyBackground : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_BACKGROUND);
+Texture2D<uint> UnpeeledFragmentCount : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_UNPEELED);
 RWTexture2D<uint> UnpeeledFragmentCountCounter : register(u0, space14);
 
-float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path, float3 background)
+float3 HsLayeredTranslucencyBackground(float3 world, float3 direction, float optical_path, float3 background)
 {
     // Rejected displaced lookups retain the valid source behind this interface.
     const float3 exit_world=world+direction*optical_path;
@@ -2381,10 +2410,10 @@ float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path,
     const uint2 sample_pixel=uint2(uv*ScreenSize.xy);
     float scene_depth=SurfaceDepth.Load(int3(sample_pixel,0));
 #if !defined(HS_SINGLE_LAYER_WATER)
-    const uint next=HeroLayerInfo.x+1u;
-    if(next<HeroLayerInfo.y)
+    const uint next=LayeredTranslucencyInfo.x+1u;
+    if(next<LayeredTranslucencyInfo.y)
     {
-        const float next_depth=HeroFrontDepth[next].Load(int3(sample_pixel,0));
+        const float next_depth=LayeredTranslucencyFrontDepth[next].Load(int3(sample_pixel,0));
         if(next_depth>scene_depth) scene_depth=next_depth;
     }
 #endif
@@ -2397,13 +2426,13 @@ float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path,
             HsSurfaceRasterUv(int2(sample_pixel)),scene_depth)+SurfaceViewOrigin.xyz;
         if(dot(scene_world-exit_world,direction)<0.0) return background;
     }
-    return HeroLayerBackground.Load(int3(sample_pixel,0)).rgb;
+    return LayeredTranslucencyBackground.Load(int3(sample_pixel,0)).rgb;
 }
 
 // Authored-thickness weighted OIT source path. This has one opaque scene guide;
 // measured front/back thickness and bounded multi-interface depth peeling are
 // separate transport paths, not implied by this screen-space lookup.
-float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
+float3 HsTranslucencyLighting(HsSurfaceClosure surface, float3 world,
     float2 pixel, float3 view, float3 normal, float3 transmitted,
     float measured_path, bool layer_transport, float3 layer_background)
 {
@@ -2414,13 +2443,14 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
     const float solid=saturate(surface.solid_transmission_weight);
     const bool total_internal=solid>0.0 && dot(transmitted,transmitted)==0.0;
     const float base_fresnel_override=total_internal ? 1.0 : -1.0;
+    const HsBsdfDirectView prepared=HsBsdfPrepareDirectView(surface,normalize(view),normalize(normal));
     float3 diffuse,specular,ambient_specular,ambient_diffuse;
     EnvironmentLightingComponents(solid<1.0,surface,world,view,HsLightAllMask,
-        ShadowVisibility(world),base_fresnel_override,diffuse,specular,ambient_specular,ambient_diffuse);
+        ShadowVisibility(world),base_fresnel_override,prepared,diffuse,specular,ambient_specular,ambient_diffuse);
     if(solid==0.0) return HsFogSurface(diffuse+specular+surface.emission,world,pixel);
-    const float nv=saturate(dot(normal,view));
+    const float nv=prepared.no_v;
     const float fresnel=total_internal ? 1.0 :
-        HsBsdfSchlickFresnel(HsBsdfSolidDielectricF0(surface).xxx,nv).x;
+        HsBsdfSchlickFresnel(prepared.solid_f0.xxx,nv).x;
     if(total_internal)
     {
         // The actual solid interface has unit Fresnel under TIR. The shared
@@ -2450,7 +2480,7 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
     const float3 exit_world=world+transmitted*optical_path;
     const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
     if(layer_transport && MaterialQualityOptions.w>0.0)
-        background=HsHeroLayerBackground(world,transmitted,optical_path,layer_background);
+        background=HsLayeredTranslucencyBackground(world,transmitted,optical_path,layer_background);
     else if(!layer_transport && MaterialQualityOptions.w>0.0 && exit_clip.w>0.0)
     {
         const float2 uv=HsSurfaceClipUv(exit_clip);
@@ -2478,7 +2508,7 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
         }
     }
     const float coat=saturate(surface.coat_weight);
-    const float coat_transmission=(1.0-coat*HsBsdfCoatFresnel(nv))*
+    const float coat_transmission=prepared.coat_entry*
         (1.0-coat*HsBsdfCoatFresnel(abs(dot(transmitted,normal))));
     // The base closure supplies the authored interface/transmission tint.
     // Bulk Beer absorption remains the separately authored inverse-metre RGB.
@@ -2503,14 +2533,14 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
     return prefix.radiance+prefix.transmittance*(raw_surface+transmission_weight*incoming);
 }
 
-float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world, float2 pixel, bool front)
+float3 HsTranslucencyLighting(HsSurfaceClosure surface, float3 world, float2 pixel, bool front)
 {
     const float3 view=normalize(CameraTime.xyz-world);
     float3 normal=normalize(surface.normal);
     if(dot(normal,view)<0.0) normal=-normal;
     const float eta=front ? 1.0/surface.ior : surface.ior;
     const float3 transmitted=refract(-view,normal,eta);
-    return HsHeroTranslucentLighting(surface,world,pixel,view,normal,transmitted,-1.0,false,0.0);
+    return HsTranslucencyLighting(surface,world,pixel,view,normal,transmitted,-1.0,false,0.0);
 }
 
 HsSurfaceClosure HsWaterSurfaceClosure(float authored_thickness)
@@ -2523,7 +2553,7 @@ HsSurfaceClosure HsWaterSurfaceClosure(float authored_thickness)
     water.normal_is_world=true;return water;
 }
 
-HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGradients gradients)
+HsSurfaceClosure HsTranslucencyTransportSurface(SceneOutput input, bool front, HsSceneGradients gradients)
 {
     HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(18u);
     if(input.Mesh==22u && input.Material==1u)
@@ -2531,12 +2561,13 @@ HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGr
         HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(14u);
         return HsWaterSurfaceClosure(input.Uv.x);
     }
-    const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;
-    if(!HsHeroTranslucentOrdinalValid(ordinal)) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(11u); discard; }
+    const uint ordinal=HsCharacterBindingOrdinals(input.Mesh,input.Material).y;
+    if(!HsCharacterTranslucentOrdinalValid(ordinal)) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(11u); discard; }
     // discard does not let DXC narrow the later dynamic material switch.
-    const HsMaterialContext ctx=HsCharacterMaterialContext(input,front,gradients,ordinal);
+    const HsMaterialContext ctx=HsCharacterMaterialContext(input,front,gradients,ordinal,
+        HsCharacterSurfaceContextDemand(ordinal) | HsContextShadingNormal | HsContextTangent);
     HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(13u);
-    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
+    const HsSurfaceClosure surface=HsCharacterClosureToWorld(HsCharacterEvaluateSurface(ctx,ordinal),ctx);
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
     if(surface.opacity-0.001<0.0) HsTranslucencyDiagnosticsAdd(12u);
 #endif
@@ -2544,11 +2575,11 @@ HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGr
     return surface;
 }
 
-bool HsHeroSelectedFront(SceneOutput input,uint layer)
+bool HsLayeredTranslucencySelectedFront(SceneOutput input,uint layer)
 {
     const int3 pixel=int3(int2(input.Position.xy),0);
-    return input.Position.z==HeroFrontDepth[layer].Load(pixel) &&
-        all(input.InstanceKey==HeroFrontIdentity[layer].Load(pixel));
+    return input.Position.z==LayeredTranslucencyFrontDepth[layer].Load(pixel) &&
+        all(input.InstanceKey==LayeredTranslucencyFrontIdentity[layer].Load(pixel));
 }
 
 uint2 LayeredTranslucencyPeelFrontPS(SceneOutput input,bool front:SV_IsFrontFace HS_TRANSLUCENCY_DIAGNOSTICS_COVERAGE):SV_Target0
@@ -2564,12 +2595,12 @@ uint2 LayeredTranslucencyPeelFrontPS(SceneOutput input,bool front:SV_IsFrontFace
     const int3 pixel=int3(int2(input.Position.xy),0);
     const float opaque_depth=SurfaceDepth.Load(pixel);
     if(input.Position.z<=opaque_depth) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(5u); discard; }
-    if(HeroLayerInfo.x>0u)
+    if(LayeredTranslucencyInfo.x>0u)
     {
-        const float previous=HeroFrontDepth[HeroLayerInfo.x-1u].Load(pixel);
+        const float previous=LayeredTranslucencyFrontDepth[LayeredTranslucencyInfo.x-1u].Load(pixel);
         if(previous<=0.0 || input.Position.z>=previous) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(6u); discard; }
     }
-    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const HsSurfaceClosure surface=HsTranslucencyTransportSurface(input,front,gradients);
     HS_TRANSLUCENCY_DIAGNOSTICS_ACCEPT(input.Position.xy);
     return input.InstanceKey;
 }
@@ -2583,14 +2614,14 @@ float4 LayeredTranslucencyGatherExitDepthPS(SceneOutput input,bool front:SV_IsFr
     float4 exits=0.0;
     [unroll] for(uint layer=0u;layer<4u;++layer)
     {
-        if(layer>=HeroLayerInfo.y) break;
-        const float entry=HeroFrontDepth[layer].Load(pixel);
+        if(layer>=LayeredTranslucencyInfo.y) break;
+        const float entry=LayeredTranslucencyFrontDepth[layer].Load(pixel);
         if(entry>0.0 && input.Position.z<entry &&
-            all(input.InstanceKey==HeroFrontIdentity[layer].Load(pixel)))
+            all(input.InstanceKey==LayeredTranslucencyFrontIdentity[layer].Load(pixel)))
             exits[layer]=input.Position.z;
     }
     if(!any(exits>0.0)) discard;
-    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const HsSurfaceClosure surface=HsTranslucencyTransportSurface(input,front,gradients);
     HS_TRANSLUCENCY_DIAGNOSTICS_ACCEPT(input.Position.xy);
     return exits;
 }
@@ -2602,13 +2633,13 @@ OitOutput LayeredTranslucencyAccumulateUnpeeledPS(SceneOutput input,bool front:S
     HS_TRANSLUCENCY_DIAGNOSTICS_ENTRY(input.Position.xy);
     // The read-only opaque DSV rejects z <= opaque before this shader runs.
     if(!front || input.InstanceKey.x==0u) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(3u); discard; }
-    [loop] for(uint layer=0u;layer<HeroLayerInfo.y;++layer)
-        if(HsHeroSelectedFront(input,layer)) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(10u); discard; }
-    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    [loop] for(uint layer=0u;layer<LayeredTranslucencyInfo.y;++layer)
+        if(HsLayeredTranslucencySelectedFront(input,layer)) { HS_TRANSLUCENCY_DIAGNOSTICS_COUNT(10u); discard; }
+    const HsSurfaceClosure surface=HsTranslucencyTransportSurface(input,front,gradients);
     HS_TRANSLUCENCY_DIAGNOSTICS_ACCEPT(input.Position.xy);
     uint ignored;
     InterlockedAdd(UnpeeledFragmentCountCounter[int2(input.Position.xy)],1u,ignored);
-    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,front);
+    const float3 color=HsTranslucencyLighting(surface,input.WorldPosition,input.Position.xy,front);
     const float alpha=saturate(surface.opacity);
     const float z=saturate(length(input.WorldPosition-CameraTime.xyz)/180.0);
     const float weight=clamp(pow(min(1.0,alpha*10.0)+0.01,3.0)*1e8*pow(1.0-z*0.9,3.0),1e-2,3e3);
@@ -2626,31 +2657,31 @@ struct LayeredTranslucencyFrontGuideOutput
     float2 Transport;
 };
 
-HsSurfaceClosure HsHeroSelectedSurface(SceneOutput input,bool front,uint hsHeroCoverage)
+HsSurfaceClosure HsLayeredTranslucencySelectedSurface(SceneOutput input,bool front,uint hsHeroCoverage)
 {
     const HsSceneGradients gradients=RasterSceneGradients(input);
     HS_TRANSLUCENCY_DIAGNOSTICS_ENTRY(input.Position.xy);
-    const uint layer=HeroLayerInfo.x;
+    const uint layer=LayeredTranslucencyInfo.x;
     // A cleared front has zero identity and cannot authorize a composite.
     // Match the front peel's reserved-key rejection before its depth match.
     if(input.InstanceKey.x==0u) discard;
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
     if(!front) { HsTranslucencyDiagnosticsAdd(3u); discard; }
-    if(input.Position.z!=HeroFrontDepth[layer].Load(int3(int2(input.Position.xy),0)))
+    if(input.Position.z!=LayeredTranslucencyFrontDepth[layer].Load(int3(int2(input.Position.xy),0)))
     { HsTranslucencyDiagnosticsAdd(8u); discard; }
-    if(any(input.InstanceKey!=HeroFrontIdentity[layer].Load(int3(int2(input.Position.xy),0))))
+    if(any(input.InstanceKey!=LayeredTranslucencyFrontIdentity[layer].Load(int3(int2(input.Position.xy),0))))
     { HsTranslucencyDiagnosticsAdd(9u); discard; }
 #else
     // Composite/guide PSOs use early depth equality against this same
     // read-only front DSV. Keep the identity match for coincident instances.
-    if(!front || any(input.InstanceKey!=HeroFrontIdentity[layer].Load(int3(int2(input.Position.xy),0)))) discard;
+    if(!front || any(input.InstanceKey!=LayeredTranslucencyFrontIdentity[layer].Load(int3(int2(input.Position.xy),0)))) discard;
 #endif
-    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const HsSurfaceClosure surface=HsTranslucencyTransportSurface(input,front,gradients);
     HS_TRANSLUCENCY_DIAGNOSTICS_ACCEPT(input.Position.xy);
     return surface;
 }
 
-LayeredTranslucencyFrontGuideOutput HsHeroSurfaceGuides(SceneOutput input,HsSurfaceClosure surface,uint unpeeled_count)
+LayeredTranslucencyFrontGuideOutput HsTranslucencySurfaceGuides(SceneOutput input,HsSurfaceClosure surface,uint unpeeled_count)
 {
     LayeredTranslucencyFrontGuideOutput output=(LayeredTranslucencyFrontGuideOutput)0;
     output.Classification=float4(HsEncodeSurfaceNormal(surface.normal),saturate(surface.opacity),surface.roughness);
@@ -2674,16 +2705,16 @@ LayeredTranslucencyFrontGuideOutput HsHeroSurfaceGuides(SceneOutput input,HsSurf
     return output;
 }
 
-float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surface)
+float4 HsLayeredTranslucencyCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surface)
 {
-    const uint layer=HeroLayerInfo.x;
+    const uint layer=LayeredTranslucencyInfo.x;
     const float3 view=normalize(CameraTime.xyz-input.WorldPosition);
     const float3 geometric_normal=normalize(input.WorldNormal);
     float3 normal=normalize(surface.normal);
     if(dot(normal,view)<0.0) normal=-normal;
     const float3 transmitted=refract(-view,normal,front ? 1.0/surface.ior : surface.ior);
     const int3 pixel=int3(int2(input.Position.xy),0);
-    const float exit_depth=HeroExitDepth.Load(pixel)[layer];
+    const float exit_depth=LayeredTranslucencyExitDepth.Load(pixel)[layer];
     float path=-1.0;
     if(exit_depth>0.0 && dot(transmitted,transmitted)>0.0)
     {
@@ -2695,13 +2726,13 @@ float4 HsHeroCompositeSurface(SceneOutput input,bool front,HsSurfaceClosure surf
     }
     // The paired exit provides a measured local slab. Open geometry uses only
     // the authored metre-valued thickness; another instance can never supply it.
-    const float3 background=HeroLayerBackground.Load(pixel).rgb;
-    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,
+    const float3 background=LayeredTranslucencyBackground.Load(pixel).rgb;
+    const float3 color=HsTranslucencyLighting(surface,input.WorldPosition,input.Position.xy,
         view,normal,transmitted,path,true,background);
     return float4(lerp(background,color,saturate(surface.opacity)),1.0);
 }
 
-struct HeroCompositeGuideOutput
+struct LayeredTranslucencyCompositeGuideOutput
 {
     float4 Color:SV_Target0;
     float2 Motion:SV_Target1;
@@ -2713,17 +2744,17 @@ struct HeroCompositeGuideOutput
 // The existing guide product is the final layer0 composite. Reuse its original
 // surface before transport lighting or view-facing normal orientation.
 [earlydepthstencil]
-HeroCompositeGuideOutput LayeredTranslucencyCompositeFrontPS(SceneOutput input,bool front:SV_IsFrontFace HS_TRANSLUCENCY_DIAGNOSTICS_COVERAGE)
+LayeredTranslucencyCompositeGuideOutput LayeredTranslucencyCompositeFrontPS(SceneOutput input,bool front:SV_IsFrontFace HS_TRANSLUCENCY_DIAGNOSTICS_COVERAGE)
 {
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
-    const HsSurfaceClosure surface=HsHeroSelectedSurface(input,front,hsHeroCoverage);
+    const HsSurfaceClosure surface=HsLayeredTranslucencySelectedSurface(input,front,hsHeroCoverage);
 #else
-    const HsSurfaceClosure surface=HsHeroSelectedSurface(input,front,0u);
+    const HsSurfaceClosure surface=HsLayeredTranslucencySelectedSurface(input,front,0u);
 #endif
-    const LayeredTranslucencyFrontGuideOutput guides=HsHeroSurfaceGuides(input,surface,
+    const LayeredTranslucencyFrontGuideOutput guides=HsTranslucencySurfaceGuides(input,surface,
         UnpeeledFragmentCount.Load(int3(int2(input.Position.xy),0)));
-    HeroCompositeGuideOutput output;
-    output.Color=HsHeroCompositeSurface(input,front,surface);
+    LayeredTranslucencyCompositeGuideOutput output;
+    output.Color=HsLayeredTranslucencyCompositeSurface(input,front,surface);
     output.Motion=guides.Motion;
     output.History=guides.History;
     output.Classification=guides.Classification;
@@ -2751,10 +2782,10 @@ SingleLayerWaterOutput SingleLayerWaterPS(SceneOutput input,bool front:SV_IsFron
     float3 normal=normalize(surface.normal);
     if(dot(normal,view)<0.0) normal=-normal;
     const float3 transmitted=refract(-view,normal,1.0/surface.ior);
-    const float3 background=HeroLayerBackground.Load(pixel).rgb;
-    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,
+    const float3 background=LayeredTranslucencyBackground.Load(pixel).rgb;
+    const float3 color=HsTranslucencyLighting(surface,input.WorldPosition,input.Position.xy,
         view,normal,transmitted,-1.0,true,background);
-    const LayeredTranslucencyFrontGuideOutput guides=HsHeroSurfaceGuides(input,surface,0u);
+    const LayeredTranslucencyFrontGuideOutput guides=HsTranslucencySurfaceGuides(input,surface,0u);
     SingleLayerWaterOutput output;
     output.Color=float4(lerp(background,color,saturate(surface.opacity)),1.0);
     output.Motion=guides.Motion; output.History=guides.History;
@@ -2767,18 +2798,18 @@ SingleLayerWaterOutput SingleLayerWaterPS(SceneOutput input,bool front:SV_IsFron
 float4 LayeredTranslucencyCompositeLayerPS(SceneOutput input,bool front:SV_IsFrontFace HS_TRANSLUCENCY_DIAGNOSTICS_COVERAGE):SV_Target0
 {
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
-    const HsSurfaceClosure surface=HsHeroSelectedSurface(input,front,hsHeroCoverage);
+    const HsSurfaceClosure surface=HsLayeredTranslucencySelectedSurface(input,front,hsHeroCoverage);
 #else
-    const HsSurfaceClosure surface=HsHeroSelectedSurface(input,front,0u);
+    const HsSurfaceClosure surface=HsLayeredTranslucencySelectedSurface(input,front,0u);
 #endif
-    return HsHeroCompositeSurface(input,front,surface);
+    return HsLayeredTranslucencyCompositeSurface(input,front,surface);
 }
 
-OitOutput HeroTranslucentPS(SceneOutput input, bool front : SV_IsFrontFace)
+OitOutput CharacterTranslucentPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     const HsSceneGradients gradients = RasterSceneGradients(input);
-    HsSurfaceClosure surface = HsHeroTransportSurface(input, front, gradients);
-    const float3 color = HsHeroTranslucentLighting(surface, input.WorldPosition, input.Position.xy, front);
+    HsSurfaceClosure surface = HsTranslucencyTransportSurface(input, front, gradients);
+    const float3 color = HsTranslucencyLighting(surface, input.WorldPosition, input.Position.xy, front);
     const float alpha = saturate(surface.opacity);
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
@@ -4161,17 +4192,17 @@ TemporalMrtOutput TemporalPS(FullScreenOutput input)
     if((LodClock.w&4u)!=0u)
     {
         const int3 guide_pixel=int3(surface.pixel,0);
-        const float hero_depth=HeroGuideDepth.Load(guide_pixel);
-        const float4 hero_class=HeroGuideClassification.Load(guide_pixel);
+        const float hero_depth=TranslucencyGuideDepth.Load(guide_pixel);
+        const float4 hero_class=TranslucencyGuideClassification.Load(guide_pixel);
         if(hero_depth>resolve.current_depth && hero_class.z>0.0)
         {
-            const float2 hero_history=HeroGuideHistory.Load(guide_pixel);
+            const float2 hero_history=TranslucencyGuideHistory.Load(guide_pixel);
             resolve.current_depth=hero_depth;
             resolve.expected_previous_depth=hero_history.x;
             resolve.history_confidence=hero_history.y;
-            resolve.motion_uv=HeroGuideMotion.Load(guide_pixel);
+            resolve.motion_uv=TranslucencyGuideMotion.Load(guide_pixel);
             resolve.current_normal=HsDecodeSurfaceNormal(hero_class.xy);
-            resolve.material_key=HeroGuideMetadata.Load(guide_pixel);
+            resolve.material_key=TranslucencyGuideMetadata.Load(guide_pixel);
             resolve.reactive=max(resolve.reactive,hero_class.z*(1.0-saturate(hero_history.y)));
         }
         if(UnpeeledFragmentCountGuide.Load(guide_pixel)>0u) resolve.reactive=1.0;

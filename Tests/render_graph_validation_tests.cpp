@@ -1,5 +1,6 @@
+#include "render_graph_membership.hpp"
 #include "render_graph_validation.hpp"
-#include "hero_coverage.hpp"
+#include "translucency_coverage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -24,28 +25,115 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
+void CheckBatchResourceMembership(std::uint32_t count)
+{
+    std::vector<std::uint32_t> ordered;
+    std::vector<std::uint64_t> membership((count + 63u) / 64u);
+    std::vector<std::uint32_t> expected;
+    for (std::uint32_t i = 0; i < count; ++i)
+    {
+        const auto value = (i * 17u) % count;
+        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership, value, count),
+            "first dense batch resource must be appended");
+        expected.push_back(value);
+    }
+    for (std::uint32_t i = count; i > 0; --i)
+        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership, expected[i - 1], count),
+            "duplicate dense batch resource must be rejected");
+    Check(ordered.size() == expected.size(), "batch membership preserves unique resource count");
+    for (std::size_t i = 0; i < ordered.size(); ++i)
+        Check(ordered[i] == expected[i], "batch membership preserves first-use order");
+}
+
+void ResourceAliasPatterns()
+{
+    std::array<int, 4> natives{};
+    std::vector<hs::render_graph::ResourceAlias> scratch;
+    const auto groups = [&](const std::array<const void *, 7> &resources) {
+        scratch.clear();
+        for (std::uint32_t index = 0; index < resources.size(); ++index)
+            scratch.push_back({resources[index], index, 0u});
+        hs::render_graph::CanonicalizeResourceAliases(scratch);
+        std::array<std::uint32_t, 7> result{};
+        for (const auto &alias : scratch) result[alias.index] = alias.group;
+        return result;
+    };
+    const auto expected = groups({nullptr, &natives[0], &natives[1], &natives[0], &natives[2], &natives[1], nullptr});
+    Check(expected[0] == 0 && expected[6] == 0 && expected[1] != 0 &&
+        expected[1] == expected[3] && expected[2] == expected[5] &&
+        expected[1] != expected[2] && expected[1] != expected[4] && expected[2] != expected[4],
+        "native aliases preserve equality while distinct and absent resources stay separate");
+    Check(groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[0], nullptr}) == expected,
+        "rotating native addresses with the same equality pattern preserves the frontend variant");
+    const auto distinct = groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[2], nullptr});
+    Check(distinct != expected && distinct[5] != distinct[2],
+        "splitting a native alias changes the retained graph identity");
+    Check(groups({}) == std::array<std::uint32_t, 7>{}, "absent resources have no alias group");
+    scratch.clear();
+    hs::render_graph::CanonicalizeResourceAliases(scratch);
+    Check(scratch.empty(), "an empty graph needs no alias storage");
+}
+
+void BatchResourceMembership()
+{
+    for (const auto count : {0u, 1u, 64u, 65u, 130u})
+        CheckBatchResourceMembership(count);
+
+    std::vector<std::uint32_t> first, second;
+    std::vector<std::uint64_t> first_membership(3), second_membership(3);
+    for (const auto value : {0u, 63u, 64u, 129u})
+    {
+        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, value, 130),
+            "first batch inserts a member at each tested word boundary");
+        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u - value, 130),
+            "second batch keeps independent membership bits");
+    }
+    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 130) &&
+          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 65u, 130),
+          "each batch rejects only its own duplicates");
+    hs::render_graph::ResetBatchResourceMembership(first, first_membership);
+    Check(first.empty(),
+          "reset clears prior batch members");
+    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65) &&
+          !hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65),
+          "reset permits a new insertion and detects it at the 64/65 word boundary");
+    std::vector<std::uint32_t> growing_order;
+    std::vector<std::uint64_t> growing_membership;
+    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 65);
+    Check(hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 64u, 65),
+          "membership supports the first resource beyond a word boundary");
+    hs::render_graph::ResetBatchResourceMembership(growing_order, growing_membership);
+    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 130);
+    Check(hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130) &&
+          !hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130),
+          "growth initializes a new word while preserving reset semantics");
+    hs::render_graph::ResetBatchResourceMembership(second, second_membership);
+    Check(second.empty() && hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u, 130),
+          "independent batches can reset and reuse the same dense resource indices");
+}
+
 void HeroProjectedCoverage()
 {
-    using hs::renderer_detail::HeroCoverageProjection;
-    using hs::renderer_detail::HeroProjectedBounds;
-    using hs::renderer_detail::ProjectHeroSphere;
-    using Kind = HeroProjectedBounds::Kind;
-    const HeroCoverageProjection view{1920, 1080, 1.1, 1.7, 0.0002, -0.0003, 0.1, 300};
-    Check(ProjectHeroSphere(view, 0, 0, 5, 0.5).kind == Kind::Visible, "visible Hero rejected");
+    using hs::renderer_detail::TranslucencyCoverageProjection;
+    using hs::renderer_detail::TranslucencyProjectedBounds;
+    using hs::renderer_detail::ProjectTranslucencySphere;
+    using Kind = TranslucencyProjectedBounds::Kind;
+    const TranslucencyCoverageProjection view{1920, 1080, 1.1, 1.7, 0.0002, -0.0003, 0.1, 300};
+    Check(ProjectTranslucencySphere(view, 0, 0, 5, 0.5).kind == Kind::Visible, "visible translucent sphere rejected");
     const std::array<std::array<double, 3>, 6> clipped{{{50., 0., 5.}, {-50., 0., 5.},
         {0., 50., 5.}, {0., -50., 5.}, {0., 0., -10.}, {0., 0., 400.}}};
     for (const auto center : clipped)
-        Check(ProjectHeroSphere(view, center[0], center[1], center[2], 0.5).kind == Kind::Outside,
+        Check(ProjectTranslucencySphere(view, center[0], center[1], center[2], 0.5).kind == Kind::Outside,
             "fully clipped Hero not proven empty");
-    Check(ProjectHeroSphere(view, 0, 0, 0.5, 0.5).kind == Kind::Unknown &&
-        ProjectHeroSphere(view, 0, 0, 299.8, 0.5).kind == Kind::Unknown,
+    Check(ProjectTranslucencySphere(view, 0, 0, 0.5, 0.5).kind == Kind::Unknown &&
+        ProjectTranslucencySphere(view, 0, 0, 299.8, 0.5).kind == Kind::Unknown,
         "clip-crossing Hero must retain the full path");
-    const auto edge = ProjectHeroSphere(view, 3.5, 0, 5, 1);
+    const auto edge = ProjectTranslucencySphere(view, 3.5, 0, 5, 1);
     Check(edge.kind == Kind::Visible && edge.right == 1920 && edge.left < edge.right,
         "partially visible Hero was culled or left the viewport");
-    Check(ProjectHeroSphere(view, 0, 0, 5, -1).kind == Kind::Unknown &&
-        ProjectHeroSphere(view, 0, 0, 5, std::numeric_limits<double>::infinity()).kind == Kind::Unknown &&
-        ProjectHeroSphere(view, std::numeric_limits<double>::quiet_NaN(), 0, 5, 1).kind == Kind::Unknown,
+    Check(ProjectTranslucencySphere(view, 0, 0, 5, -1).kind == Kind::Unknown &&
+        ProjectTranslucencySphere(view, 0, 0, 5, std::numeric_limits<double>::infinity()).kind == Kind::Unknown &&
+        ProjectTranslucencySphere(view, std::numeric_limits<double>::quiet_NaN(), 0, 5, 1).kind == Kind::Unknown,
         "uncertain Hero bounds must not authorize culling");
     std::mt19937 random(0x4845524f);
     std::uniform_real_distribution<double> unit(0, 1);
@@ -59,7 +147,7 @@ void HeroProjectedCoverage()
             current.jitter_y = (unit(random) - 0.5) * 2 / current.height;
             const double x = unit(random) * 60 - 30, y = unit(random) * 40 - 20;
             const double z = unit(random) * 49 + 1, radius = unit(random) * 2 + 0.01;
-            const auto bounds = ProjectHeroSphere(current, x, y, z, radius);
+            const auto bounds = ProjectTranslucencySphere(current, x, y, z, radius);
             for (unsigned point = 0; point < 32; ++point)
             {
                 const double cosine = unit(random) * 2 - 1, angle = unit(random) * 6.283185307179586;
@@ -868,6 +956,7 @@ int main()
 {
     try
     {
+        BatchResourceMembership(); ResourceAliasPatterns();
         HeroProjectedCoverage(); ExplicitDagOrdering();
         BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
         QueueAccessPolicy(); PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();

@@ -96,8 +96,10 @@ void TestRelicDataIsCookedFromJson()
     const auto metadata_id = "render/character/" + std::string(asset) + ".rpkg";
     const auto page_id = "render/geometry/character/" + std::string(asset) + ".rpage";
     // Monsters use whole-body animation; only the archer requires two mask regions.
+    const auto metadata_bytes = read_product(metadata_id);
+    const auto package = hs::render_data::ReadPackage(metadata_bytes, hs::MakeAssetId(metadata_id));
     const auto character = hs::render_data::DecodeCharacterMetadataPackage(
-        read_product(metadata_id), hs::MakeAssetId(metadata_id), false);
+        metadata_bytes, hs::MakeAssetId(metadata_id), false);
     const auto geometry = hs::render_data::DecodeGeometryPage(
         read_product(page_id), hs::MakeAssetId(page_id), character.geometry);
     hs::render_data::ValidateCharacterGeometry(character, geometry);
@@ -141,9 +143,23 @@ void TestRelicDataIsCookedFromJson()
     Check(character.monster.has_value() && character.transforms.empty(),
           "Slime products contain cooked final palettes without duplicate runtime TRS reconstruction");
     const auto &deformation = *character.monster;
-    Check(deformation.bone_count == character.bone_count && deformation.lods.size() == 1 &&
+    Check(deformation.bone_count == character.bone_count && !deformation.lods.empty() &&
               deformation.lods.front().lod == 0 && !deformation.interval_bounds.empty(),
           "Slime final palettes retain their actual LOD0 and interval directory");
+    if (std::string_view(asset) == "enemy_melee" || std::string_view(asset) == "enemy_ranged")
+        Check(deformation.lods.size() > 1, "Melee and ranged Slime products contain reduced geometry");
+    for (std::size_t lod = 1; lod < deformation.lods.size(); ++lod)
+    {
+        const auto &entry = deformation.lods[lod];
+        const auto &id = package.dependencies[entry.page_dependency_index];
+        const auto reduced = hs::render_data::DecodeGeometryPage(read_product(id), hs::MakeAssetId(id), entry);
+        auto view = character;
+        view.geometry = entry;
+        hs::render_data::ValidateCharacterGeometry(view, reduced);
+        Check(entry.index_count < deformation.lods[lod - 1].index_count &&
+              entry.vertex_count < deformation.lods[lod - 1].vertex_count,
+              "Slime LOD pages strictly reduce geometry");
+    }
     Check(parents.front() == std::numeric_limits<std::uint16_t>::max(),
           "Slime root remains the hierarchy root");
     // Uploaded skin = transpose(global) * inverse_bind. Solve the bind origin

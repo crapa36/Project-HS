@@ -494,11 +494,11 @@ void TestMaterialDescriptors()
     {
         const auto id="render/material/"+name+"/material.rpkg";
         const auto parameter_id=rd::MaterialParametersProduct(id);
-        std::array<std::string,4> ids{"render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
-            "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil"};
-        const std::array hero_programs{rd::MaterialProgramSource{ids[0],rd::MaterialProgramKind::HeroScenePS},
-            rd::MaterialProgramSource{ids[1],rd::MaterialProgramKind::HeroVisibilityPS},
-            rd::MaterialProgramSource{ids[2],rd::MaterialProgramKind::HeroSurfaceResolveCS},rd::MaterialProgramSource{ids[3],rd::MaterialProgramKind::HeroShadowPS}};
+        std::array<std::string,4> ids{"render/shader/character_scene_ps.dxil", "render/shader/character_visibility_ps.dxil",
+            "render/shader/character_resolve_cs.dxil", "render/shader/character_shadow_ps.dxil"};
+        const std::array hero_programs{rd::MaterialProgramSource{ids[0],rd::MaterialProgramKind::CharacterScenePS},
+            rd::MaterialProgramSource{ids[1],rd::MaterialProgramKind::CharacterVisibilityPS},
+            rd::MaterialProgramSource{ids[2],rd::MaterialProgramKind::CharacterSurfaceResolveCS},rd::MaterialProgramSource{ids[3],rd::MaterialProgramKind::CharacterShadowPS}};
         const auto hero_bytes=rd::BuildCharacterMaterialPackage(name,parameters,surface,hero_programs);
         const auto hero=rd::ReadCharacterMaterialPackage(hero_bytes,name);
         if(name=="monster_pbr") for(const auto *suffix:{"monster_basecolor","monster_emissive","monster_ram"}) {
@@ -513,7 +513,7 @@ void TestMaterialDescriptors()
                 "Hero descriptor changed domain or claimed fixed adapter texture ownership");
     }
     const std::array translucent_program{rd::MaterialProgramSource{
-        "render/shader/hero_translucent_ps.dxil", rd::MaterialProgramKind::HeroTranslucentPS}};
+        "render/shader/character_translucent_ps.dxil", rd::MaterialProgramKind::CharacterTranslucentPS}};
     const auto translucent_package = rd::BuildCharacterMaterialPackage("slime_body", parameters,
         {257u, 0u}, translucent_program);
     Require(rd::ReadCharacterMaterialPackage(translucent_package, "slime_body").domain ==
@@ -554,6 +554,20 @@ void TestDecalMaterialPackages()
         const std::string source{std::istreambuf_iterator<char>(file), {}};
         const auto graph = hs::material_content::ParseDecalMaterialGraph(name, source);
         const auto prepared = rd::PrepareMaterial(graph, rd::MaterialPreparationDomain::Decal);
+        const auto decal_demand = rd::AnalyzeContextDemand(prepared);
+        const auto decal_mask = rd::MaterialContextInputMask(rd::MaterialContextInput::Uv) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::DUvDx) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::DUvDy) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::Layer) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::Seed) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::Normal) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::SampledBaseColor) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::SampledRoughness) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::DecalTintHdr) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::DecalProjector) |
+            rd::MaterialContextInputMask(rd::MaterialContextInput::DecalShape);
+        Require(decal_demand.surface_mask == decal_mask && decal_demand.opacity_mask == 0,
+                "decal demand disagrees with its live projected closure");
         Require(prepared.Graph().kind == graph.kind &&
                 rd::EmitDecalMaterialContextHlsl(graph, "HsDecalSurface", 9) ==
                     rd::EmitDecalMaterialContextHlsl(prepared, "HsDecalSurface", 9),
@@ -1289,6 +1303,35 @@ void TestMaterialLogicAndOptimizer()
     const auto hlsl = NumericHlsl(graph);
     Require(hlsl.find("float4") == std::string::npos &&
             hlsl.find("float3") == std::string::npos, "unused vector output leaked into the roughness function");
+
+    auto demand_graph = NumericGraph();
+    demand_graph.kind = rd::MaterialGraphKind::Opaque;
+    const auto scale = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::RoughnessScale);
+    const auto selected_a = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::Add, {1, scale});
+    const auto selected_b = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::Add, {1, scale});
+    const auto selected = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::Multiply,
+                                       {selected_a, selected_b});
+    const auto unused = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::Context);
+    demand_graph.nodes[unused].context_input = rd::MaterialContextInput::EyeDistance;
+    const auto choose = MaterialNode(demand_graph, rd::MaterialType::Bool, rd::MaterialOp::Constant);
+    demand_graph.nodes[choose].bool_value = true;
+    demand_graph.roughness_output = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::Select,
+                                                {choose, selected, unused});
+    const auto alpha = MaterialNode(demand_graph, rd::MaterialType::Float, rd::MaterialOp::SampledAlpha);
+    demand_graph.opacity_output = alpha;
+    const auto mask = rd::MaterialContextInputMask;
+    const auto expected_surface = mask(rd::MaterialContextInput::SampledBaseColor) |
+        mask(rd::MaterialContextInput::SampledRoughness) | mask(rd::MaterialContextInput::RoughnessScale) |
+        mask(rd::MaterialContextInput::Metallic) | mask(rd::MaterialContextInput::Normal) |
+        mask(rd::MaterialContextInput::SampledAo);
+    const auto opaque_demand = rd::AnalyzeContextDemand(rd::PrepareMaterial(demand_graph));
+    Require(opaque_demand.surface_mask == expected_surface && opaque_demand.opacity_mask == 0,
+            "optimized opaque context demand retained a dead branch or missed fallback inputs");
+    demand_graph.kind = rd::MaterialGraphKind::Masked;
+    const auto masked_demand = rd::AnalyzeContextDemand(rd::PrepareMaterial(demand_graph));
+    Require(masked_demand.opacity_mask == mask(rd::MaterialContextInput::SampledAlpha) &&
+            masked_demand.surface_mask == (expected_surface | masked_demand.opacity_mask),
+            "masked context demand omitted opacity or included an unused field");
 }
 
 void TestUnsafeMaterialGraphs()
@@ -1619,6 +1662,17 @@ void TestAuthoredTerrainMaterial()
             "terrain schema fixture lost its v6 resource contract");
     const auto definition = mc::ParseMaterialDefinition("terrain", source);
     const auto &graph = definition.prepared.Graph();
+    const auto terrain_demand = rd::AnalyzeContextDemand(definition.prepared);
+    const auto terrain_mask = rd::MaterialContextInputMask(rd::MaterialContextInput::Uv) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::ActualWorldPosition) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::DActualWorldDx) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::DActualWorldDy) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::Mesh) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::Seed) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::ViewDirection) |
+        rd::MaterialContextInputMask(rd::MaterialContextInput::EyeDistance);
+    Require(terrain_demand.surface_mask == terrain_mask && terrain_demand.opacity_mask == 0,
+            "terrain demand missed implicit UV or explicit stochastic inputs");
     Require(mc::IsAuthoredMaterialName("terrain") && !mc::IsEnvironmentMaterialName("terrain") &&
             graph.kind == rd::MaterialGraphKind::Terrain && graph.textures.size() == 6 &&
             graph.samplers.size() == 2 && graph.terrain_output != rd::kNoMaterialInput &&
@@ -1822,6 +1876,21 @@ void TestSurfaceClosure()
             "prepared environment context emitter changed generated source");
     const auto hero_prepared = rd::PrepareMaterial(constant_closures,
         rd::MaterialPreparationDomain::Hero);
+    auto hero_opacity_graph = constant_closures;
+    auto hero_closure = hero_opacity_graph.nodes.back();
+    hero_opacity_graph.nodes.pop_back();
+    const auto hero_alpha = MaterialNode(hero_opacity_graph, rd::MaterialType::Float, rd::MaterialOp::SampledAlpha);
+    hero_closure.id = "hero_opacity_closure";
+    hero_closure.inputs[5] = hero_alpha;
+    hero_opacity_graph.closure_output = hero_opacity_graph.nodes.size();
+    hero_opacity_graph.nodes.push_back(hero_closure);
+    const auto hero_demand = rd::AnalyzeContextDemand(rd::PrepareMaterial(hero_opacity_graph,
+        rd::MaterialPreparationDomain::Hero));
+    const auto environment_demand = rd::AnalyzeContextDemand(rd::PrepareMaterial(hero_opacity_graph,
+        rd::MaterialPreparationDomain::Environment));
+    Require(hero_demand.opacity_mask == rd::MaterialContextInputMask(rd::MaterialContextInput::SampledAlpha) &&
+            environment_demand.opacity_mask == 0 && hero_demand.surface_mask == environment_demand.surface_mask,
+            "hero and environment opacity evaluators require different masks for opaque closures");
     Require(rd::EmitCharacterMaterialContextHlsl(constant_closures, "HsHeroSurface", "HsHeroOpacity") ==
             rd::EmitCharacterMaterialContextHlsl(hero_prepared, "HsHeroSurface", "HsHeroOpacity"),
             "prepared hero context emitter changed generated source");
@@ -2642,7 +2711,7 @@ void TestTranslucencyDiagnosticsRawDecoding()
 {
     hs::TranslucencyDiagnosticsShaderLayout layout;
     Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
-        layout.contributor_bytes == 512 && layout.phase_bytes == 11264 && layout.total_bytes == 247808,
+        layout.contributor_bytes == 512 && layout.phase_bytes == 11264 && layout.total_bytes == 180224,
         "hero two exact bitmaps/header/aligned stride/slot total");
     Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
         layout.total_bytes <= hs::kTranslucencyDiagnosticsShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
@@ -3176,7 +3245,8 @@ void TestTexturePackage()
 {
     {
         const auto terrain_asset = hs::MakeAssetId("render/terrain-surface/test.rpkg");
-        const std::vector<std::string> products{"render/terrain/section-z.rpkg", "render/terrain/section-a.rpkg"};
+        const std::vector<std::string> products{"render/terrain/z0.rpkg", "render/terrain/z1.rpkg", "render/terrain/z2.rpkg",
+            "render/terrain/a0.rpkg", "render/terrain/a1.rpkg", "render/terrain/a2.rpkg"};
         const std::array sections{
             rd::TerrainSurfaceSection{1, 2, -3, 4, 1, 0, 22, 123},
             rd::TerrainSurfaceSection{-5, 6, 7, 8, 0, 1, 20, 456}};
@@ -3189,15 +3259,34 @@ void TestTexturePackage()
             parsed.sections[1].x == -5 && parsed.sections[1].seed == 456 &&
             parsed.section_products == products && parsed.description.array_size == 6 &&
             parsed.description.mip_count == 2 && parsed.source_identity == identity &&
-            parsed.layout_version == rd::kTerrainSurfaceLayoutVersion,
+            parsed.layout_version == rd::kTerrainSurfaceLeafLayoutVersion,
             "terrain ordered sections, source identity and product dependencies roundtrip");
+        const std::vector<std::string> leaves{"render/terrain/z-leaf.rpkg", "render/terrain/a-leaf.rpkg"};
+        const auto index = rd::BuildTerrainSurfaceIndex(terrain_asset, leaves, sections, description, identity);
+        const auto index_view = rd::ReadTerrainSurfacePackage(index, terrain_asset);
+        Require(index_view.layout_version == rd::kTerrainSurfaceLayoutVersion && index_view.sections ==
+            std::vector<rd::TerrainSurfaceSection>(sections.begin(), sections.end()) &&
+            index_view.section_products == leaves && index_view.source_identity == identity,
+            "terrain index did not preserve tile and leaf order");
+        for (std::size_t i = 0; i < sections.size(); ++i)
+        {
+            const auto leaf_asset = hs::MakeAssetId(leaves[i]);
+            auto leaf_shape = description; leaf_shape.array_size = 3;
+            const auto leaf = rd::BuildTerrainSurfacePackage(leaf_asset,
+                std::span(products).subspan(i * 3, 3), std::span(sections).subspan(i, 1), leaf_shape, identity);
+            const auto leaf_view = rd::ReadTerrainSurfacePackage(leaf, hs::MakeAssetId(index_view.section_products[i]));
+            Require(leaf_view.layout_version == rd::kTerrainSurfaceLeafLayoutVersion &&
+                leaf_view.sections[0] == index_view.sections[i] && leaf_view.section_products ==
+                    std::vector<std::string>(products.begin() + i * 3, products.begin() + i * 3 + 3),
+                "terrain index leaf does not preserve tile and plane mapping");
+        }
         identity[7] = std::byte{0x5b};
-        auto compressed = description; compressed.width = compressed.height = 2048;
-        compressed.mip_count = 12; compressed.format = rd::kTextureFormatBc7;
+        auto compressed = description; compressed.width = compressed.height = 4096;
+        compressed.mip_count = 13; compressed.format = rd::kTextureFormatBc7;
         const auto compressed_package = rd::BuildTerrainSurfacePackage(
             terrain_asset, products, sections, compressed, identity);
         const auto compressed_view = rd::ReadTerrainSurfacePackage(compressed_package, terrain_asset);
-        Require(compressed_view.description.width == 2048 &&
+        Require(compressed_view.description.width == 4096 && compressed_view.description.mip_count == 13 &&
             compressed_view.description.format == rd::kTextureFormatBc7 &&
             compressed_view.section_products == products,
             "compressed terrain shape and section mapping roundtrip");
@@ -3220,39 +3309,130 @@ void TestTexturePackage()
         const std::vector<rd::TerrainSurfaceSection> too_many(65, sections[0]);
         Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, products, too_many, description, identity); },
             "overflow terrain section count accepted");
+        const std::vector<rd::TerrainSurfaceSection> maximum_sections(21, sections[0]);
+        std::vector<std::string> maximum_products;
+        for (std::size_t i = 0; i < maximum_sections.size() * 3; ++i)
+            maximum_products.push_back("render/terrain/plane-" + std::to_string(i) + ".rpkg");
+        auto maximum_shape = description; maximum_shape.array_size = 21 * 3;
+        const auto maximum_package = rd::BuildTerrainSurfacePackage(
+            terrain_asset, maximum_products, maximum_sections, maximum_shape, identity);
+        Require(rd::ReadTerrainSurfacePackage(maximum_package, terrain_asset).section_products == maximum_products,
+            "maximum terrain section and plane dependency count did not roundtrip");
+        auto overflow_sections = maximum_sections; overflow_sections.push_back(sections[0]);
+        maximum_products.insert(maximum_products.end(), {"render/terrain/extra0.rpkg",
+            "render/terrain/extra1.rpkg", "render/terrain/extra2.rpkg"});
+        maximum_shape.array_size = 22 * 3;
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(
+            terrain_asset, maximum_products, overflow_sections, maximum_shape, identity); },
+            "split terrain sections exceeded package dependency limit");
+        const std::vector<rd::TerrainSurfaceSection> index_sections(64, sections[0]);
+        std::vector<std::string> index_products;
+        for (std::size_t i = 0; i < index_sections.size(); ++i)
+            index_products.push_back("render/terrain/leaf-" + std::to_string(i) + ".rpkg");
+        auto index_shape = description; index_shape.array_size = 64 * 3;
+        const auto full_index = rd::BuildTerrainSurfaceIndex(
+            terrain_asset, index_products, index_sections, index_shape, identity);
+        Require(rd::ReadTerrainSurfacePackage(full_index, terrain_asset).section_products == index_products,
+            "maximum terrain tile index did not roundtrip");
+        auto duplicate_products = products;
+        duplicate_products[2] = duplicate_products[0];
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset, duplicate_products, sections, description, identity); },
+            "duplicate terrain plane product accepted");
+        Reject([&] { (void)rd::BuildTerrainSurfacePackage(terrain_asset,
+            std::span(products).first(2), sections, description, identity); },
+            "missing terrain plane products accepted");
+        const std::array tile_sources{rd::TerrainSurfaceSection{10, 20, 48, 24, 0, 1, 22, 123},
+            rd::TerrainSurfaceSection{1, 2, -24, -48, 1, 0, 20, 456}};
+        const auto tiles = rd::BuildTerrainSurfaceTiles(tile_sources);
+        Require(tiles.size() == 4 && tiles[0].source_index == 0 && tiles[0].x == 0 && tiles[0].y == 0 &&
+            tiles[0].count_x == 2 && tiles[0].count_y == 1 && tiles[0].section.x == 10 &&
+            tiles[0].section.z == 32 && tiles[1].section.z == 8 && tiles[0].section.span_x == 24 &&
+            tiles[2].source_index == 1 && tiles[2].x == 0 && tiles[2].y == 0 &&
+            tiles[2].count_x == 1 && tiles[2].count_y == 2 && tiles[2].section.z == 14 &&
+            tiles[3].section.z == -10 && tiles[2].section.span_x == -24 && tiles[2].section.span_z == -24 &&
+            tiles[2].section.mesh == 20 && tiles[2].section.seed == 456,
+            "terrain tiles changed rotated or mirrored placement and order");
+        auto invalid_tile = tile_sources[0]; invalid_tile.span_x = 0;
+        Reject([&] { (void)rd::BuildTerrainSurfaceTiles(std::span(&invalid_tile, 1)); }, "zero tile span accepted");
+        invalid_tile.span_x = std::numeric_limits<float>::infinity();
+        Reject([&] { (void)rd::BuildTerrainSurfaceTiles(std::span(&invalid_tile, 1)); }, "nonfinite tile span accepted");
+        invalid_tile.span_x = 24 * 65;
+        Reject([&] { (void)rd::BuildTerrainSurfaceTiles(std::span(&invalid_tile, 1)); }, "too many tiles accepted");
         const auto admitted = rd::ReadPackage(terrain, terrain_asset);
         auto table = std::vector<std::byte>(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        auto legacy_dependencies = std::vector<std::string>{products[0], products[3]};
+        std::ranges::sort(legacy_dependencies);
+        table.resize(68 + 2 * 32 + 2 * 4);
+        table[4] = std::byte{1};
         table[12] = std::byte{0};
+        table[68 + 2 * 32] = std::byte{1};
+        table[68 + 2 * 32 + 4] = std::byte{0};
+        std::fill_n(table.begin() + 68 + 2 * 32 + 1, 3, std::byte{0});
+        std::fill_n(table.begin() + 68 + 2 * 32 + 5, 3, std::byte{0});
         const std::array legacy_chunks{rd::ChunkSource{
             static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
-        const auto legacy = rd::BuildPackage(terrain_asset, admitted.dependencies, legacy_chunks);
+        const auto legacy = rd::BuildPackage(terrain_asset, legacy_dependencies, legacy_chunks);
         const auto legacy_view = rd::ReadTerrainSurfacePackage(legacy, terrain_asset);
-        Require(legacy_view.layout_version == 1 && legacy_view.section_products == products &&
+        Require(legacy_view.layout_version == 1 && legacy_view.section_products == std::vector<std::string>{products[0], products[3]} &&
             legacy_view.source_identity == parsed.source_identity, "legacy terrain surface layout did not decode");
-        table[12] = std::byte{1};
-        const std::array unknown_chunks{rd::ChunkSource{
+        table[12] = std::byte{2};
+        const std::array layout2_chunks{rd::ChunkSource{
             static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        const auto layout2 = rd::BuildPackage(terrain_asset, legacy_dependencies, layout2_chunks);
+        Require(rd::ReadTerrainSurfacePackage(layout2, terrain_asset).layout_version == 2,
+            "layout 2 terrain surface did not decode for fallback");
+        table[12] = std::byte{3};
+        const std::array layout3_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+        Require(rd::ReadTerrainSurfacePackage(rd::BuildPackage(terrain_asset, legacy_dependencies, layout3_chunks),
+            terrain_asset).layout_version == 3, "layout 3 terrain surface did not decode for fallback");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        table[12] = std::byte{6};
+        const std::array unknown_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
         const auto unknown = rd::BuildPackage(terrain_asset, admitted.dependencies, unknown_chunks);
         Reject([&] { (void)rd::ReadTerrainSurfacePackage(unknown, terrain_asset); },
             "unknown terrain surface layout accepted");
+        table[12] = std::byte{3};
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(
+            rd::BuildPackage(terrain_asset, admitted.dependencies, unknown_chunks), terrain_asset); },
+            "legacy terrain layout accepted with split-plane wire version");
         table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
         table[8] = std::byte{0xff}; table[9] = std::byte{0xff};
         const std::array invalid_chunks{rd::ChunkSource{
-            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
         const auto invalid = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_chunks);
         Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid, terrain_asset); },
             "malformed terrain section count accepted");
         table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
         table[68 + 2 * 32] = std::byte{0xff};
         const std::array invalid_indices{rd::ChunkSource{
-            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
         const auto invalid_mapping = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_indices);
         Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid_mapping, terrain_asset); },
             "invalid terrain product index accepted");
         table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        std::copy_n(table.begin() + 68 + 2 * 32, 4, table.begin() + 68 + 2 * 32 + 4);
+        const std::array duplicate_indices{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(
+            rd::BuildPackage(terrain_asset, admitted.dependencies, duplicate_indices), terrain_asset); },
+            "duplicate terrain product index accepted");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
+        table[4] = std::byte{1};
+        const std::array mismatch_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(
+            rd::BuildPackage(terrain_asset, admitted.dependencies, mismatch_chunks), terrain_asset); },
+            "mismatched terrain header and chunk versions accepted");
+        table[4] = std::byte{4};
+        Reject([&] { (void)rd::ReadTerrainSurfacePackage(
+            rd::BuildPackage(terrain_asset, admitted.dependencies, mismatch_chunks), terrain_asset); },
+            "unknown terrain header version accepted");
+        table.assign(admitted.chunks[0].bytes.begin(), admitted.chunks[0].bytes.end());
         std::fill_n(table.begin() + 68 + 8, 4, std::byte{0});
         const std::array invalid_span{rd::ChunkSource{
-            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 1, true, table, table.size(), 1}};
+            static_cast<std::uint32_t>(rd::ChunkType::TerrainSurfaceSections), 2, true, table, table.size(), 1}};
         const auto invalid_record = rd::BuildPackage(terrain_asset, admitted.dependencies, invalid_span);
         Reject([&] { (void)rd::ReadTerrainSurfacePackage(invalid_record, terrain_asset); },
             "decoded zero terrain span accepted");

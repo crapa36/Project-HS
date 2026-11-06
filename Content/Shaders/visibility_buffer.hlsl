@@ -172,7 +172,7 @@ HsVisibilityOutput HsVisibilityPSImpl(SceneOutput input, bool front,
         clip(-1.0);
     const HsSceneGradients gradients = RasterSceneGradients(input);
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
-    if (!HsHeroSceneCovered(input, front, gradients))
+    if (!HsCharacterSceneCovered(input, front, gradients))
 #else
     if (!HsSceneCovered(input, front, environmentOpaque, gradients, SceneDrawMaterial))
 #endif
@@ -223,7 +223,7 @@ HsVisibilityOutput EnvironmentMaskedVisibilityPS(
 }
 
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
-HsVisibilityOutput HeroVisibilityPS(SceneOutput input, bool front : SV_IsFrontFace,
+HsVisibilityOutput CharacterVisibilityPS(SceneOutput input, bool front : SV_IsFrontFace,
     uint primitiveId : SV_PrimitiveID)
 {
     return HsVisibilityPSImpl(input, front, false, primitiveId);
@@ -351,26 +351,79 @@ float2 HsGradient2(float2 a, float2 b, float2 c, float3 derivative)
     return a * derivative.x + b * derivative.y + c * derivative.z;
 }
 
+static const uint HsResolveUv = 1u;
+static const uint HsResolveColor = 2u;
+static const uint HsResolveWorld = 4u;
+static const uint HsResolveStable = 8u;
+static const uint HsResolveWorldGradients = 16u;
+static const uint HsResolveStableGradients = 32u;
+
+uint HsResolveVaryingDemand(uint variant, uint mesh)
+{
+#if defined(HS_GENERATED_CHARACTER_MATERIAL) || defined(HS_GENERATED_ENVIRONMENT_MATERIAL)
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
+    const uint mask = HsCharacterSurfaceContextDemand(variant - HsCharacterVisibilityVariantBegin) |
+        HsContextShadingNormal | HsContextTangent;
+    const uint sampled = HsContextSampledBaseColor | HsContextSampledRoughness |
+        HsContextSampledAlpha | HsContextSampledAo | HsContextSampledMetallic |
+        HsContextSampledEmission | HsContextShadingNormal;
+#else
+    const uint mask = HsEnvironmentSurfaceContextDemand();
+    const uint sampled = 0u;
+#endif
+    uint demand = 0u;
+    if ((mask & (HsContextUv | HsContextDUvDx | HsContextDUvDy | sampled)) != 0u)
+        demand |= HsResolveUv;
+    if ((mask & (HsContextActualWorldPosition | HsContextEyeDistance | HsContextViewDirection)) != 0u)
+        demand |= HsResolveWorld;
+    if ((mask & (HsContextDActualWorldDx | HsContextDActualWorldDy)) != 0u)
+        demand |= HsResolveWorldGradients;
+#ifdef HS_GENERATED_CHARACTER_MATERIAL
+    // Character stable coordinates use the same deformed world basis.
+    if ((mask & HsContextStableWorldPosition) != 0u)
+        demand |= HsResolveWorld;
+    if ((mask & (HsContextDStableWorldDx | HsContextDStableWorldDy)) != 0u)
+        demand |= HsResolveWorldGradients;
+#else
+    if ((mask & HsContextSampledBaseColor) != 0u)
+        demand |= HsResolveColor;
+    if ((mask & HsContextStableWorldPosition) != 0u || mesh == 19u)
+        demand |= HsResolveStable;
+    if ((mask & (HsContextDStableWorldDx | HsContextDStableWorldDy)) != 0u)
+        demand |= HsResolveStableGradients;
+    if ((LodClock.w & 1u) != 0u && (mesh == 9u || mesh == 20u))
+        demand |= HsResolveStable | HsResolveStableGradients;
+#endif
+    return demand;
+#else
+    return 63u;
+#endif
+}
+
 SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c,
-                                     HsTriangleSample sample, uint2 pixel)
+                                     HsTriangleSample sample, uint2 pixel, uint demand)
 {
     SceneOutput output = (SceneOutput)0;
     output.Position = float4((float2)pixel + 0.5,
         SurfaceDepth.Load(int3(pixel, 0)), rcp(sample.clipW));
     output.WorldNormal = normalize(HsInterpolate3(a.WorldNormal, b.WorldNormal,
                                                    c.WorldNormal, sample.barycentric));
-    output.WorldPosition = HsInterpolate3(a.WorldPosition, b.WorldPosition,
-                                           c.WorldPosition, sample.barycentric);
+    if ((demand & HsResolveWorld) != 0u)
+        output.WorldPosition = HsInterpolate3(a.WorldPosition, b.WorldPosition,
+                                               c.WorldPosition, sample.barycentric);
     output.PreviousUnjitteredClipPosition = a.PreviousUnjitteredClipPosition * sample.barycentric.x +
         b.PreviousUnjitteredClipPosition * sample.barycentric.y + c.PreviousUnjitteredClipPosition * sample.barycentric.z;
-    output.Color = a.Color * sample.barycentric.x + b.Color * sample.barycentric.y +
-                   c.Color * sample.barycentric.z;
-    output.Uv = HsInterpolate2(a.Uv, b.Uv, c.Uv, sample.barycentric);
+    if ((demand & HsResolveColor) != 0u)
+        output.Color = a.Color * sample.barycentric.x + b.Color * sample.barycentric.y +
+                       c.Color * sample.barycentric.z;
+    if ((demand & HsResolveUv) != 0u)
+        output.Uv = HsInterpolate2(a.Uv, b.Uv, c.Uv, sample.barycentric);
     output.WorldTangent = a.WorldTangent * sample.barycentric.x +
                           b.WorldTangent * sample.barycentric.y +
                           c.WorldTangent * sample.barycentric.z;
-    output.EnvironmentStableWorld = HsInterpolate3(a.EnvironmentStableWorld,
-        b.EnvironmentStableWorld, c.EnvironmentStableWorld, sample.barycentric);
+    if ((demand & HsResolveStable) != 0u)
+        output.EnvironmentStableWorld = HsInterpolate3(a.EnvironmentStableWorld,
+            b.EnvironmentStableWorld, c.EnvironmentStableWorld, sample.barycentric);
     output.Mesh = a.Mesh;
     output.Material = a.Material;
     output.Charge = a.Charge;
@@ -389,21 +442,30 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
 
 HsSceneGradients HsInterpolateSceneGradients(SceneOutput a, SceneOutput b,
                                              SceneOutput c,
-                                             HsTriangleSample sample)
+                                             HsTriangleSample sample, uint demand)
 {
-    HsSceneGradients gradients;
-    gradients.uvDx = HsGradient2(a.Uv, b.Uv, c.Uv, sample.dx);
-    gradients.uvDy = HsGradient2(a.Uv, b.Uv, c.Uv, sample.dy);
-    gradients.worldDx = HsGradient3(a.WorldPosition, b.WorldPosition,
-                                     c.WorldPosition, sample.dx);
-    gradients.worldDy = HsGradient3(a.WorldPosition, b.WorldPosition,
-                                     c.WorldPosition, sample.dy);
-    gradients.stableDx = HsGradient3(a.EnvironmentStableWorld,
-                                     b.EnvironmentStableWorld,
-                                     c.EnvironmentStableWorld, sample.dx);
-    gradients.stableDy = HsGradient3(a.EnvironmentStableWorld,
-                                     b.EnvironmentStableWorld,
-                                     c.EnvironmentStableWorld, sample.dy);
+    HsSceneGradients gradients = (HsSceneGradients)0;
+    if ((demand & HsResolveUv) != 0u)
+    {
+        gradients.uvDx = HsGradient2(a.Uv, b.Uv, c.Uv, sample.dx);
+        gradients.uvDy = HsGradient2(a.Uv, b.Uv, c.Uv, sample.dy);
+    }
+    if ((demand & HsResolveWorldGradients) != 0u)
+    {
+        gradients.worldDx = HsGradient3(a.WorldPosition, b.WorldPosition,
+                                         c.WorldPosition, sample.dx);
+        gradients.worldDy = HsGradient3(a.WorldPosition, b.WorldPosition,
+                                         c.WorldPosition, sample.dy);
+    }
+    if ((demand & HsResolveStableGradients) != 0u)
+    {
+        gradients.stableDx = HsGradient3(a.EnvironmentStableWorld,
+                                         b.EnvironmentStableWorld,
+                                         c.EnvironmentStableWorld, sample.dx);
+        gradients.stableDy = HsGradient3(a.EnvironmentStableWorld,
+                                         b.EnvironmentStableWorld,
+                                         c.EnvironmentStableWorld, sample.dy);
+    }
     return gradients;
 }
 
@@ -448,17 +510,18 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
     if (!HsLoadResolveTriangle(pixel, visibility, record, geometry, draw, variant,
                                vertex0, vertex1, vertex2, sample))
         return;
+    const uint demand = HsResolveVaryingDemand(variant, vertex0.Mesh);
     SceneOutput input = HsInterpolateSceneOutput(vertex0, vertex1, vertex2,
-                                                 sample, pixel);
+                                                 sample, pixel, demand);
     const HsSceneGradients gradients = HsInterpolateSceneGradients(
-        vertex0, vertex1, vertex2, sample);
+        vertex0, vertex1, vertex2, sample, demand);
     const bool front = HsFrontFace[pixel] != 0u;
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
-    if (variant < HsHeroVisibilityVariantBegin || !HsHeroOpaqueOrdinalValid(variant - HsHeroVisibilityVariantBegin) ||
-        input.MaterialId != HsCharacterMaterialIdBase + variant - HsHeroVisibilityVariantBegin) return;
-    const GBufferOutput surface = HsHeroEvaluateSceneSurface(input, front, gradients);
+    if (variant < HsCharacterVisibilityVariantBegin || !HsCharacterOpaqueOrdinalValid(variant - HsCharacterVisibilityVariantBegin) ||
+        input.MaterialId != HsCharacterMaterialIdBase + variant - HsCharacterVisibilityVariantBegin) return;
+    const GBufferOutput surface = HsCharacterEvaluateSceneSurface(input, front, gradients);
 #else
-    if (variant >= HsHeroVisibilityVariantBegin) return;
+    if (variant >= HsCharacterVisibilityVariantBegin) return;
     const GBufferOutput surface = HsEvaluateSceneSurface(input, front, false, gradients, record.materialWord);
 #endif
     HsSurfaceBaseWrite[pixel] = surface.BaseColor;
@@ -483,7 +546,7 @@ void SurfaceResolveCS(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 
 #ifdef HS_GENERATED_CHARACTER_MATERIAL
 [numthreads(64, 1, 1)]
-void HeroSurfaceResolveCS(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
+void CharacterSurfaceResolveCS(uint3 groupId : SV_GroupID, uint lane : SV_GroupIndex)
 {
     HsSurfaceResolveImpl(groupId, lane);
 }

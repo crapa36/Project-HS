@@ -39,6 +39,7 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
                                PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
+    std::string surface_demand_cases, opacity_demand_cases;
     for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
         const auto name = rd::kCharacterMaterialNames[ordinal];
@@ -48,14 +49,38 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
         const auto functions = rd::EmitCharacterMaterialContextHlsl(prepared,
-            "HsHeroEvaluateSurface_" + std::to_string(ordinal), "HsHeroEvaluateOpacity_" + std::to_string(ordinal));
+            "HsCharacterEvaluateSurface_" + std::to_string(ordinal), "HsCharacterEvaluateOpacity_" + std::to_string(ordinal));
+        if (ordinal == 0)
+        {
+            constexpr std::string_view end_marker = "#endif // HS_MATERIAL_CONTEXT_DEMAND_HLSLI\n";
+            const auto end = functions.find(end_marker);
+            Require(end != std::string::npos, "character context demand constants missing");
+            generated += functions.substr(0, end + end_marker.size());
+        }
+        const auto demand = rd::AnalyzeContextDemand(prepared);
+        auto surface_case = "    case " + std::to_string(ordinal) + "u: return " +
+            std::to_string(demand.surface_mask) + "u;\n";
+        auto opacity_case = "    case " + std::to_string(ordinal) + "u: return " +
+            std::to_string(demand.opacity_mask) + "u;\n";
+        if (!translucent)
+        {
+            surface_case = "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n" + surface_case + "#endif\n";
+            opacity_case = "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n" + opacity_case + "#endif\n";
+        }
+        surface_demand_cases += surface_case;
+        opacity_demand_cases += opacity_case;
         if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += functions;
         if (!translucent) generated += "#endif\n";
+        const auto semantic = functions + surface_case + opacity_case;
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/hero-context-ir", path,
-            std::as_bytes(std::span(functions.data(), functions.size()))));
+            std::as_bytes(std::span(semantic.data(), semantic.size()))));
     }
-    generated += "HsSurfaceClosure HsHeroEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
+    generated += "uint HsCharacterSurfaceContextDemand(uint ordinal)\n{\n    switch (ordinal)\n    {\n" +
+        surface_demand_cases + "    default: return 0x0fffffffu;\n    }\n}\n";
+    generated += "uint HsCharacterOpacityContextDemand(uint ordinal)\n{\n    switch (ordinal)\n    {\n" +
+        opacity_demand_cases + "    default: return 0x0fffffffu;\n    }\n}\n";
+    generated += "HsSurfaceClosure HsCharacterEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
     for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
         const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
@@ -63,11 +88,11 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
         if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
-        generated += "    case " + std::to_string(ordinal) + "u: return HsHeroEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
+        generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
         if (!translucent) generated += "#endif\n";
     }
     generated += "    default: return (HsSurfaceClosure)0;\n    }\n}\n";
-    generated += "float HsHeroEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
+    generated += "float HsCharacterEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
     for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
         const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
@@ -75,7 +100,7 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
         if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
-        generated += "    case " + std::to_string(ordinal) + "u: return HsHeroEvaluateOpacity_" + std::to_string(ordinal) + "(ctx);\n";
+        generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateOpacity_" + std::to_string(ordinal) + "(ctx);\n";
         if (!translucent) generated += "#endif\n";
     }
     return generated + "    default: return 0.0;\n    }\n}\n";

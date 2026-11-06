@@ -28,7 +28,7 @@ using Json = nlohmann::json;
 
 constexpr std::string_view kActionId = "audio";
 constexpr std::string_view kRecipeId = "project-hs.audio-copy";
-constexpr std::uint32_t kRecipeVersion = 3;
+constexpr std::uint32_t kRecipeVersion = 4;
 constexpr std::uint32_t kActionKeySchemaVersion = 1;
 
 [[noreturn]] void Fail(const std::string &message)
@@ -131,7 +131,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
     const ap::ActionResultSnapshot snapshot(build_root, "audio");
     Require(snapshot.ActionId() == spec.action_id, "cached audio Action ID changed");
     if (snapshot.ActionKeyValue() != key) return false;
-    Require(snapshot.ProductCount() == spec.inputs.size() + 3, "cached audio product set changed");
+    Require(snapshot.ProductCount() == spec.inputs.size() + 2, "cached audio product set changed");
     std::vector<ap::Product> products;
     fs::path directory;
     const auto verify = [&](const std::string &id, const std::string &filename, std::string_view source_digest = {}) {
@@ -151,7 +151,6 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
         const auto filename = input.path.filename().string();
         verify("audio/" + filename, filename, input.digest);
     }
-    verify("audio/release-cpp", "release_audio.cpp");
     verify("audio/release-pcm", "release_audio.pcm");
     verify("audio/release-identity", "release_audio.identity");
     std::ranges::sort(products, {}, &ap::Product::logical_id);
@@ -228,10 +227,8 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
         const auto release = hs::audio_content::BuildReleaseAudio(
             ap::ReadBytes(stage / "audio_cues.json"),
             [&](std::string_view name) { return ap::ReadBytes(stage / std::string(name)); }, 64);
-        ap::WriteBytes(stage / "release_audio.cpp", std::as_bytes(std::span(release.source.data(), release.source.size())));
         ap::WriteBytes(stage / "release_audio.pcm", std::as_bytes(std::span(release.pcm.data(), release.pcm.size())));
         ap::WriteBytes(stage / "release_audio.identity", std::as_bytes(std::span(release.identity.data(), release.identity.size())));
-        products.push_back(ap::HashProduct("audio/release-cpp", "release_audio.cpp", stage / "release_audio.cpp"));
         products.push_back(ap::HashProduct("audio/release-pcm", "release_audio.pcm", stage / "release_audio.pcm"));
         products.push_back(ap::HashProduct("audio/release-identity", "release_audio.identity", stage / "release_audio.identity"));
         std::ranges::sort(products, {}, &ap::Product::logical_id);

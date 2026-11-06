@@ -1074,7 +1074,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         D3D12_SHADER_RESOURCE_VIEW_DESC terrain_sections_null{};
         terrain_sections_null.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
-        terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(TerrainSection);
+        terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainSection);
         device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+1));
         constexpr std::array post_table_offsets{
             0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
@@ -1124,7 +1124,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         {
             const auto offset = kLayeredTranslucencyDescriptorOffset + phase * kLayeredTranslucencyTableSize;
             device->CreateConstantBufferView(nullptr, cpu(offset));
-            device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(offset + 22));
+            device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(offset + kLayeredTranslucencyUavOffset));
         }
     }
 }

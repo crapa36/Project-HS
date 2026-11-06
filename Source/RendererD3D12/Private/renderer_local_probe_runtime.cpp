@@ -37,6 +37,77 @@ Result D3D12Renderer::Impl::CreateStaticShadowBakeGeometry()
     return SubmitResidentUtilityUpload(command_list.Get(), frame.allocator.Get(), uploads);
 }
 
+void D3D12Renderer::Impl::PrepareLocalProbeCaptureInputs(LocalProbeRuntimeFrameInputs &inputs,
+    std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> &pages,
+    std::vector<LocalProbeSceneRead> &reads, bool restored_graph,
+    std::span<const GeometryPageGpu *const> bucket_pages,
+    ResourceVersion static_instances_version,
+    ResourceVersion material_parameter_version, ResourceVersion hero_binding_version,
+    const LightingProbeOutputs &probe_outputs, const LightListOutputs &light_outputs,
+    const LtcLutOutputs &ltc_outputs, const VirtualShadowOutputs &virtual_shadow_outputs,
+    const LocalShadowOutputs &local_shadow_outputs,
+    const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_buffer,
+    const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_texture)
+{
+    inputs.static_instances = static_gpu_scene->instances.resource;
+    inputs.static_allocation = static_gpu_scene->instances.allocation;
+    if (!restored_graph) inputs.static_version = static_instances_version;
+    inputs.binding_owners.push_back(static_gpu_scene);
+    struct CaptureNativeLease { Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocation; Microsoft::WRL::ComPtr<ID3D12Resource> resource; };
+    const auto capture_read = [&](AllocationResource &resource, bool texture, std::string_view name,
+                                  ResourceVersion produced = {}) {
+        if (!resource.resource) return;
+        const auto version = produced.resource ? produced : graph.Version(texture
+            ? import_texture(resource, Access::AllShaderRead, name)
+            : import_buffer(resource, Access::AllShaderRead, name));
+        if (!restored_graph && std::ranges::none_of(reads, [&](const auto &read) {
+                return read.version.resource.value == version.resource.value &&
+                       read.version.resource.kind == version.resource.kind;
+            }))
+            reads.push_back({version, Access::AllShaderRead});
+        inputs.binding_owners.push_back(std::make_shared<CaptureNativeLease>(CaptureNativeLease{resource.allocation, resource.resource}));
+    };
+    for (std::size_t material = 0; material < pages.size(); ++material)
+    {
+        const auto &page = material == kEnvironmentMaterialNames.size() ? procedural_geometry : *bucket_pages[material * 3];
+        auto &capture = pages[material];
+        capture.vertices = page.storage.resource; capture.indices = page.storage.resource;
+        capture.vertex_allocation = page.storage.allocation; capture.index_allocation = page.storage.allocation;
+        if (!restored_graph)
+            capture.vertex_version = graph.Version(import_buffer(
+                const_cast<AllocationResource &>(page.storage), Access::VertexShaderRead, "ProbeCompleteGeometry"));
+        capture.index_version = capture.vertex_version;
+        capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
+        capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
+        capture.source_digest = page.source_digest;
+        capture.bounds = page.metadata.bounds;
+        capture.complete = page.storage.resource && page.index_count != 0;
+    }
+    capture_read(material_parameters, false, "ProbeMaterialParameters", material_parameter_version);
+    capture_read(mesh_material_bindings_gpu, false, "ProbeHeroBindings", hero_binding_version);
+    capture_read(environment_brdf_lut, true, "ProbeBrdfLut");
+    if (!restored_graph)
+    {
+    for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
+            light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
+            ltc_outputs.matrix, ltc_outputs.amplitude}) reads.push_back({version, Access::AllShaderRead});
+    if (virtual_shadow_outputs.resources[0])
+        for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
+                virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
+            reads.push_back({version, Access::AllShaderRead});
+    if(virtual_shadow_outputs.root_static.resource)
+        reads.push_back({virtual_shadow_outputs.root_static,Access::AllShaderRead});
+    if(virtual_shadow_outputs.root_dynamic.resource)
+        reads.push_back({virtual_shadow_outputs.root_dynamic,Access::AllShaderRead});
+    if (local_shadow_outputs.resources[0])
+        for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
+                local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
+            reads.push_back({version, Access::AllShaderRead});
+    }
+    inputs.pages = pages;
+    inputs.scene_reads = reads;
+}
+
 #endif
 namespace
 {
@@ -414,13 +485,14 @@ struct LocalProbeCaptureFrame
     std::uint32_t generation{},stride{};
     CompletionSet completion;
     ResourceHandle constants_handle,shadow_handle;
-    std::function<void(ID3D12GraphicsCommandList *)> bind,restore;
     ~LocalProbeCaptureFrame() { if(mapped) constants.resource->Unmap(0,nullptr); }
     void BindPrivate(ID3D12GraphicsCommandList *list,UINT bank)
     {
-        bind(list);
         ID3D12DescriptorHeap *heaps[]{descriptors.Get(),samplers.Get()}; list->SetDescriptorHeaps(2,heaps);
         list->SetGraphicsRootSignature(capture->native->root.Get());
+        constexpr std::array<UINT, 5> roots{18, 20, 25, 28, 35};
+        // Source-base capture bypasses skin, VFX and instance-reference indirection.
+        for (const auto root : roots) list->SetGraphicsRootShaderResourceView(root, 0);
         list->SetGraphicsRootConstantBufferView(15,
             constants.resource->GetGPUVirtualAddress()+UINT64(bank)*kConstantsStride);
         const auto table=[&](UINT offset) {
@@ -476,7 +548,6 @@ struct LocalProbeCaptureFrame
     {
         auto *list=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if(!list || !shadow.enabled) return Failure("Static capture shadow pass has no native commands or owner");
-        struct Restore { ID3D12GraphicsCommandList *list; std::function<void(ID3D12GraphicsCommandList *)> &callback; ~Restore() { callback(list); } } restore_scope{list,restore};
         BindPrivate(list,kFaceCount);
         const auto depth=shadow_dsv->GetCPUDescriptorHandleForHeapStart();
         list->ClearDepthStencilView(depth,D3D12_CLEAR_FLAG_DEPTH,0,0,0,nullptr);
@@ -491,7 +562,6 @@ struct LocalProbeCaptureFrame
         if(view.scene!=scene || view.face>=kFaceCount) return Failure("Capture callback received a stale scene or invalid face");
         auto *list=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if(!list) return Failure("Capture callback requires native commands");
-        struct Restore { ID3D12GraphicsCommandList *list; std::function<void(ID3D12GraphicsCommandList *)> &callback; ~Restore() { callback(list); } } restore_scope{list,restore};
         auto face=base; FillFaceConstants(face,view,generation);
         std::memcpy(mapped+std::size_t(view.face)*kConstantsStride,&face,sizeof(face));
         BindPrivate(list,view.face);
@@ -750,6 +820,142 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
 }
 } // namespace
 
+#endif
+// All retained sources belong to the offline renderer until its queue is drained.
+#if defined(HS_OFFLINE_PROBE_BAKER)
+Result D3D12Renderer::Impl::PrepareSceneProbeBakeSources(SceneProbeBakeSources &sources)
+{
+    try
+    {
+        Require(sources.textures.empty(), "Scene-probe sources are already prepared");
+        std::map<std::string, std::size_t> textures;
+        std::uint64_t total_bytes{};
+        for (const auto &material : environment_material_bindings)
+            for (const auto &id : material.product_ids)
+            {
+                if (id.empty() || textures.contains(id)) continue;
+                const auto bytes = ReadProduct(config, id);
+                const auto package = ReadRendererTexturePackage(config, id, bytes);
+                const auto &source = package.description;
+                Require(source.array_size && source.array_size <= UINT16_MAX && source.mip_count &&
+                    source.mip_count <= UINT16_MAX && package.subresources.size() == source.array_size * source.mip_count,
+                    "Scene-probe texture has an invalid array or mip count");
+                D3D12_RESOURCE_DESC desc{};
+                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                desc.Width = source.width; desc.Height = source.height;
+                desc.DepthOrArraySize = static_cast<UINT16>(source.array_size);
+                desc.MipLevels = static_cast<UINT16>(source.mip_count);
+                desc.Format = static_cast<DXGI_FORMAT>(source.format); desc.SampleDesc.Count = 1;
+                sources.textures.emplace_back();
+                auto &target = sources.textures.back(); target.id = id;
+                D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+                if (auto created = CreateAllocation(target.resource, allocation, desc, D3D12_RESOURCE_STATE_COPY_DEST); !created)
+                    return created;
+                const auto size = target.resource.allocation->GetSize();
+                Require(size <= UINT64_MAX - total_bytes, "Scene-probe texture allocation sum overflows");
+                total_bytes += size;
+                Require(!config.texture_budget_mib || total_bytes <= std::uint64_t(config.texture_budget_mib) * 1024 * 1024,
+                    "Scene-probe texture set exceeds the configured texture residency budget");
+                const auto count = source.array_size * source.mip_count;
+                std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count);
+                std::vector<UINT> rows(count); std::vector<UINT64> row_bytes(count);
+                UINT64 upload_size{};
+                device->GetCopyableFootprints(&desc, 0, count, 0, footprints.data(), rows.data(), row_bytes.data(), &upload_size);
+                Require(upload_size && upload_size <= 512ull * 1024 * 1024,
+                    "Scene-probe texture exceeds the host staging budget");
+                std::vector<AllocationResource> uploads(1);
+                allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+                if (auto created = CreateAllocation(uploads.front(), allocation, BufferDescription(upload_size),
+                        D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+                std::byte *mapped{}; D3D12_RANGE no_read{};
+                Native(uploads.front().resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped)),
+                    "Map scene-probe texture upload");
+                for (UINT sub = 0; sub < count; ++sub)
+                {
+                    const auto &part = package.subresources[sub];
+                    const auto &footprint = footprints[sub];
+                    Require(rows[sub] && part.row_pitch == row_bytes[sub] &&
+                        UINT64(rows[sub]) * part.row_pitch == part.bytes.size() &&
+                        footprint.Offset <= upload_size && row_bytes[sub] <= footprint.Footprint.RowPitch &&
+                        UINT64(rows[sub] - 1) * footprint.Footprint.RowPitch + row_bytes[sub] <= upload_size - footprint.Offset,
+                        "Scene-probe texture upload footprint differs from its admitted package");
+                    for (UINT row = 0; row < rows[sub]; ++row)
+                        std::memcpy(mapped + footprint.Offset + SIZE_T(row) * footprint.Footprint.RowPitch,
+                            part.bytes.data() + SIZE_T(row) * part.row_pitch, static_cast<std::size_t>(row_bytes[sub]));
+                }
+                uploads.front().resource->Unmap(0, nullptr);
+                Native(frames[0].allocator->Reset(), "Reset scene-probe texture allocator");
+                Native(command_list->Reset(frames[0].allocator.Get(), nullptr), "Reset scene-probe texture list");
+                for (UINT sub = 0; sub < count; ++sub)
+                {
+                    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = target.resource.resource.Get();
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = sub;
+                    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = uploads.front().resource.Get();
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = footprints[sub];
+                    command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                }
+                D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition = {target.resource.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+                command_list->ResourceBarrier(1, &barrier);
+                Native(command_list->Close(), "Close scene-probe texture list");
+                if (auto submitted = SubmitResidentUtilityUpload(command_list.Get(), frames[0].allocator.Get(), uploads); !submitted)
+                    return submitted;
+                target.resource.graph_access = Access::AllShaderRead;
+                target.resource.graph_queue = QueueHint::Direct;
+                textures.emplace(id, sources.textures.size() - 1);
+            }
+        constexpr std::array legacy_names{"terrain_gaussian", "terrain_surface", "terrain_normal", "terrain_detail",
+            "terrain_height", "rock_basecolor", "rock_surface", "rock_normal", "rock_detail", "bark_basecolor",
+            "bark_surface", "bark_normal", "bark_detail", "grass_basecolor", "grass_normal", "grass_roughness",
+            "leaf_basecolor", "leaf_normal", "leaf_roughness", "terrain_histogram"};
+        static_assert(legacy_names.size() == kEnvironmentTextureCount);
+        for (UINT frame = 0; frame < kFrameCount; ++frame)
+        {
+            for (UINT material = 0; material < environment_material_bindings.size(); ++material)
+                for (UINT slot = 0; slot < rd::kMaterialTextureSlots; ++slot)
+                {
+                    const auto &id = environment_material_bindings[material].product_ids[slot];
+                    const auto found = textures.find(id);
+                    WriteEnvironmentMaterialTextureDescriptor(frame, material, slot,
+                        found == textures.end() ? nullptr : sources.textures[found->second].resource.resource.Get());
+                }
+            for (UINT index = 0; index < legacy_names.size(); ++index)
+            {
+                const auto id = std::string("render/texture/environment_") + legacy_names[index] + ".rpkg";
+                const auto found = textures.find(id);
+                Require(found != textures.end(), "Scene-probe legacy environment texture is missing: " + id);
+                auto *resource = sources.textures[found->second].resource.resource.Get();
+                const auto desc = resource->GetDesc();
+                WriteEnvironmentTextureDescriptor(frame, index, resource, desc.Format, desc.MipLevels, desc.DepthOrArraySize);
+            }
+            D3D12_SHADER_RESOURCE_VIEW_DESC metadata{};
+            metadata.Format = DXGI_FORMAT_UNKNOWN; metadata.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            metadata.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            metadata.Buffer.NumElements = kTextureFeedbackBindingCount;
+            metadata.Buffer.StructureByteStride = sizeof(UINT) * 4;
+            auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTextureFeedbackDescriptorOffset) * srv_stride;
+            device->CreateShaderResourceView(nullptr, &metadata, handle);
+        }
+        if (auto brdf = CreateEnvironmentBrdfLut(config, environment_brdf_lut); !brdf) return brdf;
+        WriteEnvironmentBrdfLutDescriptors();
+        LightingProbeCandidate probe;
+        if (auto prepared = PrepareLightingProbe(config, probe); !prepared) return prepared;
+        if (auto committed = lighting_probe.Commit(std::move(probe), graph_queue_executor.Completed()); !committed) return committed;
+        LtcLutCandidate ltc;
+        if (auto prepared = PrepareLtcLut(config, ltc); !prepared) return prepared;
+        if (auto committed = ltc_lut.Commit(std::move(ltc), graph_queue_executor.Completed()); !committed) return committed;
+        LocalProbeRuntimeCandidate local;
+        if (auto prepared = local_probes.Prepare(device.Get(), allocator, root_signature.Get(), config,
+                resource_generation_id, local, &pipeline_cache); !prepared) return prepared;
+        if (auto committed = local_probes.Commit(std::move(local), graph_queue_executor.Completed()); !committed) return committed;
+        auto &pool = owned_views.at(kMainRenderViewId.value)->targets.transient_pools[0];
+        return pool.Initialize(allocator, device.Get());
+    }
+    catch (const std::exception &error) { return Failure(error.what()); }
+}
 #endif
 Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
     const RendererConfig &config,std::string_view scene_generation,
@@ -1226,8 +1432,8 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         Require(impl_->capture->native&&impl_->capture->native->sky&&impl_->capture->revision_shadow.enabled==plan.shadow,
             "Local probe prepared capture pipelines or shadow branch changed");
         Require(in.frame_constants && in.static_instances && in.static_version.resource && in.frame_srv_heap && in.sampler_heap &&
-            in.frame_srv_base.ptr && in.sampler_table.ptr && in.bind_graphics && in.restore_graphics && !in.scene_reads.empty(),
-            "Capture requires actual static/shared bindings, graph reads and parent restore callback");
+            in.frame_srv_base.ptr && in.sampler_table.ptr && !in.scene_reads.empty(),
+            "Capture requires actual static/shared bindings and graph reads");
         Require(in.scene->instances.size()<=kLocalProbeSourceCapacity && in.max_cube_views<=6,
             "Capture instance/view budget exceeds packed source-base bounds");
         for(const auto &read:in.scene_reads)
@@ -1249,7 +1455,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         }
         frame->base.shadow_atlas_texel_size=frame->shadow.enabled?
             DirectX::XMFLOAT4{1.0f/kShadowEdge,1.0f/kShadowEdge,0,in.frame_constants->shadow_atlas_texel_size.w}:DirectX::XMFLOAT4{};
-        frame->bind=in.bind_graphics; frame->restore=in.restore_graphics; frame->samplers=in.sampler_heap;
+        frame->samplers=in.sampler_heap;
         frame->sampler_table=in.sampler_table; frame->source_descriptors=in.frame_srv_heap;
         frame->draws.reserve(in.scene->instances.size());
         for(std::size_t index=0;index<in.scene->instances.size();++index)
@@ -1484,6 +1690,52 @@ std::uint64_t LocalProbeRuntime::AllocatedBytes() const noexcept
 }
 
 #if defined(HS_OFFLINE_PROBE_BAKER)
+Result D3D12Renderer::Impl::PrepareWorldTransportInstances(
+    const std::shared_ptr<const StaticRenderScene> &scene, AllocationResource &instances,
+    std::uint32_t &generation, bool terrain_sections)
+{
+    generation = 0;
+    if (!scene || scene->instances.empty() || scene->instances.size() > kLocalProbeSourceCapacity)
+        return Failure("World transport requires a nonempty scene within the native source capacity");
+    GpuSceneTableLayout layout{};
+    if (!BuildGpuSceneTableLayout(scene->instances.size(), scene->instances.size(), layout))
+        return Failure("World transport static scene table overflows");
+    D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+    if (auto created = CreateAllocation(instances, allocation, BufferDescription(layout.total_bytes),
+            D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+    std::byte *mapped{}; D3D12_RANGE no_read{};
+    const auto result = instances.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
+    if (FAILED(result)) return HResultFailure("Map world transport static scene", result);
+    std::memset(mapped, 0, static_cast<std::size_t>(layout.total_bytes));
+    std::memcpy(mapped, &layout.header, sizeof(layout.header));
+    constexpr std::uint32_t instance_generation = 1;
+    for (std::size_t index = 0; index < scene->instances.size(); ++index)
+    {
+        const auto &source = scene->instances[index];
+        const bool environment = rd::IsEnvironmentMesh(source.mesh);
+        const auto mesh = static_cast<UINT>(source.mesh) | (environment ? kEnvironmentMeshFlag : 0u) |
+            (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u);
+        const auto seed = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch ||
+            source.mesh == RenderMesh::MeadowSurface ? std::bit_cast<float>(terrain_sections
+                ? static_cast<UINT>(index) : source.environment_seed) : 0.0f;
+        const GpuInstance instance{{source.position.x, source.position.y + (environment ? 0 : source.scale.y * .5f), source.position.z, 0},
+            {source.scale.x, source.scale.y, source.scale.z, 1}, source.color_rgba, mesh, source.yaw, seed};
+        const auto slot = SerializeGpuSceneSlot(static_cast<UINT>(index), instance,
+            {source.asset_id.value, source.material_id.value, UINT32_MAX, 0, instance_generation, 0});
+        const auto write = [&](UINT offset, const auto &value) {
+            std::memcpy(mapped + offset + index * sizeof(value), &value, sizeof(value));
+        };
+        write(layout.header.instance_offset, slot.instance); write(layout.header.transform_offset, slot.transform);
+        write(layout.header.mesh_offset, slot.mesh); write(layout.header.material_offset, slot.material);
+        write(layout.header.bounds_offset, slot.bounds); write(layout.header.skin_offset, slot.skin);
+    }
+    instances.resource->Unmap(0, nullptr);
+    instances.graph_access = Access::AllShaderRead;
+    instances.graph_queue = QueueHint::Direct;
+    generation = instance_generation;
+    return Result::Success();
+}
+
 // Retained before submission so a failed fence/event cannot release GPU readers.
 struct StaticShadowBakeFrame
 {
@@ -1622,32 +1874,10 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
             const auto page=PageOrdinal(source); Require(frame->pages[page].complete,"Bake caster lacks complete source geometry");
             frame->draws.push_back({static_cast<UINT>(index),MaterialOrdinal(source),{},page});
         }
-        GpuSceneTableLayout layout{};
-        Require(BuildGpuSceneTableLayout(scene->instances.size(),scene->instances.size(),layout),"Bake static scene table overflows");
-        allocate(owner->instances,D3D12_HEAP_TYPE_UPLOAD,BufferDescription(layout.total_bytes),D3D12_RESOURCE_STATE_GENERIC_READ);
-        std::byte *mapped{}; D3D12_RANGE no_read{};
-        Native(owner->instances.resource->Map(0,&no_read,reinterpret_cast<void **>(&mapped)),"Map bake static scene");
-        std::memset(mapped,0,static_cast<std::size_t>(layout.total_bytes));
-        std::memcpy(mapped,&layout.header,sizeof(layout.header));
-        for(std::size_t index=0;index<scene->instances.size();++index)
-        {
-            const auto &source=scene->instances[index];
-            if(!rd::IsStaticShadowCaster(source)) continue;
-            const bool environment=rd::IsEnvironmentMesh(source.mesh);
-            const auto mesh=static_cast<UINT>(source.mesh)|(environment?kEnvironmentMeshFlag:0u)|
-                (source.mesh==RenderMesh::GroundDetail?source.environment_variant<<8u:0u);
-            const auto seed=source.mesh==RenderMesh::Ground || source.mesh==RenderMesh::DirtPatch || source.mesh==RenderMesh::MeadowSurface
-                ?std::bit_cast<float>(source.environment_seed):0.0f;
-            const GpuInstance instance{{source.position.x,source.position.y+(environment?0:source.scale.y*.5f),source.position.z,0},
-                {source.scale.x,source.scale.y,source.scale.z,1},source.color_rgba,mesh,source.yaw,seed};
-            const auto slot=SerializeGpuSceneSlot(static_cast<UINT>(index),instance,
-                {source.asset_id.value,source.material_id.value,UINT32_MAX,0,1,0});
-            const auto write=[&](UINT offset,const auto &value) { std::memcpy(mapped+offset+index*sizeof(value),&value,sizeof(value)); };
-            write(layout.header.instance_offset,slot.instance); write(layout.header.transform_offset,slot.transform);
-            write(layout.header.mesh_offset,slot.mesh); write(layout.header.material_offset,slot.material);
-            write(layout.header.bounds_offset,slot.bounds); write(layout.header.skin_offset,slot.skin);
-        }
-        owner->instances.resource->Unmap(0,nullptr); frame->static_instances=owner->instances.resource;
+        if (auto prepared=impl_->PrepareWorldTransportInstances(scene,owner->instances,frame->generation,false);!prepared)
+            return prepared;
+        D3D12_RANGE no_read{};
+        frame->static_instances=owner->instances.resource;
         frame->static_allocation=owner->instances.allocation;
         FillFaceConstants(frame->base,frame->shadow.view,1);
         for(std::size_t group=0;group<frame->base.material_parameter_bases.size();++group)
@@ -1752,7 +1982,6 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
         D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format=DXGI_FORMAT_D32_FLOAT; view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
         const auto target=frame->shadow_dsv->GetCPUDescriptorHandleForHeapStart();
         device->CreateDepthStencilView(frame->shadow_map.resource.Get(),&view,target);
-        frame->bind=[](ID3D12GraphicsCommandList *) {};
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT64 readback_bytes{};
         device->GetCopyableFootprints(&depth,0,1,0,&footprint,nullptr,nullptr,&readback_bytes);
         allocate(owner->readback,D3D12_HEAP_TYPE_READBACK,BufferDescription(readback_bytes),D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1844,6 +2073,256 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
         return Result::Success();
     }
     catch(const std::exception &error) { return Failure(error.what()); }
+}
+Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
+    const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
+    std::vector<std::byte> &package_bytes)
+{
+    D3D12Renderer owner;
+    auto sources = std::make_unique<Impl::SceneProbeBakeSources>();
+    auto terrain_source = std::make_unique<AllocationResource>();
+    std::vector<std::byte> candidate;
+    const auto run = [&]() -> Result {
+        if (!scene || sun.type != LightType::Directional)
+            return Failure("Scene-probe baking requires the actual static scene and directional sun.");
+        if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::SceneProbe); !initialized)
+            return initialized;
+        auto &renderer = *owner.impl_;
+        if (auto prepared = renderer.PrepareSceneProbeBakeSources(*sources); !prepared) return prepared;
+        auto &view = *renderer.owned_views.at(kMainRenderViewId.value);
+        auto &pool = view.targets.transient_pools[0];
+        std::uint32_t generation{};
+        if (auto prepared = renderer.PrepareWorldTransportInstances(scene,
+                sources->instances, generation, true); !prepared) return prepared;
+
+        const auto terrain_bytes = scene->instances.size() * sizeof(Impl::GpuTerrainSection);
+        D3D12MA::ALLOCATION_DESC terrain_allocation{};
+        terrain_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto created = renderer.CreateAllocation(*terrain_source, terrain_allocation,
+                BufferDescription(terrain_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+        Impl::GpuTerrainSection *terrain_records{};
+        D3D12_RANGE no_terrain_read{};
+        Native(terrain_source->resource->Map(0, &no_terrain_read,
+            reinterpret_cast<void **>(&terrain_records)), "Map source-only probe terrain sections");
+        for (std::size_t index = 0; index < scene->instances.size(); ++index)
+        {
+            terrain_records[index] = {};
+            terrain_records[index].seed = scene->instances[index].environment_seed;
+        }
+        terrain_source->resource->Unmap(0, nullptr);
+        terrain_source->graph_access = Access::AllShaderRead;
+        terrain_source->graph_queue = QueueHint::Direct;
+        for (UINT frame = 0; frame < kFrameCount; ++frame)
+        {
+            auto handle = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTerrainPageDescriptorOffset) * renderer.srv_stride;
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srv.Buffer.NumElements = static_cast<UINT>(scene->instances.size());
+            srv.Buffer.StructureByteStride = sizeof(Impl::GpuTerrainSection);
+            renderer.device->CreateShaderResourceView(terrain_source->resource.Get(), &srv, handle);
+            handle.ptr += renderer.srv_stride;
+            srv.Buffer.NumElements = 1;
+            srv.Buffer.StructureByteStride = sizeof(UINT) * 4;
+            renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
+            handle.ptr += renderer.srv_stride;
+            srv = {};
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Texture2D.MipLevels = 1;
+            for (UINT index = 2; index < kTerrainPageDescriptorCount; ++index)
+            {
+                renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
+                handle.ptr += renderer.srv_stride;
+            }
+        }
+
+        LightListCandidate lights;
+        if (auto prepared = view.light_list.Prepare(renderer.device.Get(), renderer.allocator,
+                {1, 1}, 1, 1, [&](std::string_view id, std::vector<std::byte> &bytes) {
+                    bytes = ReadProduct(renderer.config, id); return Result::Success();
+                }, lights, 1); !prepared) return prepared;
+        if (auto committed = view.light_list.Commit(std::move(lights), renderer.graph_queue_executor.Completed()); !committed)
+            return committed;
+
+        FrameConstants constants{};
+        renderer.FillMaterialFrameConstants(constants);
+        constants.shadow_atlas_texel_size.w = float(renderer.QualityProfileFor(renderer.config.shadow_quality).shadow_filter_samples);
+        const auto foliage = renderer.QualityProfileFor(renderer.config.foliage_quality).foliage_density;
+        if (auto selected = renderer.local_probes.PrepareCaptureMaterialOrdinals(scene, foliage); !selected) return selected;
+        std::vector<LocalProbeTextureFact> texture_facts;
+        for (const auto material : renderer.local_probes.CachedCaptureMaterialOrdinals(scene, foliage))
+            for (const auto &id : renderer.environment_material_bindings[material].product_ids)
+                if (!id.empty() && std::ranges::none_of(texture_facts, [&](const auto &fact) { return fact.logical_id == id; }))
+                    texture_facts.push_back({id, 0, true});
+
+        std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> pages;
+        std::array<LocalProbePageRevision, kEnvironmentMaterialNames.size() + 1> revisions;
+        std::vector<std::pair<AllocationResource *, ResourceHandle>> imports;
+        std::vector<LocalProbeSceneRead> reads;
+        imports.reserve(sources->textures.size() + pages.size() + 8);
+        reads.reserve(imports.capacity() + 9);
+        const auto barriers = renderer.enhanced ? BarrierMode::Enhanced : BarrierMode::Legacy;
+        for (;;)
+        {
+            const auto completed = renderer.graph_queue_executor.Completed();
+            if (renderer.local_probes.BakeStatus(completed).capture_complete) break;
+            pool.ResetCompletedClaims(completed);
+            renderer.graph.Reset();
+            imports.clear(); reads.clear();
+            const auto import = [&](AllocationResource &resource, bool texture, Access access,
+                                    std::string_view name) -> ResourceHandle {
+                for (const auto &[existing, handle] : imports) if (existing == &resource) return handle;
+                if (auto certified = resource.EnsureNativeContract(renderer.device.Get()); !certified)
+                    throw std::runtime_error(std::string(name) + ": " + std::string(certified.Message()));
+                const auto initial = resource.graph_access == Access::Undefined ? access : resource.graph_access;
+                const ResourceHandle handle = texture
+                    ? ResourceHandle(renderer.graph.ImportTexture({resource.resource.Get(), resource.graph_completion,
+                        resource.graph_queue, {}, resource.NativeContract()}, initial, name))
+                    : ResourceHandle(renderer.graph.ImportBuffer({resource.resource.Get(), resource.graph_completion,
+                        resource.graph_queue, {}, resource.NativeContract()}, initial, name));
+                imports.emplace_back(&resource, handle);
+                return handle;
+            };
+            const auto read = [&](AllocationResource &resource, bool texture, Access access, std::string_view name) {
+                const auto handle = import(resource, texture, access, name);
+                reads.push_back({renderer.graph.Version(handle), access});
+                return handle;
+            };
+            const auto instances = import(sources->instances, false, Access::AllShaderRead, "ProbeStaticInstances");
+            for (std::size_t index = 0; index < pages.size(); ++index)
+            {
+                auto &page = index == kEnvironmentMaterialNames.size()
+                    ? renderer.procedural_geometry : renderer.environment_meshes[index * 3];
+                auto &capture = pages[index];
+                capture.vertices = page.storage.resource; capture.indices = page.storage.resource;
+                capture.vertex_allocation = page.storage.allocation; capture.index_allocation = page.storage.allocation;
+                capture.vertex_version = renderer.graph.Version(import(page.storage, false, Access::VertexShaderRead, "ProbeCompleteGeometry"));
+                capture.index_version = capture.vertex_version;
+                capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
+                capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
+                capture.source_digest = page.source_digest; capture.bounds = page.metadata.bounds;
+                capture.complete = page.storage.resource && page.index_count;
+                revisions[index] = {capture.page_slot, capture.generation, capture.index_count, capture.source_digest, capture.bounds};
+            }
+            read(renderer.material_parameters, false, Access::AllShaderRead, "ProbeMaterialParameters");
+            read(renderer.environment_brdf_lut, true, Access::AllShaderRead, "ProbeBrdfLut");
+            read(*terrain_source, false, Access::AllShaderRead, "ProbeSourceTerrainSections");
+            for (auto &texture : sources->textures)
+                read(texture.resource, true, Access::AllShaderRead, texture.id);
+
+            LocalProbeRuntimeFrameInputs input;
+            input.config = &renderer.config; input.pipeline_cache = &renderer.pipeline_cache;
+            input.scene = scene; input.lights = std::span(&sun, 1); input.static_instance_generation = generation;
+            input.material_parameter_revision = renderer.material_parameter_revision - renderer.baked_generation_material_revision;
+            input.pipeline_revision = renderer.pipeline_revision;
+            input.foliage_density = foliage; input.frame_constants = &constants; input.page_revisions = revisions;
+            input.texture_facts = texture_facts; input.texture_facts_valid = true; input.pages = pages;
+            input.static_instances = sources->instances.resource;
+            input.static_allocation = sources->instances.allocation;
+            input.static_version = renderer.graph.Version(instances);
+            input.frame_srv_heap = renderer.srv_cpu_heap; input.sampler_heap = renderer.sampler_heap;
+            input.frame_srv_base = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+            input.sampler_table = renderer.sampler_heap->GetGPUDescriptorHandleForHeapStart(); input.completed = completed;
+            LocalProbeRuntimeFramePlan plan;
+            struct Pending
+            {
+                Impl &renderer; LightListSystem &lights; TransientResourcePool &pool;
+                const LocalProbeRuntimeFrameInputs &input; LocalProbeRuntimeFramePlan &plan;
+                CompletionSet completion;
+                bool probe{}, ltc{}, light_list{}, local{}, prepared{};
+                ~Pending()
+                {
+                    if (probe) (void)renderer.lighting_probe.CompleteSubmission(renderer.graph, completion, false);
+                    if (ltc) (void)renderer.ltc_lut.CompleteSubmission(renderer.graph, completion, false);
+                    if (light_list) (void)lights.CompleteSubmission(renderer.graph, completion, false);
+                    if (local) (void)renderer.local_probes.CompleteSubmission(renderer.graph, completion, false, input.scene, plan.revisions);
+                    if (prepared) pool.SetClaimCompletion(completion);
+                }
+            } pending{renderer, view.light_list, pool, input, plan};
+            LightingProbeOutputs probe;
+            if (auto registered = renderer.lighting_probe.Register(renderer.graph, completed, probe); !registered) return registered;
+            pending.probe = true;
+            LightListInputs light_input;
+            light_input.lights = std::span(&sun, 1); light_input.render_active = {1, 1}; light_input.completed = completed;
+            DirectX::XMStoreFloat4x4(&light_input.unjittered_view, DirectX::XMMatrixIdentity());
+            DirectX::XMStoreFloat4x4(&light_input.unjittered_projection,
+                DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV2, 1, 1000, .005f));
+            light_input.near_plane = .005f; light_input.far_plane = 1000;
+            LightListOutputs light_outputs;
+            if (auto registered = view.light_list.Register(renderer.graph, light_input, light_outputs); !registered) return registered;
+            pending.light_list = true;
+            LtcLutOutputs ltc;
+            if (auto registered = renderer.ltc_lut.Register(renderer.graph, completed, ltc); !registered) return registered;
+            pending.ltc = true;
+            const auto descriptors = [&](UINT offset, auto sources) {
+                auto destination = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+                destination.ptr += SIZE_T(offset) * renderer.srv_stride;
+                for (const auto source : sources) {
+                    renderer.device->CopyDescriptorsSimple(1, destination, source, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                    destination.ptr += renderer.srv_stride;
+                }
+            };
+            descriptors(kProbeDescriptorOffset, probe.srvs);
+            descriptors(kLightListDescriptorOffset, light_outputs.srvs);
+            descriptors(kLightListDescriptorOffset + UINT(light_outputs.srvs.size()), ltc.srvs);
+            for (const auto version : {probe.radiance, probe.prefiltered, probe.irradiance,
+                    light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
+                    ltc.matrix, ltc.amplitude}) reads.push_back({version, Access::AllShaderRead});
+            input.scene_reads = reads;
+            if (auto prepared = renderer.local_probes.PrepareFrameDecisionData(input, plan); !prepared) return prepared;
+            if (auto prepared = renderer.local_probes.PrepareFrameRecordData(input, plan); !prepared) return prepared;
+            LocalProbeOutputs output;
+            if (auto registered = renderer.local_probes.Register(renderer.graph, input, plan, output, nullptr); !registered) return registered;
+            pending.local = true;
+            if (auto prepared = renderer.graph.Prepare(pool); !prepared) return prepared;
+            pending.prepared = true;
+            GraphExecutionOptions options; options.task_system = renderer.config.task_system;
+            const auto submitted = renderer.graph_queue_executor.Execute(renderer.graph, 0, barriers, pending.completion, &options);
+            for (const auto &[resource, handle] : imports)
+            {
+                resource->graph_completion.Merge(pending.completion);
+                if (submitted) {
+                    resource->graph_access = renderer.graph.FinalAccess(handle);
+                    resource->graph_queue = renderer.graph.FinalQueue(handle);
+                    resource->graph_completion.Merge(renderer.graph.ResourceCompletion(handle));
+                }
+            }
+            if (!submitted) { renderer.frame_submission_faulted = true; return submitted; }
+            if (auto accepted = renderer.lighting_probe.CompleteSubmission(renderer.graph, pending.completion, true); !accepted) return accepted;
+            pending.probe = false;
+            if (auto accepted = renderer.ltc_lut.CompleteSubmission(renderer.graph, pending.completion, true); !accepted) return accepted;
+            pending.ltc = false;
+            if (auto accepted = view.light_list.CompleteSubmission(renderer.graph, pending.completion, true); !accepted) return accepted;
+            pending.light_list = false;
+            if (auto accepted = renderer.local_probes.CompleteSubmission(renderer.graph, pending.completion, true, scene, plan.revisions); !accepted) return accepted;
+            pending.local = false;
+            if (auto waited = renderer.graph_queue_executor.Wait(pending.completion); !waited) return waited;
+        }
+        return renderer.local_probes.ExportBakedPackage(renderer.graph_queue_executor, pool, 0, barriers, candidate);
+    };
+    Result result = Result::Success();
+    try { result = run(); }
+    catch (const std::exception &error) { result = Failure(error.what()); }
+    if (owner.impl_->device)
+        if (auto drained = owner.impl_->WaitForGpu(); !drained)
+        {
+            // The one-shot sources and allocator must survive an unreliable drain together.
+            (void)sources.release();
+            (void)terrain_source.release();
+            (void)owner.impl_.release();
+            return Failure(std::string(result.Message()) + "; drain failed: " + std::string(drained.Message()));
+        }
+    sources.reset();
+    terrain_source.reset();
+    const auto cleanup = owner.Shutdown();
+    if (!cleanup) return Failure(std::string(result.Message()) + "; cleanup failed: " + std::string(cleanup.Message()));
+    if (!result) return result;
+    if (owner.ValidationErrorCount()) return Failure("Scene-probe producer reported native validation errors.");
+    package_bytes = std::move(candidate);
+    return Result::Success();
 }
 #endif
 } // namespace hs

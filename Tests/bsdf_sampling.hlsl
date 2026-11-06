@@ -361,7 +361,7 @@ float HsProbeLobeCoordinate(uint index)
 static const uint HsProbeLegacyCaseCount = 7u;
 static const uint HsProbeCoatedCaseCount = 72u;
 static const uint HsProbeFresnelCaseCount = 14u;
-static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount + HsProbeFresnelCaseCount;
+static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount + HsProbeFresnelCaseCount + 1u;
 static const uint HsProbeCoatedReferenceSamples = 65536u;
 
 struct HsProbeCoatedCase
@@ -613,6 +613,13 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
         return;
     }
 
+    if (case_index == HsProbeTotalCaseCount - 1u)
+    {
+        // Uniform incident radiance has cosine-SH c00 = pi * sqrt(4*pi) * L.
+        const float3 coefficient = float3(0.25,1.0,4.0) * 11.1366559936634;
+        output[case_index] = float4(coefficient * HsLocalProbeIsotropicBasis(),1.0);
+        return;
+    }
     if (case_index >= HsProbeLegacyCaseCount + HsProbeCoatedCaseCount)
     {
         // Raw production outputs; the host compares against independent double

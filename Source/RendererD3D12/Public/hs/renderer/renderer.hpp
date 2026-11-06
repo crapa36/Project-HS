@@ -299,18 +299,8 @@ struct RendererConfig
     bool vsync{true};
     bool bloom{true};
     bool interpolate{true};
-    bool character_preview{};
-    std::uint32_t monster_preview_asset{0xFFFFFFFFu};
-    std::uint32_t slime_family_preview_count{};
-    bool environment_preview{};
     bool grid_floor_probe{};
     bool grid_floor_disable_aa{};
-    std::uint32_t monster_preview_clip{};
-    float monster_preview_time{0.5f};
-    bool preview_camera_override{};
-    float preview_camera_yaw{180.0f};
-    float preview_camera_pitch{10.0f};
-    float preview_camera_distance{8.0f};
     bool devtools_visible{true};
     std::uint32_t render_scale_percent{100};
     bool dynamic_resolution{};
@@ -504,6 +494,7 @@ struct RendererFrameResult
     std::uint64_t presented_ui_packet_generation{};
     // At least one view accepted its graph/service submissions, even if Present failed.
     bool render_history_committed{};
+    PreviewEditValues preview;
 };
 
 struct RendererOptions;
@@ -788,6 +779,9 @@ class D3D12Renderer
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
+    [[nodiscard]] static Result BakeSceneProbePackage(const RendererConfig &configuration,
+        const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
+        std::vector<std::byte> &package_bytes);
     [[nodiscard]] Result BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
         const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
@@ -847,7 +841,8 @@ class D3D12Renderer
 
   private:
 #if defined(HS_OFFLINE_PROBE_BAKER)
-    [[nodiscard]] Result InitializeWorldTransportBake(const RendererConfig &configuration, bool terrain);
+    enum class WorldTransportBakeKind { Terrain, StaticShadow, SceneProbe };
+    [[nodiscard]] Result InitializeWorldTransportBake(const RendererConfig &configuration, WorldTransportBakeKind kind);
 #endif
     [[nodiscard]] Result BakeStaticShadowPagesPrepared(
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,

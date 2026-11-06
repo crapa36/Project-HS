@@ -215,11 +215,11 @@ enum class MaterialProgramKind : std::uint16_t
     OpaqueScenePS = 1,
     MaskedScenePS = 2,
     MaskedShadowPS = 3,
-    HeroScenePS = 4,
-    HeroVisibilityPS = 5,
-    HeroSurfaceResolveCS = 6,
-    HeroShadowPS = 7,
-    HeroTranslucentPS = 8,
+    CharacterScenePS = 4,
+    CharacterVisibilityPS = 5,
+    CharacterSurfaceResolveCS = 6,
+    CharacterShadowPS = 7,
+    CharacterTranslucentPS = 8,
     DecalSurfaceCS = 9,
 };
 

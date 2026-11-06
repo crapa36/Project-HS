@@ -655,15 +655,51 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "independent executor");
         hs::RenderGraphBuilder graph;
         std::array<void *, 6> lists{};
+        ComPtr<ID3D12Resource> source, predicate, output;
+        const auto upload_heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+        const auto output_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+        const auto data_desc = BufferDescription(256);
+        Hr(fixture.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &data_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&source)), "recording source");
+        Hr(fixture.device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &data_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&predicate)), "recording predicate");
+        Hr(fixture.device->CreateCommittedResource(&output_heap, D3D12_HEAP_FLAG_NONE, &data_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&output)), "recording output");
+        const D3D12_RANGE no_read{};
+        void *mapped{};
+        Hr(source->Map(0, &no_read, &mapped), "map recording source");
+        std::memset(mapped, 0, 256);
+        for (std::size_t index = 0; index < lists.size(); ++index)
+            static_cast<std::uint32_t *>(mapped)[index] = static_cast<std::uint32_t>(17 + index);
+        source->Unmap(0, nullptr);
+        Hr(predicate->Map(0, &no_read, &mapped), "map recording predicate");
+        std::memset(mapped, 0, 256);
+        predicate->Unmap(0, nullptr);
+        const auto source_buffer = graph.ImportBuffer({source.Get()}, hs::Access::CopySource, "recording source");
+        const auto predicate_buffer = graph.ImportBuffer({predicate.Get()}, hs::Access::IndirectArgs, "recording predicate");
+        const auto output_buffer = graph.ImportBuffer({output.Get()}, hs::Access::CopyDest, "recording output");
+        auto output_version = graph.Version(output_buffer);
         for (std::uint32_t index = 0; index < lists.size(); ++index)
-            graph.AddPass(index + 1, "independent recording", queue).SetExecuteChecked(
-                [&, index](hs::RenderPassContext &context) {
+        {
+            auto pass = graph.AddPass(index + 1, "independent recording", queue);
+            pass.Read(graph.Version(source_buffer), hs::Access::CopySource);
+            pass.Read(graph.Version(predicate_buffer), hs::Access::IndirectArgs);
+            output_version = pass.Write(output_version, hs::Access::CopyDest);
+            pass.SetExecuteChecked([&, index](hs::RenderPassContext &context) {
                     lists[index] = context.NativeCommandList();
+                    auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+                    if (index == 0) commands->CopyBufferRegion(output.Get(), 0, source.Get(), 64, (lists.size() + 1) * 4);
+                    commands->CopyBufferRegion(output.Get(), index * 4, source.Get(), index * 4, 4);
+                    // A later logical pass must not inherit this suppressed-copy state.
+                    commands->SetPredication(predicate.Get(), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+                    if (index == 0) commands->CopyBufferRegion(output.Get(), lists.size() * 4, source.Get(), 0, 4);
                     return fail_middle && index == 1
                         ? hs::Result::Failure(hs::ErrorCode::TaskFailed, "independent-test", "injected failure")
                         : hs::Result::Success();
                 });
-        Check(graph.Prepare(pool).Succeeded(), "prepare independent graph");
+        }
+        if (auto prepared = graph.Prepare(pool); !prepared)
+            throw std::runtime_error("prepare independent graph: " + std::string(prepared.Message()));
         hs::TaskSystem tasks(2);
         std::vector<hs::GpuPassTiming> cpu_passes;
         for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
@@ -703,8 +739,16 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         options.cpu_pass_timing_count = cpu_passes.size();
         hs::CompletionSet completion;
         const auto result = executor.Execute(graph, 0, barriers, completion, &options);
-        Check(executor.LastExecutionStats().record_jobs ==
-                  6u + (timestamps_enabled ? 1u : 0u), "each pass retains its own recording job");
+        std::vector<void *> distinct_lists;
+        for (const auto list : lists)
+            if (list && std::find(distinct_lists.begin(), distinct_lists.end(), list) == distinct_lists.end())
+                distinct_lists.push_back(list);
+        Check(executor.LastExecutionStats().record_jobs == distinct_lists.size() + (timestamps_enabled ? 1u : 0u),
+            "each physical recording task owns one list, with a separate timestamp resolve");
+        Check(barriers == hs::BarrierMode::Enhanced
+                ? distinct_lists.size() >= tasks.WorkerCount() && distinct_lists.size() < lists.size()
+                : distinct_lists.size() == lists.size(),
+            "compatible Enhanced passes share lists without serializing all worker recording; Legacy preserves decay");
         Check(result.Succeeded() != fail_middle, "independent callback failure preserved");
         if (fail_middle)
             Check(completion.direct == 0 && completion.compute == 0 &&
@@ -713,9 +757,8 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                   "independent recording failure submits no GPU work");
         else
         {
-            for (std::size_t i = 0; i < lists.size(); ++i)
-                for (std::size_t j = i + 1; j < lists.size(); ++j)
-                    Check(lists[i] && lists[i] != lists[j], "pass command list state remains isolated");
+            Check(std::all_of(lists.begin(), lists.end(), [](const auto list) { return list != nullptr; }),
+                "every logical callback records its work");
             for (const auto &timing : cpu_passes)
                 Check(timing.cpu_record_valid && timing.cpu_callback_valid &&
                           timing.cpu_record_begin_qpc <= timing.cpu_callback_begin_qpc &&
@@ -723,6 +766,20 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                           timing.cpu_callback_end_qpc <= timing.cpu_record_end_qpc,
                       "independent recording retains each callback inside its pass recording interval");
             Check(executor.Wait(completion).Succeeded(), "wait independent graph");
+            D3D12_RANGE copied_bytes{0, (lists.size() + 1) * 4};
+            Hr(output->Map(0, &copied_bytes, &mapped), "map recording output");
+            for (std::size_t index = 0; index < lists.size(); ++index)
+                Check(static_cast<const std::uint32_t *>(mapped)[index] == 17 + index,
+                    "shared command lists preserve initial predication and every GPU copy");
+            Check(static_cast<const std::uint32_t *>(mapped)[lists.size()] == 0,
+                "fixture predication actually suppresses its control copy");
+            const D3D12_RANGE copy_no_write{};
+            output->Unmap(0, &copy_no_write);
+            if (!timestamps_enabled && !query_subset)
+                std::printf("Recording %s/%s: %zu callbacks, %zu lists, %u jobs; GPU copies and predication reset passed.\n",
+                    barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
+                    queue == hs::QueueHint::Direct ? "Direct" : "Compute", lists.size(), distinct_lists.size(),
+                    executor.LastExecutionStats().record_jobs);
             if (timestamps_enabled)
             {
             std::uint64_t *values{};
@@ -3349,9 +3406,6 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
             graph.FinalQueue(alias_second) == hs::QueueHint::Direct,
             "alias release preserves logical access while physical views return to COMMON");
         Check(alias_lists[0] && alias_lists[1] && alias_lists[2], "alias callbacks recorded");
-        Check(alias_lists[0] != alias_lists[1] && alias_lists[1] != alias_lists[2] &&
-                  alias_lists[0] != alias_lists[2],
-              "Direct scopes retain independent command lists in both barrier modes");
         const auto alias_stats = fixture.executor.LastExecutionStats();
         const auto expected_batches = (barriers == hs::BarrierMode::Enhanced ? 1u : 3u) +
             (timing_boundaries ? 2u : 0u);

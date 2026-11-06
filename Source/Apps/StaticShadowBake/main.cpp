@@ -2,7 +2,7 @@
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/renderer/renderer.hpp>
 #include "../Common/world_transport_scene.hpp"
-#include "../RenderTestRunner/static_shadow_action.hpp"
+#include "static_shadow_action.hpp"
 
 #include <Windows.h>
 
@@ -26,8 +26,8 @@ void Require(const hs::Result &result)
 
 void BakeStaticShadowGeneration(const hs::SelectedGeneration &generation,
     const std::shared_ptr<const hs::StaticRenderScene> &scene, const std::filesystem::path &artifacts,
-    const hs::render_test::BeginStaticShadowArchive &begin,
-    const hs::render_test::WriteStaticShadowPage &write_page)
+    const hs::static_shadow::BeginStaticShadowArchive &begin,
+    const hs::static_shadow::WriteStaticShadowPage &write_page)
 {
     hs::RendererConfig config;
     config.width = 320; config.height = 180;
@@ -48,7 +48,7 @@ void BakeStaticShadowGeneration(const hs::SelectedGeneration &generation,
 
 int main(int argc, char **argv)
 {
-    return hs::render_test::ProduceStaticShadow(argc, argv,
+    return hs::static_shadow::ProduceStaticShadow(argc, argv,
         [](const hs::SelectedGeneration &generation) {
             // Static shadow archives must use the same default scene seed as gameplay.
             constexpr std::uint64_t kDefaultGameplaySeed = 1;

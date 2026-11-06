@@ -1503,6 +1503,8 @@ void RealFirePulseAndTrapMarkBindings()
               static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow)}).Succeeded() &&
               simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantUpgrade,
               static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow),3}).Succeeded() &&
+              simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow),5}).Succeeded() &&
               simulation.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy,
               static_cast<std::uint64_t>(hs::EnemyKind::Melee),0,{5.0f,0.0f}}).Succeeded(),
               "explosive fire-area setup");
@@ -1510,6 +1512,8 @@ void RealFirePulseAndTrapMarkBindings()
         input.held.aim_world={20.0f,0.0f,0.0f};
         const std::array edge{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
         hs::DomainSignal pulse{};
+        hs::DomainSignal pre_pull{};
+        std::uint32_t pre_pull_count{};
         std::uint32_t attributed_pulses{};
         std::uint32_t duplicate_pulses{};
         for(std::uint32_t step=0;step<100;++step)
@@ -1520,6 +1524,13 @@ void RealFirePulseAndTrapMarkBindings()
             (void)simulation.TickFixed(input);
             for(const auto &signal:simulation.PendingDomainSignals())
             {
+                if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
+                   signal.upgrade_skill==static_cast<std::uint8_t>(hs::SkillKind::ExplosiveArrow) &&
+                   signal.upgrade_index==5)
+                {
+                    pre_pull=signal;
+                    ++pre_pull_count;
+                }
                 if(signal.kind!=hs::DomainSignalKind::FireAreaPulse ||
                    signal.upgrade_skill!=static_cast<std::uint8_t>(hs::SkillKind::ExplosiveArrow) ||
                    signal.upgrade_index!=3) continue;
@@ -1542,8 +1553,21 @@ void RealFirePulseAndTrapMarkBindings()
               pulse.tick<=pulse.geometry.end_tick,
               "actual explosive fire-area pulse lost its area geometry, owner, or tick");
         std::array<hs::PresentationEvent,2> projected{};
-        const auto count=hs::ProjectDomainSignal(pulse,projected);
+        auto count=hs::ProjectDomainSignal(pre_pull,projected);
         std::vector<hs::PresentationEvent> output;
+        Check(pre_pull_count==1 && pre_pull.upgrade_stage==hs::UpgradeVisualStage::Resolve &&
+              pre_pull.upgrade_cast_id!=0 && pre_pull.upgrade_owner_id!=0 &&
+              pre_pull.geometry.kind==hs::DomainSignalGeometryKind::Circle &&
+              pre_pull.geometry.radius==simulation.Rules().upgrades.explosive_arrow.pre_explosion_pull.pull_radius &&
+              pre_pull.geometry.source_id==pre_pull.upgrade_owner_id && count==1 &&
+              hs::runtime_detail::DispatchVfxUpgradeEvents(
+                  program,std::span(projected).first(count),output).Succeeded() &&
+              output.size()==1 && output[0].asset.value==hs::MakeAssetId(
+                  "particle.upgrade.explosive.pre_pull").value &&
+              output[0].geometry.radius==pre_pull.geometry.radius &&
+              output[0].geometry.source_id==pre_pull.upgrade_owner_id,
+              "real explosive pre-pull lost its projectile owner or pull radius");
+        count=hs::ProjectDomainSignal(pulse,projected);
         Check(count==1 && hs::runtime_detail::DispatchVfxUpgradeEvents(
                   program,std::span(projected).first(count),output).Succeeded() &&
               output.size()==1 && output[0].asset.value==hs::MakeAssetId(

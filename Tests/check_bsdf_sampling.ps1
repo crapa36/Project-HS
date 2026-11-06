@@ -11,9 +11,7 @@ $manifest = Get-Content -LiteralPath (Join-Path $buildRoot $pointer.manifest_loc
     ConvertFrom-Json
 $shader = $null
 $coatedDfg = $null
-foreach ($logicalId in @('render/shader/bsdf_preintegrate_cs.dxil', 'render/shader/deferred_ps.dxil',
-        'render/shader/single_layer_water_ps.dxil',
-        'render/lighting/coated_ggx_dfg.dds')) {
+foreach ($logicalId in @('render/shader/bsdf_preintegrate_cs.dxil', 'render/lighting/coated_ggx_dfg.dds')) {
     $products = @($manifest.products | Where-Object logical_id -eq $logicalId)
     if ($products.Count -ne 1) { throw "Selected Generation must contain exactly one $logicalId." }
     $path = Join-Path $buildRoot $products[0].locator

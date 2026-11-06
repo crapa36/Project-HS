@@ -10,6 +10,7 @@
 
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/dds_texture.hpp>
+#include <meshoptimizer.h>
 
 #include <fbxsdk.h>
 #include <d3d11.h>
@@ -1353,6 +1354,25 @@ bool ImportCharacterAsset(CharacterIR &character, std::string &error_message,
         for (const auto &bone : bones) character.bone_names.emplace_back(bone.node->GetName());
         if (source.seal_eye_socket)
             SealSlimeEyeSocket(character);
+        if (!ground_archer)
+        {
+            if (character.vertices.empty())
+                throw std::runtime_error("Character has no triangles for tangent generation");
+            const auto &first = character.vertices.front();
+            std::map<std::uint16_t, std::vector<unsigned>> material_corners;
+            for (std::size_t index = 0; index < character.vertices.size(); ++index)
+                material_corners[character.vertices[index].material_index].push_back(static_cast<unsigned>(index));
+            for (const auto &[material, corners] : material_corners)
+            {
+                (void)material;
+                std::vector<std::array<float, 4>> tangents(corners.size());
+                meshopt_generateTangents(tangents.front().data(), corners.data(), corners.size(),
+                    first.position.data(), character.vertices.size(), sizeof(first), first.normal.data(),
+                    sizeof(first), first.uv.data(), sizeof(first), meshopt_TangentCompatible);
+                for (std::size_t index = 0; index < corners.size(); ++index)
+                    character.vertices[corners[index]].tangent = tangents[index];
+            }
+        }
         auto &named = character.animation_extension;
         named = {};
         if (!source.named_animations.empty())

@@ -681,13 +681,13 @@ std::vector<MaterialProgram> DecodeMaterialPrograms(
             masked_shadow = true;
             kind = MaterialProgramKind::MaskedShadowPS;
         }
-        else if (value >= static_cast<std::uint32_t>(MaterialProgramKind::HeroScenePS) &&
-                 value <= static_cast<std::uint32_t>(MaterialProgramKind::HeroTranslucentPS))
+        else if (value >= static_cast<std::uint32_t>(MaterialProgramKind::CharacterScenePS) &&
+                 value <= static_cast<std::uint32_t>(MaterialProgramKind::CharacterTranslucentPS))
         {
             constexpr std::array shader_ids{
-                "render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
-                "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil",
-                "render/shader/hero_translucent_ps.dxil"};
+                "render/shader/character_scene_ps.dxil", "render/shader/character_visibility_ps.dxil",
+                "render/shader/character_resolve_cs.dxil", "render/shader/character_shadow_ps.dxil",
+                "render/shader/character_translucent_ps.dxil"};
             const auto bit = 1u << (value - 4u);
             Require((hero_mask & bit) == 0, "duplicate hero material program");
             Require(id == shader_ids[value - 4u], "hero program kind references the wrong shared shader");
@@ -827,7 +827,7 @@ CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &pac
     result.domain = (result.surface.capability_mask & 256u) != 0 ?
         CharacterMaterialDomain::Translucent : CharacterMaterialDomain::Opaque;
     const bool translucent_program = std::ranges::any_of(result.programs, [](const MaterialProgram &program) {
-        return program.kind == MaterialProgramKind::HeroTranslucentPS;
+        return program.kind == MaterialProgramKind::CharacterTranslucentPS;
     });
     Require(translucent_program == (result.domain == CharacterMaterialDomain::Translucent) &&
             ((result.domain == CharacterMaterialDomain::Translucent && result.programs.size() == 1) ||
@@ -840,9 +840,9 @@ CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &pac
     {
         const auto kind = static_cast<std::uint32_t>(program.kind);
         constexpr std::array shader_ids{
-            "render/shader/hero_scene_ps.dxil", "render/shader/hero_visibility_ps.dxil",
-            "render/shader/hero_resolve_cs.dxil", "render/shader/hero_shadow_ps.dxil",
-            "render/shader/hero_translucent_ps.dxil"};
+            "render/shader/character_scene_ps.dxil", "render/shader/character_visibility_ps.dxil",
+            "render/shader/character_resolve_cs.dxil", "render/shader/character_shadow_ps.dxil",
+            "render/shader/character_translucent_ps.dxil"};
         Require(kind >= 4u && kind <= 8u &&
                 package.dependencies[program.dependency_index] == shader_ids[kind - 4u],
                 "hero material program identity disagrees with shared program kind");

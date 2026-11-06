@@ -29,9 +29,6 @@ struct PresentationCatalog
     std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
 };
 
-namespace shipping
-{
-[[nodiscard]] const PresentationCatalog &Presentation() noexcept;
-} // namespace shipping
+ // namespace shipping
 
 } // namespace hs

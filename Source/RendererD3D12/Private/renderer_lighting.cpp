@@ -344,7 +344,7 @@ Result D3D12Renderer::Impl::PrepareLayeredTranslucency(const OwnedView &owner, c
         std::min(QualityProfileFor(row).hero_refraction_layers,
             QualityProfileFor(candidate_config.transparency_quality).hero_refraction_layers);
     const bool enabled = authored_transmission && layers != 0;
-    return owner.hero_transparency.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
+    return owner.translucency.Prepare(device.Get(), allocator, root_signature.Get(), capacity,
         layers, enabled, kFrameCount,
         [&](std::string_view logical_id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;

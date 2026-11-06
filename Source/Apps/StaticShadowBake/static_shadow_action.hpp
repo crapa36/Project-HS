@@ -6,7 +6,7 @@
 #include <functional>
 #include <memory>
 
-namespace hs::render_test
+namespace hs::static_shadow
 {
 using BeginStaticShadowArchive = std::function<Result(const render_data::StaticShadowArchiveDescription &)>;
 using WriteStaticShadowPage = std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)>;

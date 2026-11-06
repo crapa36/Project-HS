@@ -1,10 +1,10 @@
 #include <hs/runtime/application.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/runtime/shipping_content.hpp>
+#include <hs/runtime/prepared_content.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 #ifdef HS_DEVELOPMENT_TOOLS
-#include <hs/presentation/presentation_catalog_io.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include "vfx_generation_rebind.hpp"
@@ -14,6 +14,9 @@
 #include <hs/presentation/meadow_surface.hpp>
 
 #include "runtime_channels.hpp"
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include "preview_scene.hpp"
+#endif
 #include "native_input_frame.hpp"
 #include "ui_command_admission.hpp"
 #include "runtime_diagnostics.hpp"
@@ -417,7 +420,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Cannot resolve the executable directory.")};
     }
-    std::uint64_t content_hash{};
+    auto content_owner = std::make_shared<shipping::PreparedContent>();
+    auto &prepared_content = *content_owner;
 #ifdef HS_DEVELOPMENT_TOOLS
     const auto generation_pointer = config.generation_pointer.empty()
         ? executable_directory / "GenerationState/runtime-full.json"
@@ -426,40 +430,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (auto loaded = LoadSelectedGeneration(generation_pointer, selected_generation);
         !loaded)
         return {loaded};
-    const std::string deployment_id = selected_generation.id;
-    std::filesystem::path cooked_particle_effects_path;
-    std::filesystem::path cooked_vfx_program_path;
-    for (const auto [id, path] : {
-             std::pair<std::string_view, std::filesystem::path *>(
-                 "vfx/particle_effects.hsbin", &cooked_particle_effects_path),
-             {"vfx/vfx_program.hsbin", &cooked_vfx_program_path}})
-        if (auto resolved = selected_generation.Require(id, *path); !resolved)
-            return {resolved};
-    SimulationRules simulation_rules;
-    std::filesystem::path cooked_simulation_rules_path;
-    if (auto resolved = selected_generation.Require("game-data/simulation-rules", cooked_simulation_rules_path); !resolved)
-        return {resolved};
-    if (auto loaded = LoadSimulationRules(cooked_simulation_rules_path,
-                                          simulation_rules, &content_hash);
-        !loaded)
+    if (auto loaded = shipping::LoadPreparedContent(std::move(selected_generation), prepared_content); !loaded)
         return {loaded};
-    PresentationCatalog presentation_catalog;
-    std::filesystem::path cooked_presentation_path;
-    if (auto resolved = selected_generation.Require("game-data/presentation-catalog", cooked_presentation_path); !resolved)
-        return {resolved};
-    if (auto loaded = LoadPresentationCatalog(cooked_presentation_path,
-                                              presentation_catalog, &content_hash);
-        !loaded)
-    {
-        return {loaded};
-    }
+    const auto &selected = *prepared_content.generation;
+    const std::string deployment_id = selected.id;
 #else
-    auto shipped_content = std::make_shared<ShippedContentOwner>();
-    if (auto opened = shipping::OpenImage(executable_directory, shipping::ImageInfo(), *shipped_content); !opened)
-        return {opened};
-    const auto &presentation_catalog = shipping::Presentation();
-    const auto &simulation_rules = shipping::Simulation();
-    content_hash = shipping::ImageInfo().content_hash;
+    if (auto loaded = shipping::LoadPreparedContent(executable_directory, shipping::ImageInfo(), prepared_content); !loaded)
+        return {loaded};
+    const auto &shipped_content = prepared_content.owner;
     std::string deployment_id;
     deployment_id.reserve(64);
     constexpr char hex[] = "0123456789abcdef";
@@ -469,32 +447,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         deployment_id += hex[byte >> 4]; deployment_id += hex[byte & 15];
     }
 #endif
+    const auto &presentation_catalog = prepared_content.presentation;
+    const auto &simulation_rules = *prepared_content.simulation;
+    const auto content_hash = prepared_content.content_hash;
 #ifdef HS_DEVELOPMENT_TOOLS
     const auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
 #endif
-#ifndef HS_DEVELOPMENT_TOOLS
-    VfxImageData shipped_vfx;
-#endif
     VfxCatalog vfx_catalog;
-#ifdef HS_DEVELOPMENT_TOOLS
-    if (auto loaded = VfxCatalog::Load(
-            cooked_particle_effects_path, cooked_vfx_program_path, vfx_catalog);
-        !loaded)
-        return {loaded};
-#else
-    {
-    std::array<std::vector<std::byte>, 2> vfx_bytes;
-    for (std::size_t i = 0; i < vfx_bytes.size(); ++i)
-        if (auto read = shipping::ReadRange(*shipped_content, shipping::ImageInfo().vfx[i], vfx_bytes[i]); !read)
-            return {read};
-    if (auto loaded = DecodeVfxImage(vfx_bytes[0], vfx_bytes[1], shipped_vfx); !loaded)
-        return {loaded};
-    }
-    if (!shipped_vfx.has_required_sprite_bindings)
-        return {Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Shipping VFX omits required sprite bindings.")};
-    if (auto bound = vfx_catalog.Bind(shipped_vfx.View()); !bound)
+    if (auto bound = vfx_catalog.Bind(prepared_content.vfx.View()); !bound)
         return {bound};
-#endif
 #ifdef HS_DEVELOPMENT_TOOLS
     PlaytestReplay replay;
     const auto replaying = !config.replay_directory.empty();
@@ -555,11 +516,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     audio.SetCaptureTimings(false);
 #endif
     audio.SetWakeCallback(runtime_detail::MainWake::NotifyOpaque, &main_wake);
-#ifdef HS_DEVELOPMENT_TOOLS
-    if (auto initialized = audio.Initialize(settings, selected_generation.product_paths); !initialized)
-#else
-    if (auto initialized = audio.Initialize(settings, shipping::Audio(), *shipped_content); !initialized)
-#endif
+    if (auto initialized = audio.Initialize(settings, prepared_content.prepared_audio, content_owner); !initialized)
     {
         return {initialized};
     }
@@ -811,14 +768,35 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::atomic<Tick> rendered_tick{};
     NativeInputFrame native_input_frame;
     native_input_frame.BindMainWake(runtime_detail::MainWake::NotifyOpaque, &main_wake);
+#ifdef HS_DEVELOPMENT_TOOLS
+    std::mutex smoke_mutex;
+    std::condition_variable smoke_cv;
+    const auto notify_smoke = [&] {
+        if (!config.smoke_render_lockstep) return;
+        std::lock_guard lock(smoke_mutex);
+        smoke_cv.notify_all();
+    };
+#endif
+    const auto request_stop = [&] {
+        channels.stop_requested.store(true, std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
+        notify_smoke();
+#endif
+        native_input_frame.Cancel();
+    };
+    const auto finish_simulation = [&] {
+        channels.simulation_done.store(true, std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
+        notify_smoke();
+#endif
+    };
     auto record_thread_failure = [&](Result failure) {
         std::lock_guard lock(result_mutex);
         if (thread_result)
         {
             thread_result = std::move(failure);
         }
-        channels.stop_requested.store(true, std::memory_order_release);
-        native_input_frame.Cancel();
+        request_stop();
     };
     const auto log_settings_save_failure = [&](const Result &failure) {
         settings_save_failed.store(true, std::memory_order_release);
@@ -864,7 +842,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto &channels = render_ports;
         SetThreadName(L"HS Render");
 #ifdef HS_DEVELOPMENT_TOOLS
-        auto render_generation = std::make_shared<const SelectedGeneration>(selected_generation);
+        std::shared_ptr<const SelectedGeneration> render_generation(content_owner, prepared_content.generation.get());
+        auto active_vfx_content = content_owner;
 #else
         std::shared_ptr<const void> render_generation = shipped_content;
 #endif
@@ -918,16 +897,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
         renderer_config.frame_generation_allowed = false; // Startup/loading/menu are not gameplay frames.
         renderer_config.interpolate = realtime;
-        renderer_config.character_preview = config.character_preview;
-        renderer_config.monster_preview_asset = config.monster_preview_asset;
-        renderer_config.slime_family_preview_count = config.slime_family_preview_count;
-        renderer_config.environment_preview = config.environment_preview;
-        renderer_config.monster_preview_clip = config.monster_preview_clip;
-        renderer_config.monster_preview_time = config.monster_preview_time;
-        renderer_config.preview_camera_override = config.preview_camera_override;
-        renderer_config.preview_camera_yaw = config.preview_camera_yaw;
-        renderer_config.preview_camera_pitch = config.preview_camera_pitch;
-        renderer_config.preview_camera_distance = config.preview_camera_distance;
         // Scripted runs must not accept developer-UI input or vary their captures with its state.
         renderer_config.devtools_visible = !config.smoke && config.skill_vfx_capture >= kCombatSkillCount;
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -958,17 +927,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.product_digests = render_generation->product_digests;
 #else
         renderer_config.content_generation_id = deployment_id;
-        renderer_config.content_generation_lease = shipped_content;
+        renderer_config.content_generation_lease = content_owner;
         renderer_config.packed_content = shipped_content;
-        renderer_config.packed_bulks = shipping::RendererBulks();
-        renderer_config.packed_textures = shipping::RendererTextures();
-        renderer_config.packed_geometry = shipping::RendererGeometry();
-        renderer_config.packed_materials = shipping::RendererMaterials();
-        renderer_config.packed_characters = shipping::RendererCharacters();
-        renderer_config.packed_animations = shipping::RendererAnimations();
-        renderer_config.packed_vfx_mesh_atlas = &shipping::RendererVfxMeshAtlas();
-        renderer_config.packed_source_revisions = shipping::RendererSourceRevisions();
-        renderer_config.packed_revision_bulks = shipping::RendererRevisionBulks();
+        renderer_config.packed_bulks = prepared_content.renderer.bulks;
+        renderer_config.packed_textures = prepared_content.renderer.textures;
+        renderer_config.packed_geometry = prepared_content.renderer.geometry;
+        renderer_config.packed_materials = prepared_content.renderer.materials;
+        renderer_config.packed_characters = prepared_content.renderer.characters;
+        renderer_config.packed_animations = prepared_content.renderer.animations;
+        renderer_config.packed_vfx_mesh_atlas = &prepared_content.renderer.atlas;
+        renderer_config.packed_source_revisions = prepared_content.renderer.source_revisions;
+        renderer_config.packed_revision_bulks = prepared_content.renderer.revision_bulks;
 #endif
 
         runtime_detail::DiagnosticSample renderer_startup{};
@@ -1141,12 +1110,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         // The future joins on teardown; the worker owns only file inputs and its read lease.
         std::future<runtime_detail::PreparedContentGeneration> generation_preparation;
         std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
-        SceneGenerationBinding scene_generation{selected_generation.id, selected_generation.id, {}};
+        SceneGenerationBinding scene_generation{selected.id, selected.id, {}};
         auto next_generation_check = std::chrono::steady_clock::now();
         std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
             << "ready active=" << render_generation->id << '\n';
 #endif
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+        PreviewEditValues preview_edit;
+        preview_edit.enabled = config.character_preview;
+#endif
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::PreparedPairFacts vfx_pair_facts;
@@ -1556,19 +1529,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                        "Content Generation changes the selected scope.");
                         if (current && reloaded && candidate.id != render_generation->id)
                         {
-                            std::filesystem::path next_particle_path, next_program_path;
+                            auto next_content = std::make_shared<shipping::PreparedContent>();
+                            next_content->generation = std::make_shared<const SelectedGeneration>(candidate);
                             VfxCatalog replacement;
                             RendererVfxSpriteBindings sprite_bindings;
                             runtime_detail::DecodedVfxState prepared_decoded;
                             runtime_detail::ActiveEffectStore prepared_active_effects = active_effects;
                             runtime_detail::VfxUpgradeMovementState prepared_movements;
                             runtime_detail::VfxPersistentSparkState prepared_sparks;
-                            if (reloaded)
-                            {
-                                stage = "vfx_paths";
-                                reloaded = candidate.Require("vfx/particle_effects.hsbin", next_particle_path);
-                                if (reloaded) reloaded = candidate.Require("vfx/vfx_program.hsbin", next_program_path);
-                            }
                             if (reloaded)
                             {
                                 for (const std::string id : {"vfx/particle_effects.hsbin", "vfx/vfx_program.hsbin"})
@@ -1588,7 +1556,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             if (reloaded && catalog_changed)
                             {
                                 stage = "vfx_catalog";
-                                reloaded = VfxCatalog::Load(next_particle_path, next_program_path, replacement);
+                                reloaded = shipping::LoadPreparedVfx(candidate, next_content->vfx);
+                                if (reloaded) reloaded = replacement.Bind(next_content->vfx.View());
                                 if (reloaded) reloaded = PrepareVfxSpriteBindings(replacement, sprite_bindings);
                                 if (reloaded && vfx_catalog_generation == UINT64_MAX)
                                     reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -1647,7 +1616,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             if (reloaded)
                             {
                                 stage = "renderer_prepare";
-                                auto next_generation = std::make_shared<const SelectedGeneration>(candidate);
+                                std::shared_ptr<const SelectedGeneration> next_generation(next_content, next_content->generation.get());
                                 // The closure includes shader/parameter leaves: the renderer alone
                                 // classifies narrow reloads, which keep the existing scene association.
                                 bool scene_compatible = true;
@@ -1656,7 +1625,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                          std::string_view(renderer_config.scene_hlod_product_id)})
                                     scene_compatible &= runtime_detail::SameCapturedAssetClosure(
                                         *render_generation, candidate, MakeAssetId(id));
-                                SceneGenerationBinding next_scene_generation{selected_generation.id, candidate.id, {}};
+                                SceneGenerationBinding next_scene_generation{selected.id, candidate.id, {}};
                                 const auto scene_snapshots = snapshot_consumer.AcquireLatest();
                                 if (scene_snapshots.has_previous)
                                     (void)next_scene_generation.Resolve(scene_snapshots.previous.static_scene);
@@ -1684,6 +1653,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     if (catalog_changed)
                                     {
                                         vfx_catalog.Swap(replacement);
+                                        active_vfx_content = next_content;
                                         active_effects.Swap(prepared_active_effects);
                                         vfx_session.SwapDecoded(prepared_decoded);
                                         vfx_session.DiscardNativeBatch();
@@ -1695,8 +1665,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     else
                                         vfx_session.decoded.entity_surface_captures.swap(
                                             prepared_decoded.entity_surface_captures);
-                                    cooked_particle_effects_path.swap(next_particle_path);
-                                    cooked_vfx_program_path.swap(next_program_path);
                                     render_generation.swap(next_generation);
                                     if (resident_replaced) scene_generation.Swap(next_scene_generation);
                                     active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
@@ -2057,7 +2025,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     resized = true;
                 }
                 RendererFrameResult frame;
-                const DevToolsFrameData devtools{
+                DevToolsFrameData devtools{
                     static_cast<std::uint32_t>(task_system.WorkerCount()),
                     static_cast<std::uint32_t>(channels.action_edges.Size()),
                     static_cast<std::uint32_t>(channels.presentation_events.Size()),
@@ -2067,6 +2035,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     channels.dropped_input_edges.load(std::memory_order_relaxed),
                     channels.dropped_presentation_events.load(std::memory_order_relaxed),
                     0};
+#if defined(HS_DEVELOPMENT_TOOLS)
+                devtools.preview = preview_edit;
+#endif
                 const auto current_vfx = snapshots.has_current
                     ? snapshots.current.persistent_vfx
                     : std::span<const PersistentVfxVisual>{};
@@ -3015,10 +2986,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
-                const std::array views{renderer.MainViewInput(InterpolateRenderCamera(snapshots, sample_alpha))};
-                const RenderPackage render_input{
+                auto package_snapshots = snapshots;
+                auto camera = InterpolateRenderCamera(snapshots, sample_alpha);
+#if defined(HS_DEVELOPMENT_TOOLS)
+                runtime_detail::PreviewScene preview_scene;
+                preview_scene.Prepare(config, preview_edit, package_snapshots);
+                camera = runtime_detail::PreviewScene::Camera(config, preview_edit, camera);
+#endif
+                const std::array views{renderer.MainViewInput(camera)};
+                RenderPackage render_input{
                     .views = views,
-                    .snapshots = snapshots,
+                    .snapshots = package_snapshots,
                     .vfx = {
                         .particle_spawns = native_particles,
                         .effect_lines = native_lines,
@@ -3055,6 +3033,26 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     .ui_packet_generation = snapshots.ui_frame ? snapshots.ui_frame->generation : 0,
                     .display_sample = RenderDisplaySample{sample_time, sample_alpha},
                 };
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (config.slime_family_preview_count)
+                {
+                    render_input.vfx.ground = {};
+                    render_input.vfx.meshes = {};
+                    render_input.vfx.ribbons = {};
+                    render_input.vfx.lights = {};
+                    render_input.vfx.distortions = {};
+                    render_input.vfx.decals = {};
+                }
+                std::vector<VfxEntitySurfaceCommand> preview_surfaces;
+                if (config.slime_family_preview_count || config.monster_preview_asset < 6 || config.environment_preview)
+                {
+                    for (const auto &surface : typed_surfaces)
+                        if (std::ranges::any_of(package_snapshots.current.instances, [&](const auto &instance) {
+                            return instance.stable_id == surface.render_instance_id;
+                        })) preview_surfaces.push_back(surface);
+                    render_input.vfx.entity_surfaces = preview_surfaces;
+                }
+#endif
                 // GPU completion is delayed; offline attribution joins this revision through its own frame ID.
                 // Simulation/input can enter Pause or a menu after this loop's
                 // input boundary. Disable before that first non-gameplay Present.
@@ -3065,6 +3063,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto frame_settings_generation = active_settings_generation;
                 const auto frame_pipeline_revision = renderer.PipelineRevision();
                 const auto rendered = renderer.Render(render_input, frame);
+#if defined(HS_DEVELOPMENT_TOOLS)
+                preview_edit = frame.preview;
+#endif
                 const auto receipts = runtime_detail::AcceptRendererReceipts(frame,
                     channels.ui_packets, snapshots.ui_frame,
                     snapshots.current.header.session_id, vfx_session);
@@ -3141,7 +3142,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
 #endif
                 if (config.smoke_render_lockstep)
+                {
                     rendered_tick.store(snapshots.current.header.tick, std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
+                    notify_smoke();
+#endif
+                }
                 const auto receipt_phase = channels.session_phase.load(std::memory_order_acquire);
                 if (execution_receipt_pending || receipt_phase != previous_receipt_phase)
                 {
@@ -3241,6 +3247,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             }
             else
             {
+#ifdef HS_DEVELOPMENT_TOOLS
+                if (config.smoke_render_lockstep)
+                {
+                    std::unique_lock lock(smoke_mutex);
+                    smoke_cv.wait(lock, [&] {
+                        return channels.completed_tick.load(std::memory_order_acquire) >
+                                   rendered_tick.load(std::memory_order_acquire) ||
+                            channels.stop_requested.load(std::memory_order_acquire) ||
+                            channels.simulation_done.load(std::memory_order_acquire);
+                    });
+                }
+                else
+#endif
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
 
@@ -3299,8 +3318,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
             if (config.smoke && captured)
             {
-                channels.stop_requested.store(true, std::memory_order_release);
-                native_input_frame.Cancel();
+                request_stop();
             }
 #endif
             if (channels.stop_requested.load(std::memory_order_acquire) &&
@@ -3510,9 +3528,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (!window.PumpMessages(&window_failure, false))
         {
             if (!window_failure) record_thread_failure(std::move(window_failure));
-            channels.stop_requested.store(true, std::memory_order_release);
-            native_input_frame.Cancel();
+            request_stop();
         }
+#ifdef HS_DEVELOPMENT_TOOLS
+        if (config.smoke_render_lockstep && channels.stop_requested.load(std::memory_order_acquire))
+            request_stop();
+#endif
         if (channels.render_ready.load(std::memory_order_acquire)) break;
 
         const auto pending_startup = [&]() noexcept {
@@ -3542,7 +3563,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (!result)
     {
         // Simulation was never started; let Render finish its normal drain.
-        channels.simulation_done.store(true, std::memory_order_release);
+        finish_simulation();
         // Teardown can publish another failure through result_mutex.
         render_thread.join();
         return {result};
@@ -3572,7 +3593,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             !initialized)
         {
             record_thread_failure(initialized);
-            channels.simulation_done.store(true, std::memory_order_release);
+            finish_simulation();
             return;
         }
 #else
@@ -3584,7 +3605,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             !initialized)
         {
             record_thread_failure(initialized);
-            channels.simulation_done.store(true, std::memory_order_release);
+            finish_simulation();
             return;
         }
 #endif
@@ -3604,7 +3625,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     !granted)
                 {
                     record_thread_failure(granted);
-                    channels.simulation_done.store(true, std::memory_order_release);
+                    finish_simulation();
                     return;
                 }
             }
@@ -3617,7 +3638,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     !granted)
                 {
                     record_thread_failure(granted);
-                    channels.simulation_done.store(true, std::memory_order_release);
+                    finish_simulation();
                     return;
                 }
             }
@@ -3633,7 +3654,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     !spawned)
                 {
                     record_thread_failure(spawned);
-                    channels.simulation_done.store(true, std::memory_order_release);
+                    finish_simulation();
                     return;
                 }
             }
@@ -3648,7 +3669,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 !spawned)
             {
                 record_thread_failure(spawned);
-                channels.simulation_done.store(true, std::memory_order_release);
+                finish_simulation();
                 return;
             }
         }
@@ -3660,7 +3681,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 !spawned)
             {
                 record_thread_failure(spawned);
-                channels.simulation_done.store(true, std::memory_order_release);
+                finish_simulation();
                 return;
             }
         }
@@ -3691,7 +3712,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (auto filled = RefillDiagnosticEnemies(simulation, config.diagnostic_enemy_count, diagnostic_spawn_index, initial_added); !filled)
             {
                 record_thread_failure(filled);
-                channels.simulation_done.store(true, std::memory_order_release);
+                finish_simulation();
                 return;
             }
         }
@@ -3783,7 +3804,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     environment_cache.Resolve(model), &enemy_animations, retained_line_signals); !projected)
             {
                 record_thread_failure(projected);
-                channels.simulation_done.store(true, std::memory_order_release);
+                finish_simulation();
                 return;
             }
             configure_dynamic_camera(model);
@@ -3933,8 +3954,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 {
                     if (replay_frame_index >= replay.frames.size())
                     {
-                        channels.stop_requested.store(true, std::memory_order_release);
-                        native_input_frame.Cancel();
+                        request_stop();
                         break;
                     }
                     input = replay.frames[replay_frame_index].View();
@@ -4359,6 +4379,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 } // Read borrows end before clearing signals or the next mutation.
                 simulation.ClearDomainSignals();
                 channels.completed_tick.store(tick.tick, std::memory_order_release);
+#ifdef HS_DEVELOPMENT_TOOLS
+                notify_smoke();
+#endif
                 channels.gameplay_checksum.store(tick.checksum, std::memory_order_release);
                 const bool new_rendered_session = !rendered_session_barrier ||
                     *rendered_session_barrier != dynamic_current.header.session_id;
@@ -4376,9 +4399,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 if (config.smoke_render_lockstep && !final_smoke_frame)
                 {
-                    while (rendered_tick.load(std::memory_order_acquire) < tick.tick &&
-                           !channels.stop_requested.load(std::memory_order_acquire))
-                        std::this_thread::yield();
+#ifdef HS_DEVELOPMENT_TOOLS
+                    std::unique_lock lock(smoke_mutex);
+                    smoke_cv.wait(lock, [&] {
+                        return rendered_tick.load(std::memory_order_acquire) >= tick.tick ||
+                            channels.stop_requested.load(std::memory_order_acquire);
+                    });
+#endif
                     if (channels.stop_requested.load(std::memory_order_acquire))
                         break;
                 }
@@ -4421,8 +4448,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
                 if (tick.phase == SessionPhase::QuitRequested)
                 {
-                    channels.stop_requested.store(true, std::memory_order_release);
-                    native_input_frame.Cancel();
+                    request_stop();
                     break;
                 }
 
@@ -4469,7 +4495,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
 #endif
         native_input_frame.Cancel();
-        channels.simulation_done.store(true, std::memory_order_release);
+        finish_simulation();
     });
 
     bool display_start_deferred{};
@@ -4604,10 +4630,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (!window.PumpMessages(&window_failure, sample_input))
         {
             if (!window_failure) record_thread_failure(std::move(window_failure));
-            channels.stop_requested.store(true, std::memory_order_release);
-            native_input_frame.Cancel();
+            request_stop();
             break;
         }
+#ifdef HS_DEVELOPMENT_TOOLS
+        if (config.smoke_render_lockstep && channels.stop_requested.load(std::memory_order_acquire))
+        {
+            request_stop();
+            break;
+        }
+#endif
         if (sampled_token) native_input_frame.Sampled(sampled_token);
         input_scope.Stop();
         runtime_detail::DiagnosticScope ui_scope(main_work[4], capture_clock);
@@ -5163,8 +5195,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             main_audio->HasPendingMusic(), main_audio->HasPendingAmbience(), main_audio->ActiveMusic().value, main_audio->ActiveAmbience().value));
     }
     window.StopInput();
-    channels.stop_requested.store(true, std::memory_order_release);
-    native_input_frame.Cancel();
+    request_stop();
     simulation_thread.join();
     // GraphicsSettingsCommit owns any in-flight request snapshot. Join before
     // that owner can be destroyed, including shutdown with an unconsumed ack.

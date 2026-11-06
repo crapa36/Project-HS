@@ -405,6 +405,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     owner.material_sidecars_initialized = false;
     owner.temporal_read_index = 0;
     owner.hzb_history_valid = false;
+    owner.last_history_frame_slot = UINT32_MAX;
     owner.hzb_read_index = 0;
     owner.targets.hzb_layout = MakeHzbLayout(owner.render_width, owner.render_height);
 
@@ -891,6 +892,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
 #if defined(HS_DEVELOPMENT_TOOLS)
     owner.hdr_capture_source.Reset();
     owner.hdr_capture_valid = false;
+    owner.shadow_atlas_active = false;
 #endif
     using std::swap;
     auto &current = owner.targets;
@@ -917,6 +919,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
     }
     current.hzb_layout = targets.hzb_layout;
     owner.hzb_history_valid = false; owner.hzb_read_index = 0;
+    owner.last_history_frame_slot = UINT32_MAX;
     owner.temporal_history_valid = false; owner.temporal_read_index = 0;
     owner.temporal_targets_initialized = false; owner.view_targets_initialized = false;
     owner.material_sidecars_initialized = false;
@@ -1607,7 +1610,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS); !created)
             return created;
     }
-    if (auto prepared = PrepareHeroBindings(command_list.Get(), geometry_uploads); !prepared) return prepared;
+    if (auto prepared = PrepareCharacterBindings(command_list.Get(), geometry_uploads); !prepared) return prepared;
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close character geometry upload", result);
     return SubmitResidentUtilityUpload(command_list.Get(), frames[0].allocator.Get(), geometry_uploads);

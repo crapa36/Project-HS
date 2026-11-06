@@ -3,10 +3,15 @@
 #include <cstdint>
 #include <limits>
 
+#define HS_RENDER_BINDING_NATIVE
+#include "../../../Content/Shaders/render_binding_contract.hlsli"
+#undef HS_RENDER_BINDING_NATIVE
+
 namespace hs
 {
 // One Archer range, three LOD ranges for each of six monster assets, and three water LODs.
-inline constexpr std::uint32_t kTranslucencyDiagnosticsContributors = 1 + 6 * 3 + 3, kTranslucencyDiagnosticsPhases = 14;
+inline constexpr std::uint32_t kTranslucencyDiagnosticsContributors = 1 + 6 * 3 + 3,
+    kTranslucencyDiagnosticsPhases = HS_TRANSLUCENCY_PHASE_COUNT;
 inline constexpr std::uint64_t kTranslucencyDiagnosticsRowBytes = 136;
 inline constexpr std::uint64_t kTranslucencyDiagnosticsStatisticsOffset = 16, kTranslucencyDiagnosticsOcclusionOffset = 128;
 inline constexpr std::uint32_t kTranslucencyDiagnosticsShaderMagic = 0x31574848u, kTranslucencyDiagnosticsShaderVersion = 1;

@@ -1,5 +1,4 @@
 #include "render_graph.hpp"
-#include "render_graph_membership.hpp"
 #include "renderer_hlod.hpp"
 #include "renderer_post_subgraphs.hpp"
 #include "renderer_adaptive_shading.hpp"
@@ -80,6 +79,26 @@ void EmptyFeatureShapes()
     reflection_layout.valid = true;
     Check(!reflections.MatchesShape(reflection_layout, false, 0, false, 0) &&
         !reflections.MatchesLayout({}, reflection_layout), "reflections accepted a shape without targets");
+    {
+        hs::RenderGraphBuilder graph;
+        const hs::TextureDesc description{16, 16, DXGI_FORMAT_R16G16B16A16_FLOAT, 0};
+        hs::ScreenReflectionsInputs inputs{};
+        inputs.depth.version = graph.Version(graph.CreateTexture(description, "SSR depth"));
+        inputs.sidecars[0].version = graph.Version(graph.CreateTexture(description, "SSR sidecar zero"));
+        inputs.sidecars[1].version = graph.Version(graph.CreateTexture(description, "SSR sidecar one"));
+        inputs.ambient_visibility.version = graph.Version(graph.CreateTexture(description, "SSR ambient"));
+        inputs.material_parameters.version = graph.Version(graph.CreateBuffer({256, 0}, "SSR parameters"));
+        const auto captured = hs::ReflectionGuides(inputs);
+        Check(captured[hs::SsrSrvDepth] == inputs.depth.version &&
+              captured[hs::SsrSrvSidecar0] == inputs.sidecars[0].version &&
+              captured[hs::SsrSrvSidecar1] == inputs.sidecars[1].version &&
+              captured[hs::SsrSrvAmbient] == inputs.ambient_visibility.version &&
+              captured[hs::SsrSrvParameters] == inputs.material_parameters.version,
+              "reflection guide mapping lost an actual input role");
+        inputs.sidecars[1].version = graph.Version(graph.CreateTexture(description, "SSR replacement sidecar"));
+        Check(hs::ReflectionGuides(inputs) != captured,
+              "reflection retained guide mapping ignored a changed sidecar version");
+    }
     hs::TranslucencySystem translucency;
     hs::LayeredTranslucencyLayout translucency_layout;
     Check(!translucency.MatchesShape(translucency_layout, false, 0),
@@ -103,97 +122,6 @@ void EmptyFeatureShapes()
         "inactive screen overlay shape disagrees with the retained layout contract");
 }
 void Hr(HRESULT result, const char *message) { Check(SUCCEEDED(result), message); }
-
-void CheckBatchResourceMembership(std::uint32_t count)
-{
-    std::vector<std::uint32_t> ordered;
-    std::vector<std::uint64_t> membership((count + 63u) / 64u);
-    std::vector<std::uint32_t> expected;
-    for (std::uint32_t i = 0; i < count; ++i)
-    {
-        const auto value = (i * 17u) % count;
-        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership, value, count),
-            "first dense batch resource must be appended");
-        expected.push_back(value);
-    }
-    for (std::uint32_t i = count; i > 0; --i)
-        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership, expected[i - 1], count),
-            "duplicate dense batch resource must be rejected");
-    Check(ordered.size() == expected.size(), "batch membership preserves unique resource count");
-    for (std::size_t i = 0; i < ordered.size(); ++i)
-        Check(ordered[i] == expected[i], "batch membership preserves first-use order");
-}
-
-void ResourceAliasPatterns()
-{
-    std::array<int, 4> natives{};
-    std::vector<hs::render_graph::ResourceAlias> scratch;
-    const auto groups = [&](const std::array<const void *, 7> &resources) {
-        scratch.clear();
-        for (std::uint32_t index = 0; index < resources.size(); ++index)
-            scratch.push_back({resources[index], index, 0u});
-        hs::render_graph::CanonicalizeResourceAliases(scratch);
-        std::array<std::uint32_t, 7> result{};
-        for (const auto &alias : scratch) result[alias.index] = alias.group;
-        return result;
-    };
-    const std::array<std::uint32_t, 7> expected{0, 2, 3, 2, 5, 3, 0};
-    Check(groups({nullptr, &natives[0], &natives[1], &natives[0], &natives[2], &natives[1], nullptr}) == expected,
-        "alias groups retain first-use positions and distinguish absent resources");
-    const auto capacity = scratch.capacity();
-    Check(groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[0], nullptr}) == expected,
-        "rotating native addresses with the same equality pattern preserves the frontend variant");
-    Check(scratch.capacity() == capacity, "alias grouping reuses caller scratch");
-    const auto distinct = groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[2], nullptr});
-    Check(distinct != expected && distinct[5] == 6,
-        "splitting a native alias changes the retained graph identity");
-    Check(groups({}) == std::array<std::uint32_t, 7>{}, "absent resources have no alias group");
-    scratch.clear();
-    hs::render_graph::CanonicalizeResourceAliases(scratch);
-    Check(scratch.empty(), "an empty graph needs no alias storage");
-}
-
-void BatchResourceMembership()
-{
-    for (const auto count : {0u, 1u, 31u, 32u, 33u, 63u, 64u, 65u, 127u, 128u,
-                             129u, 1023u, 1024u, 1025u, 4096u, 8192u})
-        CheckBatchResourceMembership(count);
-
-    std::vector<std::uint32_t> first, second;
-    std::vector<std::uint64_t> first_membership(3), second_membership(3);
-    for (const auto value : {0u, 63u, 64u, 129u})
-    {
-        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, value, 130),
-            "first batch inserts a member at each tested word boundary");
-        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u - value, 130),
-            "second batch keeps independent membership bits");
-    }
-    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 130) &&
-          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 65u, 130),
-          "each batch rejects only its own duplicates");
-    const auto first_capacity = first_membership.capacity();
-    hs::render_graph::ResetBatchResourceMembership(first, first_membership);
-    Check(first.empty() && first_membership.size() == 3 && first_membership.capacity() == first_capacity,
-          "reset clears members and retains the batch bitset storage");
-    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65) &&
-          !hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65),
-          "reset permits a new insertion and detects it at the 64/65 word boundary");
-    std::vector<std::uint32_t> growing_order;
-    std::vector<std::uint64_t> growing_membership;
-    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 65);
-    Check(growing_membership.size() == 2 &&
-          hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 64u, 65),
-          "a 65-resource graph needs two membership words");
-    hs::render_graph::ResetBatchResourceMembership(growing_order, growing_membership);
-    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 130);
-    Check(growing_membership.size() == 3 &&
-          hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130) &&
-          !hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130),
-          "growth initializes a new word while preserving reset semantics");
-    hs::render_graph::ResetBatchResourceMembership(second, second_membership);
-    Check(second.empty() && hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u, 130),
-          "independent batches can reset and reuse the same dense resource indices");
-}
 
 void HlodSlotSetTest()
 {
@@ -632,6 +560,90 @@ void CachedLogicalLifetimes(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsComm
     check_binding(false);
     Check(graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(), "restored lifetime graph executes");
     f.Submit();
+    Check(graph.RestorePlan(sequential_plan), "restore lifetime plan before rejected ordering edit");
+    for (std::uint32_t i = 0; i < 2; ++i)
+    {
+        auto pass = graph.BindPass(i, i);
+        Check(pass.has_value(), "restored lifetime pass binds before ordering edit");
+        pass->SetExecute([](auto &) {});
+    }
+    graph.AddOrderingDependency(0, 1);
+    Check(!graph.Prepare(pool).Succeeded(), "restored plan rejects added ordering declarations");
+    Check(graph.RestorePlan(sequential_plan), "rejected ordering edit preserves retained plan");
+    for (std::uint32_t i = 0; i < 2; ++i)
+    {
+        auto pass = graph.BindPass(i, i);
+        Check(pass.has_value(), "restored lifetime pass rebinds after ordering edit");
+        pass->SetExecute([](auto &) {});
+    }
+    pool.ResetClaims();
+    Check(graph.Prepare(pool).Succeeded(), "retained plan remains reusable after rejected ordering edit");
+
+    ComPtr<IDXGIAdapter> other_adapter;
+    DXGI_ADAPTER_DESC fixture_desc{};
+    Hr(f.adapter->GetDesc(&fixture_desc), "fixture adapter description");
+    (void)f.factory->EnumWarpAdapter(IID_PPV_ARGS(&other_adapter));
+    DXGI_ADAPTER_DESC other_desc{};
+    if (other_adapter && SUCCEEDED(other_adapter->GetDesc(&other_desc)) &&
+        fixture_desc.AdapterLuid.LowPart == other_desc.AdapterLuid.LowPart &&
+        fixture_desc.AdapterLuid.HighPart == other_desc.AdapterLuid.HighPart)
+    {
+        other_adapter.Reset();
+        (void)f.factory->EnumAdapters(0, &other_adapter);
+    }
+    ComPtr<ID3D12Device> other_device;
+    if (other_adapter && SUCCEEDED(D3D12CreateDevice(other_adapter.Get(), D3D_FEATURE_LEVEL_11_0,
+                                                      IID_PPV_ARGS(&other_device))) && other_device.Get() != f.device.Get())
+    {
+        D3D12MA::ALLOCATOR_DESC allocation{};
+        allocation.pDevice = other_device.Get(); allocation.pAdapter = other_adapter.Get();
+        D3D12MA::Allocator *other_allocator{};
+        Hr(D3D12MA::CreateAllocator(&allocation, &other_allocator), "other device allocator");
+        {
+            hs::TransientResourcePool other_pool;
+            Check(other_pool.Initialize(other_allocator, other_device.Get()).Succeeded(), "other device pool");
+            hs::RenderGraphBuilder device_graph;
+            const auto buffer = device_graph.CreateBuffer({4096, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS},
+                "device migration buffer with a retained long name");
+            auto pass = device_graph.AddPass(100, "device migration pass with a retained long name", hs::QueueHint::Direct);
+            (void)pass.Write(device_graph.Version(buffer), hs::Access::UnorderedWrite);
+            pass.SetExecute([](auto &) {});
+            pool.ResetClaims();
+            Check(device_graph.Prepare(pool).Succeeded(), "prepare first device plan");
+            Check(device_graph.Prepare(other_pool).Succeeded(), "recompile owned declarations on other device");
+            Check(device_graph.CompiledPassName(0) == "device migration pass with a retained long name",
+                "device migration retains pass name");
+            const auto other_plan = device_graph.PreparedPlan();
+            Check(device_graph.RestorePlan(other_plan), "restore other device plan");
+            auto restored = device_graph.BindPass(0, 100);
+            Check(restored.has_value(), "bind other device plan");
+            restored->SetExecute([](auto &) {});
+            Check(!device_graph.Prepare(pool).Succeeded(), "restored plan rejects device change");
+            restored->Read(device_graph.Version(buffer), hs::Access::UnorderedRead);
+            Check(!device_graph.Prepare(pool).Succeeded(), "failed device change keeps declarations safely editable");
+
+            D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; desc.Width = 4096;
+            desc.Height = 1; desc.DepthOrArraySize = desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            ComPtr<ID3D12Resource> original_import;
+            Hr(f.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&original_import)), "device graph import");
+            hs::RenderGraphBuilder import_graph;
+            const auto imported = import_graph.ImportBuffer({original_import.Get()}, hs::Access::Common,
+                "original device import");
+            auto import_pass = import_graph.AddPass(101, "import device check", hs::QueueHint::Direct);
+            import_pass.Read(import_graph.Version(imported), hs::Access::CopySource);
+            import_pass.SetExecute([](auto &) {});
+            pool.ResetClaims();
+            Check(import_graph.Prepare(pool).Succeeded(), "prepare original device import");
+            Check(!import_graph.Prepare(other_pool).Succeeded(), "reject import from the other device");
+            import_pass.SetExecute([](auto &) {});
+            Check(import_graph.Prepare(pool).Succeeded(), "original device import remains editable after failure");
+        }
+        other_allocator->Release();
+    }
 }
 
 void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
@@ -1237,8 +1249,6 @@ int main(int argc, char **argv)
 {
     try
     {
-        BatchResourceMembership();
-        ResourceAliasPatterns();
         HlodSlotSetTest();
         EmptyFeatureShapes();
         const bool hardware = argc == 2 && std::string_view(argv[1]) == "--hardware";

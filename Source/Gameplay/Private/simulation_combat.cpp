@@ -2665,10 +2665,12 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileRow projectile
         const auto &pull = rules.upgrades.explosive_arrow.pre_explosion_pull;
         EmitVfx(DomainSignalKind::Pull, projectile.motion.position, {},
                 pull.pull_radius, 0.12f);
+        auto geometry = ExplosionGeometry(pull.pull_radius);
+        geometry.source_id = projectile.id.value;
         EmitUpgradeVisual(SkillKind::ExplosiveArrow, 6,
                           UpgradeVisualStage::Resolve, projectile.motion.position, {},
                           projectile.combat.cast_id, projectile.id.value,
-                          ExplosionGeometry(pull.pull_radius));
+                          geometry);
         for (auto enemy : actors.enemies)
         {
             if (!enemy.life.dead && !enemy.life.boss &&

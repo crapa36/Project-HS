@@ -9,12 +9,12 @@
 
 namespace hs::renderer_detail
 {
-struct HeroCoverageProjection
+struct TranslucencyCoverageProjection
 {
     std::uint32_t width{}, height{};
     double scale_x{}, scale_y{}, jitter_x{}, jitter_y{}, near_plane{}, far_plane{};
 };
-struct HeroProjectedBounds
+struct TranslucencyProjectedBounds
 {
     enum class Kind { Unknown, Outside, Visible };
     Kind kind{Kind::Unknown};
@@ -22,7 +22,7 @@ struct HeroProjectedBounds
 };
 
 // The caller supplies a current conservative view-space sphere, including deformation.
-inline HeroProjectedBounds ProjectHeroSphere(const HeroCoverageProjection &view,
+inline TranslucencyProjectedBounds ProjectTranslucencySphere(const TranslucencyCoverageProjection &view,
     double x, double y, double z, double radius)
 {
     if (!view.width || !view.height || view.width > INT32_MAX || view.height > INT32_MAX ||
@@ -35,7 +35,7 @@ inline HeroProjectedBounds ProjectHeroSphere(const HeroCoverageProjection &view,
         !std::isfinite(radius) || radius <= 0)
         return {};
     if (z + radius < view.near_plane || z - radius > view.far_plane)
-        return {HeroProjectedBounds::Kind::Outside};
+        return {TranslucencyProjectedBounds::Kind::Outside};
     if (z - radius <= view.near_plane || z + radius >= view.far_plane)
         return {};
     const auto project_axis = [&](double center, double scale, double jitter) {
@@ -55,8 +55,8 @@ inline HeroProjectedBounds ProjectHeroSphere(const HeroCoverageProjection &view,
     const double pixel_bottom = (1.0 - bottom) * view.height * 0.5 + 2.0;
     if (pixel_right < 0 || pixel_bottom < 0 ||
         pixel_left > view.width || pixel_top > view.height)
-        return {HeroProjectedBounds::Kind::Outside};
-    return {HeroProjectedBounds::Kind::Visible,
+        return {TranslucencyProjectedBounds::Kind::Outside};
+    return {TranslucencyProjectedBounds::Kind::Visible,
         static_cast<std::int32_t>(std::floor(std::clamp(pixel_left, 0.0, double(view.width)))),
         static_cast<std::int32_t>(std::floor(std::clamp(pixel_top, 0.0, double(view.height)))),
         static_cast<std::int32_t>(std::ceil(std::clamp(pixel_right, 0.0, double(view.width)))),

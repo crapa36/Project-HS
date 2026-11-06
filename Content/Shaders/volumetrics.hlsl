@@ -1,6 +1,7 @@
 #include "volumetric_sampling.hlsli"
 #include "light_list.hlsli"
 #include "shadow_data.hlsli"
+#include "local_probe_grid.hlsli"
 
 struct VmVolume
 {
@@ -15,30 +16,10 @@ struct VmHeroVolume
     float4 optical,albedo,emission;
     uint4 sampling,effect_source,owner_event,episode_output;
 };
-Texture2D<float> VmDepth : register(t0,space24);
-Texture2D<float4> VmHdr : register(t1,space24);
-StructuredBuffer<VmVolume> VmVolumes : register(t2,space24);
-Texture3D<float4> VmMedium : register(t3,space24);
-Texture3D<float> VmPhase : register(t4,space24);
-Texture3D<float4> VmRawScattering : register(t5,space24);
-Texture3D<float4> VmPreviousScattering : register(t6,space24);
-Texture2D<float> VmPreviousDepth : register(t7,space24);
-Texture3D<float4> VmTemporalScattering : register(t8,space24);
-Texture2D<float> VmCompactShadow : register(t12,space24);
-StructuredBuffer<VmHeroVolume> VmHeroes : register(t14,space24);
-Texture2DArray<float> VmHeroBlueNoise : register(t15,space24);
-Texture3D<float4> VmHeroNoiseVolume : register(t16,space24);
-Texture2D<float4> VmHeroGradient : register(t1,space3);
+HS_VM_LOCAL_SRVS(HS_VM_HLSL_SRV)
+Texture2D<float4> VmHeroGradient : register(HS_VM_JOIN(t,HS_VM_GRADIENT_REGISTER),HS_VM_JOIN(space,HS_VM_GRADIENT_SPACE));
 SamplerState VmWrapSampler : register(s2);
-RWTexture3D<float4> VmMediumOutput : register(u0,space24);
-RWTexture3D<float> VmPhaseOutput : register(u1,space24);
-RWTexture3D<float4> VmRawOutput : register(u2,space24);
-RWTexture3D<float4> VmTemporalOutput : register(u3,space24);
-RWTexture2D<float> VmDepthOutput : register(u4,space24);
-RWTexture3D<float4> VmFilteredOutput : register(u5,space24);
-RWTexture3D<float4> VmLuminanceOutput : register(u6,space24);
-RWTexture3D<float> VmTransmittanceOutput : register(u7,space24);
-RWTexture2D<float4> VmResolvedOutput : register(u8,space24);
+HS_VM_UAVS(HS_VM_HLSL_UAV)
 
 uint VmHash(uint value)
 {
@@ -276,6 +257,16 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
     const float3 world=VmFroxelWorld(p);
     const float3 view=normalize(VmRelativeAtDepth(uv,VmOriginNear.w)-VmRelativeAtDepth(uv,VmDepthRange.x));
     const float g=VmPhase.Load(int4(p,0)); float3 lighting=0.0;
+    if(VmCounts.w!=0u)
+    {
+        const HsProbeGridCell cell=HsLocateProbeCell(world);
+        if(cell.inside)
+        {
+            // Cosine-convolved SH L0 times Y00/pi is mean radiance; isotropic phase integrates to one.
+            float basis[9]={HsLocalProbeIsotropicBasis(),0,0,0,0,0,0,0,0};
+            lighting+=HsLocalProbeGridIrradiance(cell,basis);
+        }
+    }
     HsLightQuery query=HsBeginLightQuery(world,HsLightAllMask,false); uint index;
     [loop] while(HsNextLight(query,index))
     {

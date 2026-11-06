@@ -6,6 +6,8 @@
 
 #include <DirectXMath.h>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -13,30 +15,10 @@
 namespace hs
 {
 class RendererPipelineCache;
-// Append these ranges to existing root table32, all in space36. The service
-// writes its descriptors into a waited frame bank in the caller's main heap.
-inline constexpr std::uint32_t kDecalSurfaceCbvOffset = 0;
-inline constexpr std::uint32_t kDecalSurfaceSrvOffset = 1;
-inline constexpr std::uint32_t kDecalSurfaceSrvCount = 10;
-inline constexpr std::uint32_t kDecalSurfaceUavOffset = 11;
-inline constexpr std::uint32_t kDecalSurfaceUavCount = 4;
-inline constexpr std::uint32_t kDecalSurfaceExportOffset = 15;
-inline constexpr std::uint32_t kDecalSurfaceExportCount = 4;
-inline constexpr std::uint32_t kDecalSurfaceDescriptorCount = 19;
-inline constexpr std::uint32_t kDecalSurfaceRootTable = 32;
-inline constexpr std::uint32_t kDecalSurfaceCommandStride = 96;
-
-struct alignas(16) DecalSurfaceConstants
-{
-    DirectX::XMFLOAT4X4 inverse_view_projection{};
-    DirectX::XMFLOAT4 view_origin{};
-    DirectX::XMFLOAT4 render_size{};
-    DirectX::XMUINT4 info{};
-    std::array<DirectX::XMUINT4, 2> receivers{};
-    DirectX::XMUINT4 parameter_bases{};
-};
-static_assert(sizeof(DecalSurfaceConstants) == 160);
-static_assert(offsetof(DecalSurfaceConstants, receivers) == 112);
+// The service writes its suffix into a waited bank of the caller's main heap.
+#define HS_DECAL_NATIVE
+#include "../../../Content/Shaders/decal_surface_abi.hlsli"
+#undef HS_DECAL_NATIVE
 
 struct DecalSurfaceGuide { ResourceVersion version; ID3D12Resource *resource{}; };
 struct DecalSurfaceMaterial
@@ -66,7 +48,7 @@ struct DecalSurfaceInputs
 struct DecalSurfaceOutputs
 {
     DecalSurfaceGuide base, normal, material, emission;
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> export_srvs{};
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kDecalSurfaceExportCount> export_srvs{};
     bool active{};
 };
 struct DecalSurfaceLayout
@@ -74,9 +56,9 @@ struct DecalSurfaceLayout
     bool valid{}, active{};
     ViewExtent capacity{};
     std::uint32_t frame_slots{};
-    std::array<ResourceVersion,10> guides{};
-    std::array<TextureHandle,4> outputs{};
-    std::array<ResourceVersion,4> written{};
+    std::array<ResourceVersion,kDecalSurfaceSrvCount> guides{};
+    std::array<TextureHandle,kDecalSurfaceUavCount> outputs{};
+    std::array<ResourceVersion,kDecalSurfaceUavCount> written{};
     BufferHandle constants;
     std::uint32_t pass{};
 };
@@ -112,13 +94,13 @@ class DecalSurfaceSystem
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     void SwapState(DecalSurfaceSystem &other) noexcept { targets_.swap(other.targets_); }
-    [[nodiscard]] std::array<const AllocationResource *, 4> DiagnosticResources() const noexcept;
+    [[nodiscard]] std::array<const AllocationResource *, kDecalSurfaceUavCount> DiagnosticResources() const noexcept;
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const DecalSurfaceInputs &,
         DecalSurfaceConstants,DecalSurfaceOutputs &,DecalSurfaceLayout *,const DecalSurfaceLayout *);
     std::shared_ptr<DecalSurfaceTargets> targets_;
     const RenderGraphBuilder *pending_graph_{};
-    std::array<ResourceHandle, 4> pending_outputs_{};
+    std::array<ResourceHandle, kDecalSurfaceUavCount> pending_outputs_{};
     ResourceHandle pending_constants_{};
     std::uint32_t pending_slot_{};
 };

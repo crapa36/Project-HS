@@ -201,6 +201,7 @@ struct TextureStreamRegistration
     bool pinned{};
     bool opacity_sampling{true};
     NativeResourceContract fallback_contract{};
+    bool srgb_view{};
 };
 struct TextureStreamView
 {
@@ -272,9 +273,15 @@ class RendererTextureStreaming
         GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities &,
         std::uint32_t frame_count, std::span<const render_data::TextureDescriptor> texture_catalog);
     [[nodiscard]] Result Register(TextureStreamRegistration, ResidencyManager &, TextureStreamId &);
+    // A budget refusal is a successful, non-admitted transaction with zero IDs.
+    [[nodiscard]] Result RegisterBatch(std::span<TextureStreamRegistration>, ResidencyManager &,
+                                       std::span<TextureStreamId>, bool &admitted);
     [[nodiscard]] Result SupplyDescriptor(std::string logical_id, render_data::TextureDescriptorStorage);
     [[nodiscard]] Result ValidateConfiguration(GraphicsQuality, std::uint32_t budget_mib) const;
     [[nodiscard]] Result Configure(GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib);
+    // The caller supplies the actual scene's conservative set when that set
+    // changes. These are optional quality targets, not pinned allocations.
+    [[nodiscard]] Result SetPreferredWorkingSet(std::span<const TextureStreamId> ids);
     void Demand(TextureStreamId, std::uint32_t logical_first_mip, std::uint32_t priority,
                 std::uint64_t frame_number) noexcept;
     [[nodiscard]] Result Pump(std::uint64_t frame_number, const CompletionSet &completed,

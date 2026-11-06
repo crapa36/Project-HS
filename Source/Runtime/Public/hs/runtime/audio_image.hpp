@@ -37,5 +37,4 @@ struct AudioImage
     std::span<const AudioSampleRow> samples;
     std::span<const AudioPcmChunk> chunks;
 };
-namespace shipping { [[nodiscard]] const AudioImage &Audio() noexcept; }
 }

@@ -920,7 +920,7 @@ std::vector<std::byte> CanonicalSimulationRulesBytes(const SimulationRules &rule
 
 std::uint64_t SimulationRulesSchemaHash() noexcept
 {
-    return Fnv1a64("project_hs_simulation_rules_v4");
+    return Fnv1a64("project_hs_simulation_rules_wire_v5");
 }
 
 std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept

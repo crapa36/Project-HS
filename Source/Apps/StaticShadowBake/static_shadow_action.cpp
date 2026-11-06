@@ -13,7 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace hs::render_test
+namespace hs::static_shadow
 {
 namespace
 {

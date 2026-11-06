@@ -50,13 +50,21 @@ void Require(const hs::Result &result)
 {
     if (!result) throw std::runtime_error(std::string(result.Subsystem()) + ": " + std::string(result.Message()));
 }
-std::string SectionId(std::size_t index)
+std::string SectionId(std::size_t index, std::size_t plane)
 {
-    return "render/terrain/arena_surface_section_" + std::to_string(index) + ".rpkg";
+    return "render/terrain/arena_surface_section_" + std::to_string(index * 3 + plane) + ".rpkg";
 }
-std::string SectionFile(std::size_t index)
+std::string SectionFile(std::size_t index, std::size_t plane)
 {
-    return "arena_surface_section_" + std::to_string(index) + ".rpkg";
+    return "arena_surface_section_" + std::to_string(index * 3 + plane) + ".rpkg";
+}
+std::string TileId(std::size_t index)
+{
+    return "render/terrain/arena_surface_tile_" + std::to_string(index) + ".rpkg";
+}
+std::string TileFile(std::size_t index)
+{
+    return "arena_surface_tile_" + std::to_string(index) + ".rpkg";
 }
 
 struct TerrainBc7Encoder
@@ -85,33 +93,45 @@ struct TerrainBc7Encoder
 
     std::vector<std::byte> Compress(std::span<const std::byte> payload) const
     {
-        constexpr std::size_t edge = 2048, slices = 3, mips = 12;
-        DirectX::ScratchImage input;
-        Require(SUCCEEDED(input.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM, edge, edge, slices, mips)),
-            "Cannot allocate terrain BC7 input");
+        constexpr std::size_t edge = rd::kTerrainSurfacePageEdge, slices = 3, mips = rd::kTerrainSurfacePageMips;
+        DirectX::TexMetadata metadata{};
+        metadata.width = edge; metadata.height = edge; metadata.depth = 1;
+        metadata.arraySize = slices; metadata.mipLevels = mips;
+        metadata.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
+        std::array<DirectX::Image, slices * mips> input{};
         std::size_t offset{};
         for (std::size_t slice = 0; slice < slices; ++slice)
             for (std::size_t mip = 0; mip < mips; ++mip)
             {
-                const auto *image = input.GetImage(mip, slice, 0);
                 const auto width = std::max<std::size_t>(1, edge >> mip);
                 const auto row = width * 4;
                 const auto size = row * width;
-                Require(image && image->rowPitch >= row && offset <= payload.size() && size <= payload.size() - offset,
+                Require(offset <= payload.size() && size <= payload.size() - offset,
                     "Invalid terrain RGBA8 subresource payload");
-                for (std::size_t y = 0; y < width; ++y)
-                    std::memcpy(image->pixels + y * image->rowPitch, payload.data() + offset + y * row, row);
+                auto &image = input[slice * mips + mip];
+                image.width = width; image.height = width; image.format = metadata.format;
+                image.rowPitch = row; image.slicePitch = size;
+                image.pixels = reinterpret_cast<std::uint8_t *>(const_cast<std::byte *>(payload.data() + offset));
                 offset += size;
             }
         Require(offset == payload.size(), "Terrain RGBA8 payload has trailing bytes");
         DirectX::ScratchImage compressed;
         const auto result = device
-            ? DirectX::Compress(device.Get(), input.GetImages(), input.GetImageCount(), input.GetMetadata(),
+            ? DirectX::Compress(device.Get(), input.data(), input.size(), metadata,
                 DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_DEFAULT, 1.0f, compressed)
-            : DirectX::Compress(input.GetImages(), input.GetImageCount(), input.GetMetadata(),
+            : DirectX::Compress(input.data(), input.size(), metadata,
                 DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_PARALLEL, 0.5f, compressed);
         Require(SUCCEEDED(result), "Terrain BC7 compression failed");
         std::vector<std::byte> output;
+        std::size_t encoded_bytes{};
+        for (std::size_t mip = 0; mip < mips; ++mip)
+        {
+            const auto width = std::max<std::size_t>(1, edge >> mip);
+            const auto blocks = (width + 3) / 4;
+            encoded_bytes += blocks * blocks * 16 * slices;
+        }
+        output.reserve(encoded_bytes);
         for (std::size_t slice = 0; slice < slices; ++slice)
             for (std::size_t mip = 0; mip < mips; ++mip)
             {
@@ -145,16 +165,40 @@ bool Current(const fs::path &build, const ap::ActionSpec &spec)
             std::as_bytes(std::span(bytes.data(), bytes.size())), hs::MakeAssetId(kMetadata));
         if (metadata.layout_version != rd::kTerrainSurfaceLayoutVersion || metadata.sections.empty() ||
             metadata.sections.size() != metadata.section_products.size() ||
-            snapshot.ProductCount() != metadata.sections.size() + 1) return false;
+            snapshot.ProductCount() != metadata.sections.size() * 4 + 1) return false;
         std::vector<std::string> dependencies;
         for (std::size_t i = 0; i < metadata.sections.size(); ++i)
         {
-            const auto id = SectionId(i);
-            if (metadata.section_products[i] != id ||
+          const auto leaf_id=TileId(i);
+          if(metadata.section_products[i]!=leaf_id) return false;
+          const auto leaf_bytes=snapshot.ReadProductBytes(leaf_id,ignored);
+          const auto leaf=rd::ReadTerrainSurfacePackage(
+              std::as_bytes(std::span(leaf_bytes.data(),leaf_bytes.size())),hs::MakeAssetId(leaf_id));
+          if(leaf.layout_version!=rd::kTerrainSurfaceLeafLayoutVersion || leaf.sections.size()!=1 ||
+              leaf.sections[0]!=metadata.sections[i] || leaf.section_products.size()!=3 ||
+              leaf.source_identity!=metadata.source_identity || leaf.description.width!=metadata.description.width ||
+              leaf.description.height!=metadata.description.height || leaf.description.array_size!=3 ||
+              leaf.description.mip_count!=metadata.description.mip_count || leaf.description.format!=metadata.description.format)
+              return false;
+          std::vector<std::string> leaf_dependencies;
+          for (std::size_t plane = 0; plane < 3; ++plane)
+        {
+            const auto id = SectionId(i, plane);
+            if (leaf.section_products[plane] != id ||
                 snapshot.ProductMetadata(id).value("dependencies", std::vector<std::string>{}) != dependencies)
                 return false;
-            fs::path path;
-            snapshot.ReadProduct(id, ignored, path);
+            leaf_dependencies.push_back(id);
+            const auto plane_bytes = snapshot.ReadProductBytes(id, ignored);
+            const auto plane_package = rd::ReadTexturePackage(
+                std::as_bytes(std::span(plane_bytes.data(), plane_bytes.size())), hs::MakeAssetId(id));
+            const auto &shape = plane_package.description;
+            if (shape.width != metadata.description.width || shape.height != metadata.description.height ||
+                shape.mip_count != metadata.description.mip_count || shape.format != metadata.description.format ||
+                shape.array_size != 1 || plane_package.subresources.size() != shape.mip_count) return false;
+        }
+          std::ranges::sort(leaf_dependencies);
+          if(snapshot.ProductMetadata(leaf_id).value("dependencies",std::vector<std::string>{})!=leaf_dependencies)
+              return false;
         }
         dependencies = metadata.section_products;
         std::ranges::sort(dependencies);
@@ -201,8 +245,8 @@ int main(int argc, char **argv)
         ap::ActionSpec spec;
         spec.action_id = kAction; spec.namespace_path = kNamespace;
         const TerrainBc7Encoder encoder;
-        spec.recipe_id = "project-hs.render.terrain-surface/native-seed-1-bc7-layout2" + encoder.identity;
-        spec.recipe_version = 2;
+        spec.recipe_id = "project-hs.render.terrain-surface/native-seed-1-bc7-layout5-tiles-apron" + encoder.identity;
+        spec.recipe_version = 5;
         for (const auto &[id, path] : std::initializer_list<std::pair<std::string_view, fs::path>>{
             {"terrain/world-transport", source / "Source/Apps/Common/world_transport_scene.cpp"},
             {"terrain/layout", source / "Source/Presentation/Private/environment_layout.cpp"},
@@ -213,8 +257,7 @@ int main(int argc, char **argv)
         std::set<std::string> visited;
         std::vector<std::string> pending{
             "game-data/simulation-rules", "render/material/terrain.rpkg", "render/meadow_ground.rpkg",
-            "render/shader/terrain_resolve.dxil", "render/shader/terrain_resolve_feedback.dxil",
-            "render/shader/terrain_page_bake_cs.dxil", "render/shader/terrain_page_mip_cs.dxil"};
+            "terrain/producer/bake_cs.dxil", "terrain/producer/mip_cs.dxil"};
         while (!pending.empty())
         {
             auto id = std::move(pending.back()); pending.pop_back();
@@ -258,7 +301,7 @@ int main(int argc, char **argv)
             config.product_digests = generation.product_digests;
 
             std::vector<rd::TerrainSurfaceSection> sections;
-            std::vector<std::string> section_ids, dependencies;
+            std::vector<std::string> section_ids, leaf_ids, dependencies;
             std::vector<bool> written;
             std::vector<ap::Product> products;
             rd::TextureDescription description{};
@@ -268,7 +311,8 @@ int main(int argc, char **argv)
                 [&](std::span<const rd::TerrainSurfaceSection> incoming, rd::TextureDescription global,
                     std::array<std::byte, 32> identity) {
                     Require(!begun && !incoming.empty() && incoming.size() <= UINT32_MAX / 3 &&
-                        global.width == 2048 && global.height == 2048 && global.mip_count == 12 &&
+                        global.width == rd::kTerrainSurfacePageEdge && global.height == rd::kTerrainSurfacePageEdge &&
+                        global.mip_count == rd::kTerrainSurfacePageMips &&
                         global.format == rd::kTextureFormatRgba8 && global.array_size == incoming.size() * 3,
                         "Native terrain surface description is invalid");
                     sections.assign(incoming.begin(), incoming.end());
@@ -276,32 +320,54 @@ int main(int argc, char **argv)
                     description.format = rd::kTextureFormatBc7;
                     source_identity = identity;
                     written.resize(sections.size());
-                    for (std::size_t i = 0; i < sections.size(); ++i) section_ids.push_back(SectionId(i));
+                    for (std::size_t i = 0; i < sections.size(); ++i)
+                    {
+                        leaf_ids.push_back(TileId(i));
+                        for (std::size_t plane = 0; plane < 3; ++plane) section_ids.push_back(SectionId(i, plane));
+                    }
                     begun = true;
                     return hs::Result::Success();
                 },
                 [&](std::uint32_t index, std::span<const std::byte> payload) {
                     Require(begun && index < sections.size() && !written[index], "Unexpected terrain section callback");
-                    auto local = description; local.array_size = 3;
+                    auto local = description; local.array_size = 1;
                     const auto compressed = encoder.Compress(payload);
-                    const auto package = rd::BuildTexturePackage(hs::MakeAssetId(section_ids[index]), dependencies, local, compressed);
-                    const auto filename = SectionFile(index);
-                    const auto path = stage / filename;
-                    ap::WriteBytes(path, package);
-                    auto product = ap::HashProduct(section_ids[index], filename, path);
-                    product.dependencies = dependencies;
+                    Require(compressed.size() % 3 == 0, "Invalid terrain BC7 plane payload size");
+                    const auto plane_bytes = compressed.size() / 3;
+                    for (std::size_t plane = 0; plane < 3; ++plane)
+                    {
+                        const auto &id = section_ids[size_t(index) * 3 + plane];
+                        const auto plane_payload = std::span(compressed).subspan(plane * plane_bytes, plane_bytes);
+                        const auto package = rd::BuildTexturePackage(hs::MakeAssetId(id), dependencies, local, plane_payload);
+                        const auto filename = SectionFile(index, plane);
+                        const auto path = stage / filename;
+                        ap::WriteBytes(path, package);
+                        auto product = ap::HashProduct(id, filename, path);
+                        product.dependencies = dependencies;
+                        products.push_back(std::move(product));
+                    }
+                    auto leaf_description=description;leaf_description.array_size=3;
+                    const auto plane_ids=std::span(section_ids).subspan(size_t(index)*3,3);
+                    const auto leaf=rd::BuildTerrainSurfacePackage(hs::MakeAssetId(leaf_ids[index]),plane_ids,
+                        std::span(sections).subspan(index,1),leaf_description,source_identity);
+                    const auto filename=TileFile(index);
+                    const auto path=stage/filename;
+                    ap::WriteBytes(path,leaf);
+                    auto product=ap::HashProduct(leaf_ids[index],filename,path);
+                    product.dependencies.assign(plane_ids.begin(),plane_ids.end());
+                    std::ranges::sort(product.dependencies);
                     products.push_back(std::move(product));
                     written[index] = true;
                     return hs::Result::Success();
                 }));
             Require(begun && std::ranges::all_of(written, [](bool value) { return value; }),
                 "Native terrain bake did not complete every section");
-            const auto metadata = rd::BuildTerrainSurfacePackage(
-                hs::MakeAssetId(kMetadata), section_ids, sections, description, source_identity);
+            const auto metadata = rd::BuildTerrainSurfaceIndex(
+                hs::MakeAssetId(kMetadata), leaf_ids, sections, description, source_identity);
             const auto metadata_path = stage / kMetadataFile;
             ap::WriteBytes(metadata_path, metadata);
             auto product = ap::HashProduct(std::string(kMetadata), std::string(kMetadataFile), metadata_path);
-            product.dependencies = section_ids;
+            product.dependencies = leaf_ids;
             std::ranges::sort(product.dependencies);
             products.push_back(std::move(product));
             ap::Publish(build, spec, stage, std::move(products));

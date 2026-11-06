@@ -5,10 +5,9 @@
 #include "../Content/arena_layout_payload.hpp"
 #include "../Content/content_cooker.hpp"
 #include "../Content/content_paths.hpp"
-#include "../Content/release_presentation_codegen.hpp"
-#include "../Content/release_simulation_codegen.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/presentation/presentation_catalog_io.hpp>
 
 #include <array>
@@ -45,13 +44,6 @@ void Require(bool condition, std::string_view message)
 std::span<const std::byte> Bytes(std::string_view value)
 {
     return std::as_bytes(std::span(value.data(), value.size()));
-}
-
-template <typename T>
-std::span<const std::byte> Bytes(const T &value)
-{
-    static_assert(std::is_trivially_copyable_v<T>);
-    return std::as_bytes(std::span(&value, 1));
 }
 
 std::uint64_t ParseLegacyHash(std::string_view text)
@@ -109,14 +101,14 @@ void Produce(std::string_view mode, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "game-data." + std::string(mode);
     spec.recipe_id = "project-hs.game-data." + std::string(mode);
-    spec.recipe_version = mode == "simulation-payload" ? 4 :
-                          (mode == "finalize-simulation" || mode == "presentation-payload") ? 2 : 1;
+    spec.recipe_version = mode == "simulation-payload" ? 5 :
+                          (mode == "finalize-simulation" || mode == "presentation-payload") ? 3 :
+                          mode == "finalize-presentation" ? 2 : 1;
     spec.namespace_path = "game-data/" + std::string(mode);
     std::string filename;
     std::string logical_id;
     std::string bytes;
     std::string arena_layout_bytes;
-    std::string generated_cpp;
 
     if (mode == "simulation-payload" || mode == "presentation-payload")
     {
@@ -140,10 +132,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
         if (mode == "simulation-payload")
         {
             const auto rules = hs::content::BuildGameData(sources).simulation_rules;
-            generated_cpp = hs::content::EmitReleaseSimulationCpp(rules);
-            const auto payload = hs::CanonicalSimulationRulesBytes(rules);
-            Require(payload.size() == sizeof(rules),
-                    "canonical simulation payload size differs from cooked ABI");
+            const auto payload = hs::EncodeSimulationRules(rules);
             bytes.assign(reinterpret_cast<const char *>(payload.data()), payload.size());
             arena_layout_bytes = hs::content::EncodeArenaLayoutPayload(
                 {rules.arena_half_extent, rules.arena_boundary, rules.arena_obstacles,
@@ -154,8 +143,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
         else
         {
             const auto presentation = hs::content::BuildPresentationCatalog(sources);
-            generated_cpp = hs::content::EmitReleasePresentationCpp(presentation);
-            const auto payload = Bytes(presentation);
+            const auto payload = hs::EncodePresentationCatalog(presentation);
             bytes.assign(reinterpret_cast<const char *>(payload.data()), payload.size());
             filename = "presentation_catalog.payload";
             logical_id = "game-data/presentation-payload";
@@ -198,9 +186,18 @@ void Produce(std::string_view mode, const fs::path &source_root,
         const auto payload = payload_result.ReadProductBytes("game-data/" + std::string(payload_mode), payload_dependency);
         const auto hash_bytes = hash_result.ReadProductBytes("game-data/" + std::string(hash_mode), hash_dependency);
         spec.upstream = {payload_dependency, hash_dependency};
-        Require(payload.size() == (simulation ? sizeof(hs::SimulationRules)
-                                              : sizeof(hs::PresentationCatalog)),
-                "semantic payload has unexpected ABI size");
+        if (simulation)
+        {
+            hs::SimulationRules rules;
+            const auto decoded = hs::DecodeSimulationRules(Bytes(std::string_view(payload)), rules);
+            Require(decoded.Succeeded(), "invalid simulation wire payload");
+        }
+        else
+        {
+            hs::PresentationCatalog catalog;
+            const auto decoded = hs::DecodePresentationCatalog(Bytes(std::string_view(payload)), catalog);
+            Require(decoded.Succeeded(), "invalid presentation wire payload");
+        }
         bytes = BuildCooked(payload,
                             simulation ? hs::SimulationRulesSchemaHash()
                                        : hs::PresentationCatalogSchemaHash(),
@@ -224,15 +221,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
             ap::WriteBytes(arena_path, Bytes(std::string_view(arena_layout_bytes)));
             products.push_back(ap::HashProduct("game-data/arena-layout", "arena_layout.json",
                                                arena_path));
-        }
-        if (!generated_cpp.empty())
-        {
-            const bool simulation = mode == "simulation-payload";
-            const auto cpp_name = simulation ? "simulation_rules.generated.cpp" : "presentation_catalog.generated.cpp";
-            const auto cpp_path = stage / cpp_name;
-            ap::WriteBytes(cpp_path, Bytes(std::string_view(generated_cpp)));
-            products.push_back(ap::HashProduct(simulation ? "game-data/simulation-cpp" : "game-data/presentation-cpp",
-                                               cpp_name, cpp_path));
         }
         ap::Publish(build_root, spec, stage, std::move(products));
     }

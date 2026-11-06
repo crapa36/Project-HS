@@ -11,7 +11,7 @@
 #include "renderer_post_subgraphs.hpp"
 #include "renderer_named_animation.hpp"
 #include "renderer_entity_surface.hpp"
-#include "hero_coverage.hpp"
+#include "translucency_coverage.hpp"
 #include "renderer_vfx_compatibility.hpp"
 #include "renderer_vfx_candidates.hpp"
 #include <array>
@@ -133,6 +133,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto typed_screen = vfx.screen;
     const auto typed_entity_surfaces = vfx.entity_surfaces;
     const auto &devtools = frame_input.devtools;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    auto preview_edit = devtools.preview;
+#endif
     const bool show_devtools = impl_->config.devtools_visible && view_input.role == RenderViewRole::Main;
     RendererCpuTimings cpu_timings;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -220,91 +223,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 })) admitted_entity_surfaces.push_back(command);
         if (auto prepared = entity_surface_frame.Build(admitted_entity_surfaces); !prepared) return prepared;
         cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
-        if (impl_->config.slime_family_preview_count == 0 &&
-            (!typed_ground_spawns.empty() || !typed_mesh_spawns.empty()))
+        if (!typed_ground_spawns.empty() || !typed_mesh_spawns.empty())
             FilterRenderInstancesForOwnedVfx(prepared_instances, typed_ground_spawns,
                 typed_mesh_spawns, prepared_scene.vfx_replacements);
-        if (const auto count = impl_->config.slime_family_preview_count; count != 0)
-        {
-            prepared_instances.clear();
-            const auto columns = count == 1 ? 3u : static_cast<std::uint32_t>(std::ceil(std::sqrt(count * 3.0f)));
-            for (std::uint32_t i = 0; i < count * 3; ++i)
-            {
-                const auto row = i / columns, column = i % columns;
-                const auto x = count == 1 ? (static_cast<float>(i) - 1.0f) * 2.5f
-                                          : (static_cast<float>(column) - (columns - 1) * 0.5f) * 1.1f;
-                const auto rows = (count * 3 + columns - 1) / columns;
-                const auto z = count == 1 ? 0.0f : (static_cast<float>(row) - (rows - 1) * 0.5f) * 1.1f;
-                const auto kind = i % 3;
-                const auto scale = kind == 0 ? 1.25f : kind == 1 ? 1.40625f : 1.5625f;
-                RenderInstance preview{};
-                preview.position = {x, 0.0f, z};
-                preview.scale = {scale, scale, scale};
-                preview.color_rgba = 0xffffffffu;
-                preview.mesh = static_cast<RenderMesh>(10 + kind);
-                preview.stable_id = 0x53504c4d00000000ull | static_cast<std::uint64_t>(i + 1);
-                prepared_instances.push_back(preview);
-                if (kind == 2)
-                {
-                    RenderInstance projectile{};
-                    projectile.position = {x - 1.25f, 0.45f, z - 1.5f};
-                    projectile.scale = {.24f, .24f, .8f};
-                    projectile.color_rgba = 0xff60d060u;
-                    projectile.mesh = RenderMesh::EnemyProjectile;
-                    projectile.stable_id =
-                        0x53504c4d00100000ull | static_cast<std::uint64_t>(i + 1);
-                    prepared_instances.push_back(projectile);
-                }
-            }
-        }
-        if (impl_->config.monster_preview_asset < 6 && impl_->config.slime_family_preview_count == 0)
-        {
-            const auto preview_mesh = static_cast<RenderMesh>(
-                static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
-                impl_->config.monster_preview_asset);
-            const auto found = std::ranges::find_if(
-                prepared_instances, [&](const auto &source) { return source.mesh == preview_mesh; });
-            if (found != prepared_instances.end())
-            {
-                auto preview = *found;
-                preview.position = {};
-                preview.yaw = 0.0f;
-                prepared_instances.assign(1, preview);
-            }
-            else
-            {
-                prepared_instances.clear();
-            }
-        }
-        if (impl_->config.environment_preview)
-        {
-            prepared_instances.clear();
-            const auto add = [&](RenderMesh mesh, Float3 position, Float3 scale, std::uint32_t variant) {
-                RenderInstance instance{};
-                instance.mesh = mesh;
-                instance.position = position;
-                instance.scale = scale;
-                instance.environment_variant = variant;
-                instance.environment_seed = 0x4853454eu;
-                prepared_instances.push_back(instance);
-            };
-            for (std::uint32_t variant = 0; variant < 3; ++variant)
-            {
-                const float x = static_cast<float>(variant)*5.0f-5.0f;
-                add(RenderMesh::TreeTrunk, {x,0,0}, {1,1,1}, variant);
-                add(RenderMesh::TreeCanopy, {x,0,0}, {1,1,1}, variant);
-            }
-            for (std::uint32_t variant = 0; variant < 4; ++variant)
-            {
-                const float x = static_cast<float>(variant)*3.0f-4.5f;
-                add(RenderMesh::Rock, {x,0,-5}, {.8f,.8f,.8f}, variant);
-                add(RenderMesh::Grass, {x,0,-8}, {1,1,1}, variant);
-            }
-            for (int z=-5; z<=2; ++z)
-                for (int x=-5; x<=5; ++x)
-                    add(RenderMesh::Ground, {static_cast<float>(x)*2.5f,-.055f,static_cast<float>(z)*2.5f},
-                        {2.5f,.1f,2.5f}, 0);
-        }
         for (auto &source : prepared_instances) PopulateRenderInstanceIdentity(source);
 
     }
@@ -580,40 +501,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Boss surface effects require the actual monster emission sidecar.");
     if (prepared_scene_this_view) prepared_scene.ready = true;
-    if (impl_->config.environment_preview)
-    {
-        snapshot.camera.target = {0,1,0};
-        if (!impl_->config.preview_camera_override)
-        {
-            snapshot.camera.yaw_degrees = 0.0f;
-            snapshot.camera.pitch_degrees = 22.0f;
-            snapshot.camera.distance = 22.0f;
-        }
-    }
     const auto &render_instances = prepared_scene.ordered_instances;
-    const auto family_preview = impl_->config.slime_family_preview_count != 0;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    const auto monster_preview = impl_->config.monster_preview_asset < 6 || family_preview;
-    const auto camera_yaw = impl_->config.preview_camera_override
-                                ? impl_->config.preview_camera_yaw
-                            : impl_->config.character_preview ? impl_->preview_yaw
-                                                              : snapshot.camera.yaw_degrees;
-    const auto camera_distance = impl_->config.preview_camera_override
-                                     ? impl_->config.preview_camera_distance
-                                 : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
-                                 : monster_preview
-                                     ? (impl_->config.monster_preview_asset >= 3 ? 18.0f : 8.0f)
-                                 : impl_->config.character_preview ? impl_->preview_distance
-                                     : snapshot.camera.distance;
-#else
-    const auto camera_yaw = impl_->config.preview_camera_override
-                                ? impl_->config.preview_camera_yaw
-                                : snapshot.camera.yaw_degrees;
-    const auto camera_distance = impl_->config.preview_camera_override
-                                     ? impl_->config.preview_camera_distance
-                                     : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
-                                     : snapshot.camera.distance;
-#endif
     const auto scene_local = [&](RenderWorldPosition p) {
         return DirectX::XMVectorSet(static_cast<float>(p.x - view_input.scene_origin.x),
             static_cast<float>(p.y - view_input.scene_origin.y),
@@ -621,6 +509,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
     const auto eye = scene_local(view_input.camera.position);
     const auto target = scene_local(view_input.camera.target);
+    const auto camera_distance = DirectX::XMVectorGetX(
+        DirectX::XMVector3Length(DirectX::XMVectorSubtract(target, eye)));
     const auto direction = DirectX::XMVector3Normalize(DirectX::XMVectorSubtract(target, eye));
     const auto camera_up = DirectX::XMVectorSet(view_input.camera.up.x, view_input.camera.up.y, view_input.camera.up.z, 0);
     DirectX::XMFLOAT3 lod_eye{};
@@ -641,8 +531,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto ribbon_state_start = capture_clock();
     const Float3 ribbon_eye{lod_eye.x, lod_eye.y, lod_eye.z};
     if (scene_new_session || impl_->rendered_submission_count == 0) impl_->previous_ribbon_eye = ribbon_eye;
-    const auto ribbon_sources = impl_->config.slime_family_preview_count == 0
-        ? typed_ribbons.sources : std::span<const VfxRibbonSourceInput>{};
+    const auto ribbon_sources = typed_ribbons.sources;
     const std::array<std::uint64_t, 3> ribbon_buffer_widths{
         ResourceWidth(impl_->ribbon_history), ResourceWidth(impl_->ribbon_previous),
         ResourceWidth(frame.ribbon_arguments)};
@@ -709,6 +598,23 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         cpu_timings.ribbon_prepare_thread_cpu_valid = true;
     }
     cpu_timings.ribbon_prepare_us = capture_elapsed(ribbon_prepare_start);
+    std::vector<LightView> owned_frame_lights;
+    std::span<const LightView> frame_lights = snapshot.lights;
+    if (frame_lights.empty())
+    {
+        LightView sun{{-0.4f, -0.8f, 0.3f}, 3.0f * kLightWhiteLumensPerWatt, {1, 1, 1}};
+        sun.stable_id = 1;
+        sun.shadow_flags = kLightShadowRequested;
+        owned_frame_lights.push_back(sun);
+        frame_lights = owned_frame_lights;
+    }
+    const auto authoritative_light_count = frame_lights.size();
+    std::vector<std::uint64_t> transient_light_ids;
+    std::optional<LightView> selected_primary_sun;
+    for (const auto &candidate : frame_lights)
+        if (candidate.type == LightType::Directional && (candidate.shadow_flags & kLightShadowRequested) != 0 &&
+            (!selected_primary_sun || candidate.stable_id < selected_primary_sun->stable_id)) selected_primary_sun = candidate;
+    const auto *primary_sun = selected_primary_sun ? std::addressof(*selected_primary_sun) : nullptr;
     const auto is_environment_mesh = [](RenderMesh mesh) {
         return render_data::IsEnvironmentMesh(mesh);
     };
@@ -750,7 +656,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
         const MonsterLodProjectionInputs monster_projection_inputs{
             std::span<const RenderViewInput>{frame_input.views},
-            snapshot.lights, view_input.scene_origin,
+            frame_lights, view_input.scene_origin,
             {lod_cascade_extents[0] / lod_shadow_resolution,
              lod_cascade_extents[1] / lod_shadow_resolution,
              lod_cascade_extents[2] / lod_shadow_resolution},
@@ -759,7 +665,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
              lod_cascade_extents[2] / (8.0 * kVirtualShadowInner)},
             impl_->QualityProfileFor(impl_->config.geometry_quality).geometry_screen_error_px,
             impl_->QualityProfileFor(impl_->config.shadow_quality).local_shadow_resolution,
-            true, vsm_active, local_shadows_active,
+            primary_sun != nullptr, primary_sun != nullptr && vsm_active, local_shadows_active,
             true, true};
         const auto monster_consumers = PrepareMonsterLodConsumers(monster_projection_inputs);
         prepared_scene.monster_lod_consumers_valid = monster_consumers.baseline.valid;
@@ -794,16 +700,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             if (asset.geometry_lods.size() < 2 || asset.geometry_lods.size() > 3 ||
                 !asset.interval_lookup_valid ||
                 asset.deformation_flags != render_data::kMonsterBoundsPositionEnclosure) continue;
-            AnimationPoseRef preview_pose;
             const AnimationPoseRef *pose = nullptr;
-            if (impl_->config.monster_preview_asset < 6 || family_preview)
-            {
-                preview_pose.clip = static_cast<CharacterAnimationClip>(
-                    std::min(impl_->config.monster_preview_clip, 4u));
-                preview_pose.normalized_time = impl_->config.monster_preview_time;
-                pose = &preview_pose;
-            }
-            else if (const auto found = pose_by_id.find(source.stable_id);
+            if (const auto found = pose_by_id.find(source.stable_id);
                      found != pose_by_id.end()) pose = found->second;
             if (source.animation_clip_id.value != 0 ||
                 (pose && (pose->secondary_weight != 0.0f || pose->upper_body_weight != 0.0f)))
@@ -921,11 +819,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     constexpr std::size_t kMonsterVisibilityBucketBegin = kArcherVisibilityBucket + 1;
     std::array<std::pair<std::size_t, std::size_t>,
                kEnvironmentVisibilityBucketCount> environment_ranges{};
-    const auto static_scene = impl_->config.slime_family_preview_count == 0 &&
-                              impl_->config.monster_preview_asset >= 6 &&
-                              !impl_->config.environment_preview
-        ? snapshot.static_scene : nullptr;
-    if (auto prepared = impl_->PrepareTerrainPages(static_scene, canonical_instances); !prepared) return prepared;
+    const auto static_scene = snapshot.static_scene;
+    if (auto prepared = impl_->PrepareTerrainPages(static_scene, canonical_instances, frame_slot); !prepared) return prepared;
     std::span<const RenderInstance> hlod_static_instances;
     if (auto prepared = impl_->PrepareHlodStaticScene(static_scene, hlod_static_instances); !prepared) return prepared;
     const bool view_scene_changed = owned_view.frame_number != 0 &&
@@ -988,6 +883,14 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             next_draws.ground_range = {next_draws.refs.size(), static_ground_bucket.size()};
             next_draws.refs.insert(next_draws.refs.end(), static_ground_bucket.begin(), static_ground_bucket.end());
             next_draws.leaf_count = next_draws.refs.size();
+            next_draws.shadow_bases.resize(next_draws.leaf_count);
+            next_draws.shadow_keys.reserve(next_draws.leaf_count);
+            for (const auto &reference : next_draws.refs)
+            {
+                const auto &source = static_scene->instances[reference.instance_index];
+                next_draws.shadow_keys.emplace_back(true, source.stable_id,
+                    source.stable_id == 0 ? reference.instance_index + 1u : 0u);
+            }
             next_draws.foliage_density = foliage_density;
             next_draws.valid = true;
         }
@@ -1043,7 +946,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u);
                 const auto seed = source.mesh == RenderMesh::Ground ||
                                   source.mesh == RenderMesh::DirtPatch || source.mesh == RenderMesh::MeadowSurface
-                    ? std::bit_cast<float>(impl_->TerrainSectionIndex(source)) : 0.0f;
+                    ? std::bit_cast<float>(impl_->TerrainSectionIndex(true, index, source)) : 0.0f;
                 const float radius = environment
                     ? impl_->environment_variant_radii[environment_mesh_index(source)] *
                         std::max({std::abs(source.scale.x), std::abs(source.scale.y),
@@ -1223,7 +1126,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         monster_bucket_ranges[7 + asset * 2] = monster_lod_ranges[asset * 3 + 2];
     }
     const auto has_translucent_hero_binding = [&](std::size_t asset) {
-        return asset < impl_->hero_binding_ranges.size() && impl_->hero_binding_ranges[asset].w != 0;
+        return asset < impl_->character_binding_ranges.size() && impl_->character_binding_ranges[asset].w != 0;
     };
     const auto has_translucent_monster_bucket = [&](std::size_t bucket) {
         const auto asset = bucket < 6 ? bucket : (bucket - 6) / 2;
@@ -1318,7 +1221,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         const bool translucent_hero_bucket = bucket == kArcherVisibilityBucket
             ? has_translucent_hero_binding(0)
             : bucket >= kMonsterVisibilityBucketBegin && has_translucent_monster_bucket(monster_bucket);
-        if (owned_view.hero_transparency.AllocatedBytes() != 0 &&
+        if (owned_view.translucency.AllocatedBytes() != 0 &&
             (translucent_hero_bucket ||
              (bucket < kEnvironmentVisibilityBucketCount &&
               bucket / 3 == render_data::kMeadowWaterGeometry)))
@@ -1887,24 +1790,24 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 static_cast<unsigned long long>(devtools.dropped_presentation),
                 static_cast<unsigned long long>(devtools.dropped_particles));
     ImGui::SeparatorText("Character animation inspection");
-    ImGui::Checkbox("Close-up preview", &impl_->config.character_preview);
-    if (impl_->config.character_preview)
+    ImGui::Checkbox("Close-up preview", &preview_edit.enabled);
+    if (preview_edit.enabled)
     {
-        ImGui::SliderFloat("Camera distance", &impl_->preview_distance, 2.5f, 8.0f);
-        ImGui::SliderFloat("Camera yaw", &impl_->preview_yaw, 0.0f, 360.0f);
-        ImGui::SliderFloat("Camera pitch", &impl_->preview_pitch, -20.0f, 60.0f);
-        ImGui::Checkbox("Override pose", &impl_->preview_pose_override);
-        if (impl_->preview_pose_override)
+        ImGui::SliderFloat("Camera distance", &preview_edit.distance, 2.5f, 8.0f);
+        ImGui::SliderFloat("Camera yaw", &preview_edit.yaw, 0.0f, 360.0f);
+        ImGui::SliderFloat("Camera pitch", &preview_edit.pitch, -20.0f, 60.0f);
+        ImGui::Checkbox("Override pose", &preview_edit.pose_override);
+        if (preview_edit.pose_override)
         {
             constexpr const char *clips = "Idle\0Run\0Draw\0Recoil\0Death\0";
-            ImGui::Combo("Base clip", &impl_->preview_base_clip, clips);
-            ImGui::SliderFloat("Base time", &impl_->preview_base_time, 0.0f, 1.0f);
-            ImGui::Combo("Blend clip", &impl_->preview_secondary_clip, clips);
-            ImGui::SliderFloat("Blend time", &impl_->preview_secondary_time, 0.0f, 1.0f);
-            ImGui::SliderFloat("Blend weight", &impl_->preview_secondary_weight, 0.0f, 1.0f);
-            ImGui::Combo("Upper clip", &impl_->preview_upper_clip, clips);
-            ImGui::SliderFloat("Upper time", &impl_->preview_upper_time, 0.0f, 1.0f);
-            ImGui::SliderFloat("Upper weight", &impl_->preview_upper_weight, 0.0f, 1.0f);
+            ImGui::Combo("Base clip", &preview_edit.base_clip, clips);
+            ImGui::SliderFloat("Base time", &preview_edit.base_time, 0.0f, 1.0f);
+            ImGui::Combo("Blend clip", &preview_edit.secondary_clip, clips);
+            ImGui::SliderFloat("Blend time", &preview_edit.secondary_time, 0.0f, 1.0f);
+            ImGui::SliderFloat("Blend weight", &preview_edit.secondary_weight, 0.0f, 1.0f);
+            ImGui::Combo("Upper clip", &preview_edit.upper_clip, clips);
+            ImGui::SliderFloat("Upper time", &preview_edit.upper_time, 0.0f, 1.0f);
+            ImGui::SliderFloat("Upper weight", &preview_edit.upper_weight, 0.0f, 1.0f);
         }
     }
     ImGui::SeparatorText("Simulation");
@@ -2045,8 +1948,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         fresnel_draws.push_back({instance_index, asset_index, index, player, lod, geometry_pass});
     }
     std::uint32_t owner_mesh_count{};
-    if (impl_->config.slime_family_preview_count == 0)
-        for (const auto &source : typed_mesh_spawns)
+    for (const auto &source : typed_mesh_spawns)
         {
             const auto &recipe = vfx.mesh_recipe_view.Rows()[source.recipe_index];
             auto &target_mesh = gpu_owner_meshes[owner_mesh_count++];
@@ -2110,7 +2012,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     auto *gpu_ground_gaps = reinterpret_cast<float *>(frame.mapped + ground_gap_offset);
     gpu_ground_gaps[0] = 0.0f;
     std::uint32_t gap_write_index{};
-    if (impl_->config.slime_family_preview_count == 0)
     {
         for (const auto &input : typed_ground_spawns)
         {
@@ -2459,54 +2360,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         owned_view.lod_session_epoch,
         (owned_view.temporal_history_valid || owned_view.hzb_history_valid) ? 1u : 0u,
         (impl_->config.grid_floor_probe ? 1u : 0u) | (grid_aa_disabled ? 2u : 0u)};
-    static_assert(kAuthoredMaterialNames.size() <= 16);
-    for (std::size_t group = 0; group < constants->material_parameter_bases.size(); ++group)
-    {
-        std::array<UINT, 4> bases{};
-        for (std::size_t lane = 0; lane < bases.size(); ++lane)
-            if (const auto ordinal = group * 4 + lane; ordinal < kAuthoredMaterialNames.size())
-                bases[lane] = impl_->material_parameter_bases[ordinal];
-        constants->material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
-        std::array<UINT, 4> masks{};
-        for (std::size_t lane = 0; lane < masks.size(); ++lane)
-            if (const auto ordinal = group * 4 + lane; ordinal < kAuthoredMaterialNames.size())
-                masks[lane] = impl_->material_surface_layouts[ordinal].varying_mask;
-        constants->material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
-    }
-    const auto &sidecar = impl_->material_sidecar_layout;
-    for (std::size_t group = 0; group < constants->character_material_parameter_bases.size(); ++group)
-    {
-        std::array<UINT, 4> bases{}, masks{};
-        for (std::size_t lane = 0; lane < bases.size(); ++lane)
-            if (const auto hero = group * 4 + lane; hero < kCharacterMaterialNames.size())
-            {
-                const auto ordinal = kAuthoredMaterialNames.size() + hero;
-                bases[lane] = impl_->material_parameter_bases[ordinal];
-                masks[lane] = impl_->material_surface_layouts[ordinal].varying_mask;
-            }
-        constants->character_material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
-        constants->character_material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
-    }
-    constants->hero_binding_ranges = impl_->hero_binding_ranges;
-    constants->probe_options = impl_->lighting_probe.FrameOptions();
-    constants->material_sidecar_offsets[0] = {sidecar.offsets[0], sidecar.offsets[1],
-                                             sidecar.offsets[2], sidecar.offsets[3]};
-    constants->material_sidecar_offsets[1] = {sidecar.offsets[4], UINT32_MAX, UINT32_MAX, UINT32_MAX};
-    constants->material_sidecar_info = {sidecar.mask, sidecar.word_count, sidecar.plane_count, 0};
+    impl_->FillMaterialFrameConstants(*constants);
     constants->output_size = {static_cast<float>(owned_view.width), static_cast<float>(owned_view.height),
                              1.0f / owned_view.width, 1.0f / owned_view.height};
     constants->post_options = {impl_->config.bloom_strength, 0.0f,
                               impl_->config.color_grading ? 1.0f : 0.0f, impl_->config.sharpening};
-    const bool pom_enabled = impl_->config.pom_quality != GraphicsOptionalQuality::Off;
-    const auto pom_row = pom_enabled ? static_cast<GraphicsQuality>(static_cast<unsigned>(impl_->config.pom_quality) - 1u) : GraphicsQuality::Low;
-    const auto &pom = impl_->QualityProfileFor(pom_row);
-    const auto &material = impl_->QualityProfileFor(impl_->config.material_quality);
-    // Z is bit-reinterpreted payload: positive binary16 fade start in the low
-    // half, fade end in the high half. HLSL decodes both with f16tof32.
-    const auto fade_bits = UINT(DirectX::PackedVector::XMConvertFloatToHalf(material.terrain_detail_fade_start_m)) |
-        (UINT(DirectX::PackedVector::XMConvertFloatToHalf(material.terrain_detail_fade_end_m)) << 16u);
-    constants->material_quality_options = {pom_enabled ? float(pom.pom_max_steps) : 0.0f, pom_enabled ? float(pom.pom_refinement_steps) : 0.0f,
-        std::bit_cast<float>(fade_bits), static_cast<float>(impl_->config.refraction_quality)};
     constants->display_options = {owned_view.display_state.hdr_active ? 1.0f : 0.0f,
         owned_view.display_state.paper_white_nits, owned_view.display_state.peak_nits, 0};
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -2546,23 +2404,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     DirectX::XMStoreFloat4(&constants->camera_time, eye);
     constants->camera_time.w =
         static_cast<float>(snapshot.header.simulation_time.count()) / 1'000'000'000.0f;
-    std::vector<LightView> owned_frame_lights;
-    std::span<const LightView> frame_lights = snapshot.lights;
-    if (frame_lights.empty())
-    {
-        LightView sun{{-0.4f, -0.8f, 0.3f}, 3.0f * kLightWhiteLumensPerWatt, {1, 1, 1}};
-        sun.stable_id = 1;
-        sun.shadow_flags = kLightShadowRequested;
-        owned_frame_lights.push_back(sun);
-        frame_lights = owned_frame_lights;
-    }
-    const auto authoritative_light_count = frame_lights.size();
-    std::vector<std::uint64_t> transient_light_ids;
-    std::optional<LightView> selected_primary_sun;
-    for (const auto &candidate : frame_lights)
-        if (candidate.type == LightType::Directional && (candidate.shadow_flags & kLightShadowRequested) != 0 &&
-            (!selected_primary_sun || candidate.stable_id < selected_primary_sun->stable_id)) selected_primary_sun = candidate;
-    const auto *primary_sun = selected_primary_sun ? std::addressof(*selected_primary_sun) : nullptr;
     const LightView light = primary_sun ? *primary_sun : LightView{{-0.4f, -0.8f, 0.3f}, 0, {1, 1, 1}};
     constants->light_direction_intensity = {light.direction.x, light.direction.y,
                                              light.direction.z, light.quantity / kLightWhiteLumensPerWatt};
@@ -2600,7 +2441,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::vector<LightCandidate> light_candidates;
     for (const auto &source : typed_lights)
     {
-        if (vfx_light_limit == 0 || source.intensity == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_light_limit == 0 || source.intensity == 0) continue;
         const auto world = DirectX::XMVectorSet(source.position.x, source.position.y, source.position.z, 1);
         DirectX::XMFLOAT3 view_position;
         DirectX::XMStoreFloat3(&view_position, DirectX::XMVector3TransformCoord(world, view));
@@ -2645,7 +2486,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::vector<DistortionCandidate> distortion_candidates;
     for (const auto &source : typed_distortions)
     {
-        if (vfx_distortion_limit == 0 || source.alpha == 0 || source.strength == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_distortion_limit == 0 || source.alpha == 0 || source.strength == 0) continue;
         DirectX::XMFLOAT3 center;
         DirectX::XMStoreFloat3(&center, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y,source.position.z,1),view));
         const float radius = source.radius;
@@ -2687,7 +2528,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     VfxDecalCandidates decal_candidates(vfx_decal_limit);
     for (const auto &source : typed_decals)
     {
-        if (vfx_decal_limit == 0 || source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        if (vfx_decal_limit == 0 || source.alpha == 0) continue;
         // Ground-only projector slab follows its source anchor, including elevated death events.
         DirectX::XMFLOAT3 center;
         DirectX::XMStoreFloat3(&center,DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y-.825f,source.position.z,1),view));
@@ -2759,23 +2600,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         const auto source_index = static_cast<std::uint32_t>(source - snapshot.instances.begin());
         if (const auto *selected = pose_by_source[source_index]) pose = *selected;
     }
-    bool preview_pose_override = false;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    if (impl_->config.character_preview && impl_->preview_pose_override)
-    {
-        preview_pose_override = true;
-        pose.clip = static_cast<CharacterAnimationClip>(impl_->preview_base_clip);
-        pose.normalized_time = impl_->preview_base_time;
-        pose.secondary_clip =
-            static_cast<CharacterAnimationClip>(impl_->preview_secondary_clip);
-        pose.secondary_normalized_time = impl_->preview_secondary_time;
-        pose.secondary_weight = impl_->preview_secondary_weight;
-        pose.upper_body_clip =
-            static_cast<CharacterAnimationClip>(impl_->preview_upper_clip);
-        pose.upper_body_normalized_time = impl_->preview_upper_time;
-        pose.upper_body_weight = impl_->preview_upper_weight;
-    }
-#endif
     const auto eased_weight = [](float weight) {
         const auto clamped = std::clamp(weight, 0.0f, 1.0f);
         return clamped * clamped * (3.0f - 2.0f * clamped);
@@ -2828,17 +2652,14 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         return true;
     };
     const auto pose_for_archer = [&](const RenderInstance &instance) -> const AnimationPoseRef & {
-        if (!preview_pose_override)
-        {
-            if (instance.stable_id != 0)
-                if (const auto found = pose_by_id.find(instance.stable_id); found != pose_by_id.end())
-                    return *found->second;
-            const auto ordered = static_cast<std::size_t>(&instance - render_instances.data());
-            if (ordered < ordered_source_indices.size() &&
-                ordered_source_indices[ordered] < pose_by_source.size())
-                if (const auto *candidate = pose_by_source[ordered_source_indices[ordered]])
-                    return *candidate;
-        }
+        if (instance.stable_id != 0)
+            if (const auto found = pose_by_id.find(instance.stable_id); found != pose_by_id.end())
+                return *found->second;
+        const auto ordered = static_cast<std::size_t>(&instance - render_instances.data());
+        if (ordered < ordered_source_indices.size() &&
+            ordered_source_indices[ordered] < pose_by_source.size())
+            if (const auto *candidate = pose_by_source[ordered_source_indices[ordered]])
+                return *candidate;
         return pose;
     };
     const auto sample_legacy_pose = [&](const AnimationPoseRef &pose_ref,
@@ -3225,21 +3046,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             mesh |= kEnvironmentMeshFlag;
         if (source.mesh == RenderMesh::GroundDetail) mesh |= source.environment_variant << 8u;
         float animation_time = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch || source.mesh == RenderMesh::MeadowSurface
-            ? std::bit_cast<float>(impl_->TerrainSectionIndex(source)) : 0.0f;
-        AnimationPoseRef resolved_skin_pose;
+            ? std::bit_cast<float>(impl_->TerrainSectionIndex(false, ordered_source_indices[index], source)) : 0.0f;
         const AnimationPoseRef *skin_pose = nullptr;
         RenderPoseKey pose_key{};
         if (source.mesh == RenderMesh::Archer) skin_pose = &pose_for_archer(source);
         if (is_monster(source.mesh))
         {
-            if (impl_->config.monster_preview_asset < 6 || family_preview)
-            {
-                resolved_skin_pose.clip = static_cast<CharacterAnimationClip>(
-                    std::min(impl_->config.monster_preview_clip, 4u));
-                resolved_skin_pose.normalized_time = impl_->config.monster_preview_time;
-                skin_pose = &resolved_skin_pose;
-            }
-            else if (const auto pose_it = pose_by_id.find(source.stable_id);
+            if (const auto pose_it = pose_by_id.find(source.stable_id);
                      pose_it != pose_by_id.end())
             {
                 skin_pose = pose_it->second;
@@ -3704,6 +3517,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     LocalShadowOutputs local_shadow_outputs;
     decltype(owned_view.previous_shadow_casters) current_shadow_casters;
     std::shared_ptr<Impl::StaticShadowCasterBatch> static_shadow_batch;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    bool static_membership_build_pending{}, static_binding_rebind_pending{};
+#endif
     struct ShadowBinding
     {
         const GeometryPageGpu *page{};
@@ -3829,23 +3645,52 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         signature.mesh_shader=impl_->mesh_shader_enabled;
         for(std::size_t bucket=0;bucket<kGpuVisibilityBucketCount;++bucket)
         {
+            if (bucket >= kEnvironmentVisibilityBucketCount || static_environment_ranges[bucket].second == 0)
+                continue;
             const auto *page=bucket_pages[bucket];
             signature.geometry[bucket]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
             signature.passes[bucket]=static_geometry_passes[bucket][1];
         }
-        signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
-        signature.passes.back()=ground_geometry_passes[1];
-        const bool static_warm=!new_session && previous_static_batch &&
+        if (static_ground_range.second != 0)
+        {
+            signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
+            signature.passes.back()=ground_geometry_passes[1];
+        }
+        const bool static_same_members=!new_session && previous_static_batch &&
             previous_static_batch->source==signature.source && previous_static_batch->generation==signature.generation &&
             previous_static_batch->leaf_count==signature.leaf_count && previous_static_batch->density==signature.density &&
-            previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count &&
-            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->material_revision==signature.material_revision &&
+            previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count;
+        const bool static_same_bounds=static_same_members &&
+            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->geometry==signature.geometry;
+        const bool static_warm=static_same_bounds &&
+            previous_static_batch->material_revision==signature.material_revision &&
             previous_static_batch->pipeline_revision==signature.pipeline_revision && previous_static_batch->mesh_shader==signature.mesh_shader &&
-            previous_static_batch->geometry==signature.geometry && previous_static_batch->passes==signature.passes;
+            previous_static_batch->passes==signature.passes;
+        const bool static_rebind=static_same_members && !static_warm;
         std::unordered_map<Impl::ShadowCasterMap::key_type,std::size_t,Impl::ShadowCasterKeyHash> old_static_indices,static_indices;
         if(static_warm) static_shadow_batch=previous_static_batch;
+        else if (static_rebind)
+        {
+#if defined(HS_DEVELOPMENT_TOOLS)
+            static_binding_rebind_pending = true;
+#endif
+            static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(*previous_static_batch);
+            static_shadow_batch->material_revision=signature.material_revision;
+            static_shadow_batch->pipeline_revision=signature.pipeline_revision;
+            static_shadow_batch->mesh_shader=signature.mesh_shader;
+            static_shadow_batch->geometry=signature.geometry;
+            static_shadow_batch->wind_radius=signature.wind_radius;
+            static_shadow_batch->passes=signature.passes;
+            static_shadow_batch->bindings.clear();
+            static_shadow_batch->settled=false;
+            if(shadow_owner.static_shadow_caster_revision>UINT64_MAX-2) throw std::runtime_error("Static shadow caster revision exhausted");
+            static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
+        }
         else
         {
+#if defined(HS_DEVELOPMENT_TOOLS)
+            static_membership_build_pending = true;
+#endif
             static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(std::move(signature));
             if(shadow_owner.static_shadow_caster_revision>UINT64_MAX-2) throw std::runtime_error("Static shadow caster revision exhausted");
             static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
@@ -4014,8 +3859,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     bindings.push_back({page, pipeline, material, immutable});
                 });
             VirtualShadowCaster caster;
-            const auto key = std::tuple{immutable, source.stable_id,
-                source.stable_id == 0 ? reference.instance_index + 1u : 0u};
+            const auto key = immutable ? static_draws.shadow_keys[ref_index]
+                : Impl::ShadowCasterMap::key_type{false, source.stable_id,
+                    source.stable_id == 0 ? reference.instance_index + 1u : 0u};
             Impl::ShadowCasterRecord previous_static_record;
             const Impl::ShadowCasterRecord *previous{};
             if(immutable)
@@ -4031,18 +3877,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             const auto center = instance ? instance->position : DirectX::XMFLOAT4{
                 source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0};
             const float maximum_scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)});
-            // StaticGpuScene assigns a fresh, nonwrapping instance generation
-            // whenever its strong immutable scene lease changes. Together with
-            // the page revision, this proves the local sphere transform is unchanged.
-            const bool reuse_static_center = immutable && !new_session &&
-                previous && previous->caster.immutable_source &&
-                previous->caster.instance_index == instance_index &&
-                previous->caster.instance_generation == reference.instance_generation &&
-                previous->caster.current_cut_revision == cut_revision;
-            if (reuse_static_center)
+            // StaticDrawData owns this leaf's source transform; page changes
+            // invalidate only its unexpanded geometry sphere.
+            auto *base = immutable ? &static_draws.shadow_bases[ref_index] : nullptr;
+            if (base && base->valid && base->geometry_revision == cut_revision)
             {
-                const auto &old = previous->caster.current_bounds;
-                caster.current_bounds = {old.x, old.y, old.z, sphere[3] * maximum_scale};
+                caster.current_bounds = base->sphere;
             }
             else
             {
@@ -4050,6 +3890,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 const float sine = std::sin(caster_yaw), cosine = std::cos(caster_yaw);
                 caster.current_bounds = {center.x + cosine * sx + sine * sz, center.y + sy,
                     center.z - sine * sx + cosine * sz, sphere[3] * maximum_scale};
+                if (base) *base = {caster.current_bounds, cut_revision, true};
             }
             caster.skin = hero;
             caster.wind = HasEnvironmentWind(source.mesh, source.environment_variant);
@@ -4122,6 +3963,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 caster.previous_skin = old.skin;
                 caster.previous_wind = old.wind;
                 caster.previous_animated_alpha = old.animated_alpha;
+                if (immutable && previous_static_batch &&
+                    previous_static_batch->pipeline_revision != impl_->pipeline_revision)
+                    caster.force_content_invalidation = true;
             }
             if(immutable) static_shadow_batch->records.push_back(caster);
             else { current->caster=caster; casters.push_back(caster); }
@@ -4129,6 +3973,33 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {
                 const auto &b = caster.current_bounds;
                 receivers.push_back({{b.x-b.w,b.y-b.w,b.z-b.w,0}, {b.x+b.w,b.y+b.w,b.z+b.w,1}});
+            }
+            return Result::Success();
+        };
+        const auto prepare_static_surfaces = [&]() -> Result {
+            static_shadow_batch->surface_receivers.clear();
+            static_shadow_batch->surface_aggregate.reset();
+            if (static_scene && impl_->static_gpu_scene)
+                for (std::size_t index = 0; index < static_leaf_ref_count; ++index)
+                    if (auto added = append_surface(static_scene->instances[static_draw_refs[index].instance_index],
+                            nullptr, SIZE_MAX, static_shadow_batch->surface_receivers); !added) return added;
+            for (std::size_t index = 0; index < hlod_static_instances.size(); ++index)
+                if (auto added = append_surface(hlod_static_instances[index], nullptr, SIZE_MAX,
+                        static_shadow_batch->surface_receivers, &impl_->hlod_runtime->scene.proxies.at(index).bounds); !added)
+                    return added;
+            for (const auto &surface : static_shadow_batch->surface_receivers)
+            {
+                auto &aggregate = static_shadow_batch->surface_aggregate;
+                if (!aggregate) aggregate = surface;
+                else
+                {
+                    aggregate->minimum.x = std::min(aggregate->minimum.x, surface.minimum.x);
+                    aggregate->minimum.y = std::min(aggregate->minimum.y, surface.minimum.y);
+                    aggregate->minimum.z = std::min(aggregate->minimum.z, surface.minimum.z);
+                    aggregate->maximum.x = std::max(aggregate->maximum.x, surface.maximum.x);
+                    aggregate->maximum.y = std::max(aggregate->maximum.y, surface.maximum.y);
+                    aggregate->maximum.z = std::max(aggregate->maximum.z, surface.maximum.z);
+                }
             }
             return Result::Success();
         };
@@ -4144,34 +4015,90 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             water_receiver=static_shadow_batch->water;
             receivers.insert(receivers.end(),static_shadow_batch->receivers.begin(),static_shadow_batch->receivers.end());
         }
+        else if (static_rebind)
+        {
+            // Rebind the retained membership to current geometry and pipelines.
+            // Only changed geometry or wind requires new receiver bounds.
+            if (!static_same_bounds)
+                if (auto prepared = prepare_static_surfaces(); !prepared) return prepared;
+            for (auto &caster : static_shadow_batch->records)
+            {
+                const auto &reference = static_draw_refs[caster.source_ref];
+                const auto &source = static_scene->instances[reference.instance_index];
+                const bool environment = is_environment_mesh(source.mesh);
+                const auto bucket = environment
+                    ? static_cast<UINT>(environment_mesh_index(source) * 3 + 2) : UINT32_MAX;
+                const auto *page = environment ? bucket_pages[bucket] : &impl_->procedural_geometry;
+                const auto pass = environment ? static_geometry_passes[bucket][1] : ground_geometry_passes[1];
+                if (!page || pass == 0)
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Virtual caster has no complete geometry record.");
+                const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
+                auto &base = static_draws.shadow_bases[caster.source_ref];
+                if (!base.valid || base.geometry_revision != cut_revision)
+                {
+                    const auto &sphere = page->metadata.bounds.sphere;
+                    const float sx = sphere[0] * source.scale.x, sy = sphere[1] * source.scale.y;
+                    const float sz = sphere[2] * source.scale.z;
+                    const float sine = std::sin(source.yaw), cosine = std::cos(source.yaw);
+                    const float maximum_scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)});
+                    base = {{source.position.x + cosine * sx + sine * sz,
+                        source.position.y + (environment ? 0.0f : source.scale.y * 0.5f) + sy,
+                        source.position.z - sine * sx + cosine * sz, sphere[3] * maximum_scale}, cut_revision, true};
+                }
+                caster.current_bounds = base.sphere;
+                if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
+                caster.current_cut_revision = cut_revision;
+                const UINT ordinal = environment
+                    ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3) : kTerrainMaterialOrdinal;
+                const UINT material = (impl_->material_parameter_bases[ordinal] << 1) | 1u;
+                const auto binding_key = (std::uint64_t(material) << 32) | 0x80000000u | page->page_slot;
+                const auto binding_slot = environment ? static_cast<std::size_t>(bucket) : kGpuVisibilityBucketCount;
+                caster.draw_group = ResolveShadowCasterGroup(
+                    shadow_group_indices[1][binding_slot], groups, binding_key, [&] {
+                        auto *pipeline = environment ? environment_pipeline(bucket, true) : impl_->shadow_pipeline.Get();
+                        groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
+                            ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed,
+                            page->index_count, 0, 0, page->meshlet_count});
+                        bindings.push_back({page, pipeline, material, true});
+                    });
+                caster.geometry_record = pass >> 2;
+                caster.current_revisions.material = source.revisions.material ^ impl_->material_parameter_revision;
+                // The global pipeline revision has no per-shadow-shader change
+                // notification; conservatively invalidate shadow content.
+                caster.force_content_invalidation =
+                    previous_static_batch->pipeline_revision != signature.pipeline_revision;
+            }
+            for (std::size_t i = 0; i < bindings.size(); ++i)
+                static_shadow_batch->bindings.push_back({bindings[i].page, bindings[i].pipeline, bindings[i].material,
+                    groups[i].frontend, groups[i].binding_key});
+            if (!static_same_bounds)
+            {
+                for (std::size_t index = 0; index < static_leaf_ref_count; ++index)
+                {
+                    const auto &source = static_scene->instances[static_draw_refs[index].instance_index];
+                    if (!is_environment_mesh(source.mesh) || environment_mesh_index(source) != render_data::kMeadowWaterGeometry)
+                        continue;
+                    const double radius = double(impl_->environment_variant_radii[render_data::kMeadowWaterGeometry]) *
+                        std::max({std::abs(double(source.scale.x)), std::abs(double(source.scale.y)), std::abs(double(source.scale.z))});
+                    if (auto merged = merge_receiver(water_receiver,
+                            {source.position.x, source.position.y, source.position.z, 0}, radius); !merged) return merged;
+                }
+                static_shadow_batch->water = water_receiver;
+            }
+            else water_receiver = static_shadow_batch->water;
+            receivers.insert(receivers.end(), static_shadow_batch->receivers.begin(), static_shadow_batch->receivers.end());
+        }
         else
         {
             const auto receiver_begin=receivers.size();
+            if (auto prepared = prepare_static_surfaces(); !prepared) return prepared;
             if(static_scene && impl_->static_gpu_scene)
                 for(std::size_t index=0;index<static_leaf_ref_count;++index)
                 {
-                    if(auto added=append_surface(static_scene->instances[static_draw_refs[index].instance_index],nullptr,
-                        SIZE_MAX,static_shadow_batch->surface_receivers);!added)return added;
                     if(auto added=append_caster(static_scene->instances[static_draw_refs[index].instance_index],
                         static_draw_refs[index],static_cast<UINT>(index),true,nullptr);!added) return added;
                 }
-            for(std::size_t index=0;index<hlod_static_instances.size();++index)
-                if(auto added=append_surface(hlod_static_instances[index],nullptr,SIZE_MAX,static_shadow_batch->surface_receivers,
-                    &impl_->hlod_runtime->scene.proxies.at(index).bounds);!added)return added;
-            for(const auto &surface:static_shadow_batch->surface_receivers)
-            {
-                auto &aggregate=static_shadow_batch->surface_aggregate;
-                if(!aggregate) aggregate=surface;
-                else
-                {
-                    aggregate->minimum.x=std::min(aggregate->minimum.x,surface.minimum.x);
-                    aggregate->minimum.y=std::min(aggregate->minimum.y,surface.minimum.y);
-                    aggregate->minimum.z=std::min(aggregate->minimum.z,surface.minimum.z);
-                    aggregate->maximum.x=std::max(aggregate->maximum.x,surface.maximum.x);
-                    aggregate->maximum.y=std::max(aggregate->maximum.y,surface.maximum.y);
-                    aggregate->maximum.z=std::max(aggregate->maximum.z,surface.maximum.z);
-                }
-            }
             static_shadow_batch->water=water_receiver;
             static_shadow_batch->receivers.assign(receivers.begin()+receiver_begin,receivers.end());
             for(std::size_t i=0;i<bindings.size();++i)
@@ -4427,10 +4354,38 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             geometry_demand[ordinal] = std::max(geometry_demand[ordinal], projected_error);
         }
     };
+    bool preferred_textures_changed = !impl_->preferred_texture_initialized ||
+        impl_->preferred_texture_scene != static_scene ||
+        (static_scene && impl_->preferred_texture_foliage_density != static_draws.foliage_density);
+    if (preferred_textures_changed)
+    {
+        impl_->preferred_texture_scene = static_scene;
+        impl_->preferred_texture_foliage_density = static_draws.foliage_density;
+        impl_->preferred_texture_materials.fill(false);
+        impl_->preferred_texture_materials[kTerrainMaterialOrdinal] =
+            static_scene && static_draws.ground_range.second != 0;
+        if (static_scene)
+            for (std::size_t ordinal = 0; ordinal < impl_->preferred_texture_materials.size(); ++ordinal)
+                if (static_environment_ranges[ordinal * 3].second != 0)
+                    impl_->preferred_texture_materials[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] = true;
+        impl_->preferred_texture_initialized = true;
+    }
     const auto accumulate_dynamic_geometry_demand = [&](const auto &source, std::uint32_t consumers,
                                                         std::uint32_t inside_consumers) {
+        if ((source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch) &&
+            !impl_->preferred_texture_materials[kTerrainMaterialOrdinal])
+        {
+            impl_->preferred_texture_materials[kTerrainMaterialOrdinal] = true;
+            preferred_textures_changed = true;
+        }
         if (!is_environment_mesh(source.mesh)) return;
         const auto ordinal = environment_mesh_index(source);
+        const auto material = render_data::EnvironmentGeometryMaterialOrdinal(ordinal);
+        if (!impl_->preferred_texture_materials[material])
+        {
+            impl_->preferred_texture_materials[material] = true;
+            preferred_textures_changed = true;
+        }
         const auto scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y),
                                      std::abs(source.scale.z)});
         accumulate_geometry_demand_values(ordinal, source.position.x, source.position.y,
@@ -4442,6 +4397,24 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
     const auto all_demand_consumers = (1u << active_view_count) - 1u;
     for (const auto &source : render_instances) accumulate_dynamic_geometry_demand(source, all_demand_consumers, 0);
+    if (preferred_textures_changed)
+    {
+        std::vector<TextureStreamId> preferred_ids;
+        const auto append_material = [&](std::uint32_t material) {
+            for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+            {
+                const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
+                if (id) preferred_ids.push_back(id);
+            }
+        };
+        for (std::size_t material = 0; material < impl_->preferred_texture_materials.size(); ++material)
+            if (impl_->preferred_texture_materials[material]) append_material(static_cast<std::uint32_t>(material));
+        if (auto updated = impl_->texture_streaming.SetPreferredWorkingSet(preferred_ids); !updated)
+        {
+            impl_->preferred_texture_initialized = false;
+            return updated;
+        }
+    }
     if (static_scene)
         for (std::size_t ordinal = 0; ordinal < cluster_active.size(); ++ordinal)
         {
@@ -4969,7 +4942,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     bool hero_bounds_complete = hero_candidate_count != 0 &&
         hero_active.width == owned_view.render_width && hero_active.height == owned_view.render_height;
     bool hero_all_outside = hero_bounds_complete;
-    const renderer_detail::HeroCoverageProjection hero_projection{hero_active.width, hero_active.height,
+    const renderer_detail::TranslucencyCoverageProjection hero_projection{hero_active.width, hero_active.height,
         lod_projection._11, lod_projection._22, jitter_x, jitter_y, near_plane, far_plane};
     const auto include_hero_sphere = [&](DirectX::XMFLOAT4 sphere) {
         const double position_error = 128.0 * FLT_EPSILON *
@@ -4977,10 +4950,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
              std::abs(double(sphere.z)) + std::abs(double(sphere.w)) + 1.0);
         const auto eye = DirectX::XMVector3TransformCoord(
             DirectX::XMVectorSet(sphere.x, sphere.y, sphere.z, 1.0f), view);
-        const auto projected = renderer_detail::ProjectHeroSphere(hero_projection,
+        const auto projected = renderer_detail::ProjectTranslucencySphere(hero_projection,
             DirectX::XMVectorGetX(eye), DirectX::XMVectorGetY(eye), DirectX::XMVectorGetZ(eye),
             double(sphere.w) + position_error + 0.01);
-        using Kind = renderer_detail::HeroProjectedBounds::Kind;
+        using Kind = renderer_detail::TranslucencyProjectedBounds::Kind;
         if (projected.kind == Kind::Outside) return true;
         hero_all_outside = false;
         if (projected.kind == Kind::Unknown) return false;
@@ -5068,7 +5041,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const auto cluster_record = impl_->PrepareClusterFrameRecordData(frame_slot, use_visibility);
     const auto ao_csm_adaptive_status = owned_view.adaptive_shading.Status();
     const bool overlap_ao_csm = presented_view &&
-        frame_input.views.size() == 1 && !impl_->config.environment_preview &&
+        frame_input.views.size() == 1 &&
         !impl_->mesh_shader_enabled && !use_visibility && impl_->enhanced &&
         active_features.ao_mode == GraphicsAoMode::GTAO &&
         active_features.gi_mode == GraphicsGiMode::Probe &&
@@ -5247,8 +5220,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (auto &resource : owned_view.ui.textures) append_shape(&resource);
     if (redraw_ui)
         for (auto &page : owned_view.ui.atlas) append_shape(&page.buffer);
-    append_shape(&impl_->terrain_pages);
-    append_shape(&impl_->terrain_section_buffer);
+    append_shape(impl_->terrain_static_pages_current ? &impl_->terrain_pages : nullptr);
+    append_shape(&impl_->terrain_frame_sections[frame_slot]);
     append_shape(&visibility_frame.raster_records);
     append_shape(static_scene && impl_->static_gpu_scene ? &impl_->static_gpu_scene->instances : nullptr);
     append_shape(static_scene && impl_->static_gpu_scene && impl_->static_gpu_scene->refs
@@ -5320,7 +5293,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 !owned_view.view_targets_initialized, pre_bloom, pre_tone_map,
                 devtools_ui_hook, saved.post)) return false;
         const bool transparent_guide_state = have_hero_contributors &&
-            owned_view.hero_transparency.AllocatedBytes() != 0;
+            owned_view.translucency.AllocatedBytes() != 0;
         if (pre_bloom)
         {
             if (!owned_view.hdr_post.MatchesMotionShape(saved.hdr_motion, transparent_guide_state)) return false;
@@ -5406,6 +5379,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
     {
         retained_volumetric_revisions.scene = local_probe_plan.revisions.static_layout;
+        retained_volumetric_revisions.probe_material = local_probe_plan.revisions.material;
+        retained_volumetric_revisions.probe_environment = local_probe_plan.revisions.environment;
         retained_volumetric_revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
         retained_volumetric_revisions.light = local_probe_plan.revisions.light;
         const auto mix_volumetric_revision = [](std::uint64_t &hash, std::uint64_t value) {
@@ -5442,27 +5417,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         if (primary_sun && csm_required) projected_volumetric_inputs.compact_shadow.identity.w = 1;
     }
     const auto matches_volumetric_layout = [&](const FrameGraphLayout &saved) {
-        const auto &v = saved.volumetrics.input_versions;
-        auto projected = projected_volumetric_inputs;
-        projected.depth.version = v[0]; projected.hdr.version = v[1];
-        projected.lights.lights = v[2]; projected.lights.ranges = v[3];
-        projected.lights.inline_indices = v[4]; projected.lights.spill_indices = v[5];
-        projected.shadows.metadata = v[6]; projected.shadows.page_table = v[7];
-        projected.shadows.static_bank = v[8]; projected.shadows.dynamic_bank = v[9];
-        projected.shadows.draw_records = v[10]; projected.shadows.root_static = v[11];
-        projected.shadows.root_dynamic = v[12];
-        projected.local_shadows.metadata = v[13]; projected.local_shadows.records = v[14];
-        projected.local_shadows.static_bank = v[15]; projected.local_shadows.dynamic_bank = v[16];
-        projected.local_shadows.draw_records = v[17];
-        projected.compact_shadow.atlas.version = v[18];
-        projected.hero_blue_noise.version = v[19];
-        projected.hero_gradient.version = v[20];
-        projected.hero_noise_volume.version = v[21];
-        return owned_view.volumetrics.MatchesProjectedLayout(projected, saved.volumetrics,
+        return owned_view.volumetrics.MatchesShape(projected_volumetric_inputs, saved.volumetrics,
             projected_volumetric_shadows, local_shadow_planned,
             projected_volumetric_shadows && shadow_plan.constants.root_options.x != 0u,
             projected_volumetric_shadows && shadow_plan.constants.root_options.w != 0u &&
-                shadow_plan.constants.root_options.x != 0u);
+                shadow_plan.constants.root_options.x != 0u, saved.local_probe.service.published);
     };
     FrameGraphLayout *source_candidate{};
     for (auto &saved : impl_->graph_layouts)
@@ -5516,7 +5475,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {
                 continue;
             }
-            if (!owned_view.hero_transparency.MatchesShape(saved.hero, hero_occupancy_topology,
+            if (!owned_view.translucency.MatchesShape(saved.hero, hero_occupancy_topology,
                     std::popcount(translucency_diagnostics_source_mask), single_layer_water))
             {
                 continue;
@@ -5848,11 +5807,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
         return handle;
     };
-    if (impl_->terrain_pages.resource)
+    if (impl_->terrain_static_pages_current && impl_->terrain_pages.resource)
         terrain_page_version = impl_->graph.Version(import_texture(impl_->terrain_pages,
             Access::Common, "TerrainSurfacePages"));
-    if (impl_->terrain_section_buffer.resource)
-        terrain_section_version = impl_->graph.Version(import_buffer(impl_->terrain_section_buffer,
+    if (impl_->terrain_frame_sections[frame_slot].resource)
+        terrain_section_version = impl_->graph.Version(import_buffer(impl_->terrain_frame_sections[frame_slot],
             Access::ShaderRead, "TerrainSurfaceSections"));
     TextureHandle environment_stream_texture{};
     const auto environment_brdf_lut = import_texture(
@@ -7641,7 +7600,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 list->SetPipelineState(variant == 0 ? impl_->surface_resolve_pipeline.Get()
                     : variant <= kAuthoredMaterialNames.size()
                         ? impl_->environment_material_resolve_pipelines[variant - 1].Get()
-                        : impl_->hero_resolve_pipeline.Get());
+                        : impl_->character_resolve_pipeline.Get());
                 list->ExecuteIndirect(impl_->dispatch_signature.Get(), 1,
                     owned_view.targets.visibility_dispatch_args.resource.Get(), variant * 12u, nullptr, 0);
             }
@@ -7678,7 +7637,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             if (reflections)
                 (void)view.screen_reflections.CompleteSubmission(renderer.graph, completion, false);
             if (transparency)
-                (void)view.hero_transparency.CompleteSubmission(renderer.graph, completion, false);
+                (void)view.translucency.CompleteSubmission(renderer.graph, completion, false);
             if (probe)
                 (void)renderer.lighting_probe.CompleteSubmission(renderer.graph, completion, false);
             if (ltc)
@@ -7973,13 +7932,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     local_probe_inputs.frame_srv_base.ptr += static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount * impl_->srv_stride;
     local_probe_inputs.sampler_table = sampler_table;
     local_probe_inputs.completed = impl_->graph_queue_executor.Completed();
-#if defined(HS_OFFLINE_PROBE_BAKER)
-    local_probe_inputs.bind_graphics = [&](ID3D12GraphicsCommandList *list) { bind_graphics(list); bind_scene_roots(list, false); };
-    local_probe_inputs.restore_graphics = [&](ID3D12GraphicsCommandList *list) {
-        bind_graphics(list); bind_scene_roots(list, false);
-        list->OMSetRenderTargets(surface_target_count, surface_rtvs.data(), FALSE, &dsv);
-    };
-#endif
     if (!local_probe_prepared && local_probe_revision_preflight)
         if (auto decided = impl_->local_probes.PrepareFrameDecisionData(
                 local_probe_inputs, local_probe_plan); !decided) return decided;
@@ -7989,65 +7941,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         impl_->local_probes.AllocatedBytes() != 0 && static_scene && impl_->static_gpu_scene)
     {
         if (!capture_pages) capture_pages.emplace();
-        local_probe_inputs.static_instances = impl_->static_gpu_scene->instances.resource;
-        local_probe_inputs.static_allocation = impl_->static_gpu_scene->instances.allocation;
-        if (!restored_graph) local_probe_inputs.static_version = static_instances_version;
-        local_probe_inputs.binding_owners.push_back(impl_->static_gpu_scene);
-        struct CaptureNativeLease { ComPtr<D3D12MA::Allocation> allocation; ComPtr<ID3D12Resource> resource; };
-        const auto capture_read = [&](AllocationResource &resource, bool texture, std::string_view name,
-                                      ResourceVersion produced = {}) {
-            if (!resource.resource) return;
-            const auto version = produced.resource ? produced : impl_->graph.Version(texture
-                ? import_texture(resource, Access::AllShaderRead, name)
-                : import_buffer(resource, Access::AllShaderRead, name));
-            if (!restored_graph && std::ranges::none_of(capture_reads, [&](const auto &read) {
-                    return read.version.resource.value == version.resource.value &&
-                           read.version.resource.kind == version.resource.kind;
-                }))
-                capture_reads.push_back({version, Access::AllShaderRead});
-            local_probe_inputs.binding_owners.push_back(std::make_shared<CaptureNativeLease>(CaptureNativeLease{resource.allocation, resource.resource}));
-        };
-        capture_read(impl_->static_gpu_scene->refs->storage, false, "ProbeStaticDrawRefs", static_refs_version);
-        for (std::size_t material = 0; material < capture_pages->size(); ++material)
-        {
-            const auto &page = material == kEnvironmentMaterialNames.size() ? impl_->procedural_geometry : *bucket_pages[material * 3];
-            auto &capture = (*capture_pages)[material];
-            capture.vertices = page.storage.resource; capture.indices = page.storage.resource;
-            capture.vertex_allocation = page.storage.allocation; capture.index_allocation = page.storage.allocation;
-            if (!restored_graph)
-                capture.vertex_version = impl_->graph.Version(import_buffer(
-                    const_cast<AllocationResource &>(page.storage), Access::VertexShaderRead, "ProbeCompleteGeometry"));
-            capture.index_version = capture.vertex_version;
-            capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
-            capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
-            capture.source_digest = page.source_digest;
-            capture.bounds = page.metadata.bounds;
-            capture.complete = page.storage.resource && page.index_count != 0;
-        }
-        capture_read(frame.upload, false, "ProbeMainBindings");
-        capture_read(impl_->material_parameters, false, "ProbeMaterialParameters", material_parameter_version);
-        capture_read(impl_->mesh_material_bindings_gpu, false, "ProbeHeroBindings", hero_binding_version);
-        capture_read(impl_->environment_brdf_lut, true, "ProbeBrdfLut");
-        if (!restored_graph)
-        {
-        for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
-                light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
-                ltc_outputs.matrix, ltc_outputs.amplitude}) capture_reads.push_back({version, Access::AllShaderRead});
-        if (virtual_shadow_outputs.resources[0])
-            for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
-                    virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
-                capture_reads.push_back({version, Access::AllShaderRead});
-        if(virtual_shadow_outputs.root_static.resource)
-            capture_reads.push_back({virtual_shadow_outputs.root_static,Access::AllShaderRead});
-        if(virtual_shadow_outputs.root_dynamic.resource)
-            capture_reads.push_back({virtual_shadow_outputs.root_dynamic,Access::AllShaderRead});
-        if (local_shadow_outputs.resources[0])
-            for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
-                    local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
-                capture_reads.push_back({version, Access::AllShaderRead});
-        }
-        local_probe_inputs.pages = *capture_pages;
-        local_probe_inputs.scene_reads = capture_reads;
+        impl_->PrepareLocalProbeCaptureInputs(local_probe_inputs, *capture_pages, capture_reads,
+            restored_graph, bucket_pages,
+            static_instances_version,
+            material_parameter_version, hero_binding_version, probe_outputs, light_outputs, ltc_outputs,
+            virtual_shadow_outputs, local_shadow_outputs, import_buffer, import_texture);
     }
 #endif
     LocalProbeOutputs local_probe_outputs;
@@ -8340,6 +8238,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         inputs.depth = {depth_version, owned_view.targets.depth.resource.Get()}; inputs.hdr = {hdr_version, opaque_hdr_resource};
         inputs.lights = light_outputs; inputs.shadows = virtual_shadow_outputs; inputs.volumes = impl_->volumetric_media;
         inputs.local_shadows = local_shadow_outputs;
+        inputs.probe_ready = local_probe_outputs.enabled;
+        if (inputs.probe_ready)
+        {
+            inputs.probe_irradiance = {local_probe_outputs.irradiance, local_probe_outputs.irradiance_resource};
+            inputs.probe_records = {local_probe_outputs.records, local_probe_outputs.record_resource};
+        }
         if (impl_->config.vfx_quality == VfxQuality::High) inputs.hero_volumes = typed_volumes;
         if (!typed_volumes.empty() && impl_->config.vfx_quality == VfxQuality::High)
         {
@@ -8588,7 +8492,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     bucket * kGeometryArgumentStride); !result)
                 throw std::runtime_error(std::string(result.Message()));
         };
-        if (owned_view.hero_transparency.AllocatedBytes() == 0)
+        if (owned_view.translucency.AllocatedBytes() == 0)
         {
             if (has_translucent_hero_binding(0) && archer_range.second != 0)
                 draw_cached_hero_range(kArcherVisibilityBucket);
@@ -8875,9 +8779,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
 #endif
         const auto registered_hero = restored_graph
-            ? owned_view.hero_transparency.BindRetainedLayers(impl_->graph, hero_inputs,
+            ? owned_view.translucency.BindRetainedLayers(impl_->graph, hero_inputs,
                 pending_graph_layout.hero, hero_outputs)
-            : owned_view.hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs,
+            : owned_view.translucency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs,
                 &pending_graph_layout.hero);
         if (!registered_hero) return registered_hero;
         pending_effects.transparency = static_cast<bool>(hero_outputs.depth.resource);
@@ -8950,9 +8854,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     {
         const LayeredTranslucencyGuide background{composite_hdr_version, composite_hdr_resource};
         const auto registered_composition = restored_graph
-            ? owned_view.hero_transparency.BindRetainedComposition(impl_->graph, background,
+            ? owned_view.translucency.BindRetainedComposition(impl_->graph, background,
                 pending_graph_layout.hero, hero_outputs)
-            : owned_view.hero_transparency.RegisterComposition(impl_->graph, background,
+            : owned_view.translucency.RegisterComposition(impl_->graph, background,
                 hero_outputs, &pending_graph_layout.hero);
         if (!registered_composition) return registered_composition;
     }
@@ -9718,6 +9622,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         // Partial submission cannot publish CPU history or permit storage reuse.
         // Retain every resource until Drain establishes completion for teardown.
         frame.completion.Merge(submitted_completion);
+        for (const auto &[resource, handle] : imported_resources)
+            resource->graph_completion.Merge(submitted_completion);
         dynamic_scene.graph_completion.Merge(submitted_completion);
         if (separate_previous_instance_scene)
             previous_instance_snapshot->scene.graph_completion.Merge(submitted_completion);
@@ -9734,6 +9640,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         impl_->MarkClusterFrameUse(frame_slot, submitted_completion);
         for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
         return graph_result;
+    }
+    for (const auto &[resource, handle] : imported_resources)
+    {
+        resource->graph_access = impl_->graph.FinalAccess(handle);
+        resource->graph_queue = impl_->graph.FinalQueue(handle);
+        resource->graph_completion.Merge(impl_->graph.ResourceCompletion(handle));
     }
     // Execute accepted the shared particle mutation. Publish its ping-pong
     // owner before any fallible post-submit service can return an error.
@@ -9846,9 +9758,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     frame.submitted_frame_id = ++impl_->rendered_submission_count;
 #if defined(HS_DEVELOPMENT_TOOLS)
     frame.constants_submission_id = frame.submitted_frame_id;
+#endif
     owned_view.last_submitted_frame_slot = frame_slot;
     owned_view.last_submitted_frame_id = frame.submitted_frame_id;
-#endif
     frame.submitted_view_id = view_input.id.value;
     frame.timing_source_sequence = ++owned_view.timing_source_sequence;
     frame.timing_kind = GpuFrameTimingKind::Unavailable;
@@ -9937,9 +9849,17 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     {
         auto &shadow_owner = *impl_->owned_views.at(view_input.id.value);
         CommitShadowCasterStorage(owned_view.previous_shadow_casters,shadow_owner.scratch_shadow_casters,current_shadow_casters);
+#if defined(HS_DEVELOPMENT_TOOLS)
+        shadow_owner.static_membership_builds += static_membership_build_pending;
+        shadow_owner.static_binding_rebinds += static_binding_rebind_pending;
+#endif
         if(static_shadow_batch && !static_shadow_batch->settled)
         {
-            for(auto &caster:static_shadow_batch->records) AdvanceShadowCasterHistory(caster);
+            for(auto &caster:static_shadow_batch->records)
+            {
+                AdvanceShadowCasterHistory(caster);
+                caster.force_content_invalidation = false;
+            }
             static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
             static_shadow_batch->settled=true;
         }
@@ -9968,7 +9888,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (pending_effects.transparency)
     {
         pending_effects.transparency = false;
-        if (auto completed = owned_view.hero_transparency.CompleteSubmission(impl_->graph,
+        if (auto completed = owned_view.translucency.CompleteSubmission(impl_->graph,
                 submitted_completion, true); !completed) return completed;
     }
     if (pending_effects.diffusion)
@@ -10009,12 +9929,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
 #endif
     if (use_visibility) owned_view.visibility_targets_initialized = true;
     owned_view.decal_surface_active = decal_surface_outputs.active;
-    for (const auto &[resource, handle] : imported_resources)
-    {
-        resource->graph_access = impl_->graph.FinalAccess(handle);
-        resource->graph_queue = impl_->graph.FinalQueue(handle);
-        resource->graph_completion = impl_->graph.ResourceCompletion(handle);
-    }
     output_completion = impl_->graph.ResourceCompletion(back_buffer);
     if (initialize_dynamic_lod) impl_->CommitLodStateBuffer(dynamic_lod_state);
     if (initialize_static_lod) impl_->CommitLodStateBuffer(*static_lod_state);
@@ -10187,11 +10101,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         if (impl_->cluster_runtime && frame_slot < kClusterRuntimeFrames)
             impl_->cluster_runtime->frames[frame_slot].history_generation = view_owner.history_generation;
     }
+    owned_view.last_history_frame_slot = frame_slot;
     ++owned_view.frame_number;
     world_step_receipt.history_committed = true;
     grass_history_attempt.succeeded = true;
 #if defined(HS_DEVELOPMENT_TOOLS)
     owned_view.translucency_capture_active = static_cast<bool>(hero_outputs.depth.resource);
+    owned_view.shadow_atlas_active = csm_registered;
 #endif
     cpu_timings.post_submit_us = measure_stage();
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -10244,6 +10160,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     impl_->static_scene_upload_count,
                     volumetric_outputs.constant_resource && impl_->config.vfx_quality == VfxQuality::High
                         ? static_cast<UINT>(typed_volumes.size()) : 0u};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    frame_result.preview = preview_edit;
+#endif
     frame_result.identity = {snapshot.header.tick, impl_->active_render_package_id,
         view_input.id, presented_view ? owned_view.sdk_frame_identity.presentation_id : 0, 0, false};
     if (impl_->streamline_session)

@@ -481,8 +481,8 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
     if (!frame.mapped || !owner.targets.hzb_layout.count || owner.targets.hzb_layout.elements > UINT32_MAX)
         return ClusterFailure("Cluster occlusion requires prepared frame constants and HZB layout.");
     const auto &frame_constants = *reinterpret_cast<const FrameConstants *>(frame.mapped);
-    const ClusterFrameRuntime *previous_frame = owner.last_presented_index < kClusterRuntimeFrames &&
-        owner.last_presented_index != frame_slot ? &runtime.frames[owner.last_presented_index] : nullptr;
+    const ClusterFrameRuntime *previous_frame = owner.last_history_frame_slot < kClusterRuntimeFrames &&
+        owner.last_history_frame_slot != frame_slot ? &runtime.frames[owner.last_history_frame_slot] : nullptr;
     const auto history_generation = owner.history_generation;
     const bool previous_history_valid = owner.hzb_history_valid && previous_frame &&
         previous_frame->history_generation == history_generation;
@@ -733,13 +733,13 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         cut.previous_history_slot = UINT32_MAX;
         if (previous_history_valid && actual_frame_id > 1u)
         {
-            const auto &previous = runtime.frames[owner.last_presented_index];
+            const auto &previous = runtime.frames[owner.last_history_frame_slot];
             const auto &previous_cut = previous.cuts[ordinal];
             if (previous.history_frame_id == actual_frame_id - 1u && previous_cut.actual_frame_id == actual_frame_id - 1u &&
                 previous_cut.generation == runtime.generation && previous_cut.candidate_count &&
                 previous_cut.history_bits.resource && previous_cut.history_generations.resource && previous_cut.status.resource &&
                 previous_cut.history_words_per_instance == history_words)
-                cut.previous_history_slot = owner.last_presented_index;
+                cut.previous_history_slot = owner.last_history_frame_slot;
         }
         if (cut.candidate_owner != input.candidates || cut.candidate_generation != runtime.generation ||
             cut.candidate_static_error != runtime.catalogs[ordinal].static_error)

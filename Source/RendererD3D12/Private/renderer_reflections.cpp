@@ -16,7 +16,7 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSrvCount = 13, kUavCount = 7, kDescriptorCount = 20;
+constexpr std::uint32_t kSrvCount = SsrSrvCount, kUavCount = SsrUavCount, kDescriptorCount = kSrvCount + kUavCount;
 constexpr std::uint32_t kConstantStride = 768;
 constexpr std::array<std::string_view, 5> kShaderProducts{
     "render/shader/ssr_depth_init_cs.dxil", "render/shader/ssr_depth_reduce_cs.dxil",
@@ -223,15 +223,15 @@ Result ScreenReflectionsSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator
     next->hierarchy.graph_access = Access::Common;
 
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
-    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvCount, 0, 16, 0};
-    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kUavCount, 0, 16, 0};
-    D3D12_ROOT_PARAMETER parameters[6]{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[0].Descriptor = {0, 16};
-    parameters[1].ParameterType = parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[1].DescriptorTable = {1, &ranges[0]}; parameters[2].DescriptorTable = {1, &ranges[1]};
-    parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[3].Constants = {1, 16, 4};
-    parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[4].Descriptor = {0, 0};
-    parameters[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[5].Descriptor = {0, 8};
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvCount, SsrSrvDepth, kSsrSpace, 0};
+    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kUavCount, SsrUavRaw, kSsrSpace, 0};
+    D3D12_ROOT_PARAMETER parameters[SsrRootCount]{};
+    parameters[SsrRootConstants].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[SsrRootConstants].Descriptor = {kSsrConstantRegister, kSsrSpace};
+    parameters[SsrRootSrvs].ParameterType = parameters[SsrRootUavs].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[SsrRootSrvs].DescriptorTable = {1, &ranges[0]}; parameters[SsrRootUavs].DescriptorTable = {1, &ranges[1]};
+    parameters[SsrRootPass].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[SsrRootPass].Constants = {kSsrPassRegister, kSsrSpace, SsrPassCount};
+    parameters[SsrRootFrame].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[SsrRootFrame].Descriptor = {0, 0};
+    parameters[SsrRootMaterial].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[SsrRootMaterial].Descriptor = {0, 8};
     D3D12_ROOT_SIGNATURE_DESC rootDescription{};
     rootDescription.NumParameters = UINT(std::size(parameters)); rootDescription.pParameters = parameters;
     ComPtr<ID3DBlob> signature, diagnostics;
@@ -318,10 +318,7 @@ bool ScreenReflectionsSystem::MatchesLayout(const ScreenReflectionsInputs &input
 {
     return MatchesShape(layout, inputs.reset_history, inputs.frame_index,
         inputs.ambient_visibility_enabled, inputs.sidecar_plane_count) && (!layout.active ||
-        layout.guides==std::array{inputs.depth.version,inputs.base.version,inputs.normal.version,inputs.metadata.version,
-            inputs.material.version,inputs.motion.version,inputs.surface_history.version,inputs.opaque_hdr.version,
-            inputs.environment_specular.version,inputs.material_parameters.version,inputs.sidecars[0].version,
-            inputs.sidecars[1].version,inputs.ambient_visibility.version});
+        layout.guides==ReflectionGuides(inputs));
 }
 Result ScreenReflectionsSystem::BindRetained(RenderGraphBuilder &graph, const ScreenReflectionsInputs &inputs,
     ScreenReflectionsConstants constants, const ScreenReflectionsLayout &layout, ScreenReflectionsOutputs &outputs)
@@ -362,10 +359,7 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
         !FitsTexture(graph, inputs.environment_specular, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
         inputs.sidecar_plane_count > inputs.sidecars.size())
         return ReflectionFailure(ErrorCode::InvalidArgument, "Invalid reflection compact-surface or radiance input.");
-    const std::array guides{inputs.depth.version, inputs.base.version, inputs.normal.version,
-        inputs.metadata.version, inputs.material.version, inputs.motion.version, inputs.surface_history.version,
-        inputs.opaque_hdr.version, inputs.environment_specular.version, inputs.material_parameters.version,
-        inputs.sidecars[0].version, inputs.sidecars[1].version, inputs.ambient_visibility.version};
+    const auto guides = ReflectionGuides(inputs);
     if (capture) capture->guides = guides;
     for (std::uint32_t index = 0; index < inputs.sidecar_plane_count; ++index)
     {
@@ -414,40 +408,36 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     constants.frame_info = {historyValid ? 1u : 0u, std::uint32_t(inputs.frame_index), storage->hierarchy_count, 1u};
     constants.hierarchy_levels = storage->hierarchy_levels;
     std::memcpy(storage->mapped + SIZE_T(inputs.frame_slot) * kConstantStride, &constants, sizeof(constants));
-    storage->Srv(inputs.frame_slot, 0, inputs.depth.resource, DXGI_FORMAT_R32_FLOAT);
-    storage->Srv(inputs.frame_slot, 1, inputs.base.resource, DXGI_FORMAT_R8G8B8A8_UNORM);
-    storage->Srv(inputs.frame_slot, 2, inputs.normal.resource, DXGI_FORMAT_R16G16_SNORM);
-    storage->Srv(inputs.frame_slot, 3, inputs.metadata.resource, DXGI_FORMAT_R32_UINT);
-    storage->Srv(inputs.frame_slot, 4, inputs.material.resource, DXGI_FORMAT_R8G8B8A8_UNORM);
-    storage->Srv(inputs.frame_slot, 5, inputs.motion.resource, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(inputs.frame_slot, 6, inputs.surface_history.resource, DXGI_FORMAT_R32G32_FLOAT);
-    storage->Srv(inputs.frame_slot, 7, inputs.opaque_hdr.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    storage->Srv(inputs.frame_slot, 8, inputs.environment_specular.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);
     D3D12_SHADER_RESOURCE_VIEW_DESC parameterView{};
     parameterView.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     parameterView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     parameterView.Buffer.NumElements = UINT(parameterDescription->Width / sizeof(DirectX::XMUINT4));
     parameterView.Buffer.StructureByteStride = sizeof(DirectX::XMUINT4);
-    storage->device->CreateShaderResourceView(inputs.material_parameters.resource, &parameterView, storage->Cpu(inputs.frame_slot, 9));
-    for (std::uint32_t index = 0; index < 2; ++index)
-    {
-        const auto *sidecar = index < inputs.sidecar_plane_count ? &inputs.sidecars[index] : nullptr;
-        const auto description = sidecar ? graph.ResourceDescription(sidecar->version.resource) : std::nullopt;
-        storage->Srv(inputs.frame_slot, 10 + index, sidecar ? sidecar->resource : nullptr,
-            description ? description->Format : DXGI_FORMAT_R32G32B32A32_UINT);
-    }
-    storage->Srv(inputs.frame_slot, 12, inputs.ambient_visibility_enabled ? inputs.ambient_visibility.resource : nullptr, DXGI_FORMAT_R16_FLOAT);
-    storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Uav(inputs.frame_slot, 1, storage->history[storage->read_index].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Uav(inputs.frame_slot, 2, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-    storage->Uav(inputs.frame_slot, 3, storage->validation_history[storage->read_index].resource.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
-    storage->Uav(inputs.frame_slot, 4, storage->validation_history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
-    storage->Uav(inputs.frame_slot, 5, storage->composed.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const auto sidecar_resource = [&](std::size_t index) -> ID3D12Resource * {
+        return index < inputs.sidecar_plane_count ? inputs.sidecars[index].resource : nullptr;
+    };
+    const auto sidecar_format = [&](std::size_t index) {
+        const auto description = index < inputs.sidecar_plane_count
+            ? graph.ResourceDescription(inputs.sidecars[index].version.resource) : std::nullopt;
+        return description ? description->Format : DXGI_FORMAT_R32G32B32A32_UINT;
+    };
+#define HS_SSR_WRITE_SRV_Texture(name,resource,format) storage->Srv(inputs.frame_slot, SsrSrv##name, resource, format);
+#define HS_SSR_WRITE_SRV_Buffer(name,resource,format) storage->device->CreateShaderResourceView(resource, &parameterView, storage->Cpu(inputs.frame_slot, SsrSrv##name));
+#define HS_SSR_WRITE_SRV(kind,name,slot,type,shader,version,resource,format) HS_SSR_WRITE_SRV_##kind(name,resource,format)
+    HS_SSR_SRVS(HS_SSR_WRITE_SRV)
+#undef HS_SSR_WRITE_SRV
+#undef HS_SSR_WRITE_SRV_Texture
+#undef HS_SSR_WRITE_SRV_Buffer
     D3D12_UNORDERED_ACCESS_VIEW_DESC hierarchyView{};
     hierarchyView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     hierarchyView.Buffer.NumElements = storage->hierarchy_elements; hierarchyView.Buffer.StructureByteStride = sizeof(float);
-    storage->device->CreateUnorderedAccessView(storage->hierarchy.resource.Get(), nullptr, &hierarchyView,
-                                             storage->Cpu(inputs.frame_slot, kSrvCount + 6));
+#define HS_SSR_WRITE_UAV_Texture(name,resource,format) storage->Uav(inputs.frame_slot, SsrUav##name, resource, format);
+#define HS_SSR_WRITE_UAV_Buffer(name,resource,format) storage->device->CreateUnorderedAccessView(resource, nullptr, &hierarchyView, storage->Cpu(inputs.frame_slot, kSrvCount + SsrUav##name));
+#define HS_SSR_WRITE_UAV(kind,name,slot,type,shader,version,resource,format) HS_SSR_WRITE_UAV_##kind(name,resource,format)
+    HS_SSR_UAVS(HS_SSR_WRITE_UAV)
+#undef HS_SSR_WRITE_UAV
+#undef HS_SSR_WRITE_UAV_Texture
+#undef HS_SSR_WRITE_UAV_Buffer
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.active = traceActive;
     pending.slot = inputs.frame_slot; pending.write_index = writeIndex; pending.frame = inputs.frame_index;
@@ -483,18 +473,23 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     auto validation = import(storage->validation_history[writeIndex], "SSR.CurrentValidation");
     auto composed = import(storage->composed, "SSR.ComposedOpaqueHDR");
     if (!binding_result) return binding_result;
+    const std::array<ResourceVersion *, SsrUavCount> graphUavs{{
+#define HS_SSR_UAV_VERSION(kind,name,slot,type,shader,version,resource,format) &version,
+        HS_SSR_UAVS(HS_SSR_UAV_VERSION)
+#undef HS_SSR_UAV_VERSION
+    }};
     auto execute = [storage, inputs, hierarchyHandle = hierarchy.resource](std::uint32_t pipeline, ViewExtent extent) {
         return [storage, inputs, hierarchyHandle, pipeline, extent](RenderPassContext &context) -> Result {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);
             commands->SetComputeRootSignature(storage->root.Get());
-            commands->SetComputeRootConstantBufferView(0, storage->constants.resource->GetGPUVirtualAddress() + UINT64(inputs.frame_slot) * kConstantStride);
-            commands->SetComputeRootDescriptorTable(1, storage->Gpu(inputs.frame_slot, 0));
-            commands->SetComputeRootDescriptorTable(2, storage->Gpu(inputs.frame_slot, kSrvCount));
-            commands->SetComputeRootConstantBufferView(4, inputs.frame_constants_address);
-            commands->SetComputeRootShaderResourceView(5, inputs.material_parameters.resource->GetGPUVirtualAddress());
-            const std::array<std::uint32_t, 4> pass{0, inputs.ambient_visibility_enabled ? 1u : 0u, inputs.sidecar_plane_count, 0};
-            commands->SetComputeRoot32BitConstants(3, UINT(pass.size()), pass.data(), 0);
+            commands->SetComputeRootConstantBufferView(SsrRootConstants, storage->constants.resource->GetGPUVirtualAddress() + UINT64(inputs.frame_slot) * kConstantStride);
+            commands->SetComputeRootDescriptorTable(SsrRootSrvs, storage->Gpu(inputs.frame_slot, 0));
+            commands->SetComputeRootDescriptorTable(SsrRootUavs, storage->Gpu(inputs.frame_slot, kSrvCount));
+            commands->SetComputeRootConstantBufferView(SsrRootFrame, inputs.frame_constants_address);
+            commands->SetComputeRootShaderResourceView(SsrRootMaterial, inputs.material_parameters.resource->GetGPUVirtualAddress());
+            const SsrPassConstants pass{0, inputs.ambient_visibility_enabled ? 1u : 0u, inputs.sidecar_plane_count, 0};
+            commands->SetComputeRoot32BitConstants(SsrRootPass, SsrPassCount, &pass, 0);
             if (pipeline == 2)
             {
                 // The reflection pyramid is closest-depth MAX in reversed Z,
@@ -508,12 +503,12 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
                     const auto scale = 1u << level;
                     const ViewExtent levelActive{(inputs.render_active.width + scale - 1) / scale,
                                                  (inputs.render_active.height + scale - 1) / scale};
-                    commands->SetComputeRoot32BitConstant(3, level, 0);
+                    commands->SetComputeRoot32BitConstant(SsrRootPass, level, SsrPassHierarchyLevel);
                     commands->SetPipelineState(storage->pipelines[1].Get());
                     commands->Dispatch((levelActive.width + 7) / 8, (levelActive.height + 7) / 8, 1);
                     context.UavBarrier(hierarchyHandle);
                 }
-                commands->SetComputeRoot32BitConstant(3, 0, 0);
+                commands->SetComputeRoot32BitConstant(SsrRootPass, 0, SsrPassHierarchyLevel);
             }
             commands->SetPipelineState(storage->pipelines[pipeline].Get());
             commands->Dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
@@ -521,10 +516,11 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
         };
     };
     auto readSurface = [&](PassBuilder &pass) {
-        for (const auto &input : {inputs.depth, inputs.base, inputs.normal, inputs.metadata, inputs.material, inputs.material_parameters})
-            pass.Read(input.version, Access::ComputeRead);
+#define HS_SSR_READ(name) pass.Read(guides[SsrSrv##name], Access::ComputeRead);
+        HS_SSR_SURFACE_READS(HS_SSR_READ)
+#undef HS_SSR_READ
         for (std::uint32_t index = 0; index < inputs.sidecar_plane_count; ++index)
-            pass.Read(inputs.sidecars[index].version, Access::ComputeRead);
+            pass.Read(guides[SsrSrvSidecar0 + index], Access::ComputeRead);
     };
     const auto pass_binding = [&](std::size_t index, std::uint32_t id, std::string_view name) -> std::optional<PassBuilder> {
         if (retained) return graph.BindPass(retained->passes[index], id);
@@ -537,10 +533,13 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     if (retained) { hierarchy = retained->hierarchy; raw = retained->raw; }
     else
     {
-        readSurface(trace); trace.Read(inputs.opaque_hdr.version, Access::ComputeRead);
-        trace.Read(inputs.environment_specular.version, Access::ComputeRead);
-        if (inputs.ambient_visibility_enabled) trace.Read(inputs.ambient_visibility.version, Access::ComputeRead);
-        hierarchy = trace.Write(hierarchy, Access::UnorderedWrite); raw = trace.Write(raw, Access::UnorderedWrite);
+#define HS_SSR_READ(name) trace.Read(guides[SsrSrv##name], Access::ComputeRead);
+#define HS_SSR_WRITE(name) *graphUavs[SsrUav##name] = trace.Write(*graphUavs[SsrUav##name], Access::UnorderedWrite);
+        readSurface(trace); HS_SSR_TRACE_READS(HS_SSR_READ)
+        if (inputs.ambient_visibility_enabled) { HS_SSR_READ(Ambient) }
+        HS_SSR_TRACE_WRITES(HS_SSR_WRITE)
+#undef HS_SSR_READ
+#undef HS_SSR_WRITE
     }
     trace.SetExecuteChecked(execute(2, traceActive));
     auto temporalBinding = pass_binding(1,71,"SSRTemporal");
@@ -549,13 +548,15 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     if (retained) { current = retained->current; validation = retained->validation; }
     else
     {
-        readSurface(temporal); temporal.Read(raw, Access::UnorderedRead);
-        temporal.Read(inputs.motion.version, Access::ComputeRead); temporal.Read(inputs.surface_history.version, Access::ComputeRead);
-        if (historyValid)
-        {
-            temporal.Read(previous, Access::UnorderedRead); temporal.Read(previousValidation, Access::UnorderedRead);
-        }
-        current = temporal.Write(current, Access::UnorderedWrite); validation = temporal.Write(validation, Access::UnorderedWrite);
+#define HS_SSR_READ(name) temporal.Read(guides[SsrSrv##name], Access::ComputeRead);
+#define HS_SSR_UAV_READ(name) temporal.Read(*graphUavs[SsrUav##name], Access::UnorderedRead);
+#define HS_SSR_WRITE(name) *graphUavs[SsrUav##name] = temporal.Write(*graphUavs[SsrUav##name], Access::UnorderedWrite);
+        readSurface(temporal); HS_SSR_TEMPORAL_READS(HS_SSR_READ,HS_SSR_UAV_READ)
+        if (historyValid) { HS_SSR_HISTORY_READS(HS_SSR_UAV_READ) }
+        HS_SSR_TEMPORAL_WRITES(HS_SSR_WRITE)
+#undef HS_SSR_READ
+#undef HS_SSR_UAV_READ
+#undef HS_SSR_WRITE
     }
     temporal.SetExecuteChecked(execute(3, traceActive));
     auto spatialBinding = pass_binding(2,72,"SSRSpatialCompose");
@@ -564,10 +565,14 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     if (retained) composed = retained->composed;
     else
     {
-        readSurface(spatial); spatial.Read(current, Access::UnorderedRead); spatial.Read(validation, Access::UnorderedRead);
-        spatial.Read(inputs.opaque_hdr.version, Access::ComputeRead);
-        spatial.Read(inputs.environment_specular.version, Access::ComputeRead);
-        composed = spatial.Write(composed, Access::UnorderedWrite);
+#define HS_SSR_READ(name) spatial.Read(guides[SsrSrv##name], Access::ComputeRead);
+#define HS_SSR_UAV_READ(name) spatial.Read(*graphUavs[SsrUav##name], Access::UnorderedRead);
+#define HS_SSR_WRITE(name) *graphUavs[SsrUav##name] = spatial.Write(*graphUavs[SsrUav##name], Access::UnorderedWrite);
+        readSurface(spatial); HS_SSR_SPATIAL_READS(HS_SSR_READ,HS_SSR_UAV_READ)
+        HS_SSR_SPATIAL_WRITES(HS_SSR_WRITE)
+#undef HS_SSR_READ
+#undef HS_SSR_UAV_READ
+#undef HS_SSR_WRITE
         graph.SetFinalAccess(current, Access::UnorderedRead); graph.SetFinalAccess(validation, Access::UnorderedRead);
         graph.SetFinalAccess(composed, Access::ComputeRead);
     }

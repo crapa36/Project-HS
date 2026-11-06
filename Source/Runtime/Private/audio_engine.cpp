@@ -489,31 +489,34 @@ Result AudioEngine::InitializePlayback(const SettingsData &settings)
     return InitializeDevice(settings);
 }
 
-Result AudioEngine::InitializePrepared(const SettingsData &settings, DeveloperAudioCatalog catalog)
+Result AudioEngine::InitializePrepared(const SettingsData &settings, PreparedAudio catalog)
 {
     impl_->developer_cues = std::move(catalog.cues);
     std::ranges::sort(impl_->developer_cues, {}, [](const AudioCueRow &cue) { return cue.id.value; });
-    impl_->cues = impl_->developer_cues;
+    impl_->cues = catalog.packed_cues.empty() ? std::span<const AudioCueRow>(impl_->developer_cues) : catalog.packed_cues;
     impl_->samples = std::move(catalog.samples);
     impl_->sample_count = catalog.sample_count;
+    impl_->resident_pcm = std::move(catalog.resident_pcm);
+    impl_->content = catalog.content;
     return InitializePlayback(settings);
 }
 
-Result AudioEngine::Initialize(const SettingsData &settings, const AudioImage &image, const ShippedContentOwner &owner)
+Result PrepareAudio(const AudioImage &image, const ShippedContentOwner &owner,
+                    std::shared_ptr<PreparedAudio> &output)
 {
-    Shutdown();
-    impl_->content = &owner;
     try
     {
+        auto prepared = std::make_shared<PreparedAudio>();
+        prepared->content = &owner;
         // Shipping rows remain in generated order and storage. Only PCM and
         // mutable playback state belong to the engine.
-        impl_->cues = image.cues;
-        impl_->sample_count = image.samples.size();
-        impl_->samples = std::make_unique<AudioSample[]>(impl_->sample_count);
+        prepared->packed_cues = image.cues;
+        prepared->sample_count = image.samples.size();
+        prepared->samples = std::make_unique<AudioSample[]>(prepared->sample_count);
         for (std::size_t i = 0; i < image.samples.size(); ++i)
         {
             const auto &range = image.samples[i];
-            auto &sample = impl_->samples[i];
+            auto &sample = prepared->samples[i];
             sample.data_offset = range.offset; sample.data_size = range.bytes;
             const auto align = static_cast<WORD>(range.channels * (range.bits_per_sample / 8));
             sample.format = {WAVE_FORMAT_PCM, range.channels, range.sample_rate,
@@ -522,31 +525,49 @@ Result AudioEngine::Initialize(const SettingsData &settings, const AudioImage &i
         std::size_t resident_bytes{};
         for (const auto &chunk : image.chunks)
             if (chunk.preload) resident_bytes += static_cast<std::size_t>(chunk.bytes);
-        impl_->resident_pcm.resize(resident_bytes);
+        prepared->resident_pcm.resize(resident_bytes);
         // Generated chunks retain contiguous preload reads and separate transition owners.
         std::size_t resident_offset{};
         for (const auto &chunk : image.chunks)
         {
             for (std::size_t i = 0; i < chunk.sample_count; ++i)
-                impl_->samples[chunk.first_sample + i].chunk = &chunk;
+                prepared->samples[chunk.first_sample + i].chunk = &chunk;
             if (!chunk.preload) continue;
-            auto pcm = std::span(impl_->resident_pcm).subspan(resident_offset, static_cast<std::size_t>(chunk.bytes));
+            auto pcm = std::span(prepared->resident_pcm).subspan(resident_offset, static_cast<std::size_t>(chunk.bytes));
             if (auto loaded = owner.ReadVerified(chunk.offset, pcm, chunk.digest); !loaded)
-            { Shutdown(); return loaded; }
+                return loaded;
             std::size_t sample_offset{};
             for (std::size_t i = 0; i < chunk.sample_count; ++i)
             {
-                auto &sample = impl_->samples[chunk.first_sample + i];
+                auto &sample = prepared->samples[chunk.first_sample + i];
                 sample.pcm = pcm.subspan(sample_offset, static_cast<std::size_t>(sample.data_size));
                 sample_offset += static_cast<std::size_t>(sample.data_size);
                 sample.state.store(SampleState::Ready, std::memory_order_release);
             }
             resident_offset += static_cast<std::size_t>(chunk.bytes);
         }
-        return InitializePlayback(settings);
+        output = std::move(prepared);
+        return Result::Success();
     }
     catch (const std::exception &error)
-    { Shutdown(); return Result::Failure(ErrorCode::TaskFailed, "audio", error.what()); }
+    { return Result::Failure(ErrorCode::TaskFailed, "audio", error.what()); }
+}
+
+Result AudioEngine::Initialize(const SettingsData &settings, const AudioImage &image, const ShippedContentOwner &owner)
+{
+    std::shared_ptr<PreparedAudio> prepared;
+    if (auto result = PrepareAudio(image, owner, prepared); !result) return result;
+    return Initialize(settings, std::move(prepared), {});
+}
+
+Result AudioEngine::Initialize(const SettingsData &settings, std::shared_ptr<PreparedAudio> prepared,
+                               std::shared_ptr<const void> owner)
+{
+    if (!prepared || !prepared->samples)
+        return Result::Failure(ErrorCode::InvalidArgument, "audio", "Prepared audio is missing or already consumed.");
+    Shutdown();
+    impl_->generation_lease = std::move(owner);
+    return InitializePrepared(settings, std::move(*prepared));
 }
 
 bool AudioEngine::PrepareCue(AssetId id) noexcept

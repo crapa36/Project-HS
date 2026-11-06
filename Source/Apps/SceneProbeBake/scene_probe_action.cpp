@@ -77,13 +77,24 @@ int ProduceSceneProbe(int argc,char **argv)
         Require(generation.product_paths.contains(std::string(kProduct)),"Bake input Generation lacks layout-only SPB2");
         const auto layout_path=generation.product_paths.at(std::string(kProduct));
         std::ifstream layout_stream(layout_path,std::ios::binary|std::ios::ate);
-        Require(static_cast<bool>(layout_stream)&&layout_stream.tellg()>0,"Cannot read layout-only SPB2 input");
+        Require(static_cast<bool>(layout_stream)&&layout_stream.tellg()>0&&layout_stream.tellg()<=256ll*1024*1024,
+            "Invalid layout-only SPB2 input extent");
         std::vector<std::byte> layout_bytes(static_cast<std::size_t>(layout_stream.tellg())); layout_stream.seekg(0);
         Require(static_cast<bool>(layout_stream.read(reinterpret_cast<char *>(layout_bytes.data()),static_cast<std::streamsize>(layout_bytes.size()))),
             "Cannot load layout-only SPB2 input");
+        layout_stream.close();
+        const auto layout_digest=hs::Sha256(layout_bytes);
+        constexpr char hex_digits[]="0123456789abcdef";
+        std::string layout_sha="sha256:";
+        for(const auto byte:layout_digest)
+        {
+            const auto value=std::to_integer<unsigned>(byte);
+            layout_sha.push_back(hex_digits[value>>4]); layout_sha.push_back(hex_digits[value&15]);
+        }
+        Require(layout_sha==generation.product_digests.at(std::string(kProduct)),
+            "Layout-only SPB2 differs from selected Generation");
         const auto layout=rd::ReadSceneProbePackage(layout_bytes,MakeAssetId(kProduct));
         Require(layout.payload==rd::SceneProbePayload::Layout,"Bake input must be layout-only SPB2");
-        const auto probe_count=static_cast<std::uint32_t>(layout.probes.size());
 
         ap::ActionSpec spec; spec.action_id=kAction; spec.namespace_path=kNamespace;
         spec.recipe_id="project-hs.render.scene-probes/native-irradiance-grid"; spec.recipe_version=4;
@@ -117,6 +128,10 @@ int ProduceSceneProbe(int argc,char **argv)
         }
         std::set<std::string> closure; std::vector<std::string> pending;
         pending.insert(pending.end(),layout.dependencies.begin(),layout.dependencies.end());
+        for (const auto id : {"game-data/simulation-rules", "render/config/quality_profiles.rpkg",
+                "render/lighting/coated_ggx_dfg.dds", "render/lighting/default_ltc.rpkg",
+                "render/shader/light_list_cs.dxil", "terrain/producer/bake_cs.dxil", "terrain/producer/mip_cs.dxil"})
+            pending.emplace_back(id);
         for(const auto &[id,_]:generation.product_paths)
             if(rd::IsLocalProbeMaterialRevisionProduct(id)) pending.push_back(id);
         while(!pending.empty())
@@ -142,7 +157,7 @@ int ProduceSceneProbe(int argc,char **argv)
         {
             const auto output=stage/kFilename;
             const auto artifacts=build/"Artifacts"/"scene-probe-bake"/stage.filename();
-            ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts,probe_count);
+            ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts);
             std::ifstream baked_stream(output,std::ios::binary|std::ios::ate);
             Require(static_cast<bool>(baked_stream)&&baked_stream.tellg()>0,"Native scene probe output is missing");
             std::vector<std::byte> baked_bytes(static_cast<std::size_t>(baked_stream.tellg())); baked_stream.seekg(0);

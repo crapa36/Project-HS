@@ -2,11 +2,11 @@
 
 namespace hs
 {
-Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
+Result D3D12Renderer::Impl::PrepareCharacterBindings(ID3D12GraphicsCommandList *list,
     std::vector<AllocationResource> &uploads)
 {
     std::vector<DirectX::XMUINT2> slots;
-    for (std::size_t asset = 0; asset < hero_binding_ranges.size(); ++asset)
+    for (std::size_t asset = 0; asset < character_binding_ranges.size(); ++asset)
     {
         const auto count = asset == 0 ? archer_material_count : monster_assets[asset - 1].material_count;
         const auto &bindings = asset == 0 ? archer_material_bindings : monster_assets[asset - 1].material_bindings;
@@ -17,7 +17,7 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
         for (const auto &binding : bindings)
         {
             if (binding.slot >= count || binding.hero_ordinal >= kCharacterMaterialNames.size())
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid native hero material binding.");
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid native character material binding.");
             auto &slot = slots[first + binding.slot];
             if (binding.domain == render_data::CharacterMaterialDomain::Opaque)
             {
@@ -32,11 +32,11 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
         }
         for (std::uint32_t slot = first; slot < slots.size(); ++slot)
             if (slots[slot].x == UINT32_MAX && slots[slot].y == UINT32_MAX)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character slot has no hero material binding.");
-        hero_binding_ranges[asset] = {first, count, opaque_binding_count, translucent_binding_count};
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character slot has no character material binding.");
+        character_binding_ranges[asset] = {first, count, opaque_binding_count, translucent_binding_count};
     }
     if (slots.empty())
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Native hero material table is empty.");
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Native character material table is empty.");
     const auto bytes = slots.size() * sizeof(DirectX::XMUINT2);
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -49,7 +49,7 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
     void *mapped{};
     D3D12_RANGE no_read{};
     const auto mapped_result = uploads.back().resource->Map(0, &no_read, &mapped);
-    if (FAILED(mapped_result)) return HResultFailure("Map hero material binding upload", mapped_result);
+    if (FAILED(mapped_result)) return HResultFailure("Map character material binding upload", mapped_result);
     std::memcpy(mapped, slots.data(), bytes);
     uploads.back().resource->Unmap(0, nullptr);
     list->CopyBufferRegion(mesh_material_bindings_gpu.resource.Get(), 0, uploads.back().resource.Get(), 0, bytes);
@@ -69,7 +69,7 @@ Result D3D12Renderer::Impl::PrepareHeroBindings(ID3D12GraphicsCommandList *list,
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
     {
         auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kHeroBindingDescriptorOffset) * srv_stride;
+        handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kCharacterBindingDescriptorOffset) * srv_stride;
         device->CreateShaderResourceView(mesh_material_bindings_gpu.resource.Get(), &view, handle);
     }
     return Result::Success();

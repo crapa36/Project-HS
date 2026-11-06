@@ -78,6 +78,7 @@ struct VirtualShadowCaster
     bool immutable_source{}, previous_immutable_source{};
     bool skin{}, wind{}, animated_alpha{}, baked_source{};
     bool previous_skin{}, previous_wind{}, previous_animated_alpha{};
+    bool force_content_invalidation{};
 };
 // The immutable source prefix is retained between frames; only the dynamic suffix
 // is rebuilt. Iteration preserves one logical caster sequence without copying it.

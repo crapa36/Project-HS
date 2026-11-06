@@ -101,6 +101,12 @@ void D3D12Renderer::Impl::CommitUiResources(OwnedView &owner, UiResources &resou
 {
     // The caller drains GPU users before replacing these view-owned targets.
     resources.text_layouts = std::move(owner.ui.text_layouts);
+    // Cached glyph offsets belong to the old atlas, which is retired with the targets.
+    for (auto &layout : resources.text_layouts)
+    {
+        layout.quads.clear();
+        layout.quads_valid = false;
+    }
     owner.ui = std::move(resources);
     owner.ui_draw_content.fill(nullptr);
 }
@@ -113,6 +119,7 @@ struct D3D12Renderer::Impl::UiTextRenderer final : IDWriteTextRenderer
     D2D1_RECT_F clip;
     UINT32 color{};
     std::vector<D2D1_POINT_2F> origins;
+    std::vector<UiTextLayout::CachedQuad> *capture{};
     UiTextRenderer(Impl &renderer, OwnedView &view)
         : renderer(renderer), ui(view.ui),
           scale(std::min(float(view.width) / kUiWidth, float(view.height) / kUiHeight)),
@@ -129,6 +136,7 @@ struct D3D12Renderer::Impl::UiTextRenderer final : IDWriteTextRenderer
     void Emit(UiQuad quad, UINT32 page)
     {
         if (quad.bounds.right <= quad.bounds.left || quad.bounds.bottom <= quad.bounds.top) return;
+        if (capture) capture->push_back({quad, page});
         if (ui.batches.empty() || ui.batches.back().page != page)
             ui.batches.push_back({page, static_cast<UINT32>(ui.quads.size()), 0});
         ++ui.batches.back().count;
@@ -267,11 +275,50 @@ Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_
 {
     if (!content) return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "UI draw content is required.");
     auto &ui = owner.ui;
+    const auto &models = content->models;
+    UiTextRenderer draw(*this, owner);
+    bool bars_only = ui.geometry_content && ui.geometry_content->models.size() == models.size() &&
+        ui.bar_fill_indices.size() == models.size();
+    if (bars_only)
+    {
+        const auto &previous = ui.geometry_content->models;
+        for (std::size_t index = 0; index < models.size(); ++index)
+        {
+            const auto &a = previous[index]; const auto &b = models[index];
+            if (a.kind != b.kind || a.anchor_pixels.x != b.anchor_pixels.x || a.anchor_pixels.y != b.anchor_pixels.y ||
+                a.size_pixels.x != b.size_pixels.x || a.size_pixels.y != b.size_pixels.y ||
+                a.color_rgba != b.color_rgba || a.font_pixels != b.font_pixels || a.utf8_text != b.utf8_text ||
+                (a.kind != UiModel::Kind::Bar && a.value != b.value))
+            { bars_only = false; break; }
+            if (b.kind == UiModel::Kind::Bar)
+            {
+                const auto width = std::max(b.size_pixels.x, 0.0f);
+                const auto height = std::max(b.size_pixels.y, 0.0f);
+                const auto right = b.anchor_pixels.x + width * std::clamp(b.value, 0.0f, 1.0f);
+                const auto bounds = draw.Pixels({b.anchor_pixels.x, b.anchor_pixels.y, right, b.anchor_pixels.y + height});
+                const bool present = bounds.right > bounds.left && bounds.bottom > bounds.top;
+                if (present != (ui.bar_fill_indices[index] != SIZE_MAX))
+                { bars_only = false; break; }
+            }
+        }
+    }
+    if (bars_only)
+    {
+        for (std::size_t index = 0; index < models.size(); ++index)
+            if (models[index].kind == UiModel::Kind::Bar && ui.bar_fill_indices[index] != SIZE_MAX)
+            {
+                const auto &bar = models[index];
+                const float right = bar.anchor_pixels.x + std::max(bar.size_pixels.x, 0.0f) * std::clamp(bar.value, 0.0f, 1.0f);
+                ui.quads[ui.bar_fill_indices[index]].bounds.right = right * draw.scale + draw.offset_x;
+            }
+    }
+    else
+    {
+    ui.geometry_content.reset();
     ui.quads.clear();
     ui.batches.clear();
-    const auto &models = content->models;
+    ui.bar_fill_indices.assign(models.size(), SIZE_MAX);
     ui.text_layouts.resize(models.size());
-    UiTextRenderer draw(*this, owner);
     const auto viewport_clip = draw.clip;
     for (std::size_t model_index = 0; model_index < models.size(); ++model_index)
     {
@@ -291,7 +338,9 @@ Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_
             draw.Shape(rectangle, 0xb8090605u);
             auto filled = rectangle;
             filled.right = filled.left + element_width * std::clamp(model.value, 0.0f, 1.0f);
+            const auto fill_index = ui.quads.size();
             draw.Shape(filled, model.color_rgba);
+            if (ui.quads.size() != fill_index) ui.bar_fill_indices[model_index] = fill_index;
             break;
         }
         case UiModel::Kind::Text: break;
@@ -391,14 +440,43 @@ Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_
             cached_layout.width = text_width;
             cached_layout.height = text_height;
             cached_layout.layout = std::move(layout);
+            cached_layout.quads_valid = false;
         }
         auto *draw_layout = cached_layout.layout.Get();
         assert(draw_layout->GetMaxWidth() == text_width &&
                draw_layout->GetMaxHeight() == text_height);
         draw.clip = draw.Pixels({text_rectangle.left, text_rectangle.top,
             text_rectangle.left + text_width, text_rectangle.top + text_height});
-        const auto hr = draw_layout->Draw(nullptr, &draw, text_rectangle.left, text_rectangle.top);
-        if (FAILED(hr)) return HResultFailure("Prepare UI glyphs", hr);
+        const auto &clip = draw.clip;
+        const auto &cached_clip = cached_layout.clip;
+        const bool reuse = cached_layout.quads_valid &&
+            cached_layout.origin_x == text_rectangle.left && cached_layout.origin_y == text_rectangle.top &&
+            cached_layout.scale == draw.scale && cached_layout.offset_x == draw.offset_x && cached_layout.offset_y == draw.offset_y &&
+            cached_clip.left == clip.left && cached_clip.top == clip.top &&
+            cached_clip.right == clip.right && cached_clip.bottom == clip.bottom;
+        if (reuse)
+        {
+            for (const auto &cached : cached_layout.quads)
+            {
+                auto quad = cached.quad;
+                quad.color = draw.color;
+                draw.Emit(quad, cached.page);
+            }
+        }
+        else
+        {
+            std::vector<UiTextLayout::CachedQuad> captured;
+            draw.capture = &captured;
+            const auto hr = draw_layout->Draw(nullptr, &draw, text_rectangle.left, text_rectangle.top);
+            draw.capture = nullptr;
+            if (FAILED(hr)) return HResultFailure("Prepare UI glyphs", hr);
+            cached_layout.quads = std::move(captured);
+            cached_layout.origin_x = text_rectangle.left; cached_layout.origin_y = text_rectangle.top;
+            cached_layout.scale = draw.scale; cached_layout.offset_x = draw.offset_x; cached_layout.offset_y = draw.offset_y;
+            cached_layout.clip = clip;
+            cached_layout.quads_valid = true;
+        }
+    }
     }
 
     auto &frame = frames[frame_index];
@@ -423,6 +501,7 @@ Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_
         frame.ui_upload_bytes = capacity;
     }
     if (bytes) std::memcpy(frame.ui_mapped, ui.quads.data(), bytes);
+    ui.geometry_content = content;
     return Result::Success();
 }
 

@@ -42,12 +42,29 @@ namespace hs::render_data
     return false;
 }
 
-// Keep nonshader material, texture, geometry, and environment products in the
-// established conservative domain. Narrow only shader products to the exact
-// local-probe capture and integration family.
+// Capture compatibility covers static environment products, not unrelated
+// character, decal or VFX products present only in the full runtime catalog.
 [[nodiscard]] inline bool IsLocalProbeMaterialRevisionProduct(std::string_view product_id)
 {
-    return IsRendererMaterialRevisionProduct(product_id) &&
-        (!product_id.starts_with("render/shader/") || IsLocalProbeCaptureShaderProduct(product_id));
+    if (!IsRendererMaterialRevisionProduct(product_id)) return false;
+    if (product_id.starts_with("render/shader/")) return IsLocalProbeCaptureShaderProduct(product_id);
+    if (product_id.starts_with("render/texture/"))
+        return product_id.starts_with("render/texture/environment_") ||
+            product_id.starts_with("render/texture/environment/");
+    if (product_id.starts_with("render/geometry/"))
+        return product_id.starts_with("render/geometry/environment");
+    constexpr std::string_view material_prefix{"render/material/"};
+    if (product_id.starts_with(material_prefix))
+    {
+        const auto material = product_id.substr(material_prefix.size());
+        for (const auto name : kAuthoredMaterialNames)
+            if (material.starts_with(name))
+            {
+                const auto suffix = material.substr(name.size());
+                if (suffix == ".rpkg" || suffix.starts_with('/')) return true;
+            }
+        return false;
+    }
+    return true;
 }
 } // namespace hs::render_data

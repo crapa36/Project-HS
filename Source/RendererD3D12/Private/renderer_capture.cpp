@@ -754,8 +754,8 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         SurfaceCapture{"oit_revealage", &owner.targets.oit_revealage,
                        DXGI_FORMAT_R16_FLOAT, Access::ShaderRead},
     };
-    // A proved VSM-only frame never writes or initializes the CSM atlas.
-    if (owner.virtual_shadows.CacheStatus().guarantee.csm_required)
+    // Only the last submitted view can make the CSM atlas current.
+    if (owner.shadow_atlas_active)
         surfaces.push_back(SurfaceCapture{"shadow_atlas", &owner.targets.shadow,
                            DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite});
     for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
@@ -783,7 +783,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     {
         constexpr std::array names{"translucency_depth", "translucency_motion", "translucency_history",
             "translucency_classification", "translucency_metadata", "translucency_unpeeled", "translucency_transport", "translucency_color"};
-        const auto resources = owner.hero_transparency.DiagnosticResources();
+        const auto resources = owner.translucency.DiagnosticResources();
         for (std::size_t index = 0; index < resources.size(); ++index)
             append_diagnostic(names[index], resources[index]);
     }
@@ -1086,8 +1086,11 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         light_resources.allocated_bytes, light_resources.upload_allocated_bytes,
         light_resources.capacity.width, light_resources.capacity.height,
         light_resources.frame_slot_count, light_resources.frame_slot);
+    metadata_output << std::format("  \"static_shadow_preparation\": {{\"static_membership_builds\": {}, \"static_binding_rebinds\": {}}},\n",
+        owner.static_membership_builds, owner.static_binding_rebinds);
     metadata_output << std::format("  \"decal_surface_active\": {},\n", owner.decal_surface_active);
-    metadata_output << "  \"terrain_surface_pages\": " << (impl_->terrain_pages.resource ? "true" : "false") << ",\n";
+    metadata_output << "  \"terrain_surface_pages\": " << (impl_->terrain_static_pages_current ? "true" : "false") << ",\n";
+    metadata_output << std::format("  \"terrain_archive_reads\": {},\n", impl_->terrain_archive_reads);
     const auto probe_revision = impl_->local_probes.RevisionDiagnostics();
     const auto write_probe_revision = [&](const char *name, const render_data::SceneProbeRevisions &value) {
         metadata_output << std::format("    \"{}\": {{\"environment\": \"{}\", \"material\": \"{}\", "
@@ -2431,7 +2434,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     return invalid(std::format(
                         "Classified hero pixel {} has invalid opaque hero ordinal {}.",
                         pixel, binding->hero_ordinal));
-                // Match HsHeroVisibilityVariantBegin in the producer contract:
+                // Match HsCharacterVisibilityVariantBegin in the producer contract:
                 // variant zero is the builtin path, followed by authored materials.
                 if (variant != 1u + kAuthoredMaterialNames.size() + binding->hero_ordinal)
                     return invalid(std::format(

@@ -429,9 +429,10 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         pinned_bytes = {item['logical_id']: (build / item['locator']).read_bytes()
                         for item in pinned_products}
         assert action['recipe_identity'] == 'sha256:' + hashlib.sha256(fixture_audio.read_bytes()).hexdigest()
-        expected_count = len({name for entry in json.loads(catalog.read_text())['entries']
-                              for name in entry['files']}) + 4
-        assert len(action['products']) == expected_count
+        expected_products = {f'audio/{name}' for entry in json.loads(catalog.read_text())['entries']
+                             for name in entry['files']} | {
+                                 'audio/audio_cues.json', 'audio/release-pcm', 'audio/release-identity'}
+        assert {item['logical_id'] for item in action['products']} == expected_products
         for item in action['products']:
             data = (build / item['locator']).read_bytes()
             assert item['size'] == len(data)
@@ -456,7 +457,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
                    for item in action['products'])
         # Corrupt current products are repaired as one quarantined ProductSet; the pinned
         # generation remains an independent immutable snapshot throughout publication.
-        for logical_id in ('audio/release-cpp', 'audio/release-pcm', 'audio/release-identity'):
+        for logical_id in ('audio/release-pcm', 'audio/release-identity'):
             item = next(item for item in action['products'] if item['logical_id'] == logical_id)
             path = build / item['locator']
             damaged = bytearray(published[logical_id])

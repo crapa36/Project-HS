@@ -215,11 +215,10 @@ Result AudioEngine::Initialize(
     });
 }
 
-Result AudioEngine::InitializeResolved(const SettingsData &settings,
-                                       const ResolveAudioPath &resolve_path)
+static Result PrepareResolved(const std::function<Result(std::string_view, std::filesystem::path &)> &resolve_path,
+                              std::shared_ptr<PreparedAudio> &output)
 {
-    Shutdown();
-    DeveloperAudioCatalog prepared;
+    PreparedAudio prepared;
     try
     {
         std::filesystem::path catalog_path;
@@ -307,6 +306,28 @@ Result AudioEngine::InitializeResolved(const SettingsData &settings,
         return Result::Failure(ErrorCode::InvalidArgument, "audio", error.what());
     }
 
-    return InitializePrepared(settings, std::move(prepared));
+    output = std::make_shared<PreparedAudio>(std::move(prepared));
+    return Result::Success();
+}
+
+Result PrepareAudio(const std::unordered_map<std::string, std::filesystem::path> &product_paths,
+                    std::shared_ptr<PreparedAudio> &output)
+{
+    return PrepareResolved([&](std::string_view logical_id, std::filesystem::path &path) {
+        const auto found = product_paths.find(std::string(logical_id));
+        if (found == product_paths.end())
+            return Result::Failure(ErrorCode::TaskFailed, "audio", "audio product missing: " + std::string(logical_id));
+        if (!found->second.is_absolute())
+            return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio product path is not absolute: " + std::string(logical_id));
+        path = found->second;
+        return Result::Success();
+    }, output);
+}
+
+Result AudioEngine::InitializeResolved(const SettingsData &settings, const ResolveAudioPath &resolve_path)
+{
+    std::shared_ptr<PreparedAudio> prepared;
+    if (auto result = PrepareResolved(resolve_path, prepared); !result) return result;
+    return Initialize(settings, std::move(prepared), {});
 }
 }

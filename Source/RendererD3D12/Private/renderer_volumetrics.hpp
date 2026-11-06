@@ -13,22 +13,25 @@
 
 namespace hs
 {
+#define HS_VM_NATIVE
+#include "../../../Content/Shaders/volumetrics_abi.hlsli"
+#undef HS_VM_NATIVE
 using VolumetricShaderBinder = std::function<Result(ID3D12GraphicsCommandList *)>;
 using VolumetricFrameTableBuilder = std::function<Result(D3D12_CPU_DESCRIPTOR_HANDLE, std::uint32_t, VolumetricShaderBinder &)>;
 using VolumetricShaderReader = std::function<Result(std::string_view, std::vector<std::byte> &)>;
 // Volume descriptor block, space24: b0 at0, t0..13 at1..14, u0..8 at15..23,
 // hero metadata t14 at24, actual STBN Texture2DArray t15 at25,
-// authored RGBA8 Texture3D t16 at26.
-inline constexpr std::uint32_t kVolumetricDescriptorCount=27;
-// Compact per-frame table for the volume-owned root signature. The first 27
+// authored RGBA8 Texture3D t16 at26; local SH and records t2/t4 space23 at27/28.
+inline constexpr std::uint32_t kVolumetricDescriptorCount=VmExternalGradient;
+// Compact per-frame table for the volume-owned root signature. The first 29
 // descriptors retain the suffix layout above; remaining entries are imported
 // frame inputs used by the volume shaders.
-inline constexpr std::uint32_t kVolumetricFrameDescriptorCount=41;
-inline constexpr std::uint32_t kVolumetricGradientOffset=27;
-inline constexpr std::uint32_t kVolumetricLightOffset=28;
-inline constexpr std::uint32_t kVolumetricShadowOffset=31;
-inline constexpr std::uint32_t kVolumetricShadowRootOffset=35;
-inline constexpr std::uint32_t kVolumetricLocalShadowOffset=37;
+inline constexpr std::uint32_t kVolumetricFrameDescriptorCount=VmExternalLocalShadow+VmExternalCountLocalShadow;
+inline constexpr std::uint32_t kVolumetricGradientOffset=VmExternalGradient;
+inline constexpr std::uint32_t kVolumetricLightOffset=VmExternalLight;
+inline constexpr std::uint32_t kVolumetricShadowOffset=VmExternalShadow;
+inline constexpr std::uint32_t kVolumetricShadowRootOffset=VmExternalShadowRoot;
+inline constexpr std::uint32_t kVolumetricLocalShadowOffset=VmExternalLocalShadow;
 // Pure authored-input admission, shared by frame preflight and graph registration.
 [[nodiscard]] Result ValidateVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows);
 enum class VolumetricShape : std::uint32_t { Global, Box, Sphere };
@@ -64,7 +67,7 @@ struct VolumetricCamera
 };
 struct VolumetricRevisions
 {
-    std::uint64_t scene{},light{},volume{},dynamic_scene{};
+    std::uint64_t scene{},light{},volume{},dynamic_scene{},probe_material{},probe_environment{};
     bool operator==(const VolumetricRevisions &) const = default;
 };
 struct VolumetricGuide
@@ -80,26 +83,14 @@ struct VolumetricCompactShadow
     DirectX::XMUINT4 identity{}; // Exact Directional ID lo/hi, generation, enabled.
     float receiver_bias{}; // Reversed-Z depth bias.
 };
-struct alignas(16) VolumetricConstants
-{
-    DirectX::XMFLOAT4X4 inverse_view_projection{},world_to_view{},previous_view_projection{},previous_world_to_view{};
-    std::array<DirectX::XMFLOAT4X4,3> shadow_view_projection{};
-    std::array<DirectX::XMFLOAT4,3> shadow_atlas_scale_offset{};
-    DirectX::XMFLOAT4 render_size{},froxel_size{},capacity{},previous_render_size{},previous_froxel_size{};
-    DirectX::XMFLOAT4 origin_near{},previous_origin_near{},depth_range{}; // far, log2(far/near), previous far/log.
-    DirectX::XMFLOAT4 filter_parameters{0.85f,0.03f,0.0f,0.0f}; // history blend, relative depth tolerance.
-    DirectX::XMFLOAT4 shadow_parameters{}; // Atlas inverse width/height, reversed-Z receiver bias, reserved.
-    DirectX::XMUINT4 shadow_identity{},frame_info{},counts{}; // frame lo/hi, history valid, area samples; volumes, slices.
-    DirectX::XMUINT4 hero_info{}; // Active hero count, admitted, actual local shadow resources enabled, reserved.
-};
-static_assert(sizeof(VolumetricConstants)==720);
-static_assert(offsetof(VolumetricConstants,render_size)==496);
 struct VolumetricInputs
 {
     VolumetricGuide depth,hdr; // Actual raw scene-linear opaque HDR, before pre-exposure.
     LightListOutputs lights;
     VirtualShadowOutputs shadows; // If enabled, every one of its five reads is declared.
     LocalShadowOutputs local_shadows; // Actual world-query Point/Spot atlas, all five resources or absent.
+    VolumetricGuide probe_irradiance, probe_records;
+    bool probe_ready{};
     VolumetricCompactShadow compact_shadow;
     std::span<const VolumetricVolume> volumes;
     VfxVolumeInputs hero_volumes;
@@ -143,12 +134,12 @@ struct VolumetricLayout
     // Immutable graph declarations only. Native owners, descriptors and callbacks
     // are supplied afresh for each submission.
     std::uint64_t storage_generation{};
-    std::array<ResourceVersion, 22> input_versions{};
+    std::array<ResourceVersion, 24> input_versions{};
     std::array<ResourceHandle, 14> imports{};
     std::array<ResourceVersion, 6> output_versions{};
     std::array<std::uint32_t, 7> pass_index{}; // 170..175, optional 176
     bool history{}, hero{}, shadows{}, local_shadows{}, compact_shadow{};
-    bool root_static{}, root_dynamic{};
+    bool root_static{}, root_dynamic{}, probe_ready{};
 };
 struct VolumetricStorage;
 class RendererPipelineCache;
@@ -178,11 +169,10 @@ class VolumetricSystem
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const VolumetricInputs &,
         const VolumetricLayout &,VolumetricOutputs &);
     [[nodiscard]] bool MatchesLayout(const VolumetricInputs &,const VolumetricLayout &) const noexcept;
-    // Pre-restore comparison uses the current producers' planned resource
-    // presence before their graph output structs have been populated.
-    [[nodiscard]] bool MatchesProjectedLayout(const VolumetricInputs &,
+    // Pre-restore shape comparison excludes graph versions, checked at binding.
+    [[nodiscard]] bool MatchesShape(const VolumetricInputs &,
         const VolumetricLayout &,bool shadows,bool local_shadows,
-        bool root_static,bool root_dynamic) const noexcept;
+        bool root_static,bool root_dynamic,bool probe_ready) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     void ResetHistory() noexcept;
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);

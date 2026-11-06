@@ -127,8 +127,9 @@ class TextureStreamFixture
   public:
     TextureStreamFixture(ID3D12Device *device, D3D12MA::Allocator *allocator,
                          hs::RenderGraphQueueExecutor &executor, bool reserved_candidate = false,
-                         bool prepare_sibling = false, std::uint32_t software_width = 4)
-        : device_(device), allocator_(allocator), executor_(executor)
+                         bool prepare_sibling = false, std::uint32_t software_width = 4,
+                         bool srgb_view = false)
+        : device_(device), allocator_(allocator), executor_(executor), srgb_view_(srgb_view)
     {
         description_ = reserved_candidate
             ? hs::render_data::TextureDescription{256, 256, 1, std::bit_width(256u), hs::render_data::kTextureFormatRgba8}
@@ -189,7 +190,8 @@ class TextureStreamFixture
             capabilities, 3, {}).Succeeded(), "initialize texture streaming");
 
         const auto fallback_mip = std::min(4u, description_.mip_count - 1u);
-        const auto fallback_desc = TextureDescription(description_, fallback_mip);
+        auto fallback_desc = TextureDescription(description_, fallback_mip);
+        if (srgb_view_) fallback_desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         Hr(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &fallback_desc,
@@ -208,8 +210,21 @@ class TextureStreamFixture
         registration.fallback_first_mip = fallback_mip;
         registration.fallback_allocation_bytes = allocation_info.SizeInBytes;
         registration.fallback_graph_access = hs::Access::Common;
+        registration.srgb_view = srgb_view_;
+        if (srgb_view_)
+        {
+            auto invalid = registration;
+            invalid.description.format = DXGI_FORMAT_R16_FLOAT;
+            hs::TextureStreamId rejected;
+            Check(!streaming_.Register(std::move(invalid), residency_, rejected).Succeeded() && !rejected,
+                  "sRGB streaming rejects unsupported source formats");
+        }
         Check(streaming_.Register(std::move(registration), residency_, id_).Succeeded(),
               "register synthetic streaming texture");
+        const auto initial = streaming_.View(id_);
+        Check(initial.resource == fallback_.Get() && initial.logical_description.format == description_.format &&
+              initial.resource->GetDesc().Format == fallback_desc.Format,
+              "fallback keeps typed source metadata and expected native format");
 
         Check(pool_.Initialize(allocator_, device_).Succeeded(), "initialize texture graph pool");
         // Declared last so emergency drain runs before graph/streaming owners unwind.
@@ -318,6 +333,12 @@ class TextureStreamFixture
         return Pump(id_, target_mip);
     }
 
+    void PumpWithoutDemand()
+    {
+        const auto result = streaming_.Pump(frame_, executor_.Completed(), io_, requests_, residency_);
+        if (!result) throw std::runtime_error("texture streaming pump failed: " + std::string(result.Message()));
+    }
+
     bool Pump(hs::TextureStreamId id, std::uint32_t target_mip)
     {
         streaming_.Demand(id, target_mip, 100, frame_);
@@ -415,6 +436,30 @@ class TextureStreamFixture
         }
         ComPtr<ID3D12Resource> texture = view.resource;
         const auto description = texture->GetDesc();
+        Check(view.logical_description.format == description_.format &&
+              description.Format == (srgb_view_ ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM),
+              "published texture retains typed metadata and native backing format");
+        if (srgb_view_)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+            heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            heap_desc.NumDescriptors = 2;
+            ComPtr<ID3D12DescriptorHeap> heap;
+            Hr(device_->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap)),
+               "create streaming typed-view descriptor heap");
+            auto handle = heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            srv.Texture2DArray.MipLevels = description.MipLevels;
+            srv.Texture2DArray.ArraySize = description.DepthOrArraySize;
+            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            device_->CreateShaderResourceView(texture.Get(), &srv, handle);
+            handle.ptr += device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            device_->CreateShaderResourceView(texture.Get(), &srv, handle);
+            CheckNativeValidation("linear and sRGB texture view creation");
+        }
         const auto local_mip = logical_mip - view.first_mip;
         Check(local_mip < description.MipLevels && view.logical_description.array_size == description.DepthOrArraySize,
               "logical mip and array slices map to native subresources");
@@ -560,6 +605,7 @@ class TextureStreamFixture
     ID3D12Device *device_{};
     D3D12MA::Allocator *allocator_{};
     hs::RenderGraphQueueExecutor &executor_;
+    bool srgb_view_{};
     TextureSourceFile source_;
     std::unique_ptr<TextureSourceFile> sibling_source_;
     bool sibling_prepared_{};
@@ -857,12 +903,78 @@ void RunCombinedConfiguredBudgetTextureStreamingNative(ID3D12Device *device,
           "raising the configured cap admits both mip-zero targets");
     fixture.Drain();
 }
+void RunPreferredWorkingSetNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
+                                  hs::RenderGraphQueueExecutor &executor)
+{
+    TextureStreamFixture fixture(device, allocator, executor, false, true, 16u);
+    const auto first = fixture.Id();
+    const auto second = fixture.AddSibling();
+    const std::array selected{first, first}; // Aliased material slots select one owner.
+    Check(fixture.Streaming().SetPreferredWorkingSet(selected).Succeeded(),
+          "admit preferred working set with duplicate aliases");
+    const auto settle = [&](std::uint32_t target, bool published) {
+        for (std::uint32_t attempt = 0; attempt < 128; ++attempt)
+        {
+            fixture.PumpWithoutDemand();
+            const auto status = fixture.Status(first);
+            const auto unused = fixture.Status(second);
+            if (!status.pending && status.actual_resident_mip == target &&
+                status.effective_desired_mip == target && (!published || status.publication_complete) &&
+                !unused.pending && unused.actual_resident_mip == fixture.TailMip())
+                return;
+            hs::TextureStreamingLayout layout;
+            std::vector<hs::TextureStreamingGraphBinding> bindings;
+            if (fixture.AddPendingGraph(layout, bindings)) fixture.Wait(fixture.SubmitPending());
+            fixture.NextFrame();
+        }
+        throw std::runtime_error("preferred texture target did not settle: " + fixture.TimeoutDetails(target, 128));
+    };
+    constexpr std::array qualities{
+        std::pair{hs::GraphicsQuality::Low, 2u},
+        std::pair{hs::GraphicsQuality::Medium, 1u},
+        std::pair{hs::GraphicsQuality::High, 0u}};
+    for (const auto [quality, mip] : qualities)
+    {
+        Check(fixture.Streaming().Configure(quality, mip, 0).Succeeded(),
+              "configure preferred quality without fixed budget");
+        settle(mip, true);
+        fixture.ReadbackPublished(mip);
+        const auto unused = fixture.Status(second);
+        Check(!unused.pending && unused.actual_resident_mip == fixture.TailMip(),
+              "unselected texture must remain at its registered fallback");
+    }
+    // A fully published set skips redundant view/feedback demand; an unrelated
+    // owner still participates in the ordinary demand path.
+    fixture.PumpWithoutDemand();
+    Check(!fixture.Streaming().NeedsDemand(first) &&
+          fixture.Streaming().NeedsDemand(second) == !fixture.Streaming().HardwareBacked(second),
+          "settled preferred owner did not suppress only its redundant demand");
+    const auto requests = fixture.Status(first).requests;
+    const auto unselected_requests = fixture.Status(second).requests;
+    for (unsigned i = 0; i < 4; ++i) { fixture.NextFrame(); fixture.PumpWithoutDemand(); }
+    Check(fixture.Status(first).requests == requests, "settled working set created redundant requests");
+
+    auto budget = fixture.Residency().GpuPressureFacts().budget;
+    const auto original_budget = budget;
+    budget.valid = budget.local_fresh = true;
+    budget.local_budget = 2 * fixture.NativeAllocationBytes(fixture.TailMip()) + 1;
+    budget.local_usage = fixture.Streaming().PhysicalBytes();
+    fixture.Residency().UpdateBudget(budget);
+    settle(fixture.TailMip(), false);
+    Check(fixture.Status(first).actual_resident_mip == fixture.TailMip(),
+          "budget pressure did not release optional preferred detail");
+    fixture.Residency().UpdateBudget(original_budget);
+    settle(0, true);
+    fixture.ReadbackPublished(0);
+    Check(fixture.Status(second).requests == unselected_requests, "budget recovery admitted an unselected owner");
+    fixture.Drain();
+}
 } // namespace
 
 void RunTextureStreamingSingleNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
-                                     hs::RenderGraphQueueExecutor &executor)
+                                     hs::RenderGraphQueueExecutor &executor, bool srgb_view = false)
 {
-    TextureStreamFixture fixture(device, allocator, executor);
+    TextureStreamFixture fixture(device, allocator, executor, false, false, 4, srgb_view);
     const auto fine_mip = 0u;
     const auto coarse_mip = fixture.TailMip() - 1u;
     SettleTarget(fixture, fine_mip, false);
@@ -937,18 +1049,22 @@ void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocat
 {
     RunPinnedTextureDemandNative(device, allocator, executor);
     RunTextureStreamingSingleNative(device, allocator, executor);
+    RunTextureStreamingSingleNative(device, allocator, executor, true);
     RunSharedHostBudgetTextureStreamingNative(device, allocator, executor);
     RunCombinedConfiguredBudgetTextureStreamingNative(device, allocator, executor);
+    RunPreferredWorkingSetNative(device, allocator, executor);
 }
 
 void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
                                        hs::RenderGraphQueueExecutor &executor)
 {
-    TextureStreamFixture fixture(device, allocator, executor, true);
+    for (const bool srgb_view : {false, true})
+    {
+    TextureStreamFixture fixture(device, allocator, executor, true, false, 4, srgb_view);
     if (!fixture.HardwareBacked())
     {
         fixture.Drain();
-        return;
+        continue;
     }
     const auto tail = fixture.TailMip();
     const auto fine = 0u;
@@ -961,4 +1077,5 @@ void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator 
     SettleTarget(fixture, fine, false);
     fixture.ReadbackPublished(fine);
     fixture.Drain();
+    }
 }

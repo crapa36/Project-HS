@@ -279,6 +279,7 @@ struct TopologyValues
         std::string name;
         QueueHint queue{};
         unsigned execution_kind{};
+        std::uint32_t recording_successor{UINT32_MAX};
         std::vector<ResourceUse> uses;
         std::vector<std::uint32_t> execution_resources;
         std::vector<ExecutionUse> execution_uses;
@@ -316,24 +317,26 @@ struct TopologyValues
         if (!valid) return {MismatchKind::Invalid};
         if (resources.size() != current_resources.size()) return {MismatchKind::ResourceCount};
         if (passes.size() != current_passes.size()) return {MismatchKind::PassCount};
-        if (ordering != current_ordering) return {MismatchKind::Ordering};
+        if (!restored_declarations && ordering != current_ordering) return {MismatchKind::Ordering};
         for (std::size_t i = 0; i < resources.size(); ++i)
         {
             const auto &a = resources[i]; const auto &b = current_resources[i];
-            if (a.kind != b.kind) return {MismatchKind::ResourceKind, i};
-            if (a.imported != b.imported) return {MismatchKind::ResourceImport, i};
+            if (!restored_declarations && a.kind != b.kind) return {MismatchKind::ResourceKind, i};
+            if (!restored_declarations && a.imported != b.imported) return {MismatchKind::ResourceImport, i};
             if (a.final_set != b.final_set || a.final != (b.final_set ? b.final : Access::Undefined))
                 return {MismatchKind::ResourceFinalAccess, i};
-            if (a.fixed_heap != b.fixed_buffer_heap) return {MismatchKind::ResourceHeap, i};
+            if ((!restored_declarations || b.imported) && a.fixed_heap != b.fixed_buffer_heap)
+                return {MismatchKind::ResourceHeap, i};
             if (!SameVersion(a.final_version, b.final_version)) return {MismatchKind::ResourceFinalVersion, i};
-            if (!SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
+            if ((!restored_declarations || b.imported) &&
+                !SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
                 return {MismatchKind::ResourceDescriptor, i};
         }
         for (std::size_t i = 0; i < passes.size(); ++i)
         {
             const auto &a = passes[i]; const auto &b = current_passes[i];
-            if (a.id != b.id) return {MismatchKind::PassId, i};
-            if (a.queue != b.queue) return {MismatchKind::PassQueue, i};
+            if (!restored_declarations && a.id != b.id) return {MismatchKind::PassId, i};
+            if (!restored_declarations && a.queue != b.queue) return {MismatchKind::PassQueue, i};
             if (a.execution_kind != ExecutionKind(b)) return {MismatchKind::PassExecution, i};
             if (!restored_declarations &&
                 !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))
@@ -446,6 +449,13 @@ struct TopologyValues
             if (p.external || p.execute_on_owner)
                 for (const auto &use : p.Uses())
                     resources[use.predecessor.resource.value - 1].excludes_shared_reads = true;
+        }
+        for (std::size_t position = 1; position < schedule.execution_order.size(); ++position)
+        {
+            auto &previous = passes[schedule.execution_order[position - 1]];
+            const auto next = schedule.execution_order[position];
+            if (previous.queue == passes[next].queue && previous.execution_kind < 3 &&
+                passes[next].execution_kind < 3) previous.recording_successor = next;
         }
         ordering = current_ordering;
         for (std::uint32_t position = 0; position < schedule.execution_order.size(); ++position)
@@ -1154,6 +1164,11 @@ struct RenderGraphQueueExecutor::Impl
         [[nodiscard]] std::span<const std::uint32_t> Resources() const noexcept
         { return pass == UINT32_MAX ? std::span<const std::uint32_t>{resources} : pass_resources; }
     };
+    struct RecordingBatch
+    {
+        std::size_t first{}, end{};
+        bool owner{};
+    };
     struct ResourceState
     {
         Access logical{}, physical{};
@@ -1176,6 +1191,8 @@ struct RenderGraphQueueExecutor::Impl
     std::vector<ExternalRetention> external_retained;
     // Only CPU values survive Execute; recording tasks join before these are reused.
     std::vector<Batch> batches;
+    std::vector<RecordingBatch> recording_batches;
+    std::vector<std::size_t> submission_ends;
     // Indexed by batch slot so scratch for synthesized join/export batches
     // survives when the active Batch vector shrinks back to pass count.
     std::vector<std::vector<std::uint64_t>> batch_resource_memberships;
@@ -1898,13 +1915,102 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         depend(resolve_index, last_query_producer);
         submission_order.push_back(resolve_index);
     }
-    // No vectors or graph resource states change after this point until every
-    // recording task joins. Each task owns one allocator and one command list.
-    std::array<std::size_t, 3> recorder_counts{};
-    for (auto &batch : batches)
+    auto &signals = impl_->signals;
+    signals.assign(batches.size(), 0);
+    auto &waits_before = impl_->waits_before;
+    auto &signal_after = impl_->signal_after;
+    waits_before.assign(batches.size(), false);
+    signal_after.assign(batches.size(), false);
+    auto &ordering_predecessor = impl_->ordering_predecessor;
+    ordering_predecessor.assign(batches.size(), SIZE_MAX);
+    auto &pass_positions = impl_->pass_positions;
+    pass_positions.clear();
+    pass_positions.reserve(g.passes.size());
+    for (std::size_t position = 0; position < submission_order.size(); ++position)
     {
+        const auto index = submission_order[position];
+        const auto &batch = batches[index];
+        if (batch.pass != UINT32_MAX)
+            pass_positions.emplace_back(g.passes[batch.pass].id, position);
+        for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
+            if (queue != batch.queue && batch.imported.Required(queue)) waits_before[index] = true;
+        for (const auto producer : batch.dependencies)
+            if (batches[producer].queue != batch.queue)
+            {
+                waits_before[index] = true;
+                signal_after[producer] = true;
+            }
+    }
+    std::sort(pass_positions.begin(), pass_positions.end());
+    const auto &ordering = g.restored_plan ? g.topology.ordering : g.ordering_dependencies;
+    for (const auto &[producer_id, consumer_id] : ordering)
+    {
+        const auto producer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
+            std::pair{producer_id, std::size_t{0}})->second;
+        const auto consumer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
+            std::pair{consumer_id, std::size_t{0}})->second;
+        auto &previous = ordering_predecessor[submission_order[consumer]];
+        previous = previous == SIZE_MAX ? producer : std::max(previous, producer);
+    }
+    const auto standalone = [&](std::uint32_t index) {
+        const auto &batch = batches[index];
+        return !batch.external_imports.empty() || batch.external_finish != UINT32_MAX ||
+            batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].external);
+    };
+    auto &submission_ends = impl_->submission_ends;
+    submission_ends.resize(submission_order.size());
+    auto &recording_batches = impl_->recording_batches;
+    recording_batches.clear();
+    const auto workers = tasks ? std::max<std::size_t>(tasks->WorkerCount(), 1) : 1;
+    const auto grain = std::max<std::size_t>(1, (g.passes.size() + workers - 1) / workers);
+    const auto owner_batch = [&](std::uint32_t index) {
+        return batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner;
+    };
+    for (std::size_t first = 0; first < submission_order.size();)
+    {
+        const auto index = submission_order[first];
+        const auto &batch = batches[index];
+        auto end = first + 1;
+        // Preserve Legacy decay and every existing wait/signal/provider boundary.
+        if (barriers == BarrierMode::Enhanced && !standalone(index))
+            while (end < submission_order.size())
+            {
+                const auto next = submission_order[end];
+                const auto predecessor = ordering_predecessor[next];
+                if (batches[next].queue != batch.queue || standalone(next) || waits_before[next] ||
+                    signal_after[submission_order[end - 1]] ||
+                    (predecessor != SIZE_MAX && predecessor >= first)) break;
+                ++end;
+            }
+        submission_ends[first] = end;
+        for (auto begin = first; begin < end;)
+        {
+            const auto lead = submission_order[begin];
+            auto finish = begin + 1;
+            if (!owner_batch(lead) && batches[lead].pass != UINT32_MAX)
+                while (finish < end && finish - begin < grain)
+                {
+                    const auto previous = batches[submission_order[finish - 1]].pass;
+                    const auto next = submission_order[finish];
+                    if (previous == UINT32_MAX || batches[next].pass == UINT32_MAX || owner_batch(next) ||
+                        g.topology.passes[previous].recording_successor != batches[next].pass) break;
+                    ++finish;
+                }
+            recording_batches.push_back({begin, finish, owner_batch(lead)});
+            begin = finish;
+        }
+        first = end;
+    }
+    // No vectors or graph resource states change after this point until every
+    // recording task joins. Each recording range owns one allocator and command list.
+    std::array<std::size_t, 3> recorder_counts{};
+    for (const auto &range : recording_batches)
+    {
+        auto &batch = batches[submission_order[range.first]];
         const auto queue_index = QueueIndex(batch.queue);
         batch.recorder = recorder_counts[queue_index]++;
+        for (auto position = range.first + 1; position < range.end; ++position)
+            batches[submission_order[position]].recorder = batch.recorder;
         auto &recorders = slot.recorders[queue_index];
         if (batch.recorder >= recorders.size())
         {
@@ -1934,13 +2040,16 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     }
     auto &record_results = impl_->record_results;
     record_results.assign(batches.size(), Result::Success());
-    const auto record = [&](std::uint32_t index) {
-        const auto &batch = batches[index];
-        auto &recorder = slot.recorders[QueueIndex(batch.queue)][batch.recorder];
-        auto *queries = queries_for(batch.queue);
-        auto *readback = readback_for(batch.queue);
-        auto *cpu_timing = batch.pass != UINT32_MAX && !cpu_passes.empty()
-            ? &cpu_passes[batch.position] : nullptr;
+    const auto record = [&](std::uint32_t recording_index) {
+        const auto &range = recording_batches[recording_index];
+        const auto first_index = submission_order[range.first];
+        const auto &first_batch = batches[first_index];
+        auto &recorder = slot.recorders[QueueIndex(first_batch.queue)][first_batch.recorder];
+        auto *queries = queries_for(first_batch.queue);
+        auto *readback = readback_for(first_batch.queue);
+        auto index = first_index;
+        GpuPassTiming *cpu_timing = first_batch.pass != UINT32_MAX && !cpu_passes.empty()
+            ? &cpu_passes[first_batch.position] : nullptr;
         if (cpu_timing) cpu_timing->cpu_record_begin_qpc = cpu_counter();
         try
         {
@@ -1950,87 +2059,106 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (FAILED(result)) { record_results[index] = QueueFailure("Reset graph command list", result); return; }
             auto *commands = recorder.commands.Get();
             auto *enhanced = barriers == BarrierMode::Enhanced ? recorder.enhanced.Get() : nullptr;
-            BufferBarrierBatch buffer_barriers{enhanced};
-            const auto emit = [&](const PlannedBarrier &barrier) {
-                const auto &resource = g.resources[barrier.resource];
-                const bool batch_buffer = enhanced && resource.kind == ResourceKind::Buffer &&
-                    barrier.operation != BarrierOperation::Alias;
-                // Do not move buffer barriers across texture/global/alias operations.
-                if (!batch_buffer) buffer_barriers.Flush();
-                auto *buffer_batch = batch_buffer ? &buffer_barriers : nullptr;
-                if (barrier.operation == BarrierOperation::Uav)
-                    EmitUavBarrier(commands, enhanced, barriers, resource, batch.queue, barrier.before, barrier.after, buffer_batch);
-                else if (barrier.operation == BarrierOperation::Alias)
-                    EmitAliasBarrier(commands, enhanced, barriers, resource, barrier.before,
-                                     barrier.after, batch.queue);
-                else if (!(barriers == BarrierMode::Legacy && batch.queue == QueueHint::Copy))
-                    Transition(commands, enhanced, barriers, resource, barrier.before, barrier.after, batch.queue,
-                               barrier.operation == BarrierOperation::Release, barrier.operation == BarrierOperation::Acquire, buffer_batch);
-            };
-            for (const auto &barrier : batch.before) emit(barrier);
-            buffer_barriers.Flush();
-            const auto query_slot = query_slot_for(batch.position);
-            const bool pass_has_queries = query_slot != UINT32_MAX;
-            const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
-            if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
-                pass_has_queries)
-                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
-            if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
+            for (auto position = range.first; position < range.end; ++position)
             {
-                auto &pass = g.passes[batch.pass];
-                if (queries && pass_has_queries)
+                index = submission_order[position];
+                const auto &batch = batches[index];
+                cpu_timing = batch.pass != UINT32_MAX && !cpu_passes.empty()
+                    ? &cpu_passes[batch.position] : nullptr;
+                if (position != range.first)
+                {
+                    if (cpu_timing) cpu_timing->cpu_record_begin_qpc = cpu_counter();
+                    // Preserve the initial command-list state each callback previously received.
+                    if (batch.queue != QueueHint::Copy) commands->ClearState(nullptr);
+                }
+                BufferBarrierBatch buffer_barriers{enhanced};
+                const auto emit = [&](const PlannedBarrier &barrier) {
+                    const auto &resource = g.resources[barrier.resource];
+                    const bool batch_buffer = enhanced && resource.kind == ResourceKind::Buffer &&
+                        barrier.operation != BarrierOperation::Alias;
+                    // Do not move buffer barriers across texture/global/alias operations.
+                    if (!batch_buffer) buffer_barriers.Flush();
+                    auto *buffer_batch = batch_buffer ? &buffer_barriers : nullptr;
+                    if (barrier.operation == BarrierOperation::Uav)
+                        EmitUavBarrier(commands, enhanced, barriers, resource, batch.queue, barrier.before, barrier.after, buffer_batch);
+                    else if (barrier.operation == BarrierOperation::Alias)
+                        EmitAliasBarrier(commands, enhanced, barriers, resource, barrier.before,
+                                         barrier.after, batch.queue);
+                    else if (!(barriers == BarrierMode::Legacy && batch.queue == QueueHint::Copy))
+                        Transition(commands, enhanced, barriers, resource, barrier.before, barrier.after, batch.queue,
+                                   barrier.operation == BarrierOperation::Release, barrier.operation == BarrierOperation::Acquire, buffer_batch);
+                };
+                for (const auto &barrier : batch.before) emit(barrier);
+                buffer_barriers.Flush();
+                const auto query_slot = query_slot_for(batch.position);
+                const bool pass_has_queries = query_slot != UINT32_MAX;
+                const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
+                if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
+                    pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
-#if defined(HS_DEVELOPMENT_TOOLS)
-                // Copy lists are left unmarked because PIX may issue compute-only calls.
-                if (batch.queue != QueueHint::Copy)
-                    PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.Name().c_str());
-#endif
-                RenderPassContext context(commands, enhanced, barriers, &g, batch.queue);
-                if (cpu_timing) cpu_timing->cpu_callback_begin_qpc = cpu_counter();
-                if (pass.owner_execute)
-                    record_results[index] = pass.owner_execute(context);
-                else
-                    pass.execute(context);
+                if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
+                {
+                    auto &pass = g.passes[batch.pass];
+                    if (queries && pass_has_queries)
+                        commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
+    #if defined(HS_DEVELOPMENT_TOOLS)
+                    // Copy lists are left unmarked because PIX may issue compute-only calls.
+                    if (batch.queue != QueueHint::Copy)
+                        PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.Name().c_str());
+    #endif
+                    RenderPassContext context(commands, enhanced, barriers, &g, batch.queue);
+                    if (cpu_timing) cpu_timing->cpu_callback_begin_qpc = cpu_counter();
+                    if (pass.owner_execute)
+                        record_results[index] = pass.owner_execute(context);
+                    else
+                        pass.execute(context);
+                    if (cpu_timing)
+                    {
+                        cpu_timing->cpu_callback_end_qpc = cpu_counter();
+                        cpu_timing->cpu_callback_valid = cpu_timing->cpu_callback_begin_qpc != 0 &&
+                            cpu_timing->cpu_callback_end_qpc >= cpu_timing->cpu_callback_begin_qpc;
+                    }
+    #if defined(HS_DEVELOPMENT_TOOLS)
+                    if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
+    #endif
+                    if (queries && pass_has_queries)
+                        commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
+                }
+                for (const auto &barrier : batch.after) emit(barrier);
+                buffer_barriers.Flush();
+                if (batch.external_finish != UINT32_MAX && queries && pass_has_queries)
+                    commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
+                if (batch.resolve_timestamps)
+                {
+                    std::uint32_t range_start = UINT32_MAX;
+                    std::uint32_t range_pairs{};
+                    const auto flush = [&] {
+                        if (range_pairs == 0) return;
+                        const auto query = options->timestamp_base + range_start * 2;
+                        commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query,
+                            range_pairs * 2, readback, static_cast<UINT64>(query) * sizeof(std::uint64_t));
+                        range_start = UINT32_MAX;
+                        range_pairs = 0;
+                    };
+                    for (std::uint32_t position = 0; position < g.schedule.execution_order.size(); ++position)
+                    {
+                        const auto slot = query_slot_for(position);
+                        if (slot == UINT32_MAX || g.passes[g.schedule.execution_order[position]].queue != batch.queue)
+                            continue;
+                        if (range_pairs != 0 && static_cast<std::uint64_t>(slot) !=
+                            static_cast<std::uint64_t>(range_start) + range_pairs)
+                            flush();
+                        if (range_pairs == 0) range_start = slot;
+                        ++range_pairs;
+                    }
+                    flush();
+                }
                 if (cpu_timing)
                 {
-                    cpu_timing->cpu_callback_end_qpc = cpu_counter();
-                    cpu_timing->cpu_callback_valid = cpu_timing->cpu_callback_begin_qpc != 0 &&
-                        cpu_timing->cpu_callback_end_qpc >= cpu_timing->cpu_callback_begin_qpc;
+                    cpu_timing->cpu_record_end_qpc = cpu_counter();
+                    cpu_timing->cpu_record_valid = cpu_timing->cpu_record_begin_qpc != 0 &&
+                        cpu_timing->cpu_record_end_qpc >= cpu_timing->cpu_record_begin_qpc;
                 }
-#if defined(HS_DEVELOPMENT_TOOLS)
-                if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
-#endif
-                if (queries && pass_has_queries)
-                    commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
-            }
-            for (const auto &barrier : batch.after) emit(barrier);
-            buffer_barriers.Flush();
-            if (batch.external_finish != UINT32_MAX && queries && pass_has_queries)
-                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
-            if (batch.resolve_timestamps)
-            {
-                std::uint32_t range_start = UINT32_MAX;
-                std::uint32_t range_pairs{};
-                const auto flush = [&] {
-                    if (range_pairs == 0) return;
-                    const auto query = options->timestamp_base + range_start * 2;
-                    commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query,
-                        range_pairs * 2, readback, static_cast<UINT64>(query) * sizeof(std::uint64_t));
-                    range_start = UINT32_MAX;
-                    range_pairs = 0;
-                };
-                for (std::uint32_t position = 0; position < g.schedule.execution_order.size(); ++position)
-                {
-                    const auto slot = query_slot_for(position);
-                    if (slot == UINT32_MAX || g.passes[g.schedule.execution_order[position]].queue != batch.queue)
-                        continue;
-                    if (range_pairs != 0 && static_cast<std::uint64_t>(slot) !=
-                        static_cast<std::uint64_t>(range_start) + range_pairs)
-                        flush();
-                    if (range_pairs == 0) range_start = slot;
-                    ++range_pairs;
-                }
-                flush();
             }
             result = commands->Close();
             if (FAILED(result)) record_results[index] = QueueFailure("Close graph command list", result);
@@ -2059,10 +2187,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         auto group = tasks->CreateTaskGroup();
         try
         {
-            for (std::uint32_t index = 0; index < batches.size(); ++index)
+            for (std::uint32_t index = 0; index < recording_batches.size(); ++index)
             {
-                if (batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner)
-                    continue;
+                if (recording_batches[index].owner) continue;
                 if (!group.Submit([&, index](std::stop_token) { record(index); }))
                 {
                     dispatch = fail("RenderGraph recording task submission rejected.");
@@ -2072,9 +2199,8 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             }
             // Submit every worker list before owner-only SDK recording can block dispatch.
             if (dispatch)
-                for (std::uint32_t index = 0; index < batches.size(); ++index)
-                    if (batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner)
-                        record(index);
+                for (std::uint32_t index = 0; index < recording_batches.size(); ++index)
+                    if (recording_batches[index].owner) record(index);
         }
         catch (...) { dispatch = fail("RenderGraph recording task submission threw."); }
         // join is mandatory even after a rejected/throwing submit. All lambda
@@ -2086,7 +2212,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         if (!joined) return joined;
     }
     else
-        for (std::uint32_t index = 0; index < batches.size(); ++index) record(index);
+        for (std::uint32_t index = 0; index < recording_batches.size(); ++index) record(index);
     impl_->stats.cpu_record_us = measure_stage();
     for (const auto &result : record_results) if (!result) return result;
 
@@ -2119,47 +2245,6 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         pending_imports[resource].resources.emplace_back(static_cast<ID3D12Resource *>(logical.native));
     }
 
-    auto &signals = impl_->signals;
-    signals.assign(batches.size(), 0);
-    auto &waits_before = impl_->waits_before;
-    auto &signal_after = impl_->signal_after;
-    waits_before.assign(batches.size(), false);
-    signal_after.assign(batches.size(), false);
-    auto &ordering_predecessor = impl_->ordering_predecessor;
-    ordering_predecessor.assign(batches.size(), SIZE_MAX);
-    auto &pass_positions = impl_->pass_positions;
-    pass_positions.clear();
-    pass_positions.reserve(g.passes.size());
-    for (std::size_t position = 0; position < submission_order.size(); ++position)
-    {
-        const auto index = submission_order[position];
-        const auto &batch = batches[index];
-        if (batch.pass != UINT32_MAX)
-            pass_positions.emplace_back(g.passes[batch.pass].id, position);
-        for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
-            if (queue != batch.queue && batch.imported.Required(queue)) waits_before[index] = true;
-        for (const auto producer : batch.dependencies)
-            if (batches[producer].queue != batch.queue)
-            {
-                waits_before[index] = true;
-                signal_after[producer] = true;
-            }
-    }
-    std::sort(pass_positions.begin(), pass_positions.end());
-    for (const auto &[producer_id, consumer_id] : g.ordering_dependencies)
-    {
-        const auto producer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
-            std::pair{producer_id, std::size_t{0}})->second;
-        const auto consumer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
-            std::pair{consumer_id, std::size_t{0}})->second;
-        auto &previous = ordering_predecessor[submission_order[consumer]];
-        previous = previous == SIZE_MAX ? producer : std::max(previous, producer);
-    }
-    const auto standalone = [&](std::uint32_t index) {
-        const auto &batch = batches[index];
-        return !batch.external_imports.empty() || batch.external_finish != UINT32_MAX ||
-            batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].external);
-    };
     auto &lists = impl_->lists;
     lists.reserve(submission_order.size());
     const auto retain = [&](std::uint32_t index, std::uint64_t value) {
@@ -2192,19 +2277,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         const auto index = submission_order[first];
         const auto &batch = batches[index];
         auto &state = impl_->queues[QueueIndex(batch.queue)];
-        auto end = first + 1;
-        // Legacy buffer decay needs each ExecuteCommandLists boundary. Enhanced
-        // lists can share a call without moving queue waits or delaying signals.
-        if (barriers == BarrierMode::Enhanced && !standalone(index))
-            while (end < submission_order.size())
-            {
-                const auto next = submission_order[end];
-                const auto predecessor = ordering_predecessor[next];
-                if (batches[next].queue != batch.queue || standalone(next) || waits_before[next] ||
-                    signal_after[submission_order[end - 1]] ||
-                    (predecessor != SIZE_MAX && predecessor >= first)) break;
-                ++end;
-            }
+        const auto end = submission_ends[first];
         for (const auto resource : batch.external_imports)
         {
             if (import_retention[resource] == SIZE_MAX)
@@ -2239,7 +2312,8 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         for (auto position = first; position < end; ++position)
         {
             const auto &submitted_batch = batches[submission_order[position]];
-            lists.push_back(slot.recorders[QueueIndex(batch.queue)][submitted_batch.recorder].commands.Get());
+            if (position == first || submitted_batch.recorder != batches[submission_order[position - 1]].recorder)
+                lists.push_back(slot.recorders[QueueIndex(batch.queue)][submitted_batch.recorder].commands.Get());
         }
         state.queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
         const auto value = state.next_fence++;
@@ -2712,7 +2786,6 @@ bool RenderGraphBuilder::RestorePlan(PlanHandle handle)
             pass.external->accesses = saved.boundaries;
         }
     }
-    impl_->ordering_dependencies = plan.ordering;
     impl_->restored_plan = true;
     return true;
 }
@@ -2850,6 +2923,11 @@ PassBuilder RenderGraphBuilder::AddPass(std::uint32_t pass_id, std::string_view 
 void RenderGraphBuilder::AddOrderingDependency(std::uint32_t producer_id, std::uint32_t consumer_id)
 {
     impl_->state = Preparation::Building;
+    if (impl_->restored_plan)
+    {
+        impl_->binding_failed = true;
+        return;
+    }
     impl_->ordering_dependencies.emplace_back(producer_id, consumer_id);
 }
 
@@ -2921,6 +2999,22 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         return fail("RenderGraph transient pool has no allocator or device.");
     if (impl_->plan_device.Get() != pool.impl_->device.Get())
     {
+        // Detach declarations before destroying the plan that owns their storage.
+        for (auto &resource : impl_->resources)
+            if (resource.cached_name)
+            {
+                resource.name = *resource.cached_name;
+                resource.cached_name = nullptr;
+            }
+        for (auto &pass : impl_->passes)
+        {
+            if (pass.cached_name)
+            {
+                pass.name = *pass.cached_name;
+                pass.cached_name = nullptr;
+            }
+            if (pass.cached_uses) (void)pass.MutableUses();
+        }
         impl_->topology = {};
         for (auto &previous : impl_->previous_plans) previous = {};
         impl_->plan_device = pool.impl_->device;

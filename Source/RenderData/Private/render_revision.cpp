@@ -3,19 +3,26 @@
 
 namespace hs::render_data
 {
+namespace
+{
+bool IsNumberedTerrainProduct(std::string_view id,std::string_view prefix)
+{
+    constexpr std::string_view suffix{".rpkg"};
+    if(!id.starts_with(prefix)||!id.ends_with(suffix))return false;
+    const auto index=id.substr(prefix.size(),id.size()-prefix.size()-suffix.size());
+    if(index.empty())return false;
+    for(const char c:index)if(c<'0'||c>'9')return false;
+    return true;
+}
+}
 bool IsTerrainSurfaceSectionProduct(std::string_view id)
 {
-    constexpr std::string_view prefix{"render/terrain/arena_surface_section_"};
-    constexpr std::string_view suffix{".rpkg"};
-    if (!id.starts_with(prefix) || !id.ends_with(suffix)) return false;
-    const auto index = id.substr(prefix.size(), id.size() - prefix.size() - suffix.size());
-    if (index.empty()) return false;
-    for (const char c : index) if (c < '0' || c > '9') return false;
-    return true;
+    return IsNumberedTerrainProduct(id,"render/terrain/arena_surface_section_");
 }
 bool IsTerrainSurfaceProduct(std::string_view id)
 {
-    return id == "render/terrain/arena_surface.rpkg" || IsTerrainSurfaceSectionProduct(id);
+    return id=="render/terrain/arena_surface.rpkg" || IsTerrainSurfaceSectionProduct(id) ||
+        IsNumberedTerrainProduct(id,"render/terrain/arena_surface_tile_");
 }
 bool IsRendererMaterialRevisionProduct(std::string_view id)
 {

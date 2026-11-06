@@ -6,7 +6,8 @@
 // author textures again. All consumers receive the same resolved decal Surface;
 // its emission is appended after authored sidecars, exactly once.
 
-Texture2D<float4> HsDecalSurfaceEmission : register(t13, space36);
+#include "decal_surface_abi.hlsli"
+Texture2D<float4> HsDecalSurfaceEmission : register(HS_DECAL_JOIN(t,HS_DECAL_EMISSION_REGISTER), HS_DECAL_JOIN(space,HS_DECAL_SPACE));
 HsSurfaceClosure HsApplyDecalSurfaceEmission(HsSurfaceClosure closure,uint2 activePixel)
 {
     // Empty frames retain capacity but do not write or read the export images.
@@ -44,7 +45,7 @@ HsSurfaceClosure HsReflectionDecodeClosure(uint2 metadata,float4 base,float2 pac
             varying_mask = MaterialVaryingMasks[environment / 4u][environment % 4u];
         }
     }
-    else if (HsHeroOpaqueOrdinalValid(hero))
+    else if (HsCharacterOpaqueOrdinalValid(hero))
     {
         ctx.parameter_base = CharacterMaterialParameterBases[hero / 4u][hero % 4u];
         closure = HsHeroApplyDeferredLayers(closure, ctx, hero);

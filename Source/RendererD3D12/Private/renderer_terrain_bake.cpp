@@ -13,7 +13,8 @@ namespace hs
 {
 namespace
 {
-constexpr UINT kEdge=2048, kMips=12;
+constexpr UINT kEdge=render_data::kTerrainSurfacePageEdge, kMips=render_data::kTerrainSurfacePageMips;
+constexpr UINT kApron=kEdge/16, kInterior=kEdge-2*kApron;
 static_assert((1u<<(kMips-1))==kEdge);
 constexpr DXGI_FORMAT kFormat=DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -32,9 +33,12 @@ void Transition(ID3D12GraphicsCommandList *list,ID3D12Resource *resource,
 }
 // Both packed and loose LOD0 geometry use the same expanded vertex/triangle ABI.
 std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> vertices,
-    std::span<const UINT> indices)
+    std::span<const UINT> indices,const render_data::TerrainSurfaceTile &tile)
 {
     std::vector<UINT> controls(kEdge*kEdge);
+    const float min_tile_x=-12.f+24.f*float(tile.x)/float(tile.count_x);
+    const float min_tile_z=-12.f+24.f*float(tile.y)/float(tile.count_y);
+    const float span_x=24.f/float(tile.count_x),span_z=24.f/float(tile.count_y);
     for(size_t i=0;i<indices.size();i+=3)
     {
         const auto &a=vertices[indices[i]],&b=vertices[indices[i+1]],&c=vertices[indices[i+2]];
@@ -42,16 +46,28 @@ std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> ve
         const float cx=c.position[0]-a.position[0],cz=c.position[2]-a.position[2];
         const float det=bx*cz-bz*cx;
         if(det==0) continue;
-        const auto pixel=[](float x) {return (x/24.f+.5f)*float(kEdge)-.5f;};
-        const int x0=std::max(0,int(std::ceil(pixel(std::min({a.position[0],b.position[0],c.position[0]})))));
-        const int z0=std::max(0,int(std::ceil(pixel(std::min({a.position[2],b.position[2],c.position[2]})))));
-        const int x1=std::min(int(kEdge)-1,int(std::floor(pixel(std::max({a.position[0],b.position[0],c.position[0]})))));
-        const int z1=std::min(int(kEdge)-1,int(std::floor(pixel(std::max({a.position[2],b.position[2],c.position[2]})))));
+        const auto pixel_x=[&](float x) {return float(kApron)+(x-min_tile_x)/span_x*float(kInterior)-.5f;};
+        const auto pixel_z=[&](float z) {return float(kApron)+(z-min_tile_z)/span_z*float(kInterior)-.5f;};
+        const float minx=std::min({a.position[0],b.position[0],c.position[0]});
+        const float minz=std::min({a.position[2],b.position[2],c.position[2]});
+        const float maxx=std::max({a.position[0],b.position[0],c.position[0]});
+        const float maxz=std::max({a.position[2],b.position[2],c.position[2]});
+        const int x0=minx<=-12.f?0:std::max(0,int(std::ceil(pixel_x(minx))));
+        const int z0=minz<=-12.f?0:std::max(0,int(std::ceil(pixel_z(minz))));
+        const int x1=maxx>=12.f?int(kEdge)-1:std::min(int(kEdge)-1,int(std::floor(pixel_x(maxx))));
+        const int z1=maxz>=12.f?int(kEdge)-1:std::min(int(kEdge)-1,int(std::floor(pixel_z(maxz))));
         for(int z=z0;z<=z1;++z) for(int x=x0;x<=x1;++x)
         {
-            const float rx=((x+.5f)/kEdge-.5f)*24-a.position[0],rz=((z+.5f)/kEdge-.5f)*24-a.position[2];
+            const float wx=min_tile_x+(x+.5f-kApron)/kInterior*span_x;
+            const float wz=min_tile_z+(z+.5f-kApron)/kInterior*span_z;
+            const float px=std::clamp(wx,-12.f,12.f)-a.position[0];
+            const float pz=std::clamp(wz,-12.f,12.f)-a.position[2];
+            const float pu=(px*cz-pz*cx)/det,pv=(bx*pz-bz*px)/det;
+            if(pu<-.00001f || pv<-.00001f || pu+pv>1.00001f) continue;
+            // Match raster interpolation's affine continuation in helper lanes;
+            // the material's normal [0,1] control clamp is retained below.
+            const float rx=wx-a.position[0],rz=wz-a.position[2];
             const float u=(rx*cz-rz*cx)/det,v=(bx*rz-bz*rx)/det;
-            if(u<-.00001f || v<-.00001f || u+v>1.00001f) continue;
             const auto channel=[&](size_t k){return UINT(DirectX::PackedVector::XMConvertFloatToHalf(
                 std::clamp(a.uv[k]+u*(b.uv[k]-a.uv[k])+v*(c.uv[k]-a.uv[k]),0.f,1.f)));};
             controls[size_t(z)*kEdge+x]=channel(0)|(channel(1)<<16);
@@ -69,6 +85,9 @@ struct D3D12Renderer::Impl::TerrainPagePreparation
     AllocationResource output,controls,readback;
     std::array<AllocationResource,6> sources;
     std::vector<TerrainSection> sections;
+    std::vector<render_data::TerrainSurfaceTile> tiles;
+    std::vector<render_data::ExpandedVertex> meadow_vertices;
+    std::vector<UINT> meadow_indices;
 };
 
 Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticRenderScene> &scene, std::shared_ptr<TerrainPagePreparation> &lifetime)
@@ -84,10 +103,14 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     for(const auto &s:sections)
         if(!std::isfinite(s.x)||!std::isfinite(s.z)||!std::isfinite(s.span_x)||!std::isfinite(s.span_z)||
             !std::isfinite(s.cosine)||!std::isfinite(s.sine)) return TerrainFailure("Nonfinite terrain page transform.");
+    candidate->tiles=render_data::BuildTerrainSurfaceTiles(sections);
+    candidate->sections.clear();
+    for(const auto &tile:candidate->tiles) candidate->sections.push_back(tile.section);
+    if(sections.empty()) return TerrainFailure("Terrain page bake requires a nonempty tile set.");
     if(auto waited=WaitForGpu();!waited) return waited;
     
     constexpr UINT64 kMaxSectionPageBytes=256ull<<20;
-    constexpr UINT slices=3;
+    constexpr UINT slices=1;
     D3D12_RESOURCE_DESC output_desc{};
     output_desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     output_desc.Width=kEdge;output_desc.Height=kEdge;output_desc.DepthOrArraySize=slices;
@@ -116,8 +139,8 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     hr=device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,cmd_allocator.Get(),nullptr,IID_PPV_ARGS(&list));
     if(FAILED(hr)) return HResultFailure("Create terrain page list",hr);
     std::vector<AllocationResource> uploads;
-    std::vector<UINT> controls(1);
-    if(std::ranges::any_of(sections,[](const auto &s){return s.mesh==static_cast<UINT>(RenderMesh::MeadowSurface);}))
+    const bool has_meadow=std::ranges::any_of(sections,[](const auto &s){return s.mesh==static_cast<UINT>(RenderMesh::MeadowSurface);});
+    if(has_meadow)
     {
         const auto &geo=environment_geometry_streams[render_data::kMeadowGeometryBegin];
         std::vector<std::byte> bytes;
@@ -129,21 +152,22 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
             if(geometry.descriptor)
             {
                 const auto view=render_data::BindGeometryDescriptor(bytes,*geometry.descriptor);
-                const auto vertices=render_data::DecodeExpandedVertices(view.chunks[0]);
-                std::vector<UINT> indices(geometry.descriptor->index_count);
-                if(view.chunks[1].size()!=indices.size()*sizeof(UINT))
+                candidate->meadow_vertices=render_data::DecodeExpandedVertices(view.chunks[0]);
+                candidate->meadow_indices.resize(geometry.descriptor->index_count);
+                if(view.chunks[1].size()!=candidate->meadow_indices.size()*sizeof(UINT))
                     return TerrainFailure("Terrain page index ABI mismatch.");
-                std::memcpy(indices.data(),view.chunks[1].data(),view.chunks[1].size());
-                controls=MeadowControls(vertices,indices);
+                std::memcpy(candidate->meadow_indices.data(),view.chunks[1].data(),view.chunks[1].size());
             }
-            else controls=MeadowControls(geometry.page.geometry.vertices,geometry.page.geometry.indices);
+            else
+            {
+                candidate->meadow_vertices=std::move(geometry.page.geometry.vertices);
+                candidate->meadow_indices=std::move(geometry.page.geometry.indices);
+            }
         }
         catch(const std::exception &e){return TerrainFailure(e.what());}
     }
-    const auto control_bytes=std::as_bytes(std::span(controls));
-    if(auto r=upload(candidate->controls,control_bytes.size(),[&](std::byte *dst) {
-        std::memcpy(dst,control_bytes.data(),control_bytes.size());
-    });!r) return r;
+    if(auto r=allocate(candidate->controls,BufferDescription(has_meadow?UINT64(kEdge)*kEdge*sizeof(UINT):sizeof(UINT)),
+        D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);!r) return r;
 
     D3D12_DESCRIPTOR_RANGE ranges[]{
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV,6,0,0,0},
@@ -175,8 +199,8 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
         const auto code=device->CreateComputePipelineState(&desc,IID_PPV_ARGS(&pso));
         return FAILED(code)?HResultFailure("Create terrain page compute pipeline",code):Result::Success();
     };
-    if(auto r=pipeline("render/shader/terrain_page_bake_cs.dxil",candidate->bake);!r) return r;
-    if(auto r=pipeline("render/shader/terrain_page_mip_cs.dxil",candidate->mip);!r) return r;
+    if(auto r=pipeline("terrain/producer/bake_cs.dxil",candidate->bake);!r) return r;
+    if(auto r=pipeline("terrain/producer/mip_cs.dxil",candidate->mip);!r) return r;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors=6+2*kMips;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr=device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&candidate->heap));
@@ -284,14 +308,14 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
     try
     {
       const auto work = [&]() -> Result {
-        if (auto initialized = owner.InitializeWorldTransportBake(configuration, true); !initialized)
+        if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::Terrain); !initialized)
             return initialized;
         auto &impl = *owner.impl_;
         if (auto prepared = impl.BakeTerrainPages(scene, lifetime); !prepared) return prepared;
         auto &page = *lifetime;
         const auto &sections = page.sections;
         const auto desc = page.output.resource->GetDesc();
-        constexpr UINT count = 3 * kMips;
+        constexpr UINT count = kMips;
         const render_data::TextureDescription texture{kEdge, kEdge,
             static_cast<UINT>(sections.size()) * 3u, kMips, render_data::kTextureFormatRgba8};
         std::array<std::byte,32> identity{};
@@ -322,12 +346,25 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
         allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
         if (auto created = impl.CreateAllocation(page.readback, allocation, BufferDescription(readback_size),
                 D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
-        std::vector<std::byte> payload(tight_size);
+        if (tight_size > std::numeric_limits<size_t>::max() / 3)
+            return TerrainFailure("Terrain three-plane payload size overflows.");
+        std::vector<std::byte> payload(tight_size * 3);
         const auto gpu = [&](UINT i) {
             auto h=page.heap->GetGPUDescriptorHandleForHeapStart(); h.ptr+=UINT64(i)*impl.srv_stride; return h;
         };
         for (UINT index = 0; index < sections.size(); ++index)
         {
+          if(sections[index].mesh==static_cast<UINT>(RenderMesh::MeadowSurface))
+          {
+            const auto controls=MeadowControls(page.meadow_vertices,page.meadow_indices,page.tiles[index]);
+            void *mapped_controls{};D3D12_RANGE no_read{};
+            const auto mapped=page.controls.resource->Map(0,&no_read,&mapped_controls);
+            if(FAILED(mapped)) return HResultFailure("Map terrain meadow controls",mapped);
+            std::memcpy(mapped_controls,controls.data(),controls.size()*sizeof(UINT));
+            page.controls.resource->Unmap(0,nullptr);
+          }
+          for (UINT plane = 0; plane < 3; ++plane)
+          {
             ComPtr<ID3D12CommandAllocator> allocator;
             ComPtr<ID3D12GraphicsCommandList> list;
             auto hr = impl.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
@@ -344,21 +381,20 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
             list->SetComputeRootShaderResourceView(3, page.controls.resource->GetGPUVirtualAddress());
             list->SetPipelineState(page.bake.Get());
             list->SetComputeRoot32BitConstants(4, 8, &sections[index], 0);
-            list->SetComputeRoot32BitConstant(4, 0, 8);
+            list->SetComputeRoot32BitConstant(4, plane, 8);
             list->SetComputeRoot32BitConstant(4, kEdge, 9);
             list->Dispatch(kEdge / 8, kEdge / 8, 1);
             list->SetPipelineState(page.mip.Get());
             for (UINT level = 0; level < kMips; ++level)
             {
-                for (UINT slice = 0; slice < 3; ++slice)
-                    Transition(list.Get(), output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, slice * kMips + level);
+                Transition(list.Get(), output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, level);
                 if (level + 1 == kMips) break;
                 const UINT edge = kEdge >> (level + 1);
                 list->SetComputeRootDescriptorTable(1, gpu(6 + 2 * level));
                 list->SetComputeRootDescriptorTable(2, gpu(7 + 2 * (level + 1)));
                 list->SetComputeRoot32BitConstant(4, edge, 9);
-                list->Dispatch((edge + 7) / 8, (edge + 7) / 8, 3);
+                list->Dispatch((edge + 7) / 8, (edge + 7) / 8, 1);
             }
             Transition(list.Get(), output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
             for (UINT sub = 0; sub < count; ++sub)
@@ -382,7 +418,7 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
             hr = page.readback.resource->Map(0, &read_range, &mapped_ptr);
             if (FAILED(hr)) return HResultFailure("Map terrain page readback", hr);
             const auto *mapped = static_cast<const std::byte *>(mapped_ptr);
-            size_t offset = 0;
+            size_t offset = size_t(plane) * tight_size;
             for (UINT sub = 0; sub < count; ++sub)
                 for (UINT y = 0; y < rows[sub]; ++y)
                 {
@@ -393,6 +429,7 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
                 }
             const D3D12_RANGE no_write{};
             page.readback.resource->Unmap(0, &no_write);
+          }
             if (auto saved = section_sink(index, payload); !saved) return saved;
         }
         return Result::Success();

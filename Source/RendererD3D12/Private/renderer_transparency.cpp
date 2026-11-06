@@ -20,8 +20,8 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kConstantStride = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-constexpr std::uint32_t kTailPhase = 8, kCompositePhase = 10;
-constexpr std::uint32_t kUavOffset = 22;
+constexpr std::uint32_t kTailPhase = 5, kCompositePhase = 6;
+constexpr std::uint32_t kUavOffset = kLayeredTranslucencyUavOffset;
 constexpr DXGI_FORMAT kColor = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr std::array<DXGI_FORMAT, 6> kGuideFormats{
     DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
@@ -63,8 +63,13 @@ bool Fits(const LayeredTranslucencyGuide &guide, ViewExtent active, DXGI_FORMAT 
 }
 bool FitsDepth(const LayeredTranslucencyGuide &guide, ViewExtent active)
 {
-    return Fits(guide, active, DXGI_FORMAT_R32_TYPELESS) || Fits(guide, active, DXGI_FORMAT_D32_FLOAT) ||
-        Fits(guide, active, DXGI_FORMAT_R32_FLOAT);
+    if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture)
+        return false;
+    const auto desc = guide.resource->GetDesc();
+    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.DepthOrArraySize == 1 &&
+        desc.SampleDesc.Count == 1 && desc.Width >= active.width && desc.Height >= active.height &&
+        (desc.Format == DXGI_FORMAT_R32_TYPELESS || desc.Format == DXGI_FORMAT_D32_FLOAT ||
+         desc.Format == DXGI_FORMAT_R32_FLOAT);
 }
 Result CreateTexture(D3D12MA::Allocator *allocator, ViewExtent extent, DXGI_FORMAT format,
     D3D12_RESOURCE_FLAGS flags, AllocationResource &texture)
@@ -79,7 +84,7 @@ Result CreateTexture(D3D12MA::Allocator *allocator, ViewExtent extent, DXGI_FORM
     const auto native = allocator->CreateResource(&allocation, &desc, D3D12_RESOURCE_STATE_COMMON,
         flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS ? nullptr : &clear,
         &texture.allocation, IID_PPV_ARGS(texture.resource.ReleaseAndGetAddressOf()));
-    if (FAILED(native)) return NativeFailure("Create hero transparency texture", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency texture", native);
     texture.graph_access = Access::Common;
     return Result::Success();
 }
@@ -87,14 +92,14 @@ Result CheckFormat(ID3D12Device *device, DXGI_FORMAT format, bool depth, bool co
 {
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
     const auto native = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support));
-    if (FAILED(native)) return NativeFailure("Check hero transparency format", native);
+    if (FAILED(native)) return NativeFailure("Check translucency transparency format", native);
     if (!(support.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D) ||
         (!depth && !(support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD)) ||
         (depth && !(support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)) ||
         (!depth && !counter && !(support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET)) ||
         (counter && (!(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) ||
                      !(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_ATOMIC_ADD))))
-        return Failure(ErrorCode::TaskFailed, "Hero transparency texture format lacks required native access support.");
+        return Failure(ErrorCode::TaskFailed, "Translucency transparency texture format lacks required native access support.");
     return Result::Success();
 }
 } // namespace
@@ -169,17 +174,17 @@ struct LayeredTranslucencyTargets
         device->CreateConstantBufferView(&cbv, Cpu(slot, phase, 0));
         for (std::uint32_t index = 0; index < kLayeredTranslucencyMaxLayers; ++index)
         {
-            Srv(front[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 1 + index));
-            Srv(identity[index].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 5 + index));
-            Srv(exit.resource.Get(), exit_format, Cpu(slot, phase, 9 + index));
+            Srv(front[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_FRONT_DEPTH + index));
+            Srv(identity[index].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_FRONT_IDENTITY + index));
         }
-        Srv(unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 14));
-        Srv(front[0].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 15));
+        Srv(exit.resource.Get(), exit_format, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_EXIT));
+        Srv(unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_UNPEELED));
+        Srv(front[0].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_GUIDE_DEPTH));
         for (std::uint32_t index = 1; index < 4; ++index)
-            Srv(guides[index].resource.Get(), kGuideFormats[index], Cpu(slot, phase, 15 + index));
-        Srv(identity[0].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 19));
-        Srv(unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 20));
-        Srv(guides[5].resource.Get(), kGuideFormats[5], Cpu(slot, phase, 21));
+            Srv(guides[index].resource.Get(), kGuideFormats[index], Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_GUIDE_DEPTH + index));
+        Srv(identity[0].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_GUIDE_METADATA));
+        Srv(unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_GUIDE_UNPEELED));
+        Srv(guides[5].resource.Get(), kGuideFormats[5], Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_GUIDE_TRANSPORT));
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_R32_UINT; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         device->CreateUnorderedAccessView(unpeeled_fragment_count.resource.Get(), nullptr, &uav, Cpu(slot, phase, kUavOffset));
@@ -190,7 +195,7 @@ struct LayeredTranslucencyTargets
         const auto constantSlot = inputs.frame_slot * kLayeredTranslucencyPhaseCount + phase;
         const std::array<std::uint32_t, 4> values{layer, inputs.single_layer_water ? 1u : layer_count, static_cast<std::uint32_t>(semantic), 0};
         std::memcpy(mapped + SIZE_T(constantSlot) * kConstantStride, values.data(), sizeof(values));
-        Srv(background, kColor, Cpu(inputs.frame_slot, phase, 13));
+        Srv(background, kColor, Cpu(inputs.frame_slot, phase, 1 + HS_TRANSLUCENCY_SRV_BACKGROUND));
         auto destination = inputs.table_cpu;
         destination.ptr += SIZE_T(phase * kLayeredTranslucencyTableSize) * inputs.descriptor_stride;
         device->CopyDescriptorsSimple(kLayeredTranslucencyTableSize, destination,
@@ -249,7 +254,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     if (!device || !allocator || !root || !ValidExtent(capacity) || layerCount > 4 || (enabled && !layerCount) || !frameSlots ||
         frameSlots > D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 / kLayeredTranslucencyDescriptorsPerFrame ||
         (enabled && !readShader))
-        return Failure(ErrorCode::InvalidArgument, "Invalid hero transparency device, root, extent, quality, frame slots or shader reader.");
+        return Failure(ErrorCode::InvalidArgument, "Invalid translucency transparency device, root, extent, quality, frame slots or shader reader.");
     auto next = std::make_shared<LayeredTranslucencyTargets>();
     next->device = device; next->allocator = allocator; next->root = root;
     next->capacity = capacity; next->enabled = enabled; next->layer_count = layerCount;
@@ -271,7 +276,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
         queries.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
         queries.Count = frameSlots * kLayeredTranslucencyMaxLayers;
         const auto native = device->CreateQueryHeap(&queries, IID_PPV_ARGS(&next->occupancy_queries));
-        if (FAILED(native)) return NativeFailure("Create hero occupancy queries", native);
+        if (FAILED(native)) return NativeFailure("Create translucency occupancy queries", native);
         next->occupancy_results.resize(frameSlots);
         for (auto &slot : next->occupancy_results)
             for (std::uint32_t layer = 0; layer < layerCount; ++layer)
@@ -287,7 +292,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
                 const auto created = allocator->CreateResource(&allocation, &buffer,
                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr, &result.allocation,
                     IID_PPV_ARGS(result.resource.ReleaseAndGetAddressOf()));
-                if (FAILED(created)) return NativeFailure("Create hero occupancy result", created);
+                if (FAILED(created)) return NativeFailure("Create translucency occupancy result", created);
                 result.graph_access = Access::CopyDest;
                 next->bytes += result.allocation->GetSize();
             }
@@ -311,16 +316,16 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
         D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_BLENDABLE;
     D3D12_FEATURE_DATA_FORMAT_SUPPORT exitSupport{next->exit_format};
     auto exitQuery = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &exitSupport, sizeof(exitSupport));
-    if (FAILED(exitQuery)) return NativeFailure("Check hero exit format", exitQuery);
+    if (FAILED(exitQuery)) return NativeFailure("Check translucency exit format", exitQuery);
     if ((exitSupport.Support1 & exitRequired) != exitRequired && next->exit_format != DXGI_FORMAT_R32G32B32A32_FLOAT)
     {
         next->exit_format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         exitSupport = {next->exit_format};
         exitQuery = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &exitSupport, sizeof(exitSupport));
-        if (FAILED(exitQuery)) return NativeFailure("Check hero exit format", exitQuery);
+        if (FAILED(exitQuery)) return NativeFailure("Check translucency exit format", exitQuery);
     }
     if ((exitSupport.Support1 & exitRequired) != exitRequired)
-        return Failure(ErrorCode::TaskFailed, "Hero exit depth format lacks required texture, load, render or blend support.");
+        return Failure(ErrorCode::TaskFailed, "Translucency exit depth format lacks required texture, load, render or blend support.");
     if (auto created = CreateTexture(allocator, capacity, next->exit_format,
             D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, next->exit); !created) return created;
     for (std::uint32_t index = 1; index < next->guides.size(); ++index)
@@ -336,11 +341,11 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, next->unpeeled_fragment_count); !created) return created;
 
     std::vector<std::byte> vertex;
-    if (auto read = readShader("render/shader/hero_transparency_vs.dxil", vertex); !read) return read;
-    if (vertex.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency indexed vertex shader is empty.");
+    if (auto read = readShader("render/shader/layered_translucency_vs.dxil", vertex); !read) return read;
+    if (vertex.empty()) return Failure(ErrorCode::TaskFailed, "Translucency transparency indexed vertex shader is empty.");
     std::vector<std::byte> current_vertex;
-    if (auto read = readShader("render/shader/hero_transparency_current_vs.dxil", current_vertex); !read) return read;
-    if (current_vertex.empty()) return Failure(ErrorCode::TaskFailed, "Hero current-pose vertex shader is empty.");
+    if (auto read = readShader("render/shader/layered_translucency_current_vs.dxil", current_vertex); !read) return read;
+    if (current_vertex.empty()) return Failure(ErrorCode::TaskFailed, "Translucency current-pose vertex shader is empty.");
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -359,7 +364,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
 #endif
         std::vector<std::byte> pixel;
         if (auto read = readShader(product, pixel); !read) return read;
-        if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency pixel product is empty: " + std::string(product));
+        if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Translucency transparency pixel product is empty: " + std::string(product));
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
         const auto &phase_vertex = index == 3 || index == 5 ? vertex : current_vertex;
         pipeline.pRootSignature = root; pipeline.VS = {phase_vertex.data(), phase_vertex.size()}; pipeline.PS = {pixel.data(), pixel.size()};
@@ -449,7 +454,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
             pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
         }
         const auto native = pipelineCache.CreateGraphics(&pipeline, IID_PPV_ARGS(&next->pipelines[index]));
-        if (FAILED(native)) return NativeFailure("Create hero transparency pipeline " + std::string(product), native);
+        if (FAILED(native)) return NativeFailure("Create translucency transparency pipeline " + std::string(product), native);
 #if defined(HS_DEVELOPMENT_TOOLS)
         if (next->work && index < kPixelProducts.size()) next->work->Pipeline(index, pipeline, phase_vertex, pixel, product);
 #endif
@@ -458,18 +463,18 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors = frameSlots * kLayeredTranslucencyDescriptorsPerFrame;
     auto native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->tables));
-    if (FAILED(native)) return NativeFailure("Create hero transparency source tables", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency source tables", native);
     next->srv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
     heap.NumDescriptors = 9;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->exports));
-    if (FAILED(native)) return NativeFailure("Create hero transparency exports", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency exports", native);
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 13;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->rtv_heap));
-    if (FAILED(native)) return NativeFailure("Create hero transparency RTVs", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency RTVs", native);
     next->rtv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap.NumDescriptors = 12;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->dsv_heap));
-    if (FAILED(native)) return NativeFailure("Create hero transparency DSVs", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency DSVs", native);
     next->dsv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{}; dsv.Format = DXGI_FORMAT_D32_FLOAT; dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
     for (std::uint32_t layer = 0; layer < next->layer_count; ++layer)
@@ -503,10 +508,10 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     upload.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     native = allocator->CreateResource(&uploadAllocation, &upload, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
         &next->constants.allocation, IID_PPV_ARGS(next->constants.resource.ReleaseAndGetAddressOf()));
-    if (FAILED(native)) return NativeFailure("Create hero transparency constants", native);
+    if (FAILED(native)) return NativeFailure("Create translucency transparency constants", native);
     void *mapped{}; D3D12_RANGE noRead{0, 0};
     native = next->constants.resource->Map(0, &noRead, &mapped);
-    if (FAILED(native)) return NativeFailure("Map hero transparency constants", native);
+    if (FAILED(native)) return NativeFailure("Map translucency transparency constants", native);
     next->mapped = static_cast<std::byte *>(mapped);
     // Resource identity, formats and CBV addresses are fixed for this target generation.
     for (std::uint32_t slot = 0; slot < frameSlots; ++slot)
@@ -528,14 +533,14 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
 
 Result TranslucencySystem::Commit(LayeredTranslucencyCandidate &&candidate, const CompletionSet &completed)
 {
-    if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending hero transparency before replacing targets.");
-    if (!candidate.targets_) return Failure(ErrorCode::InvalidArgument, "Hero transparency candidate was not prepared.");
+    if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending translucency transparency before replacing targets.");
+    if (!candidate.targets_) return Failure(ErrorCode::InvalidArgument, "Translucency transparency candidate was not prepared.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
-        return Failure(ErrorCode::InvalidState, "Old hero transparency targets are still in GPU use.");
+        return Failure(ErrorCode::InvalidState, "Old translucency transparency targets are still in GPU use.");
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
     if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
-        return Failure(ErrorCode::InvalidState, "Old hero contributor queries are still in GPU use.");
+        return Failure(ErrorCode::InvalidState, "Old translucency contributor queries are still in GPU use.");
     if (impl_->targets && impl_->targets->work)
     {
         const auto previous = impl_->targets->work->Status();
@@ -552,7 +557,7 @@ Result TranslucencySystem::Commit(LayeredTranslucencyCandidate &&candidate, cons
     }
 #endif
     if (impl_->next_generation == UINT64_MAX)
-        return Failure(ErrorCode::InvalidState, "Hero transparency target generation is exhausted.");
+        return Failure(ErrorCode::InvalidState, "Translucency transparency target generation is exhausted.");
     candidate.targets_->generation = ++impl_->next_generation;
     impl_->targets = std::move(candidate.targets_);
     return Result::Success();
@@ -576,17 +581,17 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
 {
     outputs = {};
     auto storage = impl_->targets;
-    if (!storage) return Failure(ErrorCode::InvalidState, "Prepare and commit hero transparency before registration.");
+    if (!storage) return Failure(ErrorCode::InvalidState, "Prepare and commit translucency transparency before registration.");
     if (!storage->enabled) return Result::Success();
     if (impl_->pending.graph || !storage->usable)
-        return Failure(ErrorCode::InvalidState, "Hero transparency is pending or its previous graph failed.");
+        return Failure(ErrorCode::InvalidState, "Translucency transparency is pending or its previous graph failed.");
     const auto active = inputs.render_active;
     const auto rect = inputs.composition_rect;
     const bool rect_empty = rect.left == rect.right && rect.top == rect.bottom;
     if (!rect_empty && (rect.left < 0 || rect.top < 0 || rect.right <= rect.left ||
             rect.bottom <= rect.top || static_cast<std::uint32_t>(rect.right) > active.width ||
             static_cast<std::uint32_t>(rect.bottom) > active.height))
-        return Failure(ErrorCode::InvalidArgument, "Hero composition rectangle exceeds its active extent.");
+        return Failure(ErrorCode::InvalidArgument, "Translucency composition rectangle exceeds its active extent.");
     const bool use_occupancy = inputs.use_occupancy_queries && storage->occupancy_queries.Get();
 #if defined(HS_DEVELOPMENT_TOOLS)
     const bool capture_work = static_cast<bool>(storage->work);
@@ -618,21 +623,21 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             retained->occupancy != use_occupancy ||
             !same_reads(inputs.peel_reads, retained->peel_reads) ||
             !same_reads(inputs.scene_reads, retained->scene_reads))
-            return Failure(ErrorCode::InvalidState, "Hero retained topology variant changed.");
+            return Failure(ErrorCode::InvalidState, "Translucency retained topology variant changed.");
         for (std::size_t index = 0; index < current.size(); ++index)
             if (!same_version(current[index], retained->inputs[index]))
-                return Failure(ErrorCode::InvalidState, "Hero retained input version changed.");
+                return Failure(ErrorCode::InvalidState, "Translucency retained input version changed.");
         const auto pass_matches = [&](std::uint32_t index, std::uint32_t id) {
             return index < graph.PassCount() && graph.DeclaredPassId(index) == id &&
                 graph.BindPass(index, id).has_value();
         };
         for (std::uint32_t layer = 0; !inputs.single_layer_water && layer < storage->layer_count; ++layer)
             if (!pass_matches(retained->front_pass[layer], 90 + layer * 2))
-                return Failure(ErrorCode::InvalidState, "Hero retained peel pass changed.");
+                return Failure(ErrorCode::InvalidState, "Translucency retained peel pass changed.");
         if ((!inputs.single_layer_water && (!pass_matches(retained->exit_pass, 97) ||
             !pass_matches(retained->tail_pass, 99))) ||
             !pass_matches(retained->unpeeled_fragment_count_clear_pass, 98))
-            return Failure(ErrorCode::InvalidState, "Hero retained unpeeled_fragment_count pass changed.");
+            return Failure(ErrorCode::InvalidState, "Translucency retained unpeeled_fragment_count pass changed.");
     }
     if (!ValidExtent(active) || active.width > storage->capacity.width || active.height > storage->capacity.height ||
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed) ||
@@ -641,7 +646,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         !Fits(inputs.revealage, active, DXGI_FORMAT_R16_FLOAT) ||
         !inputs.accumulation_rtv.ptr || !inputs.revealage_rtv.ptr || !inputs.opaque_readonly_dsv.ptr || !inputs.shader_heap ||
         !inputs.table_cpu.ptr || !inputs.table_gpu.ptr || inputs.descriptor_stride != storage->srv_stride || !inputs.draw)
-        return Failure(ErrorCode::InvalidArgument, "Hero transparency frame, guides, native table or draw callback is invalid.");
+        return Failure(ErrorCode::InvalidArgument, "Translucency transparency frame, guides, native table or draw callback is invalid.");
     const auto heap = inputs.shader_heap->GetDesc();
     auto *sourceHeap = inputs.descriptor_source_heap ? inputs.descriptor_source_heap : inputs.shader_heap;
     const auto sourceDescription = sourceHeap->GetDesc();
@@ -652,7 +657,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         sourceDescription.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         sourceDescription.NumDescriptors != heap.NumDescriptors ||
         (inputs.descriptor_source_heap && (sourceDescription.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)))
-        return Failure(ErrorCode::InvalidArgument, "Hero transparency CPU descriptor source is incompatible with its native shader heap.");
+        return Failure(ErrorCode::InvalidArgument, "Translucency transparency CPU descriptor source is incompatible with its native shader heap.");
     const auto heapCpu = sourceHeap->GetCPUDescriptorHandleForHeapStart().ptr;
     const auto heapGpu = inputs.shader_heap->GetGPUDescriptorHandleForHeapStart().ptr;
     const auto heapBytes = UINT64(heap.NumDescriptors) * inputs.descriptor_stride;
@@ -661,7 +666,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         UINT64(inputs.table_cpu.ptr - heapCpu) != inputs.table_gpu.ptr - heapGpu ||
         UINT64(inputs.table_cpu.ptr - heapCpu) % inputs.descriptor_stride != 0 ||
         UINT64(inputs.table_cpu.ptr - heapCpu) + UINT64(kLayeredTranslucencyDescriptorsPerFrame) * inputs.descriptor_stride > heapBytes)
-        return Failure(ErrorCode::InvalidArgument, "Hero transparency descriptor suffix does not fit its native shader heap.");
+        return Failure(ErrorCode::InvalidArgument, "Translucency transparency descriptor suffix does not fit its native shader heap.");
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.inputs = inputs; pending.shader_heap = inputs.shader_heap;
     if (layout)
@@ -718,23 +723,25 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
     };
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
     {
-        pending.front[layer] = import(storage->front[layer], "Hero.FrontDepth",
+        pending.front[layer] = import(storage->front[layer], "Translucency.FrontDepth",
             retained ? retained->front[layer] : TextureHandle{});
-        pending.identity[layer] = import(storage->identity[layer], "Hero.InstanceIdentity",
+        pending.identity[layer] = import(storage->identity[layer], "Translucency.InstanceIdentity",
             retained ? retained->identity[layer] : TextureHandle{});
         if (layout)
         {
             layout->front[layer] = pending.front[layer].resource;
             layout->identity[layer] = pending.identity[layer].resource;
         }
-        storage->FillTable(inputs, layer, layer, LayeredTranslucencyPhase::Front, inputs.hdr.resource);
+        if (!inputs.single_layer_water)
+            storage->FillTable(inputs, layer, layer, LayeredTranslucencyPhase::Front, inputs.hdr.resource);
     }
-    pending.exit = import(storage->exit, "Hero.ExitDepth", retained ? retained->exit : TextureHandle{});
+    pending.exit = import(storage->exit, "Translucency.ExitDepth", retained ? retained->exit : TextureHandle{});
     if (layout) layout->exit = pending.exit.resource;
-    storage->FillTable(inputs, 4, 0, LayeredTranslucencyPhase::Exit, inputs.hdr.resource);
+    if (!inputs.single_layer_water)
+        storage->FillTable(inputs, 4, 0, LayeredTranslucencyPhase::Exit, inputs.hdr.resource);
     for (std::uint32_t index = 0; index < storage->color.size(); ++index)
     {
-        pending.color[index] = import(storage->color[index], "Hero.CompositeHDR",
+        pending.color[index] = import(storage->color[index], "Translucency.CompositeHDR",
             retained ? retained->color[index] : TextureHandle{});
         if (layout) layout->color[index] = pending.color[index].resource;
     }
@@ -743,7 +750,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
     {
         if (index == 0) guides[index] = pending.front[0];
         else if (index == 4) guides[index] = pending.identity[0];
-        else guides[index] = import(storage->guides[index], "Hero.NearestFrontGuide",
+        else guides[index] = import(storage->guides[index], "Translucency.NearestFrontGuide",
             retained ? retained->guides[index] : TextureHandle{});
         if (layout) layout->guides[index] = guides[index].resource;
     }
@@ -758,7 +765,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             const auto external = ExternalBuffer{result.resource.Get(), result.graph_completion,
                 result.graph_queue, {}, result.NativeContract()};
             const auto handle = retained ? retained->occupancy_results[layer]
-                : graph.ImportBuffer(external, result.graph_access, "Hero.LayerOccupancy");
+                : graph.ImportBuffer(external, result.graph_access, "Translucency.LayerOccupancy");
             if (retained && !graph.BindBuffer(handle, external, result.graph_access))
                 imports_valid = false;
             pending.imports.push_back({&result, handle});
@@ -766,8 +773,11 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             if (layout) layout->occupancy_results[layer] = handle;
         }
     if (!imports_valid)
-        return Failure(ErrorCode::InvalidState, "Hero retained import bindings changed.");
-    storage->FillTable(inputs, kTailPhase, 0, LayeredTranslucencyPhase::Tail, inputs.hdr.resource);
+        return Failure(ErrorCode::InvalidState, "Translucency retained import bindings changed.");
+    const auto clear_phase = inputs.single_layer_water ? kCompositePhase : kTailPhase;
+    storage->FillTable(inputs, clear_phase, 0,
+        inputs.single_layer_water ? LayeredTranslucencyPhase::Composite : LayeredTranslucencyPhase::Tail,
+        inputs.hdr.resource);
     auto readScene = [&](PassBuilder &pass, bool shading, Access depthAccess = Access::ShaderRead) {
         pass.Read(inputs.opaque_depth.version, depthAccess);
         for (const auto &read : shading ? std::span<const LayeredTranslucencySceneRead>(pending.scene_reads) : inputs.peel_reads)
@@ -889,12 +899,12 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         : graph.AddPass(98, "Translucency.ClearUnpeeledFragmentCount", QueueHint::Direct);
     unpeeled_fragment_count = retained ? ResourceVersion{unpeeled_fragment_count.resource, 1}
         : clear.Write(unpeeled_fragment_count, Access::UnorderedWrite);
-    clear.SetExecute([storage, inputs](RenderPassContext &context) {
+    clear.SetExecute([storage, inputs, clear_phase](RenderPassContext &context) {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ID3D12DescriptorHeap *heaps[]{inputs.shader_heap}; commands->SetDescriptorHeaps(1, heaps);
         constexpr UINT zero[]{0, 0, 0, 0};
-        commands->ClearUnorderedAccessViewUint(storage->Gpu(inputs, kTailPhase, kUavOffset),
-            storage->Cpu(inputs.frame_slot, kTailPhase, kUavOffset), storage->unpeeled_fragment_count.resource.Get(), zero, 0, nullptr);
+        commands->ClearUnorderedAccessViewUint(storage->Gpu(inputs, clear_phase, kUavOffset),
+            storage->Cpu(inputs.frame_slot, clear_phase, kUavOffset), storage->unpeeled_fragment_count.resource.Get(), zero, 0, nullptr);
     });
     outputs.accumulation = inputs.accumulation.version;
     outputs.revealage = inputs.revealage.version;
@@ -1017,7 +1027,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
     if (impl_->targets && !impl_->targets->enabled) return Result::Success();
     auto &pending = impl_->pending;
     if (pending.graph != &graph || pending.composed)
-        return Failure(ErrorCode::InvalidState, "Register hero layers once before their composition on the same graph.");
+        return Failure(ErrorCode::InvalidState, "Register translucency layers once before their composition on the same graph.");
     auto storage = pending.targets;
     const auto inputs = pending.inputs;
     const bool use_occupancy = inputs.use_occupancy_queries && storage->occupancy_queries.Get();
@@ -1029,7 +1039,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
     if (layout && (layout->target_generation != storage->generation ||
             layout->layer_count != storage->layer_count || layout->occupancy != use_occupancy ||
             layout->capture_work != capture_work || layout->single_layer_water != inputs.single_layer_water))
-        return Failure(ErrorCode::InvalidState, "Hero composition layout variant changed.");
+        return Failure(ErrorCode::InvalidState, "Translucency composition layout variant changed.");
     if (retained)
     {
         const auto expected = retained->background;
@@ -1041,14 +1051,14 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             expected.resource.value != background.version.resource.value ||
             expected.resource.kind != background.version.resource.kind ||
             expected.ordinal != background.version.ordinal)
-            return Failure(ErrorCode::InvalidState, "Hero retained background or variant changed.");
+            return Failure(ErrorCode::InvalidState, "Translucency retained background or variant changed.");
         for (std::uint32_t step = 0; step < (inputs.single_layer_water ? 1u : storage->layer_count); ++step)
             if (!graph.BindPass(retained->copy_pass[step], 101 + step * 2) ||
                 !graph.BindPass(retained->composite_pass[step], 102 + step * 2))
-                return Failure(ErrorCode::InvalidState, "Hero retained composition pass changed.");
+                return Failure(ErrorCode::InvalidState, "Translucency retained composition pass changed.");
     }
     if (!Fits(background, inputs.render_active, kColor))
-        return Failure(ErrorCode::InvalidArgument, "Hero composition requires an initialized RGBA16F background at the active extent.");
+        return Failure(ErrorCode::InvalidArgument, "Translucency composition requires an initialized RGBA16F background at the active extent.");
     if (layout) layout->background = background.version;
     if (inputs.single_layer_water)
     {
@@ -1230,9 +1240,9 @@ Result TranslucencySystem::CompleteSubmission(const RenderGraphBuilder &graph, c
     if (!pending.graph)
     {
         if (impl_->targets && !impl_->targets->enabled) return Result::Success();
-        return Failure(ErrorCode::InvalidState, "Hero transparency has no registered submission.");
+        return Failure(ErrorCode::InvalidState, "Translucency transparency has no registered submission.");
     }
-    if (pending.graph != &graph) return Failure(ErrorCode::InvalidArgument, "Hero transparency completion refers to another graph.");
+    if (pending.graph != &graph) return Failure(ErrorCode::InvalidArgument, "Translucency transparency completion refers to another graph.");
     auto storage = pending.targets;
     storage->completion.Merge(completion); storage->slot_completion[pending.inputs.frame_slot].Merge(completion);
     for (const auto &imported : pending.imports)
@@ -1257,13 +1267,13 @@ Result TranslucencySystem::CompleteSubmission(const RenderGraphBuilder &graph, c
 }
 Result TranslucencySystem::ResetAfterCompletion(const CompletionSet &completed)
 {
-    if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending hero transparency before reset.");
+    if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending translucency transparency before reset.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
-        return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed GPU uses.");
+        return Failure(ErrorCode::InvalidState, "Translucency transparency reset requires completed GPU uses.");
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
     if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
-        return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed native contributor queries.");
+        return Failure(ErrorCode::InvalidState, "Translucency transparency reset requires completed native contributor queries.");
     impl_->retired_work = {};
 #endif
     impl_->targets.reset();
@@ -1280,7 +1290,7 @@ Result TranslucencySystem::ConsumeCompletedWork(const CompletionSet &completed, 
             240 * TranslucencyDiagnosticsRetainedLayout::kMaxContributors * kLayeredTranslucencyPhaseCount)
         {
             impl_->retired_work.overflowed = true;
-            return Failure(ErrorCode::InvalidState, "Hero contributor output exceeded its bounded pending rows; preserved rows require capture drain.");
+            return Failure(ErrorCode::InvalidState, "Translucency contributor output exceeded its bounded pending rows; preserved rows require capture drain.");
         }
         output.insert(output.end(), std::make_move_iterator(impl_->completed_work.begin()), std::make_move_iterator(impl_->completed_work.end()));
         impl_->completed_work.clear();

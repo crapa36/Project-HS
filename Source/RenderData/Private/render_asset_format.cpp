@@ -158,6 +158,8 @@ bool Known(std::uint32_t type)
 
 bool SupportedVersion(std::uint32_t type, std::uint16_t version)
 {
+    if(type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
+        return version >= 1 && version <= 3;
     return type == static_cast<std::uint32_t>(ChunkType::TextureMetadata)
                 ? (version == 1 || version == 2)
                 : version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
@@ -269,7 +271,8 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
     else if (type == static_cast<std::uint32_t>(ChunkType::AutoFgCadence))
         Require(stride == 12 && count == 1 && size == stride, "invalid Auto FG cadence chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
-        Require(stride == 1 && count >= 104 && count <= 68 + 64 * 36 && size == count,
+        Require(stride == 1 && count >= (version == 2 ? 112 : 104) &&
+            count <= 68 + 64 * (version == 2 ? 44 : 36) && size == count,
                 "invalid terrain surface sections chunk");
     else if (type == 13)
         Require(stride == kGeometryMetadataStride && count == 1 && size == stride,

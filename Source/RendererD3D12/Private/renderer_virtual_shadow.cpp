@@ -1224,7 +1224,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
     const auto pack = [&](const VirtualShadowCaster &c,std::size_t i,std::uint32_t &head,std::uint32_t &changes) {
         const bool is_static = c.immutable_source && !c.skin && !c.wind && !c.animated_alpha;
         const bool was_static = c.previous_immutable_source && !c.previous_skin && !c.previous_wind && !c.previous_animated_alpha;
-        const bool changed = c.present != c.previous_present || is_static != was_static ||
+        const bool changed = c.force_content_invalidation || c.present != c.previous_present || is_static != was_static ||
             c.instance_generation != c.previous_generation || c.current_revisions != c.previous_revisions ||
             c.current_cut_revision != c.previous_cut_revision || !Same(c.current_bounds, c.previous_bounds);
         const std::uint32_t flags = (c.present ? 1u : 0u) | (c.previous_present ? 2u : 0u) |

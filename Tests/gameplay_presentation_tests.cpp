@@ -46,6 +46,33 @@ void TestCanonicalPresentationCatalogBytes()
     first.relic_rules[0][0] = second.relic_rules[0][0] = 'R';
     Check(hs::CanonicalPresentationCatalogBytes(first) == hs::CanonicalPresentationCatalogBytes(second),
           "presentation identity ignores struct padding and bytes after string terminators");
+    const auto wire = hs::EncodePresentationCatalog(first);
+    hs::PresentationCatalog decoded{};
+    Check(hs::DecodePresentationCatalog(wire, decoded).Succeeded() &&
+          hs::EncodePresentationCatalog(decoded) == wire,
+          "presentation wire preserves camera and string rows");
+    auto invalid = wire;
+    invalid.push_back(std::byte{0});
+    auto unchanged = first;
+    Check(!hs::DecodePresentationCatalog(invalid, unchanged) &&
+          hs::EncodePresentationCatalog(unchanged) == wire,
+          "trailing presentation wire is rejected without changing output");
+    invalid = wire;
+    invalid.pop_back();
+    Check(!hs::DecodePresentationCatalog(invalid, unchanged) &&
+          hs::EncodePresentationCatalog(unchanged) == wire,
+          "truncated presentation wire preserves output");
+    invalid = wire;
+    constexpr auto names_count_offset = 8 + sizeof("project_hs.presentation_catalog") - 1 + 4 + 6 * 4;
+    invalid[names_count_offset] ^= std::byte{1};
+    Check(!hs::DecodePresentationCatalog(invalid, unchanged) &&
+          hs::EncodePresentationCatalog(unchanged) == wire,
+          "wrong presentation row count preserves output");
+    auto invalid_camera = first;
+    invalid_camera.camera.vertical_fov_degrees = 180.0f;
+    Check(!hs::DecodePresentationCatalog(hs::EncodePresentationCatalog(invalid_camera), unchanged) &&
+          hs::EncodePresentationCatalog(unchanged) == wire,
+          "invalid camera wire preserves output");
     second.relic_names[1][0] = 'B';
     Check(hs::CanonicalPresentationCatalogBytes(first) != hs::CanonicalPresentationCatalogBytes(second),
           "presentation identity preserves relic ordinal order");

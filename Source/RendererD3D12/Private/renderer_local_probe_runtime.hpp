@@ -78,10 +78,6 @@ struct LocalProbeRuntimeFrameInputs
     // All actual texture/material/light/shadow/environment/LTC/LUT/frame binding
     // reads. Native vertex/index/static table and private constants are appended.
     std::span<const LocalProbeSceneRead> scene_reads;
-    // Bind the existing common root signature, descriptor heaps/tables and all
-    // shared material/texture/light/shadow SRVs. Restore the main view bindings
-    // and viewport/targets after each capture, including a callback error.
-    std::function<void(ID3D12GraphicsCommandList *)> bind_graphics, restore_graphics;
     // Additional owners for resources read through the shared binding tables.
     std::vector<std::shared_ptr<const void>> binding_owners;
     CompletionSet completed;

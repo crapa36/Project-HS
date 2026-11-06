@@ -212,7 +212,7 @@ bool HsPrimaryDirectional(out float3 toward_light, out float3 incident)
 #ifdef HS_BSDF_METALLIC_ROUGHNESS_HLSLI
 void HsLightListEvaluateComponentsForView(HsSurfaceClosure closure, float3 world, float3 view,
     float primary_directional_visibility, uint type_mask, bool world_query,
-    float base_fresnel_override,
+    float base_fresnel_override, HsBsdfDirectView bsdf_prepared,
     out float3 diffuse, out float3 specular)
 {
     diffuse = 0.0; specular = 0.0;
@@ -220,13 +220,10 @@ void HsLightListEvaluateComponentsForView(HsSurfaceClosure closure, float3 world
     uint index;
     if (!HsNextLight(query, index)) return;
     closure = HsBsdfOrientThinSurface(closure, view);
-    const float3 bsdf_view = normalize(view);
+    const float3 bsdf_view = bsdf_prepared.view;
     const bool flip_bsdf_normal = HsBsdfThinTransmissionWeight(closure) > 0.0 &&
         dot(closure.normal, bsdf_view) < 0.0;
-    const float3 bsdf_normal = normalize(flip_bsdf_normal ? -closure.normal : closure.normal);
-    HsSurfaceClosure bsdf_surface = closure;
-    if (flip_bsdf_normal) bsdf_surface.normal = -bsdf_surface.normal;
-    const HsBsdfDirectView bsdf_prepared = HsBsdfPrepareDirectView(bsdf_surface, bsdf_view, bsdf_normal);
+    const float3 bsdf_normal = bsdf_prepared.normal;
     [loop] do
     {
         if(HsLightRecords[index].identity.w>=3u)
@@ -247,6 +244,16 @@ void HsLightListEvaluateComponentsForView(HsSurfaceClosure closure, float3 world
         diffuse += light_diffuse * incident;
         specular += light_specular * incident;
     } while (HsNextLight(query, index));
+}
+void HsLightListEvaluateComponentsForView(HsSurfaceClosure closure, float3 world, float3 view,
+    float primary_directional_visibility, uint type_mask, bool world_query,
+    float base_fresnel_override, out float3 diffuse, out float3 specular)
+{
+    const float3 normalized_view = normalize(view);
+    const HsSurfaceClosure oriented = HsBsdfOrientThinSurface(closure, normalized_view);
+    const HsBsdfDirectView prepared = HsBsdfPrepareDirectView(oriented, normalized_view, normalize(oriented.normal));
+    HsLightListEvaluateComponentsForView(oriented, world, normalized_view, primary_directional_visibility,
+        type_mask, world_query, base_fresnel_override, prepared, diffuse, specular);
 }
 void HsLightListEvaluateComponentsOptical(HsSurfaceClosure closure, float3 world, float3 camera_world,
     float primary_directional_visibility, uint type_mask, bool world_query, float base_fresnel_override,

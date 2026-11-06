@@ -93,6 +93,7 @@ void ResidencyManager::Reset() noexcept
 void ResidencyManager::UpdateBudget(ResidencyBudgetSnapshot snapshot) noexcept
 {
     unified_memory_ = snapshot.unified_memory;
+    budget_.unified_memory = snapshot.unified_memory;
     if (snapshot.valid)
     {
         budget_.valid = true;

@@ -135,33 +135,6 @@ ReleaseAudio BuildReleaseAudio(std::string_view catalog_text,
     });
     const auto identity_bytes = identity.View();
     result.identity.assign(reinterpret_cast<const char *>(identity_bytes.data()), identity_bytes.size());
-    result.source = "\n#include <hs/runtime/audio_image.hpp>\n#include <array>\nnamespace hs::shipping { namespace {\n";
-    result.source += "constinit const std::array<AudioSampleRow," + std::to_string(samples.size()) + "> kAudioSamples{{\n";
-    for (const auto &s : samples)
-        result.source += "{" + std::to_string(s.offset) + "ull," + std::to_string(s.bytes) + "ull," +
-            std::to_string(s.sample_rate) + "u," + std::to_string(s.channels) + "," + std::to_string(s.bits_per_sample) + "},\n";
-    result.source += "}};\nconstinit const std::array<AudioCueRow," + std::to_string(cues.size()) + "> kAudioCues{{\n";
-    for (const auto &c : cues)
-        result.source += "{{" + std::to_string(c.id.value) + "ull}," + std::to_string(c.first_sample) + "u," +
-            std::to_string(c.sample_count) + "u," + std::to_string(c.max_simultaneous) + "u," +
-            std::to_string(c.retrigger_ms) + "u,AudioBus(" + std::to_string(unsigned(c.bus)) + "),AudioPriority(" +
-            std::to_string(unsigned(c.priority)) + ")," + (c.spatial ? "true," : "false,") +
-            (c.preload ? "true," : "false,") + (c.arrow_impact_family ? "true," : "false,") + (c.loop ? "true},\n" : "false},\n");
-    result.source += "}};\nconstinit const std::array<AudioPcmChunk," + std::to_string(chunks.size()) + "> kAudioChunks{{\n";
-    for (const auto &chunk : chunks)
-    {
-        result.source += "{" + std::to_string(chunk.offset) + "ull," + std::to_string(chunk.bytes) + "ull," +
-            std::to_string(chunk.first_sample) + "u," + std::to_string(chunk.sample_count) + "u," +
-            (chunk.preload ? "true,{" : "false,{");
-        for (std::size_t index = 0; index < chunk.digest.size(); ++index)
-        {
-            if (index) result.source += ',';
-            result.source += "std::byte{" + std::to_string(std::to_integer<unsigned>(chunk.digest[index])) + "}";
-        }
-        result.source += "}},\n";
-    }
-    result.source += "}};\nconstinit const AudioImage kAudio{kAudioCues,kAudioSamples,kAudioChunks};\n}\n"
-        "const AudioImage &Audio() noexcept { return kAudio; }\n}\n";
     return result;
 }
 }

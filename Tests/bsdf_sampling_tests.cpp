@@ -108,7 +108,7 @@ D3D12_RESOURCE_DESC PreintegrateDescription()
 constexpr UINT kLegacyCaseCount = 7;
 constexpr UINT kCoatedCaseCount = 72;
 constexpr UINT kFresnelCaseCount = 14;
-constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount + kFresnelCaseCount;
+constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount + kFresnelCaseCount + 1;
 
 ComPtr<ID3D12RootSignature> CreateProbeRootSignature(ID3D12Device *device)
 {
@@ -675,6 +675,11 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
     }
     std::printf("Fresnel boundary cases=%u max error=%.9g tolerance=%.9g\n",
         kFresnelCaseCount,max_fresnel_error,fresnel_tolerance);
+    const auto isotropic=probe_metrics[kProbeCaseCount-1];
+    Check(std::abs(isotropic.pdf_integral-0.25f)<1e-5f &&
+          std::abs(isotropic.valid_frequency-1.0f)<1e-5f &&
+          std::abs(isotropic.energy-4.0f)<1e-5f,
+          "uniform irradiance SH must reconstruct isotropic incident radiance");
     resources.probe_readback->Unmap(0, nullptr);
 }
 } // namespace

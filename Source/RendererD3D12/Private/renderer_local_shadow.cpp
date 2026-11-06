@@ -35,7 +35,7 @@ bool StaticCaster(const VirtualShadowCaster &c,bool previous=false)
     c.present&&c.immutable_source&&!c.skin&&!c.wind&&!c.animated_alpha;}
 bool Changed(const VirtualShadowCaster &c,bool current_static,bool previous_static)
 {
-    return c.present!=c.previous_present||c.instance_generation!=c.previous_generation||
+    return c.force_content_invalidation||c.present!=c.previous_present||c.instance_generation!=c.previous_generation||
         c.current_revisions!=c.previous_revisions||c.current_cut_revision!=c.previous_cut_revision||
         !SameBounds(c.current_bounds,c.previous_bounds)||current_static!=previous_static;
 }

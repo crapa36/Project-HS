@@ -64,7 +64,11 @@ int main(int argc, char **argv)
         hs::AudioEngine audio;
         hs::SettingsData settings;
         settings.master_volume = 0;
-        if (const auto result = audio.Initialize(settings, generation.product_paths); !result)
+        std::shared_ptr<hs::audio_detail::PreparedAudio> prepared;
+        if (const auto result = hs::PrepareAudio(generation.product_paths, prepared); !result)
+            throw std::runtime_error("AudioEngine rejected selected Generation preparation");
+        auto generation_owner = std::make_shared<hs::SelectedGeneration>(std::move(generation));
+        if (const auto result = audio.Initialize(settings, prepared, generation_owner); !result)
             throw std::runtime_error("AudioEngine rejected selected Generation catalog");
         if (audio.Status().loaded_cues != 107)
             throw std::runtime_error("AudioEngine did not load all 107 authored cues");

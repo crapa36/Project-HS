@@ -122,7 +122,7 @@ HsBsdfGgxView HsBsdfPrepareGgxView(HsSurfaceClosure surface, float3 normal, floa
 }
 
 float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
-    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, float3 f0, out float3 diffuse)
 {
     diffuse = 0.0;
     float raw_no_v = prepared.no_v;
@@ -151,18 +151,28 @@ float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 
     float view_smith_denominator = prepared.view_smith_denominator;
     float light_smith_denominator = no_l + sqrt(alpha_squared + (1.0 - alpha_squared) * no_l * no_l);
     float metallic = HsBsdfMetallic(surface);
-    float3 fresnel = HsBsdfOpticalReflectionFresnel(surface, vo_h, base_fresnel_override);
+    float3 fresnel = HsBsdfSchlickFresnel(f0, vo_h);
+    if (base_fresnel_override >= 0.0)
+        fresnel = lerp(fresnel, saturate(base_fresnel_override).xxx,
+            saturate(surface.solid_transmission_weight));
     // A substrate path crosses the dielectric interface on entry and exit.
     // Use both macro-normal Fresnel transmissions for this conservative
     // single-scatter diffuse approximation; half-vector Fresnel belongs to
     // the reflected microfacet path and overcounts diffuse energy at grazing.
     // Hammon, PBR Diffuse Lighting for GGX+Smith Microsurfaces, GDC 2017.
     float3 diffuse_transmission =
-        (1.0 - HsBsdfSchlickFresnel(HsBsdfF0(surface), no_v)) *
-        (1.0 - HsBsdfSchlickFresnel(HsBsdfF0(surface), no_l));
+        (1.0 - HsBsdfSchlickFresnel(f0, no_v)) *
+        (1.0 - HsBsdfSchlickFresnel(f0, no_l));
     diffuse = diffuse_transmission * ((1.0 - metallic) * surface.base_color) * HsBsdfInvPi;
     float3 specular = distribution * fresnel / (view_smith_denominator * light_smith_denominator);
     return diffuse + specular;
+}
+
+float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
+{
+    return HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light,
+        base_fresnel_override, prepared, HsBsdfF0(surface), diffuse);
 }
 
 float3 HsBsdfBaseEvaluateOpticalComponentsPrepared(HsSurfaceClosure surface, float3 normal, float3 view,

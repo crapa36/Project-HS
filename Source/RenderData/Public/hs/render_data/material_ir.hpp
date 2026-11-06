@@ -93,6 +93,43 @@ enum class MaterialContextInput
     Mesh, Seed, ViewDirection, Metallic, SampledEmission, SampledMetallic,
     DecalTintHdr, DecalProjector, DecalShape,
 };
+// parameter_base is a uniform context field, not a MaterialContextInput.
+[[nodiscard]] constexpr std::uint32_t MaterialContextInputMask(MaterialContextInput input)
+{
+    switch (input)
+    {
+    case MaterialContextInput::Uv: return 1u << 0;
+    case MaterialContextInput::DUvDx: return 1u << 1;
+    case MaterialContextInput::DUvDy: return 1u << 2;
+    case MaterialContextInput::Layer: return 1u << 3;
+    case MaterialContextInput::ActualWorldPosition: return 1u << 4;
+    case MaterialContextInput::DActualWorldDx: return 1u << 5;
+    case MaterialContextInput::DActualWorldDy: return 1u << 6;
+    case MaterialContextInput::StableWorldPosition: return 1u << 7;
+    case MaterialContextInput::DStableWorldDx: return 1u << 8;
+    case MaterialContextInput::DStableWorldDy: return 1u << 9;
+    case MaterialContextInput::Normal: return 1u << 10;
+    case MaterialContextInput::Tangent: return 1u << 11;
+    case MaterialContextInput::EyeDistance: return 1u << 12;
+    case MaterialContextInput::SampledBaseColor: return 1u << 13;
+    case MaterialContextInput::SampledRoughness: return 1u << 14;
+    case MaterialContextInput::SampledAlpha: return 1u << 15;
+    case MaterialContextInput::RoughnessScale: return 1u << 16;
+    case MaterialContextInput::SampledAo: return 1u << 17;
+    case MaterialContextInput::ShadingNormal: return 1u << 18;
+    case MaterialContextInput::Mesh: return 1u << 19;
+    case MaterialContextInput::Seed: return 1u << 20;
+    case MaterialContextInput::ViewDirection: return 1u << 21;
+    case MaterialContextInput::Metallic: return 1u << 22;
+    case MaterialContextInput::SampledEmission: return 1u << 23;
+    case MaterialContextInput::SampledMetallic: return 1u << 24;
+    case MaterialContextInput::DecalTintHdr: return 1u << 25;
+    case MaterialContextInput::DecalProjector: return 1u << 26;
+    case MaterialContextInput::DecalShape: return 1u << 27;
+    }
+    return 0;
+}
+struct MaterialContextDemand { std::uint32_t surface_mask{}, opacity_mask{}; };
 enum class TerrainField { BaseColor, Normal, Detail, Roughness, Ao };
 
 // Arithmetic operands have exactly the result type: uint or float/float2/3/4.
@@ -215,6 +252,7 @@ private:
 
     friend PreparedMaterial PrepareMaterial(MaterialGraph, MaterialPreparationDomain);
     friend ClosureReflection AnalyzeClosure(const PreparedMaterial &);
+    friend MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &);
     friend std::string EmitUniformClosureHlsl(const PreparedMaterial &, std::string_view);
     friend std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::uint32_t);
     friend void ValidateMaterialSampleLayers(const PreparedMaterial &, std::span<const std::uint32_t>, std::uint32_t);
@@ -227,6 +265,8 @@ private:
 
 [[nodiscard]] PreparedMaterial PrepareMaterial(MaterialGraph graph,
     MaterialPreparationDomain domain = MaterialPreparationDomain::Generic);
+// Generic follows Environment opacity semantics; Hero evaluates closure opacity even when opaque.
+[[nodiscard]] MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material);
 
 enum class MaterialClosureCapability : std::uint32_t
 {

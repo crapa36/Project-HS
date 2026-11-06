@@ -14,6 +14,9 @@
 #include <stdexcept>
 #include <utility>
 #include <map>
+#ifndef NDEBUG
+#include <cstdio>
+#endif
 
 namespace hs::content
 {
@@ -131,82 +134,133 @@ std::array<double,3> SkinPosition(const rd::ExpandedVertex &vertex,
     return result;
 }
 
-struct SkinnedLodCertificate { double position{},uv{},normal{},tangent{}; };
+struct SkinnedLodCertificate { double position{},uv{},normal{},tangent{}; bool early_rejection{}; };
 SkinnedLodCertificate CertifyMonsterLod(const CharacterIR &character,
     const rd::MonsterCharacterData &monster,
-    std::span<const rd::ExpandedVertex> fine,std::span<const rd::ExpandedVertex> coarse)
+    std::span<const rd::ExpandedVertex> fine,std::span<const rd::ExpandedVertex> coarse,
+    double position_limit)
 {
-    const auto forward=geometry_content::BuildSurfaceWitnesses(fine,coarse);
-    const auto reverse=geometry_content::BuildSurfaceWitnesses(coarse,fine);
     SkinnedLodCertificate certificate;
-    const auto attributes=[&](std::span<const rd::ExpandedVertex> source,
-        std::span<const rd::ExpandedVertex> target,
-        std::span<const geometry_content::SurfaceWitness> witnesses) {
-        for(std::size_t triangle=0;triangle<witnesses.size();++triangle)
+    const double margin=4.0*monster.numerical_margin+2.0*monster.bubble_amplitude+
+        1e-5*std::max(1.0,double(monster.lods.front().bounds.sphere[3]));
+    using Bary=std::array<double,3>;
+    struct Patch { std::size_t triangle; std::array<Bary,3> corners; };
+    const auto direction=[&](std::span<const rd::ExpandedVertex> source,
+                             std::span<const rd::ExpandedVertex> target) {
+        std::vector<Patch> patches;
+        for(std::size_t triangle=0;triangle<source.size()/3;++triangle)
+            patches.push_back({triangle,{{Bary{1,0,0},Bary{0,1,0},Bary{0,0,1}}}});
+        for(unsigned depth=0;!patches.empty();++depth)
         {
-            const auto &w=witnesses[triangle];
-            for(std::size_t corner=0;corner<3;++corner)
+            std::vector<rd::ExpandedVertex> expanded;
+            expanded.reserve(patches.size()*3);
+            for(const auto &patch:patches)
+                for(const auto &q:patch.corners)
+                {
+                    auto v=source[patch.triangle*3];
+                    for(std::size_t axis=0;axis<3;++axis) {
+                        double p{},n{};for(std::size_t k=0;k<3;++k) {
+                            p+=q[k]*source[patch.triangle*3+k].position[axis];
+                            n+=q[k]*source[patch.triangle*3+k].normal[axis];}
+                        v.position[axis]=static_cast<float>(p);v.normal[axis]=static_cast<float>(n);
+                    }
+                    for(std::size_t axis=0;axis<2;++axis) {
+                        double u{};for(std::size_t k=0;k<3;++k) u+=q[k]*source[patch.triangle*3+k].uv[axis];
+                        v.uv[axis]=static_cast<float>(u);
+                    }
+                    for(std::size_t axis=0;axis<4;++axis) {
+                        double t{};for(std::size_t k=0;k<3;++k) t+=q[k]*source[patch.triangle*3+k].tangent[axis];
+                        v.tangent[axis]=static_cast<float>(t);
+                    }
+                    expanded.push_back(v);
+                }
+            const auto witnesses=geometry_content::BuildSurfaceWitnesses(expanded,target);
+            std::vector<SkinnedLodCertificate> errors(patches.size());
+            for(std::size_t triangle=0;triangle<patches.size();++triangle)
             {
-                const auto &a=source[triangle*3+corner];
+                const auto &patch=patches[triangle];const auto &w=witnesses[triangle];
+                const auto *a=source.data()+patch.triangle*3;
                 const auto *b=target.data()+w.target_triangle*3;
-                const auto &q=w.target_barycentric[corner];
-                double uv{},normal{},tangent{};
-                for(std::size_t axis=0;axis<2;++axis) {
-                    double blended{};for(std::size_t k=0;k<3;++k) blended+=q[k]*b[k].uv[axis];
-                    const double delta=double(a.uv[axis])-blended;uv+=delta*delta;
+                for(std::size_t corner=0;corner<3;++corner) {
+                    const auto &p=patch.corners[corner];const auto &q=w.target_barycentric[corner];
+                    double uv{},normal{},tangent{};
+                    for(std::size_t axis=0;axis<2;++axis) {
+                        double delta{};for(std::size_t k=0;k<3;++k) delta+=p[k]*a[k].uv[axis]-q[k]*b[k].uv[axis];
+                        uv+=delta*delta;
+                    }
+                    for(std::size_t axis=0;axis<4;++axis) {
+                        double n{},t{};for(std::size_t k=0;k<3;++k) {
+                            if(axis<3) n+=p[k]*a[k].normal[axis]-q[k]*b[k].normal[axis];
+                            t+=p[k]*a[k].tangent[axis]-q[k]*b[k].tangent[axis];}
+                        normal+=n*n;tangent+=t*t;
+                    }
+                    errors[triangle].uv=std::max(errors[triangle].uv,std::sqrt(uv));
+                    errors[triangle].normal=std::max(errors[triangle].normal,std::sqrt(normal));
+                    errors[triangle].tangent=std::max(errors[triangle].tangent,std::sqrt(tangent));
                 }
-                for(std::size_t axis=0;axis<4;++axis) {
-                    double bn{},bt{};for(std::size_t k=0;k<3;++k) {
-                        if(axis<3) bn+=q[k]*b[k].normal[axis];
-                        bt+=q[k]*b[k].tangent[axis];}
-                    if(axis<3)
-                    {const double delta=double(a.normal[axis])-bn;normal+=delta*delta;}
-                    const double delta=double(a.tangent[axis])-bt;tangent+=delta*delta;
-                }
-                certificate.uv=std::max(certificate.uv,std::sqrt(uv));
-                certificate.normal=std::max(certificate.normal,std::sqrt(normal));
-                certificate.tangent=std::max(certificate.tangent,std::sqrt(tangent));
             }
-        }
-    };
-    attributes(fine,coarse,forward);attributes(coarse,fine,reverse);
-    std::vector<std::array<double,3>> posed_fine(fine.size()),posed_coarse(coarse.size());
-    const auto position=[&](std::span<const std::array<double,3>> source,
-        std::span<const std::array<double,3>> target,
-        std::span<const geometry_content::SurfaceWitness> witnesses) {
-        for(std::size_t triangle=0;triangle<witnesses.size();++triangle)
-        {
-            const auto &w=witnesses[triangle];
-            for(std::size_t corner=0;corner<3;++corner)
+            if(depth==4)
+                for(const auto &e:errors)
+                    if(e.uv>0.02 || e.normal>0.25 || e.tangent>0.35) {
+                        certificate=e;certificate.early_rejection=true;return false;
+                    }
+            std::vector<std::array<double,3>> posed_source(source.size()),posed_target(target.size());
+            for(const auto &clip:character.clips)
+                for(std::uint32_t frame=0;frame<clip.frame_count;++frame)
+                {
+                    const auto palette=std::span(monster.final_matrices).subspan(
+                        clip.first_transform+std::size_t(frame)*character.bone_count,character.bone_count);
+                    for(std::size_t i=0;i<source.size();++i) posed_source[i]=SkinPosition(source[i],palette);
+                    for(std::size_t i=0;i<target.size();++i) posed_target[i]=SkinPosition(target[i],palette);
+                    for(std::size_t triangle=0;triangle<patches.size();++triangle) {
+                        const auto &patch=patches[triangle];const auto &w=witnesses[triangle];
+                        const auto *a=posed_source.data()+patch.triangle*3;
+                        const auto *b=posed_target.data()+w.target_triangle*3;
+                        for(std::size_t corner=0;corner<3;++corner) {
+                            const auto &p=patch.corners[corner];const auto &q=w.target_barycentric[corner];
+                            double squared{};
+                            for(std::size_t axis=0;axis<3;++axis) {
+                                double delta{};for(std::size_t k=0;k<3;++k) delta+=p[k]*a[k][axis]-q[k]*b[k][axis];
+                                squared+=delta*delta;
+                            }
+                            errors[triangle].position=std::max(errors[triangle].position,std::sqrt(squared));
+                            if(depth==4 && errors[triangle].position+margin>position_limit) {
+                                certificate=errors[triangle];certificate.early_rejection=true;return false;
+                            }
+                        }
+                    }
+                }
+            std::vector<Patch> next;
+            const auto midpoint=[](const Bary &a,const Bary &b) {
+                return Bary{(a[0]+b[0])*0.5,(a[1]+b[1])*0.5,(a[2]+b[2])*0.5};
+            };
+            for(std::size_t i=0;i<patches.size();++i)
             {
-                const auto &a=source[triangle*3+corner];
-                const auto *b=target.data()+w.target_triangle*3;
-                const auto &q=w.target_barycentric[corner];
-                double squared{};
-                for(std::size_t axis=0;axis<3;++axis) {
-                    double blended{};for(std::size_t k=0;k<3;++k) blended+=q[k]*b[k][axis];
-                    const double delta=a[axis]-blended;squared+=delta*delta;
+                const auto &e=errors[i];const auto &patch=patches[i];
+                if(depth<4 && (e.position+margin>position_limit || e.uv>0.02 || e.normal>0.25 || e.tangent>0.35))
+                {
+                    const auto &a=patch.corners[0],&b=patch.corners[1],&c=patch.corners[2];
+                    const auto ab=midpoint(a,b),bc=midpoint(b,c),ca=midpoint(c,a);
+                    next.push_back({patch.triangle,{a,ab,ca}});
+                    next.push_back({patch.triangle,{ab,b,bc}});
+                    next.push_back({patch.triangle,{ca,bc,c}});
+                    next.push_back({patch.triangle,{ab,bc,ca}});
                 }
-                certificate.position=std::max(certificate.position,std::sqrt(squared));
+                else {
+                    certificate.position=std::max(certificate.position,e.position);
+                    certificate.uv=std::max(certificate.uv,e.uv);
+                    certificate.normal=std::max(certificate.normal,e.normal);
+                    certificate.tangent=std::max(certificate.tangent,e.tangent);
+                }
             }
+            patches=std::move(next);
         }
+        return true;
     };
-    for(const auto &clip:character.clips)
-        for(std::uint32_t frame=0;frame<clip.frame_count;++frame)
-        {
-            const auto palette=std::span(monster.final_matrices).subspan(
-                clip.first_transform+std::size_t(frame)*character.bone_count,character.bone_count);
-            for(std::size_t i=0;i<fine.size();++i) posed_fine[i]=SkinPosition(fine[i],palette);
-            for(std::size_t i=0;i<coarse.size();++i) posed_coarse[i]=SkinPosition(coarse[i],palette);
-            position(posed_fine,posed_coarse,forward);
-            position(posed_coarse,posed_fine,reverse);
-        }
-    // The witness mapping is fixed per source triangle. Its barycentric
-    // interpolation makes the error affine over both triangle and palette
-    // time; norm convexity bounds the entire surface at interval endpoints.
-    certificate.position=std::nextafter(certificate.position+4.0*monster.numerical_margin+
-        2.0*monster.bubble_amplitude+
-        1e-5*std::max(1.0,double(monster.lods.front().bounds.sphere[3])),INFINITY);
+    // Each patch maps affinely into one target triangle, including after
+    // skinning and palette interpolation; endpoint norms bound its interior.
+    if(direction(fine,coarse)) direction(coarse,fine);
+    certificate.position=std::nextafter(certificate.position+margin,INFINITY);
     return certificate;
 }
 } // namespace
@@ -386,14 +440,30 @@ std::vector<CharacterProduct> BuildCharacterProducts(
             for(const double fraction:attempts[lod-1])
             {
                 const auto simplified=geometry_content::SimplifySkinnedGeometry(geometry,static_cast<float>(radius*fraction));
-                if(simplified.size()>=best_indices) continue;
+#ifndef NDEBUG
+                std::fprintf(stderr,"monster_lod %s lod=%u fraction=%.4f indices=%zu/%zu radius=%.9g",stem.c_str(),unsigned(lod),fraction,simplified.size(),best_indices,radius);
+#endif
+                if(simplified.size()>=best_indices) {
+#ifndef NDEBUG
+                    std::fprintf(stderr," no reduction\n");
+#endif
+                    continue;
+                }
                 auto candidate=geometry_content::CookGeometry(simplified,rd::kGeometryFlagSkinned);
                 if(candidate.indices.size()>=best_indices ||
-                    candidate.vertices.size()>=(lod_geometries.empty()?geometry.vertices.size():lod_geometries.back().vertices.size())) continue;
+                    candidate.vertices.size()>=(lod_geometries.empty()?geometry.vertices.size():lod_geometries.back().vertices.size())) {
+#ifndef NDEBUG
+                    std::fprintf(stderr," no vertex reduction %zu\n",candidate.vertices.size());
+#endif
+                    continue;
+                }
                 auto with_bounds=*monster;
                 AppendMonsterIntervalBounds(with_bounds,character,candidate,lod);
                 const auto coarse=ExpandGeometry(candidate);
-                const auto certificate=CertifyMonsterLod(character,with_bounds,fine,coarse);
+                const auto certificate=CertifyMonsterLod(character,with_bounds,fine,coarse,radius*pose_limits[lod-1]);
+#ifndef NDEBUG
+                std::fprintf(stderr," position=%.9g/%.9g uv=%.9g/0.02 normal=%.9g/0.25 tangent=%.9g/0.35 enclosure=%u%s\n",certificate.position,radius*pose_limits[lod-1],certificate.uv,certificate.normal,certificate.tangent,unsigned(bool(with_bounds.flags&rd::kMonsterBoundsPositionEnclosure)),certificate.early_rejection?" early rejection":"");
+#endif
                 // The same fixed surface witnesses bound the interpolated UV,
                 // normal and tangent fields. Their thresholds prevent a small
                 // geometric error from hiding a damaged material appearance.

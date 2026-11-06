@@ -86,7 +86,6 @@ constexpr std::array kProjectPrograms{
     ProgramOutput{"ribbon_vs.dxil", L"RibbonVS", L"vs_6_0"},
     ProgramOutput{"ribbon_add_ps.dxil", L"RibbonAddPS", L"ps_6_0"},
     ProgramOutput{"ribbon_oit_ps.dxil", L"RibbonOitPS", L"ps_6_0"},
-    ProgramOutput{"fullscreen_vs.dxil", L"FullScreenVS", L"vs_6_0"},
     ProgramOutput{"temporal_ps.dxil", L"TemporalPS", L"ps_6_0"},
     ProgramOutput{"composite_ps.dxil", L"CompositePS", L"ps_6_0"},
     ProgramOutput{"bloom_extract_ps.dxil", L"BloomExtractPS", L"ps_6_0"},
@@ -197,9 +196,12 @@ std::span<const ShaderFamily> ShaderFamilies()
     static constexpr std::array terrain_pages{
         ProgramOutput{"terrain_page_bake_cs.dxil", L"BakeCS", L"cs_6_0"},
         ProgramOutput{"terrain_page_mip_cs.dxil", L"MipCS", L"cs_6_0"}};
+    static constexpr std::array fullscreen_programs{
+        ProgramOutput{"fullscreen_vs.dxil", L"FullScreenVS", L"vs_6_0"}};
     static constexpr std::array families{
         ShaderFamily{"terrain-page", "Content/Shaders/terrain_page.hlsl", terrain_pages},
         ShaderFamily{"ui-draw", "Content/Shaders/ui_draw.hlsl", ui_draw_programs},
+        ShaderFamily{"fullscreen", "Content/Shaders/project_hs.hlsl", fullscreen_programs},
         ShaderFamily{"project", "Content/Shaders/project_hs.hlsl", kProjectPrograms},
         ShaderFamily{"geometry", "Content/Shaders/geometry.hlsl", kGeometryPrograms},
         ShaderFamily{"visibility", "Content/Shaders/visibility_buffer.hlsl", kVisibilityPrograms},
@@ -521,17 +523,24 @@ std::vector<ap::Input> ResolveCachedInputs(const ap::Json &metadata,
     return inputs;
 }
 
+std::string ProductId(const ShaderFamily &family, const ProgramOutput &program)
+{
+    if (family.name == "terrain-page")
+        return std::string("terrain/producer/") + (std::wstring_view(program.entry) == L"BakeCS" ? "bake_cs.dxil" : "mip_cs.dxil");
+    return "render/shader/" + std::string(program.filename);
+}
+
 bool CachedProductsMatch(const ap::ActionResultSnapshot &snapshot,
                          const ShaderFamily &family, bool &read_attempted)
 {
     if (snapshot.ProductCount() != family.programs.size()) return false;
     for (const auto &program : family.programs)
-        if (!snapshot.HasProduct("render/shader/" + std::string(program.filename))) return false;
+        if (!snapshot.HasProduct(ProductId(family, program))) return false;
     read_attempted = true;
     for (const auto &program : family.programs)
     {
         ap::UpstreamProduct dependency;
-        const auto bytes = snapshot.ReadProductBytes("render/shader/" + std::string(program.filename), dependency);
+        const auto bytes = snapshot.ReadProductBytes(ProductId(family, program), dependency);
         if (!ValidDxilBytes(bytes)) return false;
     }
     return true;
@@ -618,7 +627,7 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
                    program.entry, program.profile);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(
-                "render/shader/" + std::string(program.filename),
+                ProductId(family, program),
                 program.filename, output));
         }
         RequireStableToolInputs(spec.inputs);

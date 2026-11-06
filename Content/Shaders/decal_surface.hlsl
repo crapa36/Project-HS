@@ -2,29 +2,9 @@
 // it shares the renderer root signature without adding root parameters or MRTs.
 #include "surface_metadata.hlsli"
 #include "material_surface.hlsli"
-
-cbuffer DecalConstants : register(b0, space36)
-{
-    float4x4 DecalInverseViewProjection;
-    float4 DecalViewOrigin;
-    float4 DecalRenderSize;
-    uint4 DecalInfo; // command count, parameter slot count, gradient width/rows
-    uint4 DecalReceivers[2]; // model mask, required flags, forbidden flags, normal filter
-    uint4 DecalParameterBases;
-};
-Texture2D<float> DecalDepth : register(t0, space36);
-Texture2D<uint> DecalMetadata : register(t1, space36);
-Texture2D<float4> DecalBase : register(t2, space36);
-Texture2D<float2> DecalNormal : register(t3, space36);
-Texture2D<float4> DecalMaterial : register(t4, space36);
-ByteAddressBuffer DecalCommands : register(t5, space36);
-Texture2D<float4> DecalGradient : register(t6, space36);
-StructuredBuffer<uint4> MaterialParameters : register(t7, space36);
-// Generated texture declarations occupy t8/t9, one per authored decal graph.
-RWTexture2D<float4> DecalOutBase : register(u0, space36);
-RWTexture2D<float2> DecalOutNormal : register(u1, space36);
-RWTexture2D<float4> DecalOutMaterial : register(u2, space36);
-RWTexture2D<float4> DecalOutEmission : register(u3, space36);
+#define HS_DECAL_SHADER
+#include "decal_surface_abi.hlsli"
+#undef HS_DECAL_SHADER
 SamplerState LinearClamp : register(s0);
 
 // Decal-only context fields leave the common geometry context ABI unchanged.
@@ -163,7 +143,7 @@ void DecalSurfaceCS(uint3 dispatch : SV_DispatchThreadID)
             ? (HsDecalWorld(py, depth_y) - world).xz : 0.0;
         [loop] for (uint index = 0u; index < DecalInfo.x; ++index)
         {
-            const uint offset = index * 96u;
+            const uint offset = index * HS_DECAL_COMMAND_STRIDE;
             const float4 position_radius = asfloat(DecalCommands.Load4(offset));
             const float4 axis_alpha_age = asfloat(DecalCommands.Load4(offset + 16u));
             const float4 color_hdr = asfloat(DecalCommands.Load4(offset + 32u));

@@ -747,7 +747,7 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = v.ambient_occlusion.Commit(std::move(ambient), completed); !r) return r;
     if (auto r = v.subsurface.Commit(std::move(diffusion), completed); !r) return r;
     if (auto r = v.screen_reflections.Commit(std::move(reflections), completed); !r) return r;
-    if (auto r = v.hero_transparency.Commit(std::move(transparency), completed); !r) return r;
+    if (auto r = v.translucency.Commit(std::move(transparency), completed); !r) return r;
     if (auto r = v.hdr_post.Commit(std::move(hdr), completed); !r) return r;
     if (auto r = v.screen_overlay.Commit(std::move(overlay), completed); !r) return r;
     if (auto r = v.light_list.Commit(std::move(lights), completed); !r) return r;
@@ -800,6 +800,7 @@ void D3D12Renderer::Impl::InvalidateCanonicalDeformationAfterCompletion() noexce
 
 Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
 {
+    view.last_history_frame_slot = UINT32_MAX;
     ResetClusterViewResources(view.cluster_view);
     if (view.reconstruction_provider)
         if (auto r = view.reconstruction_provider->ResetAfterCompletion(); !r) return r;
@@ -807,7 +808,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = view.adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.subsurface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_reflections.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = RetireLayeredTranslucency(view.hero_transparency); !r) return r;
+    if (auto r = RetireLayeredTranslucency(view.translucency); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.virtual_shadows.Commit(VirtualShadowCandidate{}, graph_queue_executor.Completed()); !r) return r;
@@ -833,46 +834,23 @@ Result D3D12Renderer::Impl::ResetOwnedViewsAfterCompletion()
 
 RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
 {
-    auto camera = source;
-    const auto &config = impl_->config;
-    const bool family = config.slime_family_preview_count != 0;
-    const bool monster = config.monster_preview_asset < 6 || family;
-    if (config.environment_preview)
-    {
-        camera.target = {0,1,0};
-        if (!config.preview_camera_override) { camera.yaw_degrees = 0; camera.pitch_degrees = 22; camera.distance = 22; }
-    }
-    const float target_height = monster ? (!family && config.monster_preview_asset >= 3 ? 3.0f : 1.0f)
-        : config.character_preview ? 1.0f : camera.target.y;
-    const float yaw_degrees = config.preview_camera_override ? config.preview_camera_yaw
-#if defined(HS_DEVELOPMENT_TOOLS)
-        : config.character_preview ? impl_->preview_yaw
-#endif
-        : camera.yaw_degrees;
-    const float pitch_degrees = config.preview_camera_override ? config.preview_camera_pitch
-#if defined(HS_DEVELOPMENT_TOOLS)
-        : config.character_preview ? impl_->preview_pitch
-#endif
-        : camera.pitch_degrees;
-    const float distance = config.preview_camera_override ? config.preview_camera_distance
-        : family ? std::max(10.0f, std::sqrt(config.slime_family_preview_count * 3.0f) * 1.9f)
-#if defined(HS_DEVELOPMENT_TOOLS)
-        : monster ? (config.monster_preview_asset >= 3 ? 18.0f : 8.0f)
-        : config.character_preview ? impl_->preview_distance
-#endif
-        : camera.distance;
+    const auto &camera = source;
+    const auto yaw_degrees = camera.yaw_degrees;
+    const auto pitch_degrees = camera.pitch_degrees;
+    const auto distance = camera.distance;
+    const auto target_height = camera.target.y;
     const auto yaw = DirectX::XMConvertToRadians(yaw_degrees);
     const auto pitch = DirectX::XMConvertToRadians(pitch_degrees);
     const auto direction = DirectX::XMVector3Normalize(DirectX::XMVectorSet(
         std::cos(pitch) * std::sin(yaw), -std::sin(pitch), std::cos(pitch) * std::cos(yaw), 0));
-    const auto target = DirectX::XMVectorSet(family ? 0.0f : camera.target.x, target_height,
-        family ? 0.0f : camera.target.z, 1);
+    const auto target = DirectX::XMVectorSet(camera.target.x, target_height,
+        camera.target.z, 1);
     DirectX::XMFLOAT3 position{};
     DirectX::XMStoreFloat3(&position, DirectX::XMVectorSubtract(target, DirectX::XMVectorScale(direction, distance)));
     RenderViewInput input;
     input.id = kMainRenderViewId;
     input.camera.position = {position.x, position.y, position.z};
-    input.camera.target = {family ? 0.0 : camera.target.x, target_height, family ? 0.0 : camera.target.z};
+    input.camera.target = {camera.target.x, target_height, camera.target.z};
     input.camera.vertical_fov_degrees = camera.vertical_fov_degrees;
     input.view_origin = input.camera.position;
     const auto &main_owner = *impl_->owned_views.at(kMainRenderViewId.value);
@@ -1035,6 +1013,7 @@ Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameRes
         main_owner.content_generation = impl_->resource_generation_id;
         main_owner.pipeline_revision = impl_->pipeline_revision;
         main_owner.temporal_history_valid = false; main_owner.hzb_history_valid = false;
+        main_owner.last_history_frame_slot = UINT32_MAX;
         main_owner.history_output_extent = main_owner.state.output_extent;
     }
     const auto saved_identity = main_owner.sdk_frame_identity;
@@ -1083,10 +1062,11 @@ Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameRes
         (void)UpdateViewState(owned_view.state, view.output_extent, view.render_capacity, view.render_active);
         owned_view.width = view.output_extent.width; owned_view.height = view.output_extent.height;
         owned_view.render_width = view.render_active.width; owned_view.render_height = view.render_active.height;
-        if (active_changed) { owned_view.hzb_history_valid = false; owned_view.targets.hzb_layout = MakeHzbLayout(owned_view.render_width, owned_view.render_height); }
+        if (active_changed) { owned_view.hzb_history_valid = false; owned_view.last_history_frame_slot = UINT32_MAX; owned_view.targets.hzb_layout = MakeHzbLayout(owned_view.render_width, owned_view.render_height); }
         if (view.camera_cut)
         {
             owned_view.temporal_history_valid = false; owned_view.hzb_history_valid = false;
+            owned_view.last_history_frame_slot = UINT32_MAX;
             owned_view.exposure_initialized = false; owned_view.previous_origins_valid = false;
             owned_view.previous_skin_deformation.reset(); owned_view.previous_instances.reset(); owned_view.skin_history.Clear();
             owned_view.ambient_occlusion.ResetHistory(); owned_view.screen_reflections.ResetHistory();
@@ -1128,6 +1108,7 @@ Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameRes
         auto &failed_view = *impl_->owned_views.at(attempted_view->id.value);
         failed_view.temporal_history_valid = false;
         failed_view.hzb_history_valid = false;
+        failed_view.last_history_frame_slot = UINT32_MAX;
         failed_view.previous_origins_valid = false;
         failed_view.previous_skin_deformation.reset();
         failed_view.previous_instances.reset();

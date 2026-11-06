@@ -23,11 +23,14 @@ struct AudioSample
     std::atomic<std::uint32_t> native_pins{}; // Transition buffers only.
     Result (*read_developer)(AudioSample &){};
 };
-struct DeveloperAudioCatalog
+struct PreparedAudio
 {
     std::vector<AudioCueRow> cues;
+    std::span<const AudioCueRow> packed_cues;
     std::unique_ptr<AudioSample[]> samples;
     std::size_t sample_count{};
+    std::vector<std::byte> resident_pcm;
+    const ShippedContentOwner *content{};
 };
 [[nodiscard]] Result LoadDeveloperWavePayload(AudioSample &sample);
 }

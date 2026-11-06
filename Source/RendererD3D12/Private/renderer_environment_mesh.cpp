@@ -346,8 +346,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
             stream.target_index = static_cast<std::uint32_t>(index);
             stream.fallback_index = fallback_page_slot;
         }
-        // Startup never opens a LOD0 payload; its selected resident fallback is complete.
-        if (index % 3 == 0) continue;
+        // Runtime starts from a complete fallback; capture consumes the selected source page.
+        if (index % 3 == 0 && material_residency == EnvironmentMaterialResidency::RuntimeFallback) continue;
         std::vector<std::byte> page_bytes;
         if (auto read = ReadBinary(page_path, page_bytes); !read) return read;
         PreparedGeometryUpload preparation;

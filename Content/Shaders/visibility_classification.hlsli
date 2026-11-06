@@ -6,11 +6,11 @@ bool HsClassifiedMaterialVariant(HsRasterRecord record,
                                   out uint variant)
 {
     variant = HsRasterVariant(record);
-    if ((geometry.Flags & 16u) != 0u || HsHeroAssetIndex(geometry.MeshId) == HsHeroInvalidOrdinal)
-        return variant < HsHeroVisibilityVariantBegin;
-    const uint ordinal = HsHeroBindingOrdinals(geometry.MeshId, slot).x;
-    if (!HsHeroOpaqueOrdinalValid(ordinal)) return false;
-    variant = HsHeroVisibilityVariantBegin + ordinal;
+    if ((geometry.Flags & 16u) != 0u || HsCharacterAssetIndex(geometry.MeshId) == HsCharacterInvalidOrdinal)
+        return variant < HsCharacterVisibilityVariantBegin;
+    const uint ordinal = HsCharacterBindingOrdinals(geometry.MeshId, slot).x;
+    if (!HsCharacterOpaqueOrdinalValid(ordinal)) return false;
+    variant = HsCharacterVisibilityVariantBegin + ordinal;
     return true;
 }
 
@@ -18,8 +18,8 @@ bool HsClassifiedVariant(uint2 visibility, HsRasterRecord record,
                          GeometryDrawRecord geometry, out uint variant)
 {
     variant = HsRasterVariant(record);
-    if ((geometry.Flags & 16u) != 0u || HsHeroAssetIndex(geometry.MeshId) == HsHeroInvalidOrdinal)
-        return variant < HsHeroVisibilityVariantBegin;
+    if ((geometry.Flags & 16u) != 0u || HsCharacterAssetIndex(geometry.MeshId) == HsCharacterInvalidOrdinal)
+        return variant < HsCharacterVisibilityVariantBegin;
     // Archer's FBX slots share one draw. Classify each canonical primitive by
     // its provoking vertex instead of a draw-wide material/variant guess.
     if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||

@@ -1,5 +1,7 @@
 #include "renderer_impl.hpp"
 #include "renderer_development_catalog.hpp"
+#include <DirectXPackedVector.h>
+#include <bit>
 
 namespace hs
 {
@@ -197,9 +199,9 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     ambient_range.NumDescriptors = 2;
     ambient_range.BaseShaderRegister = 5;
     ambient_range.OffsetInDescriptorsFromTableStart += 11;
-    D3D12_DESCRIPTOR_RANGE1 hero_binding_range = material_parameter_range;
-    hero_binding_range.BaseShaderRegister = 1;
-    hero_binding_range.OffsetInDescriptorsFromTableStart = kHeroBindingDescriptorOffset - kTemporalTextureDescriptorOffset;
+    D3D12_DESCRIPTOR_RANGE1 character_binding_range = material_parameter_range;
+    character_binding_range.BaseShaderRegister = 1;
+    character_binding_range.OffsetInDescriptorsFromTableStart = kCharacterBindingDescriptorOffset - kTemporalTextureDescriptorOffset;
     D3D12_DESCRIPTOR_RANGE1 probe_range = material_parameter_range;
     probe_range.NumDescriptors = 3;
     probe_range.BaseShaderRegister = 0;
@@ -212,7 +214,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     const std::array history_geometry_ranges{
         temporal_input_range, geometry_range, surface_range,
         visibility_srv_range, visibility_uav_range, material_parameter_range,
-        view_range, exposure_srv_range, ambient_range, hero_binding_range, probe_range, light_range,
+        view_range, exposure_srv_range, ambient_range, character_binding_range, probe_range, light_range,
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kVirtualShadowDescriptorCount, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -249,16 +251,16 @@ Result D3D12Renderer::Impl::CreateRootSignature()
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 35,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kEntitySurfaceNoiseDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 36,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, HS_DECAL_CONSTANT_REGISTER, HS_DECAL_SPACE,
             D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
             kDecalSurfaceDescriptorOffset - kTemporalTextureDescriptorOffset + kDecalSurfaceCbvOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kDecalSurfaceSrvCount, 0, 36,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kDecalSurfaceSrvCount, DecalSurfaceSrvDepth, HS_DECAL_SPACE,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kDecalSurfaceDescriptorOffset - kTemporalTextureDescriptorOffset + kDecalSurfaceSrvOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kDecalSurfaceUavCount, 0, 36,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kDecalSurfaceUavCount, DecalSurfaceUavBase, HS_DECAL_SPACE,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kDecalSurfaceDescriptorOffset - kTemporalTextureDescriptorOffset + kDecalSurfaceUavOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kDecalSurfaceExportCount, 10, 36,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kDecalSurfaceExportCount, HS_DECAL_EXPORT_REGISTER_BASE, HS_DECAL_SPACE,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kDecalSurfaceDescriptorOffset - kTemporalTextureDescriptorOffset + kDecalSurfaceExportOffset}};
     D3D12_DESCRIPTOR_RANGE1 sampler_range{};
@@ -269,10 +271,10 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     const D3D12_DESCRIPTOR_RANGE1 hero_transparency_ranges[]{
         {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 14,
             D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 21, 0, 14,
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLayeredTranslucencySrvCount, 0, 14,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 1},
         {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 14,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 22}};
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, kLayeredTranslucencyUavOffset}};
     const D3D12_DESCRIPTOR_RANGE1 view_skin_ranges[]{
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4, 3,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0},
@@ -518,7 +520,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> shadow_mesh;
     std::vector<std::byte> scene_pixel;
     std::vector<std::byte> hero_scene_pixel, hero_visibility_pixel, hero_shadow_pixel;
-    std::vector<std::byte> hero_resolve_compute, hero_translucent_pixel;
+    std::vector<std::byte> character_resolve_compute, hero_translucent_pixel;
     std::array<std::vector<std::byte>, kAuthoredMaterialNames.size()> material_scene_pixels;
     std::array<std::vector<std::byte>, kAuthoredMaterialNames.size()> material_shadow_pixels;
     std::vector<std::byte> visibility_pixel;
@@ -633,16 +635,16 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (auto registered = register_shader_owner("render/shader/deferred_ps.dxil", deferred_pixel,
         deferred_bytes_verified); !registered)
         return registered;
-    if (auto read = read_shader("hero_shadow_ps.dxil", hero_shadow_pixel); !read) return read;
-    if (auto read = read_shader("hero_translucent_ps.dxil", hero_translucent_pixel); !read) return read;
+    if (auto read = read_shader("character_shadow_ps.dxil", hero_shadow_pixel); !read) return read;
+    if (auto read = read_shader("character_translucent_ps.dxil", hero_translucent_pixel); !read) return read;
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
     {
-        if (auto read = read_shader("hero_scene_ps.dxil", hero_scene_pixel); !read) return read;
+        if (auto read = read_shader("character_scene_ps.dxil", hero_scene_pixel); !read) return read;
     }
     else
     {
-        if (auto read = read_shader("hero_visibility_ps.dxil", hero_visibility_pixel); !read) return read;
-        if (auto read = read_shader("hero_resolve_cs.dxil", hero_resolve_compute); !read) return read;
+        if (auto read = read_shader("character_visibility_ps.dxil", hero_visibility_pixel); !read) return read;
+        if (auto read = read_shader("character_resolve_cs.dxil", character_resolve_compute); !read) return read;
     }
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
         if (auto read = read_shader("scene_ps.dxil", scene_pixel); !read) return read;
@@ -879,7 +881,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (FAILED(result)) return HResultFailure("Create cluster shadow PSO", result);
     }
     auto hero_shadow = environment_shadow;
-    // HeroShadowPS discards backfaces; cull them before pixel shading.
+    // CharacterShadowPS discards backfaces; cull them before pixel shading.
     hero_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     hero_shadow.PS = {hero_shadow_pixel.data(), hero_shadow_pixel.size()};
     result = create_shadow_graphics(&hero_shadow, IID_PPV_ARGS(&hero_shadow_pipeline));
@@ -888,7 +890,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
     {
         auto hero_scene = scene;
-        // HeroScenePS discards backfaces; cull them before pixel shading.
+        // CharacterScenePS discards backfaces; cull them before pixel shading.
         hero_scene.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
         hero_scene.PS = {hero_scene_pixel.data(), hero_scene_pixel.size()};
         result = pipeline_cache.CreateGraphics(&hero_scene, IID_PPV_ARGS(&hero_scene_pipeline));
@@ -1143,8 +1145,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (auto created = create_visibility_compute(surface_resolve_compute,
                 surface_resolve_pipeline, "surface resolve"); !created)
             return created;
-        if (auto created = create_visibility_compute(hero_resolve_compute,
-                hero_resolve_pipeline, "hero surface resolve"); !created) return created;
+        if (auto created = create_visibility_compute(character_resolve_compute,
+                character_resolve_pipeline, "character surface resolve"); !created) return created;
         for (std::size_t i = 0; i < kAuthoredMaterialNames.size(); ++i)
         {
             if (auto created = create_visibility_compute(material_resolve_compute[i],
@@ -1535,7 +1537,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_environment_opaque_shadow = std::move(environment_opaque_shadow_pipeline);
     auto previous_material_scenes = std::move(environment_material_scene_pipelines);
     std::array previous_heroes{std::move(hero_scene_pipeline), std::move(hero_visibility_pipeline),
-        std::move(hero_shadow_pipeline), std::move(hero_resolve_pipeline), std::move(hero_translucent_pipeline)};
+        std::move(hero_shadow_pipeline), std::move(character_resolve_pipeline), std::move(hero_translucent_pipeline)};
     auto previous_material_shadows = std::move(environment_material_shadow_pipelines);
     auto previous_visibility = std::move(visibility_pipeline);
     auto previous_material_visibility = std::move(environment_material_visibility_pipelines);
@@ -1619,7 +1621,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         hero_scene_pipeline = std::move(previous_heroes[0]);
         hero_visibility_pipeline = std::move(previous_heroes[1]);
         hero_shadow_pipeline = std::move(previous_heroes[2]);
-        hero_resolve_pipeline = std::move(previous_heroes[3]);
+        character_resolve_pipeline = std::move(previous_heroes[3]);
         hero_translucent_pipeline = std::move(previous_heroes[4]);
         environment_material_shadow_pipelines = std::move(previous_material_shadows);
         visibility_pipeline = std::move(previous_visibility);
@@ -1698,7 +1700,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = owner.screen_reflections.Commit(std::move(reflections), completed); !committed)
         { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.hero_transparency.Commit(std::move(transparency), completed); !committed)
+        if (auto committed = owner.translucency.Commit(std::move(transparency), completed); !committed)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = owner.hdr_post.Commit(std::move(hdr_post), completed); !committed)
         { frame_submission_faulted = true; return committed; }
@@ -1739,5 +1741,53 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     return result;
 }
 
+
+void D3D12Renderer::Impl::FillMaterialFrameConstants(renderer_detail::FrameConstants &constants) const
+{
+    static_assert(kAuthoredMaterialNames.size() <= 16);
+    for (std::size_t group = 0; group < constants.material_parameter_bases.size(); ++group)
+    {
+        std::array<UINT, 4> bases{};
+        for (std::size_t lane = 0; lane < bases.size(); ++lane)
+            if (const auto ordinal = group * 4 + lane; ordinal < kAuthoredMaterialNames.size())
+                bases[lane] = material_parameter_bases[ordinal];
+        constants.material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
+        std::array<UINT, 4> masks{};
+        for (std::size_t lane = 0; lane < masks.size(); ++lane)
+            if (const auto ordinal = group * 4 + lane; ordinal < kAuthoredMaterialNames.size())
+                masks[lane] = material_surface_layouts[ordinal].varying_mask;
+        constants.material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
+    }
+    const auto &sidecar = material_sidecar_layout;
+    for (std::size_t group = 0; group < constants.character_material_parameter_bases.size(); ++group)
+    {
+        std::array<UINT, 4> bases{}, masks{};
+        for (std::size_t lane = 0; lane < bases.size(); ++lane)
+            if (const auto hero = group * 4 + lane; hero < kCharacterMaterialNames.size())
+            {
+                const auto ordinal = kAuthoredMaterialNames.size() + hero;
+                bases[lane] = material_parameter_bases[ordinal];
+                masks[lane] = material_surface_layouts[ordinal].varying_mask;
+            }
+        constants.character_material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
+        constants.character_material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
+    }
+    constants.character_binding_ranges = character_binding_ranges;
+    constants.probe_options = lighting_probe.FrameOptions();
+    constants.material_sidecar_offsets[0] = {sidecar.offsets[0], sidecar.offsets[1],
+                                             sidecar.offsets[2], sidecar.offsets[3]};
+    constants.material_sidecar_offsets[1] = {sidecar.offsets[4], UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    constants.material_sidecar_info = {sidecar.mask, sidecar.word_count, sidecar.plane_count, 0};
+    const bool pom_enabled = config.pom_quality != GraphicsOptionalQuality::Off;
+    const auto pom_row = pom_enabled ? static_cast<GraphicsQuality>(static_cast<unsigned>(config.pom_quality) - 1u) : GraphicsQuality::Low;
+    const auto &pom = QualityProfileFor(pom_row);
+    const auto &material = QualityProfileFor(config.material_quality);
+    // Z is bit-reinterpreted payload: positive binary16 fade start in the low
+    // half, fade end in the high half. HLSL decodes both with f16tof32.
+    const auto fade_bits = UINT(DirectX::PackedVector::XMConvertFloatToHalf(material.terrain_detail_fade_start_m)) |
+        (UINT(DirectX::PackedVector::XMConvertFloatToHalf(material.terrain_detail_fade_end_m)) << 16u);
+    constants.material_quality_options = {pom_enabled ? float(pom.pom_max_steps) : 0.0f, pom_enabled ? float(pom.pom_refinement_steps) : 0.0f,
+        std::bit_cast<float>(fade_bits), static_cast<float>(config.refraction_quality)};
+}
 
 } // namespace hs

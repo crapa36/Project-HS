@@ -187,6 +187,19 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
 
 void D3D12Renderer::Impl::CommitMaterialParameters() noexcept
 {
+    const auto begin = material_parameter_candidate_bases[kTerrainMaterialOrdinal];
+    const auto end = material_parameter_candidate_bases[kTerrainMaterialOrdinal + 1];
+    Sha256Stream hash;
+    hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).subspan(begin, end - begin)));
+    const auto parameters = hash.Finish();
+    if (!terrain_generation_parameters_valid)
+    {
+        terrain_generation_parameters = parameters;
+        terrain_generation_parameters_valid = true;
+    }
+    const bool matches = parameters == terrain_generation_parameters;
+    terrain_parameters_changed |= matches != terrain_parameters_match;
+    terrain_parameters_match = matches;
     // Preparation completed and drained all readers. Publishing every frame
     // slot together prevents raster, shadow and compute observing mixed values.
     material_parameters = std::move(material_parameter_candidate);
@@ -725,6 +738,9 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
         if (auto result = register_texture(texture.product_id, texture.description, texture.texture, {},
             environment_material_texture_stream_ids[index]); !result) return result;
     }
+    preferred_texture_scene.reset();
+    preferred_texture_materials.fill(false);
+    preferred_texture_initialized = false;
     material_texture_stream_ids = {};
     for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
         for (std::size_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
@@ -1048,6 +1064,9 @@ void D3D12Renderer::Impl::MarkEnvironmentStreamingUse(
 
 void D3D12Renderer::Impl::ResetEnvironmentStreaming() noexcept
 {
+    preferred_texture_scene.reset();
+    preferred_texture_materials.fill(false);
+    preferred_texture_initialized = false;
     environment_stream.ResetRuntime();
     for (auto &stream : environment_geometry_streams) stream.ResetRuntime();
     environment_material_textures.clear();

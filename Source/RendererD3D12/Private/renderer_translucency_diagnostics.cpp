@@ -40,7 +40,7 @@ Result Readback(D3D12MA::Allocator *allocator, UINT64 bytes, AllocationResource 
     desc.SampleDesc.Count = 1; desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     const auto hr = allocator->CreateResource(&allocation, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
         &out.allocation, IID_PPV_ARGS(out.resource.ReleaseAndGetAddressOf()));
-    if (FAILED(hr)) return Native("Create hero contributor readback", hr);
+    if (FAILED(hr)) return Native("Create translucency contributor readback", hr);
     out.graph_access = Access::CopyDest;
     return Result::Success();
 }
@@ -54,7 +54,7 @@ Result ShaderBuffer(D3D12MA::Allocator *allocator, UINT64 bytes, bool upload, Al
     if (!upload) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     const auto hr = allocator->CreateResource(&allocation, &desc, upload ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON,
         nullptr, &out.allocation, IID_PPV_ARGS(out.resource.ReleaseAndGetAddressOf()));
-    if (FAILED(hr)) return Native("Create bounded hero shader diagnostic buffer", hr);
+    if (FAILED(hr)) return Native("Create bounded translucency shader diagnostic buffer", hr);
     out.graph_access = upload ? Access::CopySource : Access::Common;
     return Result::Success();
 }
@@ -102,11 +102,11 @@ TranslucencyDiagnosticsCapture::TranslucencyDiagnosticsCapture() : impl_(std::ma
 TranslucencyDiagnosticsCapture::~TranslucencyDiagnosticsCapture() = default;
 Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *device, D3D12MA::Allocator *allocator, std::uint32_t count, ViewExtent capacity, TranslucencyDiagnosticsMode mode)
 {
-    if (!device || !allocator || !count || !impl_->slots.empty()) return Fail("Invalid hero capture initialization.");
+    if (!device || !allocator || !count || !impl_->slots.empty()) return Fail("Invalid translucency capture initialization.");
     if (!TranslucencyDiagnosticsMakeShaderLayout(capacity.width, capacity.height, count, impl_->shader_layout))
-        return Fail("Hero shader diagnostics exceed the checked 512MiB GPU/readback/zero-upload limit or pixel index range.");
+        return Fail("Translucency shader diagnostics exceed the checked 512MiB GPU/readback/zero-upload limit or pixel index range.");
     static_assert(32 + kTranslucencyDiagnosticsShaderCounterNames.size() * 4 <= kTranslucencyDiagnosticsShaderHeaderBytes);
-    if (mode > TranslucencyDiagnosticsMode::CoverageOnly) return Fail("Invalid hero work diagnostic mode.");
+    if (mode > TranslucencyDiagnosticsMode::CoverageOnly) return Fail("Invalid translucency work diagnostic mode.");
     impl_->mode = mode;
     impl_->status.shader_counters_enabled = true;
     impl_->device = device;
@@ -116,7 +116,7 @@ Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *device, D3D12MA:
     impl_->status.enabled = true; impl_->status.mesh_statistics_supported = stats1;
     if (stats1) { impl_->statistics_type = D3D12_QUERY_TYPE_PIPELINE_STATISTICS1; impl_->statistics_bytes = 14 * sizeof(UINT64); }
     LARGE_INTEGER frequency{};
-    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return Fail("Hero capture QPC frequency is unavailable.");
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return Fail("Translucency capture QPC frequency is unavailable.");
     impl_->qpc_frequency = static_cast<std::uint64_t>(frequency.QuadPart);
     for (UINT index = 0; index < count; ++index)
     {
@@ -124,7 +124,7 @@ Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *device, D3D12MA:
         auto heap = [&](D3D12_QUERY_HEAP_TYPE type, UINT queries, ComPtr<ID3D12QueryHeap> &out) -> Result {
             D3D12_QUERY_HEAP_DESC desc{}; desc.Type = type; desc.Count = queries;
             const auto hr = device->CreateQueryHeap(&desc, IID_PPV_ARGS(&out));
-            if (FAILED(hr)) return Native("Create hero contributor query heap", hr);
+            if (FAILED(hr)) return Native("Create translucency contributor query heap", hr);
             ++impl_->status.query_heap_count; impl_->status.query_count += queries;
             return Result::Success();
         };
@@ -148,7 +148,7 @@ Result TranslucencyDiagnosticsCapture::Initialize(ID3D12Device *device, D3D12MA:
             impl_->status.shader_gpu_bytes += slot->shader_gpu[phase].allocation->GetSize();
             impl_->status.shader_readback_bytes += slot->shader_readbacks[phase].allocation->GetSize();
             if (impl_->status.readback_bytes + impl_->status.shader_gpu_bytes + impl_->status.shader_readback_bytes + impl_->status.shader_zero_upload_bytes > kTranslucencyDiagnosticsShaderStorageLimit)
-                return Fail("Actual hero shader diagnostic allocation sizes exceed 512MiB.");
+                return Fail("Actual translucency shader diagnostic allocation sizes exceed 512MiB.");
         }
         for (auto *resource : {&slot->arguments, &slot->shader_zero})
             if (auto certified = resource->EnsureNativeContract(device); !certified)
@@ -166,8 +166,8 @@ void TranslucencyDiagnosticsCapture::Pipeline(std::uint32_t index, const D3D12_G
     std::span<const std::byte> vertex, std::span<const std::byte> pixel, std::string_view product)
 {
     auto &out = impl_->pipelines.at(index);
-    out.vertex_product = index == 3 ? "render/shader/hero_transparency_vs.dxil"
-                                    : "render/shader/hero_transparency_current_vs.dxil";
+    out.vertex_product = index == 3 ? "render/shader/layered_translucency_vs.dxil"
+                                    : "render/shader/layered_translucency_current_vs.dxil";
     out.pixel_product = product;
     out.vertex_sha256 = Sha256(vertex); out.pixel_sha256 = Sha256(pixel);
     out.source_requested_flags = "RenderMaterialShader: -nologo -WX -O3 -Ges; VS vs_6_0 / PS ps_6_0; HS_GENERATED_CHARACTER_MATERIAL=1; HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1; product/source flags, not binary attestation";
@@ -196,25 +196,25 @@ Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &graph, const La
 {
     if (inputs.frame_slot >= impl_->slots.size() || inputs.work_contributors.size() > kContributors || !inputs.work_draw ||
         !inputs.direct_queue || !inputs.direct_timestamp_frequency || !inputs.submitted_frame)
-        return Fail("Hero contributor frame requires an indexed contributor callback, native direct queue and frame identity.");
+        return Fail("Translucency contributor frame requires an indexed contributor callback, native direct queue and frame identity.");
     auto &slot = *impl_->slots[inputs.frame_slot];
-    if (slot.pending) return Fail("Collect completed hero contributor slot before reusing its native queries.");
-    if (!slot.completion.IsSatisfiedBy(inputs.completed)) return Fail("Hero contributor query slot is still in GPU use.");
+    if (slot.pending) return Fail("Collect completed translucency contributor slot before reusing its native queries.");
+    if (!slot.completion.IsSatisfiedBy(inputs.completed)) return Fail("Translucency contributor query slot is still in GPU use.");
     for (const auto &source : inputs.work_contributors)
     {
         if (!source.argument_resource || !source.arguments.resource || source.arguments.resource.kind != ResourceKind::Buffer)
-            return Fail("Hero contributor requires an actual graph-owned indirect argument buffer.");
+            return Fail("Translucency contributor requires an actual graph-owned indirect argument buffer.");
         const auto desc = source.argument_resource->GetDesc();
         if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || source.argument_offset % 4 ||
             source.argument_offset > desc.Width || 24 > desc.Width - source.argument_offset)
-            return Fail("Hero indexed indirect argument range is invalid.");
+            return Fail("Translucency indexed indirect argument range is invalid.");
     }
     slot.recorded.fill(false); slot.phase_handles.fill({}); slot.arguments_handle = {};
     slot.shader_handles.fill({}); slot.shader_readback_handles.fill({}); slot.shader_zero_handle = {};
     slot.shader_clear_recorded.fill(false); slot.shader_copy_recorded.fill(false);
     if (!inputs.render_active.width || !inputs.render_active.height ||
         std::uint64_t(inputs.render_active.width) * inputs.render_active.height > impl_->shader_layout.pixels)
-        return Fail("Hero shader active extent exceeds the checked bitmap capacity.");
+        return Fail("Translucency shader active extent exceeds the checked bitmap capacity.");
     slot.contributors.assign(inputs.work_contributors.begin(), inputs.work_contributors.end());
     if (layout)
     {
@@ -229,7 +229,7 @@ Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &graph, const La
     if (slot.contributors.empty()) return Result::Success();
     void *zero{}; const D3D12_RANGE no_read{0, 0};
     auto zero_result = slot.shader_zero.resource->Map(0, &no_read, &zero);
-    if (FAILED(zero_result)) return Native("Map hero shader zero-upload owner", zero_result);
+    if (FAILED(zero_result)) return Native("Map translucency shader zero-upload owner", zero_result);
     std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
     for (UINT contributor = 0; contributor < kContributors; ++contributor)
     {
@@ -264,7 +264,7 @@ Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &graph, const La
         if (std::ranges::any_of(previous, [&](const auto &other) {
                 return other.arguments.resource.value == source.arguments.resource.value &&
                     other.arguments.ordinal != source.arguments.ordinal;
-            })) return Fail("Hero contributors reference different versions of one argument buffer.");
+            })) return Fail("Translucency contributors reference different versions of one argument buffer.");
         if (std::none_of(previous.begin(), previous.end(), [&](const auto &other) {
                 return other.arguments.resource.value == source.arguments.resource.value;
             }))
@@ -345,12 +345,12 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
             (layout.argument_copy_pass >= graph.PassCount() ||
              graph.DeclaredPassId(layout.argument_copy_pass) != 118 ||
              !graph.BindPass(layout.argument_copy_pass, 118))))
-        return Fail("Hero retained contributor layout or frame is invalid.");
+        return Fail("Translucency retained contributor layout or frame is invalid.");
     auto &slot = *impl_->slots[inputs.frame_slot];
     if (slot.pending || !slot.completion.IsSatisfiedBy(inputs.completed))
-        return Fail("Hero retained contributor slot is still in GPU use.");
+        return Fail("Translucency retained contributor slot is still in GPU use.");
     if (!slot.shader_zero.NativeContract() || !slot.arguments.NativeContract())
-        return Fail("Hero retained contributor native owner changed.");
+        return Fail("Translucency retained contributor native owner changed.");
     for (std::size_t index = 0; index < inputs.work_contributors.size(); ++index)
     {
         const auto &source = inputs.work_contributors[index];
@@ -359,15 +359,15 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
             source.arguments.resource.kind != ResourceKind::Buffer ||
             source.arguments.resource.value != expected.resource.value ||
             source.arguments.ordinal != expected.ordinal)
-            return Fail("Hero retained contributor argument topology changed.");
+            return Fail("Translucency retained contributor argument topology changed.");
         const auto desc = source.argument_resource->GetDesc();
         if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || source.argument_offset % 4 ||
             source.argument_offset > desc.Width || 24 > desc.Width - source.argument_offset)
-            return Fail("Hero retained indexed argument range is invalid.");
+            return Fail("Translucency retained indexed argument range is invalid.");
     }
     if (!inputs.render_active.width || !inputs.render_active.height ||
         std::uint64_t(inputs.render_active.width) * inputs.render_active.height > impl_->shader_layout.pixels)
-        return Fail("Hero retained shader active extent exceeds bitmap capacity.");
+        return Fail("Translucency retained shader active extent exceeds bitmap capacity.");
     slot.recorded.fill(false); slot.phase_handles.fill({});
     slot.shader_handles.fill({}); slot.shader_readback_handles.fill({});
     slot.shader_clear_recorded.fill(false); slot.shader_copy_recorded.fill(false);
@@ -379,7 +379,7 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
     if (slot.contributors.empty()) return Result::Success();
     void *zero{}; const D3D12_RANGE no_read{0, 0};
     const auto mapped = slot.shader_zero.resource->Map(0, &no_read, &zero);
-    if (FAILED(mapped)) return Native("Map retained hero shader zero upload", mapped);
+    if (FAILED(mapped)) return Native("Map retained translucency shader zero upload", mapped);
     std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
     for (UINT contributor = 0; contributor < kContributors; ++contributor)
     {
@@ -399,11 +399,11 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
             slot.arguments.graph_completion, slot.arguments.graph_queue, {},
             slot.arguments.NativeContract()},
             slot.arguments.graph_access))
-        return Fail("Hero retained contributor imports changed.");
+        return Fail("Translucency retained contributor imports changed.");
     slot.shader_zero_handle = layout.zero_upload;
     slot.arguments_handle = layout.arguments_readback;
     auto pass = graph.BindPass(layout.argument_copy_pass, 118);
-    if (!pass) return Fail("Hero retained argument copy pass was already bound.");
+    if (!pass) return Fail("Translucency retained argument copy pass was already bound.");
     pass->SetExecute([&slot](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         for (std::size_t index = 0; index < slot.contributors.size(); ++index)
@@ -417,7 +417,7 @@ Result TranslucencyDiagnosticsCapture::BindRetainedPhase(RenderGraphBuilder &gra
     std::uint32_t phase, const TranslucencyDiagnosticsRetainedLayout &layout)
 {
     if (index >= impl_->slots.size() || phase >= kPhases)
-        return Fail("Hero retained phase slot is invalid.");
+        return Fail("Translucency retained phase slot is invalid.");
     auto &slot = *impl_->slots[index];
     if (slot.contributors.empty()) return Result::Success();
     if (
@@ -425,13 +425,13 @@ Result TranslucencyDiagnosticsCapture::BindRetainedPhase(RenderGraphBuilder &gra
         !layout.shader_readback[phase] ||
         !graph.BindPass(layout.shader_initialize_pass[phase], 0x48570000u + phase * 2) ||
         !graph.BindPass(layout.shader_copy_pass[phase], 0x48570001u + phase * 2))
-        return Fail("Hero retained phase topology changed.");
+        return Fail("Translucency retained phase topology changed.");
     auto &readback = slot.readbacks[phase];
     auto &gpu = slot.shader_gpu[phase];
     auto &shader_readback = slot.shader_readbacks[phase];
     if (!readback.NativeContract() || !gpu.NativeContract() ||
         !shader_readback.NativeContract())
-        return Fail("Hero retained phase native owner changed.");
+        return Fail("Translucency retained phase native owner changed.");
     if (!graph.BindBuffer(layout.native_readback[phase], {readback.resource.Get(),
             readback.graph_completion, readback.graph_queue, {}, readback.NativeContract()},
             readback.graph_access) ||
@@ -441,14 +441,14 @@ Result TranslucencyDiagnosticsCapture::BindRetainedPhase(RenderGraphBuilder &gra
             shader_readback.graph_completion, shader_readback.graph_queue, {},
             shader_readback.NativeContract()},
             shader_readback.graph_access))
-        return Fail("Hero retained phase imports changed.");
+        return Fail("Translucency retained phase imports changed.");
     slot.phase_handles[phase] = layout.native_readback[phase];
     slot.shader_handles[phase] = layout.shader_gpu[phase];
     slot.shader_readback_handles[phase] = layout.shader_readback[phase];
     const auto bytes = impl_->shader_layout.phase_bytes;
     auto initialize = graph.BindPass(layout.shader_initialize_pass[phase], 0x48570000u + phase * 2);
     auto resolve = graph.BindPass(layout.shader_copy_pass[phase], 0x48570001u + phase * 2);
-    if (!initialize || !resolve) return Fail("Hero retained phase passes were already bound.");
+    if (!initialize || !resolve) return Fail("Translucency retained phase passes were already bound.");
     initialize->SetExecute([&slot, phase, bytes](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         list->CopyBufferRegion(slot.shader_gpu[phase].resource.Get(), 0,
@@ -547,11 +547,11 @@ Result TranslucencyDiagnosticsCapture::Collect(const CompletionSet &completed, s
         if (FAILED(deviceStatus))
         {
             slot.success = false; ++impl_->status.failed_frames;
-            return Native("Read hero contributor queries on removed device", deviceStatus);
+            return Native("Read translucency contributor queries on removed device", deviceStatus);
         }
         const auto count = std::count(slot.recorded.begin(), slot.recorded.end(), true);
         if (output.size() + count > kPendingLimit)
-        { impl_->status.overflowed = true; return Fail("Hero contributor capture exceeded its bounded pending rows; drain every frame."); }
+        { impl_->status.overflowed = true; return Fail("Translucency contributor capture exceeded its bounded pending rows; drain every frame."); }
         UINT64 gpuAnchor{}, qpcAnchor{};
         const bool calibration = SUCCEEDED(slot.queue->GetClockCalibration(&gpuAnchor, &qpcAnchor));
         std::vector<RendererTranslucencyDiagnosticsSample> ready;
@@ -561,7 +561,7 @@ Result TranslucencyDiagnosticsCapture::Collect(const CompletionSet &completed, s
         if (!slot.contributors.empty())
         {
             auto hr = slot.arguments.resource->Map(0, &argumentRange, &mapped);
-            if (FAILED(hr)) return Native("Map hero indexed arguments", hr);
+            if (FAILED(hr)) return Native("Map translucency indexed arguments", hr);
             std::memcpy(arguments.data(), mapped, argumentRange.End);
             const D3D12_RANGE noWrite{0, 0}; slot.arguments.resource->Unmap(0, &noWrite);
         }
@@ -572,12 +572,12 @@ Result TranslucencyDiagnosticsCapture::Collect(const CompletionSet &completed, s
             std::array<std::array<UINT, kTranslucencyDiagnosticsShaderHeaderBytes / 4>, kContributors> headers{};
             const D3D12_RANGE shader_range{0, static_cast<SIZE_T>(slot.contributors.size() * kTranslucencyDiagnosticsShaderHeaderBytes)};
             auto shader_hr = slot.shader_readbacks[phase].resource->Map(0, &shader_range, &mapped);
-            if (FAILED(shader_hr)) { ++impl_->status.shader_invalid_samples; return Native("Map completed hero shader counters", shader_hr); }
+            if (FAILED(shader_hr)) { ++impl_->status.shader_invalid_samples; return Native("Map completed translucency shader counters", shader_hr); }
             std::memcpy(headers.data(), mapped, shader_range.End);
             const D3D12_RANGE shader_no_write{0, 0}; slot.shader_readbacks[phase].resource->Unmap(0, &shader_no_write);
             const D3D12_RANGE range{0, static_cast<SIZE_T>(kPhaseBytes)};
             auto hr = slot.readbacks[phase].resource->Map(0, &range, &mapped);
-            if (FAILED(hr)) return Native("Map hero native queries", hr);
+            if (FAILED(hr)) return Native("Map translucency native queries", hr);
             for (UINT contributor = 0; contributor < slot.contributors.size(); ++contributor)
             {
                 const UINT query = phase * kContributors + contributor;

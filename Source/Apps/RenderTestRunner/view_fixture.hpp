@@ -2,6 +2,9 @@
 
 #include <hs/render_data/render_package.hpp>
 #include <nlohmann/json.hpp>
+#include <Windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
@@ -36,7 +39,7 @@ struct OwnedViewProbeEvidence
     std::uint64_t submissions_before{}, submissions_after_bad_preflight{}, submissions_after{};
     std::uint64_t overwrite_submission_id{};
     bool duplicate_rejected{}, nonfinite_origin_rejected{}, rejected_outputs_unchanged{}, stale_diagnostics_rejected{};
-    bool nonfinite_flash_history_rejected{};
+    bool nonfinite_flash_history_rejected{}, ui_cache_pixels_valid{};
     std::array<std::filesystem::path, 2> captures;
     std::filesystem::path hdr_capture;
     nlohmann::ordered_json motion_readbacks{nlohmann::ordered_json::object()};
@@ -113,6 +116,32 @@ inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
         temporal.at("frame").get<std::uint64_t>() != expected_frame ||
         metadata.value("foreground_depth_pixels", std::uint64_t{}) == 0)
         return Failure("Surface readback does not identify the expected rendered view/frame or foreground pixels.");
+    return Result::Success();
+}
+
+struct UiProbePixels { UINT width{}, height{}; std::vector<std::uint8_t> rgba; };
+inline Result CaptureUiProbePixels(D3D12Renderer &renderer, const std::filesystem::path &path,
+                                   UiProbePixels &out)
+{
+    if (auto captured = renderer.Capture({.path = path}); !captured) return captured;
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return Failure("UI probe COM initialization failed.");
+    struct Apartment { HRESULT result; ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); } } cleanup{apartment};
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)) ||
+        FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+            WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)) ||
+        FAILED(converter->GetSize(&out.width, &out.height)) || !out.width || !out.height ||
+        out.width > UINT_MAX / 4u || std::uint64_t(out.width) * out.height * 4u > UINT_MAX)
+        return Failure("UI probe PNG decode setup failed.");
+    out.rgba.resize(std::size_t(out.width) * out.height * 4u);
+    if (FAILED(converter->CopyPixels(nullptr, out.width * 4u, static_cast<UINT>(out.rgba.size()), out.rgba.data())))
+        return Failure("UI probe PNG readback failed.");
     return Result::Success();
 }
 } // namespace owned_view_probe_detail
@@ -636,6 +665,98 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     if (live_particle_draws != 3)
         return Failure("The package particle birth and two effect-line particles must survive the owned-view sequence; captured " +
             std::to_string(live_particle_draws) + " live draw instances, expected 3.");
+
+    // Exercise the real UI atlas, frame banks and target replacement with an
+    // opaque background so pixel comparisons are independent of scene motion.
+    auto ui = std::make_shared<UiDrawContent>();
+    UiModel panel; panel.kind = UiModel::Kind::Panel; panel.anchor_pixels = {0, 0};
+    panel.size_pixels = {1920, 1080}; panel.color_rgba = 0xff000000u;
+    UiModel bar; bar.kind = UiModel::Kind::Bar; bar.anchor_pixels = {100, 750};
+    bar.size_pixels = {400, 80}; bar.color_rgba = 0xff0000ffu;
+    UiModel text; text.kind = UiModel::Kind::Text; text.anchor_pixels = {100, 200};
+    text.size_pixels = {1100, 220}; text.font_pixels = 96; text.color_rgba = 0xffffffffu;
+    constexpr char label[] = "UI test \xed\x95\x9c\xea\xb8\x80";
+    std::copy(std::begin(label), std::end(label), text.utf8_text.begin());
+    ui->models = {panel, bar, text};
+    std::array<UiProbePixels, 8> ui_images;
+    for (std::size_t step = 0; step < ui_images.size(); ++step)
+    {
+        auto next = std::make_shared<UiDrawContent>(*ui);
+        if (step == 1) next->models[1].value = 0.5f;
+        if (step == 2) next->models[1].value = 0.0f;
+        if (step >= 4) next->models[2].color_rgba = 0xff00ff00u;
+        if (step >= 5) next->models[2].anchor_pixels.x += 100.0f;
+        if (step == 6)
+            if (auto resized = renderer.Resize(main.output_extent.width + 64u, main.output_extent.height); !resized) return resized;
+        auto ui_view = renderer.MainViewInput(snapshots.current.camera);
+        const RenderPackage ui_package{.views = std::span(&ui_view, 1), .snapshots = snapshots,
+            .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+                .stateful_target = snapshots.current.header.tick}},
+            .ui_draw_content = next, .delta_seconds = 0.0f,
+            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+        RendererFrameResult ui_result;
+        if (auto rendered = renderer.Render(ui_package, ui_result); !rendered) return rendered;
+        if (auto captured = CaptureUiProbePixels(renderer, artifacts / ("ui-cache-" + std::to_string(step) + ".png"), ui_images[step]); !captured) return captured;
+    }
+    const auto sample = [](const UiProbePixels &image, float x, float y) {
+        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
+        const auto px = static_cast<UINT>((image.width - 1920.0f * scale) * 0.5f + x * scale);
+        const auto py = static_cast<UINT>((image.height - 1080.0f * scale) * 0.5f + y * scale);
+        const auto i = (std::size_t(py) * image.width + px) * 4;
+        return std::array{image.rgba[i], image.rgba[i + 1], image.rgba[i + 2]};
+    };
+    const auto full = sample(ui_images[0], 400, 790);
+    const auto half_fill = sample(ui_images[1], 400, 790);
+    const auto zero = sample(ui_images[2], 150, 790);
+    if (full[0] <= half_fill[0] + 30 || sample(ui_images[1], 150, 790)[0] <= zero[0] + 30 ||
+        sample(ui_images[3], 400, 790) != full)
+        return Failure("UI bar-only, empty and restored fills did not reach the presented pixels.");
+    // The UI keeps a 16:9 canvas; resized windows can expose moving scene
+    // pixels in the letterbox. Compare only the opaque panel interior.
+    const auto panel_text_region = [](const UiProbePixels &image) {
+        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
+        const float left = (image.width - 1920.0f * scale) * 0.5f;
+        const float top = (image.height - 1080.0f * scale) * 0.5f;
+        return std::array{static_cast<UINT>(std::ceil(left)) + 2u,
+            static_cast<UINT>(std::ceil(top)) + 2u,
+            static_cast<UINT>(std::floor(left + 1920.0f * scale)) - 2u,
+            image.height / 2u};
+    };
+    const auto text_difference = [&](const UiProbePixels &a, const UiProbePixels &b) {
+        if (a.width != b.width || a.height != b.height) return (std::numeric_limits<std::size_t>::max)();
+        const auto region = panel_text_region(a);
+        std::size_t changed{};
+        for (UINT y = region[1]; y < region[3]; ++y)
+            for (UINT x = region[0]; x < region[2]; ++x)
+            {
+                const auto i = (std::size_t(y) * a.width + x) * 4;
+                if (a.rgba[i] != b.rgba[i] || a.rgba[i + 1] != b.rgba[i + 1] || a.rgba[i + 2] != b.rgba[i + 2]) ++changed;
+            }
+        return changed;
+    };
+    std::size_t resized_text_pixels{};
+    const auto &resized = ui_images[6];
+    const auto resized_region = panel_text_region(resized);
+    for (UINT y = resized_region[1]; y < resized_region[3]; ++y)
+        for (UINT x = resized_region[0]; x < resized_region[2]; ++x)
+        {
+            const auto i = (std::size_t(y) * resized.width + x) * 4;
+            if (resized.rgba[i + 1] > 30 && resized.rgba[i + 1] > resized.rgba[i] + 15)
+                ++resized_text_pixels;
+        }
+    if (text_difference(ui_images[3], ui_images[4]) < 5 || text_difference(ui_images[4], ui_images[5]) < 5 ||
+        text_difference(ui_images[6], ui_images[7]) != 0 || resized_text_pixels < 5 ||
+        sample(ui_images[6], 400, 790)[0] <= 30)
+        return Failure("UI text color/move or resized atlas replay did not produce the expected presented pixels.");
+    evidence.ui_cache_pixels_valid = true;
+    if (auto restored = renderer.Resize(main.output_extent.width, main.output_extent.height); !restored) return restored;
+    auto restored_view = renderer.MainViewInput(snapshots.current.camera);
+    const RenderPackage restored_package{.views = std::span(&restored_view, 1), .snapshots = snapshots,
+        .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+            .stateful_target = snapshots.current.header.tick}},
+        .ui_draw_content = ui, .delta_seconds = 0.0f,
+        .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+    if (auto rendered = renderer.Render(restored_package, evidence.final_frame); !rendered) return rendered;
     return Result::Success();
 }
 
@@ -685,6 +806,7 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
         {"nonfinite_flash_history_rejected", evidence.nonfinite_flash_history_rejected},
         {"rejected_outputs_unchanged", evidence.rejected_outputs_unchanged},
         {"stale_diagnostics_rejected", evidence.stale_diagnostics_rejected},
+        {"ui_cache_pixels_valid", evidence.ui_cache_pixels_valid},
         {"captures", {evidence.captures[0].filename().string(), evidence.captures[1].filename().string()}},
         {"hdr_capture", evidence.hdr_capture.filename().string()}};
 }

@@ -438,6 +438,12 @@ Result D3D12Renderer::Impl::PrepareResidentPublication(Impl &candidate)
 
 void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
 {
+    preferred_texture_scene.reset();
+    preferred_texture_materials.fill(false);
+    preferred_texture_initialized = false;
+    candidate.preferred_texture_scene.reset();
+    candidate.preferred_texture_materials.fill(false);
+    candidate.preferred_texture_initialized = false;
     // Publication has drained all queues. Release view banks with their actual
     // accounting owner before that manager and the shared catalog are swapped.
     ResetInactiveClusterViewResources();
@@ -500,12 +506,27 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(vfx_organic_decals);
     HS_SWAP_RESIDENT(vfx_curve_lut);
     HS_SWAP_RESIDENT(terrain_sections);
+    HS_SWAP_RESIDENT(terrain_tile_counts);
     HS_SWAP_RESIDENT(static_terrain_sections);
     HS_SWAP_RESIDENT(terrain_scene);
-    HS_SWAP_RESIDENT(terrain_page_residency);
-    HS_SWAP_RESIDENT(terrain_pipeline_revision);
-    HS_SWAP_RESIDENT(terrain_pages);
-    HS_SWAP_RESIDENT(terrain_section_buffer);
+    HS_SWAP_RESIDENT(terrain_plane_backings);
+    HS_SWAP_RESIDENT(terrain_plane_stream_ids);
+    HS_SWAP_RESIDENT(terrain_frame_mips);
+    HS_SWAP_RESIDENT(terrain_tiles);
+    HS_SWAP_RESIDENT(terrain_generation_parameters);
+    HS_SWAP_RESIDENT(terrain_generation_parameters_valid);
+    HS_SWAP_RESIDENT(terrain_parameters_match);
+    HS_SWAP_RESIDENT(terrain_parameters_changed);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    HS_SWAP_RESIDENT(terrain_archive_reads);
+#endif
+    HS_SWAP_RESIDENT(terrain_frame_sections);
+    HS_SWAP_RESIDENT(static_terrain_indices);
+    HS_SWAP_RESIDENT(dynamic_terrain_indices);
+    HS_SWAP_RESIDENT(terrain_archive_digest);
+    HS_SWAP_RESIDENT(terrain_planes_archive_digest);
+    HS_SWAP_RESIDENT(terrain_static_pages_current);
+    HS_SWAP_RESIDENT(terrain_target_first_mip);
     HS_SWAP_RESIDENT(environment_textures);
     HS_SWAP_RESIDENT(environment_texture_ids);
     HS_SWAP_RESIDENT(environment_texture_descriptions);
@@ -532,7 +553,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(material_parameter_bases);
     HS_SWAP_RESIDENT(material_parameter_layouts);
     HS_SWAP_RESIDENT(mesh_material_bindings_gpu);
-    HS_SWAP_RESIDENT(hero_binding_ranges);
+    HS_SWAP_RESIDENT(character_binding_ranges);
     HS_SWAP_RESIDENT(environment_brdf_lut);
 #undef HS_SWAP_RESIDENT
 }
@@ -550,7 +571,7 @@ void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate)
         Range{kMaterialTextureDescriptorOffset, kMaterialTextureDescriptorCount + kTerrainPageDescriptorCount},
         Range{kGeometryDescriptorOffset + 1u, kGeometryDescriptorCount - 1u},
         Range{kMaterialParameterDescriptorOffset, 1u},
-        Range{kHeroBindingDescriptorOffset, 1u}};
+        Range{kCharacterBindingDescriptorOffset, 1u}};
     // Environment's final two slots are live GBuffer material/motion; the VFX
     // gap is transient distortion. Neither is present in this asset publication.
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)

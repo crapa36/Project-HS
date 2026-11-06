@@ -31,6 +31,9 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(HS_BUILD_TESTS "Build Project HS tests" ON)
+if(HS_BUILD_TESTS)
+    cmake_file_api(QUERY API_VERSION 1 CODEMODEL 2.9)
+endif()
 option(HS_BUILD_RENDER_DATA_TESTS "Build CPU render package tests without content tools" OFF)
 option(HS_BUILD_ASSET_PIPELINE_TESTS "Build portable asset producer and generation tests" OFF)
 option(HS_BUILD_RUNTIME "Build the D3D12 runtime and applications" ON)
@@ -297,6 +300,12 @@ add_library(hs_runtime_contracts INTERFACE)
 target_include_directories(hs_runtime_contracts INTERFACE Source/Runtime/Public Source/RendererD3D12/Public)
 target_link_libraries(hs_runtime_contracts INTERFACE hs_core hs_game_domain hs_render_data_values)
 
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_ASSET_PIPELINE_TESTS OR HS_BUILD_RENDER_DATA_TESTS)
+add_library(hs_audio_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/audio_image_io.cpp)
+target_link_libraries(hs_audio_image_io PUBLIC hs_runtime_contracts)
+hs_configure_target(hs_audio_image_io)
+endif()
+
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
 add_library(hs_vfx_program_io STATIC EXCLUDE_FROM_ALL Source/RendererD3D12/Private/vfx_program_loader.cpp)
 target_include_directories(hs_vfx_program_io PUBLIC Source/RendererD3D12/Public)
@@ -342,6 +351,9 @@ target_include_directories(hs_render_data PUBLIC Source/RenderData/Public)
 target_link_libraries(hs_render_data PUBLIC hs_core hs_render_data_values)
 target_link_libraries(hs_render_data PRIVATE hs_meshoptimizer_codec)
 hs_configure_target(hs_render_data)
+add_library(hs_renderer_catalog_io STATIC EXCLUDE_FROM_ALL Source/RenderData/Private/renderer_catalog.cpp)
+target_link_libraries(hs_renderer_catalog_io PUBLIC hs_render_data)
+hs_configure_target(hs_renderer_catalog_io)
 add_library(hs_terrain_surface STATIC Source/RenderData/Private/terrain_surface.cpp)
 target_link_libraries(hs_terrain_surface PUBLIC hs_render_data)
 hs_configure_target(hs_terrain_surface)
@@ -474,7 +486,7 @@ add_library(
     Source/RendererD3D12/Private/renderer_volumetrics.cpp
     Source/RendererD3D12/Private/renderer_feature_resolve.cpp
     Source/RendererD3D12/Private/renderer_light_list.cpp
-    Source/RendererD3D12/Private/renderer_hero.cpp
+    Source/RendererD3D12/Private/renderer_character_material.cpp
     Source/RendererD3D12/Private/renderer_environment_mesh.cpp
     Source/RendererD3D12/Private/renderer_geometry_upload.cpp
     Source/RendererD3D12/Private/renderer_geometry.cpp
@@ -562,6 +574,7 @@ add_library(
     Source/Runtime/Private/generation_reload_watch.cpp
     Source/Runtime/Private/renderer_settings_projection.cpp
     Source/Runtime/Private/shipping_content.cpp
+    Source/Runtime/Private/prepared_content.cpp
     Source/Runtime/Private/audio_engine.cpp
     Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/vfx_catalog.cpp
@@ -612,9 +625,7 @@ target_link_libraries(hs_runtime_vfx_io PRIVATE hs_vfx_image_io)
 hs_configure_target(hs_runtime_vfx_io)
 target_sources(hs_runtime PRIVATE
     $<$<NOT:$<CONFIG:Release>>:$<TARGET_OBJECTS:hs_runtime_vfx_io>>)
-target_link_libraries(hs_runtime PRIVATE hs_vfx_image_io)
-target_link_libraries(hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:hs_presentation_io>)
-target_link_libraries(hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:hs_game_rules_io>)
+target_link_libraries(hs_runtime PRIVATE hs_vfx_image_io hs_audio_image_io hs_renderer_catalog_io hs_presentation_io hs_game_rules_io)
 endif()
 
 if(HS_BUILD_CONTENT_TOOLS OR (HS_BUILD_RUNTIME AND (NOT HS_SINGLE_CONFIG_RELEASE OR HS_BUILD_TESTS)))
@@ -648,6 +659,8 @@ set(HS_VISIBILITY_SHADER_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_records.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/triangle_sample.hlsli")
 set(HS_MATERIAL_SURFACE_LIBRARY
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/volumetrics_abi.hlsli"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_grid.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/entity_surface.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/texture_streaming.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_surface.hlsli"
@@ -742,6 +755,7 @@ endif()
 add_dependencies(hs_experiment hs_runtime_assets)
 endif()
 
+if(HS_BUILD_TESTS)
 add_executable(hs_render_test_runner
     Source/Apps/RenderTestRunner/main.cpp
     Source/Apps/Common/world_transport_scene.cpp)
@@ -752,6 +766,9 @@ target_link_libraries(
 target_compile_definitions(hs_render_test_runner PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 if(MSVC)
     target_sources(hs_render_test_runner PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+endif()
+hs_configure_target(hs_render_test_runner)
+add_dependencies(hs_render_test_runner hs_runtime_assets)
 endif()
 if(HS_BUILD_CONTENT_TOOLS)
     add_executable(hs_scene_probe_bake
@@ -765,11 +782,11 @@ if(HS_BUILD_CONTENT_TOOLS)
     if(MSVC)
         target_sources(hs_scene_probe_bake PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
     endif()
-    add_dependencies(hs_scene_probe_bake hs_runtime_assets)
+    add_dependencies(hs_scene_probe_bake hs_runtime_native_assets)
     add_executable(hs_static_shadow_bake
         Source/Apps/StaticShadowBake/main.cpp
         Source/Apps/Common/world_transport_scene.cpp
-        Source/Apps/RenderTestRunner/static_shadow_action.cpp)
+        Source/Apps/StaticShadowBake/static_shadow_action.cpp)
     target_link_libraries(hs_static_shadow_bake PRIVATE hs_asset_pipeline hs_probe_baker hs_render_data
         hs_asset_manifest hs_game_rules_io hs_environment_layout nlohmann_json::nlohmann_json)
     target_compile_definitions(hs_static_shadow_bake PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -791,8 +808,6 @@ if(HS_BUILD_CONTENT_TOOLS)
     endif()
     add_dependencies(hs_terrain_surface_bake hs_runtime_native_assets)
 endif()
-hs_configure_target(hs_render_test_runner)
-add_dependencies(hs_render_test_runner hs_runtime_assets)
 endif()
 
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
@@ -810,7 +825,8 @@ add_library(hs_meshoptimizer_cook STATIC
     ThirdParty/meshoptimizer/src/clusterizer.cpp
     ThirdParty/meshoptimizer/src/meshletutils.cpp
     ThirdParty/meshoptimizer/src/partition.cpp
-    ThirdParty/meshoptimizer/src/simplifier.cpp)
+    ThirdParty/meshoptimizer/src/simplifier.cpp
+    ThirdParty/meshoptimizer/src/tangentspace.cpp)
 target_include_directories(hs_meshoptimizer_cook PUBLIC ThirdParty/meshoptimizer/src)
 add_library(hs_geometry_cooker STATIC
     Source/Apps/Content/geometry_cooker.cpp
@@ -978,13 +994,11 @@ hs_add_asset_action(
 add_executable(hs_game_data
     Source/Apps/GameData/main.cpp
     Source/Apps/Content/game_data_cooker.cpp
-    Source/Apps/Content/release_presentation_codegen.cpp
-    Source/Apps/Content/release_simulation_codegen.cpp
     Source/Apps/Content/game_data_validation.cpp
     Source/Apps/Content/content_source_inventory.cpp
     Source/Apps/Content/content_paths.cpp
 )
-target_link_libraries(hs_game_data PRIVATE hs_asset_pipeline hs_presentation_io)
+target_link_libraries(hs_game_data PRIVATE hs_asset_pipeline hs_presentation_io hs_game_rules_io)
 target_include_directories(hs_game_data PRIVATE Source/Apps/Content)
 target_link_libraries(hs_game_data PRIVATE
     hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json bcrypt)
@@ -1050,7 +1064,7 @@ add_executable(hs_content_linker Source/Apps/ContentLinker/main.cpp
     Source/Apps/Content/character_products.cpp)
 target_compile_definitions(hs_content_linker PRIVATE HS_SHIPPING_PACK_RELATIVE_PATH="${HS_SHIPPING_PACK_RELATIVE_PATH}")
 target_link_libraries(hs_content_linker PRIVATE hs_asset_pipeline hs_vfx_image_io hs_geometry_cooker
-    hs_game_rules hs_presentation_io nlohmann_json::nlohmann_json)
+    hs_game_rules_io hs_presentation_io hs_renderer_catalog_io nlohmann_json::nlohmann_json)
 hs_configure_target(hs_content_linker)
 add_executable(hs_environment
     Source/Apps/Environment/main.cpp
@@ -1287,8 +1301,8 @@ target_link_libraries(hs_render_runtime_shader PRIVATE
     hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
 target_compile_definitions(hs_render_runtime_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_render_runtime_shader)
-foreach(family IN ITEMS terrain-page project ui-draw geometry visibility visibility-classification static-visibility depth-pyramid skin-cache cluster-refinement ambient-occlusion adaptive-gtao reconstruction-guides sdk-presentation hdr-post light-list virtual-shadow volumetrics scene-hlod local-probe-bake)
-    if(family STREQUAL "project")
+foreach(family IN ITEMS terrain-page project fullscreen ui-draw geometry visibility visibility-classification static-visibility depth-pyramid skin-cache cluster-refinement ambient-occlusion adaptive-gtao reconstruction-guides sdk-presentation hdr-post light-list virtual-shadow volumetrics scene-hlod local-probe-bake)
+    if(family STREQUAL "project" OR family STREQUAL "fullscreen")
         set(family_source project_hs.hlsl)
     elseif(family STREQUAL "visibility")
         set(family_source visibility_buffer.hlsl)
@@ -1341,8 +1355,10 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/grass_deformation.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/subsurface_diffusion.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
@@ -1369,9 +1385,11 @@ hs_add_asset_action(
     RESULT "${HS_SSR_SHADER_RESULT}"
     DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/screen-reflections/result.d"
     STATIC_INPUTS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflections.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflection_confidence.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/character_material.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_sidecar.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_parameters.hlsli"
@@ -1403,8 +1421,10 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/grass_deformation.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/subsurface_diffusion.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_screen_overlay.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/adaptive_shading.hlsl"
@@ -1463,7 +1483,8 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
     list(REMOVE_DUPLICATES material_texture_results)
     set(material_library_inputs)
     if(name STREQUAL "terrain")
-        list(APPEND material_library_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli")
+        list(APPEND material_library_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli")
     endif()
     set(material_geometry_results)
     if(NOT name STREQUAL "terrain" AND NOT name STREQUAL "ground_detail")
@@ -1656,6 +1677,7 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/decal_material_graph.schema.json"
         "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface.hlsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_parameters.hlsli"
         ${HS_DXC_TOOL_INPUTS}
@@ -1670,7 +1692,7 @@ target_link_libraries(hs_character_content PRIVATE hs_asset_pipeline)
 target_include_directories(hs_character_content PRIVATE Source/Apps/Content)
 target_include_directories(hs_character_content SYSTEM PRIVATE "${HS_FBX_SDK_ROOT}/include")
 target_link_libraries(hs_character_content PRIVATE
-    hs_core hs_render_data hs_geometry_cooker hs_game_rules hs_presentation nlohmann_json::nlohmann_json
+    hs_core hs_render_data hs_geometry_cooker hs_meshoptimizer_cook hs_game_rules hs_presentation nlohmann_json::nlohmann_json
     DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs d3d11 ole32 bcrypt)
 target_compile_definitions(hs_character_content PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_character_content)
@@ -1986,9 +2008,26 @@ list(REMOVE_ITEM HS_RENDER_TEST_RESULTS
     ${HS_PRESENTATION_FINALIZER_RESULTS}
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-presentation/result.json")
 hs_add_test_generation(render RESULTS ${HS_RENDER_TEST_RESULTS})
-if(TARGET hs_render_test_runner)
+if(HS_BUILD_CONTENT_TOOLS)
     if(TARGET hs_terrain_surface_bake)
-    set(HS_TERRAIN_SURFACE_INPUT_RESULTS ${HS_RENDER_TEST_RESULTS})
+    set(HS_TERRAIN_SURFACE_INPUT_RESULTS
+        ${HS_SIMULATION_FINALIZER_RESULTS}
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-simulation/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/meshes/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/histogram/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/meadow_ground/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/terrain/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/material/terrain/parameters/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/terrain/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/terrain-page/result.json")
+    foreach(channel IN ITEMS base_color surface_ra normal detail_normal height)
+        list(APPEND HS_TERRAIN_SURFACE_INPUT_RESULTS
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/terrain/${channel}/result.json")
+    endforeach()
+    foreach(channel IN ITEMS gaussian surface normal detail height histogram)
+        list(APPEND HS_TERRAIN_SURFACE_INPUT_RESULTS
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/texture/environment_terrain_${channel}/result.json")
+    endforeach()
     set(HS_TERRAIN_SURFACE_INPUT_LIST
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/terrain-surface-input-results.txt")
     set(HS_TERRAIN_SURFACE_INPUT
@@ -2011,19 +2050,29 @@ if(TARGET hs_render_test_runner)
         ARGS --produce-terrain-surface --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --generation-pointer "${HS_TERRAIN_SURFACE_INPUT}")
     list(APPEND HS_RUNTIME_FULL_RESULTS "${HS_TERRAIN_SURFACE_RESULT}")
-    # Only the producer input needs the page-generation programs.
-    list(REMOVE_ITEM HS_RUNTIME_FULL_RESULTS
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/terrain-page/result.json")
-    list(REMOVE_ITEM HS_RENDER_TEST_RESULTS
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/terrain-page/result.json")
+    # Source-only producer digests remain available without shipping their DXIL bulk.
     endif()
     if(TARGET hs_static_shadow_bake)
     # Keep the bake input independent of its output; runtime quality is not selected here.
+    set(HS_STATIC_SCENE_INPUT_RESULTS
+        ${HS_SIMULATION_FINALIZER_RESULTS}
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-simulation/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/meshes/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/histogram/result.json"
+        ${HS_ENVIRONMENT_TEXTURE_RESULTS}
+        ${HS_RENDER_TEXTURE_RESULTS}
+        ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
+    foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
+        list(APPEND HS_STATIC_SCENE_INPUT_RESULTS
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${name}/result.json"
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/material/${name}/parameters/result.json"
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${name}/result.json")
+    endforeach()
     set(HS_STATIC_SHADOW_INPUT_LIST
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/static-shadow-input-results.txt")
     set(HS_STATIC_SHADOW_INPUT
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/static-shadow-input.json")
-    list(JOIN HS_RENDER_TEST_RESULTS "\n" HS_STATIC_SHADOW_INPUT_LINES)
+    list(JOIN HS_STATIC_SCENE_INPUT_RESULTS "\n" HS_STATIC_SHADOW_INPUT_LINES)
     file(GENERATE OUTPUT "${HS_STATIC_SHADOW_INPUT_LIST}"
         CONTENT "${HS_STATIC_SHADOW_INPUT_LINES}\n")
     add_custom_command(
@@ -2031,7 +2080,7 @@ if(TARGET hs_render_test_runner)
         COMMAND "$<TARGET_FILE:hs_generation>" --compose
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope static-shadow-input
             --result-list "${HS_STATIC_SHADOW_INPUT_LIST}"
-        DEPENDS hs_generation "${HS_STATIC_SHADOW_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
+        DEPENDS hs_generation "${HS_STATIC_SHADOW_INPUT_LIST}" ${HS_STATIC_SCENE_INPUT_RESULTS}
         VERBATIM)
     hs_add_asset_action(NAME hs_render_static_shadow_candidate BUILDER hs_static_shadow_bake
         RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/arena-static-shadow/result.json"
@@ -2054,7 +2103,21 @@ if(TARGET hs_render_test_runner)
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/scene-probe-bake-input-results.txt")
     set(HS_SCENE_PROBE_BAKE_INPUT
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/scene-probe-bake-input.json")
-    list(JOIN HS_RENDER_TEST_RESULTS "\n" HS_SCENE_PROBE_BAKE_INPUT_LINES)
+    set(HS_SCENE_PROBE_BAKE_INPUT_RESULTS
+        ${HS_STATIC_SCENE_INPUT_RESULTS}
+        ${HS_SCENE_PROBE_RESOLVE_RESULTS}
+        "${HS_SCENE_PROBE_RESULT}"
+        "${HS_LIGHTING_PROBE_RESULT}"
+        "${HS_LTC_LUT_RESULT}"
+        "${HS_QUALITY_PROFILES_RESULT}"
+        "${HS_BSDF_SHADER_RESULT}"
+        "${HS_TERRAIN_SURFACE_RESULT}"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/terrain-page/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/fullscreen/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/light-list/result.json"
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/local-probe-bake/result.json")
+    list(REMOVE_DUPLICATES HS_SCENE_PROBE_BAKE_INPUT_RESULTS)
+    list(JOIN HS_SCENE_PROBE_BAKE_INPUT_RESULTS "\n" HS_SCENE_PROBE_BAKE_INPUT_LINES)
     file(GENERATE OUTPUT "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
         CONTENT "${HS_SCENE_PROBE_BAKE_INPUT_LINES}\n")
     add_custom_command(
@@ -2062,7 +2125,7 @@ if(TARGET hs_render_test_runner)
         COMMAND "$<TARGET_FILE:hs_generation>" --compose
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope scene-probe-bake-input
             --result-list "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
-        DEPENDS hs_generation hs_scene_probe_bake "${HS_SCENE_PROBE_BAKE_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
+        DEPENDS hs_generation hs_scene_probe_bake "${HS_SCENE_PROBE_BAKE_INPUT_LIST}" ${HS_SCENE_PROBE_BAKE_INPUT_RESULTS}
         VERBATIM)
     set(HS_SCENE_PROBE_BAKED_RESULT
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/scene-probes-baked/result.json")
@@ -2073,7 +2136,6 @@ if(TARGET hs_render_test_runner)
         ARGS --produce-scene-probe --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --generation "${HS_SCENE_PROBE_BAKE_INPUT}"
             --result-list "${HS_SCENE_PROBE_BAKE_INPUT_LIST}")
-    add_dependencies(hs_render_scene_probe_bake hs_render_static_shadow_candidate)
     list(REMOVE_ITEM HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_RESULT}")
     list(APPEND HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_BAKED_RESULT}")
     endif()
@@ -2150,7 +2212,7 @@ endif()
 if(HS_BUILD_RUNTIME AND (HS_BUILD_CONTENT_TOOLS OR HS_SINGLE_CONFIG_RELEASE))
     add_library(hs_shipping_content STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp")
     target_link_libraries(hs_shipping_content PRIVATE hs_runtime_contracts)
-    target_link_libraries(hs_shipping_content PUBLIC hs_presentation hs_game_rules hs_render_data)
+    target_link_libraries(hs_shipping_content PUBLIC hs_core)
     if(HS_BUILD_CONTENT_TOOLS)
         add_dependencies(hs_shipping_content hs_shipping_image)
     endif()
@@ -2359,6 +2421,8 @@ if(HS_BUILD_TESTS)
     add_test(
         NAME architecture.layers
         COMMAND ${CMAKE_COMMAND}
+            -DBUILD_ROOT=${CMAKE_BINARY_DIR}
+            -DCONFIG=$<CONFIG>
             -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_architecture.cmake
     )
@@ -2382,7 +2446,7 @@ if(HS_BUILD_TESTS)
     add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     add_executable(hs_simulation_rules_serialization_tests
         Tests/simulation_rules_serialization_tests.cpp)
-    target_link_libraries(hs_simulation_rules_serialization_tests PRIVATE hs_game_rules)
+    target_link_libraries(hs_simulation_rules_serialization_tests PRIVATE hs_game_rules_io)
     hs_configure_target(hs_simulation_rules_serialization_tests)
     add_test(NAME simulation.canonical-rules
         COMMAND hs_simulation_rules_serialization_tests)
@@ -2422,7 +2486,7 @@ if(HS_BUILD_TESTS)
         Source/Apps/RenderMaterialShader/material_graph_parser.cpp)
     target_include_directories(hs_render_package_tests PRIVATE Source/Apps/Content)
     target_link_libraries(hs_render_package_tests PRIVATE
-        hs_material_compiler hs_render_data hs_terrain_surface hs_runtime_contracts nlohmann_json::nlohmann_json)
+        hs_material_compiler hs_render_data hs_renderer_catalog_io hs_audio_image_io hs_terrain_surface hs_runtime_contracts nlohmann_json::nlohmann_json)
     hs_configure_target(hs_render_package_tests)
     add_test(NAME content.render-package-format COMMAND hs_render_package_tests)
     if(HS_BUILD_CONTENT_TOOLS)
@@ -2762,16 +2826,17 @@ if(HS_BUILD_TESTS)
     add_test(NAME simulation.presentation-contract COMMAND hs_gameplay_tests presentation
         BUILD_DEPENDS hs_test_gameplay_generation)
     add_test(NAME simulation.determinism COMMAND hs_gameplay_tests determinism
-        BUILD_DEPENDS hs_test_gameplay_generation)
+        BUILD_DEPENDS hs_test_combat_generation)
     set_tests_properties(
         simulation.content
         simulation.combat
         simulation.progression
         simulation.presentation-contract
-        simulation.determinism
         PROPERTIES TIMEOUT 120 ENVIRONMENT
             "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-gameplay.json;HS_TEST_GENERATION_SCOPE=test-gameplay"
     )
+    set_tests_properties(simulation.determinism PROPERTIES TIMEOUT 120 ENVIRONMENT
+        "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-combat.json;HS_TEST_GENERATION_SCOPE=test-combat")
     endif()
     if(TARGET hs_combat_sim)
     if(HS_BUILD_CONTENT_TOOLS)
@@ -2906,6 +2971,8 @@ if(HS_BUILD_TESTS)
     set_tests_properties(rendering.multi-queue-graph PROPERTIES TIMEOUT 90
         RESOURCE_LOCK projecths_d3d12)
     if(HS_BUILD_CONTENT_TOOLS)
+        hs_add_test_generation(bsdf RESULTS "${HS_BSDF_SHADER_RESULT}"
+            REQUIRED_IDS render/shader/bsdf_preintegrate_cs.dxil render/lighting/coated_ggx_dfg.dds)
         set(HS_BSDF_PROBE_SHADER "${CMAKE_CURRENT_BINARY_DIR}/Generated/TestShaders/bsdf_sampling.dxil")
         add_custom_command(OUTPUT "${HS_BSDF_PROBE_SHADER}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Generated/TestShaders"
@@ -2915,6 +2982,7 @@ if(HS_BUILD_TESTS)
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/bsdf_sampling.hlsl"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/screen_reflection_confidence.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_sampling.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_grid.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
                 ${HS_MATERIAL_SURFACE_LIBRARY} ${HS_DXC_TOOL_INPUTS}
             VERBATIM)
@@ -2925,14 +2993,14 @@ if(HS_BUILD_TESTS)
         target_include_directories(hs_bsdf_sampling_tests BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include")
         target_compile_definitions(hs_bsdf_sampling_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         hs_configure_target(hs_bsdf_sampling_tests)
-        add_dependencies(hs_bsdf_sampling_tests hs_runtime_native_assets)
+        add_dependencies(hs_bsdf_sampling_tests hs_runtime_native_assets hs_test_bsdf_generation)
         add_test(NAME rendering.bsdf-sampling
             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_bsdf_sampling.ps1"
                 -Runner "$<TARGET_FILE:hs_bsdf_sampling_tests>"
-                -GenerationPointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json"
+                -GenerationPointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-bsdf.json"
                 -ProbeShader "${HS_BSDF_PROBE_SHADER}"
-            BUILD_DEPENDS hs_bsdf_sampling_tests hs_content_generation)
+            BUILD_DEPENDS hs_bsdf_sampling_tests)
         set_tests_properties(rendering.bsdf-sampling PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
     endif()
     set_tests_properties(
@@ -2967,8 +3035,8 @@ if(HS_BUILD_TESTS)
         "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_RUNTIME_TEST_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_RUNTIME_TEST_GENERATION_SCOPE}")
 
     if(HS_BUILD_CONTENT_TOOLS)
-        set(HS_UI_TEXT_GENERATION_TARGET hs_test_gameplay_generation)
-        set(HS_UI_TEXT_GENERATION_SCOPE test-gameplay)
+        set(HS_UI_TEXT_GENERATION_TARGET hs_test_runtime_generation)
+        set(HS_UI_TEXT_GENERATION_SCOPE test-runtime)
     else()
         set(HS_UI_TEXT_GENERATION_TARGET ${HS_RUNTIME_TEST_GENERATION_TARGET})
         set(HS_UI_TEXT_GENERATION_SCOPE ${HS_RUNTIME_TEST_GENERATION_SCOPE})

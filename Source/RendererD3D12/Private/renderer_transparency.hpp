@@ -16,20 +16,24 @@
 #include <string_view>
 #include <vector>
 
+#define HS_RENDER_BINDING_NATIVE
+#include "../../../Content/Shaders/render_binding_contract.hlsli"
+#undef HS_RENDER_BINDING_NATIVE
+
 namespace hs
 {
 class RendererPipelineCache;
 struct AllocationResource;
 constexpr std::uint32_t kLayeredTranslucencyMaxLayers = 4;
-// One immutable table for each front, exit, tail and composite phase; slot9 is reserved.
-// Native root parameter36: CBV b0/space14 at0; SRV t0..20/space14 at1;
-// UAV u0/space14 at22. The table adds one DWORD to the native root.
-constexpr std::uint32_t kLayeredTranslucencyTableSize = 23;
-constexpr std::uint32_t kLayeredTranslucencyPhaseCount = 14;
+// Native root parameter 36: CBV, contiguous SRVs, then the counter UAV.
+constexpr std::uint32_t kLayeredTranslucencySrvCount = HS_TRANSLUCENCY_SRV_COUNT;
+constexpr std::uint32_t kLayeredTranslucencyUavOffset = HS_TRANSLUCENCY_UAV_TABLE_OFFSET;
+constexpr std::uint32_t kLayeredTranslucencyTableSize = HS_TRANSLUCENCY_TABLE_SIZE;
+constexpr std::uint32_t kLayeredTranslucencyPhaseCount = HS_TRANSLUCENCY_PHASE_COUNT;
 constexpr std::uint32_t kLayeredTranslucencyDescriptorsPerFrame =
     kLayeredTranslucencyTableSize * kLayeredTranslucencyPhaseCount;
-// Guide retains its numeric diagnostic identity; Composite layer0 now emits its guides.
-enum class LayeredTranslucencyPhase : std::uint8_t { Front, Exit, Tail, Guide, Composite };
+// Keep the historical semantic value in diagnostic logs; Guide is not a pass.
+enum class LayeredTranslucencyPhase : std::uint8_t { Front = 0, Exit = 1, Tail = 2, Composite = 4 };
 struct LayeredTranslucencyGuide { ResourceVersion version; ID3D12Resource *resource{}; };
 struct LayeredTranslucencySceneRead { ResourceVersion version; Access access{Access::ShaderRead}; };
 using LayeredTranslucencyDraw = std::function<void(ID3D12GraphicsCommandList *, ID3D12PipelineState *,

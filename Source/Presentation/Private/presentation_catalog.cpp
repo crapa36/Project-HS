@@ -2,9 +2,12 @@
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/canonical_bytes.hpp>
+#include <hs/core/canonical_reader.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -13,7 +16,7 @@ namespace hs
 
 std::uint64_t PresentationCatalogSchemaHash() noexcept
 {
-    return Fnv1a64("project_hs_presentation_catalog_v2");
+    return Fnv1a64("project_hs_presentation_catalog_wire_v3");
 }
 
 std::vector<std::byte> CanonicalPresentationCatalogBytes(const PresentationCatalog &catalog)
@@ -33,6 +36,49 @@ std::vector<std::byte> CanonicalPresentationCatalogBytes(const PresentationCatal
     return std::move(bytes).Take();
 }
 
+std::vector<std::byte> EncodePresentationCatalog(const PresentationCatalog &catalog)
+{
+    return CanonicalPresentationCatalogBytes(catalog);
+}
+
+Result DecodePresentationCatalog(std::span<const std::byte> bytes, PresentationCatalog &catalog)
+{
+    try
+    {
+        CanonicalReader in(bytes, "project_hs.presentation_catalog", 1);
+        PresentationCatalog decoded{};
+        in.Fields(decoded.camera.yaw_degrees, decoded.camera.pitch_degrees,
+                  decoded.camera.vertical_fov_degrees, decoded.camera.distance_m,
+                  decoded.camera.minimum_distance_percent, decoded.camera.maximum_distance_percent);
+        const auto &camera = decoded.camera;
+        if (!std::isfinite(camera.yaw_degrees) || !std::isfinite(camera.pitch_degrees) ||
+            !std::isfinite(camera.vertical_fov_degrees) || !std::isfinite(camera.distance_m) ||
+            camera.vertical_fov_degrees <= 0 || camera.vertical_fov_degrees >= 180 ||
+            camera.distance_m <= 0 || camera.minimum_distance_percent == 0 ||
+            camera.maximum_distance_percent < camera.minimum_distance_percent)
+            throw std::runtime_error("Invalid presentation camera.");
+        const auto strings = [&](auto &rows) {
+            if (in.Count() != rows.size()) throw std::runtime_error("Presentation row count mismatch.");
+            for (auto &row : rows)
+            {
+                const auto text = in.String();
+                if (text.size() >= row.size() || text.find('\0') != std::string_view::npos)
+                    throw std::runtime_error("Invalid presentation string.");
+                std::copy(text.begin(), text.end(), row.begin());
+            }
+        };
+        strings(decoded.relic_names);
+        strings(decoded.relic_rules);
+        in.Finish();
+        catalog = decoded;
+        return Result::Success();
+    }
+    catch (const std::runtime_error &error)
+    {
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_presentation", error.what());
+    }
+}
+
 Result LoadPresentationCatalog(const std::filesystem::path &path,
                                PresentationCatalog &catalog,
                                std::uint64_t *content_hash)
@@ -43,10 +89,7 @@ Result LoadPresentationCatalog(const std::filesystem::path &path,
                                         payload);
         !result)
         return result;
-    if (payload.size() != sizeof(PresentationCatalog))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_presentation",
-                               "Cooked presentation catalog has an unexpected size.");
-    std::memcpy(&catalog, payload.data(), sizeof(catalog));
+    if (auto result = DecodePresentationCatalog(payload, catalog); !result) return result;
     if (content_hash)
         *content_hash = header.source_hash;
     return Result::Success();

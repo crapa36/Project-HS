@@ -1,6 +1,27 @@
 #ifndef HS_RENDER_BINDING_CONTRACT_HLSLI
 #define HS_RENDER_BINDING_CONTRACT_HLSLI
 
+#define HS_TRANSLUCENCY_SRV_FRONT_DEPTH 0
+#define HS_TRANSLUCENCY_SRV_FRONT_IDENTITY 4
+#define HS_TRANSLUCENCY_SRV_EXIT 8
+#define HS_TRANSLUCENCY_SRV_BACKGROUND 9
+#define HS_TRANSLUCENCY_SRV_UNPEELED 10
+#define HS_TRANSLUCENCY_SRV_GUIDE_DEPTH 11
+#define HS_TRANSLUCENCY_SRV_GUIDE_MOTION 12
+#define HS_TRANSLUCENCY_SRV_GUIDE_HISTORY 13
+#define HS_TRANSLUCENCY_SRV_GUIDE_CLASSIFICATION 14
+#define HS_TRANSLUCENCY_SRV_GUIDE_METADATA 15
+#define HS_TRANSLUCENCY_SRV_GUIDE_UNPEELED 16
+#define HS_TRANSLUCENCY_SRV_GUIDE_TRANSPORT 17
+#define HS_TRANSLUCENCY_SRV_COUNT 18
+#define HS_TRANSLUCENCY_UAV_TABLE_OFFSET (1 + HS_TRANSLUCENCY_SRV_COUNT)
+#define HS_TRANSLUCENCY_TABLE_SIZE (HS_TRANSLUCENCY_UAV_TABLE_OFFSET + 1)
+#define HS_TRANSLUCENCY_PHASE_COUNT 10
+
+#ifndef HS_RENDER_BINDING_NATIVE
+#define HS_TRANSLUCENCY_JOIN_INNER(a,b) a##b
+#define HS_TRANSLUCENCY_JOIN(a,b) HS_TRANSLUCENCY_JOIN_INNER(a,b)
+#define HS_TRANSLUCENCY_SRV_REGISTER(slot) register(HS_TRANSLUCENCY_JOIN(t,slot), space14)
 // Producers obtain these definitions from the public RenderData catalog.
 #if !defined(HS_RENDER_AUTHORED_MATERIAL_COUNT) || !defined(HS_RENDER_CHARACTER_MATERIAL_COUNT) || \
     !defined(HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT) || !defined(HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT) || \
@@ -14,8 +35,8 @@ static const uint HsGeometryPageCapacity = HS_RENDER_GEOMETRY_PAGE_CAPACITY;
 static const uint HsGeometryDescriptorCount = 1u + HS_RENDER_GEOMETRY_PAGE_CAPACITY * HS_RENDER_GEOMETRY_BUFFERS_PER_PAGE;
 static const uint HsAuthoredMaterialCount = HS_RENDER_AUTHORED_MATERIAL_COUNT;
 static const uint HsCharacterMaterialCount = HS_RENDER_CHARACTER_MATERIAL_COUNT;
-static const uint HsHeroVisibilityVariantBegin = 1u + HsAuthoredMaterialCount;
-static const uint HsVisibilityVariantCount = HsHeroVisibilityVariantBegin + HsCharacterMaterialCount;
+static const uint HsCharacterVisibilityVariantBegin = 1u + HsAuthoredMaterialCount;
+static const uint HsVisibilityVariantCount = HsCharacterVisibilityVariantBegin + HsCharacterMaterialCount;
 static const uint HsEnvironmentGeometryLodCount = HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT;
 static const uint HsEnvironmentGeometryPageCount = HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT * HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT;
 
@@ -25,4 +46,5 @@ uint HsEnvironmentMaterialOrdinal(uint geometry_ordinal)
         ? geometry_ordinal : geometry_ordinal == HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT-2u ? 14u : HS_RENDER_GROUND_DETAIL_MATERIAL_ORDINAL;
 }
 
+#endif // HS_RENDER_BINDING_NATIVE
 #endif

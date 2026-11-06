@@ -3,6 +3,7 @@
 
 #ifndef HS_TERRAIN_PAGE_BAKE
 #include "texture_streaming.hlsli"
+#include "terrain_page_abi.hlsli"
 #endif
 #include "meadow_surface.hlsli"
 
@@ -95,6 +96,29 @@ TerrainCellSample TerrainPrepareCell(float2 baseUv,float2 baseDx,float2 baseDy,
     cell.ray=TerrainRotate(parallax.xy,cell.rotation);
     cell.depth=0;cell.previous=0;cell.active=true;
     return cell;
+}
+
+void TerrainStochasticCoordinates(float2 world,uint layer,float2 warp,
+    out float2 a,out float2 b,out float2 c,out float3 weights)
+{
+    const float tile=TerrainTileSize(layer);
+    float2 p=(world+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
+    a=i;b=i+float2(1,0);c=i+float2(0,1);
+    weights=float3(1-f.x-f.y,f.x,f.y);
+    if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);weights=float3(f.x+f.y-1,1-f.x,1-f.y);}
+    weights=weights*weights*(3-2*weights);weights/=max(weights.x+weights.y+weights.z,1e-5);
+}
+
+void TerrainStochasticCells(float2 world,float2 dx,float2 dy,uint layer,uint seed,float2 warp,
+    float3 parallax,out TerrainCellSample x,out TerrainCellSample y,out TerrainCellSample z,out float3 weights)
+{
+    const float tile=TerrainTileSize(layer);
+    const float2 uv=world/tile,gx=dx/tile,gy=dy/tile;
+    float2 a,b,c;
+    TerrainStochasticCoordinates(world,layer,warp,a,b,c,weights);
+    x=TerrainPrepareCell(uv,gx,gy,TerrainCell(a,seed),parallax);
+    y=TerrainPrepareCell(uv,gx,gy,TerrainCell(b,seed),parallax);
+    z=TerrainPrepareCell(uv,gx,gy,TerrainCell(c,seed),parallax);
 }
 
 void TerrainParallaxCells(Texture2DArray<float4> height, SamplerState environment_wrap,
@@ -195,7 +219,7 @@ HsMaterialTerrainResult TerrainLayer(
     HsTextureGradState height_state)
 {
     float tile=TerrainTileSize(layer);
-    float2 uv=world.xz/tile,dx=worldDx.xz/tile,dy=worldDy.xz/tile;
+    float2 dx=worldDx.xz/tile,dy=worldDy.xz/tile;
     const float2 detail_fade=TerrainDetailFadeRange();
 #ifdef HS_TERRAIN_PAGE_BAKE
     const bool detail_enabled=false;
@@ -209,14 +233,8 @@ HsMaterialTerrainResult TerrainLayer(
     const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,viewTs,distanceToEye,HS_MATERIAL_POM_STEPS);
 #endif
 
-    float2 p=(world.xz+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
-    float2 a=i,b=i+float2(1,0),c=i+float2(0,1);
-    float3 w=float3(1-f.x-f.y,f.x,f.y);
-    if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);w=float3(f.x+f.y-1,1-f.x,1-f.y);}
-    w=w*w*(3-2*w);w/=max(w.x+w.y+w.z,1e-5);
-    TerrainCellSample cellX=TerrainPrepareCell(uv,dx,dy,TerrainCell(a,seed),parallax);
-    TerrainCellSample cellY=TerrainPrepareCell(uv,dx,dy,TerrainCell(b,seed),parallax);
-    TerrainCellSample cellZ=TerrainPrepareCell(uv,dx,dy,TerrainCell(c,seed),parallax);
+    TerrainCellSample cellX,cellY,cellZ;float3 w;
+    TerrainStochasticCells(world.xz,worldDx.xz,worldDy.xz,layer,seed,warp,parallax,cellX,cellY,cellZ,w);
     TerrainParallaxCells(height,environment_wrap,layer,parallax.z,height_slot,height_state,cellX,cellY,cellZ);
     HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellX,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellY,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
@@ -395,16 +413,34 @@ struct HsTerrainSection
 };
 
 #ifndef HS_TERRAIN_PAGE_BAKE
-Texture2DArray<float4> HsTerrainPages : register(t0, space42);
-StructuredBuffer<HsTerrainSection> HsTerrainSections : register(t1, space42);
-Texture2DArray<float4> HsTerrainColorPages : register(t2, space42);
+struct HsTerrainPageSection
+{
+#define HS_TERRAIN_F2(name) float2 name;
+#define HS_TERRAIN_U1(name) uint name;
+#define HS_TERRAIN_U2(name) uint2 name;
+    HS_TERRAIN_GPU_SECTION_FIELDS(HS_TERRAIN_F2, HS_TERRAIN_U1, HS_TERRAIN_U2)
+#undef HS_TERRAIN_F2
+#undef HS_TERRAIN_U1
+#undef HS_TERRAIN_U2
+};
+StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(t0, space42);
+// Physical base, published logical MinMip, logical mip count, quality finest+1 (0=unavailable).
+StructuredBuffer<uint4> HsTerrainPlaneMips : register(t1, space42);
+Texture2D<float4> HsTerrainPlanes[HS_TERRAIN_PAGE_PLANE_CAPACITY] : register(t2, space42);
+
+float4 TerrainPageSample(SamplerState page_sampler,uint plane,float2 uv,float2 gx,float2 gy,float clamp_mip)
+{
+    return HsTerrainPlanes[NonUniformResourceIndex(plane)].SampleGrad(
+        page_sampler,uv,gx,gy,int2(0,0),clamp_mip);
+}
 
 float2 TerrainSectionLocal(float2 v,float2 rotation)
 {
     return float2(dot(v,float2(rotation.x,-rotation.y)),dot(v,rotation.yx));
 }
 
-float2 TerrainPageParallax(SamplerState page_sampler,float2 uv,float2 gx,float2 gy,float2 ray,float weight,uint slice)
+float2 TerrainPageParallax(SamplerState page_sampler,float2 uv,float2 gx,float2 gy,
+    float2 ray,float weight,uint plane,float clamp_mip)
 {
     const uint steps=HS_MATERIAL_POM_STEPS;
     [branch] if(steps>0 && weight>0 && any(ray!=0))
@@ -412,7 +448,8 @@ float2 TerrainPageParallax(SamplerState page_sampler,float2 uv,float2 gx,float2 
         float depth=0,previous=0;
         [loop] for(uint step=0;step<=steps;++step)
         {
-            const float surface=HsTerrainPages.SampleGrad(page_sampler,float3(uv-ray*depth,slice+1),gx,gy).a;
+            // This is a filtered height sample, not a conservative skip bound.
+            const float surface=TerrainPageSample(page_sampler,plane,uv-ray*depth,gx,gy,clamp_mip).a;
             if(depth>=surface) break;
             previous=depth;
             depth=min(1.0,depth+1.0/steps);
@@ -420,7 +457,7 @@ float2 TerrainPageParallax(SamplerState page_sampler,float2 uv,float2 gx,float2 
         [loop] for(uint refinement=0;refinement<HS_MATERIAL_POM_REFINEMENT_STEPS;++refinement)
         {
             const float middle=(previous+depth)*.5;
-            const float surface=HsTerrainPages.SampleGrad(page_sampler,float3(uv-ray*middle,slice+1),gx,gy).a;
+            const float surface=TerrainPageSample(page_sampler,plane,uv-ray*middle,gx,gy,clamp_mip).a;
             if(middle>=surface) depth=middle; else previous=middle;
         }
         uv-=ray*((previous+depth)*.5*weight);
@@ -428,25 +465,34 @@ float2 TerrainPageParallax(SamplerState page_sampler,float2 uv,float2 gx,float2 
     return uv;
 }
 
+float3 TerrainPageDetailCell(Texture2DArray<float4> detail,SamplerState samp,
+    uint detail_slot,HsTextureGradState detail_state,uint layer,TerrainCellSample cell,float weight)
+{
+    float3 n=TerrainDecode(HsTextureSampleGradPrepared(detail,detail_slot,samp,float3(cell.uv,layer),cell.dx,cell.dy,detail_state).rg);
+    n=normalize(lerp(float3(0,0,1),n,weight));
+    n.xy=TerrainRotate(n.xy,(4-cell.rotation)&3);
+    return n;
+}
+
 float3 TerrainPageDetail(Texture2DArray<float4> detail,SamplerState environment_wrap,
     uint detail_slot,uint seed,float2 world,float2 dx,float2 dy,float4 weights,float weight)
 {
     if(weight<=0) return float3(0,0,1);
     const HsTextureGradState state=HsTexturePrepareGrad(detail_slot);
+    const float2 warp=float2(TerrainNoise(world/7,seed+413),TerrainNoise(world/7,seed+827));
     float3 combined=0;
     [unroll] for(uint layer=0;layer<4;++layer)
     {
         if(weights[layer]<=0) continue;
-        const uint key=TerrainHash(seed+layer*0x9e3779b9u),rotation=TerrainHash(key)&3;
-        const float tile=TerrainTileSize(layer);
-        const float2 uv=TerrainRotate(world/tile,rotation)+float2(TerrainRandom(key+1),TerrainRandom(key+2));
-        float3 n=TerrainDecode(HsTextureSampleGradPrepared(detail,detail_slot,environment_wrap,
-            float3(uv,layer),TerrainRotate(dx/tile,rotation),TerrainRotate(dy/tile,rotation),state).rg);
-        n.xy=TerrainRotate(n.xy,(4-rotation)&3);
-        combined+=n*weights[layer];
+        TerrainCellSample x,y,z;float3 cell_weights;
+        TerrainStochasticCells(world,dx,dy,layer,seed,warp,0,x,y,z,cell_weights);
+        const float3 nx=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,x,weight);
+        const float3 ny=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,y,weight);
+        const float3 nz=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,z,weight);
+        combined+=normalize(nx*cell_weights.x+ny*cell_weights.y+nz*cell_weights.z)*weights[layer];
     }
     combined.z=max(combined.z,1e-6);
-    return normalize(lerp(float3(0,0,1),combined,weight));
+    return normalize(combined);
 }
 
 HsMaterialTerrainResult HsMaterialTerrainPage(
@@ -458,56 +504,60 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
     float2 authored_controls)
 {
-    uint count,stride;
-    HsTerrainSections.GetDimensions(count,stride);
-    HsTerrainSection section=(HsTerrainSection)0;
-    section.seed=section_index;
-    if(section_index<count) section=HsTerrainSections[section_index];
+    // Every terrain draw owns an admitted record; source-only records have zero span.
+    const HsTerrainPageSection section=HsTerrainSections[section_index];
     const bool has_page=all(section.span!=0);
     const float2 fade=TerrainDetailFadeRange();
     float2 uv=0,gx=0,gy=0,ray=0;
     float pom_weight=0;
-    float page_weight=0;
+    float3 clamp_mips=0;
+    float2 tile_span=section.span;
+    uint slice=section.pageSlice;
+    bool supported=false;
     [branch] if(has_page)
     {
-        uv=TerrainSectionLocal(world.xz-section.center,section.rotation)/section.span+.5;
-        gx=TerrainSectionLocal(dx.xz,section.rotation)/section.span;
-        gy=TerrainSectionLocal(dy.xz,section.rotation)/section.span;
-        uint width,height_px,slices;
-        HsTerrainPages.GetDimensions(width,height_px,slices);
-        const float2 extent=float2(width,height_px);
+        const float2 extent=float(section.pageEdge);
+        const float2 apron=extent/16.0,interior=extent-2*apron;
+        const float2 section_uv=TerrainSectionLocal(world.xz-section.center,section.rotation)/section.span+.5;
+        const float2 counts=float2(section.tileCount);
+        const uint2 tile=(uint2)clamp(floor(section_uv*counts),0,counts-1);
+        const float2 local=section_uv*counts-float2(tile);
+        tile_span=section.span/counts;
+        slice+=(tile.y*section.tileCount.x+tile.x)*3u;
+        const uint4 color_mip=HsTerrainPlaneMips[slice];
+        const uint4 base_mip=HsTerrainPlaneMips[slice+1u];
+        const uint4 weight_mip=HsTerrainPlaneMips[slice+2u];
+        const uint resident=max(color_mip.y,max(base_mip.y,weight_mip.y));
+        clamp_mips=float(resident)-float3(color_mip.x,base_mip.x,weight_mip.x);
+        uv=(apron+local*interior)/extent;
+        gx=TerrainSectionLocal(dx.xz,section.rotation)/tile_span*interior/extent;
+        gy=TerrainSectionLocal(dy.xz,section.rotation)/tile_span*interior/extent;
         const float2 tx=gx*extent,ty=gy*extent;
         const float xx=dot(tx,tx),xy=dot(tx,ty),yy=dot(ty,ty);
-        // sigma_min = abs(det J) / sigma_max. Nearly parallel screen derivatives
-        // still leave a direction in which the page is too coarse.
         const float major=sqrt(.5*(xx+yy+length(float2(xx-yy,2*xy))));
         const float minor=abs(tx.x*ty.y-tx.y*ty.x)/max(major,1e-12);
         const float2 edge=min(uv,1-uv)*extent;
         const float3 parallax=TerrainParallaxFootprint(dx.xz/9.0,dy.xz/9.0,3,
             normalize(view).xzy,distance_to_eye,HS_MATERIAL_POM_STEPS);
-        ray=TerrainSectionLocal(parallax.xy*9.0,section.rotation)/section.span;
+        ray=TerrainSectionLocal(parallax.xy*9.0,section.rotation)/tile_span*interior/extent;
         pom_weight=parallax.z;
-        // Bilinear taps in the next trilinear mip also cover their prefilter boxes.
-        // Keep the complete residual ray and filter support inside the section.
-        const float2 support=3*max(major,1)+abs(ray)*extent;
-        const float interior=smoothstep(1,2,min(edge.x/support.x,edge.y/support.y));
-        page_weight=interior*smoothstep(.5,1,minor);
+        // Include the residual ray and trilinear/anisotropic prefilter support.
+        const float2 support=3*max(major,exp2(float(resident)))+abs(ray)*extent;
+        // Section indices name the admitted draw; apron contains its own
+        // material continuation beyond the receiver rectangle.
+        // Texture quality selects stored mips without changing the source route.
+        const float wanted_mip=max(float(color_mip.w)-1.0,floor(log2(max(minor*.5,1.0))));
+        supported=all(uint3(color_mip.w,base_mip.w,weight_mip.w)!=0u) &&
+            float(resident)<=wanted_mip && minor>=2.0*(extent.x/4096.0) && all(edge>=support);
     }
-    HsMaterialTerrainResult reference=(HsMaterialTerrainResult)0;
-    [branch] if(page_weight<1)
-    {
-        reference=EnvTerrain(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,
+    [branch] if(!supported)
+        return EnvTerrain(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,
             world,dx,dy,mesh,section.seed,view,distance_to_eye,
             gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,authored_controls);
-        if(page_weight==0) return reference;
-    }
-    const uint slice=section_index*3u;
     const float2 start_uv=uv;
-    // Full ray/filter support is inside the section, so the existing anisotropic
-    // wrap sampler cannot cross an edge and preserves detail at grazing angles.
-    uv=TerrainPageParallax(environment_wrap,uv,gx,gy,ray,pom_weight,slice);
-    const float4 color=HsTerrainColorPages.SampleGrad(environment_wrap,float3(uv,slice),gx,gy);
-    const float4 base=HsTerrainPages.SampleGrad(environment_wrap,float3(uv,slice+1),gx,gy);
+    uv=TerrainPageParallax(environment_wrap,uv,gx,gy,ray,pom_weight,slice+1u,clamp_mips.y);
+    const float4 color=TerrainPageSample(environment_wrap,slice,uv,gx,gy,clamp_mips.x);
+    const float4 base=TerrainPageSample(environment_wrap,slice+1u,uv,gx,gy,clamp_mips.y);
     HsMaterialTerrainResult page=(HsMaterialTerrainResult)0;
     page.base_color=color.rgb;
     page.roughness=color.a;
@@ -517,19 +567,13 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
     const float detail_weight=1-smoothstep(fade.x,fade.y,distance_to_eye);
     [branch] if(detail_weight>0)
     {
-        float4 weights=max(HsTerrainPages.SampleGrad(environment_wrap,float3(uv,slice+2),gx,gy),0);
+        float4 weights=max(TerrainPageSample(environment_wrap,slice+2u,uv,gx,gy,clamp_mips.z),0);
         weights/=max(dot(weights,float4(1,1,1,1)),1e-5);
-        const float2 local_offset=(uv-start_uv)*section.span;
+        const float2 local_offset=(uv-start_uv)*tile_span*(16.0/14.0);
         const float2 world_offset=local_offset.x*float2(section.rotation.x,-section.rotation.y)+local_offset.y*section.rotation.yx;
         page.detail=TerrainPageDetail(detail,environment_wrap,detail_slot,section.seed,world.xz+world_offset,
             dx.xz,dy.xz,weights,detail_weight);
     }
-    if(page_weight==1) return page;
-    page.base_color=lerp(reference.base_color,page.base_color,page_weight);
-    page.roughness=lerp(reference.roughness,page.roughness,page_weight);
-    page.ao=lerp(reference.ao,page.ao,page_weight);
-    page.normal=normalize(lerp(reference.normal,page.normal,page_weight));
-    page.detail=normalize(lerp(reference.detail,page.detail,page_weight));
     return page;
 }
 #endif

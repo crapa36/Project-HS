@@ -119,7 +119,7 @@ void ValidateConfigOverrides(const Json &value)
     constexpr std::array allowed{
         "warp",          "validation",          "gpu_validation", "vsync",
         "bloom",                                "resize_test",    "borderless",
-        "width",         "height",              "frame_cap",      "render_scale_percent",
+        "width",         "height",              "frame_cap",      "render_scale_percent", "camera_zoom_percent",
         "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
         "capture_translucency_diagnostics", "capture_translucency_diagnostics_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
         "pom_quality", "volumetric_quality", "geometry_frontend", "smoke_render_lockstep"};
@@ -149,6 +149,7 @@ void ValidateConfigOverrides(const Json &value)
     };
     ranged("width", 640, 7680);
     ranged("height", 360, 4320);
+    ranged("camera_zoom_percent", 15, 120);
     ranged("diagnostic_enemy_count", 0, 10000);
 
     if (value.contains("frame_cap"))
@@ -738,6 +739,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         }
         number("width", config.width);
         number("height", config.height);
+        number("camera_zoom_percent", config.camera_zoom_percent);
         if (overrides.contains("width") || overrides.contains("height")) config.resolution_explicit = true;
         number("frame_cap", config.frame_cap);
         if (overrides.contains("frame_cap")) config.frame_cap_explicit = true;

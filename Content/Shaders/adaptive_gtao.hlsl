@@ -2,7 +2,7 @@
 HS_AO_ADAPTIVE(HS_AO_DECLARE_ADAPTIVE)
 groupshared AoGuide AdGtaoGuides[64];
 groupshared uint AdGtaoDensities[64];
-groupshared float4 AdGtaoRaw[64];
+groupshared float AdGtaoRaw[64];
 uint AdGtaoIndex(uint2 local) { return local.y*8u+local.x; }
 void AdGtaoLoadTile(uint2 pixel,uint2 local)
 {
@@ -39,12 +39,22 @@ void AdaptiveGtaoCS(uint3 dispatch:SV_DispatchThreadID,uint3 local:SV_GroupThrea
     const bool inBounds=all(dispatch.xy<uint2(AoSize.xy));
     const AoGuide g=AdGtaoGuides[AdGtaoIndex(local.xy)];
     bool anchor=false;
+    bool compatible=false;
     float candidate=1.0;
     if(inBounds)
     {
-        anchor=AdGtaoStride(dispatch.xy,local.xy)==1u||all((dispatch.xy&1u)==0u);
-        candidate=g.valid&&anchor?AoHorizonVisibility(g,dispatch.xy):1.0;
-        AdGtaoRaw[index]=float4(candidate,g.valid?g.position.z:0.0,g.valid?AoEncodeNormal(g.normal):0.0);
+        anchor=all((dispatch.xy&1u)==0u);
+        if(!anchor)anchor=AdGtaoStride(dispatch.xy,local.xy)==1u;
+        if(g.valid&&!anchor)
+        {
+            const AoGuide a=AdGtaoGuides[AdGtaoIndex(local.xy&~1u)];
+            // Match the encoded normal and depth stored by the anchor.
+            compatible=a.valid&&a.position.z>0.0&&all(a.material==g.material)&&
+                abs(a.position.z-g.position.z)<=g.position.z*0.005&&
+                dot(AoDecodeNormal(AoEncodeNormal(a.normal)),g.normal)>=0.995;
+        }
+        candidate=g.valid&&(anchor||!compatible)?AoHorizonVisibility(g,dispatch.xy):1.0;
+        AdGtaoRaw[index]=candidate;
     }
     else AdGtaoRaw[index]=0.0;
     GroupMemoryBarrierWithGroupSync();
@@ -53,16 +63,8 @@ void AdaptiveGtaoCS(uint3 dispatch:SV_DispatchThreadID,uint3 local:SV_GroupThrea
     float visibility=1.0;
     if(g.valid)
     {
-        if(anchor)visibility=candidate;
-        else
-        {
-            const AoGuide a=AdGtaoGuides[AdGtaoIndex(local.xy&~1u)];
-            const float4 raw=AdGtaoRaw[AdGtaoIndex(local.xy&~1u)];
-            // Preserve the encoded normal/depth contract used by the former resolve pass.
-            const bool compatible=raw.y>0.0&&all(a.material==g.material)&&
-                abs(raw.y-g.position.z)<=g.position.z*0.005&&dot(AoDecodeNormal(raw.zw),g.normal)>=0.995;
-            visibility=compatible?raw.x:AoHorizonVisibility(g,dispatch.xy);
-        }
+        if(anchor||!compatible)visibility=candidate;
+        else visibility=AdGtaoRaw[AdGtaoIndex(local.xy&~1u)];
     }
     AoRawOutput[dispatch.xy]=float4(visibility,g.valid?g.position.z:0.0,g.valid?AoEncodeNormal(g.normal):0.0);
 }

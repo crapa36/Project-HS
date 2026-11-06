@@ -1,448 +1,252 @@
 # Current technical state
 
-Working main d04cd4b8e058641fcf38e68b9ece31abdb8ea38c plus uncommitted v3 integration.
-Current Debug runtime-full is48e7d6b19b7ce0b2020936ef95a78bce70bed954289fa47841682e67101e0389.
-The v2/v3 directives and Debug1080p Ultra200-enemy60FPS goal remain incomplete.
-Root owns the sole build/GPU workload. All automated/play/performance runs use
-per-run master0 before audio initialization; user volume intent and audio work remain.
+Main HEAD is `c705366990c4054d10dced643937b7826712abb6` with uncommitted v2/v3/v5 integration.
+Current Debug runtime-full Generation is
+`dd34759eb2866520e434a95b4f56f09ebfee34c363b5e9cbcd39fd7817093bec`.
+Latest grouped verification, foreground timing and source/PE/content identities are in
+`Build/foreground-20261106`; decal/VFX component receipts remain in `Build/decal-abi-20261106`.
+Earlier slot/BSDF/graph timing evidence is in `Build/ao-integral-20261106`.
+Terrain receipts remain in `Build/terrain-route-20261106`. Earlier material-demand receipts remain in
+`Build/material-demand-terrain-20261106`; other component receipts remain in
+`Build/t02-closure-20261106`, `Build/monster-work-20261106` and
+`Build/translucency-replay-20261106`; their results qualify their recorded inputs.
+Prior Debug/Release shipping identities remain in `Build/r02-recording-20261106/preview-final-identities.json`;
+they are not qualification of the later source changes.
+The v2/v3/v5 directives and Debug 1080p Ultra, 200-enemy, 60 FPS qualification remain incomplete.
+Current ordinary-pipeline foreground ABBA runs are qualified at 56.06–56.50 FPS, below 60 FPS.
+Visibility/Compact differences overlap run variation; neither is selected by these FPS results.
+Computer Use initialization failed and was immediately ended. External-load queries remain suspended.
+Game tests use per-run master output zero before audio initialization, without changing saved audio settings.
 
-## Current AO decision and CPU preparation
+## Current verification
 
-CPU-only package pose/instance/VFX preparation runs before the frame-slot wait.
-Resident-material validation and ready publication remain after streaming; slot,
-LOD, ribbon, descriptor/upload reuse and accepted work lifetimes retain their gates.
-Existing resize/native/multi-view cases passed before rollback. scene_prepare_us
-includes both CPU preparation intervals; wait_us excludes the newly moved work.
-This rearrangement has not independently demonstrated a whole-frame speedup.
+- Grouped Debug ProjectHS/experiment/runtime-full builds pass. Current ProjectHS SHA256 is
+  `87b3606975efea2baa10ff457d85a980ee618681a714134ee8880257531081d4`;
+  measured experiment PE SHA256 is `9ef3f313848aa26bdc0f8f96cdaec47d71d8928944383af9beafba9377a1d748`
+  (FNV1a64 `b3d731c79b5ad792`). Current source manifest/identity is in
+  `Build/foreground-20261106/final-source-identity.json`; the only source change after the measured PE
+  is the shipping test's public gameplay setup. Normal Debug tests remain OFF.
+- Full Windows verify ran110 tests:109 passed; light-list exposed an inactive CSM atlas capture.
+  Capture now follows the successfully registered per-view CSM fact, invalidated with target replacement;
+  this fact is development-only. The existing light fixture exercises inactive, real positive-energy
+  fallback CSM and zero-energy directional cases. Scoped light-list/lighting auxiliaries/material reload/
+  runtime smoke then pass4/4. Other unchanged full-workflow results are reused, not a second110/110 run.
+  Existing residency GBV actually rendered53 frames (128 was the maximum), validation0.
+- Existing shipping-content comparison now uses normal movement/basic attacks/natural spawns instead
+  of development cheats rejected by Release. Canonical bytes/hashes and all600 tick checksums remain.
+  Its current RelWithDebInfo and actual Release runs each pass1/1. Final Release ProjectHS and
+  official shipping image build pass; content image is
+  `87a5024efc6f02fff93bcc5f3582e917b36675021f6926eaaa554810e5cfd977`.
+  Reconfiguration with Runtime ON/content tools OFF/tests OFF keeps the actual current pair's
+  ProjectHS build valid and the target graph contains no producer executables. This reuses the
+  existing Release cache; it is not a fresh-cache compile. Normal Release tools ON/tests OFF is restored.
+  Native checks passed before a PowerShell hash-report assembly failure; root completed the receipt
+  without rerunning tests. Exact PE/pack/header identities and scope are in prebuilt-receipt.json.
+- Decal constants160B, SRV/UAV slots/formats and command stride now share one feature-local ABI;
+  actual descriptor, graph-read and retained input order use the same rows. Root ranges, generated
+  material textures, deferred emission and producer snapshots are connected. All291 actual selected
+  DXIL files match prior admitted files/digests/sizes; Generation is unchanged. Existing package/graph
+  checks2/2 pass. No new FPS comparison is needed to attribute this declaration-only shader change.
+- Actual Explosive Arrow/all-upgrades smoke exposed missing geometry.source_id in pre-explosion
+  pull. It now uses the actual projectile ID at production, preserving radius and dispatcher rejection
+  of invalid geometry. Existing real Gameplay/Presentation/dispatch cases pass1/1; verify-core19/19
+  passes. Same muted native workload now finishes120ticks/120frames, Enhanced barriers, normal
+  validation0, actual decal peak4 and unsupported inputs0. It previously failed tick16/15frames.
+  This is not GPU validation or a new FPS result. The separate initial bordered1080p launch failed
+  window placement at1920x1061; existing borderless mode supplies the intended extent.
+- Direct lighting, coated IBL and transmission reuse one surface's normalized view, NoV, F0 and
+  coat-entry Fresnel. Per-light shadows, independent layer normals/positions, base/coat DFG and
+  probe samples remain. Existing rendering.bsdf-sampling passes1/1, including72 coated and14 Fresnel
+  cases. Its actual test Generation now selects only the two consumed products (530,052bytes),
+  without depending on the full world cook. No new runner or test file was added.
+- The experimental exact AO integral is rejected and removed, including its exclusive cases:
+  numerical agreement did not justify larger DXIL and approximately0.011ms measured gain.
+  Restored AO raw/resolved hashes equal the control. Prior single-horizon-call consolidation remains.
+- Volumetric retained preflight compares actual shape facts without reconstructing24 fake resource
+  tokens. Actual registration/binding still checks current versions/resources and completion.
+  Development-only smoke synchronization uses a condition variable instead of1ms/busy-yield polling;
+  stop/done/failure wake and join paths remain. A deliberately invalid tick7 action exits as expected.
+- Swapchain output index, accepted global submission slot and committed history slot are distinct.
+  Timing uses the accepted slot plus matching frame/view identity; cluster previous uses committed
+  history. Existing grass/multiview D/144Hz/16 fixture passes Enhanced+GPU validation, errors0.
+  It checks main/preview order, skipped views and timing ownership, not direct cluster previous-bank
+  output. It is separate from the whole-scene GBV qualification below.
+- Capture lockstep explicitly requests wait_for_streaming and drains GPU queues before rendering;
+  it is not ordinary-pipeline FPS. New non-lockstep1080p Ultra100%/200 foreground runs share one
+  PE/content and ticks300..2300 after10s warmup. VisA/CompactB/CompactA/VisB FPS are
+  56.50/56.18/56.14/56.06; matching PresentMon display intervals agree. All selected frames are
+  Playing/foreground; CompactA's33 background frames are excluded with boundary continuity.
+  GPU output dependency spans average17.655/17.754/17.768/17.794ms; gap-free/physical busy are not proved.
+  VisA CPU render16.482ms includeswait5.776ms; prepare2.444, plan1.525, submit1.521, build1.398,
+  record0.924ms are nested wall scopes. Timing/PresentMon OFF gives56.28FPS, with CPU diagnostics
+  retained; one unmatched run cannot isolate instrumentation cost. Full sorted CPU/GPU tables and
+  per-run p95/p99/1% lows are in `Build/foreground-20261106/foreground-results.md`.
+- Completed raw/DDS/duplicate PNG/PSO capture bulk was deleted after compact evidence,5,572,108,155
+  bytes. Inventory is capture-bulk-cleanup.json; result/CSV/PNG/identity receipts remain.
+- Latest completed capture raw/DDS/fixture pack/PSO cleanup removes1,749files/11,434,788,685bytes.
+  `Build/foreground-20261106/capture-cleanup-result.json` records completion; PNG/CSV/JSON/logs
+  and official current builds/content remain. Own-process ETW collection is stopped and its temporary
+  executable/helper removed. No game/trace process remains from the foreground runs.
 
-Filtered-depth AO was rejected and restored to the original GTAO shader/resources.
-The best candidate's measured AO work was2.367ms against1.967ms baseline; warm
-foreground Debug1080p Ultra200-enemy FPS was40.548 against40.837. These single-order
-runs do not establish a whole-frame regression or gain. No completed reverse-order
-comparison is available. Opaque triangle reference at Medium36samples/frame7 found
-higher raw/resolved contact error; it does not qualify Ultra144samples quality.
-Evidence: Build/v3-ao-filtered/comparison-chain.md and quality-contact-comparison.md.
-The experimental depth pyramid, descriptors, shader product and reference-only
-runner helper are removed; CPU preparation and analysis-tool fixes remain.
-Debug game/experiment/runner build and the existing seven-frame resize check pass
-(validation0). That rollback checkpoint restored runtime-full exactly to13c16640461c19f3db95513421fa6eba02915f2da4487af2c4807b33c9ac4b23;
-current quality work uses the newer identity below.
-Baseline-vs-rollback image equality was not tested at matching settings: baseline
-indexed/Visibility and rollback auto/Compact differ, so that A/B is ineligible.
-Evidence: Build/v3-ao-filtered/rollback.json and rollback-output-check.json.
-Earlier candidate generation622a95cf
-and Build/v3-integration/identities.json are historical checkpoints, not the current
-source/binary qualification. No new foreground measurement has been run.
+## Reusable scoped evidence
 
-Graphics analysis preserves stable IDs55/56 after retired53/54 and reads actual
-historical outline catalogs. Existing self-tests pass; captured GPU frame coverage
-is complete. Absent external utilization and invalid critical_path remain N/A.
+- `Build/terrain-route-20261106/RESULTS.md`: official49-tile production, codec/graph2/2,
+  muted200/120 and normal debug-layer14. Resolve1.640->.870ms accompanies local peak3.45->6.43GiB;
+  it does not close T-01 quality/residency or whole-frame acceptance.
+- `Build/monster-work-20261106/RESULTS.md`: real reduced monster page decode/bind, prepared
+  rules/presentation/VFX/audio composition, independent129-action/894-product probe producer,
+  9-cube one-shot Enhanced/Legacy GBV and7-frame world-transport readiness. Independent
+  multibounce/reference, current final shipping and runtime reduced-LOD benefit remain open.
+- `Build/translucency-replay-20261106/RESULTS.md`: volumetric ABI/DXIL equality and actual
+  indexing work reduction2.641M->1.296M VS invocations per phase, unchanged triangles. Intrusive
+  counters are not FPS evidence; that workload still selectedLOD0. Rejected dispatch chunking
+  and its exclusive cases were removed.
+- Current full-world Ultra1080/200 Enhanced+GBV run completes120ticks/120frames with validation0,
+  valid execution/assertions, full diagnostics and successful GPU drain; owned child exits0.
+  The dedicated existing child entry uses an outer600s qualification limit without changing normal
+  watchdog/CTest limits. It takes about321s including validation startup and is not FPS evidence.
+  Read-only stack sampling saw Jobs workers waiting for tasks and render submission under D3D12
+  validation with NVIDIA compiler activity; the eventual pass does not establish an exact lock cause.
+  This qualifies the recorded120-frame workload on RTX4080/driver32.0.16.2114, not all modes/devices.
+- `Build/r02-recording-20261106/RESULTS.md`: physical recording groups, native multi-queue/actual
+  copy/predication/accepted-prefix cases, material reload, skin/grass and that checkpoint's
+  Debug/Release builds. `Build/v5-integration-20261105/RESULTS.md` covers earlier water,
+  residency/UI/asset contracts. Their unchanged component results are not a new whole-tree gate.
 
-## Debug startup depth-guide fix
+## Ownership and binary content
 
-Normal startup with existing saved settings reproduced an HDR post guide failure;
-the isolated smoke profile did not. Layered translucency exports its reused front
-depth as R32_TYPELESS with an R32_FLOAT SRV, while HDR post, reconstruction and
-presentation still demanded an R32_FLOAT allocation. All three consumers now use
-their existing depth-resource helper, retaining graph identity, extent, format and
-lifetime checks. No extra texture, copy, shader or per-frame scan was introduced.
-The normal muted executable maintained a responsive Project HS window for15seconds
-and exited0 after a normal close, stderr empty. Existing water/mixed/empty fixture
-now enables motion blur/DoF and requires actual HDR geometry-post passes; its
-15-frame native run passes with validation0. Evidence: Build/v3-debug-startup-fix.json
-and v3-debug-startup-fix-build.log. Release and provider-specific qualification have not
-been rerun for these three consumer fixes.
+Simulation rules, presentation, audio and renderer catalogs use bounded explicit binary pack sections.
+`PreparedContent` owns the selected Generation or opened pack and decoded backing until consumers, including AudioEngine, stop.
+Both source paths prepare rules, presentation, VFX and the same prepared audio catalog; SFX preload and
+verified deferred music reads retain their existing lifetimes. Renderer development catalog remains a
+source adapter distinct from the shipping renderer table; full renderer-source parity is not complete.
+PreparedContent special members are out-of-line to keep RunApplication unwind metadata bounded without /bigobj.
+Admission checks domains, versions, extents, digests, semantics and dependency identity; failures preserve prior owners.
+Audio cue/sample/chunk ranges, preload owners and transition streams remain distinct; PCM is verified before use.
+The generated manifest is about5KB; replacing large C++ tables reduces generated data, not measured frame time.
+Do not restore generated simulation, presentation, audio or catalog C++ tables or duplicate payload validation.
+Canonical named shader IDs and digests remain immutable; feedback variants are selected only at effective lookup.
+Unproved loose-file fallbacks retain integrity checks; admitted product proof avoids redundant whole-file hashing.
+Gameplay preserves its 60 Hz phase order, deterministic RNG, strict FP and structural mutation barriers.
 
-## Current lighting quality work
+RenderPackage carries the explicit display sample, scene, UI owner, views and native VFX batch.
+The caller retains borrowed snapshot spans until Render returns; do not replace all borrows with shared ownership.
+Renderer uses existing creator-bound Jobs TaskGroups and joins accepted recording work, including after failure.
+CPU ingress retirement, actual GPU producer acceptance, per-view history and successful Main Present remain separate.
+Accepted prefixes, queue completions, alias/slot checks and native resource owners remain independently tracked.
+Unknown or partial submissions retain their owners until completion or the existing fault/drain path.
+Compatible Enhanced logical callbacks now share physical recording jobs inside existing submission boundaries.
+Worker-sized ranges keep parallelism; owner/import/wait/signal boundaries and Legacy decay remain intact.
+Direct/Compute logical boundaries restore fresh-list state with ClearState; Copy lists do not call it.
+Logical barriers, markers, timestamps and resource membership/completions remain individually tracked.
+Development preview instances/poses/cameras are built by Runtime and existing fixtures before Render.
+Normal character preview preserves each sample's transforms and independently indexed pose backing;
+synthetic still scenes explicitly replace their scene owner. Release excludes the preview producer and edit copies.
+Pure determinism uses the existing rules-only test-combat Generation; UI text uses test-runtime instead of character/shader products.
 
-Exposure is now fixed at1 by the selected art policy. Histogram adaptation, the
-read/write swap,3GPU dispatches,2scene/reconstruction copies,5shader products,
-unused target/PSO state and the dead upload_constants timer/CSV column are removed.
-One immutable DEFAULT float2[1,1] is initialized once per view; its initial upload
-retains the existing capture/graph state rules. SDK1x1 exposure is produced by the
-existing guide pass; DirectSR automatic exposure is disabled. No per-frame exposure
-scheduler, extra option, manager or synchronization exception was introduced.
-The identical temporal/reactive HDR input was removed from graph declarations and
-retained-plan identity(34to33 inputs), rather than relaxing duplicate-read checks.
+## Terrain and residency
 
-Depth of field focuses on the actual view eye-to-target distance, approximately28m
-for gameplay, including zoom/auxiliary views. The fixed10m setting is removed without
-changing GPU ABI or the physical CoC equation. Eight pre-post inputs matched exactly
-in the isolated focus comparison. Camera/exposure/post sequencing remains intact.
-Archer's RGB-only normal atlas now supplies neutral roughness1, with authored
-skin/cloth/equipment/cutout values. Captured skin/cloth/equipment samples have median
-roughness0.498/0.749/0.600 and maximum metallic0, replacing the renderer's universal0.30.
-Base color, normal data, alpha and slime materials were not retuned.
+Terrain page production is offline in `hs_terrain_surface_bake`; ordinary runtime never executes its programs.
+Shipping retains source-only producer digests without their DXIL bulk.
+Five physical source sections currently produce49 material tiles (at most24m per axis), with49 layout4
+metadata leaves and147 independent4096-square/13-mip BC7 planes through a layout5 root.
+The producer reuses one plane's GPU output/readback and borrows CPU RGBA8 into compression;
+per-allocation native peak cap remains256MiB. Generic32MiB payload and64-dependency caps remain.
+TSF1 wire/chunk version is1. Admitted apron, interior and mip facts determine sampling support.
+Its planes are color/roughness, base normal/AO/residual depth and four layer weights.
+Residual depth is normalized over 0–0.05 m; residual mips are appearance averages, not conservative height bounds.
+Metadata and each section product stay within existing package limits; no common wire limit was raised.
+Runtime admits pages only for matching layout, source identity and section facts; otherwise original shading remains.
+Supported pixels evaluate one page macro plus fine/residual representation; unsupported pixels use original shading once.
+Ray/filter support includes the apron. Fine height and its coarse reference are evaluated at the same moved ray position.
+Mesh, collision, RNG, wind and grass transforms are unchanged. Current quality/cost selection remains open;
+the bake's stochastic mapping and consumer's stable micro mapping are not an exact complementary decomposition.
+The previous layout3 reverse patch is historical and does not describe the current49-tile candidate.
+Runtime reads/uploads one plane at a time into the current native array; profile finest mip is2/1/0/0.
+All tile/mip publication fields participate in replacement; existing child-product changes already
+rebuild resident owners. No separate global revision or virtual-texture manager was added.
+Own DXGI local peak increased3.45->6.43GiB in the recorded comparison; independent plane streaming
+or another bounded residency choice is still required before broad supported-device acceptance.
+Dynamic terrain fallback tables and static page backing have separate owners and waited-slot lifetimes.
+Invalid backing is not imported; old backing retires after merged actual readers. Unknown submission retains it.
+A mismatched optional archive falls back without a global drain. Temporary budget refusal can retry on recovery.
+Identity tracks actual bake/mip producers and admitted terrain sources, not downstream resolve shader revisions.
+Generation input closure verifies actual dependency bytes; section products do not gain spurious runtime source deps.
+Terrain evidence and limits: `Build/terrain-residual-20261105/RESULTS.md` and `Build/terrain-surface-density-20261105/RESULTS.md`.
+Current captures are functional evidence; full motion stability and independent relief quality remain open.
 
-SSR RGB is confidence-premultiplied before filtering and added once at composition.
-History confidence reductions scale RGB too, so disocclusion immediately restores
-the environment. Original RNG/PDF/BRDF/sample count and null-sample denominators
-remain. No new probe lookup, buffer or pass. Existing GPU cases cover full miss,
-partial hit, half confidence and temporal zero/partial confidence. An obsolete
-raw-weight/five-probe-path test was removed because that production API was retired;
-current grid/native cases remain. Legacy log readers still handle retired IDs.
-The misleading scene_work capture alias is removed; the grass reader uses canonical
-composite HDR with the recorded exposure for historical adapted captures.
+Texture preferred residency uses actual static materials and dynamic materials observed within the current scene.
+Existing texture quality selects its finest allowed mip; observed OS/native/host budgets govern optional detail.
+Preferred owners are not pinned: budget pressure can coarsen or evict them, and recovery can request them again.
+Required fallback/pinned roots, real native allocation, old/candidate overlap, staged reads and completion gates remain.
+Registration, scene membership, Generation and quality changes invalidate the appropriate preferred working set.
+UMA is propagated consistently to budget and host-admission consumers. Full supported-device peak qualification is open.
+Geometry pinned roots and streaming remain separate from texture residency; no full-arena fit is assumed.
 
-Debug game/experiment/render runner and official content built. Existing configured
-post-topology and BSDF GPU checks pass. Saved-setting muted180ticks/180frames passes
-validation0 with unchanged gameplay checksum6077983588339752369. Exposure reads
-[1,1]; no exposure passes appear in the completed GPU scope. After a logging-only
-field deletion, current game/experiment/runner were rebuilt; actual CSV is199columns
-including task extensions, row widths match, and the retired timer is absent.
-Normal saved-setting muted startup kept a responsive window15seconds and closed0.
-Final water/mixed/empty15frame validation also passes with0errors. Release and
-foreground FPS have not been rerun. DirectSR code matches the official exposure API
-but HS_WITH_DIRECTSR is OFF and the cached SDK include directory is absent here.
-The isolated lighting checkpoint used runtime-full850b34ea6b0876e26f7fe115ec8d318f3d6d326c216c675385d8fba505d8812d;
-the current BSDF/demand checkpoint is below.
-Evidence: Build/quality-lighting-20261105/RESULTS.md, final-result.json and logs;
-Build/ssr-confidence-20261105 contains the isolated SSR product/math comparison.
+## Lighting, transparency and geometry
 
-The unqualified terrain stochastic-reuse candidate is isolated in
-Build/terrain-stochastic-20261105/candidate.patch and not in production source.
-It requires register/quality/frame-cost qualification before adoption. The static
-texture-demand mask candidate was removed because unused consumer planes prevented
-pruning while adding mask work. Overall directives remain incomplete and60FPS unmet.
+SPB2 separates 162 SH9 diffuse nodes from four reflection probes; wall-aware subcell masks restrict diffuse corners.
+Baked capture quality is separate from authored scene/material compatibility; material epochs are Generation-relative.
+Baked publication waits for immutable upload completion, not unrelated current readers; retirement still waits on readers.
+Runtime admits, uploads, samples and retires the bake; native capture/filter/export remain in `hs_probe_baker`.
+The production app now calls its independent one-shot source bootstrap. Offline state is function-owned,
+not conditional Impl instance storage shared with differently compiled translation units. Runtime startup
+keeps its fallback/streaming policy; capture explicitly loads the selected LOD0 source payloads.
+Normal projection and the offline scene producer share the unchanged EnvironmentSun() value.
+The current offline solver includes directly lit surfaces and one surface bounce only; multibounce remains open.
+Volumetrics share baked SH grid sampling; dynamic lights, participating medium and emission remain live.
+The 4x4x4 binary visibility-mask boundary may cause discontinuity and requires reproduction before any replacement.
+Baked GI packed-world upload/sample readiness and true material/scene rejection passed at the earlier qualified checkpoint.
+Evidence: `Build/terrain-surface-density-20261105/RESULTS.md` and `canonical-exits.json`.
 
-## Current BSDF and static-demand simplification
+Exposure is fixed at 1 by the selected art policy. DoF focuses on actual view eye-to-target distance.
+Archer normal-map roughness uses neutral alpha with authored material values; other authored optical inputs remain.
+SSR RGB is confidence-premultiplied and composed once; temporal confidence reductions scale RGB as well.
+Its BRDF/PDF/RNG, sample count and original null-sample denominator remain unchanged.
+Direct lighting shares prepared GGX view terms and diffuse/total work; coated IBL preserves probe fallback and samples.
+GTAO remains the selected implementation; the filtered-depth experiment was rejected and removed.
+GTAO host/HLSL constants, slots and graph roles share one local ABI; six qualified DXIL products were byte-identical.
+SSR also shares its constants, slots, formats and per-pass resource roles; all five selected DXIL products
+were byte-identical at the R-02 checkpoint. Volumetrics also shares its local constants, slots and resource-use declaration; actual seven DXILs
+are byte-identical in Build/translucency-replay-20261106. Other feature conversions remain incomplete.
+The typeless reused front depth is accepted by HDR post, reconstruction and presentation through existing depth helpers.
+Evidence: `Build/quality-lighting-20261105/RESULTS.md`, `Build/ssr-confidence-20261105`,
+`Build/bsdf-demand-20261105/RESULTS.md`, `Build/coated-view-20261105`, `Build/v3-ao-filtered/comparison-chain.md`.
+Static IR counts and prior isolated component timings are not executed ISA or whole-frame speed evidence.
 
-The current direct-light path prepares base/coat GGX roughness widths and view
-Smith terms once before non-area light traversal. Raw BSDF callers keep wrappers;
-coat keeps its original separately normalized basis. Anisotropic and area/PDF/
-sampling semantics are retained. Coated/prefiltered IBL now streams every admitted
-reflection candidate into a running convex mean instead of constructing and
-rereading a per-pixel index/weight array. Original coverage/global fallback and
-separate base/coat mip samples remain; mixture32 still reuses its blend across
-sample directions. No new resource, PSO, manager or production flag.
+Water-only rendering avoids crowd peel work; mixed water/slime retains the existing ordered path.
+Merged Exit has one shared SRV; translucent banks use 18 SRVs and ten dense phases.
+Mixed routing, solid thickness and ordered-vs-shape optical selection remain incomplete.
+Source-absent static/dynamic geometry buckets retain no unnecessary draw records and explicitly clear their own arguments.
+Source-present Cluster/HLOD-suppressed buckets retain records; dynamic empty must never clear static rejected arguments.
+No-sun frames avoid three CSM visibility views. Indexed and mesh 24-frame slot-wrap cases passed validation 0;
+settled static Meadow rejected counts were positive, and the 10-frame GPU LOD fixture passed.
+Geometry route selection still needs whole-LOD/instancing versus Cluster comparison and cooked per-asset decisions.
+Do not add duplicate pose banks or bounds work; exact pose sharing and actual camera/shadow/attachment demand remain scoped work.
+Evidence: `Build/sparse-draw-ao-20261105/RESULTS.md`.
 
-Actual Front/Layer DXIL confirms direct-view terms outside the main light loop.
-Each full static IR has152fewer instruction lines and8fewer array allocas, but
-4more rsqrt calls. These are not executed ISA, register or timing measurements.
-The same experiment PE with baseline8616944 and current48e7d6b each completes
-180lockstep200-enemy frames at1080p Ultra, validation0. Geometry/material/motion/
-transparent identity are unchanged;36/42saved buffers are byte-identical. Six
-HDR/temporal outputs differ with finite values and maximum absolute delta0.0003052.
-Existing hardware BSDF72coated cases and six-frame GPU light-list membership/order
-checks pass. Source/content/PE and numerical evidence: Build/coated-view-20261105.
-Checksum capture was disabled; checksum0 is not simulation equivalence evidence.
-No current foreground FPS or GPU gain is qualified. The shared smoke/capture path
-already applies master0; a redundant experiment flag was removed. No audio contract
-or new permanent test file/runner remains from this work. The baseline Generation
-pointer remains for the still-required clean performance comparison.
+## UI, tools and unresolved work
 
-Base, anisotropic and layered BSDF evaluations now return their diffuse substrate
-alongside total reflection. Direct-light component evaluation no longer computes
-the substrate Fresnel/coat attenuation again in a separate split pass. Raw APIs
-still normalize inputs; prepared evaluation shares one normalized basis. Thin-sheet
-opposite-side diffuse, coat/sheen, optical overrides, unlit and specular clamping
-retain their contracts. Floating-point normalization/reassociation may change bits.
-Existing GPU cases passed both a temporary former-calculation comparison(max4.77e-7)
-and the final analytic diffuse/finite/nonnegative/TIR cases. The temporary copied
-calculation was then removed; no new test executable or production switch remains.
-
-Static geometry-demand cells validate immutable bounds at construction. Active
-views prepare double plane/affine coefficients once per frame; cell intervals no
-longer repeat those finite/order checks. Dynamic radius/error and conservative
-double padding/overflow fallback remain. The original per-point calculation still
-determines exact demand and refreshes streaming requests. No previous-frame cache
-or new registry was added. Existing randomized/invalid-input instance cases pass.
-
-Actual DXIL static IR instructions: Front21793to21305, Layer21687to21199,
-Deferred54793to53493; corresponding rsqrt calls218to206/218to206/637to597.
-Texture samples are unchanged. These whole-IR counts include alternate branches
-and are not executed ISA, register-pressure or whole-frame performance evidence.
-
-Grouped Debug game/experiment/runner and official content build completed. The
-BSDF/demand checkpoint used28231153f9bd17a64ae43ab6ca704f3f4613fd28494344b52a4b7122f94c1e51;
-the current terrain-offline checkpoint is listed above.
-Existing water/mixed/empty native15frames pass validation0. In six selected captures,
-222of250 buffers are byte-identical, including geometry/material/motion/identity;
-changed buffers are HDR color and its temporal/translucency consumers. HDR RGB p99
-absolute difference is0; largest difference0.00390625 is4.7734375to4.77734375 in
-the mixed frame, with mean absolute differences at most2.17e-8. This qualifies
-these inputs, not every scene or foreground1080p Ultra200-enemy performance.
-Evidence: Build/bsdf-demand-20261105/RESULTS.md, result.json, native-output-comparison.json
-and static-comparison.json. Current foreground FPS/Release/full workflow remain
-unexecuted. Material.Resolve/terrain and crowd optical work remain the main GPU
-structural priorities; no new60FPS or net frame-speedup claim is made.
-
-The subsequent terrain stochastic-cell sharing prototype is parked in
-Build/terrain-stochastic-qualified-20261105/candidate.patch. The normal terrain
-source is restored exactly to SHA256400e9e7194740f5b7c98bbe00680fa81518e0d991436e4b550a8319776ab262f
-and its rollback checkpoint used28231153. Three muted offscreen lockstep
-200-enemy600-frame runs completed(exit0, validationOFF). Their timing comparison
-is ineligible: live GPU engine counters identified external HTGame at59percent.
-No foreign process was stopped; the repeat finished before cleanup. Baseline vs
-prototype final captures have36of42 buffers byte-identical, including terrain
-GBuffer and lighting. OIT/translucency/temporal color differ, so this is not a full
-image-equivalence claim. The prototype's static IR grew and its net cost remains
-unqualified. Do not adopt it from source-only redundancy reasoning. AGENTS.md now
-requires a brief external CPU/GPU load check before each comparison run and
-excludes runs contaminated later. No current foreground FPS is established.
-
-## Implemented ownership and retained contracts
-
-Renderer records through existing creator-bound Jobs TaskGroups and joins accepted
-work. RenderPackage explicitly owns the display sample, scene, UI and native VFX
-batch; obsolete internal clock/UI and snapshot adapters are removed. Native accepted
-prefixes, queue completion, alias checks and CPU/native/Present ACKs remain distinct.
-Geometry-record SRVs are written only at allocation and cluster-buffer replacement;
-resident publication preserves that slot and the existing completion waits.
-
-GPU UI uses DirectWrite glyph shaping/fallback, a glyph coverage atlas and ordered
-shape/text drawing. WIC whole-bitmap surfaces/lock/copy/version recovery are removed.
-UI host/HLSL ABI has one declaration. VFX large generated C++ tables are now binary
-shipping ranges, admitted once by the shared reader. The shipping header separately
-binds physical VFX metadata and semantic image identity; full-range SHA256 remains.
-Translucency/CharacterMaterial names, products and historical reader mappings agree.
-Pinned textures skip dynamic demand and local-shadow static batches retain owner facts.
-
-Gameplay retains60Hz, strictFP/RNG/order and structural barriers. Same-tick mutation,
-actual adjacent previous/current samples and owner-thread borrows remain independent.
-Startup fixed-clock debt is reset only after the matching session's first Playing
-Main Present; this removes the observed initial70tick jump, not later render stalls.
-
-## Terrain and grass
-
-Current surface layout2 adds one residual-depth search rather than separate POM
-searches for each layer/cell. Bake stores weighted depth below the unchanged mesh
-in metres(0..0.05), normalized into plane1 alpha; plane2 stores four layer weights.
-Fine normals are sampled independently from the source detail layers using stable
-world mapping. Geometry/collision/grass transforms, RNG and wind are unchanged.
-Page use requires sufficient minor-axis density and the full ray plus filter
-support inside the actual section. Other pixels use the existing evaluator;
-transition pixels evaluate both. No new runtime representation flag or manager.
-The first candidate exposed an isotropic page-filter mismatch: minor-axis admission
-was followed by LinearClamp's major-axis mip. Interior page reads now use the
-existing anisotropic sampler; bounded support prevents wrap across a section edge.
-Residual mips are appearance averages, not conservative height-search bounds.
-
-TSF1/chunk wire version remains1; header lane12 identifies surface layout2.
-The reader decodes legacy0 as layout1, rejects unknown layouts and retains owned
-section/product storage. Runtime only admits layout2 plus matching section/source
-identity(domain v2); legacy data selects original shading. Producer recipe also
-includes the layout. The unchanged3-plane BC7 payload remains83897249bytes across
-6products within the existing package/native budgets.
-
-Terrain codec implementation is isolated in RenderData-owned hs_terrain_surface,
-linked only by its actual consumers. The preceding broad library edit relinked
-unrelated producers: four inspected product groups retained identical digests,
-and Archer alone spent97125ms regenerating13unchanged products. This is real build
-propagation evidence, not proof of timestamp-only nondeterminism. No ActionKey or
-producer integrity check was weakened; shared codec changes still propagate.
-
-Debug game/tool links and official content generation pass. Windows verify-core
-passes19/19 and the existing package cases pass after target separation. Final
-muted1080p60tick near/far/normal executions each render60frames, exit0, validation0,
-pages admitted, checksum1396041847835126483. Final PE/content identities, captures,
-build receipts and limitations: Build/terrain-residual-20261105/RESULTS.md and
-result.json. This is component/functional evidence, not foreground200-enemy timing.
-Full motion stability, current foreground performance and final60FPS remain open.
-No new permanent test runner/file was added. Used raw/DDS captures are deleted.
-
-Terrain page production is now offline. hs_terrain_surface_bake shares the
-one-shot world-transport bootstrap, bakes the exact seed1 sections, and publishes
-TSF1 metadata plus five ordinary section TexturePackages(83897249bytes total).
-Production now reuses one2048-square3-slice output/readback pair across sections,
-with sources/PSOs/MeadowControls prepared once. Existing color/normal mip generation
-precedes BC7 compression; the three planes retain roughness alpha and normal/AO.
-The2048 BC7 payload is only84bytes/section larger than1024 RGBA8. Native consumers
-derive extent/mip/format from admitted metadata and retain the existing256MiB cap.
-Local bake ownership is released before allocator shutdown; unknown submissions
-remain held by Impl's pending owner until the existing drain succeeds.
-Section images stay within the existing32MiB chunk/64MiB package limits; neither
-limit nor the256MiB native page cap was raised. Runtime only admits matching
-section values and canonical source identity, uploads, publishes and retires.
-Other layouts/seeds, absent data or insufficient budget use original shading.
-The page compute/MeadowControls/source-copy producer moved to hs_probe_baker;
-ordinary runtime-full no longer contains its BakeCS/MipCS products. The shared
-Impl retains the same native ownership slot in both builds for failed submissions;
-producer allocation/body remains offline-only. No second renderer/task system.
-
-The source key uses six terrain texture products, the two runtime terrain resolve
-programs and Meadow geometry. Build-only inputs are Action inputs rather than
-runtime product dependencies; metadata depends only on its section products.
-The tool traverses required roots' existing Generation dependency graph and checks
-actual input bytes once. It no longer reconstructs every Action owner, rejects
-valid pinned Generations when current Actions change, or re-parses writer output
-before publication. Cache/IO integrity and native callback completion remain.
-
-Grouped Debug/official content build completed after these corrections. Existing
-package and residency/catalog tests pass; the latter required the host TEMP path
-because sandbox rename was denied. Its optional DirectStorage case remains skipped
-without that SDK. Architecture check passes. Muted1080p normal60ticks exits0,
-validation0 and explicit capture confirms terrain_surface_pages=true. Existing
-water/mixed/empty15frame validation0 takes the custom-layout fallback; all250
-captured buffers match the prior BSDF/demand checkpoint hashes. The validation
-cleanup produces identical section/metadata products. Evidence:
-Build/terrain-surface-offline-20261105/integration-result.json and RESULTS.md.
-The follow-up density/packed integration evidence is in
-Build/terrain-surface-density-20261105. Debug/content build and existing package,
-residency/catalog and architecture cases pass. Muted1080p60tick main execution
-passes validation0 and loads the pages. Actual2K bake vs published BC7 records
-all5sections/3planes/12mips; finite values and numerical differences are recorded,
-not an original-image-is-better quality oracle. At mip0 base-normal mean error
-is0.94degrees and maximum21.55degrees. Saved gameplay images were inspected as
-comparison candidates; still images do not qualify temporal stability.
-Developer and packed catalogs classify section images identically. Shared geometry
-metadata collection excludes the terrain archive/images, removing duplicate full
-image reads/parsing and the fixture's early-continue descriptor omission.
-Texture descriptor compilation reuses authenticated metadata digests instead of
-hashing the same admitted subresource again; independent file/range/bind integrity
-checks remain. Packed native fixture qualification is being completed separately.
-Release/shipping packaging and current foreground performance are not qualified.
-That density-only checkpoint did not contain the current residual representation.
-Meso geometry and current performance qualification remain open; no steady-frame
-speedup is claimed.
-
-The packed world follow-up exposed a separate baked-GI compatibility defect:
-Ultra capture density/POM/detail-fade values were also used as runtime compatibility
-inputs, so a Medium preset disabled an otherwise matching bake. Capture quality
-invalidation is now separate from authored scene/material compatibility, and export
-checks the exact completed capture before writing compatibility revisions. Actual
-source/product, parameter and scene changes still invalidate the bake. The existing
-world fixture also required retired runtime cube/SH/GGX work; it now requires real
-baked sampling/upload plus SSR/volumetric/HLOD and forbids recapture. The old
-capture-source readiness bit is not a baked publication condition.
-The7-frame GBV and standard receipts before this correction are failed workloads,
-although terrain pages and HLOD were admitted; do not report them as full passes.
-Material mutation is now relative to the admitted Generation, not an absolute
-renderer initialization counter; compatibility domain v2 rejects older meanings.
-The remaining exact mismatch was feedback aliasing: loose selection rewrote base
-shader paths/digests while packed provenance retained the named products. Both
-paths now keep canonical maps and choose effective shader variants at read/bind.
-Canonical semantic dependencies use exact named digests; actual shader bytes and
-owner checks use the effective variant. Admitted whole-file proof avoids a second
-shader SHA; unproved loose fallback retains its integrity check.
-Baked publication uses its immutable upload producer completion, independent of
-later readers or capture binding changes. Full reader completion still gates
-retirement/reset. Offline layout capture keeps its quality/invalidation/fence path.
-The existing world oracle now requires baked upload/sample readiness and forbids
-runtime capture, rather than requiring removed cube/SH/GGX work. Its always-false
-capture-source diagnostic is removed. Temporary detailed identity/product dumps
-are removed; explicit Debug capture retains only baseline/current revisions/epoch.
-
-Grouped Debug/content build and residency/catalog alias tests pass. Existing native
-multi-queue/service tests pass, including completed-upload/pending-reader publication,
-reader-protected reset, capture-binding independence, actual revision rejection and
-qualified export. Packed world7frames passes validation0: pages=true, sample_ready=true,
-HLOD accepted and no runtime capture; loose muted1080p60ticks/60frames also passes
-validation0 with checksum1396041847835126483. Both capture the same expected/current
-environment/material/layout revisions. Evidence:
-Build/terrain-surface-density-20261105/canonical-exits.json and RESULTS.md.
-The original package/architecture checks remain valid; optional DirectStorage SDK
-coverage, final-source GBV, Release/shipping package, movement stability and current
-foreground200-enemy performance remain unqualified. No60FPS claim is made.
-
-Optional pages are bounded to256MiB. Oversized valid layouts now retain the original
-material instead of failing rendering. The CPU section retains its real span/seed;
-GPU span0 signals no page. The small section table is imported even without a page.
-Fallback is retained by existing scene/layout/pipeline ownership rather than retried
-per frame. Invalid shapes, overflow and real native failures remain errors. Allocate
-CPU section storage before submission and retire old pages after GPU drain, before
-D3D12MA shutdown. No new retry manager or separate texture was added.
-
-Accepted grass history commits before Present consistently with other view history.
-This fixes the failure boundary; ordinary-play grass height/position/shape popping
-is still unlocalized. No guessed LOD/wind/bender quality change was applied.
-
-## Static lighting and transparency
-
-SPB2 separates162SH9 nodes from4reflection probes. Wall-aware subcell masks select
-valid grid corners and cells retain all reflection candidates. Runtime only admits,
-uploads/publishes, samples and retires; hs_probe_baker owns native capture/filter/export.
-The solver evaluates sky/emission/directly lit surfaces, one surface bounce only.
-Dynamic indirect GI/SDK/SDF/history/seed paths are removed; direct lights, shadows,
-SSR and translucent slimes remain. Shared point preparation locates a probe cell
-once when diffuse/reflection need it; corner arithmetic and sample ordering remain.
-
-Water-only scenes now use SingleLayerWaterPS and skip crowd peel/Exit/tail draws.
-They preserve existing optics, authored thickness, refraction background, fog and
-motion/history/identity/classification outputs. A typed water closure removes unused
-character material/family bindings. Mixed water/slime scenes deliberately keep the
-original ordered path. This is partial water separation, not completed mixed routing
-or the final ordered-vs-shape comparison. The normal character path retains runtime
-material parameters and coating/grazing fallback; no unjustified specialized PSOs.
-
-Existing direct-light traversal/background reuse and merged Exit remain. AO avoids
-same-pixel taps within each horizon side; SSR shares only its original-input PDF
-context. Cluster chooses the indexed/mesh stream and common bounds once. Do not
-count these previous changes as new savings. Offline LTC row parallelism produced
-byte-identical output in6.120s versus63.467s (Build/ltc-comparison/result.json).
-
-## Release capture separation and current evidence
-
-Release normal rendering no longer retains capture-only HDR allocations or updates
-capture-only slot/constants/metadata. Submitted timing/FG identity and skin lifetime
-remain. renderer_capture.cpp is excluded from ordinary Release and included by the
-offline baker; Impl layout is controlled consistently by HS_DEVELOPMENT_TOOLS.
-Release hs_scene_probe_bake actually completed183frames and SceneProbePackage export,
-then published scene-probes-baked using the matching executable recipe SHA256
-e0a9e65de16f205f0249d2b26b47c27e77868f8496fe14453d08e64e37054e1a.
-Evidence: Build/v3-release-capture-split-build.log and the Release Action result.
-
-Previous qualified Debug runtime-full13c16640461c19f3db95513421fa6eba02915f2da4487af2c4807b33c9ac4b23,
-shipping imagec3793c66226066dcae10df5a1991309d444ad2902cb2ef4f3d4e7c5d38337fb0.
-Previous qualified Release runtime-fullb75d990ce0834226c0220002c20eafbc1b607ffa6fa8d5201288fb58492f02a7,
-shipping image9c4b7ba45b88f48ded816815cc9acc6723c7bbc1a5b652525ab84c4325fb5169.
-Exact source/PE/DXIL hashes and receipts are recorded in Build/v3-integration/identities.json.
-Do not substitute a historical checkpoint's identities or FPS.
-
-Water-only/mixed/empty15frame transitions, actual HDR/guide/identity output and warm
-bank history passed with standard D3D12 validation0. Shared-cell change matches all
-30selected reference buffers byte-for-byte (184320000bytes), not all scenes.
-Existing BSDF/shipping checks pass. Oversized88-ground environment preview renders
-3frames with validation0 and actual textured terrain. Evidence:
-Build/v3-water-native-tests.log, v3-probe-fallback-tests.log,
-v3-environment-preview/result.json, v3-integration/probe-cell-equivalence.json.
-After the capture split, grouped Debug/Release builds completed with exit0. Existing
-render-smoke180frames/resize and shipping-content pass (44.35s/1.36s), validation0.
-Evidence: Build/v3-capture-split-final-build.log and v3-capture-split-native-tests.log.
-
-Existing grass-history D144Hz16frame, cluster-retest14frame and render-smoke180frame
-resize checks passed at the previous terrain/descriptor checkpoint. Standard200-enemy
-validation ON180frames and OFF900frames passed at the earlier quality checkpoint;
-a later real-time1200tick/760frame playback had no input/presentation drops. Those
-runs were background/offscreen and do not qualify current FPS or grass geometry.
-GPU-based validation200-enemy and Cluster checks exceeded their existing120s startup
-limit; worker stacks were in NVIDIA shader JIT (nvgpucomp64), not a proved GPU root
-cause. They remain unpassed. Keep v3-terrain-grass-cluster-stack.log/timeout receipt.
-
-## Remaining directives and known limits
-
-Remaining work: high-density terrain/derived bake and residual geometry contract,
-multibounce offline solver, complete mixed water/solid thickness and ordered-vs-shape
-selection, any AO replacement with a new measured quality/performance hypothesis,
-Visibility/compact full closure,
-static-atlas/dynamic-overlay vs VSM and local/volume invalidation, cook geometry route,
-supported-memory peak residency, immutable draw templates, full PassParameters/ABI,
-retained recording batches, remaining large binary tables and multi-view/SDK failure
-boundaries. Full target-device foreground Debug/Release qualification/deletion follows.
-Current wall masks make hardware SH interpolation ineligible for most central-floor
-receivers, so a new Texture3D path is not adopted without a measured whole-pass gain.
-
-Screen-space outline and old settings/product are removed; VFX borders are separate.
-Four controlled pickup kinds have opaque body pixels in Compact/Visibility captures,
-but ordinary-play glow-only appearance remains unresolved. PolarRune optional mask
-uses existing PreviewTiming.z with admitted12slice ranges. The VSM receiver-plane
-correction reduced the previously observed floor-stripe patches while preserving
-bias; it does not prove every later terrain artifact fixed. Evidence remains under
-Build/structure-slim-20261101/phase22 and floor-noise-20261102.
-
-Latest foreground comparison evidence is Build/v3-ao-filtered, Debug/Od with the
-existing renderer-frame Ob2,1080p Ultra100%,200enemies. Baseline warm40.837FPS,
-1%low32.404, output dependency span24.326ms; the rejected candidate is recorded
-separately. Baseline
-Material.Resolve3.568ms, CompositeFront1.918ms, AdaptiveGTAO1.522ms. CPU render
-22.723ms includes slot wait9.785ms. The older phase20/foreground2400 profile is
-historical only. Queue scopes overlap; pass sums and DXIL/source reductions are
-not whole-frame FPS.60FPS16.67ms has not been demonstrated.
-Nsight hardware capture previously failed before target launch in Qt initialization;
-no hardware counters were obtained. WPR/Nsight failure is not an engine diagnosis.
-
-Used raw captures are deleted after comparison, retaining compact receipts/results,
-selected reference buffers and PNGs. Cleanup manifests are under Build/v3-integration.
-No full workflow is inferred from leaf checks, and checks are not repeated without
-changed inputs or unresolved risk. Preserve GPU accepted-prefix/fence/alias lifetime,
-actual view history and separate activation/native/Present receipts.
+GPU UI retains DirectWrite shaping/fallback, ordered clipped premultiplied draws and a glyph coverage atlas.
+Existing layout owners retain shaped quads; color/bar-only changes reuse geometry when topology permits.
+Atlas/page and target changes invalidate the appropriate offsets. Successful Main Present owns hit-testing publication.
+The former WIC whole-screen bitmap, lock/copy and bitmap-specific recovery are removed.
+VFX retains one canonical payload row with profile views and distinguishes CPU ingress from GPU birth acceptance.
+Gameplay owns warning geometry and ticks; cosmetic budget must not discard mandatory warnings.
+Architecture layers use generated CMake File API 2.9 link and compile interfaces plus small include/Private lint.
+Production shadow bake actions are independent of the test runner; terrain producer inputs use their actual closure.
+Rules-only determinism and UI text fixture dependencies are narrowed. Static-shadow input now has
+its actual119-action/854-product closure; standalone probe bootstrap is implemented with its actual
+129-action/894-product closure. Remaining B-02 work is source-current shipping/build combinations
+and the unqualified identity/invalidation boundaries in the content coverage ledger.
+R-02 recording and SSR declaration integration, S-01 membership/binding separation and D-01 preview producers are implemented.
+Other feature PassParameters and wider shadow-change qualification remain open.
+T-02 rechecks terrain archive identity only at real scene/Generation/producer-input changes or pending
+admission retry. Terrain parameter publications decide baseline compatibility once; unrelated shader
+changes do not invalidate the page. SurfaceDiagnostics reports usable/current backing.
+Other open decisions include static atlas/overlay versus VSM, local/volume invalidation and final surface frontend selection.
+Full offline multibounce, optical-route comparison, supported-device residency peaks and SDK failure boundaries remain open.
+Grass ordinary-play popping and observed pickup glow-only appearance are unresolved; do not apply unverified quality changes.
+DirectSR was not qualified in the earlier isolated checkpoint because its optional SDK was unavailable; check current build scope.
+Prior AO candidate, discarded stochastic terrain candidate and old foreground measurements are historical, not current winners.
+No current full-frame 60 FPS, all-motion quality, all-SDK or all-supported-device claim follows from the receipts above.

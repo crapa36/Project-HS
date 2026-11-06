@@ -337,10 +337,10 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     // Opaque hero packages require the complete native four-program contract,
     // even when this fixture exercises only character dependency bindings.
     const std::array programs{
-        rd::MaterialProgramSource{"render/shader/hero_scene_ps.dxil", rd::MaterialProgramKind::HeroScenePS},
-        rd::MaterialProgramSource{"render/shader/hero_visibility_ps.dxil", rd::MaterialProgramKind::HeroVisibilityPS},
-        rd::MaterialProgramSource{"render/shader/hero_resolve_cs.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
-        rd::MaterialProgramSource{"render/shader/hero_shadow_ps.dxil", rd::MaterialProgramKind::HeroShadowPS}};
+        rd::MaterialProgramSource{"render/shader/character_scene_ps.dxil", rd::MaterialProgramKind::CharacterScenePS},
+        rd::MaterialProgramSource{"render/shader/character_visibility_ps.dxil", rd::MaterialProgramKind::CharacterVisibilityPS},
+        rd::MaterialProgramSource{"render/shader/character_resolve_cs.dxil", rd::MaterialProgramKind::CharacterSurfaceResolveCS},
+        rd::MaterialProgramSource{"render/shader/character_shadow_ps.dxil", rd::MaterialProgramKind::CharacterShadowPS}};
     linked.push_back({"render/material/archer_skin/material.rpkg", "material.rpkg", {},
         rd::BuildCharacterMaterialPackage("archer_skin", {}, {1, 0}, programs)});
     for (const auto *semantic : {"diffuse", "normal"})

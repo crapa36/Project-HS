@@ -18,22 +18,9 @@
 
 namespace hs
 {
-struct alignas(16) ScreenReflectionsConstants
-{
-    DirectX::XMFLOAT4X4 inverse_view_projection{}; // Jittered NDC -> camera-relative world.
-    DirectX::XMFLOAT4X4 world_to_view{}; // Rotation transforms positions relative to camera.
-    DirectX::XMFLOAT4X4 projection{}; // Jittered view -> clip.
-    DirectX::XMFLOAT4 render_size{}, trace_size{}, previous_trace_size{};
-    DirectX::XMFLOAT4 previous_depth_parameters{}; // Previous P33,P34,P43,P44.
-    DirectX::XMFLOAT4 jitter_uv{}; // Current xy, previous zw, logical viewport UV.
-    DirectX::XMFLOAT4 trace_parameters{50.0f, 0.15f, 0.03f, 0.75f}; // Distance/thickness/bias m, roughness cutoff.
-    DirectX::XMFLOAT4 filter_parameters{0.03f, 0.85f, 0.9f, 0.08f}; // Relative depth, normal cosine, blend, roughness delta.
-    DirectX::XMUINT4 budget{}; // Rays, traversal iterations, spatial radius, max hierarchy level.
-    DirectX::XMUINT4 frame_info{}; // History valid, frame index, hierarchy count, enabled.
-    std::array<DirectX::XMUINT4, 16> hierarchy_levels{}; // Capacity width,height,element offset,reserved.
-};
-static_assert(sizeof(ScreenReflectionsConstants) == 592);
-static_assert(offsetof(ScreenReflectionsConstants, hierarchy_levels) == 336);
+#define HS_SSR_NATIVE
+#include "../../../Content/Shaders/screen_reflections_abi.hlsli"
+#undef HS_SSR_NATIVE
 
 struct ScreenReflectionResource
 {
@@ -55,6 +42,15 @@ struct ScreenReflectionsInputs
     ScreenReflectionResource ambient_visibility;
     bool ambient_visibility_enabled{};
 };
+// Shared by initial registration and retained-plan binding checks.
+[[nodiscard]] inline std::array<ResourceVersion, SsrSrvCount> ReflectionGuides(const ScreenReflectionsInputs &inputs)
+{
+    return {{
+#define HS_SSR_GUIDE(kind,name,slot,type,shader,version,resource,format) version,
+        HS_SSR_SRVS(HS_SSR_GUIDE)
+#undef HS_SSR_GUIDE
+    }};
+}
 struct ScreenReflectionsOutputs
 {
     ResourceVersion composed;
@@ -67,7 +63,7 @@ struct ScreenReflectionsLayout
     ViewExtent render_capacity{},trace_capacity{};
     std::uint32_t hierarchy_elements{};
     std::uint32_t sidecars{};
-    std::array<ResourceVersion, 13> guides{};
+    std::array<ResourceVersion, SsrSrvCount> guides{};
     std::array<ResourceHandle, 7> resources{};
     std::array<std::uint32_t, 3> passes{};
     ResourceVersion hierarchy, raw, current, validation, composed;

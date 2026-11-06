@@ -1525,15 +1525,7 @@ Result ProjectDynamicTick(const TickReadView &model,
             timer.effect_asset = MakeAssetId("particle.session.wave_warning");
             add_visual(timer);
         }
-    LightView sun{};
-    sun.direction = kEnvironmentSunDirection;
-    sun.quantity = 3.0f * kLightWhiteLumensPerWatt;
-    sun.color = {1.0f, 0.92f, 0.78f};
-    sun.stable_id = 0x48535f53554e0001ull;
-    sun.type = LightType::Directional;
-    sun.unit = LightUnit::Lux;
-    sun.shadow_flags = kLightShadowRequested;
-    snapshot.AddLight(sun);
+    snapshot.AddLight(EnvironmentSun());
     return Result::Success();
 }
 

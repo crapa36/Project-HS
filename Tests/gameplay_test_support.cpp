@@ -31,14 +31,24 @@ void Check(const hs::Result &result, std::string_view message)
     Check(result.Succeeded(), message);
 }
 
+const hs::SimulationRules &DefaultSimulationRules()
+{
+    static const auto data = [] {
+        hs::SimulationRules loaded;
+        Check(hs::LoadSimulationRules(
+                  test_generation::ProductPath("game-data/simulation-rules"),
+                  loaded).Succeeded(),
+              "load selected simulation rules");
+        return loaded;
+    }();
+    return data;
+}
+
 const TestContent &DefaultContent()
 {
     static const auto data = [] {
         TestContent loaded;
-        Check(hs::LoadSimulationRules(
-                  test_generation::ProductPath("game-data/simulation-rules"),
-                  loaded.simulation_rules).Succeeded(),
-              "load selected simulation rules");
+        loaded.simulation_rules = DefaultSimulationRules();
         Check(hs::LoadPresentationCatalog(
                   test_generation::ProductPath("game-data/presentation-catalog"),
                   loaded.presentation).Succeeded(),
@@ -50,7 +60,7 @@ const TestContent &DefaultContent()
 
 hs::SimulationRules QuietGameData()
 {
-    auto data = DefaultContent().simulation_rules;
+    auto data = DefaultSimulationRules();
     for (auto &stage : data.spawn_stages)
     {
         stage.per_second = 0;

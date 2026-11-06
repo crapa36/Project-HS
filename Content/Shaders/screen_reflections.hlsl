@@ -48,51 +48,10 @@ cbuffer FrameConstants : register(b0)
     float4 LightingOptions;
     uint4 CharacterMaterialParameterBases[2];
     uint4 CharacterMaterialVaryingMasks[2];
-    uint4 HeroBindingRanges[7];
+    uint4 CharacterBindingRanges[7];
     float4 ProbeOptions;
 };
-cbuffer ScreenReflectionsConstants : register(b0, space16)
-{
-    row_major float4x4 SsrInverseViewProjection;
-    row_major float4x4 SsrWorldToView;
-    row_major float4x4 SsrProjection;
-    float4 SsrRenderSize, SsrTraceSize, SsrPreviousTraceSize;
-    float4 SsrPreviousDepthParameters;
-    float4 SsrJitterUv;
-    float4 SsrTraceParameters; // distance, thickness, normal bias metres, roughness cutoff
-    float4 SsrFilterParameters; // relative depth tolerance, normal cosine, history weight, roughness tolerance
-    uint4 SsrBudget; // samples, hierarchy lookups, spatial radius, maximum hierarchy level
-    uint4 SsrFrameInfo; // valid history, frame index, hierarchy count, enabled
-    uint4 SsrHierarchyLevels[16]; // allocation width,height,element offset,reserved
-};
-cbuffer ScreenReflectionsPass : register(b1, space16)
-{
-    uint SsrHierarchyLevel;
-    uint SsrAmbientVisibilityEnabled;
-    uint SsrSidecarPlaneCount;
-    uint SsrPassReserved;
-};
-Texture2D<float> SurfaceDepth : register(t0, space16);
-Texture2D<float4> GBufferBase : register(t1, space16);
-Texture2D<float2> GBufferNormal : register(t2, space16);
-Texture2D<uint> GBufferMetadata : register(t3, space16);
-Texture2D<float4> GBufferMaterial : register(t4, space16);
-Texture2D<float2> SsrMotion : register(t5, space16);
-Texture2D<float2> SsrSurfaceHistory : register(t6, space16);
-Texture2D<float4> SsrOpaqueHDR : register(t7, space16);
-Texture2D<float4> SsrEnvironmentSpecular : register(t8, space16);
-// t9 mirrors MaterialParameters in the descriptor table; the common evaluator
-// uses its native t0/space8 root descriptor.
-Texture2D<uint4> SurfaceSidecar0 : register(t10, space16);
-Texture2D<uint4> SurfaceSidecar1 : register(t11, space16);
-Texture2D<float> SsrAmbientVisibility : register(t12, space16);
-RWTexture2D<float4> SsrRawOutput : register(u0, space16);
-RWTexture2D<float4> SsrPreviousRadiance : register(u1, space16);
-RWTexture2D<float4> SsrCurrentRadiance : register(u2, space16);
-RWTexture2D<uint4> SsrPreviousValidation : register(u3, space16);
-RWTexture2D<uint4> SsrCurrentValidation : register(u4, space16);
-RWTexture2D<float4> SsrComposed : register(u5, space16);
-RWStructuredBuffer<float> SsrClosestDepth : register(u6, space16);
+#include "screen_reflections_abi.hlsli"
 
 #include "material_parameters.hlsli"
 #include "material_sidecar.hlsli"
@@ -218,7 +177,7 @@ SsrGuide SsrLoadGuide(int2 pixel)
     {
         const uint model = HsSurfaceModel(g.metadata);
         g.valid = model == HsSurfaceModelEnvironment ||
-            HsHeroOpaqueOrdinalValid(g.metadata.x - HsCharacterMaterialIdBase);
+            HsCharacterOpaqueOrdinalValid(g.metadata.x - HsCharacterMaterialIdBase);
     }
     if (g.valid)
     {

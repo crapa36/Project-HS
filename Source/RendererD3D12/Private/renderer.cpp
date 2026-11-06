@@ -261,7 +261,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     LayeredTranslucencyCandidate transparency;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::LayeredTranslucency, [&] { return impl_->PrepareLayeredTranslucency(main_view, impl_->config,
             main_view.state.render_capacity, transparency); }); !prepared) return prepared;
-    if (auto committed = MeasureStartupStep(RendererStartupStep::LayeredTranslucency, [&] { return main_view.hero_transparency.Commit(std::move(transparency),
+    if (auto committed = MeasureStartupStep(RendererStartupStep::LayeredTranslucency, [&] { return main_view.translucency.Commit(std::move(transparency),
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     LightingProbeCandidate probe;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::LightingProbe, [&] { return impl_->PrepareLightingProbe(impl_->config, probe); }); !prepared) return prepared;
@@ -419,7 +419,7 @@ void D3D12Renderer::HandleWindowMessage(const NativeWindowMessage &message) noex
 }
 
 #if defined(HS_OFFLINE_PROBE_BAKER)
-Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configuration, bool terrain)
+Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configuration, WorldTransportBakeKind kind)
 {
     if (configuration.content_generation_id.empty())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
@@ -455,10 +455,28 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
         kMainRenderViewId.value, std::make_unique<Impl::OwnedView>()).first->second;
     main_view.view_id = kMainRenderViewId;
     main_view.role = RenderViewRole::Main;
+    if (kind == WorldTransportBakeKind::SceneProbe)
+        if (auto loaded = impl_->LoadQualityProfiles(native_config); !loaded) return loaded;
     if (auto created = impl_->CreateDevice(native_config, main_view); !created) return created;
     impl_->resource_generation_id = native_config.content_generation_id;
     impl_->resident_generation_lease = native_config.content_generation_lease;
     impl_->resident_development_catalog = native_config.development_catalog;
+
+    if (kind == WorldTransportBakeKind::Terrain)
+    {
+        const auto material_id = render_data::MaterialProduct(kAuthoredMaterialNames[kTerrainMaterialOrdinal]);
+        const auto handle = FindRendererMaterial(impl_->config, MakeAssetId(material_id));
+        if (!handle)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Terrain bake requires the admitted terrain material.");
+        const auto &material = impl_->config.packed_materials[handle.value];
+        impl_->material_surface_layouts[kTerrainMaterialOrdinal] = material.surface;
+        impl_->material_parameter_layouts[kTerrainMaterialOrdinal] = MaterialLayoutDigest(material);
+        impl_->srv_stride = impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
+        constexpr std::array meadow_lod0{static_cast<std::uint32_t>(render_data::kMeadowGeometryBegin) * lod_count};
+        return impl_->CreateEnvironmentMeshes(meadow_lod0, Impl::EnvironmentMaterialResidency::CaptureOnly);
+    }
 
     if (auto descriptors = impl_->CreateSharedDescriptorHeaps(); !descriptors) return descriptors;
     for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
@@ -476,15 +494,10 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     std::array<std::uint32_t, kEnvironmentMaterialNames.size()> shadow_pages{};
     constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
     for (std::size_t ordinal = 0; ordinal < shadow_pages.size(); ++ordinal)
-        shadow_pages[ordinal] = static_cast<std::uint32_t>(ordinal) * lod_count + (lod_count - 1);
+        shadow_pages[ordinal] = static_cast<std::uint32_t>(ordinal) * lod_count +
+            (kind == WorldTransportBakeKind::SceneProbe ? 0 : lod_count - 1);
     if (auto meshes = impl_->CreateEnvironmentMeshes(shadow_pages,
         Impl::EnvironmentMaterialResidency::CaptureOnly); !meshes) return meshes;
-    if (terrain)
-    {
-        constexpr std::array meadow_lod0{static_cast<std::uint32_t>(render_data::kMeadowGeometryBegin) * lod_count};
-        if (auto meshes = impl_->CreateEnvironmentMeshes(meadow_lod0,
-            Impl::EnvironmentMaterialResidency::CaptureOnly); !meshes) return meshes;
-    }
     if (auto waited = impl_->WaitForGpu(); !waited) return waited;
     return Result::Success();
 }
@@ -515,7 +528,7 @@ Result D3D12Renderer::BakeStaticShadowPages(const RendererConfig &configuration,
                                    "Static shadow producer reported native validation errors.");
         return Result::Success();
     };
-    if (auto initialized = owner.InitializeWorldTransportBake(configuration, false); !initialized)
+    if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::StaticShadow); !initialized)
         return finish(initialized);
     return finish(owner.BakeStaticShadowPagesPrepared(scene, light, begin, page_sink));
 }
@@ -721,7 +734,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = owned_view.screen_reflections.Commit(std::move(reflections),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.hero_transparency.Commit(std::move(transparency),
+    if (auto committed = owned_view.translucency.Commit(std::move(transparency),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = owned_view.hdr_post.Commit(std::move(hdr_post),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
@@ -986,7 +999,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
     }
     if (recreate_transparency)
-        if (auto committed = owned_view.hero_transparency.Commit(std::move(transparency),
+        if (auto committed = owned_view.translucency.Commit(std::move(transparency),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (recreate_hdr_post)
         if (auto committed = owned_view.hdr_post.Commit(std::move(hdr_post),
@@ -1480,7 +1493,7 @@ Result D3D12Renderer::Shutdown()
     impl_->hero_scene_pipeline.Reset();
     impl_->hero_visibility_pipeline.Reset();
     impl_->hero_shadow_pipeline.Reset();
-    impl_->hero_resolve_pipeline.Reset();
+    impl_->character_resolve_pipeline.Reset();
     impl_->hero_translucent_pipeline.Reset();
     impl_->material_parameter_upload.Reset();
     impl_->material_parameter_upload_device.Reset();
@@ -1640,7 +1653,19 @@ Result D3D12Renderer::Shutdown()
     impl_->dispatch_signature.Reset();
     impl_->pending_terrain_pages.reset();
     impl_->terrain_pages.Reset();
-    impl_->terrain_section_buffer.Reset();
+    for (auto &sections : impl_->terrain_frame_sections) sections.Reset();
+    impl_->static_terrain_indices.clear();
+    impl_->dynamic_terrain_indices.clear();
+    impl_->terrain_archive_digest.clear();
+    impl_->terrain_pages_archive_digest.clear();
+    impl_->terrain_static_pages_current = false;
+    impl_->terrain_generation_parameters_valid = false;
+    impl_->terrain_parameters_match = true;
+    impl_->terrain_parameters_changed = false;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->terrain_archive_reads = 0;
+#endif
+    impl_->terrain_retry_budget_bytes = 0;
     if (impl_->terrain_page_residency)
         static_cast<void>(impl_->residency.ReleaseNow(impl_->terrain_page_residency));
     impl_->terrain_page_residency = {};
@@ -1648,6 +1673,9 @@ Result D3D12Renderer::Shutdown()
     impl_->static_terrain_sections.clear();
     impl_->terrain_scene.reset();
     for (auto &texture : impl_->environment_textures) texture.Reset();
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    impl_->environment_descriptor_banks = {};
+#endif
     impl_->environment_brdf_lut.Reset();
     impl_->environment_brdf_candidate.Reset();
     for (auto &mesh : impl_->environment_meshes) mesh.Reset();
@@ -1731,7 +1759,10 @@ std::uint32_t D3D12Renderer::LastParticleCount() const noexcept
 GpuPassTimings D3D12Renderer::LastGpuPassTimings() const
 {
     const auto &owner = *impl_->owned_views.at(impl_->active_view_id.value);
-    const auto &frame = impl_->frames[owner.last_presented_index];
+    if (owner.last_submitted_frame_slot >= kFrameCount) return owner.completed_gpu_timings;
+    const auto &frame = impl_->frames[owner.last_submitted_frame_slot];
+    if (frame.submitted_frame_id != owner.last_submitted_frame_id ||
+        frame.submitted_view_id != owner.view_id.value) return owner.completed_gpu_timings;
     auto timings = impl_->ReadFrameGpuTimings(frame);
     return timings.valid && timings.view_id == owner.view_id.value ? timings : owner.completed_gpu_timings;
 }
@@ -1795,19 +1826,19 @@ Result D3D12Renderer::ConsumeCompletedTranslucencyDiagnostics(std::vector<Render
     for (auto &[id, view] : impl_->owned_views)
     {
         (void)id;
-        if (auto result = view->hero_transparency.ConsumeCompletedWork(completed, output); !result) return result;
+        if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
     }
     for (auto &view : impl_->unresolved_view_candidates)
-        if (auto result = view->hero_transparency.ConsumeCompletedWork(completed, output); !result) return result;
+        if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
     for (auto &resident : impl_->unresolved_resident_candidates)
     {
         for (auto &[id, view] : resident->owned_views)
         {
             (void)id;
-            if (auto result = view->hero_transparency.ConsumeCompletedWork(completed, output); !result) return result;
+            if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
         }
         for (auto &view : resident->unresolved_view_candidates)
-            if (auto result = view->hero_transparency.ConsumeCompletedWork(completed, output); !result) return result;
+            if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
         output.insert(output.end(), std::make_move_iterator(resident->translucency_diagnostics_pending.begin()),
                       std::make_move_iterator(resident->translucency_diagnostics_pending.end()));
         resident->translucency_diagnostics_pending.clear();
@@ -1837,15 +1868,15 @@ RendererTranslucencyDiagnosticsStatus D3D12Renderer::TranslucencyDiagnosticsStat
     if (!impl_) return {};
     auto status = impl_->translucency_diagnostics_retired; status.enabled = impl_->config.capture_translucency_diagnostics;
     for (const auto &[id, view] : impl_->owned_views)
-    { (void)id; AddTranslucencyDiagnosticsStatus(status, view->hero_transparency.WorkStatus(), true); }
-    for (const auto &view : impl_->unresolved_view_candidates) AddTranslucencyDiagnosticsStatus(status, view->hero_transparency.WorkStatus(), true);
+    { (void)id; AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true); }
+    for (const auto &view : impl_->unresolved_view_candidates) AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true);
     for (const auto &resident : impl_->unresolved_resident_candidates)
     {
         AddTranslucencyDiagnosticsStatus(status, resident->translucency_diagnostics_retired, false);
         for (const auto &[id, view] : resident->owned_views)
-        { (void)id; AddTranslucencyDiagnosticsStatus(status, view->hero_transparency.WorkStatus(), true); }
+        { (void)id; AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true); }
         for (const auto &view : resident->unresolved_view_candidates)
-            AddTranslucencyDiagnosticsStatus(status, view->hero_transparency.WorkStatus(), true);
+            AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true);
     }
     return status;
 #else

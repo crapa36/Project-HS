@@ -12,6 +12,7 @@
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/runtime/audio_engine.hpp>
+#include <hs/runtime/prepared_content.hpp>
 #include <hs/runtime/shipping_content.hpp>
 #include <hs/runtime/vfx_image_io.hpp>
 
@@ -31,6 +32,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -46,6 +48,18 @@ namespace
 void Check(bool condition, std::string_view message)
 {
     if (!condition) throw std::runtime_error(std::string(message));
+}
+
+const hs::shipping::PreparedContent &InstalledContent()
+{
+    static const auto content = [] {
+        auto prepared = std::make_unique<hs::shipping::PreparedContent>();
+        const auto loaded = hs::shipping::LoadPreparedContent(hs::CurrentExecutableDirectory(),
+            hs::shipping::ImageInfo(), *prepared);
+        Check(loaded.Succeeded(), loaded.Message());
+        return prepared;
+    }();
+    return *content;
 }
 
 hs::VfxImageData LoadShippingVfx()
@@ -249,21 +263,54 @@ void TestCompiledVfxLightCoverage()
     Check(light_outputs==17,"compiled VFX light coverage inventory changed");
 }
 
-void TestCompiledShippingTables()
+void TestPreparedShippingTables()
 {
     TestPreparedVfxOutputMembership();
     TestCompiledVfxImage();
     TestCompiledVfxLightCoverage();
-    hs::ShippedContentOwner owner;
-    Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), hs::shipping::ImageInfo(), owner).Succeeded(),
-          "compiled image must open its immutable bundle");
+    const auto &installed = InstalledContent();
+    const auto &owner = *installed.owner;
+    const auto &info = hs::shipping::ImageInfo();
+    const auto read_table = [&](hs::shipping::ShippingTable table) {
+        std::vector<std::byte> bytes;
+        Check(hs::shipping::ReadRange(owner, info.tables[static_cast<std::size_t>(table)], bytes).Succeeded(),
+              "read verified shipping table");
+        return bytes;
+    };
+    const auto simulation_wire = read_table(hs::shipping::ShippingTable::Simulation);
+    const auto presentation_wire = read_table(hs::shipping::ShippingTable::Presentation);
+    const auto renderer_wire = read_table(hs::shipping::ShippingTable::Renderer);
+    Check(hs::EncodeSimulationRules(*installed.simulation) == simulation_wire,
+          "prepared simulation rules preserve the actual shipping wire table");
+    Check(hs::EncodePresentationCatalog(installed.presentation) == presentation_wire,
+          "prepared presentation preserves the actual shipping wire table");
+    Check(hs::render_data::EncodeRendererCatalog(installed.renderer.View()) == renderer_wire,
+          "prepared renderer descriptors preserve the complete shipping wire table");
+
+    hs::shipping::PreparedContent transferred;
+    {
+        hs::shipping::PreparedContent moved;
+        Check(hs::shipping::LoadPreparedContent(hs::CurrentExecutableDirectory(), info, moved).Succeeded(),
+              "load prepared content for move and failure transaction");
+        transferred = std::move(moved);
+    }
+    Check(hs::render_data::EncodeRendererCatalog(transferred.renderer.View()) == renderer_wire,
+          "moving prepared content keeps all renderer descriptor spans valid");
+    auto invalid_info = info;
+    invalid_info.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Renderer)].digest[0] ^= std::byte{1};
+    Check(!hs::shipping::LoadPreparedContent(hs::CurrentExecutableDirectory(), invalid_info, transferred).Succeeded(),
+          "invalid image admission must fail");
+    Check(transferred.owner && transferred.simulation &&
+          hs::EncodeSimulationRules(*transferred.simulation) == simulation_wire &&
+          hs::EncodePresentationCatalog(transferred.presentation) == presentation_wire &&
+          hs::render_data::EncodeRendererCatalog(transferred.renderer.View()) == renderer_wire,
+          "failed admission must preserve the existing content and its spans");
     hs::PresentationCatalog reference;
     std::uint64_t hash{};
     Check(hs::LoadPresentationCatalog(test_generation::ProductPath("game-data/presentation-catalog"), reference, &hash).Succeeded(),
           "reference presentation must load");
-    const auto &compiled = hs::shipping::Presentation();
-    Check(&compiled == &hs::shipping::Presentation() && hash == hs::shipping::ImageInfo().content_hash,
-          "compiled presentation identity");
+    const auto &compiled = installed.presentation;
+    Check(hash == info.content_hash, "prepared presentation identity");
     Check(compiled.relic_names == reference.relic_names && compiled.relic_rules == reference.relic_rules,
           "compiled presentation text bytes");
     const auto same = [](float a, float b) { return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b); };
@@ -277,8 +324,7 @@ void TestCompiledShippingTables()
     hs::SimulationRules reference_rules;
     Check(hs::LoadSimulationRules(test_generation::ProductPath("game-data/simulation-rules"), reference_rules).Succeeded(),
           "reference simulation rules must load");
-    const auto &compiled_rules = hs::shipping::Simulation();
-    Check(&compiled_rules == &hs::shipping::Simulation(), "compiled simulation rules have a stable address");
+    const auto &compiled_rules = *installed.simulation;
     Check(hs::CanonicalSimulationRulesBytes(compiled_rules) == hs::CanonicalSimulationRulesBytes(reference_rules),
           "compiled simulation rules preserve all canonical field bytes");
     Check(hs::SimulationRulesHash(compiled_rules) == hs::SimulationRulesHash(reference_rules),
@@ -288,28 +334,13 @@ void TestCompiledShippingTables()
     hs::GameSimulation loaded_world, compiled_world;
     Check(loaded_world.Initialize(config, reference_rules).Succeeded() &&
           compiled_world.Initialize(config, compiled_rules).Succeeded(), "shipping rules simulation initialization");
-    const hs::DebugCommand grant{hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot)};
-    Check(loaded_world.ApplyDebugCommand(grant).Succeeded() && compiled_world.ApplyDebugCommand(grant).Succeeded(),
-          "shipping rules fixture must equip its active skill");
     const auto initial_position = loaded_world.GetObservation().player_position;
-    bool moved = false; hs::Sequence sequence{};
+    bool moved = false;
     for (hs::Tick tick = 1; tick <= 600; ++tick)
     {
-        if (tick % 120 == 1)
-        {
-            const hs::DebugCommand spawn{hs::DebugCommandKind::SpawnEnemy, (tick / 120) % 3, 0, {6, -4}};
-            Check(loaded_world.ApplyDebugCommand(spawn).Succeeded() && compiled_world.ApplyDebugCommand(spawn).Succeeded(),
-                  "shipping rules fixture enemy spawn");
-        }
         hs::InputFrame input{}; input.target_tick = tick; input.held.move_held = true;
         input.held.move_target_world = (tick / 150) % 2 == 0 ? hs::Float3{12, 0, 8} : hs::Float3{-10, 0, -6};
         input.held.aim_world = {6, 0, -4}; input.held.basic_attack_held = tick % 60 < 40;
-        std::array<hs::ActionEdge, 1> edges{};
-        if (tick % 90 == 1 || tick % 90 == 2)
-        {
-            edges[0] = {++sequence, hs::GameAction::SkillQ,
-                tick % 90 == 1 ? hs::EdgeKind::Pressed : hs::EdgeKind::Released}; input.ordered_edges = edges;
-        }
         const auto expected = loaded_world.TickFixed(input);
         const auto actual = compiled_world.TickFixed(input);
         Check(actual.tick == expected.tick && actual.phase == expected.phase && actual.checksum == expected.checksum,
@@ -318,13 +349,15 @@ void TestCompiledShippingTables()
         moved |= position.x != initial_position.x || position.y != initial_position.y;
         loaded_world.ClearDomainSignals(); compiled_world.ClearDomainSignals();
     }
-    Check(moved && loaded_world.GetObservation().balance.skill_uses[static_cast<std::size_t>(hs::SkillKind::PiercingShot)] > 0,
-          "shipping rules comparison must exercise movement and an active skill");
+    const auto balance = loaded_world.GetObservation().balance;
+    Check(moved && balance.skill_uses[static_cast<std::size_t>(hs::SkillKind::BasicAttack)] > 0 &&
+          std::ranges::any_of(balance.enemy_spawned, [](auto count) { return count > 0; }),
+          "shipping rules comparison must exercise movement, attacks, and natural enemy spawning");
     Check(compiled_world.ComputeChecksum() == loaded_world.ComputeChecksum(), "compiled rules final gameplay state");
     Check(loaded_world.Shutdown().Succeeded() && compiled_world.Shutdown().Succeeded(), "shipping rules simulation shutdown");
-    const auto &audio_image = hs::shipping::Audio();
-    Check(&audio_image == &hs::shipping::Audio() && audio_image.cues.size() == 107 && audio_image.samples.size() == 379,
-          "compiled audio tables retain stable identity and complete authored coverage");
+    const auto audio_image = installed.audio.View();
+    Check(audio_image.cues.size() == 107 && audio_image.samples.size() == 379,
+          "prepared audio tables retain complete authored coverage");
     std::uint32_t preload_samples{};
     for (const auto &cue : audio_image.cues) if (cue.preload) preload_samples += cue.sample_count;
     Check(preload_samples == 374, "compiled audio keeps the qualified preload versus transition split");
@@ -344,6 +377,11 @@ void TestCompiledShippingTables()
               "compiled PCM ranges belong to the matching immutable image");
     hs::SettingsData silent_settings; silent_settings.master_volume = 0;
     hs::AudioEngine compiled_audio;
+    Check(compiled_audio.Initialize(silent_settings, transferred.prepared_audio, {}).Succeeded(),
+          "moved prepared content supplies the common audio consumer");
+    Check(compiled_audio.Status().loaded_cues == 107 && compiled_audio.Status().loaded_files == 374,
+          "prepared audio preserves resident and transition samples");
+    compiled_audio.Shutdown();
     Check(compiled_audio.Initialize(silent_settings, audio_image, owner).Succeeded(), "compiled audio consumes PCM ranges directly");
     Check(compiled_audio.Status().loaded_cues == 107 && compiled_audio.Status().loaded_files == 374,
           "compiled audio does not eagerly load the five transition samples");
@@ -525,7 +563,7 @@ int main(int argc, char **argv)
         if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "shipping-content"))
         {
             TestShippingImage();
-            TestCompiledShippingTables();
+            TestPreparedShippingTables();
             return 0;
         }
         Check(argc == 2 && std::string_view(argv[1]) == "ui-text-fit", "unknown shipping test case");

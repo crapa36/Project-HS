@@ -11,8 +11,8 @@ import struct
 import subprocess
 
 
-LOCAL_COUNTS = (4, 64, 65, 128, 127, 0)
-DIRECTIONAL_COUNTS = (0, 0, 0, 0, 1, 1)
+LOCAL_COUNTS = (4, 64, 65, 128, 127, 0, 4)
+DIRECTIONAL_COUNTS = (0, 0, 0, 0, 1, 1, 0)
 
 
 def require(condition, message):
@@ -28,6 +28,12 @@ def digest(path):
 def analyze_frame(directory, frame):
     metadata = json.loads((directory / f"light-list-{frame}.json").read_text(encoding="utf-8"))
     resources = {item["name"]: item for item in metadata["resources"]}
+    if frame in (1, 2, 3, 4, 7):
+        require("shadow_atlas" not in resources,
+                "CSM capture retained an atlas without a shadow-requesting sun")
+    elif frame == 5:
+        require("shadow_atlas" in resources,
+                "CSM capture omitted the radiating sun's fallback atlas")
     status = metadata["light_list"]
     names = ("light_records", "light_ranges", "light_inline", "light_spill")
     require(status["frame_slot_count"] == 3 and 0 <= status["frame_slot"] < 3, "Invalid frame slot")
@@ -126,8 +132,8 @@ def analyze(directory):
     receipt = json.loads((directory / "result.json").read_text(encoding="utf-8"))
     require(receipt["execution_valid"] and receipt["fixture"] == "light-list-capacity-v1"
             and receipt["validation_errors"] == 0, "Native execution or validation failed")
-    require(len(receipt["light_list"]["frames"]) == 6, "Fixture did not capture all six frames")
-    frames = [analyze_frame(directory, frame) for frame in range(1, 7)]
+    require(len(receipt["light_list"]["frames"]) == 7, "Fixture did not capture all seven frames")
+    frames = [analyze_frame(directory, frame) for frame in range(1, 8)]
     require(len({frame["allocation_bytes"] for frame in frames}) == 1,
             "Allocation changed with light count in a fixed-capacity fixture")
     timeline = receipt.get("diagnostics", {}).get("timeline", {})

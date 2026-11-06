@@ -210,6 +210,7 @@ float3 HsSceneProbePrefiltered(float3 world,float3 direction,float roughness)
 }
 void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 view_direction,
     float base_fresnel_override, bool indirect_diffuse_enabled, bool indirect_specular_enabled,
+    HsBsdfDirectView prepared,
     out float3 ambient_diffuse, out float3 ambient_specular)
 {
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
@@ -217,12 +218,12 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     if(IndirectArguments.Load(28u)!=0u)
     { HsTranslucencyDiagnosticsAdd(26u); ambient_diffuse=0.0; ambient_specular=0.0; return; }
 #endif
-    float3 v=normalize(view_direction);
+    float3 v=prepared.view;
     closure=HsBsdfOrientThinSurface(closure,v);
-    float3 n=normalize(closure.normal),base=closure.base_color;
-    float nv=saturate(dot(n,v));
+    float3 n=prepared.normal,base=closure.base_color;
+    float nv=prepared.no_v;
     float metallic=saturate(closure.metallic),dielectric=1-metallic;
-    float3 F0=HsBsdfF0(closure);
+    float3 F0=prepared.f0;
     ambient_diffuse=0.0;
     ambient_specular=0.0;
     [branch] if(HsBsdfCanUseCoatedIbl(closure,nv))
@@ -236,6 +237,7 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         const float2 coat_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(lut_no_v,coat_roughness),0).xy;
         float3 diffuse_factor,base_specular_factor; float coat_specular_factor;
         HsBsdfCoatedIblFactors(closure,nv,base_dfg,coat_dfg,base_fresnel_override,
+            prepared.f0,prepared.coat_entry,
             diffuse_factor,base_specular_factor,coat_specular_factor);
         const float3 kernel=diffuse_consumed?HsBsdfCoatedDiffuseKernel(closure.coat_weight):0.0;
         const float3 sky_bottom=float3(.055,.065,.045),sky_top=float3(.24,.31,.42);
@@ -357,6 +359,17 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     ambient_specular=sky*integrated_fresnel*saturate(closure.ao)*(1.0-thinWeight);
 }
 
+void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 view_direction,
+    float base_fresnel_override, bool indirect_diffuse_enabled, bool indirect_specular_enabled,
+    out float3 ambient_diffuse, out float3 ambient_specular)
+{
+    const float3 normalized_view=normalize(view_direction);
+    const HsSurfaceClosure oriented=HsBsdfOrientThinSurface(closure,normalized_view);
+    const HsBsdfDirectView prepared=HsBsdfPrepareDirectView(oriented,normalized_view,normalize(oriented.normal));
+    EnvironmentIndirectLightingComponents(diffuse_consumed,oriented,world,normalized_view,base_fresnel_override,
+        indirect_diffuse_enabled,indirect_specular_enabled,prepared,ambient_diffuse,ambient_specular);
+}
+
 void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure,float3 world,float3 view_direction,
     float base_fresnel_override,bool indirect_diffuse_enabled,bool indirect_specular_enabled,
     out float3 ambient_diffuse,out float3 ambient_specular)
@@ -367,7 +380,7 @@ void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure,float3 world
 
 void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 v,
     uint direct_light_mask, float visibility,
-    float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular,
+    float base_fresnel_override, HsBsdfDirectView prepared, out float3 diffuse, out float3 specular, out float3 ambient_specular,
     out float3 ambient_diffuse)
 {
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
@@ -375,11 +388,23 @@ void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closur
 #endif
     closure=HsBsdfOrientThinSurface(closure,v);
     HsLightListEvaluateComponentsForView(closure,world,v,visibility,
-        direct_light_mask,false,base_fresnel_override,diffuse,specular);
+        direct_light_mask,false,base_fresnel_override,prepared,diffuse,specular);
     EnvironmentIndirectLightingComponents(diffuse_consumed,closure,world,v,base_fresnel_override,
-        LightingOptions.z>0.0,LightingOptions.w>0.0,ambient_diffuse,ambient_specular);
+        LightingOptions.z>0.0,LightingOptions.w>0.0,prepared,ambient_diffuse,ambient_specular);
     diffuse+=ambient_diffuse;
     specular+=ambient_specular;
+}
+
+void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 v,
+    uint direct_light_mask, float visibility,
+    float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular,
+    out float3 ambient_diffuse)
+{
+    const float3 normalized_view=normalize(v);
+    const HsSurfaceClosure oriented=HsBsdfOrientThinSurface(closure,normalized_view);
+    const HsBsdfDirectView prepared=HsBsdfPrepareDirectView(oriented,normalized_view,normalize(oriented.normal));
+    EnvironmentLightingComponents(diffuse_consumed,oriented,world,normalized_view,direct_light_mask,visibility,
+        base_fresnel_override,prepared,diffuse,specular,ambient_specular,ambient_diffuse);
 }
 
 void EnvironmentLightingComponents(HsSurfaceClosure closure,float3 world,float visibility,

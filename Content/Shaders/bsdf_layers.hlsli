@@ -64,11 +64,11 @@ float HsBsdfAnisotropicSmithDenominator(float3 direction_local, float2 alpha)
 }
 
 float3 HsBsdfAnisotropicEvaluateComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
-    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, float3 f0, out float3 diffuse)
 {
     if (surface.anisotropy == 0.0)
     {
-        return HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared, diffuse);
+        return HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared, f0, diffuse);
     }
     diffuse = 0.0;
     float no_v = dot(normal, view);
@@ -86,11 +86,19 @@ float3 HsBsdfAnisotropicEvaluateComponentsView(HsSurfaceClosure surface, float3 
     float distribution = HsBsdfAnisotropicD(half_local, alpha);
     float view_denominator = HsBsdfAnisotropicSmithDenominator(HsBsdfToLocal(view, tangent, bitangent, normal), alpha);
     float light_denominator = HsBsdfAnisotropicSmithDenominator(HsBsdfToLocal(light, tangent, bitangent, normal), alpha);
-    float3 f0 = HsBsdfF0(surface);
-    float3 fresnel = HsBsdfOpticalReflectionFresnel(surface, saturate(0.5 * sqrt(half_length_squared)), base_fresnel_override);
+    float3 fresnel = HsBsdfSchlickFresnel(f0, saturate(0.5 * sqrt(half_length_squared)));
+    if (base_fresnel_override >= 0.0)
+        fresnel = lerp(fresnel, saturate(base_fresnel_override).xxx, saturate(surface.solid_transmission_weight));
     float3 diffuse_transmission = (1.0 - HsBsdfSchlickFresnel(f0, no_v)) * (1.0 - HsBsdfSchlickFresnel(f0, no_l));
     diffuse = diffuse_transmission * ((1.0 - HsBsdfMetallic(surface)) * surface.base_color) * HsBsdfInvPi;
     return diffuse + distribution * fresnel / (view_denominator * light_denominator);
+}
+
+float3 HsBsdfAnisotropicEvaluateComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, out float3 diffuse)
+{
+    return HsBsdfAnisotropicEvaluateComponentsView(surface, normal, view, light,
+        base_fresnel_override, prepared, HsBsdfF0(surface), diffuse);
 }
 
 float3 HsBsdfAnisotropicEvaluateComponentsPrepared(HsSurfaceClosure surface, float3 normal, float3 view,
@@ -220,11 +228,21 @@ struct HsBsdfDirectView
 {
     HsBsdfGgxView base, coat;
     float3 coat_normal, coat_view;
+    float3 normal, view, f0;
+    float no_v, solid_f0, coat_entry;
 };
+
+float HsBsdfCoatFresnel(float cosine);
 
 HsBsdfDirectView HsBsdfPrepareDirectView(HsSurfaceClosure surface, float3 view, float3 normal)
 {
     HsBsdfDirectView result = (HsBsdfDirectView)0;
+    result.normal = normal; result.view = view;
+    result.no_v = saturate(dot(normal, view));
+    result.solid_f0 = HsBsdfSolidDielectricF0(surface);
+    const float dielectric = lerp(0.04, result.solid_f0, saturate(surface.solid_transmission_weight));
+    result.f0 = lerp(dielectric.xxx, surface.base_color, saturate(surface.metallic));
+    result.coat_entry = 1.0 - saturate(surface.coat_weight) * HsBsdfCoatFresnel(result.no_v);
     if (surface.anisotropy == 0.0)
         result.base = HsBsdfPrepareGgxView(surface, normal, view);
     if (surface.coat_weight > 0.0)
@@ -261,13 +279,12 @@ float3 HsBsdfCoatedDiffuseKernel(float coat_weight)
 
 void HsBsdfCoatedIblFactors(HsSurfaceClosure surface, float no_v, float4 base_dfg,
     float2 coat_dfg, float base_fresnel_override,
+    float3 f0, float entry,
     out float3 diffuse, out float3 substrate_specular, out float coat_specular)
 {
     const float w = saturate(surface.coat_weight);
-    const float entry = 1.0 - w * HsBsdfCoatFresnel(no_v);
     // ZW integrates the same GGX DFG against the full coat exit Fresnel.
     const float2 dfg = max(base_dfg.xy - w * base_dfg.zw, 0.0);
-    const float3 f0 = HsBsdfF0(surface);
     substrate_specular = f0 * dfg.x + dfg.y;
     if (base_fresnel_override >= 0.0)
         substrate_specular = lerp(substrate_specular,
@@ -277,6 +294,15 @@ void HsBsdfCoatedIblFactors(HsSurfaceClosure surface, float no_v, float4 base_df
     // The exit factor is carried by the weighted diffuse SH convolution.
     diffuse = (1.0 - HsBsdfSchlickFresnel(f0, no_v)) * (1.0 - f0) *
         (1.0 - HsBsdfMetallic(surface)) * surface.base_color * entry;
+}
+
+void HsBsdfCoatedIblFactors(HsSurfaceClosure surface, float no_v, float4 base_dfg,
+    float2 coat_dfg, float base_fresnel_override,
+    out float3 diffuse, out float3 substrate_specular, out float coat_specular)
+{
+    HsBsdfCoatedIblFactors(surface, no_v, base_dfg, coat_dfg, base_fresnel_override,
+        HsBsdfF0(surface), 1.0 - saturate(surface.coat_weight) * HsBsdfCoatFresnel(no_v),
+        diffuse, substrate_specular, coat_specular);
 }
 
 float3 HsBsdfSheenColor(HsSurfaceClosure surface)
@@ -366,7 +392,7 @@ float3 HsBsdfEvaluateLayeredComponentsView(HsSurfaceClosure surface, float3 view
     if (no_l > 0.0)
     {
         substrate = HsBsdfAnisotropicEvaluateComponentsView(surface, normal, view, light,
-            base_fresnel_override, prepared.base, diffuse);
+            base_fresnel_override, prepared.base, prepared.f0, diffuse);
         substrate *= 1.0 - transmission;
         diffuse *= 1.0 - transmission;
     }
@@ -381,7 +407,7 @@ float3 HsBsdfEvaluateLayeredComponentsView(HsSurfaceClosure surface, float3 view
     float coat_weight = saturate(surface.coat_weight);
     // The inherited coat normal attenuates entry and exit symmetrically. For
     // transmission the exit cosine is measured on the opposite sheet face.
-    float coat_transmission = (1.0 - coat_weight * HsBsdfCoatFresnel(no_v))
+    float coat_transmission = prepared.coat_entry
         * (1.0 - coat_weight * HsBsdfCoatFresnel(abs(no_l)));
     float3 result = substrate * coat_transmission;
     diffuse *= coat_transmission;
@@ -389,7 +415,7 @@ float3 HsBsdfEvaluateLayeredComponentsView(HsSurfaceClosure surface, float3 view
     {
         float3 coat_diffuse;
         result += coat_weight * HsBsdfBaseEvaluateOpticalComponentsView(HsBsdfCoatSurface(surface),
-            prepared.coat_normal, prepared.coat_view, normalize(light), -1.0, prepared.coat, coat_diffuse);
+            prepared.coat_normal, prepared.coat_view, normalize(light), -1.0, prepared.coat, float3(0.04, 0.04, 0.04), coat_diffuse);
     }
     if (no_l < 0.0) diffuse = result;
     return result;
@@ -453,7 +479,7 @@ void HsBsdfEvaluateComponentsOpticalView(HsSurfaceClosure surface, float3 view, 
         }
         else
         {
-            total = HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared.base, diffuse);
+            total = HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override, prepared.base, prepared.f0, diffuse);
         }
     }
     specular = max(total - diffuse, 0.0);

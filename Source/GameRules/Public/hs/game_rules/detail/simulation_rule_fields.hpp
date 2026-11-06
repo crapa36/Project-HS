@@ -1,6 +1,8 @@
 #pragma once
 
 #include <hs/game_rules/simulation_rules.hpp>
+#include <type_traits>
+#include <utility>
 
 namespace hs::detail
 {
@@ -1273,5 +1275,16 @@ void VisitSimulationRuleFields(const SimulationRules &value, Visitor &&visit)
     visit("relics", value.relics);
 }
 
+// Reuse the same field inventory for mutable decode. The original object is
+// mutable; only the field-list traversal itself observes it as const.
+template <typename T, typename Visitor>
+    requires (!std::is_const_v<T>)
+void VisitSimulationRuleFields(T &value, Visitor &&visit)
+{
+    VisitSimulationRuleFields(std::as_const(value), [&](const char *name, const auto &field) {
+        using Field = std::remove_const_t<std::remove_reference_t<decltype(field)>>;
+        visit(name, const_cast<Field &>(field));
+    });
+}
 
 } // namespace hs::detail

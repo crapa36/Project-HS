@@ -31,30 +31,20 @@ Result Native(std::string_view operation,HRESULT hr)
 Result CreateVolumetricRootSignature(ID3D12Device *device,RendererPipelineCache *cache,
     ComPtr<ID3D12RootSignature> &root)
 {
-    D3D12_DESCRIPTOR_RANGE1 ranges[9]{};
-    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_CBV,1,0,24,
+    D3D12_DESCRIPTOR_RANGE1 ranges[11]{};
+    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_CBV,1,HS_VM_CONSTANT_REGISTER,HS_VM_SPACE,
         D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,0};
-    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,14,0,24,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,1};
-    ranges[2]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,9,0,24,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,15};
-    ranges[3]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,14,24,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,24};
-    ranges[4]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,1,3,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-        kVolumetricGradientOffset};
-    ranges[5]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,19,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-        kVolumetricLightOffset};
-    ranges[6]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,21,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-        kVolumetricShadowOffset};
-    ranges[7]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,5,21,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-        kVolumetricShadowRootOffset};
-    ranges[8]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,27,
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-        kVolumetricLocalShadowOffset};
+    ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,VmSrvHeroes-VmSrvDepth,VmSrvDepth,HS_VM_SPACE,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,VmSrvDescriptorDepth};
+    ranges[2]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,VmUavCount,VmUavMedium,HS_VM_SPACE,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,VmUavDescriptorMedium};
+    ranges[3]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,VmSrvCount-VmSrvHeroes,VmSrvHeroes,HS_VM_SPACE,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,VmSrvDescriptorHeroes};
+#define HS_VM_RANGE(name,index,count,base,space,offset) \
+    ranges[index]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,count,base,space, \
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE|D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,VmExternal##name};
+    HS_VM_EXTERNAL_RANGES(HS_VM_RANGE)
+#undef HS_VM_RANGE
     D3D12_ROOT_PARAMETER1 parameter{};
     parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameter.DescriptorTable={static_cast<UINT>(std::size(ranges)),ranges};
@@ -293,7 +283,7 @@ struct VolumetricStorage
     std::uint64_t previous_frame{},reset_epoch{};
     std::uint64_t generation{};
     UINT max_volumes{},descriptor_stride{},read_index{};
-    bool enabled{},hero_enabled{},history_valid{},usable{true};
+    bool enabled{},hero_enabled{},history_valid{},previous_probe_ready{},usable{true};
     ~VolumetricStorage()
     {
         if(constant_map&&constants.resource)constants.resource->Unmap(0,nullptr);
@@ -324,7 +314,7 @@ struct VolumetricStorage
 };
 namespace
 {
-std::array<ResourceVersion,22> InputVersions(const VolumetricInputs &in)
+std::array<ResourceVersion,24> InputVersions(const VolumetricInputs &in)
 {
     return {in.depth.version,in.hdr.version,
         in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices,
@@ -333,7 +323,8 @@ std::array<ResourceVersion,22> InputVersions(const VolumetricInputs &in)
         in.shadows.root_dynamic,in.local_shadows.metadata,in.local_shadows.records,
         in.local_shadows.static_bank,in.local_shadows.dynamic_bank,
         in.local_shadows.draw_records,in.compact_shadow.atlas.version,
-        in.hero_blue_noise.version,in.hero_gradient.version,in.hero_noise_volume.version};
+        in.hero_blue_noise.version,in.hero_gradient.version,in.hero_noise_volume.version,
+        in.probe_irradiance.version,in.probe_records.version};
 }
 bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &previous) noexcept
 {
@@ -367,10 +358,10 @@ bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &pre
     }
     return true;
 }
-bool HistoryEligible(const VolumetricStorage &s,const VolumetricInputs &in) noexcept
+bool HistoryEligible(const VolumetricStorage &s,const VolumetricInputs &in,bool probe_ready) noexcept
 {
     return s.history_valid&&!in.reset_history&&in.frame_index==s.previous_frame+1&&
-        in.revisions==s.previous_revisions&&HeroHistoryMatches(in.hero_volumes,s.previous_heroes)&&
+        in.revisions==s.previous_revisions&&probe_ready==s.previous_probe_ready&&HeroHistoryMatches(in.hero_volumes,s.previous_heroes)&&
         (in.hero_volumes.empty()?s.previous_hero_gradient.Get()==nullptr:
             s.previous_hero_gradient.Get()==in.hero_gradient.resource)&&
         (in.hero_volumes.empty()?s.previous_hero_blue_noise.Get()==nullptr:
@@ -397,7 +388,7 @@ struct VolumetricSystem::Impl
         ViewExtent active,froxel;
         std::uint64_t frame{},reset_epoch{};
         UINT slot{},write{};
-        bool history{},registered{};
+        bool history{},registered{},probe_ready{};
     } pending;
     ResourceVersion ImportResource(RenderGraphBuilder &graph,AllocationResource &r,
         std::string_view name,ResourceHandle saved,bool retained,bool &valid)
@@ -512,13 +503,17 @@ Result VolumetricSystem::Commit(VolumetricCandidate &&candidate,const Completion
 bool VolumetricSystem::MatchesLayout(const VolumetricInputs &in,
     const VolumetricLayout &layout) const noexcept
 {
-    return MatchesProjectedLayout(in,layout,in.shadows.resources[0]!=nullptr,
+    if(!MatchesShape(in,layout,in.shadows.resources[0]!=nullptr,
         in.local_shadows.resources[0]!=nullptr,in.shadows.resources[5]!=nullptr,
-        in.shadows.resources[6]!=nullptr);
+        in.shadows.resources[6]!=nullptr,in.probe_ready))return false;
+    const auto versions=InputVersions(in);
+    for(std::size_t index=0;index<versions.size();++index)
+        if(!(versions[index]==layout.input_versions[index]))return false;
+    return true;
 }
-bool VolumetricSystem::MatchesProjectedLayout(const VolumetricInputs &in,
+bool VolumetricSystem::MatchesShape(const VolumetricInputs &in,
     const VolumetricLayout &layout,bool shadows,bool local_shadows,
-    bool root_static,bool root_dynamic) const noexcept
+    bool root_static,bool root_dynamic,bool probe_ready) const noexcept
 {
     const auto s=impl_->storage;
     if(!s||!s->enabled||!s->usable||!layout.storage_generation||
@@ -531,10 +526,8 @@ bool VolumetricSystem::MatchesProjectedLayout(const VolumetricInputs &in,
         layout.compact_shadow!=bool(in.compact_shadow.identity.w)||
         layout.root_static!=root_static||
         layout.root_dynamic!=root_dynamic||
-        layout.history!=HistoryEligible(*s,in))return false;
-    const auto versions=InputVersions(in);
-    for(std::size_t index=0;index<versions.size();++index)
-        if(!(versions[index]==layout.input_versions[index]))return false;
+        layout.probe_ready!=probe_ready||
+        layout.history!=HistoryEligible(*s,in,probe_ready))return false;
     return true;
 }
 Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInputs &in,
@@ -600,6 +593,17 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     const ResourceVersion lightVersions[]{in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices};
     for(UINT i=0;i<4;++i)if(!ResourceRead(graph,lightVersions[i],in.lights.resources[i]))
         return Fail(ErrorCode::InvalidArgument,"Volumetric world-light query requires all four authoritative LightList resources.");
+    for(const auto &probe:{in.probe_irradiance,in.probe_records})
+        if(in.probe_ready?!ResourceRead(graph,probe.version,probe.resource):
+            (probe.resource!=nullptr||bool(probe.version.resource)))
+            return Fail(ErrorCode::InvalidArgument,"Volumetric baked irradiance requires both current probe buffers or neither.");
+    if(in.probe_ready)
+    {
+        const auto sh=in.probe_irradiance.resource->GetDesc(),records=in.probe_records.resource->GetDesc();
+        if(sh.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER||records.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER||
+            sh.Width<16||sh.Width%16||sh.Width/16>UINT_MAX||records.Width<128||records.Width%128||records.Width/128>UINT_MAX)
+            return Fail(ErrorCode::InvalidArgument,"Volumetric baked irradiance buffers do not match their structured SRV ABI.");
+    }
     struct ShadowRead
     {
         ResourceVersion version;
@@ -647,6 +651,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         }
     }
     Impl::Pending next;next.graph=&graph;next.slot=in.frame_slot;next.frame=in.frame_index;next.camera=in.camera;
+    next.probe_ready=in.probe_ready;
     next.revisions=in.revisions;next.active=in.render_active;next.froxel=FroxelExtent(next.active,s->budget.stride);
     next.heroes_state=std::move(heroes);
     if(!next.heroes_state.empty())
@@ -654,7 +659,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
      next.hero_noise_volume=in.hero_noise_volume.resource;}
     next.write=1-s->read_index;next.reset_epoch=s->reset_epoch;
     next.history=s->history_valid&&!in.reset_history&&in.frame_index==s->previous_frame+1&&
-        in.revisions==s->previous_revisions&&next.heroes_state==s->previous_heroes&&
+        in.revisions==s->previous_revisions&&in.probe_ready==s->previous_probe_ready&&next.heroes_state==s->previous_heroes&&
         next.hero_gradient.Get()==s->previous_hero_gradient.Get()&&
         next.hero_blue_noise.Get()==s->previous_hero_blue_noise.Get()&&
         next.hero_noise_volume.Get()==s->previous_hero_noise_volume.Get()&&
@@ -668,6 +673,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         layout->compact_shadow=bool(in.compact_shadow.identity.w);
         layout->root_static=in.shadows.resources[5]!=nullptr;
         layout->root_dynamic=in.shadows.resources[6]!=nullptr;
+        layout->probe_ready=in.probe_ready;
     }
     for(auto *resource:s->Resources())if(resource->resource)
         if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
@@ -706,7 +712,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     c.previous_origin_near={previous.origin.x,previous.origin.y,previous.origin.z,previous.near_plane};
     c.depth_range={in.camera.far_plane,std::log2(in.camera.far_plane/in.camera.near_plane),previous.far_plane,std::log2(previous.far_plane/previous.near_plane)};
     c.shadow_identity=in.compact_shadow.identity;c.frame_info={UINT(p.frame),UINT(p.frame>>32),p.history?1u:0u,s->budget.area_samples};
-    c.counts={UINT(in.volumes.size()),s->budget.slices,shadows?1u:0u,0u};
+    c.counts={UINT(in.volumes.size()),s->budget.slices,shadows?1u:0u,in.probe_ready?1u:0u};
     c.hero_info={UINT(p.heroes_state.size()),s->hero_enabled?1u:0u,localShadows?1u:0u,0u};
     if(in.compact_shadow.identity.w)
     {
@@ -719,35 +725,54 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         std::memcpy(s->hero_map+(UINT64(p.slot)*s->max_volumes+i)*sizeof(VolumetricHeroVolume),&p.heroes_state[i].gpu,sizeof(VolumetricHeroVolume));
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{s->constants.resource->GetGPUVirtualAddress()+UINT64(p.slot)*kConstantStride,kConstantStride};
     s->device->CreateConstantBufferView(&cbv,s->Cpu(p.slot,0));
-    s->Srv(p.slot,1,in.depth.resource,kScalar,false);s->Srv(p.slot,2,in.hdr.resource,kHdr,false);
+    std::array<const ResourceVersion *,VmSrvCount> srv_versions{};
+    std::array<ResourceVersion *,VmUavCount> uav_versions{};
+#define HS_VM_SRV(kind,name,slot,offset,type,shader,version,resource,format) srv_versions[VmSrv##name]=&version;
+    HS_VM_SRVS(HS_VM_SRV)
+#undef HS_VM_SRV
+#define HS_VM_UAV(kind,name,slot,offset,type,shader,version,resource,format) uav_versions[VmUav##name]=&version;
+    HS_VM_UAVS(HS_VM_UAV)
+#undef HS_VM_UAV
+#define HS_VM_SRV_Texture2D(offset,resource,format) s->Srv(p.slot,offset,resource,format,false);
+#define HS_VM_SRV_Texture3D(offset,resource,format) s->Srv(p.slot,offset,resource,format,true);
+#define HS_VM_SRV_Buffer(offset,resource,format)
+#define HS_VM_SRV_Texture2DArray(offset,resource,format)
+#define HS_VM_SRV_Texture3DSpecial(offset,resource,format)
+#define HS_VM_SRV(kind,name,slot,offset,type,shader,version,resource,format) HS_VM_SRV_##kind(offset,resource,format)
+    HS_VM_SRVS(HS_VM_SRV)
+#undef HS_VM_SRV
+#define HS_VM_UAV_Texture2D(offset,resource,format) s->Uav(p.slot,offset,resource,format,false);
+#define HS_VM_UAV_Texture3D(offset,resource,format) s->Uav(p.slot,offset,resource,format,true);
+#define HS_VM_UAV(kind,name,slot,offset,type,shader,version,resource,format) HS_VM_UAV_##kind(offset,resource,format)
+    HS_VM_UAVS(HS_VM_UAV)
+#undef HS_VM_UAV
     D3D12_SHADER_RESOURCE_VIEW_DESC buffer{};buffer.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;buffer.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     buffer.Buffer.FirstElement=UINT64(p.slot)*s->max_volumes;buffer.Buffer.NumElements=std::max(UINT(in.volumes.size()),1u);buffer.Buffer.StructureByteStride=sizeof(VolumetricVolume);
-    s->device->CreateShaderResourceView(s->volumes.resource.Get(),&buffer,s->Cpu(p.slot,3));
-    s->Srv(p.slot,4,s->medium.resource.Get(),kSignal,true);s->Srv(p.slot,5,s->phase.resource.Get(),kScalar,true);
-    s->Srv(p.slot,6,s->raw.resource.Get(),kSignal,true);s->Srv(p.slot,7,p.history?s->history[s->read_index].resource.Get():nullptr,kSignal,true);
-    s->Srv(p.slot,8,p.history?s->depth_history[s->read_index].resource.Get():nullptr,kScalar,false);
-    s->Srv(p.slot,9,s->history[p.write].resource.Get(),kSignal,true);s->Srv(p.slot,10,s->filtered.resource.Get(),kSignal,true);
-    s->Srv(p.slot,11,s->luminance.resource.Get(),kSignal,true);s->Srv(p.slot,12,s->transmittance.resource.Get(),kScalar,true);
-    s->Srv(p.slot,13,in.compact_shadow.identity.w?in.compact_shadow.atlas.resource:nullptr,kScalar,false);
-    s->Srv(p.slot,14,s->depth_history[p.write].resource.Get(),kScalar,false);
-    s->Uav(p.slot,15,s->medium.resource.Get(),kSignal,true);s->Uav(p.slot,16,s->phase.resource.Get(),kScalar,true);
-    s->Uav(p.slot,17,s->raw.resource.Get(),kSignal,true);s->Uav(p.slot,18,s->history[p.write].resource.Get(),kSignal,true);
-    s->Uav(p.slot,19,s->depth_history[p.write].resource.Get(),kScalar,false);s->Uav(p.slot,20,s->filtered.resource.Get(),kSignal,true);
-    s->Uav(p.slot,21,s->luminance.resource.Get(),kSignal,true);s->Uav(p.slot,22,s->transmittance.resource.Get(),kScalar,true);
-    s->Uav(p.slot,23,s->resolved.resource.Get(),kHdr,false);
+    s->device->CreateShaderResourceView(s->volumes.resource.Get(),&buffer,s->Cpu(p.slot,VmSrvDescriptorVolumes));
     buffer.Buffer.FirstElement=s->heroes.resource?UINT64(p.slot)*s->max_volumes:0;
     buffer.Buffer.NumElements=std::max(UINT(p.heroes_state.size()),1u);buffer.Buffer.StructureByteStride=sizeof(VolumetricHeroVolume);
-    s->device->CreateShaderResourceView(s->heroes.resource.Get(),&buffer,s->Cpu(p.slot,24));
+    s->device->CreateShaderResourceView(s->heroes.resource.Get(),&buffer,s->Cpu(p.slot,VmSrvDescriptorHeroes));
     D3D12_SHADER_RESOURCE_VIEW_DESC blueNoise{};blueNoise.Format=DXGI_FORMAT_R8_UNORM;
     blueNoise.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;blueNoise.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     blueNoise.Texture2DArray.MipLevels=1;blueNoise.Texture2DArray.ArraySize=64;
-    s->device->CreateShaderResourceView(p.heroes_state.empty()?nullptr:in.hero_blue_noise.resource,&blueNoise,s->Cpu(p.slot,25));
+    s->device->CreateShaderResourceView(p.heroes_state.empty()?nullptr:in.hero_blue_noise.resource,&blueNoise,s->Cpu(p.slot,VmSrvDescriptorBlueNoise));
     D3D12_SHADER_RESOURCE_VIEW_DESC noiseVolume{};noiseVolume.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
     noiseVolume.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE3D;
     noiseVolume.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     noiseVolume.Texture3D.MipLevels=1;
     s->device->CreateShaderResourceView(p.heroes_state.empty()?nullptr:in.hero_noise_volume.resource,
-                                        &noiseVolume,s->Cpu(p.slot,26));
+                                        &noiseVolume,s->Cpu(p.slot,VmSrvDescriptorNoiseVolume));
+    for(UINT i=0;i<2;++i)
+    {
+        auto *resource=i==0?in.probe_irradiance.resource:in.probe_records.resource;
+        const UINT stride=i==0?16u:128u;
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format=DXGI_FORMAT_UNKNOWN;view.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+        view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        view.Buffer.StructureByteStride=stride;
+        view.Buffer.NumElements=resource?static_cast<UINT>(resource->GetDesc().Width/stride):1u;
+        s->device->CreateShaderResourceView(resource,&view,s->Cpu(p.slot,VmExternalProbeIrradiance+i));
+    }
     VolumetricShaderBinder binder;if(auto result=in.make_bindings(s->Cpu(p.slot,0),kVolumetricDescriptorCount,binder);!result)return result;
     if(!binder)return Fail(ErrorCode::InvalidArgument,"Volumetric frame table builder returned no compute binder.");
     lease.binder=binder;
@@ -755,6 +780,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     retain(in.depth.resource);retain(in.hdr.resource);if(in.compact_shadow.identity.w)retain(in.compact_shadow.atlas.resource);
     for(auto *resource:in.lights.resources)retain(resource);for(auto *resource:in.shadows.resources)retain(resource);
     for(auto *resource:in.local_shadows.resources)retain(resource);
+    retain(in.probe_irradiance.resource);retain(in.probe_records.resource);
     if(!p.heroes_state.empty()){retain(in.hero_blue_noise.resource);retain(in.hero_gradient.resource);
         retain(in.hero_noise_volume.resource);}
     auto execute=[s,binder,froxel=p.froxel,active=p.active](UINT stage)
@@ -778,29 +804,35 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(170,"VolumetricDensity",QueueHint::Direct);
     if(!retained)
     {
-        constants(density);density.Read(in.depth.version,Access::ComputeRead);
-        density.Read(p.volumes,Access::ComputeRead);
-        p.medium=density.Write(p.medium,Access::UnorderedWrite);
-        p.phase=density.Write(p.phase,Access::UnorderedWrite);
-        p.current_depth=density.Write(p.current_depth,Access::UnorderedWrite);
+        constants(density);
+#define HS_VM_READ(name) density.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+#define HS_VM_WRITE(name) *uav_versions[VmUav##name]=density.Write(*uav_versions[VmUav##name],Access::UnorderedWrite);
+        HS_VM_DENSITY_READS(HS_VM_READ) HS_VM_DENSITY_WRITES(HS_VM_WRITE)
+#undef HS_VM_READ
+#undef HS_VM_WRITE
     }
     density.SetExecuteChecked(execute(0));
     if(!p.heroes_state.empty())
     {
-        if(!retained)p.raw=density.Write(p.raw,Access::UnorderedWrite);
+        if(!retained)*uav_versions[VmUavRaw]=density.Write(*uav_versions[VmUavRaw],Access::UnorderedWrite);
         if(layout)layout->pass_index[6]=graph.PassCount();
         auto hero=retained?*graph.BindPass(retained->pass_index[6],176):
             graph.AddPass(176,"VolumetricHeroDensity",QueueHint::Direct);
         if(!retained)
         {
-            constants(hero);hero.Read(p.heroes,Access::ComputeRead);
-            hero.Read(p.current_depth,Access::ComputeRead);
-            hero.Read(in.hero_blue_noise.version,Access::ComputeRead);
-            hero.Read(in.hero_gradient.version,Access::ComputeRead);
-            hero.Read(in.hero_noise_volume.version,Access::ComputeRead);
-            p.medium=hero.ReadWrite(p.medium,Access::UnorderedWrite);
-            p.phase=hero.ReadWrite(p.phase,Access::UnorderedWrite);
-            p.raw=hero.ReadWrite(p.raw,Access::UnorderedWrite);
+            constants(hero);
+#define HS_VM_READ(name) hero.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+#define HS_VM_WRITE(name) *uav_versions[VmUav##name]=hero.ReadWrite(*uav_versions[VmUav##name],Access::UnorderedWrite);
+            HS_VM_HERO_READS(HS_VM_READ)
+#define HS_VM_EXTERNAL_Gradient hero.Read(in.hero_gradient.version,Access::ComputeRead);
+#define HS_VM_EXTERNAL(name) HS_VM_EXTERNAL_##name
+            HS_VM_EXTERNAL_HERO_READS(HS_VM_EXTERNAL)
+#undef HS_VM_EXTERNAL
+#undef HS_VM_EXTERNAL_Gradient
+            HS_VM_READ(NoiseVolume)
+            HS_VM_HERO_WRITES(HS_VM_WRITE)
+#undef HS_VM_READ
+#undef HS_VM_WRITE
         }
         hero.SetExecuteChecked([s,binder,froxel=p.froxel](RenderPassContext &ctx)->Result
         {
@@ -816,15 +848,25 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(171,"VolumetricLighting",QueueHint::Direct);
     if(!retained)
     {
-        constants(lighting);lighting.Read(p.medium,Access::ComputeRead);
-        lighting.Read(p.phase,Access::ComputeRead);
-        for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
-        if(shadows)for(const auto &read:shadowReads)
-            if(read.resource)lighting.Read(read.version,read.access);
-        if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
-        if(in.compact_shadow.identity.w)lighting.Read(in.compact_shadow.atlas.version,Access::ComputeRead);
-        p.raw=p.heroes_state.empty()?lighting.Write(p.raw,Access::UnorderedWrite):
-            lighting.ReadWrite(p.raw,Access::UnorderedWrite);
+        constants(lighting);
+#define HS_VM_READ(name) lighting.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+        HS_VM_LIGHTING_READS(HS_VM_READ)
+#undef HS_VM_READ
+#define HS_VM_EXTERNAL_Lights for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
+#define HS_VM_EXTERNAL_Probes if(in.probe_ready){lighting.Read(in.probe_irradiance.version,Access::ComputeRead);lighting.Read(in.probe_records.version,Access::ComputeRead);}
+#define HS_VM_EXTERNAL_Shadows if(shadows)for(const auto &read:shadowReads)if(read.resource)lighting.Read(read.version,read.access);
+#define HS_VM_EXTERNAL_LocalShadows if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
+#define HS_VM_EXTERNAL_CompactShadow if(in.compact_shadow.identity.w)lighting.Read(*srv_versions[VmSrvCompactShadow],Access::ComputeRead);
+#define HS_VM_EXTERNAL(name) HS_VM_EXTERNAL_##name
+        HS_VM_EXTERNAL_LIGHTING_READS(HS_VM_EXTERNAL)
+#undef HS_VM_EXTERNAL
+#undef HS_VM_EXTERNAL_Lights
+#undef HS_VM_EXTERNAL_Probes
+#undef HS_VM_EXTERNAL_Shadows
+#undef HS_VM_EXTERNAL_LocalShadows
+#undef HS_VM_EXTERNAL_CompactShadow
+        *uav_versions[VmUavRaw]=p.heroes_state.empty()?lighting.Write(*uav_versions[VmUavRaw],Access::UnorderedWrite):
+            lighting.ReadWrite(*uav_versions[VmUavRaw],Access::UnorderedWrite);
     }
     lighting.SetExecuteChecked(execute(1));
     if(layout)layout->pass_index[2]=graph.PassCount();
@@ -832,10 +874,12 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(172,"VolumetricTemporal",QueueHint::Direct);
     if(!retained)
     {
-        constants(temporal);temporal.Read(p.raw,Access::ComputeRead);
-        temporal.Read(p.current_depth,Access::ComputeRead);
-        if(p.history){temporal.Read(p.previous,Access::ComputeRead);temporal.Read(p.previous_depth,Access::ComputeRead);}
-        p.current=temporal.Write(p.current,Access::UnorderedWrite);
+        constants(temporal);
+#define HS_VM_READ(name) temporal.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+        HS_VM_TEMPORAL_READS(HS_VM_READ)
+        if(p.history){HS_VM_HISTORY_READS(HS_VM_READ)}
+#undef HS_VM_READ
+        *uav_versions[VmUavCurrent]=temporal.Write(*uav_versions[VmUavCurrent],Access::UnorderedWrite);
     }
     temporal.SetExecuteChecked(execute(2));
     if(layout)layout->pass_index[3]=graph.PassCount();
@@ -843,9 +887,11 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(173,"VolumetricSpatial",QueueHint::Direct);
     if(!retained)
     {
-        constants(spatial);spatial.Read(p.current,Access::ComputeRead);
-        spatial.Read(p.current_depth,Access::ComputeRead);
-        p.filtered=spatial.Write(p.filtered,Access::UnorderedWrite);
+        constants(spatial);
+#define HS_VM_READ(name) spatial.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+        HS_VM_SPATIAL_READS(HS_VM_READ)
+#undef HS_VM_READ
+        *uav_versions[VmUavFiltered]=spatial.Write(*uav_versions[VmUavFiltered],Access::UnorderedWrite);
     }
     spatial.SetExecuteChecked(execute(3));
     if(layout)layout->pass_index[4]=graph.PassCount();
@@ -853,9 +899,12 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(174,"VolumetricIntegrate",QueueHint::Direct);
     if(!retained)
     {
-        constants(integrate);integrate.Read(p.filtered,Access::ComputeRead);
-        p.luminance=integrate.Write(p.luminance,Access::UnorderedWrite);
-        p.transmittance=integrate.Write(p.transmittance,Access::UnorderedWrite);
+        constants(integrate);
+#define HS_VM_READ(name) integrate.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+#define HS_VM_WRITE(name) *uav_versions[VmUav##name]=integrate.Write(*uav_versions[VmUav##name],Access::UnorderedWrite);
+        HS_VM_INTEGRATE_READS(HS_VM_READ) HS_VM_INTEGRATE_WRITES(HS_VM_WRITE)
+#undef HS_VM_READ
+#undef HS_VM_WRITE
     }
     integrate.SetExecuteChecked(execute(4));
     if(layout)layout->pass_index[5]=graph.PassCount();
@@ -863,10 +912,11 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         graph.AddPass(175,"VolumetricResolve",QueueHint::Direct);
     if(!retained)
     {
-        constants(resolve);resolve.Read(in.depth.version,Access::ComputeRead);
-        resolve.Read(in.hdr.version,Access::ComputeRead);
-        for(auto version:{p.filtered,p.current_depth,p.luminance,p.transmittance})resolve.Read(version,Access::ComputeRead);
-        p.resolved=resolve.Write(p.resolved,Access::UnorderedWrite);
+        constants(resolve);
+#define HS_VM_READ(name) resolve.Read(*srv_versions[VmSrv##name],Access::ComputeRead);
+        HS_VM_RESOLVE_READS(HS_VM_READ)
+#undef HS_VM_READ
+        *uav_versions[VmUavResolved]=resolve.Write(*uav_versions[VmUavResolved],Access::UnorderedWrite);
     }
     resolve.SetExecuteChecked(execute(5));
     if(!retained)
@@ -887,11 +937,11 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     }
     if(layout)layout->output_versions={p.luminance,p.transmittance,p.resolved,
         p.filtered,p.current_depth,p.constants};
-    out.scattering={p.luminance,s->luminance.resource.Get(),s->Cpu(p.slot,11)};
-    out.transmittance={p.transmittance,s->transmittance.resource.Get(),s->Cpu(p.slot,12)};
+    out.scattering={p.luminance,s->luminance.resource.Get(),s->Cpu(p.slot,VmSrvDescriptorLuminance)};
+    out.transmittance={p.transmittance,s->transmittance.resource.Get(),s->Cpu(p.slot,VmSrvDescriptorTransmittance)};
     out.resolved={p.resolved,s->resolved.resource.Get(),s->Export(p.slot)};
-    out.filtered_scattering={p.filtered,s->filtered.resource.Get(),s->Cpu(p.slot,10)};
-    out.column_depth={p.current_depth,s->depth_history[p.write].resource.Get(),s->Cpu(p.slot,14)};
+    out.filtered_scattering={p.filtered,s->filtered.resource.Get(),s->Cpu(p.slot,VmSrvDescriptorFiltered)};
+    out.column_depth={p.current_depth,s->depth_history[p.write].resource.Get(),s->Cpu(p.slot,VmSrvDescriptorColumnDepth)};
     out.constants=p.constants;out.constant_resource=s->constants.resource.Get();out.descriptor_suffix=s->Cpu(p.slot,0);
     out.froxel_active=p.froxel;out.froxel_capacity=s->froxel_capacity;out.slices=s->budget.slices;p.registered=true;
     return Result::Success();
@@ -910,6 +960,7 @@ Result VolumetricSystem::CompleteSubmission(const RenderGraphBuilder &graph,cons
     if(success&&p.registered)
     {
         s->read_index=p.write;s->previous_frame=p.frame;s->previous_camera=p.camera;s->previous_revisions=p.revisions;
+        s->previous_probe_ready=p.probe_ready;
         s->previous_active=p.active;s->previous_froxel=p.froxel;s->history_valid=s->reset_epoch==p.reset_epoch;
         s->previous_heroes=std::move(p.heroes_state);
         s->previous_hero_gradient=std::move(p.hero_gradient);s->previous_hero_blue_noise=std::move(p.hero_blue_noise);

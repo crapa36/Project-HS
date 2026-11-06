@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace hs::render_data
@@ -1154,6 +1155,40 @@ std::string EmitFunction(const OptimizedGraph &graph, std::size_t output,
     return result + "    return n" + std::to_string(output) + ";\n}\n";
 }
 
+std::string ContextDemandConstants()
+{
+    constexpr std::array inputs{
+        std::pair{"Uv", MaterialContextInput::Uv}, std::pair{"DUvDx", MaterialContextInput::DUvDx},
+        std::pair{"DUvDy", MaterialContextInput::DUvDy}, std::pair{"Layer", MaterialContextInput::Layer},
+        std::pair{"ActualWorldPosition", MaterialContextInput::ActualWorldPosition},
+        std::pair{"DActualWorldDx", MaterialContextInput::DActualWorldDx},
+        std::pair{"DActualWorldDy", MaterialContextInput::DActualWorldDy},
+        std::pair{"StableWorldPosition", MaterialContextInput::StableWorldPosition},
+        std::pair{"DStableWorldDx", MaterialContextInput::DStableWorldDx},
+        std::pair{"DStableWorldDy", MaterialContextInput::DStableWorldDy},
+        std::pair{"Normal", MaterialContextInput::Normal}, std::pair{"Tangent", MaterialContextInput::Tangent},
+        std::pair{"EyeDistance", MaterialContextInput::EyeDistance},
+        std::pair{"SampledBaseColor", MaterialContextInput::SampledBaseColor},
+        std::pair{"SampledRoughness", MaterialContextInput::SampledRoughness},
+        std::pair{"SampledAlpha", MaterialContextInput::SampledAlpha},
+        std::pair{"RoughnessScale", MaterialContextInput::RoughnessScale},
+        std::pair{"SampledAo", MaterialContextInput::SampledAo},
+        std::pair{"ShadingNormal", MaterialContextInput::ShadingNormal},
+        std::pair{"Mesh", MaterialContextInput::Mesh}, std::pair{"Seed", MaterialContextInput::Seed},
+        std::pair{"ViewDirection", MaterialContextInput::ViewDirection},
+        std::pair{"Metallic", MaterialContextInput::Metallic},
+        std::pair{"SampledEmission", MaterialContextInput::SampledEmission},
+        std::pair{"SampledMetallic", MaterialContextInput::SampledMetallic},
+        std::pair{"DecalTintHdr", MaterialContextInput::DecalTintHdr},
+        std::pair{"DecalProjector", MaterialContextInput::DecalProjector},
+        std::pair{"DecalShape", MaterialContextInput::DecalShape}};
+    std::string result = "#ifndef HS_MATERIAL_CONTEXT_DEMAND_HLSLI\n#define HS_MATERIAL_CONTEXT_DEMAND_HLSLI\n";
+    for (const auto &[name, input] : inputs)
+        result += "static const uint HsContext" + std::string(name) + " = " +
+            std::to_string(MaterialContextInputMask(input)) + "u;\n";
+    return result + "#endif // HS_MATERIAL_CONTEXT_DEMAND_HLSLI\n";
+}
+
 std::string ContextField(MaterialContextInput input)
 {
     constexpr std::array names{"uv", "d_uv_dx", "d_uv_dy", "layer", "actual_world_position",
@@ -1381,6 +1416,7 @@ struct PreparedMaterial::Impl
     std::size_t closure_opacity{kNoMaterialInput};
     std::vector<bool> closure_opacity_live;
     std::array<std::vector<bool>, 7> output_live;
+    MaterialContextDemand context_demand;
 };
 
 PreparedMaterial::PreparedMaterial(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -1437,6 +1473,44 @@ PreparedMaterial PrepareMaterial(MaterialGraph graph, MaterialPreparationDomain 
             impl->closure_opacity_live = Reachable(impl->optimized.nodes, impl->closure_opacity);
         }
     }
+    const auto demand = [&](const std::vector<bool> &live) {
+        std::uint32_t mask{};
+        for (std::size_t i = 0; i < live.size(); ++i)
+        {
+            if (!live[i]) continue;
+            const auto &node = impl->optimized.nodes[i];
+            switch (node.op)
+            {
+            case MaterialOp::Context: mask |= MaterialContextInputMask(node.context_input); break;
+            case MaterialOp::SampledBaseColor: mask |= MaterialContextInputMask(MaterialContextInput::SampledBaseColor); break;
+            case MaterialOp::SampledRoughness: mask |= MaterialContextInputMask(MaterialContextInput::SampledRoughness); break;
+            case MaterialOp::SampledAlpha: mask |= MaterialContextInputMask(MaterialContextInput::SampledAlpha); break;
+            case MaterialOp::RoughnessScale: mask |= MaterialContextInputMask(MaterialContextInput::RoughnessScale); break;
+            case MaterialOp::TerrainStochastic: mask |= MaterialContextInputMask(MaterialContextInput::Uv); break;
+            default: break;
+            }
+        }
+        return mask;
+    };
+    if (impl->graph.closure_output != kNoMaterialInput)
+        impl->context_demand.surface_mask = demand(impl->closure_live);
+    else
+    {
+        for (const auto slot : {0u, 1u, 3u, 4u})
+            impl->context_demand.surface_mask |= demand(impl->output_live[slot]);
+        impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::Metallic);
+        if (impl->graph.normal_output == kNoMaterialInput)
+            impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::Normal);
+        if (impl->graph.ao_output == kNoMaterialInput)
+            impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::SampledAo);
+    }
+    if (impl->graph.kind == MaterialGraphKind::Masked || domain == MaterialPreparationDomain::Hero)
+    {
+        impl->context_demand.opacity_mask = demand(impl->graph.closure_output != kNoMaterialInput
+            ? impl->closure_opacity_live : impl->output_live[2]);
+        if (impl->graph.kind == MaterialGraphKind::Masked)
+            impl->context_demand.surface_mask |= impl->context_demand.opacity_mask;
+    }
     return PreparedMaterial(std::move(impl));
 }
 
@@ -1447,6 +1521,7 @@ ClosureReflection AnalyzeClosure(const MaterialGraph &graph)
 }
 
 ClosureReflection AnalyzeClosure(const PreparedMaterial &material) { return material.impl_->reflection; }
+MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material) { return material.impl_->context_demand; }
 
 std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view function_name)
 {
@@ -1866,7 +1941,11 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
     Require(graph.normal_space == MaterialNormalSpace::Tangent ||
             graph.normal_space == MaterialNormalSpace::World, "invalid normal output space");
     const auto &optimized = material.impl_->optimized;
-    std::string result = "// Validated authored context MaterialIR; shader binding ABI 2.\n";
+    std::string result = ContextDemandConstants() + "// Validated authored context MaterialIR; shader binding ABI 2.\n";
+    result += "uint HsEnvironmentSurfaceContextDemand() { return " +
+        std::to_string(material.impl_->context_demand.surface_mask) + "u; }\n";
+    result += "uint HsEnvironmentOpacityContextDemand() { return " +
+        std::to_string(material.impl_->context_demand.opacity_mask) + "u; }\n";
     for (std::size_t slot = 0; slot < graph.textures.size(); ++slot)
         result += "Texture2DArray<float4> HsMaterialTexture" + std::to_string(slot) +
             " : register(t" + std::to_string(material_ordinal * kMaterialTextureSlots + slot) + ", space4);\n";
@@ -1996,7 +2075,7 @@ std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     const auto closure = optimized.representative[graph.closure_output];
     const auto opacity = material.impl_->closure_opacity;
     const auto &surface_live = material.impl_->closure_live;
-    std::string result = "#include \"material_surface.hlsli\"\n";
+    std::string result = ContextDemandConstants() + "#include \"material_surface.hlsli\"\n";
     result += EmitLibraryHelpers(optimized, surface_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(surface_function) + "(HsMaterialContext ctx)\n{\n";
     result += EmitContextNodes(optimized, graph, surface_live);
@@ -2041,7 +2120,7 @@ std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &material,
     // evaluator in its combined program. Decal ordinals never enter the
     // geometry material or texture ABI.
     std::string result = "Texture2DArray<float4> HsMaterialTexture0 : register(t" +
-        std::to_string(texture_register) + ", space36);\n";
+        std::to_string(texture_register) + ", HS_DECAL_JOIN(space,HS_DECAL_SPACE));\n";
     result += EmitLibraryHelpers(optimized, material.impl_->closure_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(function_name) + "(HsDecalContext ctx)\n{\n";
     result += EmitContextNodes(optimized, graph, material.impl_->closure_live);

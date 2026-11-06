@@ -640,9 +640,6 @@ struct SimulationRules
 [[nodiscard]] std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept;
 // The cooked ABI image retains member offsets and zeroes every padding byte.
 [[nodiscard]] std::vector<std::byte> CanonicalSimulationRulesBytes(const SimulationRules &rules);
-namespace shipping
-{
-[[nodiscard]] const SimulationRules &Simulation() noexcept;
-}
+
 
 } // namespace hs

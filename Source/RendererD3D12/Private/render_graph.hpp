@@ -209,7 +209,7 @@ struct GraphExecutionOptions
     const std::uint32_t *timestamp_query_slots{};
     std::size_t timestamp_query_slot_count{};
     TaskSystem *task_system{};
-    // Optional capture output in compiled execution order; each recording task owns one element.
+    // Optional capture output in compiled execution order; each recording task owns a disjoint range.
     GpuPassTiming *cpu_pass_timings{};
     std::size_t cpu_pass_timing_count{};
 };

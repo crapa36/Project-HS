@@ -13,6 +13,10 @@
   link either target; portable RenderData tests can use the CPU codec.
 - Codec source SHA-256:
   `6af26a85ed38daffb97d988e9704ffc257c690af05048304044bfc786699550f`.
+- `tangentspace.cpp` from the same pin supplies MikkTSpace-compatible character
+  tangents in the private cooker; it is not linked into the runtime.
+  Git blob: `f9a60e97a539493c42b4544635a8c2bb943ad730`.
+  SHA-256: `1ba72a59793887e870e5cc2c31b9b3d38296b436ee2fcdfb2c9e409b480e4079`.
 - Adoption evidence: `Build/tooling/geometry-qualification/REPORT.md` and
   `qualification.json`, including actual selected environment/character assets,
   duplicate and degenerate primitive preservation, and deterministic output.
