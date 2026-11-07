@@ -14,6 +14,17 @@ from synth_micro import SAMPLE_RATE, synthesize, write_wav
 
 
 class AudioToolsTests(unittest.TestCase):
+    def test_rejects_truncated_pcm_frame(self):
+        from finalize import read_wav
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "truncated.wav"
+            with wave.open(str(path), "wb") as wav:
+                wav.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+                wav.writeframes(b"\x01\x00" * 5)
+            path.write_bytes(path.read_bytes()[:-1])
+            with self.assertRaisesRegex(ValueError, "truncated PCM"):
+                read_wav(path)
+
     def test_ui_finalize(self):
         with tempfile.TemporaryDirectory() as d:
             src, dst = Path(d) / "in.wav", Path(d) / "out.wav"

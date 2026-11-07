@@ -50,6 +50,39 @@ class Stats:
                 "min": self.minimum, "max": self.maximum}
 
 
+def timestamped_pass_union(rows, owner_frequency):
+    """Union calibrated pass intervals within one completed CPU-owned frame."""
+    intervals, queues, excluded = [], defaultdict(list), Counter()
+    expected = 0
+    for row in rows:
+        if row.get("pass_name", "").startswith("RenderCriticalPath") or row.get("pass_name") == "SourceRenderOutputReady":
+            continue
+        expected += 1
+        if row.get("measured") != "1" or row.get("gpu_timings_valid") != "1":
+            excluded["unmeasured_or_invalid_query"] += 1; continue
+        if row.get("clock_calibrated") != "1":
+            excluded["uncalibrated"] += 1; continue
+        try:
+            begin, end, freq, queue = (int(row[key]) for key in ("begin_qpc", "end_qpc", "qpc_frequency", "queue"))
+            if freq <= 0 or freq != int(owner_frequency):
+                excluded["frequency_mismatch"] += 1; continue
+            if begin <= 0 or end < begin:
+                excluded["invalid_interval"] += 1; continue
+        except (KeyError, ValueError, TypeError):
+            excluded["missing_or_invalid_clock"] += 1; continue
+        intervals.append((begin, end)); queues[queue].append((begin, end))
+    def union_ms(values):
+        if not values: return None
+        values.sort(); start, end = values[0]; ticks = 0
+        for first, last in values[1:]:
+            if first <= end: end = max(end, last)
+            else: ticks += end - start; start, end = first, last
+        return (ticks + end - start) * 1000 / int(owner_frequency)
+    return {"scheduled_passes": expected, "included_passes": len(intervals), "excluded_passes": sum(excluded.values()),
+            "exclusion_reasons": dict(excluded), "complete": bool(expected and len(intervals) == expected),
+            "all_queues_ms": union_ms(intervals), "queues_ms": {str(q): union_ms(v) for q, v in sorted(queues.items())}}
+
+
 def reject_json_constant(value): raise ValueError(f"Nonfinite JSON constant: {value}")
 
 
@@ -479,6 +512,8 @@ def analyze(directory):
         issues.append("Cached renderer diagnostics have stale/mismatched frame identity; affected cached metrics excluded")
     if cpu_gaps or invalid_intervals: issues.append(f"CPU samples have {cpu_gaps} missing frame IDs and {invalid_intervals} nonpositive intervals")
     passes, groups, gpu_counts, critical = defaultdict(pass_stats), defaultdict(group_stats), Counter(), defaultdict(Stats)
+    unions = defaultdict(lambda: {"complete": Stats(), "partial": Stats(), "queues_complete": defaultdict(Stats),
+                                  "queues_partial": defaultdict(Stats), "coverage": Counter()})
     source_cadence = defaultdict(list)
     gpu_rows = gpu_frames = missing_cpu = incomplete = invalid_queries = 0
     last_gpu = 0
@@ -492,6 +527,17 @@ def analyze(directory):
             owner_scopes = scopes(owner)
             if any(row.get("fence_completed") != "1" for row in rows): incomplete += 1; continue
             gpu_frames += 1; seen = set(); frame_groups = {}
+            measured_union = timestamped_pass_union(rows, owner.get("qpc_frequency"))
+            for scope in owner_scopes:
+                aggregate = unions[scope]; coverage = aggregate["coverage"]
+                coverage["frames"] += 1
+                coverage["complete_frames" if measured_union["complete"] else "partial_frames"] += 1
+                for key in ("scheduled_passes", "included_passes", "excluded_passes"):
+                    coverage[key] += measured_union[key]
+                for reason, excluded_count in measured_union["exclusion_reasons"].items(): coverage["excluded_" + reason] += excluded_count
+                kind = "complete" if measured_union["complete"] else "partial"
+                aggregate[kind].add(measured_union["all_queues_ms"])
+                for queue, value in measured_union["queues_ms"].items(): aggregate["queues_" + kind][queue].add(value)
             if rows[0].get("gpu_timings_valid") == "0": invalid_queries += 1
             first = rows[0]
             if (first.get("frame_metric_kind") == "source_output_ready" and
@@ -607,6 +653,12 @@ def analyze(directory):
             "gpu_completed_frames": gpu_counts[f"config:{revision}"], "gpu_critical_path_ms": critical[f"config:{revision}"].result()}
             for revision in sorted(seen_configs)], "gpu_critical_path_ms": critical["overall"].result(),
         "playing_gpu_critical_path_ms": critical["playing"].result(), "utilization": usage, "playing_utilization": playing_usage,
+        "timestamped_gpu_pass_interval_union": {scope: {
+            "coverage": dict(data["coverage"]), "complete_all_queues_ms": data["complete"].result(),
+            "partial_all_queues_ms": data["partial"].result(),
+            "complete_queues_ms": {q: values.result() for q, values in sorted(data["queues_complete"].items())},
+            "partial_queues_ms": {q: values.result() for q, values in sorted(data["queues_partial"].items())}}
+            for scope, data in sorted(unions.items())},
         "limits": [capture_build_limit(provenance),
                    "Foreground is sampled at each CPU frame; only consecutive frames with the same foreground state contribute to its split FPS. No focus history is inferred between samples.",
                    "FPS uses adjacent CPU frame QPC intervals, never GPU-duration inversion. Same-phase/config FPS excludes transition intervals; raw throughput includes them.",
@@ -614,6 +666,7 @@ def analyze(directory):
                    "CPU stage and per-pass recording/provider times are wall time. Parallel tasks overlap; their sum is not whole-frame CPU busy time.",
                    "Optional CPU subsets are already included in graph_build/graph_prepare. Unattributed residuals exclude the named subsets and may include cleanup after detailed scopes. Older 66-column captures leave these fields N/A.",
                    "GPU feature work sums pass durations; async queues overlap. Critical path, GPU busy percentage and marginal option savings are distinct.",
+                   "Timestamped GPU pass interval union includes only calibrated, measured pass intervals; it excludes unmeasured work, barriers outside pass timestamps, residency, scheduling and external SDK work. It is neither total GPU busy time nor critical path. Partial unions are lower-bound observations with excluded passes.",
                    "Unsupported/unmeasured Copy and unavailable native counters remain N/A. A zero is emitted only for a measured zero or no scheduled group work.",
                    "Per-pass/group summaries use running count/mean/min/max; no p95/p99 estimate is fabricated.",
                    "NVIDIA counters are device-wide. Tracked renderer memory is partial accounting; DXGI local usage/budget is a separate observation."]}
@@ -643,8 +696,21 @@ def write_outputs(directory, result):
     report = [f"Capture analysis: {summary['analysis_status']}", "", f"Runtime/own-frame GPU coverage complete: {summary['capture_complete']}. CPU frames {summary['cpu_frame_count']}; GPU completed frames {summary['gpu_frame_count']}.", "",
               f"Playing contiguous same-phase/config FPS: {fmt(playing['fps_contiguous_same_phase_config']['fps'])}; Playing frames: {playing['frames']}.",
               f"Overall contiguous same-phase/config FPS: {fmt(overall['fps_contiguous_same_phase_config']['fps'])}; raw adjacent QPC throughput: {fmt(overall['raw_adjacent_frame_throughput']['fps'])}.", "",
-              f"Playing GPU critical path mean: {fmt(summary['playing_gpu_critical_path_ms']['mean'])} ms; overall {fmt(summary['gpu_critical_path_ms']['mean'])} ms. This is not GPU busy percentage or an FPS estimate.", "",
-              "CPU stage wall time (Playing only)", "", "| Stage | Count | Mean ms | Min ms | Max ms |", "|---|---:|---:|---:|---:|"]
+              f"Playing GPU critical path mean: {fmt(summary['playing_gpu_critical_path_ms']['mean'])} ms; overall {fmt(summary['gpu_critical_path_ms']['mean'])} ms. This is not GPU busy percentage or an FPS estimate.", ""]
+    union = summary["timestamped_gpu_pass_interval_union"].get("playing")
+    lines = ["Timestamped GPU pass interval union (Playing only)", "",
+             "Only calibrated measured intervals on the same QPC frequency are merged; partial frames exclude unavailable passes. Not total GPU busy time or critical path.", "",
+             "| Scope | Coverage | Frames | Mean ms | Min ms | Max ms |", "|---|---|---:|---:|---:|---:|"]
+    if union:
+        coverage = union["coverage"]
+        lines += [f"| Passes | included {coverage.get('included_passes', 0)} / scheduled {coverage.get('scheduled_passes', 0)}; excluded {coverage.get('excluded_passes', 0)} | {coverage.get('frames', 0)} | N/A | N/A | N/A |"]
+        for kind in ("complete", "partial"):
+            for name, data in [("All queues", union[kind + "_all_queues_ms"]), *[("Queue " + q, stat) for q, stat in union[kind + "_queues_ms"].items()]]:
+                lines.append(f"| {name} | {kind} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
+        lines += ["", f"Excluded pass reasons: {coverage}."]
+    else: lines += ["| All queues | unavailable | 0 | N/A | N/A | N/A |"]
+    report += lines + ["", "CPU stage wall time (Playing only)", "",
+                       "| Stage | Count | Mean ms | Min ms | Max ms |", "|---|---:|---:|---:|---:|"]
     for name, data in sorted(playing["cpu_stage_wall_ms"].items(), key=lambda item: item[1]["mean"] or -1, reverse=True):
         report.append(f"| {STAGE_LABELS.get(name, name)} | {data['count']} | {fmt(data['mean'])} | {fmt(data['min'])} | {fmt(data['max'])} |")
     report += ["", "Qualified source render-ready cadence by phase/configuration/foreground/view", "",
@@ -770,6 +836,21 @@ def write_outputs(directory, result):
 
 
 def self_test():
+    base = {"measured": "1", "gpu_timings_valid": "1", "clock_calibrated": "1",
+            "qpc_frequency": "1000000", "queue": "0", "pass_name": "pass"}
+    start = 10**18
+    sample = [{**base, "begin_qpc": str(start + a), "end_qpc": str(start + b), "queue": str(q)}
+              for a, b, q in ((1, 11, 0), (1, 11, 0), (6, 16, 1), (20, 25, 1))]
+    union = timestamped_pass_union(sample, "1000000")
+    assert union["complete"] and math.isclose(union["all_queues_ms"], .02)
+    assert math.isclose(union["queues_ms"]["0"], .01) and math.isclose(union["queues_ms"]["1"], .015)
+    bad = sample + [{**base, "clock_calibrated": "0"}, {**base, "begin_qpc": "4", "end_qpc": "3"},
+                    {**base, "qpc_frequency": "10", "begin_qpc": "1", "end_qpc": "2"},
+                    {**base, "measured": "0"}, {**base}]
+    partial = timestamped_pass_union(bad, "1000000")
+    assert not partial["complete"] and partial["included_passes"] == 4 and partial["excluded_passes"] == 5
+    assert len(partial["exclusion_reasons"]) == 5 and math.isclose(partial["all_queues_ms"], .02)
+    assert timestamped_pass_union([{**base, "measured": "0"}], "1000000")["all_queues_ms"] is None
     cadence = source_cadence_report([(1, 20.0, 1000 / 60), (2, 35.0, 1000 / 60),
                                      (4, 10.0, 1000 / 60)])
     assert cadence["p95"] == 35.0 and cadence["exceed"]["target"]["count"] == 2

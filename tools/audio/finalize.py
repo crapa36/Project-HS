@@ -39,6 +39,8 @@ def read_wav(path: Path) -> tuple[int, int, list[list[float]]]:
             raise ValueError("only uncompressed PCM WAV 8/16/24/32-bit is supported")
         raw = wav.readframes(frames)
     step = width * channels
+    if len(raw) != frames * step:
+        raise ValueError("truncated PCM WAV data")
     result = [[] for _ in range(channels)]
     for pos in range(0, len(raw), step):
         for channel in range(channels):

@@ -112,6 +112,7 @@ def pass_feature_group(row):
     name, identity = LEGACY_PASS_NAMES.get(row["pass_name"], row["pass_name"]), int(row["pass_id"])
     if name == "Screen-space Outline": return "outline"
     if (name.startswith("RenderCriticalPath") or name == "SourceRenderOutputReady"): return None
+    if name.startswith("TranslucencyDiagnostics") or identity in (0x48570000, 0x48570001): return "diagnostics"
     if identity == 169 or name == "RayTransportCompose": return "shared_ray_compose"
     if identity in (2, 177) or name.startswith(("VirtualShadow.", "LocalShadow.", "RayShadow.")): return "shadows"
     if name.startswith(("GTAO", "AdaptiveGTAO", "RTAO")): return "ao"
@@ -119,7 +120,7 @@ def pass_feature_group(row):
     if name.startswith(("Brixelizer", "RTGI", "RRDiffuse", "GINRD")) or name == "LightingProbeUpload": return "gi"
     if name.startswith(("SSR", "HybridReflection", "RRSpecular", "RRReflection", "ReflectionNRD")): return "reflections"
     if name.startswith(("LocalProbe",)): return "shared_probes"
-    if name.startswith(("FSR RR", "DLSS RR")) or identity >= 3000: return "denoising"
+    if name.startswith(("FSR RR", "DLSS RR")) or 3000 <= identity < 4000: return "denoising"
     # Current SceneGeometry preparation is consumed only by SoftwareHybrid GI.
     if name.startswith("SceneGeometry"): return "gi"
     if name.startswith(("RayScene", "RayGeometry", "OpacityMicromap")): return "ray_scene"
@@ -316,6 +317,9 @@ def self_test():
     assert pass_group({"pass_name": "RenderCriticalPathEnd", "pass_id": "38"}) is None
     assert pass_group({"pass_name": "SourceRenderOutputReady", "pass_id": "38"}) is None
     assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "1000"}) == "texture_streaming"
+    assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "65536"}) == "texture_streaming"
+    assert pass_group({"pass_name": "TranslucencyDiagnostics.Clear", "pass_id": str(0x48570000)}) == "diagnostics"
+    assert pass_group({"pass_name": "TranslucencyDiagnostics.Readback", "pass_id": str(0x48570001)}) == "diagnostics"
     assert pass_group({"pass_name": "REBLUR temporal accumulation", "pass_id": "3000"}) == "denoising"
     assert pass_group({"pass_name": "RayTransportCompose", "pass_id": "169"}) == "shared_ray_compose"
     assert "shared_ray_compose" in LEGACY_OPTIONS["gi_mode"][1] and "shared_ray_compose" in LEGACY_OPTIONS["reflection_mode"][1]

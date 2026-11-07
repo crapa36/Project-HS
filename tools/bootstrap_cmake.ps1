@@ -9,7 +9,7 @@ $version = '4.4.3'
 $downloadUrl = 'https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-windows-x86_64.zip'
 $expectedSha256 = '4d52ebab7193a698651639ed80d8d04fd903358843572cf44c7fd234cb7c26ab'
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$toolingRoot = Join-Path $repoRoot 'Build/tooling/cmake-4.4.3'
+$toolingRoot = Join-Path $repoRoot 'Build/msvc-debug/.tools/cmake-4.4.3'
 $toolingRootPrefix = [IO.Path]::GetFullPath($toolingRoot) + [IO.Path]::DirectorySeparatorChar
 $repoRootPrefix = [IO.Path]::GetFullPath($repoRoot) + [IO.Path]::DirectorySeparatorChar
 
@@ -132,6 +132,7 @@ if (!(Test-CMakeVersion -Path $cmakePath)) {
     throw "Repo-local CMake installation did not report version $version."
 }
 
+Remove-Item -LiteralPath (Assert-ContainedPath $archivePath) -Force
 return $cmakePath
 }
 

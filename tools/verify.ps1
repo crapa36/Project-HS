@@ -15,7 +15,7 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 if ($All) { $Workflow = 'verify' }
 $preset = if ($Workflow -eq 'verify-core') { 'msvc-core' } else { 'msvc-validation' }
 $buildRoot = Join-Path $repoRoot "Build/$preset"
-$logDirectory = Join-Path $repoRoot 'Build/verification'
+$logDirectory = Join-Path $buildRoot 'Artifacts/verification'
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 $runId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + $PID
 $logPath = Join-Path $logDirectory "$Workflow-$runId.log"
