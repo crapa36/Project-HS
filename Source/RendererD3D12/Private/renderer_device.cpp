@@ -122,14 +122,15 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     }
     else
     {
-        for (UINT index = 0;
-             factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                                 IID_PPV_ARGS(&adapter)) !=
-             DXGI_ERROR_NOT_FOUND;
-             ++index)
+        for (UINT index = 0; ; ++index)
         {
+            result = factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                         IID_PPV_ARGS(&adapter));
+            if (result == DXGI_ERROR_NOT_FOUND) break;
+            if (FAILED(result)) return HResultFailure("EnumAdapterByGpuPreference", result);
             DXGI_ADAPTER_DESC3 description{};
-            adapter->GetDesc3(&description);
+            if (auto described = adapter->GetDesc3(&description); FAILED(described))
+                return HResultFailure("Get adapter description", described);
             if (!(description.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE) &&
                 SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                             __uuidof(ID3D12Device), nullptr)))
@@ -241,16 +242,17 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 feedback_options{};
     D3D12_FEATURE_DATA_SHADER_MODEL feedback_shader_model{D3D_SHADER_MODEL_6_5};
     ComPtr<ID3D12Device8> feedback_device;
+    const bool texture_options_available = SUCCEEDED(device->CheckFeatureSupport(
+        D3D12_FEATURE_D3D12_OPTIONS, &texture_options, sizeof(texture_options)));
+    texture_streaming_capabilities.tiled_resources = texture_options_available &&
+        texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2;
     texture_streaming_capabilities.sampler_feedback =
+        texture_options_available && texture_options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3 &&
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &feedback_options, sizeof(feedback_options))) &&
         feedback_options.SamplerFeedbackTier != D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED &&
         SUCCEEDED(device.As(&feedback_device)) &&
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &feedback_shader_model, sizeof(feedback_shader_model))) &&
         feedback_shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
-    texture_streaming_capabilities.tiled_resources = texture_streaming_capabilities.sampler_feedback &&
-        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &texture_options, sizeof(texture_options))) &&
-        texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2 &&
-        texture_options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
     texture_streaming_capabilities.packed_mip_arrays = texture_streaming_capabilities.tiled_resources &&
         texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
     // Concrete DeferredLight pixel and adaptive GTAO consumers are integrated;
@@ -1069,13 +1071,16 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
             device->CreateShaderResourceView(nullptr, &view, cpu(offset));
         };
 
-        create_null_texture(kTerrainPageDescriptorOffset,D3D12_SRV_DIMENSION_TEXTURE2DARRAY,DXGI_FORMAT_R8G8B8A8_UNORM);
-        create_null_texture(kTerrainPageDescriptorOffset+2,D3D12_SRV_DIMENSION_TEXTURE2DARRAY,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         D3D12_SHADER_RESOURCE_VIEW_DESC terrain_sections_null{};
         terrain_sections_null.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
         terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainSection);
-        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+1));
+        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_SECTION_SRV));
+        terrain_sections_null.Buffer.StructureByteStride=sizeof(TextureMipMetadata);
+        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_MIP_SRV));
+        for (UINT plane = 0; plane < kTerrainPagePlaneCapacity; ++plane)
+            create_null_texture(kTerrainPageDescriptorOffset+HS_TERRAIN_PLANE_SRV+plane,D3D12_SRV_DIMENSION_TEXTURE2D,
+                plane%3==0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM);
         constexpr std::array post_table_offsets{
             0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
         for (const auto table_offset : post_table_offsets)

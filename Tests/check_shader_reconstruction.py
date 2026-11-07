@@ -28,18 +28,18 @@ class ShaderContracts(unittest.TestCase):
             count = math.prod(int(n) for n in re.findall(r"\d+", dimensions))
             offset += (64 if kind == "float4x4" else 16) * count
         self.assertEqual({name: offsets[name] for name in ("ScreenSize", "LodClock", "OutputSize", "ProbeOptions")},
-                         {"ScreenSize": 192, "LodClock": 3008, "OutputSize": 3200, "ProbeOptions": 3520})
-        self.assertEqual(offsets["PreviousGrassBenders"], 3536)
-        self.assertEqual(offsets["PreviousGrassState"], 4048)
-        self.assertEqual(offsets["PreviousGrassOriginDelta"], 4064)
-        self.assertEqual(offsets["SceneTableBounds"], 4080)
-        self.assertEqual(offsets["GrassBenderGrid"], 4096)
-        self.assertEqual(offsets["GrassBenderMasks"], 4112)
-        self.assertEqual(offsets["PreviousGrassBenderGrid"], 4368)
-        self.assertEqual(offsets["PreviousGrassBenderMasks"], 4384)
-        self.assertEqual(offsets["ParticleTerrain"], 4640)
-        self.assertEqual(offsets["PreviousInstanceUnjitteredViewProjection"], 4656)
-        self.assertEqual(offset, 4720)
+                         {"ScreenSize": 192, "LodClock": 1968, "OutputSize": 2160, "ProbeOptions": 2480})
+        self.assertEqual(offsets["PreviousGrassBenders"], 2496)
+        self.assertEqual(offsets["PreviousGrassState"], 3008)
+        self.assertEqual(offsets["PreviousGrassOriginDelta"], 3024)
+        self.assertEqual(offsets["SceneTableBounds"], 3040)
+        self.assertEqual(offsets["GrassBenderGrid"], 3056)
+        self.assertEqual(offsets["GrassBenderMasks"], 3072)
+        self.assertEqual(offsets["PreviousGrassBenderGrid"], 3328)
+        self.assertEqual(offsets["PreviousGrassBenderMasks"], 3344)
+        self.assertEqual(offsets["ParticleTerrain"], 3600)
+        self.assertEqual(offsets["PreviousInstanceUnjitteredViewProjection"], 3616)
+        self.assertEqual(offset, 3680)
 
 
 if __name__ == "__main__":

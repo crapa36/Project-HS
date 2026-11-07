@@ -77,10 +77,8 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     ap::ActionSpec spec;
     spec.action_id = "render.hlod.arena";
     spec.recipe_id = "project-hs.render.scene-hlod";
-    spec.recipe_version = 3;
+    spec.recipe_version = 4;
     spec.namespace_path = "render/hlod/arena";
-    spec.inputs.push_back(ap::HashInput("layout/implementation",
-        source / "Source/Presentation/Private/environment_layout.cpp"));
     std::map<std::string, ap::ActionResultSnapshot> snapshots;
     const auto arena_bytes = Upstream(build, spec, snapshots,
         "game-data/simulation-payload", "game-data/arena-layout");
@@ -99,7 +97,9 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
         selected_names.push_back(name);
         const auto action_namespace = "render/" + std::string(name);
         auto &snapshot = snapshots.try_emplace(action_namespace, build, action_namespace).first->second;
-        for (const auto &product_id : {id, "render/geometry/" + std::string(name) + ".rpage"})
+        for (const auto &product_id : {id, "render/geometry/" + std::string(name) + ".rpage",
+                "render/" + std::string(name) + "_lod2.rpkg",
+                "render/geometry/" + std::string(name) + "_lod2.rpage"})
         {
             ap::UpstreamProduct dependency;
             fs::path path;
@@ -119,7 +119,7 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     phase("current_miss");
 
     // Geometry expansion is only needed for a miss; each decoder consumes verified bytes.
-    struct Source { std::string id; rd::GeometryData geometry; std::vector<std::string> materials; };
+    struct Source { std::string id; rd::GeometryData geometry, coarse; std::vector<std::string> materials; bool coarse_material_matches{}; };
     std::map<std::uint64_t, Source> assets;
     for (const auto name : selected_names)
     {
@@ -148,11 +148,31 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
         Require(material_id == rd::MaterialProduct(
             rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(ordinal)]),
             "source canonical material does not match its geometry");
-        assets.emplace(asset_id.value, Source{id, std::move(geometry), std::vector<std::string>(selectors, material_id)});
+        const auto coarse_id = "render/" + std::string(name) + "_lod2.rpkg";
+        const auto coarse_bytes = snapshot.ReadProductBytes(coarse_id, dependency);
+        const auto coarse_package = rd::ReadPackage(Bytes(coarse_bytes), hs::MakeAssetId(coarse_id));
+        const auto coarse_metadata_chunk = std::ranges::find(coarse_package.chunks,
+            rd::ChunkType::GeometryMetadata, &rd::ChunkView::type);
+        Require(coarse_metadata_chunk != coarse_package.chunks.end(), "authored LOD metadata missing");
+        const auto coarse_metadata = rd::DecodeGeometryMetadata(coarse_metadata_chunk->bytes,
+            coarse_package.dependencies, coarse_id);
+        Require(coarse_metadata.lod == 2, "authored LOD metadata has wrong level");
+        const auto coarse_reference = std::ranges::find(coarse_package.chunks,
+            rd::ChunkType::GeometryMaterialReference, &rd::ChunkView::type);
+        Require(coarse_reference != coarse_package.chunks.end() && coarse_reference->required,
+            "authored LOD canonical material reference missing");
+        const auto &coarse_material = coarse_package.dependencies[rd::DecodeGeometryMaterialReference(
+            coarse_reference->bytes, coarse_package.dependencies)];
+        const auto coarse_page_id = "render/geometry/" + std::string(name) + "_lod2.rpage";
+        const auto coarse_page_bytes = snapshot.ReadProductBytes(coarse_page_id, dependency);
+        auto coarse = rd::DecodeGeometryPage(Bytes(coarse_page_bytes), hs::MakeAssetId(coarse_page_id), coarse_metadata);
+        assets.emplace(asset_id.value, Source{id, std::move(geometry), std::move(coarse),
+            std::vector<std::string>(selectors, material_id), coarse_material == material_id});
     }
     std::vector<hs::geometry_content::SceneHlodCookSource> sources;
     for (const auto &[asset, value] : assets)
-        sources.push_back({hs::AssetId{asset}, value.id, &value.geometry, value.materials});
+        sources.push_back({hs::AssetId{asset}, value.id, &value.geometry, value.materials,
+                           value.coarse_material_matches ? &value.coarse : nullptr});
     phase("source_decode");
     hs::geometry_content::SceneHlodCookOptions options;
     if (exhaustive_geometry_error)

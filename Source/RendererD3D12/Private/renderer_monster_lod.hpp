@@ -31,6 +31,12 @@ struct MonsterLodWorldSphere
     double radius{};
     bool pose_bounds_qualified{};
 };
+struct MonsterLodShadowWindow
+{
+    RenderWorldPosition scene_origin{};
+    std::array<double,3> right{}, up{};
+    double min_x{}, min_y{}, max_x{}, max_y{}, world_texel{};
+};
 
 struct MonsterLodProjectionInputs
 {
@@ -44,6 +50,8 @@ struct MonsterLodProjectionInputs
     // The caller has enumerated every active view and requested local light.
     // Missing consumers cannot silently qualify a reduced page.
     bool camera_views_complete{}, local_lights_complete{};
+    std::span<const MonsterLodShadowWindow> vsm_windows;
+    std::span<const MonsterLodShadowWindow> csm_windows;
 };
 
 struct MonsterLodProjection
@@ -79,6 +87,7 @@ struct MonsterLodPreparedConsumers
 {
     std::vector<MonsterLodPreparedCamera> cameras;
     std::vector<MonsterLodPreparedLocalLight> local_lights;
+    std::vector<MonsterLodShadowWindow> shadow_windows;
     MonsterLodProjection baseline;
     double maximum_error_pixels{};
 };
@@ -205,8 +214,16 @@ using Vec3 = std::array<double, 3>;
                 projection.valid = false;
             else projection.Include(1.001/world_texel,inputs.maximum_error_pixels);
     };
-    add_texels(inputs.csm_active,inputs.csm_world_texels);
-    add_texels(inputs.vsm_active,inputs.vsm_world_texels);
+    if (inputs.csm_active && !inputs.csm_windows.empty())
+        prepared.shadow_windows.assign(inputs.csm_windows.begin(),inputs.csm_windows.end());
+    else add_texels(inputs.csm_active,inputs.csm_world_texels);
+    if (inputs.vsm_active && !inputs.vsm_windows.empty())
+    {
+        prepared.shadow_windows.insert(prepared.shadow_windows.end(),inputs.vsm_windows.begin(),inputs.vsm_windows.end());
+        // The fixed root may cover receivers outside all moving clipmap windows.
+        add_texels(true,{inputs.vsm_world_texels[2],inputs.vsm_world_texels[2],inputs.vsm_world_texels[2]});
+    }
+    else add_texels(inputs.vsm_active,inputs.vsm_world_texels);
     if (!projection.valid) return prepared;
     if (inputs.local_shadows_active)
         for (const auto &light : inputs.local_lights)
@@ -261,6 +278,21 @@ using Vec3 = std::array<double, 3>;
         if (!monster_lod_detail::CameraProjection(projection,sphere,view,
             consumers.maximum_error_pixels))
         { projection.valid = false; return projection; }
+    for (const auto &window : consumers.shadow_windows)
+    {
+        const auto relative=monster_lod_detail::Difference(center,monster_lod_detail::Vector(window.scene_origin));
+        const double x=monster_lod_detail::Dot(relative,window.right), y=monster_lod_detail::Dot(relative,window.up);
+        const double magnitude=std::abs(relative[0])+std::abs(relative[1])+std::abs(relative[2])+sphere.radius;
+        const double radius=sphere.radius+std::max(0.001,16.0*std::numeric_limits<float>::epsilon()*magnitude);
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius) ||
+            !std::isfinite(window.min_x) || !std::isfinite(window.min_y) ||
+            !std::isfinite(window.max_x) || !std::isfinite(window.max_y) ||
+            !std::isfinite(window.world_texel) || window.world_texel<=0)
+        { projection.valid=false; return projection; }
+        if (x+radius>=window.min_x && x-radius<=window.max_x &&
+            y+radius>=window.min_y && y-radius<=window.max_y)
+            projection.Include(1.001/window.world_texel,consumers.maximum_error_pixels);
+    }
     for (const auto &light : consumers.local_lights)
         if (!monster_lod_detail::LocalShadowProjection(projection,sphere,light,
             consumers.maximum_error_pixels))

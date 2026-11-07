@@ -144,6 +144,7 @@ struct TextureOwner
     Access fallback_access{Access::Undefined};
     Access active_access{Access::Undefined};
     bool reserved_published{}, demand_valid{};
+    bool feedback_supported{};
     bool preferred{};
 
     [[nodiscard]] bool IsStreamed() const noexcept
@@ -415,9 +416,8 @@ Result RendererTextureStreaming::Initialize(ID3D12Device *device, D3D12MA::Alloc
         SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device8))) &&
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))) &&
         shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
-    // Reserved resources are sampled only by the actual feedback PSO variants.
-    // This authored feedback ABI exposes 96 UAV bindings, beyond tier2's 64.
-    capabilities.tiled_resources = capabilities.tiled_resources && capabilities.sampler_feedback &&
+    // The feedback ABI exposes 96 UAV bindings, beyond tier2's 64.
+    capabilities.sampler_feedback = capabilities.sampler_feedback &&
         options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
     capabilities.packed_mip_arrays = capabilities.tiled_resources &&
         options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
@@ -573,7 +573,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
     if (impl_->textures.size() >= UINT32_MAX || prepared.size() >= UINT32_MAX - impl_->textures.size())
         return Failure("Texture registration batch exceeds owner identity capacity.");
     if (supplied != impl_->supplied_descriptors.end() &&
-        (supplied->second.asset_id != MakeAssetId(registration.logical_id) ||
+        (supplied->second.asset_id.value != MakeAssetId(registration.logical_id).value ||
          !Same(supplied->second.description, registration.description) ||
          supplied->second.dimension != render_data::TextureDimension::Texture2DArray))
         return Failure("Supplied texture descriptor disagrees with its selected owner.");
@@ -596,13 +596,31 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
     texture.tail_mip = std::min(4u, texture.registration.description.mip_count - 1u);
     texture.desired_mip = texture.tail_mip;
     D3D12_FEATURE_DATA_FORMAT_SUPPORT format{static_cast<DXGI_FORMAT>(texture.registration.description.format)};
-    const bool feedback_format = SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
-        &format, sizeof(format))) && (format.Support2 & D3D12_FORMAT_SUPPORT2_SAMPLER_FEEDBACK) != 0;
+    const bool typed_supported = SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+        &format, sizeof(format)));
+    auto native_format = format;
+    native_format.Format = Description(texture.registration, 0).Format;
+    const bool native_supported = native_format.Format == format.Format ? typed_supported :
+        SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &native_format, sizeof(native_format)));
+    bool tiled_format = typed_supported && native_supported &&
+        (format.Support2 & D3D12_FORMAT_SUPPORT2_TILED) != 0 &&
+        (native_format.Support2 & D3D12_FORMAT_SUPPORT2_TILED) != 0;
+    texture.feedback_supported = impl_->capabilities.sampler_feedback && typed_supported &&
+        (format.Support2 & D3D12_FORMAT_SUPPORT2_SAMPLER_FEEDBACK) != 0;
+    if (texture.registration.srgb_view)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT srgb{format.Format == DXGI_FORMAT_BC7_UNORM
+            ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB};
+        const bool supported = SUCCEEDED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &srgb, sizeof(srgb)));
+        tiled_format = tiled_format && supported && (srgb.Support2 & D3D12_FORMAT_SUPPORT2_TILED) != 0;
+        texture.feedback_supported = texture.feedback_supported && supported &&
+            (srgb.Support2 & D3D12_FORMAT_SUPPORT2_SAMPLER_FEEDBACK) != 0;
+    }
     // Full-chain authored arrays contain packed tails. D3D12 prohibits that
     // reserved layout before tier4; select their software owner before allocation.
     const bool array_supported = texture.registration.description.array_size == 1u ||
         impl_->capabilities.packed_mip_arrays;
-    if (!texture.registration.pinned && impl_->capabilities.tiled_resources && array_supported && feedback_format &&
+    if (!texture.registration.pinned && impl_->capabilities.tiled_resources && array_supported && tiled_format &&
         texture.registration.description.width >= 8u && texture.registration.description.height >= 8u)
     {
         auto description = Description(texture.registration, 0);
@@ -628,7 +646,16 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
         impl_->device->GetResourceTiling(texture.reserved.Get(), &total_tiles, &texture.packed, &shape,
             &count, 0, texture.tilings.data());
         if (!total_tiles || count != texture.tilings.size()) return Failure("Native selected texture tiling is incomplete.");
-        if (texture.packed.NumPackedMips) texture.tail_mip = std::min(texture.tail_mip,
+        if (!texture.packed.NumStandardMips)
+        {
+            // A wholly packed chain cannot release tiles when requesting coarser mips.
+            texture.reserved_contract = {};
+            texture.reserved.Reset();
+            texture.tilings.clear();
+            texture.packed = {};
+            texture.feedback_supported = false;
+        }
+        else if (texture.packed.NumPackedMips) texture.tail_mip = std::min(texture.tail_mip,
             static_cast<std::uint32_t>(texture.packed.NumStandardMips));
     }
     if (!impl_->BuildMipCosts(texture))
@@ -686,7 +713,6 @@ void RendererTextureStreaming::Demand(TextureStreamId id, std::uint32_t mip, std
     if (!id || id.value > impl_->textures.size()) return;
     auto &texture = impl_->textures[id.value - 1];
     if (texture.registration.pinned) return;
-    if (impl_->settled_preferred && texture.preferred) return;
     impl_->settled_preferred = false;
     if (!texture.demand_valid || texture.demand_frame != frame)
     { texture.observed_mip = texture.tail_mip; texture.priority = 0; }
@@ -1391,7 +1417,6 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
     const auto host_budget_snapshot = residency.HostAdmissionFacts().budget;
     const auto pressure = residency.GpuPressureFacts();
     const auto &observed = pressure.budget;
-    const bool prefer_working_set = observed.valid && observed.local_budget;
     std::uint64_t planned{};
     for (auto &texture : impl_->textures)
     {
@@ -1411,13 +1436,12 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             // Retain demand/publication through one actual feedback-bank cycle.
             // This supplies hysteresis and a minimum residency period without
             // treating missing delayed feedback as a fresh coarse request.
-            texture.priority = 0;
-            texture.desired_mip = (texture.reserved_published || texture.software.resource) && recent(texture.publication_frame)
+            texture.priority = texture.preferred ? 1u : 0u;
+            texture.desired_mip = (texture.reserved_published || texture.software.resource) &&
+                (texture.preferred || recent(texture.publication_frame))
                 ? texture.resident_mip : texture.tail_mip;
         }
         texture.desired_mip = std::min(texture.tail_mip, std::max(texture.desired_mip, impl_->finest_mip));
-        if (prefer_working_set && texture.preferred)
-            texture.desired_mip = std::min(texture.tail_mip, impl_->finest_mip);
         if (!texture.reserved && !texture.ranged_descriptor.subresources.empty() &&
             host_budget_snapshot.host_budget_valid && host_budget_snapshot.host_fresh)
         {
@@ -1914,7 +1938,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             if (texture.registration.pinned) return true;
             if (texture.pending || texture.request || texture.software_transaction || texture.budget_coarsened)
                 return false;
-            const auto target = texture.preferred ? std::min(texture.tail_mip, impl_->finest_mip) : texture.tail_mip;
+            const auto target = texture.preferred ? texture.resident_mip : texture.tail_mip;
             if (texture.desired_mip != target || texture.resident_mip != target ||
                 (!texture.IsStreamed() && (texture.reserved || texture.first_mip != target))) return false;
             return texture.preferred || !texture.demand_valid || texture.demand_frame > frame ||
@@ -1945,18 +1969,18 @@ TextureStreamView RendererTextureStreaming::View(TextureStreamId id) const noexc
     auto completion = texture.last_use; completion.Merge(texture.publication);
     return {resource, texture.registration.description, texture.first_mip, resident_mip,
         texture.revision, completion, texture.active_access, texture.reserved_published,
-        texture.registration.opacity_sampling};
+        texture.registration.opacity_sampling, texture.feedback_supported};
 }
 bool RendererTextureStreaming::HardwareBacked(TextureStreamId id) const noexcept
 {
     return id && id.value <= impl_->textures.size() && !!impl_->textures[id.value - 1].reserved;
 }
-bool RendererTextureStreaming::NeedsDemand(TextureStreamId id, bool baseline_consumer) const noexcept
+bool RendererTextureStreaming::NeedsDemand(TextureStreamId id, bool baseline_consumer, bool feedback_active) const noexcept
 {
     if (!id || id.value > impl_->textures.size()) return false;
     const auto &texture = impl_->textures[id.value - 1];
-    return !texture.registration.pinned && !(impl_->settled_preferred && texture.preferred) &&
-        (baseline_consumer || !texture.reserved);
+    return !texture.registration.pinned &&
+        (baseline_consumer || !feedback_active || !texture.reserved || !texture.feedback_supported);
 }
 bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
     const TextureStreamingLayout &layout) const noexcept

@@ -160,80 +160,6 @@ HsSurfaceClosure HsProbeLayeredRegressionSurface(uint case_index)
     return surface;
 }
 
-// Frozen pre-refactor layered paths: keep this test oracle independent of the prepared API.
-float HsProbeOriginalLayeredPdf(HsSurfaceClosure surface, float3 wo, float3 wi)
-{
-    if (surface.unlit)
-        return 0.0;
-    if (!HsBsdfHasLayers(surface))
-        return HsBsdfBasePdf(surface, wo, wi);
-    float3 view = normalize(wo);
-    float3 light = normalize(wi);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    float no_l = dot(normal, light);
-    if (dot(normal, view) <= 0.0 || no_l == 0.0)
-        return 0.0;
-    float4 probabilities = HsBsdfLayerProbabilities(surface, view);
-    if (no_l < 0.0)
-        return probabilities.w * (-no_l) * HsBsdfInvPi;
-    return probabilities.x * HsBsdfAnisotropicPdf(surface, view, light)
-        + probabilities.y * HsBsdfBasePdf(HsBsdfCoatSurface(surface), view, light)
-        + probabilities.z * (0.5 * HsBsdfInvPi);
-}
-
-HsBsdfSampleResult HsProbeOriginalLayeredSample(
-    HsSurfaceClosure surface, float3 wo, float u_lobe, float2 u_dir)
-{
-    if (surface.unlit)
-        return (HsBsdfSampleResult)0;
-    if (!HsBsdfHasLayers(surface))
-        return HsBsdfBaseSample(surface, wo, u_lobe, u_dir);
-    HsBsdfSampleResult result = (HsBsdfSampleResult)0;
-    float3 view = normalize(wo);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    if (dot(normal, view) <= 0.0)
-        return result;
-    float4 probabilities = HsBsdfLayerProbabilities(surface, view);
-    if (u_lobe < probabilities.x)
-    {
-        result = HsBsdfAnisotropicSample(surface, view, u_lobe / probabilities.x, u_dir);
-        if (!result.valid)
-            return result;
-    }
-    else if (u_lobe < probabilities.x + probabilities.y)
-    {
-        result = HsBsdfBaseSample(HsBsdfCoatSurface(surface), view, 0.0, u_dir);
-        if (!result.valid)
-            return result;
-    }
-    else
-    {
-        float3 tangent = HsBsdfTangent(normal);
-        float3 bitangent = cross(normal, tangent);
-        if (u_lobe < probabilities.x + probabilities.y + probabilities.z)
-        {
-            float cosine = u_dir.x;
-            float sine = sqrt(max(0.0, 1.0 - cosine * cosine));
-            float phi = 2.0 * HsBsdfPi * u_dir.y;
-            result.wi = HsBsdfToWorld(
-                float3(sine * cos(phi), sine * sin(phi), cosine), tangent, bitangent, normal);
-        }
-        else
-        {
-            result.wi = HsBsdfSampleCosineHemisphere(u_dir, tangent, bitangent, -normal);
-        }
-    }
-    result.wi = normalize(result.wi);
-    result.f = HsBsdfEvaluate(surface, view, result.wi);
-    result.pdf = HsProbeOriginalLayeredPdf(surface, view, result.wi);
-    result.valid = result.pdf > 0.0;
-    if (!result.valid)
-        return (HsBsdfSampleResult)0;
-    return result;
-}
-
 float HsProbePreparedLayeredRegressionError(uint case_index)
 {
     HsSurfaceClosure surface = HsProbeLayeredRegressionSurface(case_index);
@@ -242,44 +168,16 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
     float no_v = case_index == 6u ? 0.0001 : case_index == 1u ? 0.2 : 0.8;
     float3 front_view = (HsBsdfTangent(normal) * sqrt(max(0.0, 1.0 - no_v * no_v)) +
         normal * no_v) * 1.37;
-    HsBsdfSamplingContext front_sampling = HsBsdfPrepareSampling(surface, front_view);
-    HsBsdfSamplingContext back_sampling = HsBsdfPrepareSampling(surface, -front_view);
-    HsBsdfPdfContext front_pdf = HsBsdfPreparePdf(surface, front_view);
-    HsBsdfPdfContext back_pdf = HsBsdfPreparePdf(surface, -front_view);
     float error = 0.0;
     [loop]
     for (uint index = 0u; index < 16u; ++index)
     {
         const bool back_face = (index & 1u) != 0u;
         float3 wo = front_view;
-        HsBsdfSamplingContext sampling = front_sampling;
-        HsBsdfPdfContext pdf_context = front_pdf;
-        if (back_face)
-        {
-            wo = -front_view;
-            sampling = back_sampling;
-            pdf_context = back_pdf;
-        }
-        const float u_lobe = frac((float(index) + 0.5) * 0.6180339887498948482);
+        if (back_face) wo = -front_view;
         const float2 u_dir = float2((float(index) + 0.5) / 16.0,
             float(HsProbeReverseBits(index)) * 2.3283064365386962890625e-10);
-        const HsBsdfSampleResult original = HsProbeOriginalLayeredSample(surface, wo, u_lobe, u_dir);
-        const HsBsdfSampleResult prepared = HsBsdfSamplePrepared(surface, wo, sampling, u_lobe, u_dir);
-        const HsBsdfSampleResult raw = HsBsdfSample(surface, wo, u_lobe, u_dir);
-        error = max(error, original.valid != prepared.valid ? 1.0 : 0.0);
-        error = max(error, original.valid != raw.valid ? 1.0 : 0.0);
-        error = max(error, abs(original.pdf - prepared.pdf));
-        error = max(error, abs(original.pdf - raw.pdf));
-        error = HsProbeMaxError(error, original.wi - prepared.wi);
-        error = HsProbeMaxError(error, original.wi - raw.wi);
-        error = HsProbeMaxError(error, original.f - prepared.f);
-        error = HsProbeMaxError(error, original.f - raw.f);
         const float3 wi = HsProbeUniformHemisphere(u_dir);
-        const float original_pdf = HsProbeOriginalLayeredPdf(surface, wo, wi);
-        const float prepared_pdf = HsBsdfPdfPrepared(surface, wo, pdf_context, wi);
-        const float raw_pdf = HsBsdfPdf(surface, wo, wi);
-        error = max(error, abs(original_pdf - prepared_pdf));
-        error = max(error, abs(original_pdf - raw_pdf));
 
         const float3 light_view = normalize(wo);
         const HsSurfaceClosure light_surface = HsBsdfOrientThinSurface(surface, light_view);

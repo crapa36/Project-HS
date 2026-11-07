@@ -9,6 +9,7 @@
 
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -97,15 +98,34 @@ int ProduceSceneProbe(int argc,char **argv)
         Require(layout.payload==rd::SceneProbePayload::Layout,"Bake input must be layout-only SPB2");
 
         ap::ActionSpec spec; spec.action_id=kAction; spec.namespace_path=kNamespace;
-        spec.recipe_id="project-hs.render.scene-probes/native-irradiance-grid"; spec.recipe_version=4;
+        spec.recipe_id="project-hs.render.scene-probes/native-irradiance-grid"; spec.recipe_version=6;
         // The bake layout is an explicit byte input. Its logical product id is
         // also the final baked product id, so it must not be represented as
         // an upstream product of this Action.
         spec.inputs.push_back(ap::HashInput("scene-probe/layout-input",layout_path));
-        for(const auto &[id,path]:std::initializer_list<std::pair<std::string_view,fs::path>>{
-            {"scene-probe/source",source/"ContentSource/Lighting/local_probes.json"},
-            {"scene-probe/schema",source/"Schemas/scene_probe.schema.json"}})
-            spec.inputs.push_back(ap::HashInput(std::string(id),path));
+        const auto source_path=source/"ContentSource/Lighting/local_probes.json";
+        const auto source_bytes=ap::ReadBytes(source_path);
+        const auto authored=ap::Json::parse(source_bytes);
+        const auto &view_limit=authored.at("capture").at("maximum_cube_views_per_graph");
+        Require(view_limit.is_number_integer(),"Scene probe cube-view budget must be an integer");
+        const auto numeric_limit=view_limit.get<std::int64_t>();
+        Require(numeric_limit>=1 && numeric_limit<=6,"Scene probe cube-view budget must be 1..6");
+        const auto maximum_cube_views=static_cast<std::uint32_t>(numeric_limit);
+        const auto &solve=authored.at("capture").at("offline_multibounce");
+        Require(solve.is_object() && solve.size()==4 && solve.at("mode")=="previous_complete_grid",
+            "Invalid offline diffuse solve mode");
+        const auto &limit=solve.at("maximum_iterations");
+        Require(limit.is_number_integer(),"Scene probe iteration limit must be an integer");
+        const auto iteration_limit=limit.get<std::int64_t>();
+        Require(iteration_limit>=1 && iteration_limit<=64,"Scene probe iteration limit must be 1..64");
+        const auto &abs_value=solve.at("absolute_tolerance"), &rel_value=solve.at("relative_tolerance");
+        Require(abs_value.is_number() && rel_value.is_number(),"Scene probe tolerances must be numeric");
+        const auto abs_tolerance=abs_value.get<double>(),rel_tolerance=rel_value.get<double>();
+        Require(std::isfinite(abs_tolerance) && std::isfinite(rel_tolerance) && abs_tolerance>=0 && abs_tolerance<=1 &&
+            rel_tolerance>=0 && rel_tolerance<=1 && (abs_tolerance>0 || rel_tolerance>0),"Invalid scene probe tolerances");
+        spec.inputs.push_back({"scene-probe/source",source_path,
+            ap::Sha256Bytes(std::as_bytes(std::span(source_bytes.data(),source_bytes.size())))});
+        spec.inputs.push_back(ap::HashInput("scene-probe/schema",source/"Schemas/scene_probe.schema.json"));
 
         std::map<std::string,std::string> owners;
         std::map<std::string,ap::ActionResultSnapshot> snapshots;
@@ -157,7 +177,8 @@ int ProduceSceneProbe(int argc,char **argv)
         {
             const auto output=stage/kFilename;
             const auto artifacts=build/"Artifacts"/"scene-probe-bake"/stage.filename();
-            ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts);
+            ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts,maximum_cube_views,
+                static_cast<std::uint32_t>(iteration_limit),abs_tolerance,rel_tolerance);
             std::ifstream baked_stream(output,std::ios::binary|std::ios::ate);
             Require(static_cast<bool>(baked_stream)&&baked_stream.tellg()>0,"Native scene probe output is missing");
             std::vector<std::byte> baked_bytes(static_cast<std::size_t>(baked_stream.tellg())); baked_stream.seekg(0);

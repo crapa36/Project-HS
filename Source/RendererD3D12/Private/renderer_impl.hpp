@@ -90,7 +90,6 @@
 #include <wrl/client.h>
 
 #include <DirectXMath.h>
-#include <chrono>
 
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <imgui.h>
@@ -209,7 +208,7 @@ constexpr std::uint32_t kGeometryPageCapacity = render_data::kGeometryPageCapaci
 constexpr std::uint32_t kGeometryBuffersPerPage = render_data::kGeometryBuffersPerPage;
 constexpr std::uint32_t kTerrainPageDescriptorOffset = kMaterialTextureDescriptorOffset + kMaterialTextureDescriptorCount;
 constexpr std::uint32_t kTerrainPagePlaneCapacity = HS_TERRAIN_PAGE_PLANE_CAPACITY;
-constexpr std::uint32_t kTerrainPageDescriptorCount = 2 + kTerrainPagePlaneCapacity;
+constexpr std::uint32_t kTerrainPageDescriptorCount = HS_TERRAIN_DESCRIPTOR_COUNT;
 constexpr std::uint32_t kGeometryDescriptorOffset = kTerrainPageDescriptorOffset + kTerrainPageDescriptorCount;
 constexpr std::uint32_t kGeometryDescriptorCount =
     1 + kGeometryPageCapacity * kGeometryBuffersPerPage;
@@ -441,6 +440,9 @@ struct MonsterAsset : GeometryPageGpu
     float ground_offset{};
     std::uint32_t skin_offset{};
     std::array<DirectX::XMUINT4, static_cast<std::size_t>(CharacterAnimationClip::Count)> clip_meta{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::array<float, static_cast<std::size_t>(CharacterAnimationClip::Count)> clip_durations{};
+#endif
     std::array<std::byte,32> skeleton_binding{};
     std::uint32_t deformation_flags{};
     std::span<const render_data::GeometryMetadata> geometry_lods;
@@ -514,6 +516,9 @@ struct MonsterAsset : GeometryPageGpu
         owned_material_bindings.clear(); owned_geometry_lods.clear(); owned_interval_bounds.clear();
         bone_count=material_count=skin_offset=deformation_flags=0; ground_offset=0;
         clip_meta={}; skeleton_binding={}; interval_clip_offsets={};
+#if defined(HS_DEVELOPMENT_TOOLS)
+        clip_durations={};
+#endif
         interval_rows_per_lod=0; interval_maximum_extent={}; interval_lookup_valid=false;
     }
 };
@@ -538,9 +543,6 @@ struct FrameConstants
     DirectX::XMFLOAT4 grass_benders[32];
     DirectX::XMUINT4 grass_bender_count;
     DirectX::XMUINT4 authored_particle_clock;
-    DirectX::XMFLOAT4 vfx_light_position_radius[32];
-    DirectX::XMFLOAT4 vfx_light_color_intensity[32];
-    DirectX::XMUINT4 vfx_light_count;
     DirectX::XMUINT4 vfx_decal_count;
     DirectX::XMUINT4 skin_cache_options;
     DirectX::XMFLOAT4X4 inverse_view_projection;
@@ -581,21 +583,21 @@ constexpr std::uint32_t kDisabledVolumetricConstantsOffset = (sizeof(FrameConsta
 constexpr std::uint32_t kDisabledVolumetricConstantsSize = (sizeof(VolumetricConstants) + 255u) & ~255u;
 constexpr std::uint32_t kInstanceDataOffset =
     kDisabledVolumetricConstantsOffset + kDisabledVolumetricConstantsSize;
-static_assert(sizeof(FrameConstants) == 4720);
+static_assert(sizeof(FrameConstants) == 3680);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
-static_assert(offsetof(FrameConstants, lod_clock) == 3008);
-static_assert(offsetof(FrameConstants, output_size) == 3200);
-static_assert(offsetof(FrameConstants, probe_options) == 3520);
-static_assert(offsetof(FrameConstants, previous_grass_benders) == 3536);
-static_assert(offsetof(FrameConstants, previous_grass_state) == 4048);
-static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 4064);
-static_assert(offsetof(FrameConstants, scene_table_bounds) == 4080);
-static_assert(offsetof(FrameConstants, grass_bender_grid) == 4096);
-static_assert(offsetof(FrameConstants, grass_bender_masks) == 4112);
-static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 4368);
-static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 4384);
-static_assert(offsetof(FrameConstants, particle_terrain) == 4640);
-static_assert(offsetof(FrameConstants, previous_instance_unjittered_view_projection) == 4656);
+static_assert(offsetof(FrameConstants, lod_clock) == 1968);
+static_assert(offsetof(FrameConstants, output_size) == 2160);
+static_assert(offsetof(FrameConstants, probe_options) == 2480);
+static_assert(offsetof(FrameConstants, previous_grass_benders) == 2496);
+static_assert(offsetof(FrameConstants, previous_grass_state) == 3008);
+static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 3024);
+static_assert(offsetof(FrameConstants, scene_table_bounds) == 3040);
+static_assert(offsetof(FrameConstants, grass_bender_grid) == 3056);
+static_assert(offsetof(FrameConstants, grass_bender_masks) == 3072);
+static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 3328);
+static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 3344);
+static_assert(offsetof(FrameConstants, particle_terrain) == 3600);
+static_assert(offsetof(FrameConstants, previous_instance_unjittered_view_projection) == 3616);
 
 struct GpuParticle
 {
@@ -772,7 +774,7 @@ struct FrameUploadGraphLayout
 {
     std::uint32_t pass_index{};
     ResourceVersion dynamic_lod{}, static_lod{}, geometry_records{}, dynamic_instances{};
-    ResourceVersion static_instances{}, static_refs{}, environment_stream{};
+    ResourceVersion static_instances{}, static_refs{};
     std::vector<ResourceVersion> geometry_streams;
 };
 
@@ -856,9 +858,9 @@ struct FrameGraphLayout
     {
         std::uint32_t frame_slot{}, render_width{}, render_height{}, output_width{}, output_height{};
         std::uint32_t material_sidecar_planes{};
-        bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{}, static_scene_present{};
+        bool presented{}, visibility{}, enhanced{}, skinned{}, skin_pass{}, previous_skin{}, static_scene_present{};
         bool exposure_initialization{}, ui_draw{}, temporal_initialization{}, offscreen_initialization{};
-        bool static_scene_upload{}, static_refs_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
+        bool static_scene_upload{}, static_refs_upload{}, dynamic_scene_upload{}, geometry_upload{};
         bool separate_previous_instance_scene{};
         bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{}, single_layer_water{};
         bool composite_gradient_read{};
@@ -875,6 +877,7 @@ struct FrameGraphLayout
         GraphicsReflectionMode reflection_mode{};
         GraphicsShadowMode shadow_mode{};
         std::uint32_t geometry_upload_count{}, translucency_diagnostics_source_mask{};
+        std::array<std::uint64_t, (kTerrainPagePlaneCapacity + 63) / 64> terrain_sampling{};
         [[nodiscard]] bool operator==(const EarlyKey &) const noexcept = default;
     } early;
     RenderGraphBuilder::PlanHandle handle{};
@@ -999,33 +1002,7 @@ struct D3D12Renderer::Impl
     };
     using ShadowCasterMap = std::unordered_map<std::tuple<bool, std::uint64_t, std::uint32_t>,
         ShadowCasterRecord, ShadowCasterKeyHash>;
-    struct StaticShadowCasterBatch
-    {
-        struct Binding
-        {
-            const GeometryPageGpu *page{};
-            ID3D12PipelineState *pipeline{};
-            UINT material{};
-            VirtualShadowFrontend frontend{};
-            std::uint64_t key{};
-        };
-        std::shared_ptr<const StaticRenderScene> source;
-        std::uint32_t generation{};
-        float density{}, wind_radius{};
-        std::uint64_t material_revision{}, pipeline_revision{}, revision{};
-        std::size_t leaf_count{};
-        std::array<std::uint64_t,kGpuVisibilityBucketCount+1> geometry{};
-        std::array<std::uint32_t,kGpuVisibilityBucketCount+1> passes{};
-        std::vector<VirtualShadowCaster> records;
-        std::vector<ShadowCasterMap::key_type> keys;
-        std::vector<Binding> bindings;
-        std::optional<VirtualShadowReceiver> water;
-        std::vector<VirtualShadowReceiver> receivers;
-        std::vector<ShadowSurfaceReceiver> surface_receivers;
-        std::optional<ShadowSurfaceReceiver> surface_aggregate;
-        std::size_t receiver_proxy_count{};
-        bool settled{}, mesh_shader{};
-    };
+    struct StaticShadowCasterBatch;
     struct UiResources
     {
         std::array<AllocationResource, kFrameCount> textures;
@@ -1075,6 +1052,13 @@ struct D3D12Renderer::Impl
         retained.graph_access = source.graph_access;
         retained.graph_queue = source.graph_queue;
         retained.graph_completion = source.graph_completion;
+        if (source.NativeContract())
+        {
+            retained.native_contract = source.native_contract;
+            retained.contract_resource = source.contract_resource;
+            retained.contract_allocation = source.contract_allocation;
+            retained.contract_device_input = source.contract_device_input;
+        }
         return retained;
     }
     struct InstanceHistory
@@ -1281,71 +1265,6 @@ struct D3D12Renderer::Impl
     };
     [[nodiscard]] Result PrepareReadGeometry(const RendererConfig &, std::string_view,
         std::span<const std::byte>, const render_data::GeometryMetadata &, PreparedGeometryUpload &) const;
-    struct EnvironmentTextureStream
-    {
-        RendererAssetSource source;
-        std::string logical_id;
-        std::string source_id;
-        StreamingRequestId request;
-        std::future<std::vector<std::byte>> read_future;
-        std::vector<std::byte> decoded_storage;
-        ResidencyTicket decoded_residency;
-        ResidencyTicket decode_reservation;
-        std::uint64_t read_bytes{}, last_demand_frame{};
-        std::uint32_t priority{};
-        AllocationResource candidate;
-        AllocationResource upload;
-        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
-        std::uint32_t subresource_count{};
-        CompletionSet upload_completion{};
-        CompletionSet fallback_use{};
-        CompletionSet fine_use{}, retirement{};
-        std::array<std::uint64_t, kFrameCount> frame_generation{1, 1, 1};
-        ResidencyTicket fallback_residency;
-        ResidencyTicket candidate_residency;
-        ResidencyTicket upload_residency;
-        std::uint64_t generation{1};
-        std::uint64_t requests{};
-        std::uint64_t uploads{};
-        std::uint64_t publications{};
-        std::uint64_t reclaims{};
-        bool upload_pending{};
-        bool upload_submitted{};
-
-        bool fine_resident{}, retiring{};
-
-        void ResetRuntime() noexcept
-        {
-            source.clear();
-            logical_id.clear();
-            source_id.clear();
-            request = {};
-            if (read_future.valid())
-                read_future.wait();
-            read_future = {};
-            candidate.Reset();
-            upload.Reset();
-            footprints.clear();
-            subresource_count = 0;
-            upload_completion = {};
-            fallback_use = {};
-            fine_use = {}; retirement = {};
-            frame_generation = {1, 1, 1};
-            fallback_residency = {};
-            candidate_residency = {};
-            upload_residency = {};
-            std::vector<std::byte>{}.swap(decoded_storage);
-            decoded_residency = {};
-            read_bytes = last_demand_frame = 0;
-            decode_reservation = {};
-            priority = 0;
-            generation = 1;
-            requests = uploads = publications = reclaims = 0;
-            upload_pending = false;
-            upload_submitted = false;
-            fine_resident = retiring = false;
-        }
-    };
     struct EnvironmentGeometryStream
     {
         RendererAssetSource source;
@@ -1472,7 +1391,6 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareLodStateBuffer(GpuLodStateBuffer &buffer, std::size_t capacity);
     void CommitLodStateBuffer(GpuLodStateBuffer &buffer);
     void SwapOptionPools(OwnedView &owner, std::array<TransientResourcePool, kFrameCount> &pools) noexcept;
-    void ClearTransientDescriptors() noexcept;
     void WriteOptionTargetDescriptors(OwnedView &owner, std::uint32_t frame) noexcept;
     [[nodiscard]] Result CreatePipeline(const RendererConfig &pipeline_config);
     [[nodiscard]] Result SelectTextureFeedbackShaders(const RendererConfig &, RendererConfig &) const;
@@ -1500,8 +1418,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result RecreatePresentation(const RendererConfig &, ViewExtent output, ViewExtent capacity,
         DisplayState &, std::optional<bool> cadence_suppression = std::nullopt);
     [[nodiscard]] Result PreparePresentationGuides(const RendererConfig &, ViewExtent output, ViewExtent capacity,
-        const DisplayState &, PresentationGuidesCandidate &) const;
-    [[nodiscard]] Result ReloadPipeline(RendererConfig candidate_config);
+        const DisplayState &, SdkPresentationOwner, PresentationGuidesCandidate &) const;
+    [[nodiscard]] Result ReloadPipeline(RendererConfig candidate_config, bool parameters_changed);
     [[nodiscard]] Result InitializeResidentAssetContext(const RendererConfig &, std::unique_ptr<Impl> &);
     [[nodiscard]] Result PrepareResidentAssetData(Impl &candidate);
     [[nodiscard]] Result PrepareResidentPublication(Impl &candidate);
@@ -1701,8 +1619,6 @@ struct D3D12Renderer::Impl
         bool for_hlod_admission = false);
     [[nodiscard]] Result PrepareEnvironmentStreaming();
     [[nodiscard]] Result PrepareHardwareTextureStreaming(const RendererAssetIo *live_transport = nullptr);
-    [[nodiscard]] Result DemandEnvironmentTexture(std::uint32_t priority);
-    [[nodiscard]] Result PumpEnvironmentStreaming(std::uint32_t frame_slot);
     [[nodiscard]] Result PrepareEnvironmentGeometryStreaming();
     [[nodiscard]] Result DemandEnvironmentGeometry(std::uint32_t ordinal,
                                                    std::uint32_t priority);
@@ -1740,7 +1656,7 @@ struct D3D12Renderer::Impl
     void CountValidationErrors();
     void WriteDred(HRESULT reason) const;
     [[nodiscard]] Result WritePng(const std::filesystem::path &path, const std::byte *pixels,
-                                  std::uint32_t row_pitch) const;
+                                  std::uint32_t row_pitch, ViewExtent extent) const;
 
     RendererConfig config;
     RendererFeatureCapabilities feature_capabilities;
@@ -1800,7 +1716,7 @@ struct D3D12Renderer::Impl
     std::array<bool, kEnvironmentMaterialNames.size()> preferred_texture_materials{};
     float preferred_texture_foliage_density{};
     bool preferred_texture_initialized{};
-    EnvironmentTextureStream environment_stream;
+    ResidencyTicket environment_fallback_residency;
     std::array<EnvironmentGeometryStream, kEnvironmentMaterialNames.size()>
         environment_geometry_streams;
     std::vector<RetiredStreamingTexture> retired_streaming_textures;
@@ -1811,7 +1727,6 @@ struct D3D12Renderer::Impl
     std::uint64_t static_scene_upload_count{};
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     PersistentGpuSceneSlots dynamic_scene_slots;
-    SkinCache skin_cache;
 #if defined(HS_DEVELOPMENT_TOOLS)
     std::ofstream dynamic_instance_upload_log;
 #endif
@@ -1862,7 +1777,6 @@ struct D3D12Renderer::Impl
     AllocationResource indirect_arguments;
     std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_surface_layouts;
     render_data::MaterialSidecarLayout material_sidecar_layout;
-    bool material_sidecars_initialized{};
     struct MaterialHeader
     {
         std::vector<std::byte> bytes;
@@ -1942,6 +1856,7 @@ struct D3D12Renderer::Impl
     };
     std::vector<std::shared_ptr<TerrainPlaneBacking>> terrain_plane_backings;
     std::vector<TextureStreamId> terrain_plane_stream_ids;
+    std::vector<std::uint8_t> terrain_plane_needed;
     std::vector<render_data::TerrainSurfaceTile> terrain_tiles;
     std::array<AllocationResource, kFrameCount> terrain_frame_mips;
     struct TerrainDescriptorBank
@@ -1955,8 +1870,11 @@ struct D3D12Renderer::Impl
             bool written{};
         };
         ComPtr<ID3D12DescriptorHeap> heap;
+        ComPtr<ID3D12Resource> metadata_resource;
         D3D12_CPU_DESCRIPTOR_HANDLE first{};
         UINT stride{};
+        UINT published_count{};
+        bool metadata_initialized{}, descriptors_initialized{};
         std::vector<Entry> entries;
     };
     mutable std::array<TerrainDescriptorBank,kFrameCount> terrain_descriptor_banks;
@@ -1966,7 +1884,8 @@ struct D3D12Renderer::Impl
     std::vector<UINT> static_terrain_indices, dynamic_terrain_indices;
     std::string terrain_archive_digest, terrain_planes_archive_digest;
     bool terrain_static_pages_current{};
-    UINT terrain_target_first_mip{UINT_MAX};
+    UINT64 terrain_retry_budget_bytes{};
+    UINT terrain_target_first_mip{UINT_MAX}, terrain_target_budget_mib{UINT_MAX};
     std::array<std::byte, 32> terrain_generation_parameters{};
     bool terrain_generation_parameters_valid{}, terrain_parameters_match{true}, terrain_parameters_changed{};
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -2046,10 +1965,18 @@ struct D3D12Renderer::Impl
         std::vector<std::uint64_t> skin_attachment_ids;
         std::vector<std::uint32_t> ordered_source_indices, order_scratch;
         std::vector<std::uint16_t> selected_lods, ordered_lods;
+        struct MonsterProjection
+        {
+            MonsterLodProjection projection;
+            double world_scale{};
+            std::size_t source_index{};
+        };
+        std::vector<MonsterProjection> monster_projections;
         std::vector<PersistentGpuSceneSlot> gpu_slots;
         std::optional<MonsterLodInstanceOrder> order;
         std::unordered_map<std::uint64_t, const AnimationPoseRef *> poses_by_id;
         std::vector<const AnimationPoseRef *> poses_by_source;
+        std::vector<std::uint32_t> original_source_ordinals;
         struct SkinCullView
         {
             std::array<double, 3> eye{}, target{}, forward{}, right{}, vertical{}, scene_origin{};
@@ -2070,6 +1997,8 @@ struct D3D12Renderer::Impl
         {
             poses_by_id.clear();
             poses_by_source.clear();
+            original_source_ordinals.clear();
+            monster_projections.clear();
             gpu_slots.clear();
             skin_cull_views.clear();
             skin_cull_views_prepared = skin_cull_views_valid = skin_cull_sun_valid = false;
@@ -2084,7 +2013,7 @@ struct D3D12Renderer::Impl
     } prepared_scene_package;
     struct PreparedArcherPalette
     {
-        RenderPoseKey key;
+        RenderPoseSampleKey key;
         std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> bones{};
     };
     std::vector<PreparedArcherPalette> prepared_archer_palettes;
@@ -2209,7 +2138,7 @@ struct D3D12Renderer::Impl
     std::span<const render_data::CharacterMaterialBinding> archer_material_bindings;
     float archer_ground_offset{};
     RenderGraphBuilder graph;
-    std::array<FrameGraphLayout, 8> graph_layouts{};
+    std::array<FrameGraphLayout, RenderGraphBuilder::RetainedPlanCapacity> graph_layouts{};
     std::vector<FrameGraphLayout::ResourceShape> graph_direct_shapes_scratch;
     std::vector<render_graph::ResourceAlias> graph_alias_scratch;
     std::uint64_t graph_layout_use_serial{};

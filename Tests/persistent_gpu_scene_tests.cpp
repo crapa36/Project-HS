@@ -208,6 +208,31 @@ void PacketSkinConsumerCoverageIsPreparedForEveryView()
     Check(prepared.baseline.valid && prepared.cameras.size() == views.size() &&
               prepared.local_lights.size() == lights.size(),
           "packet skin demand retains every camera and requested local-shadow consumer");
+    const std::array<hs::MonsterLodShadowWindow,2> windows{{
+        {{}, {1,0,0}, {0,0,1}, -2,-2,2,2,0.05},
+        {{}, {1,0,0}, {0,0,1}, 48,-2,52,2,0.2}}};
+    inputs.camera_views = {};
+    inputs.csm_active = inputs.local_shadows_active = false;
+    inputs.vsm_windows = windows;
+    const auto selective = hs::PrepareMonsterLodConsumers(inputs);
+    const auto near = hs::PrepareMonsterLodProjection({{0,0,0},0.5,true},selective);
+    const auto other_view = hs::PrepareMonsterLodProjection({{50,0,0},0.5,true},selective);
+    const auto outside = hs::PrepareMonsterLodProjection({{100,0,0},0.5,true},selective);
+    Check(near.valid && near.maximum_normalized_projection > 20.0 &&
+          other_view.valid && other_view.maximum_normalized_projection > 5.0 &&
+          other_view.maximum_normalized_projection < 6.0 &&
+          outside.valid && outside.maximum_normalized_projection > 1.0 &&
+          outside.maximum_normalized_projection < 2.0,
+          "monster LOD includes intersecting VSM windows from every view and the fixed root");
+    inputs.vsm_active = false;
+    inputs.csm_active = true;
+    inputs.csm_windows = windows;
+    const auto cascade = hs::PrepareMonsterLodConsumers(inputs);
+    const auto edge = hs::PrepareMonsterLodProjection({{2.5,0,0},0.5,true},cascade);
+    const auto cascade_far = hs::PrepareMonsterLodProjection({{100,0,0},0.5,true},cascade);
+    Check(edge.valid && edge.has_consumer && edge.maximum_normalized_projection > 20.0 &&
+          cascade_far.valid && !cascade_far.has_consumer,
+          "cascade consumers include boundary spheres and exclude disjoint light-space windows");
 }
 
 void PayloadRevisionRangesTrackRotatingUploads()

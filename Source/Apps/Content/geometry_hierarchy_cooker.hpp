@@ -34,5 +34,6 @@ struct CookedGeometryHierarchy
     std::span<const render_data::ExpandedVertex> expanded, std::uint32_t flags,
     std::string_view logical_page_prefix,
     std::span<const std::uint16_t> material_mapping = {},
-    GeometryHierarchyCookOptions options = {});
+    GeometryHierarchyCookOptions options = {},
+    std::span<const OpticalMaterialProfile> optical_profiles = {});
 } // namespace hs::geometry_content

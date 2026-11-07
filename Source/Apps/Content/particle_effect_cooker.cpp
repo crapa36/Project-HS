@@ -106,11 +106,19 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
         ParticleSpriteSource sprite;
         sprite.id = RequireString(sprites[index], "particles", sprite_path, "id");
         sprite.file = RequireString(sprites[index], "particles", sprite_path, "file");
-        const auto frames = read_values(sprites[index], "frames", 2, sprite_path);
-        sprite.frame_columns = static_cast<std::uint8_t>(frames[0]);
-        sprite.frame_rows = static_cast<std::uint8_t>(frames[1]);
-        if (frames[0] != sprite.frame_columns || frames[1] != sprite.frame_rows ||
-            !sprite_indices.emplace(sprite.id, static_cast<hs::ParticleSprite>(index)).second)
+        const auto &frames=RequireArray(sprites[index], "particles", sprite_path, "frames");
+        if(frames.size()!=2) ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
+        const auto dimension=[&](const Json &value) {
+            if(!value.is_number_integer()) ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
+            if(!value.is_number_unsigned() && value.get<std::int64_t>()<1)
+                ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
+            const auto number=value.get<std::uint64_t>();
+            if(number<1 || number>255) ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
+            return static_cast<std::uint8_t>(number);
+        };
+        sprite.frame_columns=dimension(frames[0]);
+        sprite.frame_rows=dimension(frames[1]);
+        if (!sprite_indices.emplace(sprite.id, static_cast<hs::ParticleSprite>(index)).second)
             ThrowValidationError("particles", sprite_path, "invalid or duplicate sprite");
         const auto sprite_hash = hs::MakeAssetId("particle_sprite." + sprite.id).value;
         if (!sprite_hashes.emplace(sprite_hash, sprite.id).second)
@@ -248,7 +256,10 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
                     static_cast<float>(RequireNumber(source, "particles", emitter_path, "cone_degrees"));
                 emitter.gravity = static_cast<float>(RequireNumber(source, "particles", emitter_path, "gravity"));
                 emitter.stretch = static_cast<float>(RequireNumber(source, "particles", emitter_path, "stretch"));
-                emitter.count = static_cast<std::uint32_t>(RequireInteger(source, "particles", emitter_path, "count"));
+                const auto count = RequireInteger(source, "particles", emitter_path, "count");
+                if (count <= 0 || static_cast<std::uint64_t>(count) > UINT32_MAX)
+                    ThrowValidationError("particles", emitter_path + "/count", "count is outside the supported range");
+                emitter.count = static_cast<std::uint32_t>(count);
                 const auto direction_length =
                     std::sqrt(direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]);
                 if (lifetime[0] <= 0 || lifetime[0] > lifetime[1] || speed[0] < 0 || speed[0] > speed[1] ||

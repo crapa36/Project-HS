@@ -32,8 +32,13 @@ uint AdGtaoStride(uint2 pixel,uint2 local)
     return 2u;
 }
 [numthreads(8,8,1)]
-void AdaptiveGtaoCS(uint3 dispatch:SV_DispatchThreadID,uint3 local:SV_GroupThreadID)
+void AdaptiveGtaoCS(uint3 group:SV_GroupID,uint groupIndex:SV_GroupIndex)
 {
+    // Keep mandatory anchors together without changing any pixel or shared-tile address.
+    const uint2 pixelInGroup=uint2(groupIndex&3u,(groupIndex>>2u)&3u)*2u+
+        uint2((groupIndex>>4u)&1u,(groupIndex>>5u)&1u);
+    const uint3 local=uint3(pixelInGroup,0u);
+    const uint3 dispatch=uint3(group.xy*8u+pixelInGroup,0u);
     AdGtaoLoadTile(dispatch.xy,local.xy);
     const uint index=AdGtaoIndex(local.xy);
     const bool inBounds=all(dispatch.xy<uint2(AoSize.xy));

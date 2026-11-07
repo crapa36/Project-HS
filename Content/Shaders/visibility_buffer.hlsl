@@ -437,6 +437,7 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
     output.HistoryConfidence = a.HistoryConfidence;
     output.RasterDrawRecordId = a.RasterDrawRecordId;
     output.InstanceKey = a.InstanceKey;
+    output.OpticalComponentId = a.OpticalComponentId;
     return output;
 }
 

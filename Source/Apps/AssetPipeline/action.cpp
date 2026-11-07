@@ -7,12 +7,12 @@
 #include "action.hpp"
 #include <hs/asset_manifest/generation_lock.hpp>
 #include <hs/core/process_info.hpp>
+#include <hs/core/sha256.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
 #else
-#include <hs/core/sha256.hpp>
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/random.h>
@@ -126,90 +126,6 @@ std::string UtcFilename(const UtcTime &time)
 #endif
 }
 
-#ifdef _WIN32
-class Sha256
-{
-  public:
-    Sha256()
-    {
-        Require(BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM,
-                                            nullptr, 0) >= 0,
-                "cannot open SHA-256 provider");
-        try
-        {
-            DWORD length = 0;
-            DWORD returned = 0;
-            Require(BCryptGetProperty(algorithm_, BCRYPT_OBJECT_LENGTH,
-                                      reinterpret_cast<PUCHAR>(&length), sizeof(length),
-                                      &returned, 0) >= 0 && returned == sizeof(length),
-                    "cannot query SHA-256 provider");
-            object_.resize(length);
-            Require(BCryptCreateHash(algorithm_, &hash_, object_.data(), length,
-                                     nullptr, 0, 0) >= 0,
-                    "cannot create SHA-256 hash");
-        }
-        catch (...)
-        {
-            BCryptCloseAlgorithmProvider(algorithm_, 0);
-            throw;
-        }
-    }
-    Sha256(const Sha256 &) = delete;
-    Sha256 &operator=(const Sha256 &) = delete;
-    ~Sha256()
-    {
-        if (hash_)
-            BCryptDestroyHash(hash_);
-        if (algorithm_)
-            BCryptCloseAlgorithmProvider(algorithm_, 0);
-    }
-    void Add(const void *data, std::size_t count)
-    {
-        const auto *bytes = static_cast<const std::uint8_t *>(data);
-        while (count)
-        {
-            const auto chunk = static_cast<ULONG>(std::min<std::size_t>(count, 1u << 20));
-            Require(BCryptHashData(hash_, const_cast<PUCHAR>(bytes), chunk, 0) >= 0,
-                    "SHA-256 update failed");
-            bytes += chunk;
-            count -= chunk;
-        }
-    }
-    void AddInteger(std::uint64_t value)
-    {
-        std::array<std::uint8_t, 8> bytes{};
-        for (std::size_t i = 0; i < bytes.size(); ++i)
-            bytes[i] = static_cast<std::uint8_t>(value >> (i * 8));
-        Add(bytes.data(), bytes.size());
-    }
-    void AddString(std::string_view value)
-    {
-        AddInteger(value.size());
-        Add(value.data(), value.size());
-    }
-    std::string Finish()
-    {
-        std::array<std::uint8_t, 32> bytes{};
-        Require(BCryptFinishHash(hash_, bytes.data(), static_cast<ULONG>(bytes.size()), 0) >= 0,
-                "SHA-256 finalization failed");
-        constexpr char hex[] = "0123456789abcdef";
-        std::string result = "sha256:";
-        result.reserve(71);
-        for (const auto byte : bytes)
-        {
-            result += hex[byte >> 4];
-            result += hex[byte & 15];
-        }
-        return result;
-    }
-
-  private:
-    BCRYPT_ALG_HANDLE algorithm_ = nullptr;
-    BCRYPT_HASH_HANDLE hash_ = nullptr;
-    std::vector<std::uint8_t> object_;
-};
-
-#else
 class Sha256
 {
   public:
@@ -244,7 +160,6 @@ class Sha256
   private:
     hs::Sha256Stream hash_;
 };
-#endif
 
 bool IsReparsePoint(const fs::path &path)
 {

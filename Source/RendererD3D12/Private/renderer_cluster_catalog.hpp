@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -122,7 +123,11 @@ public:
         std::uint32_t group_base, std::uint32_t child_base, std::uint32_t cluster_base,
         std::uint32_t page_base, std::uint32_t material_base, ClusterGpuTables &output) const;
     void Reset() noexcept;
-    [[nodiscard]] const render_data::GeometryHierarchy &Hierarchy() const noexcept { return hierarchy_; }
+    [[nodiscard]] const render_data::GeometryHierarchy &Hierarchy() const noexcept
+    {
+        static const render_data::GeometryHierarchy empty;
+        return hierarchy_ ? hierarchy_->Value() : empty;
+    }
     [[nodiscard]] std::span<const ClusterCatalogPage> Pages() const noexcept { return pages_; }
     [[nodiscard]] std::span<const std::uint32_t> PinnedPages() const noexcept { return pinned_pages_; }
     [[nodiscard]] std::string_view Generation() const noexcept { return generation_; }
@@ -130,7 +135,7 @@ public:
     [[nodiscard]] std::uint32_t FindPage(std::string_view logical_id) const;
 
 private:
-    render_data::GeometryHierarchy hierarchy_;
+    std::optional<render_data::AdmittedGeometryHierarchy> hierarchy_;
     std::vector<ClusterCatalogPage> pages_;
     std::vector<std::uint32_t> pinned_pages_;
     std::unordered_map<std::string, std::uint32_t> page_indices_;

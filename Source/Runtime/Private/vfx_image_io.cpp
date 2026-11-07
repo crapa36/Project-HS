@@ -97,7 +97,8 @@ void PrepareHexMaskVariants(VfxProgramView p,const VfxOutputRecord &output,VfxGr
             const auto *resource=GroundTextureResource(p,binding);
             if(!resource || variant.present || binding.selection!=ShapeId("stable_seed_mod_group_size") ||
                !binding.slices.count || !ValidRange(binding.slices,p.slice_indices.size()) ||
-               !GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_authored_mask_array.dds"))
+               std::string_view(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
+                   resource->asset_path_bytes.count)!="Content/Textures/VFX/vfx_authored_mask_array.dds")
             { variant.valid=false; break; }
             bool slices_valid=true;
             for(std::size_t j=binding.slices.first;j<static_cast<std::size_t>(binding.slices.first)+binding.slices.count;++j)
@@ -737,11 +738,10 @@ void PrepareVfxRibbonRecipes(VfxProgramView p,std::vector<VfxRibbonEffectRecipe>
         noise=ShapeId("noise_warp"),phase=ShapeId("phase_offset"),width=ShapeId("width"),
         taper=ShapeId("taper"),multiplier=ShapeId("width_multiplier"),reverse=ShapeId("reverse_flow"),
         segments=ShapeId("segments"),pulse=ShapeId("travel_pulse");
-    const auto set_float=[](VfxRibbonOutputRecipe &row,std::uint32_t key,VfxParameterType type,
+    const auto set_float=[](VfxParameterType type,
         std::uint32_t bits,bool &present,bool &valid,float &value) {
         present=true;valid=type==VfxParameterType::Float;
         if(valid){value=std::bit_cast<float>(bits);valid=std::isfinite(value);}
-        (void)key;
     };
     effects.assign(p.effects.size(),{});sources.assign(p.sources.size(),{});
     outputs.assign(p.outputs.size(),{});textures.assign(p.texture_bindings.size(),{});
@@ -800,7 +800,7 @@ void PrepareVfxRibbonRecipes(VfxProgramView p,std::vector<VfxRibbonEffectRecipe>
         if(output.parameters.count>1)row.second_parameter_key=p.parameters[output.parameters.first+1].key;
         const auto parse_float=[&](std::uint32_t key,bool &present,bool &valid,float &value) {
             for(const auto &parameter:p.parameters.subspan(output.parameters.first,output.parameters.count))
-                if(parameter.key==key){set_float(row,key,parameter.type,parameter.bits,present,valid,value);return;}
+                if(parameter.key==key){set_float(parameter.type,parameter.bits,present,valid,value);return;}
         };
         parse_float(arc,row.arc_present,row.arc_valid,row.arc_degrees);
         parse_float(head,row.width_head_present,row.width_head_valid,row.width_head);
@@ -1901,11 +1901,9 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     effect.input_mode==0 && effect.sources.count==2 && effect.anchor==ShapeId("presentation_context") &&
                     effect.orientation==ShapeId("effect_defined") && effect.scale==ShapeId("authored") &&
                     effect.binding_timing==ShapeId("charge_ratio") && effect.geometry==ShapeId("cosmetic_only") &&
-                    effect.must_match_logic==0 && source.type==VfxSourceType::Direct &&
+                    effect.must_match_logic==0 &&
                     source.parameters.count==0 && valid(source.parameters,p.parameters.size()) &&
-                    (source.knot_count==2 || source.knot_count==4) &&
-                    source.knots[source.knot_count-1]>source.knots[0] && source.outputs.count==1 &&
-                    valid(source.outputs,p.outputs.size()) && source.outputs.first==oi)
+                    source.outputs.count==1 && source.outputs.first==oi)
                 {
                     const bool ring=source.stable_id==ShapeId("gameplay_boundary");
                     if((!ring && source.stable_id!=ShapeId("interior_secondary")) || output.source!=si ||
@@ -1978,7 +1976,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                             recipe.texture_contract_valid=PrepareStateRingTextureContract(p,output,false);
                             if(!recipe.texture_contract_valid) continue;
                             const auto segments=parameter_bits(output,ShapeId("segments"),VfxParameterType::Int);
-                            if(!segments || *segments<3 || *segments>64 || output.rgba[3]<0 || output.rgba[3]>1) continue;
+                            if(!segments || *segments<3 || *segments>64) continue;
                             recipe.tick_count=*segments;
                         }
                         else if(kind==VfxGroundRecipeKind::PolarRune)
@@ -1998,7 +1996,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                             const auto spokes=parameter_bits(output,ShapeId("spokes"),VfxParameterType::Int);
                             const auto rings=parameter_bits(output,ShapeId("ring_count"),VfxParameterType::Int);
                             const auto speed=parameter_bits(output,ShapeId("rotation_speed"),VfxParameterType::Float);
-                            if(!spokes || !rings || !speed || *spokes!=6 || *rings!=2 || output.rgba[3]<0 || output.rgba[3]>1) continue;
+                            if(!spokes || !rings || !speed || *spokes!=6 || *rings!=2) continue;
                             recipe.tick_count=*spokes; recipe.pulse_curve_interpolation=*rings; recipe.primary=std::bit_cast<float>(*speed);
                             if(!std::isfinite(recipe.primary) || recipe.primary<=0) continue;
                         }
@@ -2125,7 +2123,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 for(const auto &v:p.parameters.subspan(output.parameters.first,output.parameters.count))
                     if(v.type==VfxParameterType::Float && !std::isfinite(std::bit_cast<float>(v.bits))) finite_parameters=false;
                 if(!finite_parameters) continue;
-                const auto parameter=[&](std::uint32_t key,VfxParameterType type,bool required)->std::optional<std::uint32_t>{
+                const auto parameter=[&](std::uint32_t key,VfxParameterType type)->std::optional<std::uint32_t>{
                     if(!key) return std::nullopt;
                     const VfxParameterRecord *found=nullptr;
                     for(const auto &v:p.parameters.subspan(output.parameters.first,output.parameters.count))
@@ -2134,13 +2132,12 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                             if(found || v.type!=type) return std::nullopt;
                             found=&v;
                         }
-                    return found ? std::optional<std::uint32_t>{found->bits} :
-                        (required ? std::nullopt : std::optional<std::uint32_t>{});
+                    return found ? std::optional<std::uint32_t>{found->bits} : std::nullopt;
                 };
-                const auto primary=parameter(primary_key,VfxParameterType::Float,kind!=VfxGroundRecipeKind::Ticks);
-                const auto secondary=parameter(secondary_key,VfxParameterType::Float,secondary_key!=0);
+                const auto primary=parameter(primary_key,VfxParameterType::Float);
+                const auto secondary=parameter(secondary_key,VfxParameterType::Float);
                 const auto tick_count=parameter(kind==VfxGroundRecipeKind::Ticks?ShapeId("tick_count"):0,
-                    VfxParameterType::Int,kind==VfxGroundRecipeKind::Ticks);
+                    VfxParameterType::Int);
                 if((kind!=VfxGroundRecipeKind::Ticks && !primary) || (secondary_key && !secondary) ||
                     (kind==VfxGroundRecipeKind::Ticks && (!tick_count || !*tick_count || *tick_count>0x7fffffffu))) continue;
                 const float a=primary?std::bit_cast<float>(*primary):0.0f;
@@ -2218,7 +2215,6 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
         const auto id=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;});
         if(id!=p.effect_lookup.end()&&!id->effect_id) continue;
         const auto unique_identity=id!=p.effect_lookup.end() &&
-            std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle&&v.effect_id==id->effect_id;})==1 &&
             std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;})==1 &&
             std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.effect_id==id->effect_id;})==1;
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
@@ -2306,8 +2302,6 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 }
                 const bool contact=shape->shape==VfxImpactShape::ThreeProngBite||shape->shape==VfxImpactShape::BossCrestContact||shape->shape==VfxImpactShape::NeedleStar;
                 if(contact && output.parameters.count!=1) supported=false;
-                if(shape->shape==VfxImpactShape::SoftDisc && !scalar("size",spawn.size,true)) supported=false;
-                if(shape->shape==VfxImpactShape::CrossSlash && !scalar("aspect",spawn.aspect,true)) supported=false;
                 if(!supported)continue;
                 if(!oit) for(const auto &v:p.parameters.subspan(output.parameters.first,output.parameters.count))
                     if(v.type==VfxParameterType::Float&&!std::isfinite(std::bit_cast<float>(v.bits))) supported=false;
@@ -3184,27 +3178,30 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
         return result;
     PrepareVfxEntitySurfaceRecipes(loaded.program.View(),loaded.entity_surface_effect_recipes,
         loaded.entity_surface_recipes,loaded.entity_surface_routes);
-    PrepareVfxRibbonRecipes(loaded.program.View(),loaded.ribbon_effect_recipes,loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes,loaded.ribbon_texture_recipes,loaded.ribbon_slice_indices);
+    std::vector<VfxRibbonSourceRecipe> ribbon_sources;
+    std::vector<VfxRibbonOutputRecipe> ribbon_outputs;
+    std::vector<VfxRibbonTextureRecipe> ribbon_textures;
+    PrepareVfxRibbonRecipes(loaded.program.View(),loaded.ribbon_effect_recipes,ribbon_sources,
+        ribbon_outputs,ribbon_textures,loaded.ribbon_slice_indices);
     PrepareVfxRibbonWakeRecipes(loaded.ribbon_effect_recipes,
-        loaded.ribbon_source_recipes, loaded.ribbon_output_recipes,
-        loaded.ribbon_texture_recipes, loaded.ribbon_slice_indices,
+        ribbon_sources, ribbon_outputs,
+        ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_wake_effect_ranges, loaded.ribbon_wake_recipes);
-    PrepareVfxRibbonFixedRecipes(loaded.ribbon_effect_recipes, loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes, loaded.ribbon_texture_recipes, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonFixedRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
+        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_fixed_effect_ranges, loaded.ribbon_fixed_recipes);
-    PrepareVfxRibbonProjectileRecipes(loaded.ribbon_effect_recipes, loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes, loaded.ribbon_texture_recipes, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonProjectileRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
+        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_projectile_effect_ranges, loaded.ribbon_projectile_sources,
         loaded.ribbon_projectile_outputs);
-    PrepareVfxRibbonCancelRecipes(loaded.ribbon_effect_recipes, loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes, loaded.ribbon_texture_recipes,
+    PrepareVfxRibbonCancelRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
+        ribbon_outputs, ribbon_textures,
         loaded.ribbon_cancel_effect_ranges, loaded.ribbon_cancel_recipes);
-    PrepareVfxRibbonLinkRecipes(loaded.ribbon_effect_recipes, loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes, loaded.ribbon_texture_recipes, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonLinkRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
+        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_link_effect_recipes, loaded.ribbon_link_output_recipes);
-    PrepareVfxRibbonEventRecipes(loaded.ribbon_effect_recipes, loaded.ribbon_source_recipes,
-        loaded.ribbon_output_recipes, loaded.ribbon_texture_recipes, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonEventRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
+        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_event_effect_recipes, loaded.ribbon_event_sources, loaded.ribbon_event_outputs);
     PrepareVfxEffectLookupById(loaded.program.View(), loaded.effect_lookup_by_id);
     PrepareVfxFresnelRecipes(loaded.program.View(), loaded.fresnel_effect_recipes,

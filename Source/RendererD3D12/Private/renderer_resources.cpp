@@ -275,7 +275,8 @@ Result D3D12Renderer::Impl::RecreatePresentation(const RendererConfig &candidate
     }
     auto attempted = create(candidate, output, capacity, display, cadence_suppression);
     PresentationGuidesCandidate guides;
-    if (attempted) attempted = PreparePresentationGuides(candidate, output, capacity, display, guides);
+    if (attempted) attempted = PreparePresentationGuides(candidate, output, capacity, display,
+        sdk_presentation.PresentationOwner(), guides);
     if (attempted) attempted = sdk_presentation.IsEnabled()
         ? presentation_guides.Commit(std::move(guides), graph_queue_executor.Completed())
         : presentation_guides.ResetAfterCompletion(graph_queue_executor.Completed());
@@ -923,7 +924,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
     owner.temporal_history_valid = false; owner.temporal_read_index = 0;
     owner.temporal_targets_initialized = false; owner.view_targets_initialized = false;
     owner.material_sidecars_initialized = false;
-    SwapOptionPools(owner, current.transient_pools);
+    SwapOptionPools(owner, targets.transient_pools);
     (void)owner;
 }
 
@@ -1085,45 +1086,6 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
         auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         descriptor.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + table + 9) * srv_stride;
         device->CreateShaderResourceView(owner.ui.textures[frame].resource.Get(), &ui_view, descriptor);
-    }
-}
-
-void D3D12Renderer::Impl::ClearTransientDescriptors() noexcept
-{
-    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
-    D3D12_RENDER_TARGET_VIEW_DESC rtv_view{};
-    rtv_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    rtv_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv_view{};
-    srv_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    srv_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv_view.Texture2D.MipLevels = 1;
-    const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    const auto srv_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
-    {
-        auto rtv = rtv_start;
-        rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame_index * kRtvBankStride + kDistortionRtvOffset) * rtv_stride;
-        device->CreateRenderTargetView(nullptr, &rtv_view, rtv);
-        for (std::uint32_t slot = 0; slot < 3; ++slot)
-        {
-            rtv = rtv_start;
-            rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame_index * kRtvBankStride + kBloomRtvOffset + slot) * rtv_stride;
-            device->CreateRenderTargetView(nullptr, &rtv_view, rtv);
-        }
-        auto srv = srv_start;
-        srv.ptr += (static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount +
-                    kVfxDistortionDescriptorOffset) * srv_stride;
-        device->CreateShaderResourceView(nullptr, &srv_view, srv);
-        srv = srv_start;
-        srv.ptr += (static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount +
-                    kBloomTextureDescriptorOffset) * srv_stride;
-        for (std::uint32_t slot = 0; slot < 3; ++slot)
-        {
-            device->CreateShaderResourceView(nullptr, &srv_view, srv);
-            srv.ptr += srv_stride;
-        }
     }
 }
 
@@ -1307,8 +1269,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
             {
                 if(!preparation.page.geometry.vertices.empty() && loose_character)
                 {
-                    auto view=*loose_character;view.geometry=metadata;
-                    render_data::ValidateCharacterGeometry(view,preparation.page);
+                    render_data::ValidateCharacterGeometry(*loose_character,metadata,preparation.page);
                 }
                 if(preparation.descriptor &&
                     (!preparation.descriptor->payload_ready ||
@@ -1355,8 +1316,13 @@ Result D3D12Renderer::Impl::CreateGpuData()
             asset.skeleton_binding = descriptor->skeleton_binding; asset.deformation_flags = descriptor->deformation_flags;
             asset.geometry_lods = descriptor->lods; asset.interval_bounds = descriptor->interval_bounds;
             for (const auto &clip : descriptor->clips)
+            {
                 asset.clip_meta[static_cast<std::size_t>(clip.clip)] =
                     {clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+#if defined(HS_DEVELOPMENT_TOOLS)
+                asset.clip_durations[static_cast<std::size_t>(clip.clip)] = clip.duration_seconds;
+#endif
+            }
             if (character.monster->final_matrices.size() !=
                 descriptor->final_matrices.byte_count / sizeof(DirectX::XMFLOAT4X4))
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Admitted monster palette size differs");
@@ -1378,7 +1344,12 @@ Result D3D12Renderer::Impl::CreateGpuData()
             asset.skeleton_binding = descriptor.skeleton_binding; asset.deformation_flags = descriptor.deformation_flags;
             asset.geometry_lods = descriptor.lods; asset.interval_bounds = descriptor.interval_bounds;
             for (const auto &clip : descriptor.clips)
+            {
                 asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+#if defined(HS_DEVELOPMENT_TOOLS)
+                asset.clip_durations[static_cast<std::size_t>(clip.clip)] = clip.duration_seconds;
+#endif
+            }
             const auto &range = descriptor.final_matrices;
             if (skin_matrices.size() > UINT32_MAX || !range.byte_count || range.byte_count % sizeof(DirectX::XMFLOAT4X4) ||
                 range.byte_count / sizeof(DirectX::XMFLOAT4X4) > UINT32_MAX - skin_matrices.size())
@@ -1403,8 +1374,13 @@ Result D3D12Renderer::Impl::CreateGpuData()
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Monster product is missing its cooked final palette; recook the character product.");
         for (const auto &clip : owned.clips)
+        {
             asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {
                 clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+#if defined(HS_DEVELOPMENT_TOOLS)
+            asset.clip_durations[static_cast<std::size_t>(clip.clip)] = clip.duration_seconds;
+#endif
+        }
         auto &cooked = *owned.monster;
         asset.skeleton_binding = cooked.skeleton_binding;
         asset.deformation_flags = cooked.flags;
@@ -1551,7 +1527,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
     for (const auto &vertex : cooked_vertices)
         archer_support_vertices.push_back({vertex.position, vertex.normal,
             vertex.bone_indices, vertex.bone_weights, vertex.uv, vertex.tangent,
-            vertex.material_index, vertex.reserved});
+            vertex.material_index, vertex.optical_component_id});
 
     const std::string projectile_logical_id = "render/character/enemy_gel_projectile.rpkg";
     render_data::CharacterMetadataPackageData projectile_package;

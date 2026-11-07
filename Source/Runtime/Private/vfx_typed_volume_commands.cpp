@@ -65,20 +65,21 @@ Result Append(const VfxImage &image,const VfxVolumeEffectRecipe &effect,VfxVolum
        effect.outputs.count>image.volume_recipes.size()-effect.outputs.first)
         return Invalid("Malformed or unsupported cooked LocalVolume source or output contract.");
     const bool crown=effect.effect_id==kAura;
+    VfxVolumeInput transformed;
+    if(effect.outputs.count && !Transform(transform,scale,crown,transformed))
+        return Invalid("Malformed or unsupported cooked LocalVolume transform or scale.");
     for(std::size_t i=effect.outputs.first;i<static_cast<std::size_t>(effect.outputs.first)+effect.outputs.count;++i)
     {
         const auto &recipe=image.volume_recipes[i];
-        VfxVolumeInput command;command.identity=identity;command.identity.effect_id=effect.effect_id;
+        if(static_cast<std::uint32_t>(quality)<recipe.min_quality)continue;
+        if(!crown&&(effect_age<recipe.knot_start||effect_age>=recipe.knot_end))continue;
+        VfxVolumeInput command=transformed;command.identity=identity;command.identity.effect_id=effect.effect_id;
         command.identity.effect_handle=identity.effect_handle;command.identity.source_id=recipe.source_id;
         command.identity.source_index=recipe.source_index;command.identity.output_index=recipe.output_index;
         command.shape=recipe.shape;command.noise=recipe.noise;command.minimum_quality=recipe.min_quality;
         command.stable_seed=seed;command.elapsed_seconds=elapsed;command.gradient_row=recipe.gradient_row;
         command.alpha=recipe.alpha;command.hdr=recipe.hdr;command.steps=recipe.steps;
         command.half_resolution=recipe.half_resolution;command.density=recipe.density;command.anisotropy=recipe.anisotropy;
-        if(!Transform(transform,scale,crown,command))
-            return Invalid("Malformed or unsupported cooked LocalVolume transform or scale.");
-        if(static_cast<std::uint32_t>(quality)<recipe.min_quality)continue;
-        if(!crown&&(effect_age<recipe.knot_start||effect_age>=recipe.knot_end))continue;
         command.source_age=crown?effect_age:(effect_age-recipe.knot_start)/(recipe.knot_end-recipe.knot_start);
         if(!std::isfinite(command.source_age)||command.source_age<0||command.source_age>1)
             return Invalid("LocalVolume source age must be the actual bounded lifecycle phase.");

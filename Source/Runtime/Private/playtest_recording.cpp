@@ -144,6 +144,8 @@ struct PlaytestRecorder::Impl
     Float2 previous_position{};
     std::array<std::uint64_t, 4> skill_press_counts{};
     std::uint64_t frame_count{};
+    std::uint64_t summary_frame_count{}, summary_session{};
+    bool summary_session_set{};
     std::uint64_t near_death_ticks{};
     std::uint64_t maximum_damage_taken_in_tick{};
     std::uint64_t previous_damage_taken{};
@@ -162,6 +164,18 @@ struct PlaytestRecorder::Impl
     enum class FinishState { Pending, Failed, Succeeded };
     bool active{};
     FinishState finish_state{FinishState::Pending};
+
+    void ResetSummary(std::uint64_t session) noexcept
+    {
+        summary_session = session; summary_session_set = true; summary_frame_count = 0;
+        last_probe = {}; previous_position = {}; skill_press_counts = {};
+        near_death_ticks = maximum_damage_taken_in_tick = previous_damage_taken = 0;
+        minimum_health = std::numeric_limits<std::uint32_t>::max();
+        peak_enemies = peak_projectiles = peak_pickups = 0; first_kill_tick = 0;
+        phase_ticks = {}; upgrade_uses_at_acquisition = {}; distance_moved = 0;
+        for (auto &skill : upgrade_acquired_ticks) skill.fill(std::numeric_limits<Tick>::max());
+        relic_acquired_ticks.fill(std::numeric_limits<Tick>::max());
+    }
 
     bool FinishTraceFiles() noexcept
     {
@@ -222,6 +236,9 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
            "player_projectiles,enemy_projectiles,pickups,kills,damage_dealt,"
            "damage_taken,healing,x,z,checksum\n";
     impl_->active = true;
+    impl_->finish_state = Impl::FinishState::Pending;
+    impl_->frame_count = 0;
+    impl_->summary_session_set = false;
     impl_->terminal_probe.reset();
     for (auto &skill : impl_->upgrade_acquired_ticks)
         skill.fill(std::numeric_limits<Tick>::max());
@@ -231,9 +248,14 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
 
 Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checksum,
                                 const SimulationObservation &probe,
-                                std::span<const PresentationEvent> presentation_events)
+                                std::span<const PresentationEvent> presentation_events,
+                                std::uint64_t session_id)
 {
     if (!impl_->active || impl_->finish_state != Impl::FinishState::Pending) return Result::Success();
+    if (!impl_->terminal_probe && (!impl_->summary_session_set || impl_->summary_session != session_id))
+        impl_->ResetSummary(session_id);
+    const bool summarize = !impl_->terminal_probe;
+    if (summarize) {
     for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
         for (std::size_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
             if ((probe.upgrade_masks[skill] & (1u << upgrade)) != 0 &&
@@ -248,6 +270,7 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
         if ((probe.relic_mask & (RelicMask{1} << relic)) != 0 &&
             impl_->relic_acquired_ticks[relic] == std::numeric_limits<Tick>::max())
             impl_->relic_acquired_ticks[relic] = probe.tick;
+    }
     impl_->inputs << InputJson(input, checksum).dump() << '\n';
     impl_->timeline << probe.tick << ',' << probe.growth_ticks << ','
                     << probe.boss_fight_ticks << ','
@@ -270,6 +293,7 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
                       << '\n';
     }
 
+    if (summarize) {
     for (const auto &edge : input.ordered_edges)
     {
         if (edge.kind != EdgeKind::Pressed) continue;
@@ -277,7 +301,7 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
             ++impl_->skill_press_counts[static_cast<std::size_t>(edge.action) -
                                         static_cast<std::size_t>(GameAction::SkillQ)];
     }
-    if (impl_->frame_count != 0)
+    if (impl_->summary_frame_count != 0)
     {
         const auto dx = probe.player_position.x - impl_->previous_position.x;
         const auto dz = probe.player_position.y - impl_->previous_position.y;
@@ -305,6 +329,8 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
     if (!impl_->terminal_probe &&
         (probe.phase == SessionPhase::Victory || probe.phase == SessionPhase::Defeat))
         impl_->terminal_probe = probe;
+    ++impl_->summary_frame_count;
+    }
     ++impl_->frame_count;
     if (impl_->frame_count % 60 == 0)
     {
@@ -695,6 +721,11 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
                                     aim.at(2).get<float>()};
             frame.held.cursor_normalized = {cursor.at(0).get<float>(),
                                             cursor.at(1).get<float>()};
+            if (!std::isfinite(frame.held.move_target_world.x) || !std::isfinite(frame.held.move_target_world.y) ||
+                !std::isfinite(frame.held.move_target_world.z) || !std::isfinite(frame.held.aim_world.x) ||
+                !std::isfinite(frame.held.aim_world.y) || !std::isfinite(frame.held.aim_world.z) ||
+                !std::isfinite(frame.held.cursor_normalized.x) || !std::isfinite(frame.held.cursor_normalized.y))
+                return Invalid("Playtest input contains a nonfinite coordinate.");
             frame.held.move_held = json.at("move_held").get<bool>();
             frame.held.basic_attack_held = json.at("basic_attack_held").get<bool>();
             for (const auto &edge : json.at("edges"))

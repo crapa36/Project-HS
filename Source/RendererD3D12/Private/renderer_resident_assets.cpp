@@ -511,7 +511,9 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(terrain_scene);
     HS_SWAP_RESIDENT(terrain_plane_backings);
     HS_SWAP_RESIDENT(terrain_plane_stream_ids);
+    HS_SWAP_RESIDENT(terrain_plane_needed);
     HS_SWAP_RESIDENT(terrain_frame_mips);
+    HS_SWAP_RESIDENT(terrain_descriptor_banks);
     HS_SWAP_RESIDENT(terrain_tiles);
     HS_SWAP_RESIDENT(terrain_generation_parameters);
     HS_SWAP_RESIDENT(terrain_generation_parameters_valid);
@@ -527,6 +529,8 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(terrain_planes_archive_digest);
     HS_SWAP_RESIDENT(terrain_static_pages_current);
     HS_SWAP_RESIDENT(terrain_target_first_mip);
+    HS_SWAP_RESIDENT(terrain_target_budget_mib);
+    HS_SWAP_RESIDENT(terrain_retry_budget_bytes);
     HS_SWAP_RESIDENT(environment_textures);
     HS_SWAP_RESIDENT(environment_texture_ids);
     HS_SWAP_RESIDENT(environment_texture_descriptions);
@@ -536,7 +540,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(environment_meshes);
     HS_SWAP_RESIDENT(environment_variant_radii);
     HS_SWAP_RESIDENT(environment_cluster_catalogs);
-    HS_SWAP_RESIDENT(environment_stream);
+    HS_SWAP_RESIDENT(environment_fallback_residency);
     HS_SWAP_RESIDENT(environment_geometry_streams);
     HS_SWAP_RESIDENT(retired_streaming_textures);
     HS_SWAP_RESIDENT(cluster_runtime);

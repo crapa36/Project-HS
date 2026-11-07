@@ -195,17 +195,9 @@ float3 HsSceneProbeRadiance(float3 world,float3 direction,HsLocalProbeBlend blen
 float3 HsSceneProbeIrradiance(float3 world,float3 normal)
 {
 #ifdef HS_LOCAL_PROBE_CAPTURE
-    return HsProbeIrradiance(normal);
+    return RenderOptions.w>0.0 ? HsLocalProbeIrradiance(world,normal) : HsProbeIrradiance(normal);
 #else
     return HsLocalProbeIrradiance(world,normal);
-#endif
-}
-float3 HsSceneProbePrefiltered(float3 world,float3 direction,float roughness)
-{
-#ifdef HS_LOCAL_PROBE_CAPTURE
-    return HsProbePrefiltered(direction,roughness);
-#else
-    return HsLocalProbePrefiltered(world,direction,roughness);
 #endif
 }
 void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 view_direction,
@@ -249,7 +241,8 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
             base_sky=HsProbePrefiltered(reflected,roughness);
             coat_sky=HsProbePrefiltered(reflected,coat_roughness);
             irradiance=0.0;
-            if(diffuse_consumed)irradiance=HsProbeIrradiance(n,kernel);
+            if(diffuse_consumed)irradiance=RenderOptions.w>0.0 ?
+                HsLocalProbeIrradiance(world,n,kernel) : HsProbeIrradiance(n,kernel);
 #else
             HsLocalProbeEvaluateIbl(world,n,reflected,float2(roughness,coat_roughness),
                 coat_specular_factor>0.0,diffuse_consumed,indirect_specular_enabled,indirect_diffuse_enabled,kernel,
@@ -325,10 +318,23 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     HsTranslucencyDiagnosticsAdd(24u);
 #endif
     float thinWeight=HsBsdfThinTransmissionWeight(closure);
+#ifndef HS_LOCAL_PROBE_CAPTURE
+    HsProbeGridCell basic_probe_cell=(HsProbeGridCell)0;
+    if(ProbeOptions.w>0.0 && (indirect_specular_enabled || (diffuse_consumed && indirect_diffuse_enabled)))
+        basic_probe_cell=HsLocateProbeCell(world);
+    const bool paired_irradiance=diffuse_consumed && thinWeight>0.0 && ProbeOptions.w>0.0 && indirect_diffuse_enabled;
+    float3 front_irradiance=0,back_irradiance=0;
+    if(paired_irradiance)
+        HsLocalProbeIrradiancePair(basic_probe_cell,n,front_irradiance,back_irradiance);
+#endif
     if(diffuse_consumed)
     {
         const float3 irradiance=ProbeOptions.w>0.0 ?
-            (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,n) : HsProbeIrradiance(n))*HsBsdfInvPi :
+#ifdef HS_LOCAL_PROBE_CAPTURE
+            HsSceneProbeIrradiance(world,n)*HsBsdfInvPi :
+#else
+            (indirect_diffuse_enabled ? (paired_irradiance ? front_irradiance : HsLocalProbeIrradiance(basic_probe_cell,n,1.0.xxx)) : HsProbeIrradiance(n))*HsBsdfInvPi :
+#endif
             lerp(float3(0.07,0.08,0.055),float3(0.22,0.28,0.36),n.y*0.5+0.5);
         // Entry/exit Schlick transmission, with cosine exit average20/21.
         const float3 albedo=base*(1-HsBsdfSchlickFresnel(F0,nv))*(1-F0)*(20.0/21.0)*dielectric;
@@ -340,7 +346,11 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         // lobe: E[wi.y] = -2*n.y/3. Dense vegetation needs no sample loop.
         float3 skyBottom=float3(0.055,0.065,0.045),skyTop=float3(0.24,0.31,0.42);
         float3 backSky=ProbeOptions.w>0.0 ?
-            (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,-n) : HsProbeIrradiance(-n))*HsBsdfInvPi :
+#ifdef HS_LOCAL_PROBE_CAPTURE
+            HsSceneProbeIrradiance(world,-n)*HsBsdfInvPi :
+#else
+            (indirect_diffuse_enabled ? back_irradiance : HsProbeIrradiance(-n))*HsBsdfInvPi :
+#endif
             (skyBottom+skyTop)*0.5-(skyTop-skyBottom)*n.y/3.0;
         ambient_diffuse=ambient_diffuse*(1.0-thinWeight)+HsBsdfThinTransmissionColor(closure)*
             thinWeight*backSky*saturate(closure.ao);
@@ -350,8 +360,12 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         float2(sqrt(saturate(nv)),saturate(closure.roughness)),0).xy;
     float3 reflected=reflect(-v,n);float skyT=lerp(saturate(reflected.y*0.5+0.5),0.5,closure.roughness*closure.roughness);
     float3 sky=ProbeOptions.w>0.0 ?
-        (indirect_specular_enabled ? HsSceneProbePrefiltered(world,reflected,saturate(closure.roughness)) :
+#ifdef HS_LOCAL_PROBE_CAPTURE
+        HsProbePrefiltered(reflected,saturate(closure.roughness)) :
+#else
+        (indirect_specular_enabled ? HsLocalProbePrefiltered(world,basic_probe_cell,reflected,saturate(closure.roughness)) :
             HsProbePrefiltered(reflected,saturate(closure.roughness))) :
+#endif
         lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),skyT);
     const float3 integrated_fresnel=base_fresnel_override>=0.0 ?
         lerp(F0*AB.x+AB.y,saturate(base_fresnel_override).xxx*(AB.x+AB.y),saturate(closure.solid_transmission_weight)) :

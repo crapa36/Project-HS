@@ -31,8 +31,11 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderPackage &input)
                 !input.vfx.particle_spawns.empty() || !input.vfx.effect_lines.empty())))
             return ViewFailure("Native VFX batch must match the session and identify its emission/reset submission.");
     }
-    if (input.delta_seconds && (!std::isfinite(*input.delta_seconds) || *input.delta_seconds < 0))
+#if defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
+    if (input.devtools.delta_seconds &&
+        (!std::isfinite(*input.devtools.delta_seconds) || *input.devtools.delta_seconds < 0))
         return ViewFailure("Frame delta must be finite and nonnegative.");
+#endif
     if (input.screen_overlay_intensity && (!std::isfinite(*input.screen_overlay_intensity) ||
         *input.screen_overlay_intensity < 0 || *input.screen_overlay_intensity > 1))
         return ViewFailure("Screen overlay intensity must be finite and between zero and one.");
@@ -206,6 +209,10 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             (source.shape != VfxImpactShape::Smoke6Way ||
              (source.smoke_frame_count > 0 && source.smoke_first_frame < 64 &&
               source.smoke_frame_count <= 64 - source.smoke_first_frame && source.smoke_fps > 0));
+        if (!finite)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored flash command.");
+        if (source.shape == VfxImpactShape::Spark)
+        {
         const auto spark_speed = std::hypot(source.initial_velocity.x,
                                             source.initial_velocity.y,
                                             source.initial_velocity.z);
@@ -215,13 +222,13 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
         const auto spark_alignment = source.direction.x * source.initial_velocity.x +
             source.direction.y * source.initial_velocity.y +
             source.direction.z * source.initial_velocity.z;
-        if (!finite || (source.shape == VfxImpactShape::Spark &&
-            (source.oit || source.ground_base_anchor || source.aspect != 1.0f ||
+        if (source.oit || source.ground_base_anchor || source.aspect != 1.0f ||
              !std::isfinite(spark_speed) || spark_speed <= 0.0f ||
              !std::isfinite(spark_direction) || std::abs(spark_direction - 1.0f) > 0.001f ||
-             spark_alignment < 0.999f * spark_speed)))
+             spark_alignment < 0.999f * spark_speed)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "Invalid authored flash command.");
+        }
     }
     for (const auto &input : frame_input.vfx.ground)
     {
@@ -454,7 +461,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored distortion command.");
         const bool cone = source.shape == VfxDistortionShape::ConeSector;
         const bool annulus = source.shape == VfxDistortionShape::GappedAnnulus;
-        const float horizontal_direction = std::hypot(source.direction.x,source.direction.z);
+        const float horizontal_direction = cone ? std::hypot(source.direction.x,source.direction.z) : 0.0f;
         if ((cone && (!std::isfinite(source.half_angle_degrees) || source.half_angle_degrees <= 0 ||
                       source.half_angle_degrees > 180 || !std::isfinite(horizontal_direction) ||
                       horizontal_direction <= .0001f || source.inner_radius != 0 ||
@@ -527,7 +534,8 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
     const auto &snapshot = input.snapshots.has_current ? input.snapshots.current : empty_snapshot;
     const auto &static_scene = snapshot.static_scene;
     const auto render_instances = snapshot.instances;
-    std::vector<RenderInstance> retained_instances;
+    auto &prepared_instances = prepared_scene_package.instances;
+    prepared_instances.assign(render_instances.begin(), render_instances.end());
     if (!input.vfx.entity_surfaces.empty())
     {
         for (const auto &command : input.vfx.entity_surfaces)
@@ -537,17 +545,18 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
                     [&](const auto &instance) { return instance.stable_id == command.render_instance_id; });
             };
             if (!command.has_retained_instance || already_present(render_instances) ||
-                already_present(retained_instances)) continue;
+                already_present(prepared_instances)) continue;
             const auto &instance = command.retained_instance;
             if (instance.stable_id != command.render_instance_id ||
                 instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
                 instance.asset_id.value == 0 || instance.material_id.value == 0 ||
                 (instance.animation_clip_id.value == 0 && !command.has_retained_animation_pose))
                 return ViewFailure("Entity surface retention requires its actual boss mesh and captured pose.");
-            retained_instances.push_back(instance);
+            prepared_instances.push_back(instance);
         }
     }
-    const auto render_instance_count = render_instances.size() + retained_instances.size();
+    const auto retained_instances = std::span(prepared_instances).subspan(render_instances.size());
+    const auto render_instance_count = prepared_instances.size();
     std::vector<VfxEntitySurfaceCommand> admitted_surfaces;
     for (const auto &command : input.vfx.entity_surfaces)
         if (std::ranges::any_of(render_instances, [&](const auto &instance) {
@@ -557,8 +566,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
                 return instance.stable_id == command.render_instance_id &&
                     instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
             })) admitted_surfaces.push_back(command);
-    EntitySurfaceFrame surface;
-    if (auto r = surface.Build(admitted_surfaces); !r) return r;
+    if (auto r = prepared_scene_package.entity_surfaces.Build(admitted_surfaces); !r) return r;
     std::unordered_set<RenderSceneInstanceKey, RenderSceneInstanceKeyHash> source_keys;
     bool unique_sources = render_instance_count <= UINT32_MAX;
     for (std::size_t index = 0; unique_sources && index < render_instances.size(); ++index)
@@ -570,12 +578,11 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             static_cast<std::uint32_t>(render_instances.size() + index))).second;
     if (!unique_sources)
         return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
-    const auto validate_animation = [&](const RenderInstance &instance, std::size_t index) -> Result {
+    const auto validate_animation = [&](const RenderInstance &instance) -> Result {
         if (!instance.animation_clip_id.value) return Result::Success();
         if (instance.mesh != RenderMesh::Archer)
             return ViewFailure("Explicit named animation requires a loaded skeleton-bound character extension.");
-        const auto key = MakeRenderPoseKey(instance,
-            FindLastRenderPose(snapshot.poses, static_cast<std::uint32_t>(index)));
+        const auto key = MakeRenderPoseSampleKey(instance, nullptr);
         if (std::ranges::any_of(prepared_archer_palettes,
                 [&](const auto &entry) { return entry.key == key; })) return Result::Success();
         auto &prepared = prepared_archer_palettes.emplace_back();
@@ -586,10 +593,10 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             : SampleNamedCharacterAnimation(archer_named_animations, instance, std::span(prepared.bones.data(), archer_bone_count));
         return sampled;
     };
-    for (std::size_t index = 0; index < render_instances.size(); ++index)
-        if (auto r = validate_animation(render_instances[index], index); !r) return r;
-    for (std::size_t index = 0; index < retained_instances.size(); ++index)
-        if (auto r = validate_animation(retained_instances[index], render_instances.size() + index); !r) return r;
+    for (const auto &instance : render_instances)
+        if (auto r = validate_animation(instance); !r) return r;
+    for (const auto &instance : retained_instances)
+        if (auto r = validate_animation(instance); !r) return r;
     if (static_scene && (!static_gpu_scene || static_gpu_scene->source != static_scene))
     {
         std::uint64_t output_count{};
@@ -784,7 +791,6 @@ void D3D12Renderer::Impl::InvalidateCanonicalDeformationAfterCompletion() noexce
         view->hdr_capture_valid = false;
     }
 #endif
-    skin_cache.Clear();
     for (auto &[id, view] : owned_views)
     {
         if (id == active_view_id.value) continue;
@@ -858,278 +864,6 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
     input.render_capacity = main_owner.state.render_capacity;
     input.render_active = main_owner.state.render_active;
     return input;
-}
-
-Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameResult &frame_result)
-{
-    frame_result.render_history_committed = false;
-    // Rejected preflight keeps the last frame evidence, with no new submission receipt.
-    struct WorldStepReceipt
-    {
-        RendererFrameResult &output;
-        Tick tick{};
-        std::uint64_t session{}, sequence{};
-        bool submitted{};
-        std::uint64_t presented_ui_generation{};
-        ~WorldStepReceipt()
-        {
-            output.vfx_world_step_submitted = submitted;
-            output.vfx_world_tick = tick;
-            output.vfx_world_session_id = session;
-            output.vfx_world_batch_sequence = sequence;
-            output.presented_ui_packet_generation = presented_ui_generation;
-        }
-    } world_step_receipt{frame_result};
-    const auto wrapper_start = std::chrono::steady_clock::now();
-    std::chrono::steady_clock::duration view_render_time{};
-    if (!impl_->initialized || impl_->frame_submission_faulted)
-        return Result::Failure(ErrorCode::InvalidState, "hs_render_view", "Renderer is not available for frame submission.");
-    CanonicalFrame canonical{source_input};
-    auto &input = canonical.input;
-    if (!input.display_sample || !input.ui_draw_content)
-        return ViewFailure("A render package requires its prepared display sample and UI owner.");
-    const auto package_time = input.display_sample->time;
-    const auto alpha = input.display_sample->interpolation;
-    if (!(alpha >= 0.0f && alpha <= 1.0f) || (alpha < 1.0f && !input.snapshots.has_previous))
-        return ViewFailure("Display interpolation requires a finite fraction and a previous snapshot.");
-    if (alpha < 1.0f)
-    {
-        const auto &previous = input.snapshots.previous.header;
-        const auto &current = input.snapshots.current.header;
-        if (!input.snapshots.has_current || previous.session_id != current.session_id ||
-            previous.clock.epoch != current.clock.epoch || previous.tick >= current.tick ||
-            current.tick - previous.tick != 1 || previous.simulation_time >= current.simulation_time)
-            return ViewFailure("Display interpolation requires adjacent samples from the same session and clock.");
-    }
-    auto &sample_header = input.snapshots.current.header;
-    const auto current_time = sample_header.simulation_time;
-    auto display_time = current_time;
-    if (input.snapshots.has_previous && alpha < 1.0f)
-    {
-        const auto previous_time = input.snapshots.previous.header.simulation_time;
-        display_time = previous_time + std::chrono::nanoseconds(static_cast<std::int64_t>(
-            static_cast<double>((current_time - previous_time).count()) * alpha));
-    }
-    const auto previous_count = input.snapshots.has_previous && alpha < 1.0f
-        ? input.snapshots.previous.instances.size() : 0;
-    if (input.snapshots.current.instances.size() > UINT32_MAX ||
-        previous_count > UINT32_MAX - input.snapshots.current.instances.size())
-        return ViewFailure("Display sample exceeds native instance addressing.");
-    impl_->render_scene_sample.Prepare(input.snapshots, alpha,
-        [&](const RenderInstance &instance, CharacterAnimationClip clip) {
-            const auto index = static_cast<std::size_t>(clip);
-            if (instance.mesh == RenderMesh::Archer)
-                return index < impl_->archer_clips.size() && impl_->archer_clips[index].looping != 0;
-            if (instance.mesh >= RenderMesh::MonsterMelee && instance.mesh <= RenderMesh::BossFinal)
-            {
-                const auto &asset = impl_->monster_assets[static_cast<std::size_t>(instance.mesh) -
-                    static_cast<std::size_t>(RenderMesh::MonsterMelee)];
-                return index < asset.clip_meta.size() && asset.clip_meta[index].z != 0;
-            }
-            return false;
-        });
-    canonical.interpolation = alpha;
-    input.snapshots.current = impl_->render_scene_sample.View(input.snapshots.current);
-    sample_header.simulation_time = display_time;
-    impl_->prepared_archer_palettes.clear();
-    if (auto r = impl_->ValidateFrameInput(input); !r) return r;
-    if (!impl_->owned_views.contains(kMainRenderViewId.value) ||
-        !impl_->owned_views.at(kMainRenderViewId.value)->ready)
-        return ViewFailure("Main render view has no initialized GPU owner.");
-    // Prepare all new/replaced view packages before publishing any of them.
-    std::map<std::uint32_t, std::unique_ptr<Impl::OwnedView>> candidates;
-    for (const auto &view : input.views)
-    {
-        if (view.role == RenderViewRole::Main) continue;
-        const auto found = impl_->owned_views.find(view.id.value);
-        const bool replace = found == impl_->owned_views.end() ||
-            found->second->state.output_extent != view.output_extent ||
-            found->second->state.render_capacity != view.render_capacity ||
-            found->second->configuration_revision != impl_->view_configuration_revision ||
-            found->second->content_generation != impl_->resource_generation_id ||
-            found->second->pipeline_revision != impl_->pipeline_revision;
-        if (!replace) continue;
-        std::unique_ptr<Impl::OwnedView> candidate;
-        if (auto r = impl_->PrepareOwnedView(view, candidate, false); !r) return r;
-        if (found != impl_->owned_views.end()) candidate->history_generation = found->second->history_generation + 1;
-        candidates.emplace(view.id.value, std::move(candidate));
-    }
-    const auto restore_native_selection = [&]() -> Result {
-        if (impl_->streamline_session)
-            if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return r;
-        if (impl_->fsr_session)
-            if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return r;
-        return Result::Success();
-    };
-    const auto reject_candidates = [&](Result failure) -> Result {
-        for (auto &[id, candidate] : candidates)
-            if (auto r = impl_->ResetOwnedViewAfterCompletion(*candidate); !r) {
-                // Failed native cleanup must retain its complete candidate lease.
-                impl_->initialized = false;
-                impl_->unresolved_view_candidates.push_back(std::move(candidate));
-                return r;
-            }
-        if (auto r = restore_native_selection(); !r) return r;
-        return failure;
-    };
-    if (!candidates.empty())
-    {
-        if (auto r = impl_->WaitForGpu(); !r) return r;
-        // Configuration of native candidates affects only their unique viewport.
-        for (auto &[id, candidate] : candidates)
-        {
-            if (impl_->streamline_session)
-                if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(candidate->native_viewport_id); !r) return reject_candidates(r);
-            if (impl_->fsr_session)
-                if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(candidate->native_viewport_id); !r) return reject_candidates(r);
-            if (candidate->reconstruction_provider)
-                if (auto r = candidate->reconstruction_provider->ConfigureAfterCompletion(candidate->state.render_capacity); !r) return reject_candidates(r);
-        }
-        if (impl_->streamline_session)
-            if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return reject_candidates(r);
-        if (impl_->fsr_session)
-            if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return reject_candidates(r);
-        for (auto &[id, candidate] : candidates)
-        {
-            if (auto old = impl_->owned_views.find(id); old != impl_->owned_views.end())
-            {
-                if (auto r = impl_->RetireHlodView(ViewId{id}); !r) return r;
-                if (auto r = impl_->ResetOwnedViewAfterCompletion(*old->second); !r) return r;
-            }
-            impl_->owned_views.insert_or_assign(id, std::move(candidate));
-        }
-        if (impl_->streamline_session)
-            if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return r;
-        if (impl_->fsr_session)
-            if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return r;
-    }
-    auto &main_owner = *impl_->owned_views.at(kMainRenderViewId.value);
-    if (main_owner.configuration_revision != impl_->view_configuration_revision ||
-        main_owner.content_generation != impl_->resource_generation_id || main_owner.pipeline_revision != impl_->pipeline_revision ||
-        main_owner.history_output_extent != main_owner.state.output_extent)
-    {
-        ++main_owner.history_generation;
-        main_owner.configuration_revision = impl_->view_configuration_revision;
-        main_owner.content_generation = impl_->resource_generation_id;
-        main_owner.pipeline_revision = impl_->pipeline_revision;
-        main_owner.temporal_history_valid = false; main_owner.hzb_history_valid = false;
-        main_owner.last_history_frame_slot = UINT32_MAX;
-        main_owner.history_output_extent = main_owner.state.output_extent;
-    }
-    const auto saved_identity = main_owner.sdk_frame_identity;
-    const auto saved_input_phase = impl_->native_input_phase;
-    impl_->active_render_package_id = impl_->render_package_id + 1;
-    if (!input.snapshots.has_current) input.snapshots.current = {};
-    input.display_sample = RenderDisplaySample{package_time, alpha};
-    canonical.advance_native_world = input.vfx.world_batch.sequence != 0;
-    canonical.native_display_tick = static_cast<double>(input.snapshots.current.header.tick);
-    if (input.snapshots.has_previous && alpha < 1.0f)
-        canonical.native_display_tick -= 1.0 - alpha;
-    if (auto r = impl_->BeginHlodViewPackage(input); !r) return r;
-    input.snapshots.current.ui = {};
-    input.screen_overlay_intensity = input.screen_overlay_intensity.value_or(impl_->config.screen_overlay_intensity);
-    auto &prepared_scene = impl_->prepared_scene_package;
-    prepared_scene.ReleaseBorrowed();
-    struct PreparedSceneLease
-    {
-        Impl::PreparedScenePackage &scene;
-        ~PreparedSceneLease() { scene.ReleaseBorrowed(); }
-    } prepared_scene_lease{prepared_scene};
-    Result result = Result::Success();
-    RendererFrameResult main_result{};
-    std::vector<RenderViewFrameResult> view_results;
-    view_results.reserve(input.views.size());
-    bool rendered_main{}, rendered_any{}, failed_view_history_committed{};
-    const RenderViewInput *attempted_view{};
-    const auto main = std::ranges::find(input.views, RenderViewRole::Main, &RenderViewInput::role);
-    auto next = input.views.begin();
-    for (std::size_t ordinal = 0; ordinal < input.views.size(); ++ordinal)
-    {
-        // Main consumes the presentation token first; other views keep packet order.
-        auto view_pointer = main;
-        if (ordinal != 0 || main == input.views.end())
-        {
-            if (next == main) ++next;
-            view_pointer = next++;
-        }
-        const auto &view = *view_pointer;
-        attempted_view = nullptr;
-        if (auto r = impl_->ActivateView(view.id); !r) { result = r; break; }
-        auto &owned_view = *impl_->owned_views.at(view.id.value);
-        attempted_view = &view;
-        if (view.role == RenderViewRole::Main) { impl_->native_input_phase = saved_input_phase; owned_view.sdk_frame_identity = saved_identity; }
-        const bool active_changed = view.render_active != owned_view.state.render_active;
-        (void)UpdateViewState(owned_view.state, view.output_extent, view.render_capacity, view.render_active);
-        owned_view.width = view.output_extent.width; owned_view.height = view.output_extent.height;
-        owned_view.render_width = view.render_active.width; owned_view.render_height = view.render_active.height;
-        if (active_changed) { owned_view.hzb_history_valid = false; owned_view.last_history_frame_slot = UINT32_MAX; owned_view.targets.hzb_layout = MakeHzbLayout(owned_view.render_width, owned_view.render_height); }
-        if (view.camera_cut)
-        {
-            owned_view.temporal_history_valid = false; owned_view.hzb_history_valid = false;
-            owned_view.last_history_frame_slot = UINT32_MAX;
-            owned_view.exposure_initialized = false; owned_view.previous_origins_valid = false;
-            owned_view.previous_skin_deformation.reset(); owned_view.previous_instances.reset(); owned_view.skin_history.Clear();
-            owned_view.ambient_occlusion.ResetHistory(); owned_view.screen_reflections.ResetHistory();
-            owned_view.volumetrics.ResetHistory();
-        }
-        RendererFrameResult rendered{};
-        // Event spawns are scene simulation inputs and are consumed once; the
-        // retained particles/ribbons are shared by every sequential view.
-        const bool first = ordinal == 0;
-        const auto view_render_start = std::chrono::steady_clock::now();
-        const auto view_delta_seconds = input.delta_seconds.value_or(
-            owned_view.exposure_sample_time.time_since_epoch().count() == 0 ? 1.0f / 60.0f
-                : std::chrono::duration<float>(package_time - owned_view.exposure_sample_time).count());
-        result = RenderView(canonical, view, first, view_delta_seconds, rendered);
-        view_render_time += std::chrono::steady_clock::now() - view_render_start;
-        if (rendered.presented_ui_packet_generation)
-            world_step_receipt.presented_ui_generation = rendered.presented_ui_packet_generation;
-        if (rendered.vfx_world_step_submitted)
-        {
-            world_step_receipt.submitted = true;
-            world_step_receipt.tick = rendered.vfx_world_tick;
-            world_step_receipt.session = rendered.vfx_world_session_id;
-            world_step_receipt.sequence = rendered.vfx_world_batch_sequence;
-        }
-        if (!result)
-        {
-            failed_view_history_committed = rendered.render_history_committed;
-            frame_result.render_history_committed |= rendered.render_history_committed;
-            break;
-        }
-        rendered_any = true;
-        view_results.push_back({rendered.identity, impl_->rendered_submission_count, rendered.frame,
-            rendered.view_history_generation, rendered.rendered_view, rendered.unjittered_view_projection});
-        frame_result = rendered;
-        if (view.role == RenderViewRole::Main) { rendered_main = true; main_result = rendered; }
-    }
-    if (!result && attempted_view && !failed_view_history_committed)
-    {
-        auto &failed_view = *impl_->owned_views.at(attempted_view->id.value);
-        failed_view.temporal_history_valid = false;
-        failed_view.hzb_history_valid = false;
-        failed_view.last_history_frame_slot = UINT32_MAX;
-        failed_view.previous_origins_valid = false;
-        failed_view.previous_skin_deformation.reset();
-        failed_view.previous_instances.reset();
-        failed_view.skin_history.Clear();
-    }
-    if (auto restored = impl_->ActivateView(kMainRenderViewId); !restored) return restored;
-    if (!rendered_main) { impl_->native_input_phase = saved_input_phase; main_owner.sdk_frame_identity = saved_identity; }
-    if (rendered_main) frame_result = main_result;
-    frame_result.views = std::move(view_results);
-    frame_result.cpu_timings.wrapper_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - wrapper_start - view_render_time).count());
-    if (!result)
-    {
-        const auto removed = impl_->device->GetDeviceRemovedReason();
-        if (FAILED(removed)) return impl_->CheckDevice(removed, "Render view submission");
-        // Successfully rendered views retain their histories. The failed view
-        // cannot publish a partial camera/pose/native history on the next call.
-        if (rendered_any && impl_->frame_submission_faulted) impl_->native_input_phase = 0;
-    }
-    return result;
 }
 
 Result D3D12Renderer::ReleaseView(ViewId id)

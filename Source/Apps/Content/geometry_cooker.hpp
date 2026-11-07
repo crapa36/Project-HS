@@ -36,6 +36,11 @@ struct GeometryErrorChecks
     GeometryErrorCheckMode mode{GeometryErrorCheckMode::Normal};
     const GeometryErrorQualification *qualification{};
 };
+struct OpticalMaterialProfile
+{
+    std::uint32_t compatibility_group{};
+    bool solid_transmission{};
+};
 // One fixed target triangle per source triangle. Its three barycentric
 // witnesses are reused at both palette endpoints; convexity then encloses
 // the complete source triangle throughout linear skin interpolation.
@@ -53,7 +58,8 @@ void IndexVertices(std::span<const render_data::ExpandedVertex> expanded,
                    std::vector<render_data::ExpandedVertex> &vertices,
                    std::vector<unsigned> &indices);
 [[nodiscard]] render_data::GeometryData CookGeometry(
-    std::span<const render_data::ExpandedVertex> expanded, std::uint32_t flags);
+    std::span<const render_data::ExpandedVertex> expanded, std::uint32_t flags,
+    std::span<const OpticalMaterialProfile> optical_profiles = {});
 // Index-only skinned simplification keeps every surviving authored vertex
 // field intact. Each material submesh is simplified independently.
 [[nodiscard]] std::vector<render_data::ExpandedVertex> SimplifySkinnedGeometry(

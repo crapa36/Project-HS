@@ -213,6 +213,7 @@ struct TextureStreamView
     Access access{Access::Undefined};
     bool reserved{};
     bool opacity_sampling{true};
+    bool feedback_supported{};
 };
 struct TextureStreamingGraphBinding
 {
@@ -300,7 +301,8 @@ class RendererTextureStreaming
     [[nodiscard]] bool HasStartedWork() const noexcept;
     [[nodiscard]] TextureStreamView View(TextureStreamId) const noexcept;
     [[nodiscard]] bool HardwareBacked(TextureStreamId) const noexcept;
-    [[nodiscard]] bool NeedsDemand(TextureStreamId, bool baseline_consumer = false) const noexcept;
+    [[nodiscard]] bool NeedsDemand(TextureStreamId, bool baseline_consumer = false,
+                                   bool feedback_active = false) const noexcept;
     void MarkUse(TextureStreamId, const CompletionSet &) noexcept;
     void CancelReads(RendererAssetIo &, StreamingManager &) noexcept;
     void SwapState(RendererTextureStreaming &) noexcept;

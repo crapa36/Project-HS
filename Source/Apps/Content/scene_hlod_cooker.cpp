@@ -206,6 +206,7 @@ struct Key
     auto operator<=>(const Key &) const = default;
 };
 using Representation = std::map<Key, std::vector<rd::ExpandedVertex>>;
+using RepresentationErrors = std::map<Key, double>;
 struct BakedMember
 {
     rd::SceneHlodMember record;
@@ -265,11 +266,11 @@ std::vector<rd::ExpandedVertex> Simplify(std::span<const rd::ExpandedVertex> exp
     { Require(simplified[i] < vertices.size(), "simplification index range"); output.push_back(vertices[simplified[i]]); }
     return output;
 }
-void BakeInto(Representation &target, const BakedMember &member)
+void BakeInto(Representation &target, RepresentationErrors &errors, const BakedMember &member,
+              const rd::GeometryData &geometry, double seed_error)
 {
     Require(member.source && member.source->geometry, "missing source for leaf bake");
     const auto &source = *member.source;
-    const auto &geometry = *source.geometry;
     const auto &record = member.record;
     const bool reflected = double(member.instance.scale.x) * member.instance.scale.y * member.instance.scale.z < 0;
     const auto sine = std::sin(member.instance.yaw), cosine = std::cos(member.instance.yaw);
@@ -284,6 +285,7 @@ void BakeInto(Representation &target, const BakedMember &member)
                 "missing actual material identity");
         const Key key{source.material_products[selector], record.mesh_semantic, selector, record.tint_rgba,
                       record.variant, geometry.flags};
+        if (seed_error > 0.0) errors[key] = std::max(errors[key], seed_error);
         auto &vertices = target[key];
         Require(vertices.size() <= rd::kMaxGeometryIndices - 3, "leaf representation exceeds geometry page ABI");
         for (std::size_t lane = 0; lane < 3; ++lane)
@@ -375,15 +377,14 @@ class Builder
 {
 public:
     Builder(CookedSceneHlod &output, std::vector<Object> objects, std::string_view prefix, SceneHlodCookOptions options,
-            CookProfile &profile)
+            CookProfile &profile, const std::map<std::uint64_t, double> &coarse_errors)
         : output_(output), objects_(std::move(objects)), prefix_(prefix), options_(options),
           tasks_(options.error_worker_count == 0 ? hs::TaskSystem::DefaultWorkerCount()
-                                                  : options.error_worker_count), profile_(profile) {}
+                                                  : options.error_worker_count), profile_(profile), coarse_errors_(coarse_errors) {}
     void Run()
     {
         output_.scene.roots = Build(0, objects_.size());
         for (auto &page : output_.scene.pages) page.flags &= ~rd::kSceneHlodPagePinned;
-        for (auto &representation : representations_) representation.clear();
     }
 private:
     std::uint32_t Dependency(const std::string &id)
@@ -400,17 +401,42 @@ private:
         {
             const auto leaf_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
             rd::SceneHlodGroup group; group.first_member = Count(output_.scene.members.size());
-            Representation original; std::vector<rd::GeometryBounds> bounds;
+            Representation original; RepresentationErrors errors; std::vector<rd::GeometryBounds> bounds;
             for (auto index = begin; index < end; ++index)
                 for (auto &member : objects_[index].members)
                 {
                     output_.scene.members.push_back(member.record);
-                    BakeInto(original, member);
+                    member_original_indices_.push_back(member.source->geometry->indices.size());
+                    const auto found = coarse_errors_.find(member.source->asset_id.value);
+                    const bool use_coarse = found != coarse_errors_.end();
+                    const auto &geometry = use_coarse ? *member.source->coarse_geometry : *member.source->geometry;
+                    const double scale = std::max({std::abs(double(member.instance.scale.x)),
+                        std::abs(double(member.instance.scale.y)), std::abs(double(member.instance.scale.z))});
+                    double seed{};
+                    if (use_coarse)
+                    {
+                        const auto sine = std::sin(member.instance.yaw), cosine = std::cos(member.instance.yaw);
+                        const double rotation_norm = std::max(1.0, std::hypot(double(sine), double(cosine)));
+                        double coordinate = 1.0;
+                        for (const auto *bounds : {&member.source->geometry->bounds, &geometry.bounds})
+                            for (std::size_t lane = 0; lane < 3; ++lane)
+                                coordinate = std::max({coordinate, std::abs(double(bounds->minimum[lane])) * scale,
+                                                       std::abs(double(bounds->maximum[lane])) * scale});
+                        coordinate += std::max({std::abs(double(member.instance.position.x)),
+                            std::abs(double(member.instance.position.y)), std::abs(double(member.instance.position.z))});
+                        // Bound float scale/rotation/translation rounding in both
+                        // transformed surfaces as well as the rotation norm.
+                        const double margin = 32.0 * std::numeric_limits<float>::epsilon() * coordinate;
+                        seed = std::nextafter(found->second * scale * rotation_norm + margin,
+                                              std::numeric_limits<double>::infinity());
+                    }
+                    BakeInto(original, errors, member, geometry, seed);
                     bounds.push_back(member.record.bounds);
                 }
             group.member_count = Count(output_.scene.members.size()) - group.first_member; group.bounds = Union(bounds);
             const auto id = Count(output_.scene.groups.size()); output_.scene.groups.push_back(group);
             representations_.push_back(std::move(original));
+            representation_errors_.push_back(std::move(errors));
             if (profile_.enabled) profile_.leaf_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - leaf_start).count();
             return {id};
         }
@@ -437,8 +463,20 @@ private:
         const auto simplify_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
         for (const auto &[key, vertices] : input) coarse[key] = Simplify(vertices, options_.reduction_ratio);
         if (profile_.enabled) profile_.simplify_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - simplify_start).count();
-        // A retained duplicate is never published as a coarser object group.
-        if (TriangleCount(coarse) >= TriangleCount(input)) return children;
+        // Compare against what this cut actually draws: originals for leaves,
+        // already-published proxy indices for internal children.
+        std::uint64_t child_draw_indices{};
+        for (const auto child : children)
+        {
+            const auto &entry = output_.scene.groups[child];
+            if (!entry.child_count)
+                for (std::uint32_t i = entry.first_member; i < entry.first_member + entry.member_count; ++i)
+                    child_draw_indices += member_original_indices_[i];
+            else
+                for (std::uint32_t i = entry.first_proxy; i < entry.first_proxy + entry.proxy_count; ++i)
+                    child_draw_indices += output_.scene.proxies[i].index_count;
+        }
+        if (TriangleCount(coarse) * 3u >= child_draw_indices) return children;
         // Never publish a representation that requires an unbounded atomic
         // residency set. Children remain complete roots when this parent does
         // not fit; do this before the costly geometric-error qualification.
@@ -448,11 +486,9 @@ private:
         rd::SceneHlodGroup group; group.first_member = output_.scene.groups[children.front()].first_member;
         const auto &last = output_.scene.groups[children.back()];
         group.member_count = last.first_member + last.member_count - group.first_member;
-        double inherited_error{};
-        for (const auto child : children)
-            inherited_error = std::max(inherited_error, double(output_.scene.groups[child].world_error));
         struct ErrorRow
         {
+            const Key *key{};
             std::span<const rd::ExpandedVertex> fine;
             std::span<const rd::ExpandedVertex> coarse;
             GeometryErrorBounds measured{};
@@ -461,7 +497,7 @@ private:
         std::vector<ErrorRow> rows;
         rows.reserve(coarse.size());
         for (const auto &[key, vertices] : coarse)
-            rows.push_back({input.at(key), vertices});
+            rows.push_back({&key, input.at(key), vertices});
         if (!rows.empty())
         {
             const auto error_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
@@ -487,16 +523,28 @@ private:
             if (profile_.enabled) profile_.error_wall_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - error_start).count();
             Require(wait.Succeeded(), "geometric error worker failure");
         }
+        RepresentationErrors errors;
         for (const auto &row : rows)
         {
             if (row.exception) std::rethrow_exception(row.exception);
             const auto &measured = row.measured;
             Require(std::isfinite(measured.lower) && measured.lower >= 0 && measured.upper >= measured.lower,
                     "invalid qualified world error");
-            // Symmetric Hausdorff distance obeys the triangle inequality.
-            // Measure the immediate child surfaces once, then include their
-            // already-qualified original-to-child bound for this entire group.
-            group.world_error = std::max(group.world_error, Upper(measured.upper + inherited_error));
+            // A child contributes inherited error only to the same material
+            // representation. The union of its matching surfaces is bounded
+            // by the maximum of their individual certified errors.
+            double inherited_error{};
+            for (const auto child : children)
+            {
+                const auto &child_errors = representation_errors_[child];
+                const auto found = child_errors.find(*row.key);
+                if (found != child_errors.end()) inherited_error = std::max(inherited_error, found->second);
+            }
+            double error = measured.upper + inherited_error;
+            if (measured.upper > 0.0 && inherited_error > 0.0)
+                error = std::nextafter(error, std::numeric_limits<double>::infinity());
+            errors.emplace(*row.key, error);
+            group.world_error = std::max(group.world_error, Upper(error));
         }
         std::vector<rd::GeometryBounds> bounds;
         for (const auto child : children)
@@ -511,10 +559,15 @@ private:
         for (const auto child : children) output_.scene.groups[child].parent = id;
         output_.scene.children.insert(output_.scene.children.end(), children.begin(), children.end());
         output_.scene.groups.push_back(group); representations_.push_back(std::move(coarse));
+        representation_errors_.push_back(std::move(errors));
         // Moving the map retains its element addresses and vertex buffers,
         // so the plan's key pointers and spans remain valid.
         Pages(id, plan);
-        for (const auto child : children) representations_[child].clear();
+        for (const auto child : children)
+        {
+            representations_[child].clear();
+            representation_errors_[child].clear();
+        }
         return {id};
     }
     void Pages(std::uint32_t id, const PackedPlan &plan)
@@ -564,6 +617,9 @@ private:
     hs::TaskSystem tasks_;
     CookProfile &profile_;
     std::vector<Representation> representations_;
+    std::vector<RepresentationErrors> representation_errors_;
+    std::vector<std::uint64_t> member_original_indices_;
+    const std::map<std::uint64_t, double> &coarse_errors_;
 };
 } // namespace
 
@@ -595,6 +651,36 @@ CookedSceneHlod CookSceneHlod(AssetId scene_asset_id, std::uint32_t layout_abi,
     }
     std::unordered_set<std::uint64_t> used_sources;
     for (const auto &member : members) used_sources.insert(member.instance.asset_id.value);
+    std::map<std::uint64_t, double> coarse_errors;
+    for (const auto &[asset, source] : source_assets)
+    {
+        if (!used_sources.contains(asset) || !source->coarse_geometry) continue;
+        const auto &fine = *source->geometry;
+        const auto &coarse = *source->coarse_geometry;
+        rd::ValidateGeometryData(coarse);
+        if (coarse.flags != fine.flags || coarse.indices.size() >= fine.indices.size()) continue;
+        std::vector<bool> fine_selectors(65536), coarse_selectors(65536);
+        std::vector<rd::ExpandedVertex> fine_expanded, coarse_expanded;
+        fine_expanded.reserve(fine.indices.size()); coarse_expanded.reserve(coarse.indices.size());
+        for (const auto index : fine.indices)
+        {
+            const auto &vertex = fine.vertices[index];
+            fine_selectors[vertex.material_index] = true;
+            fine_expanded.push_back(vertex);
+        }
+        for (const auto index : coarse.indices)
+        {
+            const auto &vertex = coarse.vertices[index];
+            coarse_selectors[vertex.material_index] = true;
+            coarse_expanded.push_back(vertex);
+        }
+        if (fine_selectors != coarse_selectors) continue;
+        const auto measured = MeasureGeometryError(fine_expanded, coarse_expanded, {},
+            options.error_refinement_budget, options.error_checks);
+        Require(std::isfinite(measured.upper) && measured.upper >= measured.lower && measured.lower >= 0.0,
+                "invalid authored LOD geometric certificate");
+        coarse_errors.emplace(asset, measured.upper);
+    }
     for (const auto &[asset, source] : source_assets)
     {
         if (!used_sources.contains(asset)) continue;
@@ -632,7 +718,7 @@ CookedSceneHlod CookSceneHlod(AssetId scene_asset_id, std::uint32_t layout_abi,
         for (const auto &member : object.members) bounds.push_back(member.record.bounds);
         object.bounds = Union(bounds); spatial.push_back(std::move(object));
     }
-    Builder(output, std::move(spatial), prefix, options, profile).Run();
+    Builder(output, std::move(spatial), prefix, options, profile, coarse_errors).Run();
     // Pages are emitted in postorder, so update ancestor spheres after page
     // packing rather than trusting a different partition sphere center.
     for (auto &group : output.scene.groups)

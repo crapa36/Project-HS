@@ -1,5 +1,4 @@
 # Optional native renderer SDKs are isolated from the low-level module graph.
-include("${CMAKE_SOURCE_DIR}/cmake/RenderSdkPin.cmake")
 function(hs_configure_render_sdks)
     option(HS_WITH_XESS "Build pinned XeSS super resolution" OFF)
     option(HS_WITH_XESS_FG "Build pinned XeSS frame generation" OFF)

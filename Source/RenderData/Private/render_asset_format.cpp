@@ -65,7 +65,7 @@ std::uint64_t Get(std::span<const std::byte> bytes, std::uint64_t offset,
     return value;
 }
 
-void ValidateVertex(const ExpandedVertex &vertex)
+void ValidateVertex(const ExpandedVertex &vertex, std::uint16_t wire_version = kExpandedVertexWireVersion)
 {
     const auto finite = [](float value) { return std::isfinite(value); };
     Require(std::ranges::all_of(vertex.position, finite) &&
@@ -81,7 +81,10 @@ void ValidateVertex(const ExpandedVertex &vertex)
                                vertex.bone_weights[2] + vertex.bone_weights[3];
     Require(total_weight == 0.0f || std::abs(total_weight - 1.0f) <= 0.01f,
             "expanded vertex weights must be zero or normalized");
-    Require(vertex.reserved == 0, "expanded vertex reserved field is invalid");
+    Require(wire_version == kExpandedVertexWireVersion ||
+            (wire_version == kLegacyExpandedVertexWireVersion &&
+             vertex.optical_component_id == 0),
+            "legacy expanded vertex contains an optical component ID");
 }
 
 void PutFloat(std::span<std::byte> bytes, std::size_t offset, float value)
@@ -96,7 +99,8 @@ float GetFloat(std::span<const std::byte> bytes, std::size_t offset)
     return std::bit_cast<float>(static_cast<std::uint32_t>(Get(bytes, offset, 4)));
 }
 
-ExpandedVertex DecodeVertex(std::span<const std::byte> bytes, std::size_t offset)
+ExpandedVertex DecodeVertex(std::span<const std::byte> bytes, std::size_t offset,
+                            std::uint16_t wire_version)
 {
     ExpandedVertex vertex{};
     for (std::size_t i = 0; i < 3; ++i)
@@ -113,17 +117,17 @@ ExpandedVertex DecodeVertex(std::span<const std::byte> bytes, std::size_t offset
     for (std::size_t i = 0; i < 2; ++i)
         vertex.uv[i] = GetFloat(bytes, offset + 48 + i * 4);
     vertex.material_index = static_cast<std::uint16_t>(Get(bytes, offset + 72, 2));
-    vertex.reserved = static_cast<std::uint16_t>(Get(bytes, offset + 74, 2));
-    ValidateVertex(vertex);
+    vertex.optical_component_id = static_cast<std::uint16_t>(Get(bytes, offset + 74, 2));
+    ValidateVertex(vertex, wire_version);
     return vertex;
 }
 
-void ValidateEncodedVertices(std::span<const std::byte> bytes)
+void ValidateEncodedVertices(std::span<const std::byte> bytes, std::uint16_t wire_version)
 {
     Require(!bytes.empty() && bytes.size() % kExpandedVertexStride == 0,
             "invalid expanded vertex byte count");
     for (std::size_t offset = 0; offset < bytes.size(); offset += kExpandedVertexStride)
-        (void)DecodeVertex(bytes, offset);
+        (void)DecodeVertex(bytes, offset, wire_version);
 }
 
 bool ValidId(std::string_view id)
@@ -160,6 +164,9 @@ bool SupportedVersion(std::uint32_t type, std::uint16_t version)
 {
     if(type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
         return version >= 1 && version <= 3;
+    if (type == static_cast<std::uint32_t>(ChunkType::GeometryVertices) ||
+        type == static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout))
+        return version == 1 || version == 2;
     return type == static_cast<std::uint32_t>(ChunkType::TextureMetadata)
                 ? (version == 1 || version == 2)
                 : version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
@@ -230,7 +237,8 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
         Require(stride == 32 && count == 1 && size == count * stride,
                 "invalid material parameter layout chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout))
-        Require(stride == kMaterialSurfaceLayoutStride && count == 1 && size == stride,
+        Require(stride == (version == 1 ? kLegacyMaterialSurfaceLayoutStride : kMaterialSurfaceLayoutStride) &&
+                count == 1 && size == stride,
                 "invalid material surface layout chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata))
         Require(stride == 28 && count == 1 && size == stride,
@@ -324,19 +332,23 @@ std::vector<std::byte> EncodeExpandedVertices(std::span<const ExpandedVertex> ve
         for (std::size_t i = 0; i < 2; ++i)
             PutFloat(bytes, offset + 48 + i * 4, vertex.uv[i]);
         Put(bytes, offset + 72, vertex.material_index, 2);
-        Put(bytes, offset + 74, vertex.reserved, 2);
+        Put(bytes, offset + 74, vertex.optical_component_id, 2);
     }
     return bytes;
 }
 
-std::vector<ExpandedVertex> DecodeExpandedVertices(std::span<const std::byte> bytes)
+std::vector<ExpandedVertex> DecodeExpandedVertices(std::span<const std::byte> bytes,
+                                                   std::uint16_t wire_version)
 {
+    Require(wire_version == kLegacyExpandedVertexWireVersion ||
+            wire_version == kExpandedVertexWireVersion,
+            "unsupported expanded vertex wire version");
     Require(!bytes.empty() && bytes.size() % kExpandedVertexStride == 0,
             "invalid expanded vertex byte count");
     std::vector<ExpandedVertex> vertices;
     vertices.reserve(bytes.size() / kExpandedVertexStride);
     for (std::size_t offset = 0; offset < bytes.size(); offset += kExpandedVertexStride)
-        vertices.push_back(DecodeVertex(bytes, offset));
+        vertices.push_back(DecodeVertex(bytes, offset, wire_version));
     return vertices;
 }
 
@@ -374,7 +386,7 @@ std::vector<std::byte> BuildPackage(AssetId asset_id,
             ValidateKnown(chunk.type, chunk.version,
                           chunk.bytes.size(), chunk.count, chunk.stride);
             if (chunk.type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || chunk.type == 14)
-                ValidateEncodedVertices(chunk.bytes);
+                ValidateEncodedVertices(chunk.bytes, chunk.version);
             else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
                 (void)DecodeGeometryHierarchyReference(chunk.bytes, dependencies);
             else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
@@ -584,7 +596,7 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
         saw_known[type] = true;
         if ((type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || type == 14) &&
             mode == PackageReadMode::FullValidation)
-            ValidateEncodedVertices(chunk_bytes);
+            ValidateEncodedVertices(chunk_bytes, version);
         else if (type == static_cast<std::uint32_t>(ChunkType::MaterialMetadata))
             (void)DecodeRockMaterial(chunk_bytes, view.dependencies);
         else if (type == static_cast<std::uint32_t>(ChunkType::MaterialProgram))

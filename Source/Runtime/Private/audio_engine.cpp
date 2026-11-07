@@ -142,8 +142,7 @@ struct AudioEngine::Impl
     float ui_volume{1.0f};
     bool owns_com{};
     std::uint32_t device_channels{2};
-    std::uint64_t voice_serial{}, device_epoch{}, buffer_sequence{};
-    std::array<std::uint64_t, AudioEngine::kMaximumSourceVoices> voice_generations{};
+    std::uint64_t voice_serial{};
     std::array<std::array<AudioBufferCompletion, 2>, AudioEngine::kMaximumSourceVoices> completions{};
     std::span<const AudioCueRow> cues;
     std::vector<AudioCueRow> developer_cues;
@@ -633,7 +632,6 @@ bool AudioEngine::IsTransitionTrack(AssetId id) const noexcept
 Result AudioEngine::InitializeDevice(const SettingsData &settings)
 {
     runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::InitializeDevice), impl_->Clock());
-    ++impl_->device_epoch;
     const auto com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(com_result))
     {
@@ -885,8 +883,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
             if (!candidate.completion) { ++impl_->status.skipped_voice_limits; return AudioPlayResult::Limited; }
             candidate.completion->wake_main = impl_->wake_main;
             candidate.completion->wake_context = impl_->wake_context;
-            candidate.completion->Begin(sample->native_pins,
-                {impl_->device_epoch, ++impl_->voice_generations[slot], ++impl_->buffer_sequence});
+            candidate.completion->Begin(sample->native_pins);
             buffer.pContext = candidate.completion;
         }
         const auto created = impl_->engine->CreateSourceVoice(&candidate.voice, &sample->format, 0, 2.0f,

@@ -52,13 +52,15 @@ inline void Geometry(CanonicalBytes &b, const render_data::GeometryDescriptor &v
     b.Sequence(v.ground_support, [](CanonicalBytes &out, const auto &r) {
         Numbers(out, r.position); Numbers(out, r.normal); Numbers(out, r.bone_indices);
         Numbers(out, r.bone_weights); Numbers(out, r.uv); Numbers(out, r.tangent);
-        out.Fields(r.material_index, r.reserved);
+        out.Fields(r.material_index, r.optical_component_id);
     });
     b.Scalar(v.payload_ready);
 }
 inline void Material(CanonicalBytes &b, const render_data::MaterialDescriptor &v)
 {
-    b.Fields(v.asset_id.value, v.bulk_index, v.kind, v.surface.capability_mask, v.surface.varying_mask);
+    b.Fields(v.asset_id.value, v.bulk_index, v.kind, v.surface.capability_mask, v.surface.varying_mask,
+        v.surface.has_static_solid_transmission_profile);
+    Numbers(b, v.surface.solid_transmission_profile);
     b.Blob(v.parameter_layout);
     b.Sequence(v.defaults, [](CanonicalBytes &out, const auto &r) { Numbers(out, r.words); });
     b.Sequence(v.programs, [](CanonicalBytes &out, const auto &r) {

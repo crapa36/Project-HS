@@ -700,6 +700,33 @@ bool FiniteWarningOwner(const PersistentVfxVisual &owner, double current_tick) n
 
 } // namespace
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+std::optional<PersistentVfxKind> TestRoomPersistentKind(std::uint64_t effect_id,
+    const VfxEffectRecord &effect) noexcept
+{
+    const auto found = std::find_if(kPersistentBindings.begin(), kPersistentBindings.end(),
+        [effect_id](const auto &binding) { return binding.effect_id == effect_id; });
+    if (found != kPersistentBindings.end()) return found->kind;
+    if (effect_id == kBleedTickEffect) return PersistentVfxKind::EnemyBleedStatus;
+    if (effect_id == kBurnTickEffect) return PersistentVfxKind::EnemyBurnStatus;
+    if (const auto warning = WarningBinding(effect_id)) return warning->kind;
+    for (const auto &alias : kUpgradeSlowAreaAliases)
+        if (alias.effect_id == effect_id) return PersistentVfxKind::UpgradeSlowArea;
+    for (const auto &supplement : kDamageTrailSupplements)
+        if (supplement.effect_id == effect_id) return PersistentVfxKind::DamageTrail;
+    if (effect_id == Hash64("particle.upgrade.arrow_rain.secondary_area")) return PersistentVfxKind::ArrowRainArea;
+    if (effect_id == Hash64("particle.upgrade.arrow_rain.fire_patch") ||
+        effect_id == Hash64("particle.upgrade.trap.fire_variant")) return PersistentVfxKind::FireArea;
+    if (effect_id == Hash64("particle.upgrade.retreat.start_trap")) return PersistentVfxKind::TrapArmed;
+    if (effect_id == kArrowRainIncomingEffect) return PersistentVfxKind::ScheduledAreaDelivery;
+    if (effect_id == Hash64("particle.session.wave_warning")) return PersistentVfxKind::WaveTimer;
+    if (effect.input_mode == 1 && effect.payload_kind == kProjectilePayload)
+        return PersistentVfxKind::ProjectileHead;
+    return std::nullopt;
+}
+
+#endif
+
 std::size_t PreparedPairFacts::VisualHash::operator()(const VisualKey &key) const noexcept
 {
     return std::hash<std::uint64_t>{}(key.stable_id ^

@@ -18,9 +18,6 @@ cbuffer FrameConstants : register(b0)
     float4 GrassBenders[32];
     uint4 GrassBenderCount;
     uint4 AuthoredParticleClock;
-    float4 VfxLightPositionRadius[32];
-    float4 VfxLightColorIntensity[32];
-    uint4 VfxLightCount;
     uint4 VfxDecalCount;
     uint4 SkinCacheOptions;
 };

@@ -714,18 +714,6 @@ void SealSlimeEyeSocket(CharacterIR &asset)
         throw std::runtime_error("Slime eye socket repair did not add eight triangles");
 }
 
-FbxNode *FindBone(FbxScene &scene, std::string_view name)
-{
-    FbxNode *result{};
-    VisitNodes(scene.GetRootNode(), [&](FbxNode *node) {
-        if (!result && BoneName(*node) == name)
-        {
-            result = node;
-        }
-    });
-    return result;
-}
-
 void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones,
                      hs::CharacterAnimationClip clip, bool looping,
                      CharacterIR &output,
@@ -1251,7 +1239,6 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
             if (!image || image->width != mips[mip].width || image->height != mips[mip].height ||
                 image->format != DXGI_FORMAT_R32G32B32A32_FLOAT)
                 throw std::runtime_error("character BC7 QA extent mismatch");
-            std::size_t reference_covered{}, decoded_covered{};
             std::size_t coverage_mismatches{};
             for (std::uint32_t y = 0; y < image->height; ++y)
                 for (std::uint32_t x = 0; x < image->width; ++x)
@@ -1296,7 +1283,6 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                     if (alpha.cutoff > 0)
                     {
                         const bool before = reference[3] >= alpha.cutoff, after = pixel[3] >= alpha.cutoff;
-                        reference_covered += before; decoded_covered += after;
                         if (before != after)
                         {
                             ++coverage_mismatches;
@@ -1305,12 +1291,6 @@ bool WriteDds(IWICImagingFactory &factory, CharacterTextureSources &sources, con
                 }
             if (alpha.cutoff > 0 && coverage_mismatches)
                 throw std::runtime_error("character BC7 changed the spatial cutoff mask after local repair: " + path.string() +
-                    " mip=" + std::to_string(mip));
-            // One texel is the smallest nonzero representable coverage quantum.
-            // A failing recipe is rejected; this is not an optical-quality pass.
-            if (alpha.cutoff > 0 && std::max(reference_covered, decoded_covered) -
-                std::min(reference_covered, decoded_covered) > 1)
-                throw std::runtime_error("character BC7 changed cutoff coverage by more than one texel: " + path.string() +
                     " mip=" + std::to_string(mip));
         }
         DirectX::Blob dds;

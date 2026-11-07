@@ -21,7 +21,6 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <bcrypt.h>
 #endif
 
 namespace hs
@@ -31,52 +30,7 @@ namespace
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
 
-class PayloadHash
-{
-public:
-#ifdef _WIN32
-    PayloadHash()
-    {
-        if (BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
-            throw std::runtime_error("cannot initialize Generation SHA-256 provider");
-        if (BCryptCreateHash(algorithm_, &hash_, nullptr, 0, nullptr, 0, 0) < 0)
-        {
-            BCryptCloseAlgorithmProvider(algorithm_, 0);
-            algorithm_ = nullptr;
-            throw std::runtime_error("cannot initialize Generation SHA-256 hash");
-        }
-    }
-    ~PayloadHash()
-    {
-        if (hash_) BCryptDestroyHash(hash_);
-        if (algorithm_) BCryptCloseAlgorithmProvider(algorithm_, 0);
-    }
-    PayloadHash(const PayloadHash &) = delete;
-    PayloadHash &operator=(const PayloadHash &) = delete;
-    void Add(std::span<const std::byte> bytes)
-    {
-        if (BCryptHashData(hash_, reinterpret_cast<PUCHAR>(
-                const_cast<std::byte *>(bytes.data())), static_cast<ULONG>(bytes.size()), 0) < 0)
-            throw std::runtime_error("cannot hash Generation payload");
-    }
-    [[nodiscard]] std::array<std::byte, 32> Finish()
-    {
-        std::array<std::byte, 32> digest{};
-        if (BCryptFinishHash(hash_, reinterpret_cast<PUCHAR>(digest.data()),
-                             static_cast<ULONG>(digest.size()), 0) < 0)
-            throw std::runtime_error("cannot finish Generation SHA-256 hash");
-        return digest;
-    }
-private:
-    BCRYPT_ALG_HANDLE algorithm_{};
-    BCRYPT_HASH_HANDLE hash_{};
-#else
-    void Add(std::span<const std::byte> bytes) { hash_.Add(bytes); }
-    [[nodiscard]] std::array<std::byte, 32> Finish() { return hash_.Finish(); }
-private:
-    Sha256Stream hash_;
-#endif
-};
+using PayloadHash = Sha256Stream;
 
 [[nodiscard]] bool IsDigest(std::string_view value)
 {

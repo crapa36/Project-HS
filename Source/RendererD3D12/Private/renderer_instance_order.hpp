@@ -22,7 +22,8 @@ inline constexpr std::size_t kInstanceBucketCount = kInstanceOtherBucket + 1;
 
 inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instances,
     std::span<const VfxGroundSpawnInput> ground, std::span<const VfxOwnedMeshInput> meshes,
-    std::vector<std::pair<std::uint64_t, std::uint8_t>> &replacements)
+    std::vector<std::pair<std::uint64_t, std::uint8_t>> &replacements,
+    std::vector<std::uint32_t> *source_ordinals = nullptr)
 {
     constexpr std::uint8_t area_body=1,area_owner=2,projectile_owner=4;
     replacements.clear();
@@ -51,13 +52,19 @@ inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instan
         const auto found=std::ranges::lower_bound(replacements,id,{},&std::pair<std::uint64_t,std::uint8_t>::first);
         return found!=replacements.end()&&found->first==id?found->second:0;
     };
+    std::size_t ordinal{}, survivors{};
     std::erase_if(instances,[&](const RenderInstance &instance) {
+        bool remove;
         if(instance.mesh==RenderMesh::Area)
-            return (instance.stable_id!=0&&(mask_for(instance.stable_id)&area_body)!=0)||
+            remove = (instance.stable_id!=0&&(mask_for(instance.stable_id)&area_body)!=0)||
                 (instance.vfx_owner_id!=0&&(mask_for(instance.vfx_owner_id)&area_owner)!=0);
-        return (instance.mesh==RenderMesh::PlayerProjectile||instance.mesh==RenderMesh::EnemyProjectile)&&
+        else remove = (instance.mesh==RenderMesh::PlayerProjectile||instance.mesh==RenderMesh::EnemyProjectile)&&
             (mask_for(instance.stable_id)&projectile_owner)!=0;
+        if(source_ordinals && !remove) (*source_ordinals)[survivors++]=(*source_ordinals)[ordinal];
+        ++ordinal;
+        return remove;
     });
+    if(source_ordinals) source_ordinals->resize(survivors);
 }
 
 // Only draw references are reordered. Canonical indices also identify anonymous

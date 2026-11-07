@@ -159,8 +159,8 @@ struct XessFrameGeneration::Impl
     Result Check(const char *operation, xefg_swapchain_result_t native)
     {
         if (native < XEFG_SWAPCHAIN_RESULT_SUCCESS) return Fail(operation, native);
-        if (native > XEFG_SWAPCHAIN_RESULT_SUCCESS)
 #if defined(HS_DEVELOPMENT_TOOLS)
+        if (native > XEFG_SWAPCHAIN_RESULT_SUCCESS)
             std::fprintf(stderr, "hs.xess_fg.warning operation=%s native_result=%d\n", operation, static_cast<int>(native));
 #endif
         return Result::Success();

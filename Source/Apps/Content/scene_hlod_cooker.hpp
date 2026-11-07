@@ -25,6 +25,9 @@ struct SceneHlodCookSource
     const render_data::GeometryData *geometry{};
     // Authored ExpandedVertex selector -> actual cooked material product ID.
     std::span<const std::string> material_products;
+    // Optional authored representation of the same canonical materials.
+    // Its selector coverage and geometry error are qualified by the cooker.
+    const render_data::GeometryData *coarse_geometry{};
 };
 
 struct SceneHlodCookOptions

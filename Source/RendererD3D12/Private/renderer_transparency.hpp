@@ -109,7 +109,7 @@ struct LayeredTranslucencyLayout
     std::array<ResourceVersion, 4> inputs{};
     ResourceVersion background{};
     std::vector<LayeredTranslucencySceneRead> peel_reads, scene_reads;
-    std::array<TextureHandle, kLayeredTranslucencyMaxLayers> front{}, identity{};
+    std::array<TextureHandle, kLayeredTranslucencyMaxLayers> front{}, identity{}, optical_component{};
     TextureHandle exit{};
     std::array<TextureHandle, 2> color{};
     std::array<TextureHandle, 6> guides{};
@@ -165,7 +165,7 @@ class TranslucencySystem
     [[nodiscard]] Result ConsumeCompletedWork(const CompletionSet &, std::vector<RendererTranslucencyDiagnosticsSample> &);
     [[nodiscard]] RendererTranslucencyDiagnosticsStatus WorkStatus() const;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    [[nodiscard]] std::array<const AllocationResource *, 8> DiagnosticResources() const noexcept;
+    [[nodiscard]] std::array<const AllocationResource *, 15> DiagnosticResources() const noexcept;
 #endif
     // Called only after all old submissions have reliably completed.
     void SwapState(TranslucencySystem &other) noexcept { impl_.swap(other.impl_); }

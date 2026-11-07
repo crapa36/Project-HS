@@ -15,7 +15,9 @@ SceneInput LoadGeometryVertex(uint descriptor, uint vertex_id)
     input.BoneWeights = asfloat(GeometryBuffers[NonUniformResourceIndex(descriptor)].Load4(offset + 32u));
     input.Uv = asfloat(GeometryBuffers[NonUniformResourceIndex(descriptor)].Load2(offset + 48u));
     input.Tangent = asfloat(GeometryBuffers[NonUniformResourceIndex(descriptor)].Load4(offset + 56u));
-    input.Material = GeometryBuffers[NonUniformResourceIndex(descriptor)].Load(offset + 72u) & 65535u;
+    const uint material_and_optical_component = GeometryBuffers[NonUniformResourceIndex(descriptor)].Load(offset + 72u);
+    input.Material = material_and_optical_component & 65535u;
+    input.OpticalComponentId = material_and_optical_component >> 16u;
     return input;
 }
 

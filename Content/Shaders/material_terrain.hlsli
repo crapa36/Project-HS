@@ -47,7 +47,8 @@ float TerrainNoise(float2 p, uint seed)
 }
 float2 TerrainRotate(float2 p,uint r) { return r==0?p:r==1?float2(-p.y,p.x):r==2?-p:float2(p.y,-p.x); }
 float3 TerrainDecode(float2 rg) { float2 xy=rg*2-1; return float3(xy,sqrt(saturate(1-dot(xy,xy)))); }
-float TerrainTileSize(uint layer) { return layer==3 ? 9.0 : 12.0; }
+float TerrainTileSize(uint layer) { return TerrainSourceMetersPerTile[layer]; }
+float TerrainHeightScale(uint layer) { return TerrainSourceHeightScale[layer]; }
 float2 TerrainDetailFadeRange()
 {
     // Native frame Z is two IEEE binary16 distances, not an enum or arithmetic
@@ -59,7 +60,7 @@ float3 TerrainParallaxFootprint(float2 dx, float2 dy, uint layer,
     float3 viewTs, float distanceToEye, uint steps)
 {
     if (steps == 0u || distanceToEye >= 55.0) return 0;
-    float tile=TerrainTileSize(layer); float heightScale=layer==3?0.05:layer==2?0.035:0.025;
+    float tile=TerrainTileSize(layer); float heightScale=TerrainHeightScale(layer);
     // Preserve the component-wise divide/multiply order. Quarter turns only
     // permute/sign-flip components; ray length and the Jacobian norms agree.
     float2 ray=viewTs.xy/max(abs(viewTs.z),0.05)*heightScale/tile*(1-smoothstep(35,55,distanceToEye));
@@ -102,11 +103,13 @@ void TerrainStochasticCoordinates(float2 world,uint layer,float2 warp,
     out float2 a,out float2 b,out float2 c,out float3 weights)
 {
     const float tile=TerrainTileSize(layer);
-    float2 p=(world+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
+    const float2 p=(world+warp*1.3)/(tile*0.9);
+    const float2 skew=float2(p.x-0.5773502691896258*p.y,1.1547005383792515*p.y);
+    const float2 i=floor(skew),f=frac(skew);
+    // Sharpened weights can reveal the underlying cell pattern.
     a=i;b=i+float2(1,0);c=i+float2(0,1);
     weights=float3(1-f.x-f.y,f.x,f.y);
     if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);weights=float3(f.x+f.y-1,1-f.x,1-f.y);}
-    weights=weights*weights*(3-2*weights);weights/=max(weights.x+weights.y+weights.z,1e-5);
 }
 
 void TerrainStochasticCells(float2 world,float2 dx,float2 dy,uint layer,uint seed,float2 warp,
@@ -179,7 +182,7 @@ HsMaterialTerrainResult TerrainSample(
     m.height=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(uv,layer),dx,dy,height_state).r;return m;
 }
 
-float3 TerrainGrassPalette(float3 color,float coverage)
+float3 TerrainGrassPalette(float3 color)
 {
     // Linear mean of both foliage_grass_atlas_[0,1]_basecolor.png atlases, alpha >= 0.5.
     const float3 foliageAlbedo=float3(0.099848532,0.159184398,0.020007386);
@@ -187,7 +190,7 @@ float3 TerrainGrassPalette(float3 color,float coverage)
     const float3 groundAlbedo=float3(0.165660347,0.151494940,0.047493307);
     // Match the lit canopy rather than the brighter upward-facing ground under daylight.
     const float3 canopyGain=float3(0.5,0.72,0.08);
-    return color*lerp(float3(1,1,1),foliageAlbedo/groundAlbedo*canopyGain,coverage);
+    return color*(foliageAlbedo/groundAlbedo*canopyGain);
 }
 
 float3 DecodeTerrainHistogram(Texture2DArray<float4> histogram, SamplerState linear_clamp,
@@ -239,12 +242,15 @@ HsMaterialTerrainResult TerrainLayer(
     HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellX,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellY,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellZ,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
-    float3 gaussian_value=0.5+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-0.5)*rsqrt(dot(w,w));
-    float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*2048*2048,1e-8));
+    float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*
+        float(TerrainSourceTextureEdge)*float(TerrainSourceTextureEdge),1e-8));
     // Decode with the mip actually available to the Gaussian sample, including streaming fallback.
 #ifndef HS_TERRAIN_PAGE_BAKE
     lod=max(lod,float(HsTextureMipMetadata[gaussian_slot].y));
 #endif
+    // Row 12 texels 1..12 contain decoded Gaussian means for mips 0..11.
+    float3 mean=histogram.SampleLevel(linear_clamp,float3((clamp(lod,0,11)+1.5)/256.0,12.5/16.0,layer),0).rgb;
+    float3 gaussian_value=mean+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-mean)*rsqrt(dot(w,w));
     x.base_color=DecodeTerrainHistogram(histogram,linear_clamp,gaussian_value,layer,lod);
     x.normal=normalize(x.normal*w.x+y.normal*w.y+z.normal*w.z);
     x.detail=normalize(x.detail*w.x+y.detail*w.y+z.detail*w.z);
@@ -346,24 +352,31 @@ HsMaterialTerrainResult EnvTerrain(
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
     float2 authoredControls)
 {
-    float4 w=max(float4(0.5-TerrainNoise(world.xz/12,seed),0.7+TerrainNoise(world.xz/16,seed+9),TerrainNoise(world.xz/22,seed+31),TerrainNoise(world.xz/9,seed+71)),0);
-    w.x=max(w.x,0.05);
+    if(mesh==22u) seed=MeadowSurfaceSeed;
     const float2 warp=float2(TerrainNoise(world.xz/7,seed+413),TerrainNoise(world.xz/7,seed+827));
     const float meso=TerrainNoise(world.xz/.85,seed+571);
+    const float patch=TerrainNoise((world.xz+warp*2)/16,seed+9);
+    const float bare=smoothstep(.35,.70,patch+meso*.10);
+    const float soilDry=saturate(.5+.5*TerrainNoise(world.xz/22,seed+31));
+    const float stones=.25*smoothstep(.55,.85,TerrainNoise(world.xz/9,seed+71));
+    float4 w=float4(bare*(1-stones)*(1-soilDry),1-bare,bare*(1-stones)*soilDry,bare*stones);
     const float path=TerrainMeadowRoad(world.xz,warp,meso);
     // Static controls use meadow UVs; texture mapping remains in world metres.
-    float wetness,dryness;
+    float wetness;
     [branch] if(mesh==22u)
     {
-        wetness=saturate(authoredControls.x);dryness=saturate(authoredControls.y);
+        wetness=saturate(authoredControls.x);
     }
     else
     {
-        wetness=MeadowWetness(world.xz);dryness=MeadowSoilDryness(world.xz,wetness);
+        wetness=MeadowWetness(world.xz);
     }
+    // Road coverage and its derived soil mix must share world coordinates.
+    const float dryness=MeadowSoilDryness(world.xz,wetness);
     w=lerp(w,float4(1-dryness,0,dryness,0),path);
     if(mesh==20) w=float4(1,0,0,0);
-    float total=0;
+    float total=0,grassWeight=0;
+    const float macro=TerrainNoise(world.xz/18,seed+173);
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
     const float3 viewTs=normalize(viewDirection).xzy;
     const HsTextureGradState gaussian_state=HsTexturePrepareGrad(gaussian_slot);
@@ -377,10 +390,19 @@ HsMaterialTerrainResult EnvTerrain(
         if(w[layer]<=0) continue;
         HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewTs,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
         float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)));
+        n.roughness=saturate(n.roughness+macro*0.04);
+        if(layer==1u)
+        {
+            n.base_color=TerrainGrassPalette(n.base_color)*MeadowDryGrassGain(world.xz);
+            n.ao*=0.1;
+            n.roughness=lerp(n.roughness,1.0,0.8);
+            grassWeight=weight;
+        }
+        else n.base_color*=float3(.58,.43,.30);
         m.base_color+=n.base_color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight;
         m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight;
 #ifdef HS_TERRAIN_PAGE_BAKE
-        m.residual_depth+=(1-n.height)*(layer==3?0.05:layer==2?0.035:0.025)*weight;
+        m.residual_depth+=(1-n.height)*TerrainHeightScale(layer)*weight;
         m.layer_weights[layer]=weight;
 #endif
     }
@@ -389,17 +411,9 @@ HsMaterialTerrainResult EnvTerrain(
     m.residual_depth/=total;
     m.layer_weights/=total;
 #endif
-    const float grassCoverage=mesh==20u?0.0:(1.0-path)*smoothstep(0.0,0.2,w.y);
-    m.base_color=TerrainGrassPalette(m.base_color,grassCoverage);
-    // Soil-only reflectance correction keeps sampled grain and foliage/UI exposure intact.
-    m.base_color*=lerp(float3(.58,.43,.30),float3(1,1,1),grassCoverage);
-    m.base_color*=lerp(float3(1,1,1),MeadowDryGrassGain(world.xz),grassCoverage);
-    // Dense turf occludes sky fill and its pale reflection between the individual grass cards.
-    m.ao*=lerp(1.0,0.1,grassCoverage);
-    float macro=TerrainNoise(world.xz/18,seed+173);
+    const float grassCoverage=grassWeight/total;
     // Keep terrain reflectance below the washed-out daylight range without darkening UI or actors.
-    m.base_color*=0.6*(1+macro*0.08+meso*0.04);m.roughness=saturate(m.roughness+macro*0.04);
-    m.roughness=lerp(m.roughness,1.0,0.8*grassCoverage);
+    m.base_color*=0.6*(1+macro*0.08+meso*0.04);
     m.normal=normalize(m.normal);m.detail=normalize(m.detail);
     TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed,wetness,dryness);
     return m;
@@ -423,10 +437,10 @@ struct HsTerrainPageSection
 #undef HS_TERRAIN_U1
 #undef HS_TERRAIN_U2
 };
-StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(t0, space42);
+StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_SECTION_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
 // Physical base, published logical MinMip, logical mip count, quality finest+1 (0=unavailable).
-StructuredBuffer<uint4> HsTerrainPlaneMips : register(t1, space42);
-Texture2D<float4> HsTerrainPlanes[HS_TERRAIN_PAGE_PLANE_CAPACITY] : register(t2, space42);
+StructuredBuffer<uint4> HsTerrainPlaneMips : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_MIP_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+Texture2D<float4> HsTerrainPlanes[HS_TERRAIN_PAGE_PLANE_CAPACITY] : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_PLANE_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
 
 float4 TerrainPageSample(SamplerState page_sampler,uint plane,float2 uv,float2 gx,float2 gy,float clamp_mip)
 {
@@ -537,9 +551,10 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         const float major=sqrt(.5*(xx+yy+length(float2(xx-yy,2*xy))));
         const float minor=abs(tx.x*ty.y-tx.y*ty.x)/max(major,1e-12);
         const float2 edge=min(uv,1-uv)*extent;
-        const float3 parallax=TerrainParallaxFootprint(dx.xz/9.0,dy.xz/9.0,3,
+        const float parallax_tile=TerrainTileSize(3);
+        const float3 parallax=TerrainParallaxFootprint(dx.xz/parallax_tile,dy.xz/parallax_tile,3,
             normalize(view).xzy,distance_to_eye,HS_MATERIAL_POM_STEPS);
-        ray=TerrainSectionLocal(parallax.xy*9.0,section.rotation)/tile_span*interior/extent;
+        ray=TerrainSectionLocal(parallax.xy*parallax_tile,section.rotation)/tile_span*interior/extent;
         pom_weight=parallax.z;
         // Include the residual ray and trilinear/anisotropic prefilter support.
         const float2 support=3*max(major,exp2(float(resident)))+abs(ray)*extent;
@@ -571,7 +586,7 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         weights/=max(dot(weights,float4(1,1,1,1)),1e-5);
         const float2 local_offset=(uv-start_uv)*tile_span*(16.0/14.0);
         const float2 world_offset=local_offset.x*float2(section.rotation.x,-section.rotation.y)+local_offset.y*section.rotation.yx;
-        page.detail=TerrainPageDetail(detail,environment_wrap,detail_slot,section.seed,world.xz+world_offset,
+        page.detail=TerrainPageDetail(detail,environment_wrap,detail_slot,mesh==22u?MeadowSurfaceSeed:section.seed,world.xz+world_offset,
             dx.xz,dy.xz,weights,detail_weight);
     }
     return page;

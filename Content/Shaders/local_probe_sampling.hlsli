@@ -38,6 +38,17 @@ float3 HsLocalProbeIrradiance(HsProbeGridCell c,float3 normal,float3 kernel)
     [unroll] for(uint k=0;k<9;++k) basis[k]*=kernel[k==0?0:k<4?1:2];
     return HsLocalProbeGridIrradiance(c,basis);
 }
+void HsLocalProbeIrradiancePair(HsProbeGridCell c,float3 normal,out float3 front,out float3 back)
+{
+    if(!c.inside)
+    {
+        front=HsProbeIrradiance(normal);
+        back=HsProbeIrradiance(-normal);
+        return;
+    }
+    float basis[9]; HsProbeShBasis(normalize(normal),basis);
+    HsLocalProbeGridIrradiancePair(c,basis,front,back);
+}
 float3 HsLocalProbeIrradiance(float3 world,float3 normal,float3 kernel)
 {
     return HsLocalProbeIrradiance(HsLocateProbeCell(world),normal,kernel);
@@ -88,12 +99,10 @@ HsLocalProbeBlend HsLocalProbePrepareBlend(float3 world,bool enabled)
     blend.global_weight=1;
     return blend;
 }
-void HsLocalProbeEvaluateIbl(float3 world,float3 normal,float3 reflected,float2 roughness,
+void HsLocalProbeEvaluateIbl(float3 world,HsProbeGridCell cell,float3 normal,float3 reflected,float2 roughness,
     bool need_coat,bool need_diffuse,bool local_specular,bool local_diffuse,float3 diffuse_kernel,
     out float3 base,out float3 coat,out float3 diffuse)
 {
-    HsProbeGridCell cell=(HsProbeGridCell)0;
-    if(local_specular || (need_diffuse && local_diffuse)) cell=HsLocateProbeCell(world);
     diffuse=0;
     if(need_diffuse) diffuse=local_diffuse?HsLocalProbeIrradiance(cell,normal,diffuse_kernel):HsProbeIrradiance(normal,diffuse_kernel);
     float3 local_base=0,local_coat=0;
@@ -135,10 +144,19 @@ void HsLocalProbeEvaluateIbl(float3 world,float3 normal,float3 reflected,float2 
     base+=local_base*coverage;
     if(need_coat) coat+=local_coat*coverage;
 }
-float3 HsLocalProbePrefiltered(float3 world,float3 direction,float roughness)
+void HsLocalProbeEvaluateIbl(float3 world,float3 normal,float3 reflected,float2 roughness,
+    bool need_coat,bool need_diffuse,bool local_specular,bool local_diffuse,float3 diffuse_kernel,
+    out float3 base,out float3 coat,out float3 diffuse)
+{
+    HsProbeGridCell cell=(HsProbeGridCell)0;
+    if(local_specular || (need_diffuse && local_diffuse)) cell=HsLocateProbeCell(world);
+    HsLocalProbeEvaluateIbl(world,cell,normal,reflected,roughness,need_coat,need_diffuse,
+        local_specular,local_diffuse,diffuse_kernel,base,coat,diffuse);
+}
+float3 HsLocalProbePrefiltered(float3 world,HsProbeGridCell cell,float3 direction,float roughness)
 {
     float3 base,coat,diffuse;
-    HsLocalProbeEvaluateIbl(world,0,direction,roughness.xx,false,false,true,false,0,base,coat,diffuse);
+    HsLocalProbeEvaluateIbl(world,cell,0,direction,roughness.xx,false,false,true,false,0,base,coat,diffuse);
     return base;
 }
 float3 HsLocalProbeRadiance(float3 world,float3 direction,HsLocalProbeBlend blend)

@@ -47,7 +47,7 @@ struct HlodViewRuntime
     std::array<std::uint32_t, 16> last_status{}; // Completed telemetry for this view only.
     std::shared_ptr<const StaticRenderScene> matching_scene;
     HlodSystem system;
-    ResidencyTicket residency;
+    ResidencyTicket residency, upload_residency;
     std::array<HlodRuntimeFrame, 3> frames;
 };
 struct HlodRuntime

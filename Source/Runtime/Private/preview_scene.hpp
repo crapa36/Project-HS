@@ -12,6 +12,13 @@ namespace hs::runtime_detail
 // Owns the scene spans submitted by one preview package.
 struct PreviewScene
 {
+    static float TargetHeight(RenderMesh mesh) noexcept
+    {
+        if (mesh == RenderMesh::Archer) return 1.0f;
+        if (mesh >= RenderMesh::MonsterMelee && mesh <= RenderMesh::BossFinal)
+            return mesh >= RenderMesh::BossFiveMinute ? 3.0f : 1.0f;
+        return mesh >= RenderMesh::TreeTrunk && mesh < RenderMesh::MeadowSurface ? 1.0f : 0.0f;
+    }
     std::vector<RenderInstance> instances;
     std::vector<AnimationPoseRef> poses;
     std::vector<AnimationPoseRef> previous_poses;
@@ -25,7 +32,8 @@ struct PreviewScene
             camera.target = {0, 1, 0};
             if (!config.preview_camera_override) { camera.yaw_degrees = 0; camera.pitch_degrees = 22; camera.distance = 22; }
         }
-        if (monster) camera.target.y = !family && config.monster_preview_asset >= 3 ? 3.0f : 1.0f;
+        if (monster) camera.target.y = TargetHeight(family ? RenderMesh::MonsterMelee :
+            static_cast<RenderMesh>(static_cast<std::uint32_t>(RenderMesh::MonsterMelee) + config.monster_preview_asset));
         else if (edit.enabled) camera.target.y = 1.0f;
         if (family) { camera.target.x = 0; camera.target.z = 0; }
         if (config.preview_camera_override)

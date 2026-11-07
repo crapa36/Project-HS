@@ -10,6 +10,17 @@
 
 namespace hs
 {
+// Lower bound on the minor singular value of the ground-space pixel Jacobian.
+// Degenerate or nonfinite inputs request the finest texture mip.
+[[nodiscard]] inline float ConservativeGroundTextureFootprint(double dx_x,double dx_z,double dy_x,double dy_z) noexcept
+{
+    const double norm=std::hypot(std::hypot(dx_x,dx_z),std::hypot(dy_x,dy_z));
+    const double determinant=std::abs(dx_x*dy_z-dx_z*dy_x);
+    if (!std::isfinite(norm) || !std::isfinite(determinant) || norm<=0 || determinant<=0) return 0;
+    const double lower=determinant/norm;
+    if (!std::isfinite(lower) || lower<=0 || lower>std::numeric_limits<float>::max()) return 0;
+    return std::nextafter(static_cast<float>(lower),0.0f);
+}
 struct GeometryDemandPoint
 {
     std::array<float, 3> position;

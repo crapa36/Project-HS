@@ -76,14 +76,14 @@ VndfFrame PrepareVndfFrame(Vec3 view,double alpha)
     const auto t1=lensq>0?Vec3{-stretched.y/std::sqrt(lensq),stretched.x/std::sqrt(lensq),0}:Vec3{1,0,0};
     return {stretched,t1,Cross(stretched,t1),0.5*(1+stretched.z)};
 }
-struct VndfSample { double u{},disk_x{},disk_y{}; };
+struct VndfSample { double disk_x{},disk_y{}; };
 std::vector<VndfSample> PrepareVndfSamples(std::uint32_t count)
 {
     std::vector<VndfSample> result;
     result.reserve(count);
     for(const auto sample:hs::content::MakeHammersleySamples(count)) {
         const double radius=std::sqrt(sample.u),phi=2*kPi*sample.v;
-        result.push_back({sample.u,radius*std::cos(phi),radius*std::sin(phi)});
+        result.push_back({radius*std::cos(phi),radius*std::sin(phi)});
     }
     return result;
 }
@@ -300,8 +300,9 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
             const auto current=ap::Json::parse(ap::ReadBytes(resultPath));
             if(current.at("action_id")==spec.action_id && current.at("action_key")==ap::ActionKey(spec) && current.at("products").size()==1)
             {
-                ap::UpstreamProduct ignored; fs::path path;
-                (void)ap::ReadActionResult(buildRoot,kNamespace,kProduct,ignored,path); const auto existing=ap::ReadBytes(path);
+                ap::UpstreamProduct ignored;
+                const ap::ActionResultSnapshot snapshot(buildRoot,kNamespace);
+                const auto existing=snapshot.ReadProductBytes(kProduct,ignored);
                 (void)rd::ReadLtcLutPackage(std::as_bytes(std::span(existing.data(),existing.size())),hs::MakeAssetId(kProduct));
                 ap::TouchActionResult(resultPath); return;
             }

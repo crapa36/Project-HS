@@ -654,6 +654,9 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
                    ? DefWindowProcW(window, message, wparam, lparam) : 0;
     case WM_KILLFOCUS:
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
+        test_room_keys_.fill(false);
+#endif
         // System messages can overtake deferred input while the native token is
         // parked. Those queued values belong to the closing focus epoch.
         MSG stale{};
@@ -706,6 +709,34 @@ void Window::HandleRawInput(HRAWINPUT input)
     const auto &raw = *reinterpret_cast<const RAWINPUT *>(storage.data());
     if (raw.header.dwType == RIM_TYPEKEYBOARD)
     {
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (test_room_enabled_)
+        {
+            const auto key = raw.data.keyboard.VKey;
+            const bool pressed = (raw.data.keyboard.Flags & RI_KEY_BREAK) == 0;
+            const auto index = key == VK_SPACE ? 0u : key == 'R' ? 1u : key == VK_F12 ? 2u : 3u;
+            if (index < test_room_keys_.size())
+            {
+                if (pressed && !test_room_keys_[index])
+                {
+                    if (index == 1) channels_->camera_zoom_percent.store(100, std::memory_order_release);
+                    else test_room_actions_.fetch_or(1u << index);
+                }
+                test_room_keys_[index] = pressed;
+                return;
+            }
+            if (key == VK_ESCAPE)
+            {
+                if (pressed)
+                {
+                    channels_->stop_requested.store(true, std::memory_order_release);
+                    channels_->NotifyMain();
+                }
+                return;
+            }
+            if (key == VK_TAB) return;
+        }
+#endif
         if (channels_->devtools_capture_keyboard.load(std::memory_order_acquire)) return;
         const auto key = raw.data.keyboard.VKey;
         const auto pressed = (raw.data.keyboard.Flags & RI_KEY_BREAK) == 0;

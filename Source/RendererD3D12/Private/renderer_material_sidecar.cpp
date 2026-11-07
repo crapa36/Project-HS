@@ -41,8 +41,10 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(
             const auto &package = header.view;
             const auto chunk = std::ranges::find(package.chunks,
                 render_data::ChunkType::MaterialSurfaceLayout, &render_data::ChunkView::type);
-            if (chunk == package.chunks.end() || !chunk->required || chunk->version != 1 ||
-                chunk->count != 1 || chunk->stride != render_data::kMaterialSurfaceLayoutStride)
+            if (chunk == package.chunks.end() || !chunk->required ||
+                !((chunk->version == 1 && chunk->stride == render_data::kLegacyMaterialSurfaceLayoutStride) ||
+                  (chunk->version == 2 && chunk->stride == render_data::kMaterialSurfaceLayoutStride)) ||
+                chunk->count != 1)
                 throw std::runtime_error("required material surface profile is missing: " + id);
             layouts[ordinal] = render_data::DecodeMaterialSurfaceLayout(chunk->bytes);
             mask |= layouts[ordinal].varying_mask;

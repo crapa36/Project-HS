@@ -1,8 +1,8 @@
 #ifndef HS_LIGHT_LIST_HLSLI
 #define HS_LIGHT_LIST_HLSLI
 
-// 128-byte record ABI from renderer_light_list.hpp. Authored photometric units
-// are converted once on CPU using the explicit 683 lm/W white-equivalent policy.
+// 128-byte record ABI from renderer_light_list.hpp. CPU converts authored units
+// to radiometric quantities; prepared radiometric Point inputs pass through.
 struct HsGpuLightRecord
 {
     float4 position_range;

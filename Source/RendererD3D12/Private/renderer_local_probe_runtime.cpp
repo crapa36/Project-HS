@@ -9,12 +9,15 @@
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/lighting_probe.hpp>
 #include <hs/render_data/scene_probe_revision.hpp>
+#include <hs/render_data/scene_probe_grid_bake.hpp>
 #include <hs/render_data/static_shadow.hpp>
 #include <hs/render_data/static_shadow_archive.hpp>
 #include <hs/render_data/texture_package.hpp>
 
 #include <bit>
 #include <cassert>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <limits>
@@ -313,7 +316,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
             const float z=((corner&4)?bounds.maximum[2]:bounds.minimum[2])*instance.scale.z;
             const float world_x=instance.position.x+x*cosine+z*sine;
             const bool terrain=instance.mesh==RenderMesh::Ground || instance.mesh==RenderMesh::DirtPatch;
-            const float world_y=instance.position.y+y+(bake_bounds && terrain ? instance.scale.y*.5f : 0.0f);
+            const float world_y=instance.position.y+y+(terrain ? instance.scale.y*.5f : 0.0f);
             const float world_z=instance.position.z-x*sine+z*cosine;
             // Capture zeroes grass benders/time. BendGrass still adds its fixed
             // world-space wind envelope: 0.035 X and 0.035*0.7 Z, at most.
@@ -363,6 +366,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
 void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::uint32_t generation)
 {
     using namespace DirectX;
+    const float offline_previous_grid=c.render_options.w;
     const auto vp=XMLoadFloat4x4(&view.view_projection);
     XMStoreFloat4x4(&c.view_projection,XMMatrixTranspose(vp)); c.previous_view_projection=c.view_projection;
     c.current_unjittered_view_projection=view.view_projection;
@@ -375,12 +379,13 @@ void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::
     c.surface_view_origin={0,0,0,0}; c.surface_jitter_uv={0,0,0,0};
     c.temporal_options={view.irradiance_node?1.f:0.f,0,view.far_distance,view.near_distance};
     c.grass_bender_count={0,0,0,0}; c.previous_grass_state={};
-    c.vfx_light_count={0,0,0,0}; c.vfx_decal_count={0,0,0,0};
+    c.vfx_decal_count={0,0,0,0};
     c.particle_options={0,0,0,0}; c.authored_particle_clock={0,0,0,0}; c.lod_clock={0,0,0,0};
     c.skin_cache_options={0,0,0,generation}; c.lighting_options={0,0,1,1};
     // Captured transport is independent of exposure, screen AO/contact, camera
     // history, gameplay grass benders, VFX/decal lights and post/display settings.
     c.display_options={0,0,0,0}; c.post_options={0,0,0,0}; c.render_options={0,0,0,0};
+    c.render_options.w=offline_previous_grid;
 }
 #endif
 } // namespace
@@ -679,7 +684,8 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
         {"BLENDWEIGHT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,32,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
         {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
         {"TANGENT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,56,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-        {"MATERIAL",0,DXGI_FORMAT_R16_UINT,0,72,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
+        {"MATERIAL",0,DXGI_FORMAT_R16_UINT,0,72,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"OPTICAL_COMPONENT",0,DXGI_FORMAT_R16_UINT,0,74,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{}; p.pRootSignature=root; p.VS={vertex.data(),vertex.size()};
     p.InputLayout={layout,static_cast<UINT>(std::size(layout))}; p.SampleMask=UINT_MAX;
     p.BlendState.IndependentBlendEnable=TRUE;
@@ -1636,6 +1642,11 @@ Result LocalProbeRuntime::ResetAfterCompletion(const CompletionSet &completed)
     return Result::Success();
 }
 #if defined(HS_OFFLINE_PROBE_BAKER)
+Result LocalProbeRuntime::BeginOfflineIteration(const CompletionSet &completed,bool reflections_only)
+{
+    if(impl_->pending_graph) return Failure("Cannot restart probe capture with pending graph work");
+    return impl_->service.BeginOfflineIteration(completed,reflections_only);
+}
 Result LocalProbeRuntime::ExportBakedPackage(RenderGraphQueueExecutor &executor,TransientResourcePool &pool,
     std::uint32_t frame_slot,BarrierMode barriers,std::vector<std::byte> &package_bytes)
 {
@@ -2076,11 +2087,21 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
 }
 Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
     const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
-    std::vector<std::byte> &package_bytes)
+    std::vector<std::byte> &package_bytes, std::uint32_t maximum_cube_views_per_graph, SceneProbeBakePolicy policy)
 {
+    if (maximum_cube_views_per_graph < 1 || maximum_cube_views_per_graph > 6)
+        return Failure("Scene-probe cube-view budget must be between one and six.");
+    if (policy.maximum_iterations < 1 || policy.maximum_iterations > 64 ||
+        !std::isfinite(policy.absolute_tolerance) || policy.absolute_tolerance < 0 || policy.absolute_tolerance > 1 ||
+        !std::isfinite(policy.relative_tolerance) || policy.relative_tolerance < 0 || policy.relative_tolerance > 1 ||
+        (policy.absolute_tolerance == 0 && policy.relative_tolerance == 0))
+        return Failure("Invalid scene-probe diffuse convergence policy.");
     D3D12Renderer owner;
     auto sources = std::make_unique<Impl::SceneProbeBakeSources>();
     auto terrain_source = std::make_unique<AllocationResource>();
+    struct PreviousGrid { AllocationResource sh,records; UINT sh_elements{}; };
+    // Keep the submitted snapshot alive through the outer drain, including an unknown submission result.
+    auto retained_grid = std::make_unique<std::shared_ptr<PreviousGrid>>();
     std::vector<std::byte> candidate;
     const auto run = [&]() -> Result {
         if (!scene || sun.type != LightType::Directional)
@@ -2116,23 +2137,25 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
         {
             auto handle = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTerrainPageDescriptorOffset) * renderer.srv_stride;
+            const auto terrain_base = handle.ptr;
+            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_SECTION_SRV) * renderer.srv_stride;
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srv.Buffer.NumElements = static_cast<UINT>(scene->instances.size());
             srv.Buffer.StructureByteStride = sizeof(Impl::GpuTerrainSection);
             renderer.device->CreateShaderResourceView(terrain_source->resource.Get(), &srv, handle);
-            handle.ptr += renderer.srv_stride;
+            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_MIP_SRV) * renderer.srv_stride;
             srv.Buffer.NumElements = 1;
             srv.Buffer.StructureByteStride = sizeof(UINT) * 4;
             renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
-            handle.ptr += renderer.srv_stride;
+            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_PLANE_SRV) * renderer.srv_stride;
             srv = {};
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srv.Texture2D.MipLevels = 1;
-            for (UINT index = 2; index < kTerrainPageDescriptorCount; ++index)
+            for (UINT index = 0; index < kTerrainPagePlaneCapacity; ++index)
             {
                 renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
                 handle.ptr += renderer.srv_stride;
@@ -2165,10 +2188,58 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
         imports.reserve(sources->textures.size() + pages.size() + 8);
         reads.reserve(imports.capacity() + 9);
         const auto barriers = renderer.enhanced ? BarrierMode::Enhanced : BarrierMode::Legacy;
+        std::shared_ptr<PreviousGrid> previous_grid;
+        std::vector<Float4> previous_coefficients;
+        unsigned iterations{};
+        bool final_reflections{};
         for (;;)
         {
-            const auto completed = renderer.graph_queue_executor.Completed();
-            if (renderer.local_probes.BakeStatus(completed).capture_complete) break;
+            auto completed = renderer.graph_queue_executor.Completed();
+            if (renderer.local_probes.BakeStatus(completed).capture_complete)
+            {
+                if (auto exported=renderer.local_probes.ExportBakedPackage(
+                        renderer.graph_queue_executor,pool,0,barriers,candidate); !exported) return exported;
+                completed=renderer.graph_queue_executor.Completed();
+                const auto baked=rd::ReadSceneProbePackage(candidate,MakeAssetId("render/lighting/local_probes.spkg"));
+                if (!baked.description.grid.NodeCount() || final_reflections) return Result::Success();
+                std::vector<Float4> current(baked.cosine_sh.size()/sizeof(Float4));
+                std::memcpy(current.data(),baked.cosine_sh.data(),baked.cosine_sh.size());
+                const auto state=rd::CompareSceneProbeIterations(previous_coefficients.empty()?std::span<const Float4>(current):
+                    std::span<const Float4>(previous_coefficients),current,policy.absolute_tolerance,policy.relative_tolerance);
+                if (state==rd::SceneProbeIterationState::Invalid) return Failure("Probe iteration contains invalid radiance energy or coefficients.");
+                const bool converged=!previous_coefficients.empty() && state==rd::SceneProbeIterationState::Converged;
+                if (!converged && ++iterations>policy.maximum_iterations)
+                    return Failure("Probe diffuse iteration did not converge within its bounded budget.");
+                auto next=std::make_shared<PreviousGrid>();
+                const auto sh_bytes=baked.cosine_sh.size()+baked.cells.size()*80u;
+                next->sh_elements=static_cast<UINT>(sh_bytes/16u);
+                D3D12MA::ALLOCATION_DESC upload{}; upload.HeapType=D3D12_HEAP_TYPE_UPLOAD;
+                if (auto created=renderer.CreateAllocation(next->sh,upload,BufferDescription(sh_bytes),
+                        D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+                if (auto created=renderer.CreateAllocation(next->records,upload,BufferDescription(128),
+                        D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+                std::byte *mapped{}; D3D12_RANGE no_read{0,0};
+                Native(next->sh.resource->Map(0,&no_read,reinterpret_cast<void **>(&mapped)),"Map previous probe grid");
+                std::memcpy(mapped,baked.cosine_sh.data(),baked.cosine_sh.size());
+                for (std::size_t i=0;i<baked.cells.size();++i)
+                {
+                    auto *cell=mapped+baked.cosine_sh.size()+i*80u;
+                    std::memset(cell,0,80); std::memcpy(cell,baked.cells[i].reachable.data(),64);
+                    std::memcpy(cell+64,baked.cells[i].reflections.data(),8);
+                }
+                next->sh.resource->Unmap(0,nullptr);
+                std::array<DirectX::XMFLOAT4,8> record{};
+                const auto &grid=baked.description.grid;
+                const auto packed=grid.dimensions[0]+256u*grid.dimensions[1]+65536u*grid.dimensions[2];
+                record[6]={grid.origin.x,grid.origin.y,grid.origin.z,float(packed)};
+                record[7]={grid.spacing.x,grid.spacing.y,grid.spacing.z,float(grid.NodeCount())};
+                Native(next->records.resource->Map(0,&no_read,reinterpret_cast<void **>(&mapped)),"Map previous probe grid header");
+                std::memcpy(mapped,record.data(),sizeof(record)); next->records.resource->Unmap(0,nullptr);
+                previous_grid=std::move(next); previous_coefficients=std::move(current);
+                *retained_grid=previous_grid;
+                final_reflections=converged;
+                if (auto restarted=renderer.local_probes.BeginOfflineIteration(completed,final_reflections); !restarted) return restarted;
+            }
             pool.ResetCompletedClaims(completed);
             renderer.graph.Reset();
             imports.clear(); reads.clear();
@@ -2208,12 +2279,18 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
                 revisions[index] = {capture.page_slot, capture.generation, capture.index_count, capture.source_digest, capture.bounds};
             }
             read(renderer.material_parameters, false, Access::AllShaderRead, "ProbeMaterialParameters");
+            if (previous_grid)
+            {
+                read(previous_grid->sh,false,Access::AllShaderRead,"ProbePreviousGridSH");
+                read(previous_grid->records,false,Access::AllShaderRead,"ProbePreviousGridHeader");
+            }
             read(renderer.environment_brdf_lut, true, Access::AllShaderRead, "ProbeBrdfLut");
             read(*terrain_source, false, Access::AllShaderRead, "ProbeSourceTerrainSections");
             for (auto &texture : sources->textures)
                 read(texture.resource, true, Access::AllShaderRead, texture.id);
 
             LocalProbeRuntimeFrameInputs input;
+            input.max_cube_views = maximum_cube_views_per_graph;
             input.config = &renderer.config; input.pipeline_cache = &renderer.pipeline_cache;
             input.scene = scene; input.lights = std::span(&sun, 1); input.static_instance_generation = generation;
             input.material_parameter_revision = renderer.material_parameter_revision - renderer.baked_generation_material_revision;
@@ -2225,6 +2302,8 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             input.static_version = renderer.graph.Version(instances);
             input.frame_srv_heap = renderer.srv_cpu_heap; input.sampler_heap = renderer.sampler_heap;
             input.frame_srv_base = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+            constants.render_options.w=previous_grid?1.0f:0.0f;
+            if (previous_grid) input.binding_owners.push_back(previous_grid);
             input.sampler_table = renderer.sampler_heap->GetGPUDescriptorHandleForHeapStart(); input.completed = completed;
             LocalProbeRuntimeFramePlan plan;
             struct Pending
@@ -2266,6 +2345,19 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
                 }
             };
             descriptors(kProbeDescriptorOffset, probe.srvs);
+            if (previous_grid)
+            {
+                D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+                srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.Buffer.NumElements=previous_grid->sh_elements; srv.Buffer.StructureByteStride=16;
+                auto destination=renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+                destination.ptr+=SIZE_T(kLocalProbeDescriptorOffset+2)*renderer.srv_stride;
+                renderer.device->CreateShaderResourceView(previous_grid->sh.resource.Get(),&srv,destination);
+                srv.Buffer.NumElements=1; srv.Buffer.StructureByteStride=128;
+                destination.ptr+=SIZE_T(2)*renderer.srv_stride;
+                renderer.device->CreateShaderResourceView(previous_grid->records.resource.Get(),&srv,destination);
+            }
             descriptors(kLightListDescriptorOffset, light_outputs.srvs);
             descriptors(kLightListDescriptorOffset + UINT(light_outputs.srvs.size()), ltc.srvs);
             for (const auto version : {probe.radiance, probe.prefiltered, probe.irradiance,
@@ -2301,7 +2393,7 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             pending.local = false;
             if (auto waited = renderer.graph_queue_executor.Wait(pending.completion); !waited) return waited;
         }
-        return renderer.local_probes.ExportBakedPackage(renderer.graph_queue_executor, pool, 0, barriers, candidate);
+        return Result::Success();
     };
     Result result = Result::Success();
     try { result = run(); }
@@ -2312,11 +2404,14 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             // The one-shot sources and allocator must survive an unreliable drain together.
             (void)sources.release();
             (void)terrain_source.release();
+            (void)retained_grid.release();
             (void)owner.impl_.release();
             return Failure(std::string(result.Message()) + "; drain failed: " + std::string(drained.Message()));
         }
     sources.reset();
     terrain_source.reset();
+    // The drain succeeded; release the outer snapshot owner before Shutdown destroys its allocator.
+    retained_grid.reset();
     const auto cleanup = owner.Shutdown();
     if (!cleanup) return Failure(std::string(result.Message()) + "; cleanup failed: " + std::string(cleanup.Message()));
     if (!result) return result;

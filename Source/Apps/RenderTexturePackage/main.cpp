@@ -113,10 +113,8 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
                 ap::Json::array({std::string(source_id)}))
             return false;
         ap::UpstreamProduct ignored;
-        fs::path package_path;
-        (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                   product_id, ignored, package_path);
-        const auto contents = ap::ReadBytes(package_path);
+        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
+        const auto contents = snapshot.ReadProductBytes(product_id, ignored);
         const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
         const auto view = rd::ReadTexturePackage(bytes, hs::MakeAssetId(product_id));
         const auto &expected = texture.description;
@@ -141,9 +139,8 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     const auto action_namespace = "render/texture/environment_" + std::string(texture.name);
     const auto filename = "environment_" + std::string(texture.name) + ".rpkg";
     ap::UpstreamProduct upstream;
-    fs::path dds_path;
-    (void)ap::ReadActionResult(build_root, source_namespace, source_id,
-                               upstream, dds_path);
+    const ap::ActionResultSnapshot snapshot(build_root, source_namespace);
+    const auto dds = snapshot.ReadProductBytes(source_id, upstream);
     ap::ActionSpec spec;
     spec.action_id = "render.texture.environment_" + std::string(texture.name);
     spec.recipe_id = "project-hs.render.texture." +
@@ -164,7 +161,6 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
-        const auto dds = ap::ReadBytes(dds_path);
         const auto bytes = std::as_bytes(std::span(dds.data(), dds.size()));
         const auto payload = DdsPayload(bytes, texture.description);
         const std::array dependencies{source_id};

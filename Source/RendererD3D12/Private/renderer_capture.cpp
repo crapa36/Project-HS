@@ -28,6 +28,17 @@ FrameContext *D3D12Renderer::Impl::SubmittedFrame(const OwnedView &owner) noexce
 
 namespace
 {
+template <class RendererImpl>
+Result SubmitCaptureCopy(RendererImpl &impl, ID3D12CommandAllocator *allocator,
+                         const AllocationResource &readback)
+{
+    const auto closed = impl.command_list->Close();
+    if (FAILED(closed)) return HResultFailure("Close capture copy list", closed);
+    std::vector<AllocationResource> retained;
+    retained.push_back(RendererImpl::RetainViewAllocation(readback));
+    return impl.SubmitResidentUtilityUpload(impl.command_list.Get(), allocator, retained);
+}
+
 // PNG is an SDR preview. HDR readback keeps its native packed representation
 // until PQ and the display primaries have been decoded here.
 float DecodePqNits(float value)
@@ -77,11 +88,10 @@ void HdrPreview(const std::byte *source, std::uint32_t source_pitch,
 } // namespace
 
 Result D3D12Renderer::Impl::WritePng(const std::filesystem::path &path,
-                                     const std::byte *pixels, std::uint32_t row_pitch) const
+                                    const std::byte *pixels, std::uint32_t row_pitch, ViewExtent extent) const
 {
-    const auto &view = *owned_views.at(kMainRenderViewId.value);
-    const auto width = view.width;
-    const auto height = view.height;
+    const auto width = extent.width;
+    const auto height = extent.height;
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
 
@@ -145,7 +155,7 @@ Result D3D12Renderer::Impl::WritePng(const std::filesystem::path &path,
     return Result::Success();
 }
 
-Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
+Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_id)
 {
     if (!impl_->initialized)
     {
@@ -157,9 +167,11 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         return result;
     }
 
-    const auto &main_view = *impl_->owned_views.at(kMainRenderViewId.value);
-    const auto output_index = main_view.last_presented_index;
-    const auto description = impl_->back_buffers[output_index]->GetDesc();
+    const auto &view = *impl_->owned_views.at(view_id.value);
+    const auto output_index = view.last_presented_index;
+    const auto &output = view_id == kMainRenderViewId
+        ? impl_->back_buffers[output_index] : view.outputs[output_index];
+    const auto description = output->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT rows{};
     UINT64 row_size{};
@@ -191,7 +203,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     {
         return HResultFailure("Reset capture list", result);
     }
-    impl_->TransitionTexture(impl_->back_buffers[output_index].Get(),
+    impl_->TransitionTexture(output.Get(),
                              D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE);
@@ -201,7 +213,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint = footprint;
     D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = impl_->back_buffers[output_index].Get();
+    source.pResource = output.Get();
     source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     impl_->command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     impl_->TransitionBuffer(
@@ -217,14 +229,11 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_COPY_SOURCE,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
-    impl_->TransitionTexture(impl_->back_buffers[output_index].Get(),
+    impl_->TransitionTexture(output.Get(),
                              D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT,
                              D3D12_BARRIER_LAYOUT_COPY_SOURCE,
                              D3D12_BARRIER_LAYOUT_PRESENT);
-    impl_->command_list->Close();
-    ID3D12CommandList *lists[] = {impl_->command_list.Get()};
-    impl_->queue->ExecuteCommandLists(1, lists);
-    if (auto wait = impl_->WaitForGpu(); !wait)
+    if (auto wait = SubmitCaptureCopy(*impl_, frame.allocator.Get(), readback); !wait)
     {
         return wait;
     }
@@ -242,12 +251,12 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     std::vector<std::byte> preview;
     if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
     {
-        HdrPreview(png_pixels, png_pitch, main_view.width, main_view.height,
-                   main_view.display_state.paper_white_nits, preview);
+        HdrPreview(png_pixels, png_pitch, view.width, view.height,
+                   view.display_state.paper_white_nits, preview);
         png_pixels = preview.data();
-        png_pitch = main_view.width * 4;
+        png_pitch = view.width * 4;
     }
-    const auto write = impl_->WritePng(path, png_pixels, png_pitch);
+    const auto write = impl_->WritePng(path, png_pixels, png_pitch, {view.width, view.height});
     std::array<D3D12_DRAW_ARGUMENTS, kParticleDrawBinCount> particle_draws{};
     impl_->last_particle_count = 0;
     for (std::size_t bin = 0; bin < particle_draws.size(); ++bin)
@@ -597,12 +606,7 @@ template <typename Impl>
     impl.command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, &source_box);
     impl.TransitionTexture(source_resource.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                            native.state, D3D12_BARRIER_LAYOUT_COPY_SOURCE, native.layout);
-    result = impl.command_list->Close();
-    if (FAILED(result))
-        return HResultFailure("Close HDR capture list", result);
-    ID3D12CommandList *lists[] = {impl.command_list.Get()};
-    impl.queue->ExecuteCommandLists(1, lists);
-    if (auto wait = impl.WaitForGpu(); !wait)
+    if (auto wait = SubmitCaptureCopy(impl, frame.allocator.Get(), readback); !wait)
         return wait;
 
     void *mapped_data{};
@@ -778,11 +782,18 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto ao_resources = owner.ambient_occlusion.DiagnosticResources();
     for (std::size_t index = 0; index < ao_resources.size(); ++index)
         append_diagnostic(ao_names[index], ao_resources[index]);
+    constexpr std::array ssr_names{"ssr_raw", "ssr_history", "ssr_validation"};
+    const auto ssr_resources = owner.screen_reflections.DiagnosticResources(owner.frame_number - 1u);
+    for (std::size_t index = 0; index < ssr_resources.size(); ++index)
+        append_diagnostic(ssr_names[index], ssr_resources[index]);
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (owner.translucency_capture_active)
     {
         constexpr std::array names{"translucency_depth", "translucency_motion", "translucency_history",
-            "translucency_classification", "translucency_metadata", "translucency_unpeeled", "translucency_transport", "translucency_color"};
+            "translucency_classification", "translucency_metadata", "translucency_unpeeled", "translucency_transport", "translucency_color",
+            "translucency_depth_layer1", "translucency_optical_component_0", "translucency_optical_component_1",
+            "translucency_optical_component_2", "translucency_optical_component_3", "translucency_exit_depth",
+            "translucency_metadata_layer1"};
         const auto resources = owner.translucency.DiagnosticResources();
         for (std::size_t index = 0; index < resources.size(); ++index)
             append_diagnostic(names[index], resources[index]);
@@ -913,12 +924,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                                  D3D12_RESOURCE_STATE_COPY_SOURCE, surface.final_state,
                                  D3D12_BARRIER_LAYOUT_COPY_SOURCE, surface.final_layout);
     }
-    const auto close_result = impl_->command_list->Close();
-    if (FAILED(close_result))
-        return HResultFailure("Close surface diagnostic list", close_result);
-    ID3D12CommandList *lists[] = {impl_->command_list.Get()};
-    impl_->queue->ExecuteCommandLists(1, lists);
-    if (auto wait = impl_->WaitForGpu(); !wait)
+    if (auto wait = SubmitCaptureCopy(*impl_, frame.allocator.Get(), readback); !wait)
         return wait;
 
     void *mapped_data{};
@@ -1320,12 +1326,7 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
             impl_->TransitionBuffer(buffer.resource->resource.Get(), copy_state, buffer.native_state,
                                     copy_sync, buffer.native_sync, copy_access, buffer.native_access);
     }
-    result = impl_->command_list->Close();
-    if (FAILED(result))
-        return HResultFailure("Close geometry diagnostic list", result);
-    ID3D12CommandList *lists[] = {impl_->command_list.Get()};
-    impl_->queue->ExecuteCommandLists(1, lists);
-    if (auto wait = impl_->WaitForGpu(); !wait)
+    if (auto wait = SubmitCaptureCopy(*impl_, capture_frame.allocator.Get(), readback); !wait)
         return wait;
 
     void *mapped_data{};
@@ -1907,12 +1908,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         impl_->TransitionBuffer(buffer.resource->resource.Get(), copy_state, buffer.native.state,
                                 copy_sync, buffer.native.sync, copy_access, buffer.native.access);
     }
-    result = impl_->command_list->Close();
-    if (FAILED(result))
-        return HResultFailure("Close visibility diagnostic list", result);
-    ID3D12CommandList *lists[] = {impl_->command_list.Get()};
-    impl_->queue->ExecuteCommandLists(1, lists);
-    if (auto wait = impl_->WaitForGpu(); !wait)
+    if (auto wait = SubmitCaptureCopy(*impl_, capture_frame.allocator.Get(), readback); !wait)
         return wait;
 
     void *mapped_data{};
@@ -2646,7 +2642,7 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
     switch (request.kind)
     {
     case CaptureKind::Color:
-        result = CapturePng(request.path);
+        result = CapturePng(request.path, request.view_id);
         break;
     case CaptureKind::HdrColor:
         result = CaptureHdrColor(*impl_, request.path);

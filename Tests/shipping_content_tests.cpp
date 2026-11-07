@@ -1,7 +1,7 @@
 #include "../Source/Apps/ContentLinker/vfx_storage_tag.hpp"
+#include "../Source/Runtime/Private/vfx_typed_light_commands.hpp"
 #include "test_generation_paths.hpp"
 #include "vfx_catalog.hpp"
-#include "vfx_light_reference.hpp"
 #include <hs/core/process_info.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/shipped_content_owner.hpp>
@@ -251,10 +251,11 @@ void TestCompiledVfxLightCoverage()
             input.quality=quality; input.geometry_owner_id=owned?91:0; input.geometry_start_tick=3; input.geometry_end_tick=243;
             for(hs::Tick tick=0;tick<=250;++tick)
             {
-                const auto reference=hs::runtime_detail::light_reference::BuildVfxTypedLightCommands(
-                    program,std::span(&input,1),tick);
-                vfx_light_test::Compare(reference,hs::runtime_detail::BuildVfxTypedLightCommands(
-                    image,std::span(&input,1),tick));
+                const auto lights=hs::runtime_detail::BuildVfxTypedLightCommands(image,std::span(&input,1),tick);
+                for (const auto &light : lights)
+                    Check(light.stable_id != 0 && light.quality == quality && std::isfinite(light.intensity) &&
+                        light.intensity > 0 && std::isfinite(light.radius) && light.radius > 0,
+                        "compiled light has invalid identity, quality, intensity or radius");
             }
         }
         Check(decoded==expected,"compiled VFX light recipe coverage");

@@ -1087,7 +1087,7 @@ struct RenderGraphBuilder::Impl
         render_graph::AliasPlan aliases;
     };
     // Current topology is newest; previous plans are ordered from most to least recently used.
-    std::array<PreviousPlan, 7> previous_plans;
+    std::array<PreviousPlan, RenderGraphBuilder::RetainedPlanCapacity - 1> previous_plans;
     std::uint64_t plan_input_builds{};
     std::uint64_t plan_compilations{};
     std::uint64_t plan_reuses{};
@@ -3810,7 +3810,7 @@ bool RenderGraphBuilder::OutputClosureImportsReady(
         for (const auto &use : pass.Uses())
         {
             const auto *resource = impl_->Find(use.predecessor.resource);
-            if (!resource || (resource->imported && !resource->completion.IsSatisfiedBy(completed)))
+            if (!resource || (resource->imported && !resource->imported_completion.IsSatisfiedBy(completed)))
                 return false;
         }
     }

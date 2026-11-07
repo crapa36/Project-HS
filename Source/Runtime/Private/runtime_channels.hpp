@@ -32,6 +32,26 @@ struct ResizeCommand
     std::uint32_t height{};
 };
 
+class ResizeMailbox
+{
+  public:
+    bool TryPush(ResizeCommand value) noexcept
+    {
+        pending_.store((std::uint64_t(value.width) << 32) | value.height, std::memory_order_release);
+        return true;
+    }
+    bool TryPop(ResizeCommand &value) noexcept
+    {
+        const auto pending = pending_.exchange(0, std::memory_order_acq_rel);
+        if (!pending) return false;
+        value = {std::uint32_t(pending >> 32), std::uint32_t(pending)};
+        return true;
+    }
+    std::size_t Size() const noexcept { return pending_.load(std::memory_order_acquire) != 0; }
+  private:
+    std::atomic<std::uint64_t> pending_{};
+};
+
 struct QueuedAudioEvent
 {
     PresentationEvent event;
@@ -56,7 +76,7 @@ struct RenderPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
-    BoundedSpscQueue<ResizeCommand, 64> &resize_commands;
+    ResizeMailbox &resize_commands;
     BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> &renderer_settings;
     BoundedSpscQueue<GraphicsSettingsAck, 8> &renderer_settings_acks;
     BoundedSpscQueue<NativeWindowMessage, 256> &window_messages;
@@ -135,14 +155,14 @@ struct SimulationPorts
     }
 
     // The same owned values feed recording and one live destination in source order.
-    void ProjectDomainSignalsOnce(std::span<const DomainSignal> signals, float arena_half_extent,
+    void ProjectDomainSignalsOnce(std::span<const DomainSignal> signals, bool meadow_terrain_enabled,
                                   bool capture_trace, std::vector<PresentationEvent> *record_events)
     {
         if (record_events) record_events->clear();
         for (const auto &signal : signals)
         {
             std::array<PresentationEvent, 3> projected{};
-            const auto count = ProjectDomainSignal(signal, projected, arena_half_extent);
+            const auto count = ProjectDomainSignal(signal, projected, meadow_terrain_enabled);
             for (const auto &event : std::span(projected).first(count))
             {
                 if (record_events) record_events->push_back(event);
@@ -189,7 +209,7 @@ struct RuntimeChannels
     runtime_detail::DiagnosticClock capture_clock{}; // Assigned before worker publication.
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
-    BoundedSpscQueue<ResizeCommand, 64> resize_commands;
+    ResizeMailbox resize_commands;
     // Requests carry a pointer to the commit owner's immutable in-flight graphics
     // snapshot. Release/acquire queue publication and the acknowledgment queue
     // protect it until the render consumer finishes; Runtime joins before teardown.

@@ -197,18 +197,32 @@ std::string_view ShaderMaterialName(std::string_view id, std::string_view suffix
 std::vector<std::byte> EncodeMaterialSurfaceLayout(MaterialSurfaceLayout layout)
 {
     std::vector<std::byte> bytes(kMaterialSurfaceLayoutStride);
-    Put(bytes, 0, 0x314c534du, 4); // MSL1
+    Put(bytes, 0, 0x324c534du, 4); // MSL2
     Put(bytes, 4, layout.capability_mask, 4);
     Put(bytes, 8, layout.varying_mask, 4);
+    Put(bytes, 12, layout.has_static_solid_transmission_profile ? 1u : 0u, 4);
+    for (std::size_t lane = 0; lane < layout.solid_transmission_profile.size(); ++lane)
+        Put(bytes, 16 + lane * 4, layout.solid_transmission_profile[lane], 4);
     (void)DecodeMaterialSurfaceLayout(bytes);
     return bytes;
 }
 
 MaterialSurfaceLayout DecodeMaterialSurfaceLayout(std::span<const std::byte> bytes)
 {
-    Require(bytes.size() == kMaterialSurfaceLayoutStride && Get(bytes, 0, 4) == 0x314c534du &&
-            Get(bytes, 12, 4) == 0, "invalid material surface layout record");
-    MaterialSurfaceLayout layout{Get(bytes, 4, 4), Get(bytes, 8, 4)};
+    const bool legacy = bytes.size() == kLegacyMaterialSurfaceLayoutStride &&
+        Get(bytes, 0, 4) == 0x314c534du && Get(bytes, 12, 4) == 0;
+    Require(legacy || (bytes.size() == kMaterialSurfaceLayoutStride &&
+            Get(bytes, 0, 4) == 0x324c534du && Get(bytes, 12, 4) <= 1),
+        "invalid material surface layout record");
+    MaterialSurfaceLayout layout;
+    layout.capability_mask = Get(bytes, 4, 4);
+    layout.varying_mask = Get(bytes, 8, 4);
+    if (!legacy)
+    {
+        layout.has_static_solid_transmission_profile = Get(bytes, 12, 4) != 0;
+        for (std::size_t lane = 0; lane < layout.solid_transmission_profile.size(); ++lane)
+            layout.solid_transmission_profile[lane] = Get(bytes, 16 + lane * 4, 4);
+    }
     Require((layout.capability_mask & ~511u) == 0 && (layout.capability_mask & 65u) != 0 &&
             (layout.varying_mask & ~31u) == 0, "unsupported material surface capabilities");
     Require((layout.capability_mask & 65u) != 65u,
@@ -219,6 +233,13 @@ MaterialSurfaceLayout DecodeMaterialSurfaceLayout(std::span<const std::byte> byt
     Require((layout.capability_mask & 64u) == 0 ||
             (layout.capability_mask & (2u | 4u | 8u | 16u | 128u | 256u)) == 0,
             "unlit material surface cannot contain scattering layers");
+    if (layout.has_static_solid_transmission_profile)
+        Require((layout.capability_mask & 256u) != 0,
+            "static optical profile requires solid transmission");
+    else
+        Require(std::ranges::all_of(layout.solid_transmission_profile,
+                [](std::uint32_t bits) { return bits == 0; }),
+            "unknown optical profile must use canonical zero bits");
     constexpr std::array<std::uint32_t, 5> capabilities{4u, 2u, 8u, 16u, 32u | 64u};
     for (std::size_t bit = 0; bit < capabilities.size(); ++bit)
         Require((layout.varying_mask & (1u << bit)) == 0 ||
@@ -403,7 +424,6 @@ std::vector<MaterialParameterDefinition> DecodeMaterialParameters(
             parameter.default_words[lane] = GetParameter(bytes, cursor + 4 + lane * 4, 4);
         parameter.uint_min = GetParameter(bytes, cursor + 20, 4);
         parameter.uint_max = GetParameter(bytes, cursor + 24, 4);
-        ValidateParameterDefinition(parameter);
         result.push_back(std::move(parameter));
         cursor += 28 + id_length;
     }
@@ -821,7 +841,11 @@ CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &pac
     };
     CharacterMaterialPackageData result;
     result.dependencies = package.dependencies;
-    result.surface = DecodeMaterialSurfaceLayout(find(ChunkType::MaterialSurfaceLayout).bytes);
+    const auto &surface_chunk = find(ChunkType::MaterialSurfaceLayout);
+    Require((surface_chunk.version == 1 && surface_chunk.stride == kLegacyMaterialSurfaceLayoutStride) ||
+            (surface_chunk.version == 2 && surface_chunk.stride == kMaterialSurfaceLayoutStride),
+            "unsupported hero material surface profile version");
+    result.surface = DecodeMaterialSurfaceLayout(surface_chunk.bytes);
     result.parameter_layout_hash = DecodeMaterialParameterLayout(find(ChunkType::MaterialParameterLayout).bytes);
     result.programs = DecodeMaterialPrograms(find(ChunkType::MaterialProgram).bytes, package.dependencies);
     result.domain = (result.surface.capability_mask & 256u) != 0 ?
@@ -876,7 +900,7 @@ std::vector<std::byte> BuildCharacterMaterialPackage(std::string_view name,
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialProgram), 1, true, program_bytes,
                     programs.size(), kMaterialProgramStride},
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialParameterLayout), 1, true, layout_bytes, 1, 32},
-        ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout), 1, true, surface_bytes, 1, kMaterialSurfaceLayoutStride}};
+        ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout), 2, true, surface_bytes, 1, kMaterialSurfaceLayoutStride}};
     const auto package = BuildPackage(MakeAssetId("render/material/" + std::string(name) + "/material.rpkg"), dependencies, chunks);
     (void)ReadCharacterMaterialPackage(package, name);
     return package;

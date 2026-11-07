@@ -11,7 +11,8 @@
 
 namespace hs::render_data
 {
-inline constexpr std::uint32_t kGeometryAbi = 1;
+inline constexpr std::uint32_t kGeometryAbi = 2;
+inline constexpr std::uint32_t kLegacyGeometryAbi = 1;
 // Shared CPU/shader descriptor capacity; residency byte budgets remain independent.
 inline constexpr std::uint32_t kGeometryPageCapacity = 256;
 inline constexpr std::uint32_t kGeometryBuffersPerPage = 4;
@@ -64,6 +65,7 @@ struct GeometryMeshlet
 };
 struct GeometryData
 {
+    std::uint16_t vertex_wire_version{kExpandedVertexWireVersion};
     std::vector<ExpandedVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<GeometrySubmesh> submeshes;

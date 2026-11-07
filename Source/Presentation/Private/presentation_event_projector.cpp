@@ -101,10 +101,10 @@ void AddVfx(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t
 }
 
 std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<PresentationEvent> out,
-                                float arena_half_extent) noexcept
+                                bool meadow_terrain_enabled) noexcept
 {
     auto s = source;
-    if (arena_half_extent >= 14.0f)
+    if (meadow_terrain_enabled)
     {
         s.position.y += MeadowGroundHeight({s.position.x, s.position.z});
         if ((s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0)

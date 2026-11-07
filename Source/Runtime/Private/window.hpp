@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <functional>
@@ -59,6 +60,10 @@ class Window
                                 bool borderless);
     [[nodiscard]] bool PumpMessages(Result *failure = nullptr, bool sample_input = true);
     [[nodiscard]] HWND Handle() const noexcept;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    void EnableTestRoom() noexcept { test_room_enabled_ = true; }
+    unsigned ConsumeTestRoomActions() noexcept { return test_room_actions_.exchange(0); }
+#endif
     void StopInput() noexcept;
     void BeginSkillRebind(std::uint32_t slot) noexcept;
     void CancelSkillRebind() noexcept;
@@ -93,6 +98,11 @@ class Window
     std::function<void(Float2)> ui_hover_handler_;
     Sequence input_sequence_{};
     bool accepting_input_{true};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    bool test_room_enabled_{};
+    std::atomic<unsigned> test_room_actions_{};
+    std::array<bool, 3> test_room_keys_{};
+#endif
     bool borderless_{};
     bool has_windowed_rect_{};
     RECT windowed_rect_{};

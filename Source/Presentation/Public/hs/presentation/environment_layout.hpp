@@ -14,12 +14,13 @@ namespace hs
 {
 inline constexpr std::uint32_t kEnvironmentLayoutAbi = 2;
 inline constexpr Float3 kEnvironmentSunDirection{-0.45f, -0.82f, 0.35f};
+inline constexpr float kEnvironmentSunIlluminanceLux = 2049.0f;
 
 [[nodiscard]] constexpr LightView EnvironmentSun() noexcept
 {
     LightView sun{};
     sun.direction = kEnvironmentSunDirection;
-    sun.quantity = 3.0f * kLightWhiteLumensPerWatt;
+    sun.quantity = kEnvironmentSunIlluminanceLux;
     sun.color = {1.0f, 0.92f, 0.78f};
     sun.stable_id = 0x48535f53554e0001ull;
     sun.type = LightType::Directional;

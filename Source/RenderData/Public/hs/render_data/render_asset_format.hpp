@@ -13,19 +13,23 @@ namespace hs::render_data
 {
 inline constexpr std::uint16_t kRenderPackageVersion = 1;
 inline constexpr std::uint32_t kExpandedVertexStride = 76;
+inline constexpr std::uint16_t kExpandedVertexWireVersion = 2;
+inline constexpr std::uint16_t kLegacyExpandedVertexWireVersion = 1;
 inline constexpr std::uint32_t kMaterialMetadataStride = 40;
 // v1-v3 material chunks used a 36-byte record. They remain readable through
 // the explicit historical decoder, while newly encoded records use v4/40.
 inline constexpr std::uint32_t kHistoricalMaterialMetadataStride = 36;
 inline constexpr std::uint32_t kMaterialProgramStride = 4;
 inline constexpr std::uint32_t kMaterialBindingStride = 12;
-inline constexpr std::uint32_t kMaterialSurfaceLayoutStride = 16;
+inline constexpr std::uint32_t kMaterialSurfaceLayoutStride = 32;
+inline constexpr std::uint32_t kLegacyMaterialSurfaceLayoutStride = 16;
 inline constexpr std::uint32_t kGeometryHierarchyReferenceStride = 4;
 inline constexpr std::uint32_t kCharacterMaterialBindingStride = 8;
 
-// ExpandedVertices v1 uses these fields, never a C++ struct's object bytes.
+// GeometryVertices v2 uses these fields, never a C++ struct's object bytes.
 // Offsets: position 0, normal 12, bone indices 24, weights 32, UV 48,
-// tangent 56, material index 72, reserved 74. All scalars are little-endian.
+// tangent 56, material index 72, optical component ID 74. All scalars are little-endian.
+// Version 1 requires optical_component_id to be zero.
 struct ExpandedVertex
 {
     std::array<float, 3> position{};
@@ -35,14 +39,15 @@ struct ExpandedVertex
     std::array<float, 2> uv{};
     std::array<float, 4> tangent{};
     std::uint16_t material_index{};
-    std::uint16_t reserved{};
+    std::uint16_t optical_component_id{};
 };
 
 void ValidateExpandedVertices(std::span<const ExpandedVertex> vertices);
 [[nodiscard]] std::vector<std::byte> EncodeExpandedVertices(
     std::span<const ExpandedVertex> vertices);
 [[nodiscard]] std::vector<ExpandedVertex> DecodeExpandedVertices(
-    std::span<const std::byte> bytes);
+    std::span<const std::byte> bytes,
+    std::uint16_t wire_version = kExpandedVertexWireVersion);
 
 enum class ChunkType : std::uint32_t
 {

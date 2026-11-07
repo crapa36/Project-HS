@@ -18,6 +18,7 @@
 
 namespace hs
 {
+struct AllocationResource;
 #define HS_SSR_NATIVE
 #include "../../../Content/Shaders/screen_reflections_abi.hlsli"
 #undef HS_SSR_NATIVE
@@ -106,6 +107,8 @@ class ScreenReflectionsSystem
     void ResetHistory() noexcept;
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+    [[nodiscard]] std::array<const AllocationResource *, 3> DiagnosticResources(
+        std::uint64_t frame_index) const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(ScreenReflectionsSystem &other) noexcept { impl_.swap(other.impl_); }
   private:

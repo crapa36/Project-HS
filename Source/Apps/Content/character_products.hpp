@@ -15,6 +15,7 @@ struct CharacterMaterialDomainSelection
 {
     std::uint32_t hero_ordinal{};
     render_data::CharacterMaterialDomain domain{};
+    render_data::MaterialSurfaceLayout surface{};
 };
 
 struct CharacterProduct

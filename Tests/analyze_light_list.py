@@ -12,7 +12,7 @@ import subprocess
 
 
 LOCAL_COUNTS = (4, 64, 65, 128, 127, 0, 4)
-DIRECTIONAL_COUNTS = (0, 0, 0, 0, 1, 1, 0)
+DIRECTIONAL_COUNTS = (0, 0, 0, 0, 1, 0, 0)
 
 
 def require(condition, message):
@@ -79,6 +79,19 @@ def analyze_frame(directory, frame):
         require(ids[:directional] == sorted(ids[:directional])
                 and ids[directional:] == sorted(ids[directional:]) and len(set(ids)) == total,
                 "Stable record order or identity uniqueness changed")
+        for index, identity in enumerate(identities):
+            if identity[3] == 1:  # Point: frame7 supplies already radiometric intensity.
+                intensity = struct.unpack_from("<f", records, index * 128 + 44)[0]
+                expected_intensity = (100.0 / local) / 683.0 / (4.0 * math.pi)
+                require(math.isclose(intensity, expected_intensity, rel_tol=2e-6),
+                        "Point luminous-flux and prepared radiant-intensity inputs disagree")
+            elif identity[3] == 2:
+                outer = struct.unpack_from("<f", records, index * 128 + 28)[0]
+                inner = struct.unpack_from("<f", records, index * 128 + 52)[0]
+                intensity = struct.unpack_from("<f", records, index * 128 + 44)[0]
+                solid_angle = 2.0 * math.pi * ((1.0 - inner) + (inner - outer) / 3.0)
+                require(math.isclose(intensity, (100.0 / local) / 683.0 / solid_angle, rel_tol=2e-6),
+                        "Spot luminous flux does not match its squared cosine-ramp solid angle")
 
         encoding = status["index_encoding"]
         complete_mask = encoding == "bitset_u32x4_complete"

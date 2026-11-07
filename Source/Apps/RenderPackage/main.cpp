@@ -190,7 +190,12 @@ constexpr std::string_view kTerrainMaterialName = "terrain";
 rd::MaterialSurfaceLayout SurfaceLayout(const rd::PreparedMaterial &prepared)
 {
     const auto reflection = rd::AnalyzeClosure(prepared);
-    const rd::MaterialSurfaceLayout layout{reflection.capability_mask, reflection.varying_mask};
+    rd::MaterialSurfaceLayout layout{reflection.capability_mask, reflection.varying_mask};
+    if (const auto profile = rd::SolidTransmissionProfileBits(prepared))
+    {
+        layout.solid_transmission_profile = *profile;
+        layout.has_static_solid_transmission_profile = true;
+    }
     (void)rd::EncodeMaterialSurfaceLayout(layout);
     return layout;
 }
@@ -199,7 +204,7 @@ bool MatchesSurfaceLayout(const rd::PackageView &package, rd::MaterialSurfaceLay
 {
     const auto chunk = std::ranges::find(package.chunks,
         rd::ChunkType::MaterialSurfaceLayout, &rd::ChunkView::type);
-    return chunk != package.chunks.end() && chunk->required && chunk->version == 1 &&
+    return chunk != package.chunks.end() && chunk->required && chunk->version == 2 &&
         chunk->count == 1 && chunk->stride == rd::kMaterialSurfaceLayoutStride &&
         rd::DecodeMaterialSurfaceLayout(chunk->bytes) == expected;
 }
@@ -284,7 +289,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.material";
-    spec.recipe_version = 4;
+    spec.recipe_version = 5;
     spec.namespace_path = "render/" + std::string(name);
     UpstreamProducts upstream_products(build_root);
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) + "/package-structure",
@@ -371,7 +376,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
             rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),
                             1, true, parameter_layout, 1, 32},
             rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),
-                            1, true, surface_bytes, 1, rd::kMaterialSurfaceLayoutStride}};
+                            2, true, surface_bytes, 1, rd::kMaterialSurfaceLayoutStride}};
         const auto package = rd::BuildPackage(hs::MakeAssetId(product_id),
                                                dependencies, chunks);
         const auto verified = rd::ReadPackage(package, hs::MakeAssetId(product_id));
@@ -416,7 +421,8 @@ std::vector<std::uint16_t> MaterialPartitionMapping(
 {
     std::uint16_t max_entry = 0;
     for (const auto &vertex : fine) max_entry = std::max(max_entry, vertex.material_index);
-    for (const auto &vertex : coarse) max_entry = std::max(max_entry, vertex.material_index);
+    if (fine.data() != coarse.data() || fine.size() != coarse.size())
+        for (const auto &vertex : coarse) max_entry = std::max(max_entry, vertex.material_index);
     // Each RenderPackage action owns one MaterialDefinition. Mesh material
     // entries are shader/atlas selectors, so every entry maps to that one
     // actual material partition for geometry error measurement.
@@ -573,7 +579,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.environment";
-    spec.recipe_version = 15;
+    spec.recipe_version = 16;
     spec.namespace_path = "render/" + std::string(name);
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
     UpstreamProducts upstream_products(build_root);
@@ -683,7 +689,6 @@ void Produce(std::string_view name, const fs::path &source_root,
     std::set<std::string> decoded_upstream_ids{parameter_id};
     ValidateParameterBytes(parameter_id, parameter_bytes,
         definition.prepared.Graph().parameters);
-    texture_descriptions.clear();
     for (const auto &texture : definition.prepared.Graph().textures)
     {
         const auto texture_namespace = texture.product_id.substr(0, texture.product_id.size() - 5);
@@ -708,10 +713,9 @@ void Produce(std::string_view name, const fs::path &source_root,
             std::as_bytes(std::span(mesh.data() + 16, mesh.size() - 16)));
         std::uint32_t required_layer = name.starts_with("leaf_") ? 2u :
                                        name.starts_with("grass_") ? 1u : 0u;
-        for (std::size_t offset = 16; offset < mesh.size(); offset += rd::kExpandedVertexStride)
+        for (const auto &vertex : package.vertices)
         {
-            const auto material_index = static_cast<unsigned char>(mesh[offset + 72]) |
-                (std::uint32_t(static_cast<unsigned char>(mesh[offset + 73])) << 8);
+            const auto material_index = std::uint32_t(vertex.material_index);
             if (masked)
                 Require(material_index < (name.starts_with("leaf_") ? 18u : 30u),
                         "foliage atlas entry exceeds the shader page mapping ABI");
@@ -737,10 +741,19 @@ void Produce(std::string_view name, const fs::path &source_root,
             (hs::HasEnvironmentWind(rd::EnvironmentMeshForOrdinal(geometry_ordinal),
                 geometry_ordinal >= rd::kGroundDetailGeometryBegin ? geometry_ordinal - rd::kGroundDetailGeometryBegin : 0u)
                 ? rd::kGeometryFlagWind : 0u);
+        std::uint32_t max_selector{};
+        for (const auto &package : packages)
+            for (const auto &vertex : package.vertices)
+                max_selector = std::max(max_selector, std::uint32_t(vertex.material_index));
+        std::vector<hs::geometry_content::OpticalMaterialProfile> optical_profiles(
+            std::size_t(max_selector) + 1);
+        if (surface_layout.capability_mask &
+            static_cast<std::uint32_t>(rd::MaterialClosureCapability::SolidTransmission))
+            for (auto &profile : optical_profiles) profile = {1, true};
         const auto hierarchy_mapping = MaterialPartitionMapping(packages.front().vertices, packages.front().vertices);
         const auto cooked_hierarchy = hs::geometry_content::CookGeometryHierarchy(
             packages.front().vertices, geometry_flags, "render/hierarchy/" + std::string(name),
-            hierarchy_mapping, hierarchy_options);
+            hierarchy_mapping, hierarchy_options, optical_profiles);
         std::vector<std::string> hierarchy_dependencies;
         for (std::size_t index = 0; index < cooked_hierarchy.pages.size(); ++index)
         {
@@ -787,7 +800,7 @@ void Produce(std::string_view name, const fs::path &source_root,
                     material_bindings,rd::kMaterialTextureSlots,rd::kMaterialBindingStride},
                 rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),1,true,
                     parameter_layout,1,32},
-                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),1,true,
+                rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),2,true,
                     surface_bytes,1,rd::kMaterialSurfaceLayoutStride}};
             const auto material_bytes = rd::BuildPackage(hs::MakeAssetId(material_product),
                 material_dependencies, material_chunks);
@@ -805,7 +818,7 @@ void Produce(std::string_view name, const fs::path &source_root,
         for (const auto &input : packages)
         {
             const auto geometry=hs::geometry_content::CookGeometry(input.vertices,
-                geometry_flags);
+                geometry_flags, optical_profiles);
             rd::GeometryMetadata gm;gm.flags=geometry.flags;gm.vertex_count=static_cast<std::uint32_t>(geometry.vertices.size());gm.index_count=static_cast<std::uint32_t>(geometry.indices.size());gm.submesh_count=static_cast<std::uint32_t>(geometry.submeshes.size());gm.meshlet_count=static_cast<std::uint32_t>(geometry.meshlets.size());gm.vertex_ref_count=static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());gm.bounds=geometry.bounds;gm.lod=input.lod;
             for(const auto&v:geometry.vertices)gm.max_material_index=std::max(gm.max_material_index,std::uint32_t(v.material_index));
             const auto dep=[&](const std::string&id){const auto found=std::ranges::find(input.dependencies,id);Require(found!=input.dependencies.end(),"missing geometry dependency");return static_cast<std::uint16_t>(found-input.dependencies.begin());};

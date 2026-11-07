@@ -265,6 +265,9 @@ TextureDescriptorStorage CompileTextureMetadataDescriptor(const PackageDirectory
     descriptor.description.mip_count = static_cast<std::uint32_t>(Get(metadata, 24, 4));
     const auto layout = Layout(descriptor.description);
     const auto &payload = directory.chunks[1];
+    Require(product_bytes <= std::numeric_limits<std::size_t>::max() &&
+        payload.offset <= product_bytes && payload.byte_count <= product_bytes - payload.offset,
+        "texture proof payload exceeds product bounds");
     Require(Get(metadata, 28, 4) == layout.size() &&
         metadata.size() == kMetadataHeader + layout.size() * kRecordStride &&
         Get(metadata, 32, 8) == payload.byte_count &&
@@ -285,7 +288,6 @@ TextureDescriptorStorage CompileTextureMetadataDescriptor(const PackageDirectory
     }
     for (const auto &dependency : directory.dependencies)
         descriptor.dependencies.push_back(MakeAssetId(dependency));
-    ValidateTextureDescriptor(descriptor.View(), product_bytes);
     return descriptor;
 }
 

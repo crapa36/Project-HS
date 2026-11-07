@@ -50,14 +50,7 @@ const ChunkView &RequiredChunk(const PackageView &package, ChunkType type)
 }
 void Surface(MaterialSurfaceLayout layout)
 {
-    Require(!(layout.capability_mask & ~511u) && (layout.capability_mask & 65u) &&
-            (layout.capability_mask & 65u) != 65u && !(layout.varying_mask & ~31u), "invalid surface capabilities");
-    const auto transport = layout.capability_mask & (16u | 128u | 256u);
-    Require(!transport || !(transport & (transport - 1)), "conflicting surface transport");
-    Require(!(layout.capability_mask & 64u) || !(layout.capability_mask & (2u|4u|8u|16u|128u|256u)), "unlit scattering surface");
-    constexpr std::array<std::uint32_t,5> capabilities{4u,2u,8u,16u,32u|64u};
-    for (std::size_t i=0;i<capabilities.size();++i)
-        Require(!(layout.varying_mask & (1u<<i)) || (layout.capability_mask & capabilities[i]), "varying field lacks capability");
+    (void)EncodeMaterialSurfaceLayout(layout);
 }
 } // namespace
 

@@ -221,7 +221,7 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
         views[index] = streaming.View(bindings[index]);
         const auto &view = views[index];
         if (view.resource) metadata[index] = {view.first_mip, view.resident_min_mip,
-            view.logical_description.mip_count, static_cast<UINT>(impl_->hardware && view.reserved)};
+            view.logical_description.mip_count, static_cast<UINT>(impl_->hardware && view.reserved && view.feedback_supported)};
         if (!previous) continue;
         const auto alias = previous->aliases[index];
         if (!metadata[index].feedback_enabled) { reuse = reuse && alias == UINT32_MAX; continue; }
@@ -248,7 +248,7 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
             const auto &view = views[index];
             if (!view.resource) continue;
             metadata[index] = {view.first_mip, view.resident_min_mip, view.logical_description.mip_count,
-                static_cast<UINT>(impl_->hardware && view.reserved)};
+                static_cast<UINT>(impl_->hardware && view.reserved && view.feedback_supported)};
             if (!metadata[index].feedback_enabled) continue;
             const auto found = owners.find(bindings[index].value);
             if (found != owners.end()) { candidate->aliases[index] = found->second; continue; }

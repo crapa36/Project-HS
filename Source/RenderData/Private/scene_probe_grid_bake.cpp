@@ -8,6 +8,31 @@
 
 namespace hs::render_data
 {
+SceneProbeIterationState CompareSceneProbeIterations(std::span<const Float4> previous,
+    std::span<const Float4> next,double absolute_tolerance,double relative_tolerance) noexcept
+{
+    if (previous.empty() || previous.size()!=next.size() || previous.size()%9!=0 ||
+        !std::isfinite(absolute_tolerance) || absolute_tolerance<0 ||
+        !std::isfinite(relative_tolerance) || relative_tolerance<0)
+        return SceneProbeIterationState::Invalid;
+    bool converged=true;
+    for (std::size_t i=0;i<previous.size();++i)
+    {
+        const float a[]{previous[i].x,previous[i].y,previous[i].z};
+        const float b[]{next[i].x,next[i].y,next[i].z};
+        if (!std::isfinite(previous[i].w) || !std::isfinite(next[i].w) ||
+            previous[i].w!=0 || next[i].w!=0) return SceneProbeIterationState::Invalid;
+        for (std::size_t channel=0;channel<3;++channel)
+        {
+            if (!std::isfinite(a[channel]) || !std::isfinite(b[channel]) ||
+                (i%9==0 && (a[channel]<0 || b[channel]<0))) return SceneProbeIterationState::Invalid;
+            const double scale=std::max(std::abs(double(a[channel])),std::abs(double(b[channel])));
+            if (std::abs(double(a[channel])-double(b[channel]))>absolute_tolerance+relative_tolerance*scale)
+                converged=false;
+        }
+    }
+    return converged ? SceneProbeIterationState::Converged : SceneProbeIterationState::Unconverged;
+}
 std::vector<SceneProbeCell> BakeSceneProbeCells(const SceneProbeDescription &description,
     std::span<const SceneProbeRecord> reflections,std::span<const float> signed_hits)
 {

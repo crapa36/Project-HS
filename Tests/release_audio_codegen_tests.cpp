@@ -1,6 +1,7 @@
 #include "release_audio_codegen.hpp"
 #include <hs/runtime/audio_image_io.hpp>
 #include <hs/core/sha256.hpp>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <span>
 #include <stdexcept>
@@ -26,6 +27,24 @@ void TestReleaseAudioCodegen()
         return bytes;
     };
     const auto read = [&](std::string_view name) { return wave(name.starts_with("music") ? 2 : 1); };
+    for (const auto field : {"max_simultaneous", "minimum_retrigger_ms"})
+        for (const auto &invalid : {nlohmann::json(-1), nlohmann::json(4294967296ull), nlohmann::json(0.5)})
+        {
+            auto changed = nlohmann::json::parse(catalog);
+            changed["entries"][0][field] = invalid;
+            bool rejected = false;
+            try { (void)hs::audio_content::BuildReleaseAudio(changed.dump(), read, 64); }
+            catch (const std::exception &) { rejected = true; }
+            check(rejected);
+        }
+    {
+        auto changed = nlohmann::json::parse(catalog);
+        changed["entries"][0]["max_simultaneous"] = 0;
+        bool rejected = false;
+        try { (void)hs::audio_content::BuildReleaseAudio(changed.dump(), read, 64); }
+        catch (const std::exception &) { rejected = true; }
+        check(rejected);
+    }
     const auto release = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
     const auto repeated = hs::audio_content::BuildReleaseAudio(catalog, read, 64);
     check(release.pcm == repeated.pcm && release.identity == repeated.identity && !release.identity.empty());

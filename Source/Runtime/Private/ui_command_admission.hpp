@@ -39,7 +39,6 @@ inline bool AdmitPresentedUiInteraction(UiInteraction &interaction,
         envelope.action = *interaction.gameplay_action;
         envelope.packet_generation = displayed.generation;
         envelope.session_id = displayed.session_id;
-        envelope.selection_epoch = displayed.selection_epoch;
         envelope.displayed_session = displayed.session;
         admitted = actions.TryPush(envelope);
     }

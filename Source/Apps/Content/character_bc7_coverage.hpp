@@ -115,8 +115,8 @@ inline void FitColor(const CharacterBc7Texels &source,Colors &endpoints,std::arr
     }
     // Reference is the semantic float mip, not its R8 wire quantization. If
     // that quantization crossed cutoff, include the closest byte on its proper side.
-    if(uncovered && minimum>=threshold) { if(!threshold) return false;minimum=threshold-1; }
-    if(covered && maximum<threshold) { if(threshold>255) return false;maximum=threshold; }
+    if(uncovered && minimum>=threshold) minimum=threshold-1;
+    if(covered && maximum<threshold) maximum=threshold;
     std::array<unsigned,16> alpha_indices{};
     for(unsigned pixel=0;pixel<16;++pixel)
     {

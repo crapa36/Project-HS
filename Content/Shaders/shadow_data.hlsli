@@ -129,7 +129,7 @@ bool HsVirtualShadowLookupLevel(float3 light, uint level, float2 depth_gradient,
 #endif
             const float2 delta = (float2(pixel - origin) + 0.5 - position) * float2(map.y, -map.y);
             const float tap_receiver = receiver - dot(depth_gradient, delta) * depth.y;
-            sum += tap_receiver + receiver_bias >= caster ? 1.0 : 0.0;
+            sum += caster == 0.0 || tap_receiver + receiver_bias >= caster ? 1.0 : 0.0;
         }
     visibility = sum / float(samples);
     return true;

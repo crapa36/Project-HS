@@ -24,7 +24,8 @@ __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\";
 namespace hs::scene_probe_bake
 {
 void BakeSceneProbe(const SelectedGeneration &generation, const std::filesystem::path &output,
-    const std::filesystem::path &artifacts)
+    const std::filesystem::path &artifacts, std::uint32_t maximum_cube_views,
+    std::uint32_t maximum_iterations, double absolute_tolerance, double relative_tolerance)
 {
     RendererConfig config;
     config.capture_timing_stream = false;
@@ -50,7 +51,8 @@ void BakeSceneProbe(const SelectedGeneration &generation, const std::filesystem:
     progress << "phase=bake\n" << std::flush;
     if (!progress) throw std::runtime_error("Cannot write scene-probe bake progress");
     std::vector<std::byte> bytes;
-    if (auto baked = D3D12Renderer::BakeSceneProbePackage(config, scene, sun, bytes); !baked)
+    if (auto baked = D3D12Renderer::BakeSceneProbePackage(config, scene, sun, bytes, maximum_cube_views,
+        {maximum_iterations, absolute_tolerance, relative_tolerance}); !baked)
         throw std::runtime_error(std::string(baked.Subsystem()) + ": " + std::string(baked.Message()));
     std::ofstream file(output, std::ios::binary | std::ios::trunc);
     file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));

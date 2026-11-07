@@ -754,10 +754,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         case rd::MaterialOp::SampledAlpha:
             ExactKeys(definition, {"id", "op", "type"});
             break;
-        case rd::MaterialOp::RoughnessScale:
-            ExactKeys(definition, {"id", "op", "type", "name"});
-            Require(definition.at("name") == "roughness_scale", "unknown parameter");
-            break;
         case rd::MaterialOp::Constant:
             ExactKeys(definition, {"id", "op", "type", "value"});
             break;

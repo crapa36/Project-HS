@@ -73,11 +73,7 @@ struct RenderPackage
     DevToolsFrameData devtools;
     // The owner, including an empty UI, is selected by the producer.
     std::shared_ptr<const UiDrawContent> ui_draw_content{EmptyUiDrawContent()};
-    std::optional<float> delta_seconds;
     std::optional<float> screen_overlay_intensity;
-    // Offline lockstep: complete prior GPU work and await admitted asset reads
-    // so publication boundaries depend on frames rather than wall-clock speed.
-    bool wait_for_streaming{};
     std::uint64_t ui_packet_generation{};
     // Capture before preparing effects so all package consumers sample one clock.
     // Views do not retime this explicit sample; discontinuities reset their history.

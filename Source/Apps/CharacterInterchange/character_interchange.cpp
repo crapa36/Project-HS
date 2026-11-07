@@ -212,9 +212,10 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
         runtime.materials.push_back({{}, {}, Id(materials[i].at("id"))});
     }
     runtime.material_count = static_cast<std::uint32_t>(materials.size());
-    for (const auto &v : render_data::DecodeExpandedVertices(vertices))
+    for (const auto &v : render_data::DecodeExpandedVertices(
+             vertices, render_data::kLegacyExpandedVertexWireVersion))
         runtime.vertices.push_back({v.position, v.normal, v.bone_indices, v.bone_weights,
-                                    v.uv, v.tangent, v.material_index, v.reserved});
+                                    v.uv, v.tangent, v.material_index, v.optical_component_id});
     Require(runtime.vertices.size() % 3 == 0, "nontriangular vertex count");
     for (const auto &vertex : runtime.vertices)
         for (std::size_t lane = 0; lane < 3; ++lane)

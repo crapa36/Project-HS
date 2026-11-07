@@ -10,6 +10,9 @@
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/render_data/scene_probe.hpp>
 #include <hs/render_data/surface_layout.hpp>
+#include <hs/render_data/geometry_package.hpp>
+#include <hs/render_data/character_package.hpp>
+#include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/quality_profiles.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
 #include <hs/render_data/material_descriptor.hpp>
@@ -23,6 +26,9 @@
 #include "static_shadow_bake_probe.hpp"
 #include "../Common/world_transport_scene.hpp"
 #include "../Common/renderer_geometry_catalog.hpp"
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+#include "../Content/geometry_cooker.hpp"
+#endif
 #include <hs/jobs/task_system.hpp>
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -63,6 +69,243 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 using Json = nlohmann::ordered_json;
+constexpr std::array kLightListLocalCounts{4u, 64u, 65u, 128u, 127u, 0u, 4u};
+constexpr std::array kLightListDirectionalCounts{0u, 0u, 0u, 0u, 1u, 0u, 0u};
+void Require(const hs::Result &result);
+
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+std::vector<std::byte> ReadFixtureProduct(const std::filesystem::path &path)
+{
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() <= 0 || input.tellg() > std::streamoff(256 * 1024 * 1024))
+        throw std::runtime_error("Invalid selected product extent for the translucency geometry fixture");
+    std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+        throw std::runtime_error("Could not read selected product for the translucency geometry fixture");
+    return bytes;
+}
+
+std::string FixtureDigest(std::span<const std::byte> bytes)
+{
+    constexpr char digits[] = "0123456789abcdef";
+    const auto hash = hs::Sha256(bytes);
+    std::string result = "sha256:";
+    result.reserve(71);
+    for (const auto byte : hash)
+    {
+        const auto value = std::to_integer<unsigned>(byte);
+        result.push_back(digits[value >> 4]);
+        result.push_back(digits[value & 15]);
+    }
+    return result;
+}
+
+struct OpticalPairFixtureProducts
+{
+    std::uint16_t outer_component{}, inner_component{};
+    std::uint32_t material_slot{};
+    std::string source_generation;
+    std::vector<std::string> output_digests;
+};
+
+hs::render_data::GeometryData MakeOpticalOctahedronPair(
+    std::uint32_t material_count, std::uint32_t material_slot, bool nested,
+    std::vector<hs::render_data::ExpandedVertex> &expanded)
+{
+    using Vertex = hs::render_data::ExpandedVertex;
+    using Profile = hs::geometry_content::OpticalMaterialProfile;
+    if (material_count == 0 || material_count > 65535 || material_slot >= material_count)
+        throw std::runtime_error("Selected character has no valid solid-transmission material slot");
+
+    std::vector<Profile> profiles(material_count);
+    profiles[material_slot] = {1, true};
+    constexpr std::array<std::array<float, 3>, 6> axes{{
+        {{0,0,1}}, {{0,0,-1}}, {{1,0,0}}, {{0,1,0}}, {{-1,0,0}}, {{0,-1,0}}}};
+    constexpr std::array<std::array<std::uint8_t, 3>, 8> faces{{
+        {{0,2,3}}, {{0,3,4}}, {{0,4,5}}, {{0,5,2}},
+        {{1,3,2}}, {{1,4,3}}, {{1,5,4}}, {{1,2,5}}}};
+    const auto append_shell = [&](float radius) {
+        for (auto face : faces)
+        {
+            std::array<float, 3> a{}, b{}, c{};
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                a[axis] = axes[face[0]][axis] * radius;
+                b[axis] = axes[face[1]][axis] * radius;
+                c[axis] = axes[face[2]][axis] * radius;
+            }
+            const std::array ab{b[0]-a[0], b[1]-a[1], b[2]-a[2]};
+            const std::array ac{c[0]-a[0], c[1]-a[1], c[2]-a[2]};
+            const std::array normal{ab[1]*ac[2]-ab[2]*ac[1], ab[2]*ac[0]-ab[0]*ac[2], ab[0]*ac[1]-ab[1]*ac[0]};
+            if (normal[0]*(a[0]+b[0]+c[0]) + normal[1]*(a[1]+b[1]+c[1]) +
+                    normal[2]*(a[2]+b[2]+c[2]) < 0.0f)
+                std::swap(face[1], face[2]);
+            for (const auto index : face)
+            {
+                Vertex vertex{};
+                vertex.position = {axes[index][0]*radius, axes[index][1]*radius, axes[index][2]*radius};
+                const float inverse_length = 1.0f / std::sqrt(vertex.position[0]*vertex.position[0] +
+                    vertex.position[1]*vertex.position[1] + vertex.position[2]*vertex.position[2]);
+                vertex.normal = {vertex.position[0]*inverse_length, vertex.position[1]*inverse_length,
+                    vertex.position[2]*inverse_length};
+                vertex.bone_indices = {0,0,0,0};
+                vertex.bone_weights = {1,0,0,0};
+                vertex.tangent = {1,0,0,1};
+                vertex.material_index = static_cast<std::uint16_t>(material_slot);
+                expanded.push_back(vertex);
+            }
+        }
+    };
+    append_shell(0.42f);
+    if (nested) append_shell(0.19f);
+    auto geometry = hs::geometry_content::CookGeometry(expanded,
+        hs::render_data::kGeometryFlagSkinned, profiles);
+    std::set<std::uint16_t> ids;
+    for (const auto &vertex : geometry.vertices)
+    {
+        if (vertex.optical_component_id == 0)
+            throw std::runtime_error("Cooked translucency fixture contains an uncertified shell");
+        ids.insert(vertex.optical_component_id);
+    }
+    if (ids.size() != (nested ? 2u : 1u))
+        throw std::runtime_error("Cooked translucency fixture component count differs from the authored shells");
+    if (nested)
+    {
+        const auto contains_radius = [&](float radius) {
+            return std::ranges::any_of(geometry.vertices, [radius](const auto &vertex) {
+                const float length = std::sqrt(vertex.position[0]*vertex.position[0] +
+                    vertex.position[1]*vertex.position[1] + vertex.position[2]*vertex.position[2]);
+                return std::abs(length-radius) < 1.0e-5f;
+            });
+        };
+        if (!contains_radius(0.42f) || !contains_radius(0.19f))
+            throw std::runtime_error("Cooked translucency fixture lost a shell radius");
+    }
+    return geometry;
+}
+
+OpticalPairFixtureProducts BuildOpticalPairFixture(hs::SelectedGeneration &generation,
+    const std::filesystem::path &artifacts)
+{
+    using namespace hs::render_data;
+    OpticalPairFixtureProducts result;
+    result.source_generation = generation.id;
+    const auto write_product = [&](std::string_view id, std::span<const std::byte> bytes) {
+        const auto path = artifacts / (std::string(id.substr(id.rfind('/') + 1)) + ".optical-fixture");
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        if (!output) throw std::runtime_error("Could not write selected-generation translucency fixture product");
+        const auto digest = FixtureDigest(bytes);
+        generation.product_paths[std::string(id)] = path;
+        generation.product_digests[std::string(id)] = digest;
+        result.output_digests.push_back(digest);
+    };
+    for (const auto &[stem, nested] : {std::pair<std::string_view, bool>{"enemy_melee", true}, {"enemy_ranged", false}})
+    {
+        const std::string metadata_id = "render/character/" + std::string(stem) + ".rpkg";
+        const std::string page_id = "render/geometry/character/" + std::string(stem) + ".rpage";
+        std::filesystem::path metadata_path;
+        Require(generation.Require(metadata_id, metadata_path));
+        const auto source_bytes = ReadFixtureProduct(metadata_path);
+        if (generation.product_digests.at(metadata_id) != FixtureDigest(source_bytes))
+            throw std::runtime_error("Selected character metadata digest mismatch before translucency override");
+        const auto package = ReadPackage(source_bytes, hs::MakeAssetId(metadata_id));
+        const auto source = DecodeCharacterMetadataPackage(package, false);
+        if (!source.monster || source.monster->lods.empty() ||
+            source.geometry.page_dependency_index >= package.dependencies.size() ||
+            package.dependencies[source.geometry.page_dependency_index] != page_id)
+            throw std::runtime_error("Selected slime metadata does not point to the expected LOD0 page");
+
+        std::uint32_t material_slot = UINT32_MAX;
+        for (const auto &binding : source.material_bindings)
+        {
+            if (binding.domain != CharacterMaterialDomain::Translucent) continue;
+            const auto material_name = kCharacterMaterialNames[binding.hero_ordinal];
+            const auto material_id = "render/material/" + std::string(material_name) + "/material.rpkg";
+            std::filesystem::path material_path;
+            Require(generation.Require(material_id, material_path));
+            const auto material_bytes = ReadFixtureProduct(material_path);
+            if (generation.product_digests.at(material_id) != FixtureDigest(material_bytes))
+                throw std::runtime_error("Selected material digest mismatch during translucency fixture admission");
+            const auto material = ReadCharacterMaterialPackage(material_bytes, material_name);
+            if (material.domain == CharacterMaterialDomain::Translucent &&
+                (material.surface.capability_mask & static_cast<std::uint32_t>(MaterialClosureCapability::SolidTransmission)) != 0)
+            {
+                material_slot = binding.slot;
+                break;
+            }
+        }
+        if (material_slot == UINT32_MAX)
+            throw std::runtime_error("Selected slime material binding has no admitted solid-transmission domain");
+        std::vector<ExpandedVertex> expanded;
+        expanded.reserve(nested ? 48u : 24u);
+        auto geometry = MakeOpticalOctahedronPair(source.material_count, material_slot, nested, expanded);
+        auto metadata = source.geometry;
+        metadata.abi = kGeometryAbi;
+        metadata.flags = geometry.flags;
+        metadata.vertex_count = static_cast<std::uint32_t>(geometry.vertices.size());
+        metadata.index_count = static_cast<std::uint32_t>(geometry.indices.size());
+        metadata.submesh_count = static_cast<std::uint32_t>(geometry.submeshes.size());
+        metadata.meshlet_count = static_cast<std::uint32_t>(geometry.meshlets.size());
+        metadata.vertex_ref_count = static_cast<std::uint32_t>(geometry.meshlet_vertex_refs.size());
+        metadata.max_material_index = material_slot;
+        metadata.bounds = geometry.bounds;
+        auto monster = *source.monster;
+        monster.lods.front() = metadata;
+        // This fixture supplies exactly one synthetic geometry page. Keep its
+        // monster directory and per-frame intervals limited to that page;
+        // retaining authored lower-detail pages would violate the required
+        // strictly decreasing vertex/index counts after replacing LOD0.
+        monster.lods.resize(1);
+        std::erase_if(monster.interval_bounds, [](const auto &bound) { return bound.lod != 0; });
+
+        CharacterPackageData character;
+        character.vertices.reserve(expanded.size());
+        for (const auto &vertex : expanded)
+            character.vertices.push_back({vertex.position, vertex.normal, vertex.bone_indices,
+                vertex.bone_weights, vertex.uv, vertex.tangent, vertex.material_index, 0});
+        character.clips = source.clips;
+        character.parents = source.parents;
+        character.inverse_bind_matrices = source.inverse_bind_matrices;
+        character.upper_body_weights = source.upper_body_weights;
+        // Production metadata stores its pose count with the monster final
+        // palette and intentionally has no local-transform chunk. The builder
+        // still validates its source shape against that count before omitting
+        // local transforms from the cooked monster package.
+        character.transforms.resize(source.monster->final_matrices.size());
+        character.bone_count = source.bone_count;
+        character.material_count = source.material_count;
+        character.ground_offset = 0.0f;
+        const auto rebuilt_metadata = BuildCharacterMetadataPackage(hs::MakeAssetId(metadata_id),
+            package.dependencies, character, metadata, source.material_bindings, &monster);
+        const auto rebuilt_page = BuildGeometryPage(hs::MakeAssetId(page_id), {}, geometry);
+        const auto rebuilt_character = DecodeCharacterMetadataPackage(rebuilt_metadata, hs::MakeAssetId(metadata_id), false);
+        const auto verified_page = PrepareGeometryPage(rebuilt_page, hs::MakeAssetId(page_id), rebuilt_character.geometry);
+        ValidateCharacterGeometry(rebuilt_character, verified_page);
+        write_product(metadata_id, rebuilt_metadata);
+        write_product(page_id, rebuilt_page);
+        if (stem == "enemy_melee")
+        {
+            result.material_slot = material_slot;
+            for (const auto &vertex : geometry.vertices)
+            {
+                const float length = std::sqrt(vertex.position[0]*vertex.position[0] +
+                    vertex.position[1]*vertex.position[1] + vertex.position[2]*vertex.position[2]);
+                if (std::abs(length - 0.42f) < 1.0e-5f) result.outer_component = vertex.optical_component_id;
+                if (std::abs(length - 0.19f) < 1.0e-5f) result.inner_component = vertex.optical_component_id;
+            }
+            if (!result.outer_component || !result.inner_component || result.outer_component == result.inner_component)
+                throw std::runtime_error("Certified nested shell IDs do not identify distinct outer and inner components");
+        }
+    }
+    std::string identity = generation.id;
+    for (const auto &digest : result.output_digests) identity += digest;
+    generation.id = FixtureDigest(std::as_bytes(std::span(identity.data(), identity.size()))).substr(7);
+    return result;
+}
+#endif
 
 double StageElapsedMilliseconds(Clock::time_point start)
 {
@@ -234,6 +477,11 @@ void ValidateTranslucencyDiagnosticsProbe(const std::vector<hs::RendererTransluc
         check(std::uint64_t(c[20]) * 32 == c[21] && std::uint64_t(c[22]) + c[23] == c[21], "environment32 sample conservation");
         check(p.pixel_product.ends_with("_translucency_diagnostics.dxil"), "instrumented shader product identity");
         check(sample.phase != 3, "retired standalone Guide draw was submitted");
+        if (sample.phase == 0)
+            check(p.pixel_product == "render/shader/layered_translucency_peel_front_ps_translucency_diagnostics.dxil" &&
+                p.rtv_count == 2 && p.rtv_formats[0] == DXGI_FORMAT_R32G32_UINT &&
+                p.rtv_formats[1] == DXGI_FORMAT_R32_UINT,
+                "front peel must write instance identity and optical component ID");
         if (require_layer_transition && (sample.phase <= 1 || sample.phase == 4))
             layer_rows[{sample.completed_frame, sample.view_id, sample.contributor}][sample.phase == 4 ? 2 : sample.phase].insert(sample.layer);
         if (sample.phase == 1)
@@ -279,7 +527,7 @@ void ValidateTranslucencyDiagnosticsProbe(const std::vector<hs::RendererTransluc
                 farther_accepted[sample.completed_frame] += c[15];
         }
         if (sample.phase == 2 || sample.phase == 4) shaded_accepted += c[15];
-        if (sample.source.label == "water")
+        if (sample.source.label == "water" || sample.source.label == "dynamic_water")
         {
             ++water_rows; water_accepted += c[15]; water_constructions += c[14];
             water_sources.emplace(sample.source.asset_id, sample.source.product, sample.source.lod);
@@ -500,17 +748,6 @@ Json PipelineCacheReceipt(const hs::RendererPsoCacheStats &stats)
         {"last_cache_hresult", stats.last_cache_hresult},
         {"last_io_error", stats.last_io_error},
     };
-}
-
-bool HasGpuPass(const hs::GpuPassTimings &timings, std::uint32_t pass_id,
-                std::string_view name)
-{
-    if (!timings.valid)
-        return false;
-    return std::any_of(timings.passes.begin(), timings.passes.end(),
-        [&](const hs::GpuPassTiming &pass) {
-            return pass.pass_id == pass_id && pass.name == name;
-        });
 }
 
 const char *GraphicsCapabilityReasonName(hs::GraphicsCapabilityReason reason)
@@ -1110,10 +1347,13 @@ bool FilesEqual(const std::filesystem::path &left, const std::filesystem::path &
 {
     std::ifstream first(left, std::ios::binary | std::ios::ate);
     std::ifstream second(right, std::ios::binary | std::ios::ate);
-    if (!first || !second || first.tellg() != second.tellg()) return false;
+    if (!first || !second) return false;
+    const auto expected=first.tellg();
+    if (expected < 0 || expected != second.tellg()) return false;
     first.seekg(0);
     second.seekg(0);
     std::array<char, 64 * 1024> a{}, b{};
+    std::streamoff total{};
     while (first && second)
     {
         first.read(a.data(), static_cast<std::streamsize>(a.size()));
@@ -1122,8 +1362,10 @@ bool FilesEqual(const std::filesystem::path &left, const std::filesystem::path &
         if (count != second.gcount() ||
             !std::equal(a.begin(), a.begin() + count, b.begin()))
             return false;
+        total += count;
     }
-    return true;
+    return !first.bad() && !second.bad() && first.eof() && second.eof() &&
+        total == static_cast<std::streamoff>(expected);
 }
 
 std::pair<std::uint64_t, std::uint64_t> ValidateMaterialReloadShadowDepth(
@@ -1254,6 +1496,126 @@ struct WaterSurfaceCapture
     std::uint64_t pixels{}, history_pixels{}, nonzero_unpeeled{}, changed_color{};
     std::set<std::pair<std::uint32_t,std::uint32_t>> identities;
 };
+
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+struct TranslucencyDepthCapture
+{
+    std::uint32_t width{}, height{};
+    std::vector<float> front0, front1, exit0, exit1;
+    std::vector<std::uint32_t> component0, component1;
+    std::vector<std::array<std::uint32_t, 2>> identity0, identity1;
+};
+
+TranslucencyDepthCapture ReadTranslucencyDepthCapture(const std::filesystem::path &path)
+{
+    const auto diagnostic = Json::parse(std::ifstream(path));
+    struct Image { std::uint32_t width{}, height{}; std::size_t row{}; std::vector<std::byte> bytes; };
+    const auto find = [&](std::string_view name) -> const Json * {
+        for (const auto &resource : diagnostic.at("resources"))
+            if (resource.at("name").get<std::string>() == name) return &resource;
+        return nullptr;
+    };
+    const auto load = [&](std::string_view name, std::string_view format, std::size_t pixel_bytes) {
+        const auto *entry = find(name);
+        if (!entry || entry->at("format").get<std::string>() != format)
+            throw std::runtime_error("missing or invalid optical-pair capture resource: " + std::string(name));
+        Image image;
+        image.width = entry->at("width").get<std::uint32_t>();
+        image.height = entry->at("height").get<std::uint32_t>();
+        image.row = entry->at("row_size").get<std::size_t>();
+        if (!image.width || !image.height || image.row != std::size_t(image.width) * pixel_bytes)
+            throw std::runtime_error("invalid optical-pair capture extent: " + std::string(name));
+        std::ifstream input(path.parent_path() / entry->at("file").get<std::string>(), std::ios::binary | std::ios::ate);
+        if (!input || input.tellg() != std::streamoff(image.row * image.height))
+            throw std::runtime_error("invalid optical-pair capture bytes: " + std::string(name));
+        image.bytes.resize(image.row * image.height);
+        input.seekg(0);
+        if (!input.read(reinterpret_cast<char *>(image.bytes.data()), static_cast<std::streamsize>(image.bytes.size())))
+            throw std::runtime_error("could not read optical-pair capture: " + std::string(name));
+        return image;
+    };
+    const auto front0 = load("translucency_depth", "DXGI_FORMAT_R32_TYPELESS", 4);
+    const auto front1 = load("translucency_depth_layer1", "DXGI_FORMAT_R32_TYPELESS", 4);
+    const auto component0 = load("translucency_optical_component_0", "DXGI_FORMAT_R32_UINT", 4);
+    const auto component1 = load("translucency_optical_component_1", "DXGI_FORMAT_R32_UINT", 4);
+    const auto identity0 = load("translucency_metadata", "DXGI_FORMAT_R32G32_UINT", 8);
+    const auto identity1 = load("translucency_metadata_layer1", "DXGI_FORMAT_R32G32_UINT", 8);
+    const auto *exit_format = find("translucency_exit_depth");
+    if (!exit_format) throw std::runtime_error("gathered exit depth is absent from translucency capture");
+    const auto format = exit_format->at("format").get<std::string>();
+    const std::size_t exit_pixel_bytes = format == "DXGI_FORMAT_R32_FLOAT" ? 4u :
+        format == "DXGI_FORMAT_R32G32_FLOAT" ? 8u :
+        format == "DXGI_FORMAT_R32G32B32A32_FLOAT" ? 16u : 0u;
+    if (!exit_pixel_bytes) throw std::runtime_error("gathered exit depth has an unsupported native format");
+    const auto exit = load("translucency_exit_depth", format, exit_pixel_bytes);
+    if (front0.width != front1.width || front0.height != front1.height || front0.width != component0.width ||
+        front0.height != component0.height || front0.width != component1.width || front0.height != component1.height ||
+        front0.width != identity0.width || front0.height != identity0.height || front0.width != identity1.width ||
+        front0.height != identity1.height || front0.width != exit.width || front0.height != exit.height || exit_pixel_bytes < 8)
+        throw std::runtime_error("optical-pair capture surfaces have different extents or fewer than two exit channels");
+    const auto read_u32 = [](const std::byte *bytes) { std::uint32_t value{}; std::memcpy(&value, bytes, 4); return value; };
+    const auto read_f32 = [](const std::byte *bytes) { float value{}; std::memcpy(&value, bytes, 4); return value; };
+    const auto pixel = [](const Image &image, std::uint32_t x, std::uint32_t y, std::size_t bytes) {
+        return image.bytes.data() + std::size_t(y) * image.row + std::size_t(x) * bytes;
+    };
+    TranslucencyDepthCapture result;
+    result.width = front0.width; result.height = front0.height;
+    const std::size_t count = std::size_t(result.width) * result.height;
+    result.front0.resize(count); result.front1.resize(count); result.component0.resize(count); result.component1.resize(count);
+    result.identity0.resize(count); result.identity1.resize(count);
+    result.exit0.resize(count); result.exit1.resize(count);
+    for (std::uint32_t y = 0; y < result.height; ++y)
+        for (std::uint32_t x = 0; x < result.width; ++x)
+        {
+            const auto index = std::size_t(y) * result.width + x;
+            result.front0[index] = read_f32(pixel(front0, x, y, 4));
+            result.front1[index] = read_f32(pixel(front1, x, y, 4));
+            result.component0[index] = read_u32(pixel(component0, x, y, 4));
+            result.component1[index] = read_u32(pixel(component1, x, y, 4));
+            const auto *key0 = pixel(identity0, x, y, 8);
+            const auto *key1 = pixel(identity1, x, y, 8);
+            result.identity0[index] = {read_u32(key0), read_u32(key0 + 4)};
+            result.identity1[index] = {read_u32(key1), read_u32(key1 + 4)};
+            const auto *exit_sample = pixel(exit, x, y, exit_pixel_bytes);
+            result.exit0[index] = read_f32(exit_sample);
+            result.exit1[index] = read_f32(exit_sample + 4);
+            if (!std::isfinite(result.front0[index]) || !std::isfinite(result.front1[index]) ||
+                !std::isfinite(result.exit0[index]) || !std::isfinite(result.exit1[index]))
+                throw std::runtime_error("optical-pair capture contains a non-finite depth");
+        }
+    return result;
+}
+
+std::uint64_t ValidateNestedOpticalPair(const TranslucencyDepthCapture &nested,
+    const TranslucencyDepthCapture &outer_only, std::uint16_t outer_id, std::uint16_t inner_id)
+{
+    if (nested.width != outer_only.width || nested.height != outer_only.height || !outer_id || !inner_id || outer_id == inner_id)
+        throw std::runtime_error("optical-pair fixture identities or capture extents are invalid");
+    std::uint64_t paired_pixels{};
+    for (std::size_t index = 0; index < nested.front0.size(); ++index)
+    {
+        if (nested.component0[index] != outer_id || nested.component1[index] != inner_id ||
+            nested.front0[index] <= 0.0f || nested.front1[index] <= 0.0f)
+            continue;
+        const auto nested_outer_exit = nested.exit0[index];
+        const auto nested_inner_exit = nested.exit1[index];
+        const auto reference_outer_exit = outer_only.exit0[index];
+        const auto &outer_key = nested.identity0[index];
+        const auto &inner_key = nested.identity1[index];
+        if (nested_outer_exit <= 0.0f || nested_inner_exit <= 0.0f || reference_outer_exit <= 0.0f ||
+            outer_only.component0[index] != outer_id ||
+            outer_key != inner_key || (outer_key[0] == 0 && outer_key[1] == 0) ||
+            !(nested_outer_exit < nested_inner_exit) ||
+            std::abs(nested_outer_exit - reference_outer_exit) > 2.0e-6f)
+            throw std::runtime_error("nested-shell exit pairing differs from its outer-only reference");
+        ++paired_pixels;
+    }
+    if (paired_pixels < 8)
+        throw std::runtime_error("nested-shell GPU oracle did not find enough overlapping component pixels");
+    return paired_pixels;
+}
+#endif
+
 WaterSurfaceCapture ValidateWaterSurface(const std::filesystem::path &path, bool empty)
 {
     const auto diagnostic = Json::parse(std::ifstream(path));
@@ -1269,7 +1631,10 @@ WaterSurfaceCapture ValidateWaterSurface(const std::filesystem::path &path, bool
     {
         for (const auto *name : {"translucency_depth", "translucency_motion", "translucency_history",
                 "translucency_classification", "translucency_metadata", "translucency_unpeeled",
-                "translucency_transport", "translucency_color"})
+                "translucency_transport", "translucency_color", "translucency_depth_layer1",
+                "translucency_optical_component_0", "translucency_optical_component_1",
+                "translucency_optical_component_2", "translucency_optical_component_3",
+                "translucency_exit_depth", "translucency_metadata_layer1"})
             if (find(name)) throw std::runtime_error("empty water frame retained transparent capture resources");
         return {};
     }
@@ -1366,6 +1731,80 @@ void ValidateSurfaceDiagnostic(const std::filesystem::path &path,
         throw std::runtime_error("surface diagnostic has no nonzero historical motion pixels");
     diagnostic["path"] = path.filename().string();
     receipt["surface_diagnostics"][receipt_name] = std::move(diagnostic);
+}
+
+Json ValidateAoVisibilityCapture(const std::filesystem::path &path,
+                                 std::uint32_t active_width, std::uint32_t active_height)
+{
+    const auto diagnostic = Json::parse(std::ifstream(path));
+    struct Output
+    {
+        const char *name;
+        const char *format;
+        std::size_t pixel_bytes;
+        bool half_float;
+    };
+    constexpr std::array outputs{
+        Output{"ao_raw", "DXGI_FORMAT_R32G32B32A32_FLOAT", 16, false},
+        Output{"ao_resolved", "DXGI_FORMAT_R16_FLOAT", 2, true},
+        Output{"ao_history", "DXGI_FORMAT_R32G32B32A32_FLOAT", 16, false},
+    };
+    Json result = Json::object();
+    for (const auto &output : outputs)
+    {
+        const Json *resource{};
+        for (const auto &candidate : diagnostic.at("resources"))
+            if (candidate.at("name").get<std::string>() == output.name)
+            {
+                resource = &candidate;
+                break;
+            }
+        if (!resource || resource->at("format").get<std::string>() != output.format)
+            throw std::runtime_error(std::format("AO capture is missing {} in its expected format", output.name));
+        const auto width = resource->at("width").get<std::uint32_t>();
+        const auto height = resource->at("height").get<std::uint32_t>();
+        const auto row_size = resource->at("row_size").get<std::size_t>();
+        if (width < active_width || height < active_height ||
+            row_size != std::size_t(width) * output.pixel_bytes)
+            throw std::runtime_error(std::format("AO capture {} has an invalid extent or row size", output.name));
+        std::ifstream input(path.parent_path() / resource->at("file").get<std::string>(),
+            std::ios::binary | std::ios::ate);
+        if (!input || input.tellg() != std::streamoff(row_size * height))
+            throw std::runtime_error(std::format("AO capture {} has an invalid byte count", output.name));
+        std::vector<std::byte> row(row_size);
+        float minimum = 1.0f;
+        float maximum = 0.0f;
+        std::uint64_t occluded_pixels{};
+        input.seekg(0);
+        for (std::uint32_t y = 0; y < active_height; ++y)
+        {
+            input.read(reinterpret_cast<char *>(row.data()), static_cast<std::streamsize>(row.size()));
+            if (!input) throw std::runtime_error(std::format("Could not read AO capture {}", output.name));
+            for (std::uint32_t x = 0; x < active_width; ++x)
+            {
+                float visibility{};
+                const auto *pixel = row.data() + std::size_t(x) * output.pixel_bytes;
+                if (output.half_float)
+                {
+                    std::uint16_t bits{};
+                    std::memcpy(&bits, pixel, sizeof(bits));
+                    visibility = DirectX::PackedVector::XMConvertHalfToFloat(bits);
+                }
+                else
+                    std::memcpy(&visibility, pixel, sizeof(visibility));
+                if (!std::isfinite(visibility) || visibility < 0.0f || visibility > 1.0f)
+                    throw std::runtime_error(std::format("AO capture {} has a nonfinite or out-of-range visibility", output.name));
+                minimum = std::min(minimum, visibility);
+                maximum = std::max(maximum, visibility);
+                occluded_pixels += visibility < 0.999f;
+            }
+        }
+        result[output.name] = {{"minimum_visibility", minimum}, {"maximum_visibility", maximum},
+            {"occluded_pixels_below_0_999", occluded_pixels}};
+        if (std::string_view(output.name) == "ao_raw" && occluded_pixels == 0)
+            throw std::runtime_error("AO grass fixture produced no nontrivial raw visibility despite its ground/grass occluders");
+    }
+    return result;
 }
 
 void ValidateVisibilityCommandCapture(const std::filesystem::path &path,
@@ -1561,7 +2000,7 @@ void ValidateGeometryDiagnostic(const std::filesystem::path &path, const char *r
         throw std::runtime_error("geometry diagnostic ref counters do not match its records");
     for (const auto &[key, observations] : groups)
     {
-        if (observations.empty() || observations.size() > 2)
+        if (observations.size() > 2)
             throw std::runtime_error("geometry diagnostic has more than two pages per LOD family");
         if (observations.size() == 1)
         {
@@ -1639,6 +2078,7 @@ int main(int argc, char **argv)
         {
             std::ofstream output(artifacts / "result.json");
             output << receipt.dump(2) << '\n';
+            output.close();
             if (!output)
             {
                 std::cerr << "Could not write render result: " << artifacts / "result.json" << '\n';
@@ -1675,6 +2115,7 @@ int main(int argc, char **argv)
         bool timing_stream_probe{};
         bool timing_stream_critical_probe{};
         bool translucency_diagnostics_probe{}, translucency_diagnostics_mode_explicit{}, shadow_transition_probe{}, hero_layer_probe{};
+        bool translucency_optical_pair_probe{};
         bool world_transport_probe{};
         bool single_layer_water_probe{};
         bool gameplay_scene{};
@@ -1760,6 +2201,7 @@ int main(int argc, char **argv)
                 config.width = 320; config.height = 180;
             }
             else if (arg == "--translucency-diagnostics-probe") translucency_diagnostics_probe = true;
+            else if (arg == "--translucency-optical-pair-probe") translucency_optical_pair_probe = true;
             else if (arg == "--shadow-transition-probe") shadow_transition_probe = true;
             else if (arg.starts_with("--translucency-diagnostics-mode="))
             {
@@ -1833,8 +2275,6 @@ int main(int argc, char **argv)
             ? "visibility" : "compact";
         const bool material_reload_probe = !material_reload_pointer.empty() ||
                                            !material_reload_invalid_pointer.empty();
-        const bool surface_motion_resize_fixture =
-            surface_motion_resize_probe;
         if (entity_surface_probe)
         {
             if ((frames_explicit && frames != 8) || !vfx_composition_probe.empty() || !grass_history_probe.empty())
@@ -1854,20 +2294,35 @@ int main(int argc, char **argv)
         if (!grass_history_probe.empty())
         {
             if (grass_history_probe.size() != 1 || grass_history_probe[0] < 'A' ||
-                grass_history_probe[0] > 'E' || frames < 16 || gameplay_scene || owned_view_probe ||
-                surface_motion_resize_fixture || persistent_scene_probe || gpu_lod_probe)
-                throw std::runtime_error("grass history probe requires A..E and at least 16 ordinary frames");
+                grass_history_probe[0] > 'F' || frames < 16 || gameplay_scene || owned_view_probe ||
+                surface_motion_resize_probe || persistent_scene_probe || gpu_lod_probe)
+                throw std::runtime_error("grass history probe requires A..F and at least 16 ordinary frames");
             config.dynamic_resolution = false;
-            config.temporal_reconstruction = true;
+            config.temporal_reconstruction = grass_history_probe[0] != 'F';
             config.sharpening = 0;
             config.bloom = false;
-            config.ao_mode = hs::GraphicsAoMode::Off;
+            if (grass_history_probe[0] == 'F')
+            {
+                if (frames != 24)
+                    throw std::runtime_error("AO grass history probe F requires exactly 24 frames");
+                config.ao_mode = hs::GraphicsAoMode::GTAO;
+                config.ao_quality = hs::GraphicsQuality::Ultra;
+            }
+            else
+                config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
             config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
             receipt["grass_history"] = {{"case", grass_history_probe},
                 {"logical_render_hz", grass_cadence}, {"diagnostic_options", true},
                 {"frames", Json::array()}};
+            if (grass_history_probe[0] == 'F')
+            {
+                receipt["grass_history"]["ao_mode"] = "gtao";
+                receipt["grass_history"]["ao_quality"] = "ultra";
+                receipt["grass_history"]["temporal_reconstruction"] = false;
+                receipt["grass_history"]["ao_capture_frames"] = {4, 5, 24};
+            }
         }
         if (light_list_probe || lighting_auxiliary_probe)
         {
@@ -1882,8 +2337,8 @@ int main(int argc, char **argv)
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
             config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
             if (light_list_probe)
-                receipt["light_list"] = {{"local_counts", {4, 64, 65, 128, 127, 0, 4}},
-                    {"directional_counts", {0, 0, 0, 0, 1, 1, 0}}, {"frames", Json::array()}};
+                receipt["light_list"] = {{"local_counts", kLightListLocalCounts},
+                    {"directional_counts", kLightListDirectionalCounts}, {"frames", Json::array()}};
             else receipt["lighting_auxiliaries"]["frames"] = Json::array();
         }
         if (!vfx_composition_probe.empty())
@@ -1891,7 +2346,7 @@ int main(int argc, char **argv)
             if ((vfx_composition_probe != "fixed" && vfx_composition_probe != "auto" &&
                  vfx_composition_probe != "control" && vfx_composition_probe != "switch") ||
                 (frames_explicit && frames != 32) || oit_overdraw_probe || camera_basis_probe ||
-                gameplay_scene || owned_view_probe || surface_motion_resize_fixture ||
+                gameplay_scene || owned_view_probe || surface_motion_resize_probe ||
                 persistent_scene_probe || grid_floor_probe || world_transport_probe ||
                 provider_switch_probe || material_reload_probe || !grass_history_probe.empty() ||
                 light_list_probe || lighting_auxiliary_probe || skin_cache_monster_probe ||
@@ -1939,7 +2394,7 @@ int main(int argc, char **argv)
             if (!frames_explicit) frames = required_frames;
             if (frames != required_frames || (oit_overdraw_probe && camera_basis_probe) ||
                 owned_view_probe || grid_floor_probe || gameplay_scene ||
-                surface_motion_resize_fixture || world_transport_probe || provider_switch_probe)
+                surface_motion_resize_probe || world_transport_probe || provider_switch_probe)
                 throw std::runtime_error("OIT/camera-basis probes require their own four/six ordinary render frames");
             config.temporal_reconstruction = false;
             config.bloom = false;
@@ -2006,6 +2461,26 @@ int main(int argc, char **argv)
             throw std::runtime_error("--translucency-diagnostics-mode requires --translucency-diagnostics-probe");
         if (shadow_transition_probe && (!translucency_diagnostics_probe || !gameplay_scene))
             throw std::runtime_error("--shadow-transition-probe requires --translucency-diagnostics-probe --gameplay-scene");
+        if (translucency_optical_pair_probe && (translucency_diagnostics_probe || gameplay_scene || timing_stream_probe ||
+                !grass_history_probe.empty() || !vfx_composition_probe.empty()))
+            throw std::runtime_error("--translucency-optical-pair-probe requires its own isolated preview run");
+#if !defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+        if (translucency_optical_pair_probe)
+            throw std::runtime_error("--translucency-optical-pair-probe requires HS_BUILD_CONTENT_TOOLS=ON or HS_BUILD_RENDER_DATA_TESTS=ON");
+#endif
+        if (translucency_optical_pair_probe)
+        {
+            if (!frames_explicit) frames = 2;
+            if (frames != 2) throw std::runtime_error("--translucency-optical-pair-probe requires exactly two frames");
+            config.capture_translucency_diagnostics = true;
+            config.transparency_quality = hs::GraphicsQuality::Ultra;
+            config.refraction_quality = hs::GraphicsOptionalQuality::Ultra;
+            config.temporal_reconstruction = false;
+            config.bloom = false;
+            slime_preview = true;
+            receipt["translucency_optical_pair"] = {{"fixture", "certified-nested-slime-outer-reference"},
+                {"requested_frames", frames}, {"functional_only", true}};
+        }
         if (translucency_diagnostics_probe)
         {
             if (!frames_explicit) frames = 4;
@@ -2057,14 +2532,14 @@ int main(int argc, char **argv)
             throw std::runtime_error("--dynamic-lod-skin-growth-probe requires at least 8 frames");
         if (gpu_lod_probe && frames < 10)
             throw std::runtime_error("--gpu-lod-probe requires at least 10 frames");
-        if (surface_motion_resize_fixture && frames < 7)
+        if (surface_motion_resize_probe && frames < 7)
             throw std::runtime_error("--surface-motion-resize-probe requires at least 7 frames");
         if (static_cast<unsigned>(translucency_diagnostics_probe) + static_cast<unsigned>(persistent_scene_probe) +
                 static_cast<unsigned>(skin_cache_monster_probe) +
                 static_cast<unsigned>(dynamic_lod_skin_growth_probe) +
                 static_cast<unsigned>(gpu_lod_probe) +
                 static_cast<unsigned>(residency_streaming_probe) +
-                static_cast<unsigned>(surface_motion_resize_fixture) +
+                static_cast<unsigned>(surface_motion_resize_probe) +
                 static_cast<unsigned>(world_transport_probe) +
                 static_cast<unsigned>(single_layer_water_probe) +
                 static_cast<unsigned>(gameplay_scene && !translucency_diagnostics_probe) +
@@ -2170,10 +2645,27 @@ int main(int argc, char **argv)
         hs::SelectedGeneration material_reload_invalid_generation;
         hs::render_data::SceneProbeDescription probe_fixture_description;
         std::vector<hs::render_data::SceneProbeRecord> probe_fixture_records;
+#if !defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+        static_cast<void>(translucency_optical_pair_probe);
+#else
+        std::optional<OpticalPairFixtureProducts> optical_pair_fixture;
+#endif
         failure_code = "HS_GENERATION_INVALID";
         timings["runner_setup_before_generation"] = StageElapsedMilliseconds(runner_entry);
         LogStageElapsed("runner_setup_before_generation", timings["runner_setup_before_generation"]);
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+        if (translucency_optical_pair_probe)
+        {
+            optical_pair_fixture = BuildOpticalPairFixture(generation, artifacts);
+            receipt["translucency_optical_pair"]["fixture_products"] = {
+                {"source_generation", optical_pair_fixture->source_generation},
+                {"nested_outer_component", optical_pair_fixture->outer_component},
+                {"nested_inner_component", optical_pair_fixture->inner_component},
+                {"material_slot", optical_pair_fixture->material_slot},
+                {"synthetic_product_digests", optical_pair_fixture->output_digests}};
+        }
+#endif
         if (local_probe_revision_probe)
         {
             constexpr std::string_view id = "render/lighting/local_probes.spkg";
@@ -2200,8 +2692,9 @@ int main(int argc, char **argv)
             if (source_digest != generation.product_digests.at(std::string(id)))
                 throw std::runtime_error("Scene-probe revision fixture source digest differs from its Generation");
             const auto package = hs::render_data::ReadSceneProbePackage(bytes, hs::MakeAssetId(id));
-            if (package.payload != hs::render_data::SceneProbePayload::Layout || package.probes.empty())
-                throw std::runtime_error("Scene-probe revision fixture requires a layout and reflection probe");
+            if ((package.payload != hs::render_data::SceneProbePayload::Layout &&
+                    package.payload != hs::render_data::SceneProbePayload::Baked) || package.probes.empty())
+                throw std::runtime_error("Scene-probe revision fixture requires a validated baked or layout package with a reflection probe");
             auto description = package.description;
             description.grid.dimensions = {2, 2, 2};
             const auto fixture = hs::render_data::BuildSceneProbePackage(hs::MakeAssetId(id),
@@ -2373,6 +2866,12 @@ int main(int argc, char **argv)
             measure("scene_probe_bake", [&] {
                 Require(hs::D3D12Renderer::BakeSceneProbePackage(config, world_scene, hs::EnvironmentSun(), baked));
             });
+            std::vector<std::byte> partitioned_bake;
+            measure("scene_probe_partitioned_bake", [&] {
+                Require(hs::D3D12Renderer::BakeSceneProbePackage(config, world_scene, hs::EnvironmentSun(), partitioned_bake, 3));
+            });
+            if (baked != partitioned_bake)
+                throw std::runtime_error("Scene-probe Jacobi result depends on capture graph partitioning");
             const auto package = hs::render_data::ReadSceneProbePackage(
                 baked, hs::MakeAssetId("render/lighting/local_probes.spkg"));
             const auto &grid = package.description.grid;
@@ -2845,6 +3344,8 @@ int main(int argc, char **argv)
                 }
         hs::RenderSnapshotPair pair;
         pair.has_current = true;
+        const auto fixture_sun = hs::EnvironmentSun();
+        pair.current.lights = std::span(&fixture_sun, 1);
         pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || single_layer_water_probe || material_reload_terrain_archive ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
@@ -3158,6 +3659,10 @@ int main(int argc, char **argv)
         std::size_t residency_quality_phase{};
         Json residency_quality_samples = Json::array();
         std::uint32_t rendered_frame_count{};
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+        std::optional<TranslucencyDepthCapture> nested_optical_capture;
+        std::optional<TranslucencyDepthCapture> reference_optical_capture;
+#endif
         const auto residency_streaming_complete = [&] {
             if (!residency_streaming_probe ||
                 residency_quality_phase != residency_texture_qualities.size() ||
@@ -3439,7 +3944,7 @@ int main(int argc, char **argv)
                         current.resize(3);
                     }
                 }
-                else if (surface_motion_resize_fixture)
+                else if (surface_motion_resize_probe)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                     if (frame == 2)
@@ -3526,7 +4031,7 @@ int main(int argc, char **argv)
                         };
                     }
                 }
-                else if (!world_transport_probe && !persistent_scene_probe && !single_layer_water_probe)
+                else if (!world_transport_probe && !single_layer_water_probe)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                 }
@@ -3617,6 +4122,25 @@ int main(int argc, char **argv)
                     hs::PopulateRenderInstanceIdentity(projectile);
                     preview_instances.push_back(projectile);
                 }
+                const bool optical_pair_nested_frame = translucency_optical_pair_probe && frame == 1;
+                const bool optical_pair_reference_frame = translucency_optical_pair_probe && frame == 2;
+                if (optical_pair_nested_frame || optical_pair_reference_frame)
+                {
+                    preview_instances.clear();
+                    preview_poses.clear();
+                    hs::RenderInstance actor{};
+                    actor.mesh = optical_pair_nested_frame ? hs::RenderMesh::MonsterMelee : hs::RenderMesh::MonsterRanged;
+                    actor.position = {};
+                    actor.scale = {1, 1, 1};
+                    actor.stable_id = 0x4f50544943414c01ull;
+                    hs::PopulateRenderInstanceIdentity(actor);
+                    hs::AnimationPoseRef pose{};
+                    pose.instance_index = 0;
+                    pose.clip = hs::CharacterAnimationClip::Idle;
+                    pose.normalized_time = 0.5f;
+                    preview_instances.push_back(actor);
+                    preview_poses.push_back(pose);
+                }
                 if (environment_preview)
                 {
                     preview_instances.clear(); preview_poses.clear();
@@ -3686,9 +4210,8 @@ int main(int argc, char **argv)
                 }
                 if (light_list_probe)
                 {
-                    constexpr std::array counts{4u, 64u, 65u, 128u, 127u, 0u, 4u};
-                    const auto local_count = counts[frame - 1];
-                    const auto directional_count = frame == 5 || frame == 6 ? 1u : 0u;
+                    const auto local_count = kLightListLocalCounts[frame - 1];
+                    const auto directional_count = kLightListDirectionalCounts[frame - 1];
                     light_list_lights.assign(local_count + directional_count, {});
                     for (std::uint32_t index = 0; index < light_list_lights.size(); ++index)
                     {
@@ -3708,8 +4231,13 @@ int main(int argc, char **argv)
                         light.range = 10000; light.emitter_radius = .15f;
                         light.inner_cone_radians = .2f; light.outer_cone_radians = .6f;
                         light.shape = {2, 2}; light.area_tangent = {1, 0, 0};
+                        if (frame == 7 && light.type == hs::LightType::Point)
+                        {
+                            light.unit = hs::LightUnit::RadiantIntensity;
+                            light.quantity = static_cast<float>(double(light.quantity) /
+                                hs::kRgbReferenceLumensPerWatt / (4.0 * std::acos(-1.0)));
+                        }
                     }
-                    // An explicit zero-intensity sun avoids Runtime's empty-table default sun.
                     pair.current.lights = light_list_lights;
                     main_view.camera_cut = true;
                 }
@@ -3794,24 +4322,41 @@ int main(int argc, char **argv)
                         preview_pair.previous.static_scene.reset();
                     }
                 }
-                if (slime_preview && !environment_preview &&
+                if (slime_preview && !environment_preview && !optical_pair_nested_frame && !optical_pair_reference_frame &&
                     (preview_pair.current.instances.size() != 4 || preview_pair.current.poses.size() != 3 ||
                      preview_pair.current.static_scene || preview_pair.current.instances[2].stable_id == 0 ||
                      preview_pair.current.poses[2].instance_index != 2))
                     throw std::runtime_error("slime preview package lost its scene or animation identity");
+                if ((optical_pair_nested_frame || optical_pair_reference_frame) &&
+                    (preview_pair.current.instances.size() != 1 || preview_pair.current.poses.size() != 1 ||
+                     preview_pair.current.static_scene || preview_pair.current.instances.front().stable_id != 0x4f50544943414c01ull))
+                    throw std::runtime_error("certified optical-pair preview lost its single-instance identity");
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+                if (translucency_optical_pair_probe)
+                {
+                    // Both captures use the same camera and fixed Idle sample; only the
+                    // selected certified geometry package changes between frames.
+                    main_view.camera.position = {0, 1.6, -3.0};
+                    main_view.camera.target = {0, 0.45, 0};
+                    main_view.camera.up = {0, 1, 0};
+                    main_view.view_origin = main_view.camera.position;
+                    main_view.camera_cut = true;
+                }
+#endif
                 const hs::RenderPackage render_input{
                     .views = std::span(&main_view, 1), .snapshots = preview_pair,
                     .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces,
                         .world_batch = {pair.current.header.session_id, pair.current.header.tick, frame}},
-                    .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
-                        : local_probe_revision_probe || translucency_diagnostics_probe ? std::optional<float>{1.0f / 60.0f}
+                    .devtools = {
+                        .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
+                        : local_probe_revision_probe || translucency_diagnostics_probe || translucency_optical_pair_probe ? std::optional<float>{1.0f / 60.0f}
                         : !vfx_composition_probe.empty()
                         ? std::optional<float>{vfx_composition_probe == "auto" || vfx_composition_probe == "switch"
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = entity_surface_probe || world_transport_probe || local_probe_revision_probe || single_layer_water_probe ||
-                        !vfx_composition_probe.empty(),
+                        .wait_for_streaming = entity_surface_probe || world_transport_probe || local_probe_revision_probe || single_layer_water_probe ||
+                            !vfx_composition_probe.empty()},
                     .display_sample = hs::RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
                 if (provider_switch_probe)
                 {
@@ -3829,6 +4374,20 @@ int main(int argc, char **argv)
                     });
                 else Require(renderer.Render(render_input, frame_result));
                 rendered_frame_count = frame;
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+                if (optical_pair_nested_frame || optical_pair_reference_frame)
+                {
+                    const auto filename = optical_pair_nested_frame ? "translucency-optical-nested.json" :
+                        "translucency-optical-outer-only.json";
+                    const auto path = artifacts / filename;
+                    Require(renderer.Capture({.view_id = hs::kMainRenderViewId, .path = path,
+                        .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                    auto capture = ReadTranslucencyDepthCapture(path);
+                    if (optical_pair_nested_frame) nested_optical_capture = std::move(capture);
+                    else reference_optical_capture = std::move(capture);
+                    receipt["translucency_optical_pair"][optical_pair_nested_frame ? "nested_capture" : "outer_only_capture"] = filename;
+                }
+#endif
                 if (world_transport_probe && frame == 1)
                 {
                     const auto path = artifacts / "world-transport-surface.json";
@@ -4309,18 +4868,27 @@ int main(int argc, char **argv)
                         {"nonzero_outside_published_prefix", 0},
                     };
                 }
-                if (surface_motion_resize_fixture && frame == 3)
+                if (surface_motion_resize_probe && frame == 3)
                 {
                     failure_code = "HS_RENDER_SURFACE_DIAGNOSTIC_FAILED";
                     Require(renderer.Capture({.path = artifacts / "surface-motion.json", .kind = hs::CaptureKind::SurfaceDiagnostics}));
                     ValidateSurfaceDiagnostic(artifacts / "surface-motion.json", config.width,
                                               config.height, true, "motion", receipt);
                 }
-                if (!grass_history_probe.empty() && (frame == 1 || frame == 5 || frame == 6 || frame > frames - 6))
+                const bool capture_grass_diagnostics = grass_history_probe == "F"
+                    ? (frame == 4 || frame == 5 || frame == frames)
+                    : !grass_history_probe.empty() &&
+                        (frame == 1 || frame == 5 || frame == 6 || frame > frames - 6);
+                if (capture_grass_diagnostics)
                 {
                     const auto name = std::format("grass-{:03}.json", frame);
                     Require(renderer.Capture({.path = artifacts / name, .kind = hs::CaptureKind::SurfaceDiagnostics}));
                     const auto diagnostic = Json::parse(std::ifstream(artifacts / name));
+                    const auto ao_visibility = grass_history_probe == "F"
+                        ? ValidateAoVisibilityCapture(artifacts / name,
+                            diagnostic.at("width").get<std::uint32_t>(),
+                            diagnostic.at("height").get<std::uint32_t>())
+                        : Json{};
                     const auto grass = diagnostic.at("grass");
                     const auto pixels = grass.at("pixels").get<std::uint64_t>();
                     const auto historical = grass.at("historical_pixels").get<std::uint64_t>();
@@ -4340,9 +4908,11 @@ int main(int argc, char **argv)
                     for (const auto &pass : gpu.passes)
                         if (gpu.valid && pass.measured)
                             passes.push_back({{"name", pass.name}, {"nanoseconds", pass.nanoseconds}});
-                    receipt["grass_history"]["frames"].push_back({{"frame", frame},
+                    Json frame_capture{{"frame", frame},
                         {"capture", name}, {"grass", grass},
-                        {"gpu_frame", gpu.completed_frame_id}, {"gpu_passes", passes}});
+                        {"gpu_frame", gpu.completed_frame_id}, {"gpu_passes", passes}};
+                    if (grass_history_probe == "F") frame_capture["ao_visibility"] = ao_visibility;
+                    receipt["grass_history"]["frames"].push_back(std::move(frame_capture));
                 }
                 if (!grass_history_probe.empty() && (frame == 3 || frame == 9))
                 {
@@ -4474,7 +5044,7 @@ int main(int argc, char **argv)
                     Require(renderer.Capture({.path = artifacts / name}));
                     receipt["grid_floor"]["captures"][std::to_string(frame)] = name;
                 }
-                if (surface_motion_resize_fixture && frame == 4)
+                if (surface_motion_resize_probe && frame == 4)
                 {
                     // The fixture changes only controls it actually owns. The
                     // remaining fields retain GraphicsSettings defaults rather
@@ -4517,9 +5087,9 @@ int main(int argc, char **argv)
                         hs::GraphicsSettingsRequest{next_settings_generation, hs::GraphicsSettingsRequestCause::User,
                                                     std::move(graphics)}));
                 }
-                if (surface_motion_resize_fixture && frame == 5)
+                if (surface_motion_resize_probe && frame == 5)
                     Require(renderer.Resize(960, 540));
-                if (surface_motion_resize_fixture && frame == 7)
+                if (surface_motion_resize_probe && frame == 7)
                 {
                     failure_code = "HS_RENDER_SURFACE_DIAGNOSTIC_FAILED";
                     Require(renderer.Capture({.path = artifacts / "surface-resized.json", .kind = hs::CaptureKind::SurfaceDiagnostics}));
@@ -4851,6 +5421,19 @@ int main(int argc, char **argv)
                     residency_stats.geometry_streaming_requests)
                 throw std::runtime_error("Geometry streaming did not publish and reclaim every requested geometry family.");
         }
+#if defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
+        if (optical_pair_fixture)
+        {
+            if (!nested_optical_capture || !reference_optical_capture)
+                throw std::runtime_error("certified nested-shell GPU capture pair is incomplete");
+            const auto paired_pixels = ValidateNestedOpticalPair(*nested_optical_capture, *reference_optical_capture,
+                optical_pair_fixture->outer_component, optical_pair_fixture->inner_component);
+            receipt["translucency_optical_pair"]["nested_shell_oracle"] = {
+                {"paired_pixels", paired_pixels}, {"same_instance_key", true},
+                {"outer_exit_matches_outer_only_reference", true},
+                {"outer_exit_precedes_inner_exit", true}};
+        }
+#endif
         if (translucency_diagnostics_probe)
         {
             failure_code = "HS_RENDER_TRANSLUCENCY_DIAGNOSTICS_PROBE_FAILED";

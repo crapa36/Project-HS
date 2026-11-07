@@ -416,7 +416,8 @@ void AssignCoverage(CookedGeometryHierarchy &output, const std::vector<WorkGroup
 
 CookedGeometryHierarchy CookGeometryHierarchy(std::span<const rd::ExpandedVertex> expanded,
     std::uint32_t flags, std::string_view logical_page_prefix,
-    std::span<const std::uint16_t> material_mapping, GeometryHierarchyCookOptions options)
+    std::span<const std::uint16_t> material_mapping, GeometryHierarchyCookOptions options,
+    std::span<const OpticalMaterialProfile> optical_profiles)
 {
     Require(options.target_group_size >= 2 && options.target_group_size <= 64 &&
             std::isfinite(options.reduction_ratio) && options.reduction_ratio > 0.0f &&
@@ -425,7 +426,7 @@ CookedGeometryHierarchy CookGeometryHierarchy(std::span<const rd::ExpandedVertex
             options.max_page_meshlets <= rd::kMaxGeometryIndices / 3, "invalid cook options");
     Require(logical_page_prefix.starts_with("render/hierarchy/") && !logical_page_prefix.ends_with('/') &&
             logical_page_prefix.size() <= 448, "invalid logical page prefix");
-    const auto geometry = CookGeometry(expanded, flags);
+    const auto geometry = CookGeometry(expanded, flags, optical_profiles);
     std::vector<std::array<float, 3>> positions;
     positions.reserve(geometry.vertices.size());
     for (const auto &vertex : geometry.vertices) positions.push_back(vertex.position);

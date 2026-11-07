@@ -598,6 +598,7 @@ Result RendererAssetIo::DrainSubmitted(StreamingManager &streaming, ResidencyMan
             return IoFailure("DirectStorage drain did not establish terminal completion.");
 #endif
         if (read.future.valid()) read.future.wait();
+        if (read.prepare_future.valid()) read.prepare_future.wait();
         AssetReadCompletion output;
         if (auto result = Poll(read.input.request, streaming, residency, output); !result) return result;
     }

@@ -16,12 +16,20 @@
     "revision_policy": {"const": "hash_actual_environment_material_light_static_layout_inputs"},
     "capture": {
       "type": "object", "additionalProperties": false,
-      "required": ["kind", "cube_edge", "ggx_samples", "maximum_cube_views_per_graph", "include", "exclude"],
+      "required": ["kind", "cube_edge", "ggx_samples", "maximum_cube_views_per_graph", "offline_multibounce", "include", "exclude"],
       "properties": {
         "kind": {"const": "native_static_common_material_cube_views"},
         "cube_edge": {"enum": [16, 32, 64, 128]},
         "ggx_samples": {"enum": [64, 128, 256, 512, 1024, 2048]},
         "maximum_cube_views_per_graph": {"type": "integer", "minimum": 1, "maximum": 6},
+        "offline_multibounce": {"type":"object", "additionalProperties":false,
+          "required":["mode","maximum_iterations","absolute_tolerance","relative_tolerance"],
+          "properties":{"mode":{"const":"previous_complete_grid"},
+            "maximum_iterations":{"type":"integer","minimum":1,"maximum":64},
+            "absolute_tolerance":{"type":"number","minimum":0,"maximum":1},
+            "relative_tolerance":{"type":"number","minimum":0,"maximum":1}},
+          "anyOf":[{"properties":{"absolute_tolerance":{"exclusiveMinimum":0}}},
+                   {"properties":{"relative_tolerance":{"exclusiveMinimum":0}}}]},
         "include": {"const": ["static_geometry", "common_material_opacity", "static_direct_lights", "emission", "global_environment_sky"]},
         "exclude": {"const": ["dynamic_characters", "dynamic_vfx", "ui", "post", "exposure", "recursive_local_probes"]}
       }

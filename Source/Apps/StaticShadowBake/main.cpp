@@ -37,11 +37,7 @@ void BakeStaticShadowGeneration(const hs::SelectedGeneration &generation,
     config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
     config.product_paths = generation.product_paths;
     config.product_digests = generation.product_digests;
-    hs::LightView sun;
-    sun.direction = hs::kEnvironmentSunDirection;
-    sun.quantity = 50000.0f; sun.color = {1.0f, .94f, .86f};
-    sun.stable_id = 0x535342414b450001ull;
-    sun.shadow_flags = hs::kLightShadowRequested;
+    const auto sun = hs::EnvironmentSun();
     Require(hs::D3D12Renderer::BakeStaticShadowPages(config, scene, sun, begin, write_page));
 }
 }

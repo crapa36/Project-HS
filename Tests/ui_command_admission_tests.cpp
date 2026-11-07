@@ -59,7 +59,6 @@ int main()
     displayed.session.card_count=2;
     displayed.session.cards[0]={hs::CardKind::LearnSkill,1,0};
     displayed.session.cards[1]={hs::CardKind::SkillUpgrade,2,3};
-    displayed.selection_epoch=hs::runtime_detail::UiSelectionEpoch(displayed.session);
     std::array<hs::UiModel, 2> layout{};
     layout[0].kind=hs::UiModel::Kind::Button; layout[0].anchor_pixels={360,300}; layout[0].size_pixels={360,420};
     layout[1].kind=hs::UiModel::Kind::Text; layout[1].anchor_pixels={400,350}; layout[1].size_pixels={100,30};
@@ -71,7 +70,7 @@ int main()
           "resize rejects clicks until the new extent has an accepted UI frame");
     hs::runtime_detail::UiActionEnvelope envelope;
     envelope.action={hs::UiActionKind::SelectCard,0,0}; envelope.packet_generation=displayed.generation;
-    envelope.session_id=displayed.session_id; envelope.selection_epoch=displayed.selection_epoch;
+    envelope.session_id=displayed.session_id;
     envelope.displayed_session=displayed.session;
     Check(hs::runtime_detail::UiActionCurrent(envelope,7,displayed.session),
           "accepted card frame action retains its subject and session identity");

@@ -96,7 +96,16 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
     if(archive_present && archive_digest.empty()) return TerrainFailure("Missing terrain archive digest.");
     const UINT first_mip=QualityProfileFor(config.texture_quality).texture_finest_mip;
     bool recheck=scene_changed || terrain_parameters_changed || terrain_archive_digest!=archive_digest ||
-        terrain_target_first_mip!=first_mip;
+        terrain_target_first_mip!=first_mip || terrain_target_budget_mib!=config.texture_budget_mib;
+    const auto segment=ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT);
+    bool budget_updated=false;
+    if(!recheck && terrain_retry_budget_bytes)
+    {
+        if(auto r=UpdateResidencyBudget();!r) return r;
+        budget_updated=true;
+        recheck=residency.CanAdmit(terrain_retry_budget_bytes,10,segment);
+    }
+    UINT64 retry_budget_bytes=recheck?0:terrain_retry_budget_bytes;
     render_data::TerrainSurfacePackageView archive;
     std::vector<render_data::TerrainSurfaceTile> tiles;
     bool use_pages=recheck?false:terrain_static_pages_current;
@@ -157,6 +166,65 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                     return TerrainFailure("Terrain tile plane directory mismatch.");
                 plane_ids.insert(plane_ids.end(),leaf.section_products.begin(),leaf.section_products.end());
             }
+            std::vector<render_data::TextureHandle> handles;
+            std::vector<RendererAssetSource> sources;
+            handles.reserve(plane_ids.size()); sources.reserve(plane_ids.size());
+            for(const auto &id:plane_ids)
+            {
+                const auto handle=FindRendererTexture(config,MakeAssetId(id));
+                if(!handle || handle.value>=config.packed_textures.size())
+                    return TerrainFailure("Terrain plane lacks authenticated texture metadata.");
+                const auto &descriptor=config.packed_textures[handle.value];
+                auto expected=d; expected.array_size=1;
+                if(descriptor.asset_id.value!=MakeAssetId(id).value ||
+                    descriptor.dimension!=render_data::TextureDimension::Texture2DArray ||
+                    !SameTextureShape(descriptor.description,expected) ||
+                    descriptor.subresources.size()!=expected.mip_count)
+                    return TerrainFailure("Terrain plane texture description mismatch.");
+                RendererAssetSource source;
+                if(auto r=ResolveRendererAsset(config,id,source);!r) return r;
+                UINT64 product_bytes{};
+                if(auto r=source.ByteCount(product_bytes);!r) return r;
+                try { render_data::ValidateTextureDescriptor(descriptor,product_bytes); }
+                catch(const std::exception &e) { return TerrainFailure(e.what()); }
+                for(UINT mip=4;mip<d.mip_count;++mip)
+                {
+                    const auto &subresource=descriptor.subresources[mip];
+                    const UINT width=std::max(1u,d.width>>mip), height=std::max(1u,d.height>>mip);
+                    const UINT64 row=UINT64((width+3u)/4u)*16u, rows=(height+3u)/4u;
+                    if(!subresource.has_digest || subresource.row_pitch!=row ||
+                        subresource.byte_count!=row*rows || subresource.slice_pitch!=row*rows)
+                        return TerrainFailure("Invalid terrain tail subresource.");
+                }
+                handles.push_back(handle); sources.push_back(std::move(source));
+            }
+            D3D12_RESOURCE_DESC tail_desc{}; tail_desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            tail_desc.Width=std::max(1u,d.width>>4); tail_desc.Height=std::max(1u,d.height>>4);
+            tail_desc.DepthOrArraySize=1; tail_desc.MipLevels=static_cast<UINT16>(d.mip_count-4);
+            tail_desc.Format=DXGI_FORMAT_BC7_TYPELESS; tail_desc.SampleDesc.Count=1;
+            const auto color_bytes=device->GetResourceAllocationInfo(0,1,&tail_desc).SizeInBytes;
+            tail_desc.Format=DXGI_FORMAT_BC7_UNORM;
+            const auto linear_bytes=device->GetResourceAllocationInfo(0,1,&tail_desc).SizeInBytes;
+            const UINT64 color_count=plane_ids.size()/3, linear_count=plane_ids.size()-color_count;
+            if(!color_bytes || color_bytes==UINT64_MAX || !linear_bytes || linear_bytes==UINT64_MAX ||
+                (color_count && color_bytes>UINT64_MAX/color_count) ||
+                (linear_count && linear_bytes>UINT64_MAX/linear_count))
+                return TerrainFailure("Invalid terrain tail allocation size.");
+            const UINT64 color_total=color_bytes*color_count, linear_total=linear_bytes*linear_count;
+            if(color_total>UINT64_MAX-linear_total) return TerrainFailure("Terrain tail allocation size overflow.");
+            const UINT64 tail_total=color_total+linear_total;
+            if(!budget_updated)
+            {
+                if(auto r=UpdateResidencyBudget();!r) return r;
+                budget_updated=true;
+            }
+            if(!residency.CanAdmit(tail_total,10,segment))
+            {
+                retry_budget_bytes=tail_total;
+                use_pages=false;
+            }
+            if(use_pages)
+            {
             if(!terrain_plane_stream_ids.empty())
                 return TerrainFailure("Terrain plane owner differs from its resident generation.");
             std::vector<TextureStreamRegistration> registrations;
@@ -172,22 +240,16 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                 const auto closed=list->Close();
                 if(FAILED(closed)) return HResultFailure("Close terrain tail list",closed);
                 if(auto r=SubmitResidentUtilityUpload(list.Get(),command_allocator.Get(),retained);!r) return r;
-                list.Reset(); command_allocator.Reset(); batch_bytes=0;
+                retained.clear(); list.Reset(); command_allocator.Reset(); batch_bytes=0;
                 return Result::Success();
             };
             for(std::size_t plane=0;plane<plane_ids.size();++plane)
             {
                 const auto &id=plane_ids[plane];
-                const auto handle=FindRendererTexture(config,MakeAssetId(id));
-                if(!handle || handle.value>=config.packed_textures.size())
-                    return TerrainFailure("Terrain plane lacks authenticated texture metadata.");
+                const auto handle=handles[plane];
                 const auto &descriptor=config.packed_textures[handle.value];
                 auto expected=d; expected.array_size=1;
-                if(!SameTextureShape(descriptor.description,expected) ||
-                    descriptor.subresources.size()!=expected.mip_count)
-                    return TerrainFailure("Terrain plane texture description mismatch.");
-                RendererAssetSource source;
-                if(auto r=ResolveRendererAsset(config,id,source);!r) return r;
+                const auto &source=sources[plane];
                 auto backing=std::make_shared<TerrainPlaneBacking>();
                 backing->generation_lease=resident_generation_lease;
                 constexpr UINT tail=4;
@@ -204,8 +266,11 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                 device->GetCopyableFootprints(&desc,0,count,0,footprints.data(),rows.data(),row_bytes.data(),&upload_size);
                 if(!upload_size || upload_size==UINT64_MAX) return TerrainFailure("Invalid terrain tail footprint.");
                 constexpr UINT64 max_upload_batch=32ull*1024ull*1024ull;
-                if(upload_size>max_upload_batch) return TerrainFailure("Terrain tail exceeds upload batch limit.");
-                if(batch_bytes>max_upload_batch-upload_size)
+                const auto upload_desc=BufferDescription(upload_size);
+                const auto upload_allocation=device->GetResourceAllocationInfo(0,1,&upload_desc).SizeInBytes;
+                if(!upload_allocation || upload_allocation>max_upload_batch)
+                    return TerrainFailure("Terrain tail exceeds upload batch limit.");
+                if(batch_bytes>max_upload_batch-upload_allocation)
                     if(auto r=flush();!r) return r;
                 if(!list)
                 {
@@ -214,10 +279,10 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                     result=device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,command_allocator.Get(),nullptr,IID_PPV_ARGS(&list));
                     if(FAILED(result)) return HResultFailure("Create terrain tail list",result);
                 }
-                batch_bytes+=upload_size;
+                batch_bytes+=upload_allocation;
                 const auto upload_index=retained.size(); retained.emplace_back();
                 allocation.HeapType=D3D12_HEAP_TYPE_UPLOAD;
-                if(auto r=CreateAllocation(retained.back(),allocation,BufferDescription(upload_size),D3D12_RESOURCE_STATE_GENERIC_READ);!r) return r;
+                if(auto r=CreateAllocation(retained.back(),allocation,upload_desc,D3D12_RESOURCE_STATE_GENERIC_READ);!r) return r;
                 void *address{}; D3D12_RANGE empty{};
                 auto hr=retained.back().resource->Map(0,&empty,&address);
                 if(FAILED(hr)) return HResultFailure("Map terrain tail upload",hr);
@@ -273,6 +338,7 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                 terrain_planes_archive_digest=archive_digest;
             }
             else use_pages=false;
+            }
         }
         if(use_pages)
         {
@@ -330,12 +396,15 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
     }
     terrain_static_pages_current=use_pages;terrain_archive_digest=archive_digest;
     terrain_target_first_mip=first_mip;
+    terrain_target_budget_mib=config.texture_budget_mib;
+    terrain_retry_budget_bytes=retry_budget_bytes;
     terrain_parameters_changed=false;
     return Result::Success();
 }
 
 void D3D12Renderer::Impl::DemandTerrainPages(std::span<const RenderViewInput> views,std::uint64_t frame_number)
 {
+    terrain_plane_needed.assign(terrain_plane_stream_ids.size(),0);
     if(!terrain_static_pages_current) return;
     const UINT finest=QualityProfileFor(config.texture_quality).texture_finest_mip;
     for(std::size_t index=0;index<terrain_tiles.size();++index)
@@ -370,7 +439,10 @@ void D3D12Renderer::Impl::DemandTerrainPages(std::span<const RenderViewInput> vi
         if(!needed) continue;
         const auto priority=std::bit_cast<UINT>(static_cast<float>(1.0/(1.0+nearest)));
         for(std::size_t plane=0;plane<3;++plane)
+        {
+            terrain_plane_needed[index*3+plane]=1;
             texture_streaming.Demand(terrain_plane_stream_ids[index*3+plane],finest,priority,frame_number);
+        }
     }
 }
 
@@ -384,19 +456,51 @@ Result D3D12Renderer::Impl::PublishTerrainStreaming(UINT frame_slot)
         D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=D3D12_HEAP_TYPE_UPLOAD;
         if(auto r=CreateAllocation(buffer,allocation,BufferDescription(bytes),D3D12_RESOURCE_STATE_GENERIC_READ);!r) return r;
     }
-    void *address{}; D3D12_RANGE empty{};
-    const auto hr=buffer.resource->Map(0,&empty,&address);
-    if(FAILED(hr)) return HResultFailure("Map terrain texture metadata",hr);
-    auto *entries=static_cast<TextureMipMetadata *>(address);
-    std::fill_n(entries,kTerrainPagePlaneCapacity,TextureMipMetadata{});
-    if(terrain_static_pages_current)
-        for(std::size_t i=0;i<terrain_plane_stream_ids.size();++i)
+    auto &bank=terrain_descriptor_banks[frame_slot];
+    const auto heap_start=srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    if(bank.heap.Get()!=srv_cpu_heap.Get() || bank.first.ptr!=heap_start.ptr || bank.stride!=srv_stride ||
+        bank.metadata_resource.Get()!=buffer.resource.Get())
+    {
+        bank={}; bank.heap=srv_cpu_heap; bank.first=heap_start; bank.stride=srv_stride;
+        bank.metadata_resource=buffer.resource;
+    }
+    if(bank.entries.empty()) bank.entries.resize(kTerrainPagePlaneCapacity);
+    const UINT quality=QualityProfileFor(config.texture_quality).texture_finest_mip+1;
+    const auto current=terrain_static_pages_current?static_cast<UINT>(terrain_plane_stream_ids.size()):0u;
+    const auto limit=std::max(current,bank.published_count);
+    TextureMipMetadata *mapped=nullptr;
+    const auto map=[&]() -> Result
+    {
+        if(mapped) return Result::Success();
+        void *address{}; D3D12_RANGE empty{};
+        const auto hr=buffer.resource->Map(0,&empty,&address);
+        if(FAILED(hr)) return HResultFailure("Map terrain texture metadata",hr);
+        mapped=static_cast<TextureMipMetadata *>(address);
+        return Result::Success();
+    };
+    if(!bank.metadata_initialized)
+    {
+        if(auto result=map();!result) return result;
+        std::memset(mapped,0,static_cast<std::size_t>(bytes));
+    }
+    for(UINT i=0;i<limit;++i)
+    {
+        TextureMipMetadata value{};
+        if(i<current && i<terrain_plane_needed.size() && terrain_plane_needed[i])
         {
             const auto view=texture_streaming.View(terrain_plane_stream_ids[i]);
-            if(view.resource) entries[i]={view.first_mip,view.resident_min_mip,
-                view.logical_description.mip_count,QualityProfileFor(config.texture_quality).texture_finest_mip+1};
+            if(view.resource) value={view.first_mip,view.resident_min_mip,view.logical_description.mip_count,quality};
         }
-    buffer.resource->Unmap(0,nullptr);
+        auto &previous=bank.entries[i].metadata;
+        if(value.first_mip==previous.first_mip && value.resident_min_mip==previous.resident_min_mip &&
+            value.mip_count==previous.mip_count && value.feedback_enabled==previous.feedback_enabled) continue;
+        if(auto result=map();!result) return result;
+        mapped[i]=value;
+        previous=value;
+    }
+    if(mapped)
+        buffer.resource->Unmap(0,nullptr);
+    bank.metadata_initialized=true;
     const auto &sections=terrain_frame_sections[frame_slot];
     const auto count=sections.resource ? static_cast<UINT>(sections.resource->GetDesc().Width/sizeof(GpuTerrainSection)) : 0u;
     WriteTerrainPageDescriptors(frame_slot,count);
@@ -407,25 +511,38 @@ void D3D12Renderer::Impl::WriteTerrainPageDescriptors(UINT frame_slot,UINT secti
 {
     auto h=srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     h.ptr+=(SIZE_T(frame_slot)*kTextureDescriptorCount+kTerrainPageDescriptorOffset)*srv_stride;
+    const auto base=h.ptr;
+    h.ptr=base+SIZE_T(HS_TERRAIN_SECTION_SRV)*srv_stride;
     const auto &sections=terrain_frame_sections[frame_slot];
     D3D12_SHADER_RESOURCE_VIEW_DESC table{}; table.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
     table.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     table.Buffer.StructureByteStride=sizeof(GpuTerrainSection); table.Buffer.NumElements=std::max(1u,section_count);
     device->CreateShaderResourceView(section_count?sections.resource.Get():nullptr,&table,h);
-    h.ptr+=srv_stride;
+    h.ptr=base+SIZE_T(HS_TERRAIN_MIP_SRV)*srv_stride;
     table.Buffer.StructureByteStride=sizeof(TextureMipMetadata); table.Buffer.NumElements=kTerrainPagePlaneCapacity;
     device->CreateShaderResourceView(terrain_frame_mips[frame_slot].resource.Get(),&table,h);
-    h.ptr+=srv_stride;
-    for(UINT plane=0;plane<kTerrainPagePlaneCapacity;++plane)
+    h.ptr=base+SIZE_T(HS_TERRAIN_PLANE_SRV)*srv_stride;
+    auto &bank=terrain_descriptor_banks[frame_slot];
+    const UINT current=terrain_static_pages_current?static_cast<UINT>(terrain_plane_stream_ids.size()):0u;
+    const UINT limit=bank.descriptors_initialized?std::max(current,bank.published_count):kTerrainPagePlaneCapacity;
+    for(UINT plane=0;plane<limit;++plane)
     {
-        const auto view=terrain_static_pages_current && plane<terrain_plane_stream_ids.size()
+        const auto view=plane<current
             ? texture_streaming.View(terrain_plane_stream_ids[plane]) : TextureStreamView{};
+        auto &entry=bank.entries[plane];
+        const UINT mip_levels=view.resource?view.resource->GetDesc().MipLevels:1;
+        if(entry.written && entry.resource.Get()==view.resource && entry.revision==view.revision &&
+            entry.mip_levels==mip_levels) { h.ptr+=srv_stride; continue; }
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
         srv.Format=plane%3==0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
         srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Texture2D.MipLevels=view.resource?view.resource->GetDesc().MipLevels:1;
+        srv.Texture2D.MipLevels=mip_levels;
         device->CreateShaderResourceView(view.resource,&srv,h); h.ptr+=srv_stride;
+        entry.resource=view.resource; entry.revision=view.revision;
+        entry.mip_levels=mip_levels; entry.written=true;
     }
+    bank.descriptors_initialized=true;
+    bank.published_count=current;
 }
 } // namespace hs

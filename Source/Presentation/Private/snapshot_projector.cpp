@@ -16,6 +16,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <stdexcept>
 #include <type_traits>
 namespace hs { namespace {
 constexpr Tick Seconds(float v) noexcept { return static_cast<Tick>(v*60.0f+0.5f); }
@@ -186,7 +187,7 @@ void PlayerFootstepTimeline::Reset(const TickReadView &model, Sequence motion_ep
 }
 
 std::optional<PresentationEvent> PlayerFootstepTimeline::Advance(
-    const TickReadView &model, Sequence motion_epoch) noexcept
+    const TickReadView &model, Sequence motion_epoch, bool meadow_terrain_enabled) noexcept
 {
     if (!initialized_ || model.session_id != session_id_ || motion_epoch != motion_epoch_ ||
         tick_ == std::numeric_limits<Tick>::max() ||
@@ -204,7 +205,7 @@ std::optional<PresentationEvent> PlayerFootstepTimeline::Advance(
     event.kind = PresentationKind::Audio;
     event.session_id = model.session_id;
     event.position = {model.player.position.x, 0.0f, model.player.position.y};
-    if (model.arena_half_extent >= 14.0f)
+    if (meadow_terrain_enabled)
         event.position.y = MeadowGroundHeight({event.position.x, event.position.z});
     event.asset = MakeAssetId(model.player.locomotion_blend >= 0.5f
                                   ? "audio.player.footstep_run"
@@ -219,23 +220,13 @@ template <typename Actions>
 EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
     const Actions &actions, const EnemyAnimationState *enemy_animations)
 {
-    const auto color = enemy.boss == BossKind::Final ? 0xFF4040E8u :
-                       enemy.boss == BossKind::TenMinute ? 0xFFB040E8u :
-                       enemy.boss == BossKind::FiveMinute ? 0xFFE86040u :
-                       enemy.kind == EnemyKind::Ranged ? 0xFF40B060u :
-                       enemy.kind == EnemyKind::Suicide ? 0xFF40D8E8u : 0xFF5D66E8u;
     const auto mesh = enemy.boss == BossKind::Final ? RenderMesh::BossFinal :
                       enemy.boss == BossKind::TenMinute ? RenderMesh::BossTenMinute :
                       enemy.boss == BossKind::FiveMinute ? RenderMesh::BossFiveMinute :
                       enemy.kind == EnemyKind::Ranged ? RenderMesh::MonsterRanged :
                       enemy.kind == EnemyKind::Suicide ? RenderMesh::MonsterSuicide
                                                        : RenderMesh::MonsterMelee;
-    const auto uniform_scale = enemy.boss == BossKind::Final ? 3.51f :
-                               enemy.boss == BossKind::TenMinute ? 4.71f :
-                               enemy.boss == BossKind::FiveMinute ? 4.23f :
-                                enemy.kind == EnemyKind::Ranged ? 1.40625f :
-                                enemy.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
-    const Float3 scale{uniform_scale, uniform_scale, uniform_scale};
+    const auto appearance = DefaultCharacterRenderAppearance(mesh);
     std::uint32_t status_visual_mask{};
     if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Bleed))
         status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Bleed);
@@ -254,10 +245,11 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
                             ? enemy.locked_aim
                             : ((cancel_progress || (release_tick && *release_tick == tick) ||
                                  animation.attack_recoil) && release_direction
-                                   ? Float2{release_direction->x, release_direction->z} : enemy.velocity);
+                                   ? Float2{release_direction->x, release_direction->z}
+                                   : LengthSquared(enemy.facing) > 0.0001f ? enemy.facing : enemy.velocity);
     RenderInstance instance
         {{enemy.position.x, 0.0f, enemy.position.y},
-         std::atan2(facing.x, facing.y), scale, color, mesh,
+         std::atan2(facing.x, facing.y), appearance.scale, appearance.color_rgba, mesh,
          kEnemyRenderId | enemy.id.value, status_visual_mask};
     AnimationPoseRef enemy_pose;
 
@@ -322,9 +314,17 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
 }
 } // namespace
 
+bool SceneHasMeadowTerrain(const StaticRenderScene &scene) noexcept
+{
+    return std::ranges::any_of(scene.instances, [](const RenderInstance &instance) {
+        return instance.mesh == RenderMesh::MeadowSurface && instance.environment_variant == 0;
+    });
+}
+
 Result ProjectDynamicTick(const TickReadView &model,
                         RenderSnapshotStorage &snapshot,
                         std::shared_ptr<const StaticRenderScene> environment_scene,
+                        bool meadow_terrain_enabled,
                         const EnemyAnimationState *enemy_animations,
                         std::span<const DomainSignal> retained_visual_links)
 {
@@ -339,7 +339,7 @@ Result ProjectDynamicTick(const TickReadView &model,
     snapshot.camera.target_motion_epoch = enemy_animations ? enemy_animations->PlayerMotionEpoch() : 0;
     snapshot.SetStaticScene(std::move(environment_scene));
 
-    const bool terrain_enabled = model.arena_half_extent >= 14.0f;
+    const bool terrain_enabled = meadow_terrain_enabled;
     const auto terrain_height = [&](Float2 position) {
         return terrain_enabled ? MeadowGroundHeight(position) : 0.0f;
     };
@@ -514,10 +514,11 @@ Result ProjectDynamicTick(const TickReadView &model,
             model.player.active_basic_empower_started,
             model.player.active_basic_empower_until + 1, SkillKind::BasicAttack,
             0);
+    const auto player_appearance = DefaultCharacterRenderAppearance(RenderMesh::Archer);
     RenderInstance player_instance{
         {model.player.position.x, 0.0f, model.player.position.y},
          std::atan2(model.player.facing.x, model.player.facing.y),
-         {0.97174913f, 0.97174913f, 0.97174913f}, 0xFFFFFFFFu, RenderMesh::Archer,
+         player_appearance.scale, player_appearance.color_rgba, RenderMesh::Archer,
          kPlayerRenderId};
     player_instance.motion_epoch = snapshot.camera.target_motion_epoch;
     if (model.session.phase != SessionPhase::Defeat &&
@@ -1121,8 +1122,10 @@ Result ProjectDynamicTick(const TickReadView &model,
                                          float length, PersistentVfxKind kind) {
             PersistentVfxVisual visual{position, yaw, radius, length, kind,
                                        kAreaRenderId | area.id.value};
-            visual.active_tick = area.active_tick;
-            visual.expires = area.expires;
+            const Tick pending_until = area.pending_until_tick ? area.pending_until_tick : area.active_tick;
+            visual.active_tick = kind == PersistentVfxKind::TrapPending ? area.pending_start_tick :
+                kind == PersistentVfxKind::TrapArmed ? pending_until : area.active_tick;
+            visual.expires = kind == PersistentVfxKind::TrapPending ? pending_until : area.expires;
             visual.cast_id = area.cast_id;
             visual.skill = static_cast<std::uint8_t>(area.skill);
             visual.source_upgrade = area.source_upgrade;
@@ -1135,7 +1138,7 @@ Result ProjectDynamicTick(const TickReadView &model,
         };
         if (area.kind == AreaViewKind::Trap)
         {
-            const auto pending_kind = model.tick < area.active_tick
+            const auto pending_kind = model.tick < (area.pending_until_tick ? area.pending_until_tick : area.active_tick)
                                         ? PersistentVfxKind::TrapPending
                                         : PersistentVfxKind::TrapArmed;
             add_area_visual({area.position.x, 0.025f, area.position.y},
@@ -2057,9 +2060,7 @@ void ProjectTickUi(const TickReadView &model,
                 const auto attack_speed = model.effective_attack_speed;
                 const auto move_speed = model.effective_move_speed;
                 const auto magnet_radius = model.effective_magnet_radius;
-                const auto cooldown_reduction =
-                    0.03f * probe.stat_points[
-                                static_cast<std::size_t>(StatKind::CooldownReduction)];
+                const auto cooldown_reduction = probe.effective_cooldown_reduction;
                 add_ui(UiModel::Kind::Text, {350, 235}, {570, 470}, 0xFFFFFFFFu,
                        std::format(
                            "상세 능력치\n\n"
@@ -2351,6 +2352,16 @@ void CaptureUiProjectionFacts(const TickReadView &model,
         }
     };
     const auto &probe = model.session;
+    switch (probe.phase)
+    {
+    case SessionPhase::MainMenu: case SessionPhase::Playing: case SessionPhase::Paused:
+    case SessionPhase::CardSelection: case SessionPhase::StatAllocation: case SessionPhase::RelicSelection:
+    case SessionPhase::Victory: case SessionPhase::Defeat: case SessionPhase::QuitRequested: break;
+    default: throw std::invalid_argument("Unknown UI projection session phase.");
+    }
+    word(input_rejected);
+    if (ui.page == UiPage::MainMenuSettings || ui.page == UiPage::PauseSettings)
+        word(modal_phase);
     if (probe.phase == SessionPhase::MainMenu ||
         (probe.phase == SessionPhase::Paused &&
          ui.page == UiPage::PauseSettings))
@@ -2574,8 +2585,7 @@ void CaptureUiProjectionFacts(const TickReadView &model,
             word(model.skills[0].displayed_damage);
             text(std::format("{:.3f}", model.effective_attack_speed));
             text(std::format("{:.2f}", model.effective_move_speed));
-            text(std::format("{:.0f}", 0.03f * probe.stat_points[
-                static_cast<std::size_t>(StatKind::CooldownReduction)] * 100.0f));
+            text(std::format("{:.0f}", probe.effective_cooldown_reduction * 100.0f));
             text(std::format("{:.1f}", model.effective_magnet_radius));
             for (const auto points : probe.stat_points) word(points);
             word(probe.damage_dealt); word(model.summary.direct_damage);
@@ -2696,95 +2706,7 @@ void CaptureUiProjectionFacts(const TickReadView &model,
         return;
     }
     if (probe.phase == SessionPhase::QuitRequested) return;
-    // Preserve conservative dependencies for an out-of-range phase value.
-    word(ui.page); word(ui.selected_collection_skill); word(ui.selected_character_skill);
-    word(ui.loadout_source_slot); word(ui.settings_group); word(ui.settings_page);
-    word(ui.character_details_page); word(modal_phase); word(pending_rebind_slot); word(input_rejected);
-    word(settings.schema_version); word(settings.width); word(settings.height); word(settings.borderless);
-    word(settings.vsync); word(settings.frame_cap); word(settings.render_scale_percent);
-    word(settings.shadow_resolution); word(settings.particle_percentage); word(settings.bloom);
-    word(settings.master_volume); word(settings.bgm_volume);
-    word(settings.sfx_volume); word(settings.ui_volume);
-    for (const auto key : settings.skill_virtual_keys) word(key);
-    word(settings.screen_overlay_intensity);
-    word(probe.phase);
-    word(probe.growth_ticks); word(probe.boss_fight_ticks);
-    word(probe.normal_enemy_count);
-    word(probe.level); word(probe.experience); word(probe.experience_to_next);
-    word(probe.health); word(probe.max_health);
-    word(probe.kills); word(probe.damage_dealt); word(probe.damage_taken); word(probe.healing);
-    word(probe.level_rerolls_remaining); word(probe.relic_rerolls_remaining);
-    word(probe.pending_stat_points);
-    word(probe.final_boss_spawned);
-    word(probe.relic_mask); word(probe.card_count);
-    for (auto skill : probe.skill_loadout) word(skill);
-    for (auto value : probe.skill_levels) word(value);
-    for (auto value : probe.upgrade_masks) word(value);
-    for (auto value : probe.cooldown_ticks) word(value);
-    for (auto value : probe.stat_points) word(value);
-    for (std::size_t index = 0; index < probe.card_count; ++index)
-    {
-        const auto &card = probe.cards[index];
-        word(card.kind); word(card.subject); word(card.upgrade);
-        if (card.kind == CardKind::Relic && card.subject < kRelicCount)
-        {
-            text(presentation.relic_names[card.subject].data());
-            text(presentation.relic_rules[card.subject].data());
-        }
-    }
-    for (std::size_t relic = 0; relic < kRelicCount; ++relic)
-        if (HasRelic(probe.relic_mask, static_cast<RelicKind>(relic)))
-        {
-            text(presentation.relic_names[relic].data());
-            text(presentation.relic_rules[relic].data());
-        }
-    for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
-        word(probe.damage_by_skill[skill]);
-    for (const auto &wave : model.waves) { word(wave.start); word(wave.duration); }
-    for (const auto &skill : model.skills)
-    {
-        word(skill.effective_cooldown); word(skill.displayed_damage); word(skill.effective_range);
-        word(skill.area_radius); word(skill.duration); word(skill.projectile_count); word(skill.pierce_count);
-    }
-    for (const auto skill : model.player.loadout) word(skill);
-    word(model.effective_attack); word(model.effective_attack_speed);
-    word(model.effective_move_speed); word(model.effective_magnet_radius);
-    word(model.summary.direct_damage); word(model.summary.derived_damage);
-    word(model.summary.damage_over_time);
-    for (const auto &row : model.summary.upgrade_damage) for (auto value : row) word(value);
-    for (auto value : model.summary.relic_damage) word(value);
-    for (auto value : model.summary.relic_triggers) word(value);
-    for (auto value : model.summary.relic_kills) word(value);
-    for (const auto &row : model.summary.relic_effects) for (auto value : row) word(value);
-    word(model.seed);
-    // Boss rows are the only enemy-domain data shown by the HUD. SessionProbe's
-    // authoritative count avoids invoking any row readers in the common no-boss case.
-    if (probe.boss_count)
-    {
-        std::uint64_t visible_bosses{};
-        std::array<std::uint64_t, 4> boss_facts{
-            0x243f6a8885a308d3ull, 0x13198a2e03707344ull,
-            0xa4093822299f31d0ull, 0x082efa98ec4e6c89ull};
-        for (const auto &enemy : model.enemies)
-            if (enemy.boss && !enemy.dead)
-            {
-                ++visible_bosses;
-                const std::array<std::uint64_t, 4> row{
-                    static_cast<std::uint64_t>(*enemy.boss), enemy.spawned_tick,
-                    static_cast<std::uint64_t>(static_cast<std::int64_t>(enemy.health)),
-                    static_cast<std::uint64_t>(static_cast<std::int64_t>(enemy.max_health))};
-                for (std::size_t value = 0; value < row.size(); ++value)
-                    for (std::size_t lane = 0; lane < boss_facts.size(); ++lane)
-                    {
-                        auto mixed = boss_facts[lane] ^ (row[value] +
-                            (visible_bosses << (lane + 1)) + value * 0x9e3779b97f4a7c15ull);
-                        mixed *= 0x100000001b3ull + lane * 2u;
-                        boss_facts[lane] = std::rotl(mixed, static_cast<int>(11u + lane * 7u));
-                    }
-            }
-        word(visible_bosses);
-        for (const auto value : boss_facts) word(value);
-    }
+    throw std::invalid_argument("Unknown UI projection session phase.");
 }
 
 Result ProjectTick(const TickReadView &model,
@@ -2798,7 +2720,8 @@ Result ProjectTick(const TickReadView &model,
                  const GraphicsSettingsUiModel *graphics_ui,
                  std::span<const DomainSignal> retained_visual_links)
 {
-    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), enemy_animations,
+    const bool meadow_terrain_enabled = environment_scene && SceneHasMeadowTerrain(*environment_scene);
+    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), meadow_terrain_enabled, enemy_animations,
                                      retained_visual_links);
     if (!result) return result;
     ProjectTickUi(model, presentation, ui, settings, snapshot, pending_rebind_slot, graphics_ui);

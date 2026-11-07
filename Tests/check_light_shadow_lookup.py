@@ -1,5 +1,6 @@
 """Exercise the real light-list capture reader with complete and legacy masks."""
 import json
+import math
 import struct
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ class LightListCaptureReaderTests(unittest.TestCase):
             records = bytearray(total * 128)
             for index in range(total):
                 struct.pack_into("<4I", records, index * 128 + 64, index + 1, 0, 1, 1)
+                struct.pack_into("<f", records, index * 128 + 44, (100.0 / total) / 683.0 / (4.0 * math.pi))
             data = {
                 "light_records": records,
                 "light_ranges": ranges,

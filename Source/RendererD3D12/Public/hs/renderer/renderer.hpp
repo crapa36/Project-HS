@@ -145,6 +145,13 @@ struct RendererCharacterAnimationClip
     std::uint32_t frame_count{};
     bool looping{};
 };
+#if defined(HS_DEVELOPMENT_TOOLS)
+struct RendererLegacyCharacterAnimationClip
+{
+    std::uint32_t character{}, clip{};
+    float duration_seconds{};
+};
+#endif
 struct RendererLightingStatus
 {
     RendererLightingModes requested, active;
@@ -728,6 +735,13 @@ struct RendererDiagnosticsSnapshot
     RendererReconstructionStatus reconstruction;
 };
 
+struct SceneProbeBakePolicy
+{
+    std::uint32_t maximum_iterations{16};
+    double absolute_tolerance{1e-4};
+    double relative_tolerance{1e-3};
+};
+
 class D3D12Renderer
 {
   public:
@@ -781,7 +795,8 @@ class D3D12Renderer
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
     [[nodiscard]] static Result BakeSceneProbePackage(const RendererConfig &configuration,
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
-        std::vector<std::byte> &package_bytes);
+        std::vector<std::byte> &package_bytes, std::uint32_t maximum_cube_views_per_graph = 6,
+        SceneProbeBakePolicy policy = {});
     [[nodiscard]] Result BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
         const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
@@ -834,6 +849,9 @@ class D3D12Renderer
     [[nodiscard]] RendererTextureProductStatus GetTextureStreamingStatus(std::string_view logical_id) const noexcept;
     [[nodiscard]] RendererSceneProbeBakeStatus GetSceneProbeBakeStatus() const noexcept;
     [[nodiscard]] std::vector<RendererCharacterAnimationClip> GetCharacterAnimationClips() const;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    [[nodiscard]] std::vector<RendererLegacyCharacterAnimationClip> GetLegacyCharacterAnimationClips() const;
+#endif
     [[nodiscard]] RendererPsoCacheStats GetPipelineCacheStats() const;
     [[nodiscard]] RendererStartupTimings GetStartupTimings() const noexcept;
     // Call on the renderer owner thread; the returned bounded value owns its data.
@@ -848,7 +866,7 @@ class D3D12Renderer
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
-    [[nodiscard]] Result CapturePng(const std::filesystem::path &path);
+    [[nodiscard]] Result CapturePng(const std::filesystem::path &path, ViewId view_id);
     [[nodiscard]] Result CaptureSurfaceDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result CaptureGeometryDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result CaptureVisibilityDiagnostics(const std::filesystem::path &path);

@@ -114,7 +114,7 @@ struct LayeredTranslucencyTargets
     std::unique_ptr<TranslucencyDiagnosticsCapture> work;
 #endif
     ComPtr<ID3D12DescriptorHeap> tables, rtv_heap, dsv_heap, exports;
-    std::array<AllocationResource, 4> front, identity;
+    std::array<AllocationResource, 4> front, identity, optical_component;
     AllocationResource exit;
     DXGI_FORMAT exit_format{};
     std::array<AllocationResource, 6> guides;
@@ -143,6 +143,10 @@ struct LayeredTranslucencyTargets
     D3D12_CPU_DESCRIPTOR_HANDLE Rtv(std::uint32_t offset) const
     {
         auto handle = rtv_heap->GetCPUDescriptorHandleForHeapStart(); handle.ptr += SIZE_T(offset) * rtv_stride; return handle;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE GuideRtv(std::uint32_t index) const
+    {
+        return Rtv(index == 5 ? 12 : 8 + index);
     }
     D3D12_CPU_DESCRIPTOR_HANDLE Dsv(std::uint32_t offset) const
     {
@@ -176,6 +180,8 @@ struct LayeredTranslucencyTargets
         {
             Srv(front[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_FRONT_DEPTH + index));
             Srv(identity[index].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_FRONT_IDENTITY + index));
+            Srv(optical_component[index].resource.Get(), DXGI_FORMAT_R32_UINT,
+                Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_FRONT_OPTICAL_COMPONENT + index));
         }
         Srv(exit.resource.Get(), exit_format, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_EXIT));
         Srv(unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 1 + HS_TRANSLUCENCY_SRV_UNPEELED));
@@ -211,6 +217,8 @@ struct TranslucencySystem::Impl
     std::vector<RendererTranslucencyDiagnosticsSample> completed_work;
     RendererTranslucencyDiagnosticsStatus retired_work;
     std::uint32_t diagnostic_color_index{};
+    bool diagnostic_submission_valid{};
+    bool diagnostic_single_layer_water{};
 #endif
     struct Import { AllocationResource *allocation{}; ResourceHandle handle; };
     struct Pending
@@ -221,7 +229,7 @@ struct TranslucencySystem::Impl
         ComPtr<ID3D12DescriptorHeap> shader_heap;
         std::vector<LayeredTranslucencySceneRead> scene_reads;
         std::vector<Import> imports;
-        std::array<ResourceVersion, 4> front, identity;
+        std::array<ResourceVersion, 4> front, identity, optical_component;
         ResourceVersion exit;
         std::array<ResourceVersion, kLayeredTranslucencyMaxLayers> occupancy;
         std::array<ResourceVersion, 2> color;
@@ -236,13 +244,27 @@ TranslucencySystem::~TranslucencySystem() = default;
 std::uint64_t LayeredTranslucencyCandidate::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 std::uint64_t TranslucencySystem::AllocatedBytes() const noexcept { return impl_->targets ? impl_->targets->bytes : 0; }
 #if defined(HS_DEVELOPMENT_TOOLS)
-std::array<const AllocationResource *, 8> TranslucencySystem::DiagnosticResources() const noexcept
+std::array<const AllocationResource *, 15> TranslucencySystem::DiagnosticResources() const noexcept
 {
-    if (!impl_->targets || !impl_->targets->enabled || !impl_->targets->usable) return {};
+    if (!impl_->targets || !impl_->targets->enabled || !impl_->targets->usable ||
+        !impl_->diagnostic_submission_valid) return {};
     const auto &targets = *impl_->targets;
-    return {&targets.front[0], &targets.guides[1], &targets.guides[2],
+    std::array<const AllocationResource *, 15> resources{
+        &targets.front[0], &targets.guides[1], &targets.guides[2],
         &targets.guides[3], &targets.identity[0], &targets.unpeeled_fragment_count, &targets.guides[5],
         &targets.color[impl_->diagnostic_color_index]};
+    if (!impl_->diagnostic_single_layer_water)
+    {
+        if (targets.layer_count > 1)
+        {
+            resources[8] = &targets.front[1];
+            resources[14] = &targets.identity[1];
+        }
+        for (std::uint32_t layer = 0; layer < targets.layer_count; ++layer)
+            resources[9 + layer] = &targets.optical_component[layer];
+        resources[13] = &targets.exit;
+    }
+    return resources;
 }
 #endif
 
@@ -299,6 +321,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     }
     if (auto checked = CheckFormat(device, DXGI_FORMAT_D32_FLOAT, true, false); !checked) return checked;
     if (auto checked = CheckFormat(device, DXGI_FORMAT_R32G32_UINT, false, false); !checked) return checked;
+    if (auto checked = CheckFormat(device, DXGI_FORMAT_R32_UINT, false, false); !checked) return checked;
     if (auto checked = CheckFormat(device, DXGI_FORMAT_R32_UINT, false, true); !checked) return checked;
     if (auto checked = CheckFormat(device, kColor, false, false); !checked) return checked;
     for (const auto format : kGuideFormats)
@@ -309,6 +332,8 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
                 D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, next->front[layer]); !created) return created;
         if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R32G32_UINT,
                 D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, next->identity[layer]); !created) return created;
+        if (auto created = CreateTexture(allocator, capacity, DXGI_FORMAT_R32_UINT,
+                D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, next->optical_component[layer]); !created) return created;
     }
     next->exit_format = layerCount == 1 ? DXGI_FORMAT_R32_FLOAT :
         layerCount == 2 ? DXGI_FORMAT_R32G32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -353,7 +378,8 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
         {"BLENDWEIGHT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 48, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 56, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-        {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
+        {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"OPTICAL_COMPONENT", 0, DXGI_FORMAT_R16_UINT, 0, 74, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     for (std::uint32_t index = 0; index < next->pipelines.size(); ++index)
     {
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -391,7 +417,9 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
             pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
             pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
             pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-            pipeline.NumRenderTargets = 1; pipeline.RTVFormats[0] = DXGI_FORMAT_R32G32_UINT;
+            pipeline.NumRenderTargets = 2;
+            pipeline.RTVFormats[0] = DXGI_FORMAT_R32G32_UINT;
+            pipeline.RTVFormats[1] = DXGI_FORMAT_R32_UINT;
         }
         else if (index == 1)
         {
@@ -468,7 +496,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     heap.NumDescriptors = 9;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->exports));
     if (FAILED(native)) return NativeFailure("Create translucency transparency exports", native);
-    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 13;
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; heap.NumDescriptors = 15;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->rtv_heap));
     if (FAILED(native)) return NativeFailure("Create translucency transparency RTVs", native);
     next->rtv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
@@ -484,20 +512,22 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
         read_only.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
         device->CreateDepthStencilView(next->front[layer].resource.Get(), &read_only, next->Dsv(8 + layer));
         device->CreateRenderTargetView(next->identity[layer].resource.Get(), nullptr, next->Rtv(layer));
+        device->CreateRenderTargetView(next->optical_component[layer].resource.Get(), nullptr, next->Rtv(4 + layer));
     }
-    device->CreateRenderTargetView(next->exit.resource.Get(), nullptr, next->Rtv(12));
+    device->CreateRenderTargetView(next->exit.resource.Get(), nullptr, next->Rtv(8));
     next->Srv(next->front[0].resource.Get(), DXGI_FORMAT_R32_FLOAT, next->Export(0));
     for (std::uint32_t index = 1; index < next->guides.size(); ++index)
     {
         if (index == 4) continue;
-        device->CreateRenderTargetView(next->guides[index].resource.Get(), nullptr, next->Rtv(4 + index));
+        device->CreateRenderTargetView(next->guides[index].resource.Get(), nullptr,
+            next->Rtv(index == 5 ? 12 : 8 + index));
         next->Srv(next->guides[index].resource.Get(), kGuideFormats[index], next->Export(index));
     }
     next->Srv(next->identity[0].resource.Get(), DXGI_FORMAT_R32G32_UINT, next->Export(4));
     next->Srv(next->unpeeled_fragment_count.resource.Get(), DXGI_FORMAT_R32_UINT, next->Export(6));
     for (std::uint32_t index = 0; index < next->color.size(); ++index)
     {
-        device->CreateRenderTargetView(next->color[index].resource.Get(), nullptr, next->Rtv(10 + index));
+        device->CreateRenderTargetView(next->color[index].resource.Get(), nullptr, next->Rtv(13 + index));
         next->Srv(next->color[index].resource.Get(), kColor, next->Export(7 + index));
     }
     D3D12MA::ALLOCATION_DESC uploadAllocation{}; uploadAllocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
@@ -521,6 +551,7 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     include(next->constants); include(next->unpeeled_fragment_count);
     for (const auto &resource : next->front) include(resource);
     for (const auto &resource : next->identity) include(resource);
+    for (const auto &resource : next->optical_component) include(resource);
     include(next->exit);
     for (const auto &resource : next->guides) include(resource);
     for (const auto &resource : next->color) include(resource);
@@ -560,6 +591,11 @@ Result TranslucencySystem::Commit(LayeredTranslucencyCandidate &&candidate, cons
         return Failure(ErrorCode::InvalidState, "Translucency transparency target generation is exhausted.");
     candidate.targets_->generation = ++impl_->next_generation;
     impl_->targets = std::move(candidate.targets_);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->diagnostic_color_index = 0;
+    impl_->diagnostic_submission_valid = false;
+    impl_->diagnostic_single_layer_water = false;
+#endif
     return Result::Success();
 }
 
@@ -687,7 +723,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         return resource.EnsureNativeContract(storage->device.Get());
     };
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
-        for (auto *resource : {&storage->front[layer], &storage->identity[layer]})
+        for (auto *resource : {&storage->front[layer], &storage->identity[layer], &storage->optical_component[layer]})
             if (auto certified = certify(*resource); !certified) return certified;
     if (auto certified = certify(storage->exit); !certified) return certified;
     for (std::uint32_t index = 0; index < storage->guides.size(); ++index)
@@ -727,10 +763,13 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             retained ? retained->front[layer] : TextureHandle{});
         pending.identity[layer] = import(storage->identity[layer], "Translucency.InstanceIdentity",
             retained ? retained->identity[layer] : TextureHandle{});
+        pending.optical_component[layer] = import(storage->optical_component[layer], "Translucency.OpticalComponent",
+            retained ? retained->optical_component[layer] : TextureHandle{});
         if (layout)
         {
             layout->front[layer] = pending.front[layer].resource;
             layout->identity[layer] = pending.identity[layer].resource;
+            layout->optical_component[layer] = pending.optical_component[layer].resource;
         }
         if (!inputs.single_layer_water)
             storage->FillTable(inputs, layer, layer, LayeredTranslucencyPhase::Front, inputs.hdr.resource);
@@ -810,6 +849,8 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
                 : front.Write(pending.front[layer], Access::DepthWrite);
             pending.identity[layer] = retained ? ResourceVersion{pending.identity[layer].resource, 1}
                 : front.Write(pending.identity[layer], Access::RenderTarget);
+            pending.optical_component[layer] = retained ? ResourceVersion{pending.optical_component[layer].resource, 1}
+                : front.Write(pending.optical_component[layer], Access::RenderTarget);
     #if defined(HS_DEVELOPMENT_TOOLS)
             if (storage->work)
             {
@@ -824,10 +865,12 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             front.SetExecute([storage, inputs, layer, use_occupancy](RenderPassContext &context) {
                 auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
                 constexpr float clear[]{0, 0, 0, 0};
-                const auto target = storage->Rtv(layer), depth = storage->Dsv(layer);
+                const D3D12_CPU_DESCRIPTOR_HANDLE targets[]{storage->Rtv(layer), storage->Rtv(4 + layer)};
+                const auto depth = storage->Dsv(layer);
                 commands->ClearDepthStencilView(depth, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-                commands->ClearRenderTargetView(target, clear, 0, nullptr);
-                commands->OMSetRenderTargets(1, &target, FALSE, &depth);
+                commands->ClearRenderTargetView(targets[0], clear, 0, nullptr);
+                commands->ClearRenderTargetView(targets[1], clear, 0, nullptr);
+                commands->OMSetRenderTargets(2, targets, FALSE, &depth);
                 if (use_occupancy)
                 {
                     commands->BeginQuery(storage->occupancy_queries.Get(), D3D12_QUERY_TYPE_OCCLUSION,
@@ -861,6 +904,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             {
                 exit.Read(pending.front[layer], Access::ShaderRead);
                 exit.Read(pending.identity[layer], Access::ShaderRead);
+                exit.Read(pending.optical_component[layer], Access::ShaderRead);
             }
             if (use_occupancy) exit.Read(occupancy[0], Access::IndirectArgs);
         }
@@ -880,7 +924,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         exit.SetExecute([storage, inputs, use_occupancy](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             constexpr float zero[]{0, 0, 0, 0};
-            const auto target = storage->Rtv(12);
+            const auto target = storage->Rtv(8);
             commands->ClearRenderTargetView(target, zero, 0, nullptr);
             commands->OMSetRenderTargets(1, &target, FALSE, nullptr);
             if (use_occupancy)
@@ -926,6 +970,7 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         if (!retained) for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
         {
             tail.Read(pending.front[layer], Access::ShaderRead); tail.Read(pending.identity[layer], Access::ShaderRead);
+            tail.Read(pending.optical_component[layer], Access::ShaderRead);
         }
         unpeeled_fragment_count = retained ? ResourceVersion{unpeeled_fragment_count.resource, 2}
             : tail.Write(unpeeled_fragment_count, Access::UnorderedWrite);
@@ -1103,12 +1148,12 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             constexpr float zero[]{0, 0, 0, 0};
             const auto depth = storage->Dsv(0);
             std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2 + kCompositeGuideIndices.size()> targets{};
-            targets[0] = storage->Rtv(10); targets[1] = storage->Rtv(0);
+            targets[0] = storage->Rtv(13); targets[1] = storage->Rtv(0);
             commands->ClearDepthStencilView(depth, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
             commands->ClearRenderTargetView(targets[1], zero, 0, nullptr);
             for (std::uint32_t index = 0; index < kCompositeGuideIndices.size(); ++index)
             {
-                targets[index + 2] = storage->Rtv(4 + kCompositeGuideIndices[index]);
+                targets[index + 2] = storage->GuideRtv(kCompositeGuideIndices[index]);
                 commands->ClearRenderTargetView(targets[index + 2], zero, 0, nullptr);
             }
             commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, &depth);
@@ -1165,6 +1210,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             compose.Read(inputs.opaque_depth.version, Access::ShaderRead);
             compose.Read(pending.front[layer], Access::DepthShaderRead);
             compose.Read(pending.identity[layer], Access::ShaderRead);
+            compose.Read(pending.optical_component[layer], Access::ShaderRead);
             compose.Read(pending.exit, Access::ShaderRead);
             if (use_occupancy) compose.Read(pending.occupancy[layer], Access::IndirectArgs);
             if (layer + 1 < storage->layer_count)
@@ -1196,7 +1242,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
 #endif
         compose.SetExecute([storage, inputs, layer, phase, target, use_occupancy](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            const auto rtv = storage->Rtv(10 + target);
+        const auto rtv = storage->Rtv(13 + target);
             const auto depth = storage->Dsv(8 + layer);
             if (layer == 0)
             {
@@ -1205,7 +1251,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
                 for (std::uint32_t index = 0; index < kCompositeGuideIndices.size(); ++index)
                 {
                     const auto guideIndex = kCompositeGuideIndices[index];
-                    targets[1 + index] = storage->Rtv(4 + guideIndex);
+                    targets[1 + index] = storage->GuideRtv(guideIndex);
                     commands->ClearRenderTargetView(targets[1 + index], zero, 0, nullptr);
                 }
                 commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, &depth);
@@ -1259,8 +1305,12 @@ Result TranslucencySystem::CompleteSubmission(const RenderGraphBuilder &graph, c
     if (!success) storage->usable = false;
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (storage->work) storage->work->Submitted(graph, pending.inputs.frame_slot, completion, success);
-    if (success && pending.composed)
+    impl_->diagnostic_submission_valid = success && pending.composed;
+    if (impl_->diagnostic_submission_valid)
+    {
+        impl_->diagnostic_single_layer_water = pending.inputs.single_layer_water;
         impl_->diagnostic_color_index = pending.inputs.single_layer_water ? 0u : (storage->layer_count - 1u) % 2u;
+    }
 #endif
     pending = {};
     return Result::Success();
@@ -1277,6 +1327,11 @@ Result TranslucencySystem::ResetAfterCompletion(const CompletionSet &completed)
     impl_->retired_work = {};
 #endif
     impl_->targets.reset();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->diagnostic_submission_valid = false;
+    impl_->diagnostic_single_layer_water = false;
+    impl_->diagnostic_color_index = 0;
+#endif
     return Result::Success();
 }
 #if defined(HS_DEVELOPMENT_TOOLS)

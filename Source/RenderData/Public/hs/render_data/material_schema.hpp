@@ -51,6 +51,8 @@ struct MaterialSurfaceLayout
 {
     std::uint32_t capability_mask{};
     std::uint32_t varying_mask{};
+    std::array<std::uint32_t, 4> solid_transmission_profile{};
+    bool has_static_solid_transmission_profile{};
     friend bool operator==(const MaterialSurfaceLayout &, const MaterialSurfaceLayout &) = default;
 };
 [[nodiscard]] std::vector<std::byte> EncodeMaterialSurfaceLayout(MaterialSurfaceLayout layout);

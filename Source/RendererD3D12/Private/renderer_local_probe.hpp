@@ -156,6 +156,9 @@ class LocalProbeSystem
     [[nodiscard]] bool NativeCaptureRequired(const std::shared_ptr<const StaticRenderScene> &,
         render_data::SceneProbeRevisions, const CompletionSet &completed) const noexcept;
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result BeginOfflineIteration(const CompletionSet &,bool reflections_only);
+#endif
     [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
     // Submission success records completion requirements; it does not publish
     // new cubes. Register publishes only after those requirements are completed,

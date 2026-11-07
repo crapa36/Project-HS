@@ -81,7 +81,8 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     if (sdk_presentation.IsEnabled())
     {
         PresentationGuidesCandidate guides;
-        HS_PREPARE(next.PreparePresentationGuides(cfg, {owner.width, owner.height}, capacity, owner.display_state, guides));
+        HS_PREPARE(next.PreparePresentationGuides(cfg, {owner.width, owner.height}, capacity, owner.display_state,
+            sdk_presentation.PresentationOwner(), guides));
         HS_PREPARE(next.presentation_guides.Commit(std::move(guides), unused));
     }
 #undef HS_PREPARE

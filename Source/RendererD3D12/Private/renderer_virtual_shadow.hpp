@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 #include <d3d12.h>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -23,6 +24,78 @@ struct VirtualShadowBakeData;
 struct AllocationResource;
 inline constexpr std::uint32_t kVirtualShadowInner = 128, kVirtualShadowGuard = 2;
 inline constexpr std::uint32_t kVirtualShadowTile = 132, kVirtualShadowLevels = 3;
+struct VirtualShadowViewFacts
+{
+    DirectX::XMFLOAT4 right{}, up{}, forward{};
+    std::array<DirectX::XMFLOAT4, kVirtualShadowLevels> clipmaps{};
+    std::array<DirectX::XMINT4, kVirtualShadowLevels> windows{};
+};
+struct CascadedShadowViewFacts
+{
+    DirectX::XMFLOAT4X4 light_view{};
+    std::array<DirectX::XMFLOAT4X4,3> projections{};
+    std::array<DirectX::XMFLOAT4,3> bounds{}; // Light-view XY minimum and maximum.
+    std::array<float,3> texels{};
+};
+[[nodiscard]] inline bool PrepareCascadedShadowViewFacts(DirectX::XMFLOAT3 direction,
+    DirectX::XMFLOAT3 target,float distance,std::uint32_t resolution,CascadedShadowViewFacts &facts) noexcept
+{
+    const std::array extents{distance*(18.0f/160.0f),distance*(48.0f/160.0f),distance};
+    const auto light_direction=DirectX::XMVector3Normalize(DirectX::XMVectorSet(direction.x,direction.y,direction.z,0));
+    const auto light_up=std::abs(DirectX::XMVectorGetY(light_direction))>0.99f
+        ? DirectX::XMVectorSet(0,0,1,0) : DirectX::XMVectorSet(0,1,0,0);
+    const auto light_view=DirectX::XMMatrixLookAtLH(DirectX::XMVectorScale(light_direction,-distance),
+        DirectX::XMVectorZero(),light_up);
+    DirectX::XMStoreFloat4x4(&facts.light_view,light_view);
+    const auto center=DirectX::XMVector3TransformCoord(DirectX::XMLoadFloat3(&target),light_view);
+    bool valid=std::isfinite(distance) && distance>0 && resolution!=0;
+    for (std::size_t cascade=0;cascade<3;++cascade)
+    {
+        const float extent=extents[cascade],texel=extent/float(resolution);
+        const float cx=std::round(DirectX::XMVectorGetX(center)/texel)*texel;
+        const float cy=std::round(DirectX::XMVectorGetY(center)/texel)*texel;
+        const float cz=DirectX::XMVectorGetZ(center),half=extent*0.5f;
+        facts.bounds[cascade]={cx-half,cy-half,cx+half,cy+half}; facts.texels[cascade]=texel;
+        const auto projection=DirectX::XMMatrixOrthographicOffCenterLH(cx-half,cx+half,cy-half,cy+half,
+            cz+distance,cz-distance);
+        DirectX::XMStoreFloat4x4(&facts.projections[cascade],DirectX::XMMatrixTranspose(light_view*projection));
+        valid=valid && std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz) &&
+            std::isfinite(texel) && texel>0;
+    }
+    return valid;
+}
+[[nodiscard]] inline bool PrepareVirtualShadowViewFacts(DirectX::XMFLOAT3 direction,
+    DirectX::XMFLOAT3 center, const std::array<float,3> &extents,
+    const std::array<std::uint32_t,3> &sides, VirtualShadowViewFacts &facts) noexcept
+{
+    const auto vector = DirectX::XMVectorSet(direction.x,direction.y,direction.z,0);
+    const float length = DirectX::XMVectorGetX(DirectX::XMVector3Length(vector));
+    if (!std::isfinite(length) || length <= 0.0f) return false;
+    const auto forward = DirectX::XMVector3Normalize(vector);
+    const auto seed = std::abs(DirectX::XMVectorGetY(forward)) > 0.95f
+        ? DirectX::XMVectorSet(0,0,1,0) : DirectX::XMVectorSet(0,1,0,0);
+    const auto right = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(seed,forward));
+    DirectX::XMStoreFloat4(&facts.right,right);
+    DirectX::XMStoreFloat4(&facts.up,DirectX::XMVector3Cross(forward,right));
+    DirectX::XMStoreFloat4(&facts.forward,forward);
+    std::uint32_t table_base{};
+    for (std::uint32_t level=0;level<kVirtualShadowLevels;++level)
+    {
+        const float extent=extents[level]; const auto side=sides[level];
+        if (!side || !std::isfinite(extent) || extent<=0 || (level && extent<=extents[level-1])) return false;
+        const float page=extent*2.0f/float(side);
+        if (!std::isfinite(page) || page<=0 || page/float(kVirtualShadowInner)<=0) return false;
+        const double x=std::floor(double(center.x*facts.right.x+center.y*facts.right.y+center.z*facts.right.z)/page);
+        const double y=std::floor(double(center.x*facts.up.x+center.y*facts.up.y+center.z*facts.up.z)/page);
+        if (!std::isfinite(x) || !std::isfinite(y) || x<double(INT32_MIN)+side || y<double(INT32_MIN)+side ||
+            x>double(INT32_MAX)-side || y>double(INT32_MAX)-side) return false;
+        facts.clipmaps[level]={page,page/float(kVirtualShadowInner),extent,0};
+        facts.windows[level]={std::int32_t(x)-std::int32_t(side/2),std::int32_t(y)-std::int32_t(side/2),
+            std::int32_t(side),std::int32_t(table_base)};
+        table_base+=side*side;
+    }
+    return true;
+}
 inline constexpr std::uint32_t kVirtualShadowPassBit = 0x80000000u;
 // Append these five SRVs to graphics table32, t0..t4/space21. No new graphics
 // root parameter/CBV. Virtual draw signatures set only PassValue (root6 DWORD0).
@@ -307,6 +380,7 @@ class VirtualShadowSystem
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] VirtualShadowCacheStatus CacheStatus() const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+    [[nodiscard]] std::array<std::uint32_t,3> ActiveVirtualSides() const noexcept;
     [[nodiscard]] std::array<const AllocationResource *, 5> DiagnosticResources() const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(VirtualShadowSystem &other) noexcept { impl_.swap(other.impl_); }

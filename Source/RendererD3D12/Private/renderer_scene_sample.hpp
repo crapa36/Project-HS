@@ -51,6 +51,34 @@ inline RenderPoseKey MakeRenderPoseKey(const RenderInstance &instance,
         std::bit_cast<std::uint32_t>(p.upper_body_weight)}};
 }
 
+// Sampling shares exact operands; per-instance history revisions remain in RenderPoseKey.
+struct RenderPoseSampleKey
+{
+    std::array<std::uint64_t, 16> values{};
+    bool operator==(const RenderPoseSampleKey &) const noexcept = default;
+};
+
+inline RenderPoseSampleKey MakeRenderPoseSampleKey(const RenderInstance &instance,
+                                                   const AnimationPoseRef *pose) noexcept
+{
+    if (instance.animation_clip_id.value)
+        return {{instance.asset_id.value, static_cast<std::uint64_t>(instance.mesh),
+            instance.animation_clip_id.value,
+            std::bit_cast<std::uint64_t>(instance.animation_time_seconds),
+            std::bit_cast<std::uint32_t>(instance.animation_playback_rate)}};
+    const AnimationPoseRef empty{};
+    const auto &p = pose ? *pose : empty;
+    return {{instance.asset_id.value, static_cast<std::uint64_t>(instance.mesh), 0, 0, 0,
+        static_cast<std::uint64_t>(p.clip), std::bit_cast<std::uint32_t>(p.normalized_time),
+        std::bit_cast<std::uint32_t>(p.playback_rate), static_cast<std::uint64_t>(p.secondary_clip),
+        std::bit_cast<std::uint32_t>(p.secondary_normalized_time),
+        std::bit_cast<std::uint32_t>(p.secondary_playback_rate),
+        std::bit_cast<std::uint32_t>(p.secondary_weight), static_cast<std::uint64_t>(p.upper_body_clip),
+        std::bit_cast<std::uint32_t>(p.upper_body_normalized_time),
+        std::bit_cast<std::uint32_t>(p.upper_body_playback_rate),
+        std::bit_cast<std::uint32_t>(p.upper_body_weight)}};
+}
+
 // One immutable display sample is shared by all views in the rendered package.
 class RenderSceneSample
 {

@@ -63,6 +63,10 @@ void TestSmokeUsesProcessDefaults()
               overridden.particle_percentage == 50 && !overridden.bloom &&
               overridden.frame_cap == 31,
           "smoke explicit overrides");
+    const auto invalid = Parse({"--render-scale=75junk", "--shadow=oops", "--particles=50junk"});
+    Check(!invalid.render_scale_explicit && !invalid.shadow_resolution_explicit &&
+              !invalid.particle_percentage_explicit,
+          "invalid numeric overrides are not marked explicit");
 }
 
 void TestInteractiveSettingsAndCliPrecedence()
@@ -280,6 +284,25 @@ int main()
     {
         Check(Parse({}).surface_frontend == hs::SurfaceFrontend::VisibilityBuffer,
               "game defaults to the visibility surface frontend");
+#if defined(HS_DEVELOPMENT_TOOLS)
+        Check(!Parse({}).test_room && Parse({"--test-room"}).test_room,
+              "asset test room is an explicit development-only launch mode");
+        const auto room_capture = Parse({"--test-room-capture=2", "--test-room-time=1.25", "--ticks=3", "--vsync"});
+        Check(room_capture.test_room_capture == 2u && room_capture.test_room && room_capture.smoke &&
+                  !room_capture.visible && room_capture.smoke_render_lockstep && room_capture.mute_audio &&
+                  !room_capture.vsync && room_capture.frame_cap == 0 && room_capture.maximum_ticks == 105,
+              "test room capture configures deterministic muted capture after parsing");
+        Check(Parse({"--test-room-capture=1"}).maximum_ticks == 60 &&
+                  Parse({"--test-room-time=0", "--test-room-capture=1"}).maximum_ticks == 30 &&
+                  Parse({"--test-room-time=30", "--test-room-capture=1"}).maximum_ticks == 1830,
+              "test room capture time defaults and boundaries");
+        for (const auto invalid : {"--test-room-capture=0", "--test-room-capture=-1", "--test-room-capture=1x", "--test-room-capture="})
+            Check(!Parse({invalid}).test_room_capture && !Parse({invalid}).test_room,
+                  "invalid test room station does not enable capture");
+        for (const auto invalid : {"--test-room-time=-1", "--test-room-time=31", "--test-room-time=nan", "--test-room-time=1x"})
+            Check(Parse({invalid, "--test-room-capture=1"}).maximum_ticks == 60,
+                  "invalid test room time preserves default");
+#endif
         Check(!Parse({}).capture_diagnostics, "detailed diagnostics disabled by default");
         Check(Parse({"--capture-diagnostics"}).capture_diagnostics, "explicit capture diagnostics");
         TestSmokeUsesProcessDefaults();

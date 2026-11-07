@@ -229,7 +229,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     {
         PresentationGuidesCandidate guides;
         if (auto prepared = MeasureStartupStep(RendererStartupStep::PresentationGuides, [&] { return impl_->PreparePresentationGuides(impl_->config, {main_view.width, main_view.height},
-                main_view.state.render_capacity, main_view.display_state, guides); }); !prepared) return prepared;
+                main_view.state.render_capacity, main_view.display_state, impl_->sdk_presentation.PresentationOwner(), guides); }); !prepared) return prepared;
         if (auto committed = MeasureStartupStep(RendererStartupStep::PresentationGuides, [&] { return impl_->presentation_guides.Commit(std::move(guides),
                 impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     }
@@ -711,6 +711,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                std::format("{}; renderer is unusable.", result.Message()));
     }
+    }
 
     impl_->CommitOptionTargets(*impl_->owned_views.at(impl_->active_view_id.value), targets);
     impl_->CommitUiResources(owned_view, ui_targets);
@@ -723,7 +724,6 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         // restored into this swapchain. Report the failed configuration exactly.
         impl_->initialized = false;
         return committed;
-    }
     }
     owned_view.reconstruction_plan = std::move(reconstruction);
     if (auto committed = owned_view.adaptive_shading.Commit(std::move(adaptive),
@@ -817,7 +817,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         UsesInternalResolveTargets(reconstruction) != UsesInternalResolveTargets(owned_view.reconstruction_plan) ||
         options.bloom != impl_->config.bloom ||
         impl_->RequiredLightingAuxiliaries(feature_config) != impl_->RequiredLightingAuxiliaries(impl_->config);
-    const auto recreate_pools = recreate_surfaces || options.bloom != impl_->config.bloom;
     const auto adaptive_status = owned_view.adaptive_shading.Status();
     const bool recreate_adaptive = capacity != owned_view.state.render_capacity ||
         previous_features.adaptive_raster_enabled != next_features.adaptive_raster_enabled ||
@@ -835,11 +834,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     AmbientOcclusionCandidate ambient;
     if (recreate_ambient)
     {
-        auto candidate_config = feature_config;
-        candidate_config.ao_quality = options.ao_quality;
-        candidate_config.ao_mode = options.ao_mode;
-        candidate_config.contact_shadows = options.contact_shadows;
-        if (auto prepared = impl_->PrepareAmbientOcclusion(owned_view, candidate_config, capacity, ambient,
+        if (auto prepared = impl_->PrepareAmbientOcclusion(owned_view, feature_config, capacity, ambient,
                 adaptive_compute_ready); !prepared)
             return prepared;
     }
@@ -850,10 +845,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LayeredTranslucencyCandidate transparency;
     if (recreate_transparency)
     {
-        auto candidate_config = feature_config;
-        candidate_config.transparency_quality = options.transparency_quality;
-        candidate_config.refraction_quality = options.refraction_quality;
-        if (auto prepared = impl_->PrepareLayeredTranslucency(owned_view, candidate_config, capacity, transparency); !prepared)
+        if (auto prepared = impl_->PrepareLayeredTranslucency(owned_view, feature_config, capacity, transparency); !prepared)
             return prepared;
     }
     const bool recreate_surface_lighting = capacity != owned_view.state.render_capacity ||
@@ -863,27 +855,17 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     ScreenReflectionsCandidate reflections;
     if (recreate_surface_lighting)
     {
-        auto candidate_config = feature_config;
-        candidate_config.reflection_mode = options.reflection_mode;
-        candidate_config.reflection_quality = options.reflection_quality;
-        if (auto prepared = impl_->PrepareSurfaceLighting(owned_view, candidate_config, capacity,
+        if (auto prepared = impl_->PrepareSurfaceLighting(owned_view, feature_config, capacity,
                 diffusion, reflections); !prepared) return prepared;
     }
     const auto target_height = capacity.height;
     Impl::OptionTargets targets;
-    std::array<TransientResourcePool, kFrameCount> pools;
     if (recreate_surfaces)
     {
         if (auto prepared = impl_->PrepareOptionTargets(targets, target_width, target_height,
             shadow_resolution, options.bloom, owned_view.width, owned_view.height,
             UsesInternalResolveTargets(reconstruction),
             impl_->RequiredLightingAuxiliaries(feature_config)); !prepared) return prepared;
-    }
-    else if (recreate_pools)
-    {
-        if (auto prepared = impl_->PrepareOptionPools(pools,
-            owned_view.state.render_capacity.width, owned_view.state.render_capacity.height,
-            options.bloom, owned_view.width, owned_view.height); !prepared) return prepared;
     }
     const bool recreate_hdr_post = capacity != owned_view.state.render_capacity ||
         options.motion_blur != impl_->config.motion_blur ||
@@ -898,11 +880,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     HdrPostCandidate hdr_post;
     if (recreate_hdr_post)
     {
-        auto candidate_config = feature_config;
-        candidate_config.motion_blur = options.motion_blur;
-        candidate_config.depth_of_field = options.depth_of_field;
-        candidate_config.color_grading = options.color_grading;
-        if (auto prepared = impl_->PrepareHdrPost(owned_view, candidate_config, capacity,
+        if (auto prepared = impl_->PrepareHdrPost(owned_view, feature_config, capacity,
                 {owned_view.width, owned_view.height}, hdr_post); !prepared) return prepared;
     }
     const bool recreate_decal_surface = capacity != owned_view.state.render_capacity;
@@ -920,18 +898,12 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LocalProbeRuntimeCandidate local_probes;
     if (recreate_local_probes)
     {
-        auto candidate_config = feature_config;
-        candidate_config.gi_mode = options.gi_mode;
-        candidate_config.reflection_mode = options.reflection_mode;
-        if (auto prepared = impl_->PrepareLocalProbes(candidate_config, local_probes); !prepared) return prepared;
+        if (auto prepared = impl_->PrepareLocalProbes(feature_config, local_probes); !prepared) return prepared;
     }
     Impl::VolumetricPrepared volumetrics;
     if (recreate_volumetrics)
     {
-        auto candidate_config = feature_config;
-        candidate_config.volumetric_quality = options.volumetric_quality;
-        candidate_config.vfx_quality = options.vfx_quality;
-        if (auto prepared = impl_->PrepareVolumetrics(owned_view, candidate_config, capacity, volumetrics); !prepared) return prepared;
+        if (auto prepared = impl_->PrepareVolumetrics(owned_view, feature_config, capacity, volumetrics); !prepared) return prepared;
     }
     LightListCandidate light_list;
     if (recreate_light_list)
@@ -977,7 +949,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (!presentation_recreated)
         if (auto display = impl_->ApplyDisplayOptions(options); !display) return display;
     if (previous_hdr != owned_view.display_state.hdr_active) owned_view.temporal_history_valid = false;
-    if (change_texture_policy || recreate_pools || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface)
+    if (change_texture_policy || recreate_surfaces || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface || recreate_local_probes)
         if (auto drained = impl_->WaitForGpu(); !drained) return drained;
     if (replace_provider)
     {
@@ -1034,11 +1006,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         owned_view.dynamic_resolution_controller.Reset();
         owned_view.temporal_history_valid = false;
         owned_view.temporal_read_index = 0;
-    }
-    else if (recreate_pools)
-    {
-        impl_->SwapOptionPools(*impl_->owned_views.at(impl_->active_view_id.value), pools);
-        impl_->ClearTransientDescriptors();
     }
     if (reconstruction.temporal_enabled != impl_->config.temporal_reconstruction ||
         reconstruction.effective_provider != owned_view.reconstruction_plan.effective_provider ||
@@ -1265,13 +1232,17 @@ RendererTextureStreamingStatus D3D12Renderer::GetTextureStreamingStatus() const
     status.physical_bytes = impl_->texture_streaming.PhysicalBytes();
     status.ready = status.texture_count != 0 && !impl_->frame_submission_faulted;
     status.native_asset_io = impl_->asset_io.NativeEnabled();
-    for (std::uint32_t index = 1; index <= status.texture_count; ++index)
-        status.sampler_feedback = status.sampler_feedback || impl_->texture_streaming.View({index}).reserved;
+    for (const auto id : impl_->material_texture_stream_ids)
+    {
+        const auto view = impl_->texture_streaming.View(id);
+        status.sampler_feedback = status.sampler_feedback ||
+            (impl_->config.selected_texture_feedback && view.reserved && view.feedback_supported);
+    }
     if (impl_->frame_submission_faulted) status.reason = "Partial frame submission requires a reliable drain and reinitialization.";
     else if (!impl_->texture_streaming_capabilities.tiled_resources)
-        status.reason = "Native sampler feedback is unavailable; environment textures use real reduced mip resources. Hero textures remain pinned.";
+        status.reason = "Native tiled resources are unavailable; environment textures use real reduced mip resources. Hero textures remain pinned.";
     else if (!status.sampler_feedback)
-        status.reason = "No native mip tail has published yet; environment fallback resources are active. Hero textures remain pinned.";
+        status.reason = "Sampler feedback is inactive or no supported native mip tail has published. CPU demand remains available.";
     else if (!impl_->texture_streaming_capabilities.packed_mip_arrays)
         status.reason = "Whole-mip hardware residency covers supported single-slice materials; mip arrays use reduced resources because tiled tier4 is unavailable. Hero textures remain pinned.";
     else status.reason = "Whole-mip hardware residency covers supported environment materials and mip arrays. Hero textures remain pinned.";
@@ -1349,6 +1320,24 @@ std::vector<RendererCharacterAnimationClip> D3D12Renderer::GetCharacterAnimation
         clips.push_back({clip.id, clip.name, clip.duration_seconds, clip.frame_count, clip.looping});
     return clips;
 }
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+std::vector<RendererLegacyCharacterAnimationClip> D3D12Renderer::GetLegacyCharacterAnimationClips() const
+{
+    std::vector<RendererLegacyCharacterAnimationClip> clips;
+    if (impl_)
+    {
+        for (const auto &clip : impl_->archer_clips)
+            if (clip.frame_count)
+                clips.push_back({0, static_cast<std::uint32_t>(clip.clip), clip.duration_seconds});
+        for (std::uint32_t character = 0; character < impl_->monster_assets.size(); ++character)
+            for (std::uint32_t clip = 0; clip < impl_->monster_assets[character].clip_meta.size(); ++clip)
+                if (impl_->monster_assets[character].clip_meta[clip].y != 0)
+                    clips.push_back({character + 1, clip, impl_->monster_assets[character].clip_durations[clip]});
+    }
+    return clips;
+}
+#endif
 
 RendererStartupTimings D3D12Renderer::GetStartupTimings() const noexcept
 {
@@ -1652,12 +1641,17 @@ Result D3D12Renderer::Shutdown()
     impl_->visibility_scatter_pipeline.Reset();
     impl_->dispatch_signature.Reset();
     impl_->pending_terrain_pages.reset();
-    impl_->terrain_pages.Reset();
+    impl_->terrain_descriptor_banks = {};
+    impl_->terrain_plane_stream_ids.clear();
+    impl_->terrain_plane_needed.clear();
+    impl_->terrain_plane_backings.clear();
+    impl_->terrain_tiles.clear();
+    for (auto &mips : impl_->terrain_frame_mips) mips.Reset();
     for (auto &sections : impl_->terrain_frame_sections) sections.Reset();
     impl_->static_terrain_indices.clear();
     impl_->dynamic_terrain_indices.clear();
     impl_->terrain_archive_digest.clear();
-    impl_->terrain_pages_archive_digest.clear();
+    impl_->terrain_planes_archive_digest.clear();
     impl_->terrain_static_pages_current = false;
     impl_->terrain_generation_parameters_valid = false;
     impl_->terrain_parameters_match = true;
@@ -1665,10 +1659,9 @@ Result D3D12Renderer::Shutdown()
 #if defined(HS_DEVELOPMENT_TOOLS)
     impl_->terrain_archive_reads = 0;
 #endif
+    impl_->terrain_target_first_mip = UINT_MAX;
+    impl_->terrain_target_budget_mib = UINT_MAX;
     impl_->terrain_retry_budget_bytes = 0;
-    if (impl_->terrain_page_residency)
-        static_cast<void>(impl_->residency.ReleaseNow(impl_->terrain_page_residency));
-    impl_->terrain_page_residency = {};
     impl_->terrain_sections.clear();
     impl_->static_terrain_sections.clear();
     impl_->terrain_scene.reset();

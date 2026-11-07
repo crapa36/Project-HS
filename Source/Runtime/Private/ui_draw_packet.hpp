@@ -61,30 +61,9 @@ struct UiActionEnvelope
     UiAction action{};
     std::uint64_t packet_generation{};
     std::uint64_t session_id{};
-    std::uint64_t selection_epoch{};
     SessionProbe displayed_session{};
 };
 static_assert(std::is_trivially_copyable_v<UiActionEnvelope>);
-
-[[nodiscard]] inline std::uint64_t UiSelectionEpoch(const SessionProbe &session) noexcept
-{
-    std::uint64_t value = 0x9E3779B97F4A7C15ull ^ static_cast<std::uint64_t>(session.phase);
-    auto mix = [&](std::uint64_t item) {
-        value ^= item + 0x9E3779B97F4A7C15ull + (value << 6) + (value >> 2);
-    };
-    mix(session.card_count);
-    mix(session.pending_stat_points);
-    mix(session.level_rerolls_remaining);
-    mix(session.relic_rerolls_remaining);
-    for (std::size_t i = 0; i < session.card_count && i < session.cards.size(); ++i)
-    {
-        mix(static_cast<std::uint64_t>(session.cards[i].kind));
-        mix(session.cards[i].subject);
-        mix(session.cards[i].upgrade);
-    }
-    for (const auto points : session.stat_points) mix(points);
-    return value ? value : 1;
-}
 
 [[nodiscard]] inline bool SameUiSelection(const SessionProbe &left,
                                          const SessionProbe &right) noexcept
@@ -111,14 +90,14 @@ static_assert(std::is_trivially_copyable_v<UiActionEnvelope>);
     std::uint64_t current_session_id, const SessionProbe &current) noexcept
 {
     if (!action.packet_generation || action.session_id != current_session_id ||
-        action.selection_epoch != UiSelectionEpoch(action.displayed_session) ||
         action.displayed_session.phase != current.phase) return false;
     if (UiSelectionPhase(current.phase) && !SameUiSelection(current, action.displayed_session))
         return false;
     if (action.action.kind == UiActionKind::SelectCard)
     {
         const auto index = action.action.value;
-        if (index >= current.card_count || index >= action.displayed_session.card_count) return false;
+        if (index >= current.card_count || index >= action.displayed_session.card_count ||
+            index >= current.cards.size() || index >= action.displayed_session.cards.size()) return false;
         const auto &now = current.cards[index];
         const auto &then = action.displayed_session.cards[index];
         if (now.kind != then.kind || now.subject != then.subject || now.upgrade != then.upgrade)

@@ -203,7 +203,7 @@ std::vector<hs::content::CharacterMaterialDomainSelection> ReadCharacterMaterial
         const auto bytes = producer.ReadProductBytes(material_id, upstream);
         const auto package = hs::render_data::ReadCharacterMaterialPackage(
             std::as_bytes(std::span(bytes.data(), bytes.size())), name);
-        result.push_back({ordinal, package.domain});
+        result.push_back({ordinal, package.domain, package.surface});
         spec.upstream.push_back(std::move(upstream));
     }
     return result;
@@ -253,7 +253,8 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
             return false;
         const auto product_ids = snapshot.ProductIds();
         std::unordered_set<std::string> actual_names;
-        fs::path metadata_path, page_path, animation_path;
+        std::string contents, page, animation;
+        bool has_metadata=false, has_page=false, has_animation=false;
         for (const auto product_id : product_ids)
         {
             const auto &product = snapshot.ProductMetadata(product_id);
@@ -264,46 +265,43 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
             if (!actual_names.insert(name).second)
                 return false;
             ap::UpstreamProduct dependency;
-            fs::path product_path;
-            snapshot.ReadProduct(product_id, dependency, product_path);
-            if (source && name == source->output_name + ".rpkg") metadata_path = product_path;
-            if (source && name == source->output_name + ".rpage") page_path = product_path;
-            if (source && name == source->output_name + "_animation.rpkg") animation_path = product_path;
+            if (source && name == source->output_name + ".rpkg")
+            { contents=snapshot.ReadProductBytes(product_id,dependency); has_metadata=true; }
+            else if (source && name == source->output_name + ".rpage")
+            { page=snapshot.ReadProductBytes(product_id,dependency); has_page=true; }
+            else if (source && name == source->output_name + "_animation.rpkg")
+            { animation=snapshot.ReadProductBytes(product_id,dependency); has_animation=true; }
+            else
+            { fs::path product_path; snapshot.ReadProduct(product_id, dependency, product_path); }
         }
         std::vector<std::string> expected;
         if (source)
         {
-            if (metadata_path.empty() || page_path.empty()) return false;
-            const auto contents = ap::ReadBytes(metadata_path);
+            if (!has_metadata || !has_page) return false;
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto id = "render/character/" + source->output_name + ".rpkg";
             const auto prepared = hs::content::PrepareCharacterBinding(id, bytes);
             const auto &metadata = prepared.character;
-            const auto page = ap::ReadBytes(page_path);
             const auto page_bytes = std::as_bytes(std::span(page.data(), page.size()));
             const auto page_id = "render/geometry/character/" + source->output_name + ".rpage";
-            if (!hs::render_data::ReadPackage(page_bytes, hs::MakeAssetId(page_id)).dependencies.empty()) return false;
-            hs::render_data::ValidateCharacterGeometry(metadata,
-                hs::render_data::DecodeGeometryPage(page_bytes, hs::MakeAssetId(page_id), metadata.geometry));
+            const auto prepared_page=hs::render_data::PrepareGeometryPage(page_bytes,hs::MakeAssetId(page_id),metadata.geometry);
+            if (!prepared_page.package.dependencies.empty()) return false;
+            hs::render_data::ValidateCharacterGeometry(metadata,prepared_page);
             if(metadata.monster)
                 for(std::size_t lod=1;lod<metadata.monster->lods.size();++lod)
                 {
                     const auto &entry=metadata.monster->lods[lod];
                     const auto &lod_id=prepared.package.dependencies[entry.page_dependency_index];
                     ap::UpstreamProduct dependency;
-                    fs::path lod_path;
-                    snapshot.ReadProduct(lod_id,dependency,lod_path);
-                    const auto content=ap::ReadBytes(lod_path);
+                    const auto content=snapshot.ReadProductBytes(lod_id,dependency);
                     const auto lod_bytes=std::as_bytes(std::span(content.data(),content.size()));
-                    if(!hs::render_data::ReadPackage(lod_bytes,hs::MakeAssetId(lod_id)).dependencies.empty()) return false;
-                    auto view=metadata;view.geometry=entry;
-                    hs::render_data::ValidateCharacterGeometry(view,
-                        hs::render_data::DecodeGeometryPage(lod_bytes,hs::MakeAssetId(lod_id),entry));
+                    const auto prepared_lod=hs::render_data::PrepareGeometryPage(lod_bytes,hs::MakeAssetId(lod_id),entry);
+                    if(!prepared_lod.package.dependencies.empty()) return false;
+                    hs::render_data::ValidateCharacterGeometry(metadata,entry,prepared_lod);
                 }
             if (!source->named_animations.empty())
             {
-                if (animation_path.empty()) return false;
-                const auto animation = ap::ReadBytes(animation_path);
+                if (!has_animation) return false;
                 const auto named = hs::render_data::DecodeCharacterAnimationExtension(
                     std::as_bytes(std::span(animation.data(), animation.size())),
                     hs::MakeAssetId("render/animation/" + source->output_name + ".rpkg"));
@@ -347,7 +345,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
     spec.action_id = "character." + std::string(mode);
     spec.recipe_id = "project-hs.character." + std::string(mode) + "." +
         hs::content::CharacterTextureCookRecipeIdentity();
-    spec.recipe_version = 7;
+    spec.recipe_version = 8;
     spec.namespace_path = "character/" + std::string(mode);
 
     hs::content::CharacterAssetSource character_source;

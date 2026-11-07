@@ -428,6 +428,7 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
     if (uses_shadow_closure)
     {
         logical_paths.insert("Content/Shaders/local_shadow.hlsli");
+        logical_paths.insert("Content/Shaders/local_shadow_abi.hlsli");
     }
     std::vector<ap::Input> inputs;
     inputs.reserve(logical_paths.size() + 3);

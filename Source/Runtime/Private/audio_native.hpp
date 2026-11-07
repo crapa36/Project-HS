@@ -51,17 +51,10 @@ template<class Voice> NativeAudioResult SubmitPreparedVoice(Voice &voice,
     return {};
 }
 
-struct AudioBufferToken
-{
-    std::uint64_t device_epoch{}, voice_generation{}, buffer_sequence{};
-    bool operator==(const AudioBufferToken &) const = default;
-};
-
 // Only evictable PCM uses a record. The record is never reused before its voice
 // is destroyed, even if OnBufferEnd has already released its one buffer pin.
 struct AudioBufferCompletion final : IXAudio2VoiceCallback
 {
-    AudioBufferToken token{};
     std::atomic<std::uint32_t> *pins{};
     std::atomic<bool> pending{};
     std::atomic<HRESULT> native_error{S_OK};
@@ -69,9 +62,9 @@ struct AudioBufferCompletion final : IXAudio2VoiceCallback
     void (*wake_main)(void *) noexcept{};
     void *wake_context{};
 
-    void Begin(std::atomic<std::uint32_t> &owner_pins, AudioBufferToken identity) noexcept
+    void Begin(std::atomic<std::uint32_t> &owner_pins) noexcept
     {
-        token = identity; pins = &owner_pins; claimed = true;
+        pins = &owner_pins; claimed = true;
         native_error.store(S_OK, std::memory_order_relaxed);
         pins->fetch_add(1, std::memory_order_relaxed);
         pending.store(true, std::memory_order_release);

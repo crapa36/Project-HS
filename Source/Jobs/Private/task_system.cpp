@@ -227,8 +227,6 @@ bool TaskSystem::Submit(std::shared_ptr<TaskGroup::State> state,
     if (!impl_->executor)
     {
         if (!reserve()) return false;
-        TaskGroup::State::Completion reservation{state.get()};
-        reservation.state = nullptr;
         execute(task);
         return true;
     }

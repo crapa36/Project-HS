@@ -151,6 +151,8 @@ class HlodCandidate
 {
 public:
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+    [[nodiscard]] std::uint64_t DefaultBytes() const noexcept;
+    [[nodiscard]] std::uint64_t UploadBytes() const noexcept;
 private:
     std::shared_ptr<HlodStorage> storage_;
     friend class HlodSystem;
@@ -168,6 +170,9 @@ public:
     ~HlodSystem();
     HlodSystem(const HlodSystem &) = delete;
     HlodSystem &operator=(const HlodSystem &) = delete;
+    [[nodiscard]] Result AllocationRequirements(ID3D12Device *, const render_data::SceneHlod &,
+        std::uint32_t static_slot_capacity, std::uint32_t frame_slot_count,
+        std::uint64_t &default_bytes, std::uint64_t &upload_bytes) const;
     [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *,
         const render_data::SceneHlod &, std::string_view content_generation_id,
         std::uint32_t content_generation, std::uint32_t static_slot_capacity,

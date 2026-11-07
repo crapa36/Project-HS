@@ -17,6 +17,15 @@ namespace hs::audio_content
 namespace
 {
 void Require(bool condition, const char *message) { if (!condition) throw std::runtime_error(message); }
+std::uint32_t CatalogU32(const nlohmann::json &value, bool positive)
+{
+    Require(value.is_number_integer(), "audio limit must be an integer");
+    if (!value.is_number_unsigned())
+        Require(value.get<std::int64_t>() >= 0, "audio limit must be nonnegative");
+    const auto number = value.get<std::uint64_t>();
+    Require(number <= UINT32_MAX && (!positive || number != 0), "audio limit is outside its supported range");
+    return static_cast<std::uint32_t>(number);
+}
 bool Arrow(std::string_view id)
 {
     return id.starts_with("audio.common.arrow_impact") || id == "audio.skill.basic.impact" ||
@@ -66,8 +75,8 @@ ReleaseAudio BuildReleaseAudio(std::string_view catalog_text,
         Require(entry.at("encoding") == "PCM" && !entry.at("streaming").get<bool>(), "unsupported release audio encoding");
         cue.spatial = entry.at("spatial").get<bool>(); cue.preload = entry.at("preload").get<bool>();
         cue.loop = entry.at("loop").get<bool>(); cue.arrow_impact_family = Arrow(asset);
-        cue.max_simultaneous = std::max(1u, entry.at("max_simultaneous").get<std::uint32_t>());
-        cue.retrigger_ms = entry.at("minimum_retrigger_ms").get<std::uint32_t>();
+        cue.max_simultaneous = CatalogU32(entry.at("max_simultaneous"), true);
+        cue.retrigger_ms = CatalogU32(entry.at("minimum_retrigger_ms"), false);
         cue.first_sample = static_cast<std::uint32_t>(samples.size());
         const auto &files = entry.at("files");
         Require(files.is_array() && !files.empty(), "release audio cue needs samples");

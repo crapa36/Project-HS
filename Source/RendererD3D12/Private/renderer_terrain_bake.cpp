@@ -180,9 +180,9 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     for(UINT i=0;i<2;++i)
     {
-        auto &s=samplers[i];s.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        auto &s=samplers[i];s.Filter=i?D3D12_FILTER_MIN_MAG_MIP_LINEAR:D3D12_FILTER_ANISOTROPIC;
         s.AddressU=s.AddressV=s.AddressW=i?D3D12_TEXTURE_ADDRESS_MODE_CLAMP:D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        s.MaxAnisotropy=1;s.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;s.MaxLOD=D3D12_FLOAT32_MAX;s.ShaderRegister=i;
+        s.MaxAnisotropy=i?1:D3D12_MAX_MAXANISOTROPY;s.ComparisonFunc=D3D12_COMPARISON_FUNC_ALWAYS;s.MaxLOD=D3D12_FLOAT32_MAX;s.ShaderRegister=i;
     }
     D3D12_ROOT_SIGNATURE_DESC rs{5,params,2,samplers,D3D12_ROOT_SIGNATURE_FLAG_NONE};
     ComPtr<ID3DBlob> blob,error;

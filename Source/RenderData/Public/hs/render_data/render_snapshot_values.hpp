@@ -256,17 +256,18 @@ enum class LightUnit : std::uint32_t
     Lux,       // Directional illuminance.
     Lumen,     // Total Point/Spot luminous flux.
     Luminance, // Rectangle/Disk emitted luminance in cd/m^2, per emitting side.
+    RadiantIntensity, // Prepared Point intensity in W/sr; no photometric round trip.
 };
 
-// The renderer's explicit white-equivalent photometric conversion policy.
-inline constexpr float kLightWhiteLumensPerWatt = 683.0f;
+// RGB reference for conversion to the renderer's radiometric units, not a solar spectrum calibration.
+inline constexpr float kRgbReferenceLumensPerWatt = 683.0f;
 inline constexpr std::uint32_t kLightShadowRequested = 1u;
 
 struct LightView
 {
     Float3 direction{}; // Propagation direction; renderer normalizes it during upload.
-    float quantity{};   // Authored photometric quantity in unit.
-    Float3 color{};     // Linear RGB multiplier; photometric conversion happens once on upload.
+    float quantity{};   // Quantity in the explicitly selected unit.
+    Float3 color{};     // Linear RGB multiplier; unit conversion happens once on upload.
     std::uint64_t stable_id{};
     std::uint32_t generation{1};
     std::uint64_t revision{1};

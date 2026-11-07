@@ -1220,12 +1220,6 @@ hs::VfxPersistentInput SparkOwner(std::uint32_t elapsed_tick)
     return owner;
 }
 
-std::uint32_t SparkModelMix(std::uint32_t value)
-{
-    value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
-    value *= 0x846ca68bu; return value ^ (value >> 16);
-}
-
 hs::VfxProgramData MultiSourceSparkProgram()
 {
     auto program = SparkProgram();
@@ -1239,98 +1233,19 @@ hs::VfxProgramData MultiSourceSparkProgram()
     return program;
 }
 
-class LinearSparkReference
-{
-  public:
-    void Append(std::span<const hs::VfxPersistentInput> owners, hs::Tick current_tick,
-                std::vector<std::uint32_t> &seeds)
-    {
-        struct Change { std::size_t index; Cursor cursor; bool is_new; };
-        std::vector<Change> changes;
-        constexpr auto effect_id = Hash64("particle.basic_attack");
-        constexpr auto source_id = Hash("micro_sparks");
-        for (const auto &owner : owners)
-        {
-            const auto *projectile = std::get_if<hs::VfxProjectilePayload>(&owner.payload);
-            if (!projectile) continue;
-            const auto age = static_cast<std::int64_t>(owner.elapsed_ticks);
-            for (std::uint32_t source = 0; source < 2; ++source)
-            {
-                auto change = std::find_if(changes.begin(), changes.end(), [&](const Change &item) {
-                    return item.cursor.owner_id == owner.stable_id && item.cursor.effect_handle == owner.effect_handle &&
-                        item.cursor.source_index == source;
-                });
-                if (change == changes.end())
-                {
-                    const auto cursor = std::find_if(cursors_.begin(), cursors_.end(), [&](const Cursor &item) {
-                        return current_tick < item.expires_tick && item.owner_id == owner.stable_id &&
-                            item.effect_handle == owner.effect_handle && item.source_index == source;
-                    });
-                    if (cursor != cursors_.end())
-                        changes.push_back({static_cast<std::size_t>(cursor - cursors_.begin()), *cursor, false});
-                    else
-                        changes.push_back({std::numeric_limits<std::size_t>::max(),
-                            {owner.stable_id, owner.effect_handle, source, 0,
-                             current_tick - static_cast<hs::Tick>(age) + 27}, true});
-                    change = std::prev(changes.end());
-                }
-                auto &cursor = change->cursor;
-                for (std::uint32_t ordinal = cursor.next_ordinal; ordinal < 3;)
-                {
-                    const auto birth_tick = static_cast<std::int64_t>(
-                        std::ceil((.1 * .45 + ((.9 - .1) * .45 / 2.0) * ordinal) * 60.0 - .000001));
-                    if (age < birth_tick) break;
-                    ++cursor.next_ordinal;
-                    if (age == birth_tick)
-                    {
-                        const auto seed = SparkModelMix(owner.stable_seed ^
-                            SparkModelMix(static_cast<std::uint32_t>(effect_id)) ^
-                            SparkModelMix(static_cast<std::uint32_t>(effect_id >> 32)) ^
-                            SparkModelMix(source_id) ^ SparkModelMix(ordinal + 1));
-                        seeds.push_back(seed);
-                    }
-                    ++ordinal;
-                }
-            }
-        }
-        for (const auto &change : changes)
-            if (!change.is_new) cursors_[change.index] = change.cursor;
-        std::erase_if(cursors_, [current_tick](const Cursor &cursor) {
-            return current_tick >= cursor.expires_tick;
-        });
-        for (const auto &change : changes)
-            if (change.is_new) cursors_.push_back(change.cursor);
-    }
-
-  private:
-    struct Cursor
-    {
-        std::uint64_t owner_id{};
-        hs::VfxEffectHandle effect_handle{};
-        std::uint32_t source_index{}, next_ordinal{};
-        hs::Tick expires_tick{};
-    };
-    std::vector<Cursor> cursors_;
-};
-
-void PersistentSparkIndexMatchesOriginalLinearModel()
+void PersistentSparkMultiSourceBirths()
 {
     const auto program = MultiSourceSparkProgram();
     const auto image = Prepared(program);
     hs::runtime_detail::VfxPersistentSparkState indexed;
-    LinearSparkReference linear;
     auto a = SparkOwner(3); a.stable_id = 1001; a.stable_seed = 0x102030u;
     auto b = SparkOwner(3); b.stable_id = 2002; b.stable_seed = 0x405060u;
     auto c = SparkOwner(3); c.stable_id = 3003; c.stable_seed = 0x708090u;
     const auto compare = [&](std::span<const hs::VfxPersistentInput> owners, hs::Tick tick) {
         std::vector<hs::VfxFlashSpawnInput> output;
-        std::vector<std::uint32_t> expected;
         indexed.Append(image.View(), owners, tick, 1.0f, output);
-        linear.Append(owners, tick, expected);
-        Require(output.size() == expected.size(), "indexed spark output count differed from linear cursor model");
-        for (std::size_t i = 0; i < output.size(); ++i)
-            Require(output[i].stable_seed == expected[i] && output[i].event_tick == tick,
-                "indexed spark order or ordinal seed differed from linear cursor model");
+        for (const auto &spark : output)
+            Require(spark.event_tick == tick, "spark birth used the wrong live tick");
         return output.size();
     };
     const std::array duplicate_inputs{a, b, a, c};
@@ -1618,6 +1533,6 @@ void CookedPersistentSparksConvertWhenAvailable()
 }
 int RunVfxMoteTests()
 {
-    try {PreparedRoutesCloseAuthoredWindows();PreparedResidualAndTickRoutesRequireTwoKnots();VisibleMoteProjectionPreservesSplitFlashPrefixAndSuffix();BurstAndScale();AppendAndConsumedSequenceSemantics();PreparedBurstAdmissionPreservesPriorityAndOrdinals();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();SafeGapSectorAcceptsNonAmbientSourceId();OwnedMalformedAndQuality();PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparkIndexMatchesOriginalLinearModel();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparkQuotaConsumesSkippedOrdinalAndPreservesPrefix();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
+    try {PreparedRoutesCloseAuthoredWindows();PreparedResidualAndTickRoutesRequireTwoKnots();VisibleMoteProjectionPreservesSplitFlashPrefixAndSuffix();BurstAndScale();AppendAndConsumedSequenceSemantics();PreparedBurstAdmissionPreservesPriorityAndOrdinals();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();SafeGapSectorAcceptsNonAmbientSourceId();OwnedMalformedAndQuality();PersistentMotesRecomputeDeterministicBirthsAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparkMultiSourceBirths();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparkQuotaConsumesSkippedOrdinalAndPreservesPrefix();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

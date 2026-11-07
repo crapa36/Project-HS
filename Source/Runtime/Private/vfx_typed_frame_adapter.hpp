@@ -9,12 +9,18 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace hs::runtime_detail
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
+// Uses the same immutable identity-to-owner binding as normal presentation.
+[[nodiscard]] std::optional<PersistentVfxKind> TestRoomPersistentKind(std::uint64_t effect_id,
+    const VfxEffectRecord &effect) noexcept;
+#endif
 
 struct VfxTypedFrameInputs
 {

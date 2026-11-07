@@ -25,7 +25,28 @@ ApplicationConfig ParseProjectHsArguments(
     for (const std::string_view argument : args)
     {
 #if defined(HS_DEVELOPMENT_TOOLS)
-        if (argument == "--smoke")
+        if (argument == "--test-room")
+        {
+            config.test_room = true;
+        }
+        else if (argument.starts_with("--test-room-capture="))
+        {
+            const auto value = argument.substr(std::string_view{"--test-room-capture="}.size());
+            std::uint32_t station{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), station);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && station > 0)
+                config.test_room_capture = station;
+        }
+        else if (argument.starts_with("--test-room-time="))
+        {
+            const auto value = argument.substr(std::string_view{"--test-room-time="}.size());
+            float seconds{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), seconds);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                std::isfinite(seconds) && seconds >= 0.0f && seconds <= 30.0f)
+                config.test_room_time = seconds;
+        }
+        else if (argument == "--smoke")
         {
             config.smoke = true;
             config.visible = false;
@@ -300,28 +321,27 @@ ApplicationConfig ParseProjectHsArguments(
         }
         else if (argument.starts_with("--render-scale="))
         {
-            config.render_scale_explicit = true;
             const auto value = argument.substr(15);
-            std::from_chars(value.data(), value.data() + value.size(),
-                            config.render_scale_percent);
-            config.render_scale_percent =
-                config.render_scale_percent <= 75 ? 75u : 100u;
+            std::uint32_t parsed_value{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), parsed_value);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size())
+            { config.render_scale_percent = parsed_value <= 75 ? 75u : 100u; config.render_scale_explicit = true; }
         }
         else if (argument.starts_with("--shadow="))
         {
-            config.shadow_resolution_explicit = true;
             const auto value = argument.substr(9);
-            std::from_chars(value.data(), value.data() + value.size(),
-                            config.shadow_resolution);
-            config.shadow_resolution = config.shadow_resolution <= 1024 ? 1024u : 2048u;
+            std::uint32_t parsed_value{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), parsed_value);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size())
+            { config.shadow_resolution = parsed_value <= 1024 ? 1024u : 2048u; config.shadow_resolution_explicit = true; }
         }
         else if (argument.starts_with("--particles="))
         {
-            config.particle_percentage_explicit = true;
             const auto value = argument.substr(12);
-            std::from_chars(value.data(), value.data() + value.size(),
-                            config.particle_percentage);
-            config.particle_percentage = config.particle_percentage <= 50 ? 50u : 100u;
+            std::uint32_t parsed_value{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), parsed_value);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size())
+            { config.particle_percentage = parsed_value <= 50 ? 50u : 100u; config.particle_percentage_explicit = true; }
         }
 #if defined(HS_DEVELOPMENT_TOOLS)
         else if (argument == "--capture-diagnostics")
@@ -352,6 +372,19 @@ ApplicationConfig ParseProjectHsArguments(
             }
         }
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (config.test_room_capture)
+    {
+        config.test_room = true;
+        config.smoke = true;
+        config.visible = false;
+        config.smoke_render_lockstep = true;
+        config.mute_audio = true;
+        config.vsync = false;
+        config.frame_cap = 0;
+        config.maximum_ticks = 30 + static_cast<Tick>(std::ceil(config.test_room_time * 60.0f));
+    }
+#endif
     return config;
 }
 

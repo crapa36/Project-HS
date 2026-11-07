@@ -204,7 +204,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     ap::ActionSpec spec;
     spec.action_id = "shipping-image";
     spec.recipe_id = "shipping-image-v1";
-    spec.recipe_version = 19;
+    spec.recipe_version = 20;
     spec.upstream = {presentation_dependency, simulation_dependency, identity_dependency};
     auto rules = std::make_unique<hs::SimulationRules>();
     hs::PresentationCatalog catalog;
@@ -319,6 +319,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     write(std::string(64,'\0'));
     audio.CopyProductBytesTo("audio/release-pcm",output,audio_pcm_dependency,copy_scratch);
     const auto pcm_bytes=audio_pcm_dependency.size;
+    const auto pcm_digest=audio_pcm_dependency.digest;
     Require(pcm_bytes<=UINT64_MAX-64ull-font_bytes,"shipping prefix extent overflow");
     spec.upstream.push_back(std::move(audio_pcm_dependency));
     ap::CopyFileBytesTo(font_path,output,font_bytes,font_digest,copy_scratch);
@@ -496,7 +497,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     semantic.Blob(Bytes(Header(std::string(64, '0'), extent)));
     semantic.String(HS_SHIPPING_PACK_RELATIVE_PATH);
     semantic.Fields(content_hash, font_offset, font_bytes, std::uint64_t{64}, pcm_bytes);
-    semantic.String(font_digest); semantic.String(audio_pcm_dependency.digest);
+    semantic.String(font_digest); semantic.String(pcm_digest);
     for (std::size_t i=0;i<tables.size();++i)
     {
         semantic.Fields(tables[i].offset,tables[i].size);

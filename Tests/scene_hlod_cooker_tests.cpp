@@ -302,11 +302,12 @@ void TestIndexedVertexFieldIdentity()
     Check(indices == expected_indices, "native indexing must preserve portable field identity and first occurrence order");
     Check(rd::EncodeExpandedVertices(vertices) == rd::EncodeExpandedVertices(expected_vertices),
           "native indexed vertices must preserve every portable field bit");
-    source.front().reserved = 1;
-    bool rejected = false;
-    try { gc::IndexVertices(source, vertices, indices); }
-    catch (const std::runtime_error &) { rejected = true; }
-    Check(rejected, "native indexing must retain reserved-field validation");
+    source.front().optical_component_id = 1;
+    gc::IndexVertices(source, vertices, indices);
+    std::vector<rd::ExpandedVertex> restored;
+    for (const auto index : indices) restored.push_back(vertices[index]);
+    Check(rd::EncodeExpandedVertices(restored) == rd::EncodeExpandedVertices(source),
+          "native indexing must preserve optical component identity");
 }
 void Validate(const gc::CookedSceneHlod &cooked, std::uint32_t page_limit)
 {
@@ -457,6 +458,64 @@ void TestSharedMaterialAtlasSelectors()
     }
     Check(mixed_parent, "fixture failed to produce a parent with distinct slice0/slice1 proxies");
 }
+void TestAuthoredCoarseSceneRepresentation()
+{
+    const auto fine = Grid();
+    const auto vertex = [](float x, float z) {
+        rd::ExpandedVertex v{}; v.position = {x, 0.1f, z};
+        v.normal = {0, 1, 0}; v.tangent = {1, 0, 0, 1}; v.uv = {x / 8, z / 8};
+        return v;
+    };
+    std::vector<rd::ExpandedVertex> coarse_vertices{
+        vertex(0, 0), vertex(0, 8), vertex(8, 0),
+        vertex(8, 0), vertex(0, 8), vertex(8, 8)};
+    const auto coarse = gc::CookGeometry(coarse_vertices, 0);
+    const std::string id = "render/rock_0.rpkg";
+    const std::array materials{std::string("render/material/rock.rmat")};
+    const auto asset = hs::MakeAssetId(id);
+    std::vector<gc::SceneHlodCookMember> members;
+    std::vector<rd::SceneHlodMember> layout;
+    for (std::uint32_t i = 0; i < 2; ++i)
+    {
+        hs::RenderInstance instance{};
+        instance.stable_id = i + 1; instance.asset_id = asset; instance.mesh = hs::RenderMesh::Rock;
+        instance.position = {float(i) * 20, 0, 0}; instance.scale = {2, 3, 1}; instance.color_rgba = 0xffffffffu;
+        members.push_back({instance, i + 1});
+        rd::SceneHlodMember record{};
+        record.stable_id = instance.stable_id; record.object_id = i + 1; record.asset_id = asset;
+        record.mesh_semantic = static_cast<std::uint32_t>(instance.mesh); record.tint_rgba = instance.color_rgba;
+        record.position = instance.position; record.scale = instance.scale;
+        layout.push_back(record);
+    }
+    gc::SceneHlodCookOptions options;
+    options.objects_per_leaf = 1; options.children_per_group = 2; options.error_worker_count = 1;
+    const auto cook = [&](const rd::GeometryData *candidate) {
+        const std::array sources{gc::SceneHlodCookSource{asset, id, &fine, materials, candidate}};
+        return gc::CookSceneHlod(hs::MakeAssetId("render/scene/coarse.shlod"), 1,
+            rd::ComputeSceneHlodLayoutDigest(1, layout), members, sources, "render/hlod/coarse", options);
+    };
+    const auto cooked = cook(&coarse);
+    Validate(cooked, options.max_group_pages);
+    Check(cooked.scene.roots.size() == 1, "authored reduced leaves failed to form a parent");
+    const auto &parent = cooked.scene.groups[cooked.scene.roots.front()];
+    Check(parent.child_count == 2 && parent.world_error >= 0.3f,
+          "authored coarse parent must carry the nonuniformly scaled original error");
+    std::uint64_t parent_indices{};
+    for (std::uint32_t i = parent.first_proxy; i < parent.first_proxy + parent.proxy_count; ++i)
+        parent_indices += cooked.scene.proxies[i].index_count;
+    Check(parent_indices == coarse.indices.size() * members.size() &&
+          parent_indices < fine.indices.size() * members.size(),
+          "parent must admit authored reduction even when further simplification does nothing");
+    for (const auto &group : cooked.scene.groups)
+        if (!group.child_count) Check(group.proxy_count == 0 && group.world_error == 0,
+                                      "leaf must retain the original fallback");
+    for (auto &v : coarse_vertices) v.material_index = 1;
+    const auto incompatible = gc::CookGeometry(coarse_vertices, 0);
+    const auto rejected = cook(&incompatible);
+    const auto original = cook(nullptr);
+    Check(rd::EncodeSceneHlod(rejected.scene) == rd::EncodeSceneHlod(original.scene),
+          "selector mismatch must use the original source path");
+}
 } // namespace
 int main()
 {
@@ -471,6 +530,7 @@ int main()
         TestIndexedVertexFieldIdentity();
         TestGroundDetailCanonicalLayoutDigest();
         TestSharedMaterialAtlasSelectors();
+        TestAuthoredCoarseSceneRepresentation();
         const auto geometry = Grid();
         const auto nonplanar_geometry = Grid(true);
         const std::string source_id = "render/rock_0.rpkg";
@@ -561,6 +621,48 @@ int main()
                       rd::BuildGeometryPage(asset, {}, nonplanar_parallel.pages[index]),
                   "nonplanar serial and parallel geometry page payloads differ");
         }
+
+        // Check a multi-level aggregate against the original surface, not
+        // just its immediate children. Each fixture tint identifies one member.
+        auto multilevel_options = packed_options;
+        multilevel_options.objects_per_leaf = 1;
+        multilevel_options.children_per_group = 2;
+        const auto multilevel = nonplanar_cook(multilevel_options);
+        bool checked_multilevel = false;
+        for (const auto &group : multilevel.scene.groups)
+        {
+            bool has_parent_child = false;
+            for (std::uint32_t i = 0; i < group.child_count; ++i)
+                has_parent_child |= multilevel.scene.groups[multilevel.scene.children[group.first_child + i]].child_count != 0;
+            if (!has_parent_child || group.proxy_count == 0) continue;
+            const auto &proxy = multilevel.scene.proxies[group.first_proxy];
+            const auto member = std::ranges::find_if(members, [&](const auto &value) {
+                return value.instance.color_rgba == proxy.tint_rgba;
+            });
+            Check(member != members.end(), "multilevel proxy lost its original member");
+            std::vector<rd::ExpandedVertex> original, aggregate;
+            for (const auto index : nonplanar_geometry.indices)
+            {
+                auto vertex = nonplanar_geometry.vertices[index];
+                vertex.position[0] += member->instance.position.x;
+                original.push_back(vertex);
+            }
+            for (std::uint32_t i = group.first_proxy; i < group.first_proxy + group.proxy_count; ++i)
+            {
+                const auto &part = multilevel.scene.proxies[i];
+                if (part.tint_rgba != proxy.tint_rgba) continue;
+                const auto &page = multilevel.pages[part.page_index];
+                for (std::uint32_t index = part.first_index; index < part.first_index + part.index_count; ++index)
+                    aggregate.push_back(page.vertices[page.indices[index]]);
+            }
+            Check(!aggregate.empty(), "multilevel proxy has no aggregate geometry");
+            const auto measured = gc::MeasureGeometryError(original, aggregate);
+            Check(measured.lower <= group.world_error,
+                  "multilevel certified group error underestimated its original surface");
+            checked_multilevel = true;
+            break;
+        }
+        Check(checked_multilevel, "nonplanar fixture did not produce a multi-level aggregate");
 
         gc::SceneHlodCookOptions bounded_options;
         bounded_options.objects_per_leaf = 1;

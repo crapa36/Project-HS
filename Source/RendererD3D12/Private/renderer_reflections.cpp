@@ -173,6 +173,16 @@ ScreenReflectionsSystem::ScreenReflectionsSystem() : impl_(std::make_unique<Impl
 ScreenReflectionsSystem::~ScreenReflectionsSystem() = default;
 std::uint64_t ScreenReflectionsCandidate::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 std::uint64_t ScreenReflectionsSystem::AllocatedBytes() const noexcept { return impl_->targets ? impl_->targets->bytes : 0; }
+#if defined(HS_DEVELOPMENT_TOOLS)
+std::array<const AllocationResource *, 3> ScreenReflectionsSystem::DiagnosticResources(
+    std::uint64_t frame_index) const noexcept
+{
+    const auto &storage = impl_->targets;
+    if (!storage || !storage->history_valid || storage->previous_frame != frame_index) return {};
+    return {&storage->raw, &storage->history[storage->read_index],
+            &storage->validation_history[storage->read_index]};
+}
+#endif
 
 Result ScreenReflectionsSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     ViewExtent capacity, GraphicsOptionalQuality quality, const render_data::QualityProfile &profile, std::uint32_t frameSlots,

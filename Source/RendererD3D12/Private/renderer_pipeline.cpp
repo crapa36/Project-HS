@@ -6,11 +6,12 @@
 namespace hs
 {
 Result D3D12Renderer::Impl::PreparePresentationGuides(const RendererConfig &candidate, ViewExtent output,
-    ViewExtent capacity, const DisplayState &display, PresentationGuidesCandidate &guides) const
+    ViewExtent capacity, const DisplayState &display, SdkPresentationOwner presentation_owner,
+    PresentationGuidesCandidate &guides) const
 {
-    if (!sdk_presentation.IsEnabled()) return Result::Success();
+    if (presentation_owner == SdkPresentationOwner::None) return Result::Success();
     return presentation_guides.Prepare(device.Get(), allocator, capacity, output, display.format, display.color_space,
-        sdk_presentation.PresentationOwner(), kFrameCount,
+        presentation_owner, kFrameCount,
         [&](std::string_view logical, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate, logical, path); !resolved) return resolved;
@@ -126,7 +127,8 @@ Result D3D12Renderer::Impl::CreateRootSignature()
         kGeometryDescriptorOffset - kTemporalTextureDescriptorOffset;
     auto terrain_page_range = material_texture_range;
     terrain_page_range.NumDescriptors = kTerrainPageDescriptorCount;
-    terrain_page_range.RegisterSpace = 42;
+    terrain_page_range.RegisterSpace = HS_TERRAIN_PAGE_SPACE;
+    terrain_page_range.BaseShaderRegister = HS_TERRAIN_SECTION_SRV;
     terrain_page_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     terrain_page_range.OffsetInDescriptorsFromTableStart = kTerrainPageDescriptorOffset - kPostTextureDescriptorCount;
     const std::array ranges{character_range, monster_pbr_range, environment_range,
@@ -236,7 +238,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 25,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kHlodDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLocalShadowDescriptorCount, 0, 27,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLocalShadowDescriptorCount, 0, HS_LOCAL_SHADOW_SPACE,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kLocalShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 32,
@@ -775,6 +777,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"OPTICAL_COMPONENT", 0, DXGI_FORMAT_R16_UINT, 0, 74,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC scene{};
@@ -881,8 +885,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (FAILED(result)) return HResultFailure("Create cluster shadow PSO", result);
     }
     auto hero_shadow = environment_shadow;
-    // CharacterShadowPS discards backfaces; cull them before pixel shading.
-    hero_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    // CharacterShadowPS retains two-sided translucent shadow coverage.
+    hero_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     hero_shadow.PS = {hero_shadow_pixel.data(), hero_shadow_pixel.size()};
     result = create_shadow_graphics(&hero_shadow, IID_PPV_ARGS(&hero_shadow_pipeline));
     if (FAILED(result)) return HResultFailure("Create hero shadow PSO", result);
@@ -1459,10 +1463,10 @@ Result D3D12Renderer::ReloadShaderGeneration(
         }
         return Result::Success();
     }
-    return impl_->ReloadPipeline(std::move(candidate));
+    return impl_->ReloadPipeline(std::move(candidate), parameters_changed);
 }
 
-Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
+Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config, bool parameters_changed)
 {
     auto &owner = *owned_views.at(active_view_id.value);
     AdaptiveShadingCandidate adaptive;
@@ -1480,7 +1484,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     ReconstructionGuidesCandidate guides;
     PresentationGuidesCandidate presentation;
     if (auto prepared = PreparePresentationGuides(candidate_config, {owner.width, owner.height},
-            owner.state.render_capacity, owner.display_state, presentation); !prepared) return prepared;
+            owner.state.render_capacity, owner.display_state, sdk_presentation.PresentationOwner(), presentation); !prepared) return prepared;
     HdrPostCandidate hdr_post;
     LightListCandidate light_list;
     if (auto prepared = PrepareLightList(owner, candidate_config, owner.state.render_capacity, light_list); !prepared)
@@ -1728,7 +1732,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
             { frame_submission_faulted = true; return committed; }
         environment_brdf_lut = std::move(environment_brdf_candidate);
         WriteEnvironmentBrdfLutDescriptors();
-        if (material_parameter_candidate.resource) CommitMaterialParameters();
+        if (parameters_changed) CommitMaterialParameters();
         ++pipeline_revision;
         for (auto &[id, view] : owned_views) view->ui_draw_content.fill(nullptr);
         config = std::move(candidate_config);

@@ -23,6 +23,27 @@ namespace hs
 {
 class RenderSnapshotStorage;
 
+struct CharacterRenderAppearance
+{
+    Float3 scale{1, 1, 1};
+    std::uint32_t color_rgba{0xffffffffu};
+};
+
+[[nodiscard]] constexpr CharacterRenderAppearance DefaultCharacterRenderAppearance(RenderMesh mesh) noexcept
+{
+    switch (mesh)
+    {
+    case RenderMesh::Archer: return {{.97174913f, .97174913f, .97174913f}, 0xffffffffu};
+    case RenderMesh::MonsterMelee: return {{1.25f, 1.25f, 1.25f}, 0xff5d66e8u};
+    case RenderMesh::MonsterRanged: return {{1.40625f, 1.40625f, 1.40625f}, 0xff40b060u};
+    case RenderMesh::MonsterSuicide: return {{1.5625f, 1.5625f, 1.5625f}, 0xff40d8e8u};
+    case RenderMesh::BossFiveMinute: return {{4.23f, 4.23f, 4.23f}, 0xffe86040u};
+    case RenderMesh::BossTenMinute: return {{4.71f, 4.71f, 4.71f}, 0xffb040e8u};
+    case RenderMesh::BossFinal: return {{3.51f, 3.51f, 3.51f}, 0xff4040e8u};
+    default: return {};
+    }
+}
+
 struct UiInteraction
 {
     std::optional<UiAction> gameplay_action;
@@ -79,7 +100,7 @@ struct GraphicsSettingsUiModel
 struct UiFrame
 {
     Sequence generation{};
-    std::uint64_t session_id{}, selection_epoch{};
+    std::uint64_t session_id{};
     SessionProbe session{};
     PresentationUiState ui{};
     SettingsData settings{};
@@ -154,7 +175,7 @@ class PlayerFootstepTimeline
   public:
     void Reset(const TickReadView &model, Sequence motion_epoch = 0) noexcept;
     [[nodiscard]] std::optional<PresentationEvent> Advance(
-        const TickReadView &model, Sequence motion_epoch = 0) noexcept;
+        const TickReadView &model, Sequence motion_epoch, bool meadow_terrain_enabled) noexcept;
 
   private:
     Tick tick_{};
@@ -165,15 +186,18 @@ class PlayerFootstepTimeline
 
 [[nodiscard]] std::size_t ProjectDomainSignal(
     const DomainSignal &signal, std::span<PresentationEvent> output,
-    float arena_half_extent = 0.0f) noexcept;
+    bool meadow_terrain_enabled = false) noexcept;
 [[nodiscard]] UiInteraction ResolveUiInteraction(const SessionProbe &session,
                                                  PresentationUiState &ui,
                                                  const SettingsData &settings,
                                                  Float2 cursor_normalized,
                                                  const GraphicsSettingsUiModel *graphics_ui = nullptr);
+// Derived once when a static scene is admitted, then reused by dynamic projection.
+[[nodiscard]] bool SceneHasMeadowTerrain(const StaticRenderScene &scene) noexcept;
 [[nodiscard]] Result ProjectDynamicTick(const TickReadView &model,
                                         RenderSnapshotStorage &snapshot,
                                         std::shared_ptr<const StaticRenderScene> environment_scene,
+                                        bool meadow_terrain_enabled,
                                         const EnemyAnimationState *enemy_animations = nullptr,
                                         std::span<const DomainSignal> retained_visual_links = {});
 void ProjectTickUi(const TickReadView &model,

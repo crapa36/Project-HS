@@ -17,6 +17,10 @@ Result D3D12Renderer::Impl::PrepareLodStateBuffer(GpuLodStateBuffer &buffer,
         return retired.completion.IsSatisfiedBy(completed);
     });
 
+    // Reserve before any graph can submit the staging or preserved prefix.
+    if (requested_capacity && (!buffer.initialized || requested_capacity > buffer.capacity))
+        buffer.retired.reserve(buffer.retired.size() + 1);
+
     if (requested_capacity == 0 ||
         requested_capacity <= static_cast<std::size_t>(buffer.capacity))
     {

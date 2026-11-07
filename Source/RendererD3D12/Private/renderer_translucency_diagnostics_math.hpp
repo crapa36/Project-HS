@@ -9,8 +9,8 @@
 
 namespace hs
 {
-// One Archer range, three LOD ranges for each of six monster assets, and three water LODs.
-inline constexpr std::uint32_t kTranslucencyDiagnosticsContributors = 1 + 6 * 3 + 3,
+// One Archer range, three LODs per monster asset, and static/dynamic water LODs.
+inline constexpr std::uint32_t kTranslucencyDiagnosticsContributors = 1 + 6 * 3 + 3 + 3,
     kTranslucencyDiagnosticsPhases = HS_TRANSLUCENCY_PHASE_COUNT;
 inline constexpr std::uint64_t kTranslucencyDiagnosticsRowBytes = 136;
 inline constexpr std::uint64_t kTranslucencyDiagnosticsStatisticsOffset = 16, kTranslucencyDiagnosticsOcclusionOffset = 128;

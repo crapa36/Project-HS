@@ -5,6 +5,7 @@
 #include "renderer_local_probe.hpp"
 #include "renderer_pipeline_cache.hpp"
 #include "renderer_virtual_shadow.hpp"
+#include "renderer_local_shadow.hpp"
 #include <hs/renderer/renderer.hpp>
 
 #include <D3D12MemAlloc.h>
@@ -2189,7 +2190,6 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     ComPtr<IDxcBlob> code;
     Hr(compiled->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&code), nullptr), "read production shadow DXIL");
 
-    constexpr std::array<UINT, 7> uav_registers{0u, 2u, 3u, 4u, 5u, 6u, 8u};
     // CullCS keeps all runtime-selected phases in one entry point. Cover the
     // complete production binding set even though this oracle dispatches only
     // root phases 3 and 4.
@@ -2199,17 +2199,28 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[1].Constants = {1u, 21u, 1u};
     constexpr std::array<UINT, 3> srv_registers{2u, 5u, 6u};
+    std::array<D3D12_DESCRIPTOR_RANGE1, 9> buffer_ranges{};
     for (UINT index = 0; index < srv_registers.size(); ++index)
     {
-        parameters[2u + index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-        parameters[2u + index].Descriptor = {srv_registers[index], 21u,
-            D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
+        auto &range = buffer_ranges[index];
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = 1u; range.BaseShaderRegister = srv_registers[index];
+        range.RegisterSpace = 21u; range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE |
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
+        parameters[2u + index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[2u + index].DescriptorTable = {1u, &range};
     }
-    for (UINT index = 0; index < uav_registers.size(); ++index)
+    constexpr std::array<UINT, 6> output_parameters{5u, 6u, 7u, 8u, 9u, 11u};
+    constexpr std::array<UINT, 6> output_registers{0u, 2u, 3u, 4u, 5u, 8u};
+    for (UINT index = 0; index < output_registers.size(); ++index)
     {
-        parameters[5u + index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        parameters[5u + index].Descriptor = {uav_registers[index], 21u,
-            D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+        auto &range = buffer_ranges[index + 3u];
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        range.NumDescriptors = 1u; range.BaseShaderRegister = output_registers[index];
+        range.RegisterSpace = 21u; range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
+        parameters[output_parameters[index]].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[output_parameters[index]].DescriptorTable = {1u, &range};
     }
     // Production binds CommandCounts through a sized raw UAV descriptor table.
     // Keep this oracle slot bounded too, without padding the counter resource.
@@ -2263,7 +2274,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         IID_PPV_ARGS(&root)), "create production virtual shadow CullCS root");
     D3D12_DESCRIPTOR_HEAP_DESC count_heap_description{};
     count_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    count_heap_description.NumDescriptors = 8u;
+    count_heap_description.NumDescriptors = 26u;
     count_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ComPtr<ID3D12DescriptorHeap> count_heap;
     Hr(fixture.device->CreateDescriptorHeap(&count_heap_description, IID_PPV_ARGS(&count_heap)),
@@ -2345,19 +2356,19 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         const UINT root_counter_base = test.max_groups * 2u + 2u;
         hs::VirtualShadowConstants constants{};
         constants.counts = {static_cast<UINT>(test.casters.size()), 0u, test.fine_entries, 0u};
+        if (test.admission) constants.counts.w = test.fine_entries;
         constants.identity.w = 91u;
         constants.frame.w = test.admission ? test.group_count : test.group_count * 2u;
         constants.frame.z = test.admission ? 3u : 0u;
         constants.options.z = test.fine_capacity;
         constants.root_options = {1u, 1u, 1u, root_counter_base};
-
         std::array<std::byte, 512> constants_bytes{};
         std::memcpy(constants_bytes.data(), &constants, sizeof(constants));
         auto constant_upload = create_upload(constants_bytes.data(), constants_bytes.size(), "create CullCS constants");
         const UINT caster_bytes = static_cast<UINT>(test.casters.size() * sizeof(CasterInput));
         auto caster_upload = create_upload(test.casters.empty() ? nullptr : test.casters.data(), caster_bytes,
             "create CullCS caster input");
-        const UINT segment_count = (constants.frame.w + test.group_count) * 8u;
+        const UINT segment_count = (test.admission ? constants.frame.w : constants.frame.w + test.group_count) * 8u;
         std::vector<UINT> segments(segment_count, sentinel);
         for (UINT group = 0; group < test.group_count; ++group)
         {
@@ -2396,8 +2407,16 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         const UINT mesh_seed = append_poison(mesh_bytes);
         if (test.admission)
         {
+            std::memset(seed.data() + counters_seed, 0, constants.frame.w * sizeof(UINT));
             std::vector<hs::GpuShadowPageEntry> admission_pages(test.fine_entries + 1u);
-            for (auto &page : admission_pages) page.flags = 1u;
+            for (std::size_t entry = 0; entry < admission_pages.size(); ++entry)
+            {
+                auto &page = admission_pages[entry];
+                page.flags = 1u;
+                page.epoch = constants.identity.w;
+                if (entry < test.fine_entries && entry != 0u)
+                    page.physical = static_cast<UINT>(entry);
+            }
             std::memcpy(seed.data() + pages_seed, admission_pages.data(), pages_bytes);
         }
         auto seed_upload = create_upload(seed.data(), seed.size(), "create CullCS output seed");
@@ -2408,12 +2427,12 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         UINT requests_bytes{}, page_draw_counts_bytes{};
         if (test.admission)
         {
-            const std::array<UINT, 3> request_words{(1u << 1u) | (1u << 4u), 0u, (1u << 0u) | (1u << 3u)};
-            std::vector<UINT> page_draw_counts(test.fine_entries, 0u);
-            page_draw_counts[1u] = 1u;
-            page_draw_counts[4u] = 1u;
-            page_draw_counts[64u] = 3u;
-            page_draw_counts[67u] = 2u;
+            const std::array<UINT, 3> request_words{1u | (1u << 1u) | (1u << 4u), 0u,
+                (1u << 0u) | (1u << 3u)};
+            std::vector<UINT> page_draw_counts(test.fine_entries * test.group_count, 0u);
+            // The preceding cull produces no draw count for requested, unmapped page 0.
+            page_draw_counts[1u] = 1u; page_draw_counts[4u] = 1u;
+            page_draw_counts[64u] = 3u; page_draw_counts[67u] = 2u;
             requests_bytes = static_cast<UINT>(sizeof(request_words));
             page_draw_counts_bytes = static_cast<UINT>(page_draw_counts.size() * sizeof(UINT));
             requests_upload = create_upload(request_words.data(), requests_bytes, "create CullCS admission requests");
@@ -2505,20 +2524,48 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             list->SetComputeRootSignature(root.Get()); list->SetPipelineState(pipeline.Get());
             list->SetComputeRootConstantBufferView(0u, constant_upload->GetGPUVirtualAddress());
             list->SetComputeRoot32BitConstant(1u, phase, 0u);
-            list->SetComputeRootShaderResourceView(2u, caster_upload->GetGPUVirtualAddress());
-            list->SetComputeRootShaderResourceView(3u, segment_upload->GetGPUVirtualAddress());
-            list->SetComputeRootShaderResourceView(4u, segment_upload->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(5u, static_cast<ID3D12Resource *>(context.Resolve(pages_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(6u, test.admission
-                ? static_cast<ID3D12Resource *>(context.Resolve(requests_handle))->GetGPUVirtualAddress()
-                : static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(7u, static_cast<ID3D12Resource *>(context.Resolve(records_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(8u, static_cast<ID3D12Resource *>(context.Resolve(indexed_handle))->GetGPUVirtualAddress());
-            list->SetComputeRootUnorderedAccessView(9u, static_cast<ID3D12Resource *>(context.Resolve(mesh_handle))->GetGPUVirtualAddress());
+            const std::array<ID3D12Resource *, 9> buffers{
+                caster_bytes ? caster_upload.Get() : nullptr, segment_upload.Get(), segment_upload.Get(),
+                static_cast<ID3D12Resource *>(context.Resolve(pages_handle)),
+                test.admission ? static_cast<ID3D12Resource *>(context.Resolve(requests_handle)) : counts_resource,
+                static_cast<ID3D12Resource *>(context.Resolve(records_handle)),
+                static_cast<ID3D12Resource *>(context.Resolve(indexed_handle)),
+                static_cast<ID3D12Resource *>(context.Resolve(mesh_handle)),
+                test.admission ? static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle)) : counts_resource};
+            constexpr std::array<UINT, 9> roots{2u,3u,4u,5u,6u,7u,8u,9u,11u};
+            constexpr std::array<UINT, 9> strides{sizeof(CasterInput),0u,0u,sizeof(hs::GpuShadowPageEntry),0u,
+                sizeof(hs::GpuShadowDrawRecord),0u,0u,0u};
+            for (UINT index = 0; index < buffers.size(); ++index)
+            {
+                const UINT slot = 8u + (phase == 3u ? 0u : 9u) + index;
+                auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
+                auto gpu = count_heap->GetGPUDescriptorHandleForHeapStart();
+                cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
+                gpu.ptr += static_cast<UINT64>(slot) * descriptor_stride;
+                const UINT stride = strides[index];
+                const UINT elements = buffers[index] ? static_cast<UINT>(buffers[index]->GetDesc().Width / (stride ? stride : 4u)) : 1u;
+                if (index < 3u)
+                {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+                    view.Format = stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                    view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    view.Buffer.NumElements = elements; view.Buffer.StructureByteStride = stride;
+                    if (!stride) view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                    fixture.device->CreateShaderResourceView(buffers[index], &view, cpu);
+                }
+                else
+                {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                    view.Format = stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                    view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                    view.Buffer.NumElements = elements; view.Buffer.StructureByteStride = stride;
+                    if (!stride) view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                    fixture.device->CreateUnorderedAccessView(buffers[index], nullptr, &view, cpu);
+                }
+                list->SetComputeRootDescriptorTable(roots[index], gpu);
+            }
             list->SetComputeRootDescriptorTable(10u, gpu_counts_handle);
-            list->SetComputeRootUnorderedAccessView(11u, test.admission
-                ? static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle))->GetGPUVirtualAddress()
-                : static_cast<ID3D12Resource *>(context.Resolve(counters_handle))->GetGPUVirtualAddress());
             auto input_table = count_heap->GetGPUDescriptorHandleForHeapStart();
             input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
             list->SetComputeRootDescriptorTable(12u, input_table);
@@ -2539,7 +2586,7 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
             pages = admit.ReadWrite(pages, hs::Access::UnorderedWrite);
             admit.SetExecute([&](hs::RenderPassContext &context) {
                 bind(context, 1u);
-                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(test.group_count, 1u, 1u);
+                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(1u, 1u, 1u);
             });
         }
         else
@@ -2597,6 +2644,34 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         fixture.Execute(graph, frame_slot, barriers, completion, "execute production CullCS root oracle");
         Check(fixture.executor.Wait(completion).Succeeded(), "wait production CullCS root oracle");
 
+        void *mapped{}; const D3D12_RANGE read{0, readback_bytes};
+        Hr(readback->Map(0, &read, &mapped), "map production CullCS root results");
+        const auto *result = static_cast<const std::byte *>(mapped);
+        const auto compare_words = [&](UINT offset, const std::vector<UINT> &expected, const char *label) {
+            const auto *actual = reinterpret_cast<const UINT *>(result + offset);
+            Check(std::equal(expected.begin(), expected.end(), actual), label);
+        };
+        if (test.admission)
+        {
+            const auto *actual_counters = reinterpret_cast<const UINT *>(result + counters_read);
+            for (UINT index = 0; index < counter_words; ++index)
+                Check(actual_counters[index] == (index < constants.frame.w ? 0u : sentinel),
+                    "admission must reset its segment counters and preserve unrelated counter words");
+            const auto *actual_page_words = reinterpret_cast<const UINT *>(result + pages_read);
+            for (UINT entry = 0; entry <= test.fine_entries; ++entry)
+            {
+                const UINT rejected = 67u;
+                const UINT expected_flags = entry == rejected ? 9u : 1u;
+                Check(actual_page_words[entry * 8u + 5u] == expected_flags,
+                    "production CullCS admission changed an unrequested page or violated ascending overflow after an empty request word");
+            }
+            readback->Unmap(0, nullptr);
+            fixture.CheckValidation();
+            pool.ResetCompletedClaims(fixture.executor.Completed());
+            std::printf("Production VSM CullCS %s/%s passed (empty request word between partial masks, ordered overflow).\n",
+                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy", test.name);
+            continue;
+        }
         const UINT page_index = test.fine_entries;
         const UINT root_flags = 16u;
         std::vector<UINT> expected_counts(counter_words, sentinel);
@@ -2630,29 +2705,6 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         for (UINT group = 0; group < test.group_count; ++group)
             expected_counts[root_counter_base + group] = group_attempts[group];
 
-        void *mapped{}; const D3D12_RANGE read{0, readback_bytes};
-        Hr(readback->Map(0, &read, &mapped), "map production CullCS root results");
-        const auto *result = static_cast<const std::byte *>(mapped);
-        const auto compare_words = [&](UINT offset, const std::vector<UINT> &expected, const char *label) {
-            const auto *actual = reinterpret_cast<const UINT *>(result + offset);
-            Check(std::equal(expected.begin(), expected.end(), actual), label);
-        };
-        if (test.admission)
-        {
-            const auto *actual_page_words = reinterpret_cast<const UINT *>(result + pages_read);
-            for (UINT entry = 0; entry <= test.fine_entries; ++entry)
-            {
-                const UINT expected_flags = entry == 67u ? 9u : 1u;
-                Check(actual_page_words[entry * 8u + 5u] == expected_flags,
-                    "production CullCS admission changed an unrequested page or violated ascending overflow after an empty request word");
-            }
-            readback->Unmap(0, nullptr);
-            fixture.CheckValidation();
-            pool.ResetCompletedClaims(fixture.executor.Completed());
-            std::printf("Production VSM CullCS %s/%s passed (empty request word between partial masks, ordered overflow).\n",
-                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy", test.name);
-            continue;
-        }
         std::vector<UINT> expected_pages((test.fine_entries + 1u) * 8u, sentinel);
         expected_pages[page_index * 8u + 0u] = 0u; expected_pages[page_index * 8u + 1u] = 0u;
         expected_pages[page_index * 8u + 2u] = 3u; expected_pages[page_index * 8u + 3u] = UINT_MAX;
@@ -3489,6 +3541,127 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
     }
     fixture.CheckValidation();
 }
+void RunLocalShadowDynamicBankOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    hs::LocalShadowSystem shadows;
+    hs::LocalShadowProfile profile{};
+    profile.enabled=true;profile.byte_budget=64ull*1024*1024;profile.maximum_lights=1;
+    profile.face_resolution=16;profile.max_casters=4;profile.max_draw_groups=4;
+    profile.filter_samples=1;profile.command_capacity=16;profile.frame_slots=3;
+    hs::LocalShadowCandidate candidate;
+    // Prepare owns only native resources; the caller supplies the raster callback.
+    Check(shadows.Prepare(fixture.device.Get(),fixture.allocator,profile,{},candidate).Succeeded(),
+          "prepare local shadow bank oracle");
+    Check(shadows.Commit(std::move(candidate),fixture.executor.Completed()).Succeeded(),
+          "commit local shadow bank oracle");
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator,fixture.device.Get()).Succeeded(),"local shadow oracle pool");
+    hs::LightView light{};
+    light.stable_id=1;light.generation=1;light.revision=1;light.type=hs::LightType::Spot;
+    light.unit=hs::LightUnit::Lumen;light.shadow_flags=hs::kLightShadowRequested;
+    light.position={0,0,0};light.direction={0,0,1};light.range=10;light.quantity=1;
+    light.color={1,1,1};light.inner_cone_radians=.2f;light.outer_cone_radians=.6f;
+    std::array lights{light};
+    hs::VirtualShadowCaster caster{};
+    caster.current_bounds={0,0,2,.25f};caster.instance_generation=1;caster.draw_group=0;
+    caster.current_revisions={1,1,1,1};
+    std::array casters{caster};
+    const std::array groups{hs::VirtualShadowDrawGroup{1,hs::VirtualShadowFrontend::Indexed,3,0,0,0}};
+    const std::array<std::uint8_t,1> temporal_groups{0};
+    auto opacity_owner=std::make_shared<int>(1);
+    hs::LocalShadowInputs inputs{};
+    inputs.lights=lights;inputs.casters=std::span<const hs::VirtualShadowCaster>(casters);
+    inputs.draw_groups=groups;inputs.temporal_opacity_groups=temporal_groups;
+    inputs.opacity_owner=opacity_owner;inputs.pipeline_revision=1;inputs.frame_slot=frame_slot;
+    unsigned callback_count{};
+    inputs.draw=[&](hs::RenderPassContext &context,const hs::LocalShadowOutputs &outputs,
+                    std::span<const hs::VirtualShadowDrawBatch> batches) {
+        Check(!batches.empty()&&batches.front().layer==1,"oracle expects dynamic shadow draw");
+        ++callback_count;
+        auto *commands=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        commands->ClearDepthStencilView(outputs.depth_views[1],D3D12_CLEAR_FLAG_DEPTH,.75f,0,0,nullptr);
+        return hs::Result::Success();
+    };
+    ComPtr<ID3D12Resource> readback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT rows{};UINT64 row_bytes{},total_bytes{};
+    std::array<std::size_t,3> nonzero{};
+    for (unsigned frame=0;frame<3;++frame)
+    {
+        inputs.completed=fixture.executor.Completed();inputs.rendered_frame_id=frame+1;
+        if(frame==1)
+        {
+            casters[0].previous_present=true;casters[0].previous_bounds=casters[0].current_bounds;
+            casters[0].previous_generation=casters[0].instance_generation;
+            casters[0].previous_revisions=casters[0].current_revisions;
+        }
+        if(frame==2)casters[0].present=false;
+        hs::RenderGraphBuilder graph;hs::LocalShadowFramePlan plan;hs::LocalShadowOutputs outputs;
+        Check(shadows.PrepareFrameRecordData(inputs,plan).Succeeded(),"prepare local shadow oracle frame");
+        Check(shadows.Register(graph,inputs,plan,outputs).Succeeded(),"register local shadow oracle frame");
+        Check(outputs.dynamic_bank.resource&&outputs.resources[3],"local shadow oracle bank exists");
+        if(!readback)
+        {
+            const auto desc=outputs.resources[3]->GetDesc();
+            fixture.device->GetCopyableFootprints(&desc,0,1,0,&footprint,&rows,&row_bytes,&total_bytes);
+            const auto heap=HeapProperties(D3D12_HEAP_TYPE_READBACK);const auto buffer=BufferDescription(total_bytes);
+            Hr(fixture.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"create local shadow readback");
+        }
+        const auto target=graph.ImportBuffer({readback.Get()},hs::Access::CopyDest,"local shadow oracle readback");
+        auto copy=graph.AddPass(224,"local shadow oracle copy",hs::QueueHint::Direct);
+        copy.Read(outputs.dynamic_bank,hs::Access::CopySource);
+        (void)copy.Write(graph.Version(target),hs::Access::CopyDest);
+        copy.SetExecute([&,source=outputs.resources[3]](hs::RenderPassContext &context) {
+            D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=source;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=readback.Get();
+            dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=footprint;
+            static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        });
+        Check(graph.Prepare(pool).Succeeded(),"prepare local shadow oracle graph");
+        hs::CompletionSet completion;
+        fixture.Execute(graph,frame_slot,barriers,completion,"submit local shadow oracle frame");
+        Check(shadows.CompleteSubmission(graph,completion,true).Succeeded(),"commit local shadow oracle frame");
+        Check(fixture.executor.Wait(completion).Succeeded(),"wait local shadow oracle frame");
+        const D3D12_RANGE read{0,static_cast<SIZE_T>(total_bytes)},no_write{0,0};
+        void *mapped_raw{};
+        Hr(readback->Map(0,&read,&mapped_raw),"map local shadow oracle");
+        const auto *mapped=static_cast<const std::byte *>(mapped_raw);
+        for(UINT y=0;y<rows;++y)
+            for(UINT64 x=0;x<row_bytes;x+=sizeof(float))
+            {
+                float depth{};std::memcpy(&depth,mapped+footprint.Offset+y*footprint.Footprint.RowPitch+x,sizeof(depth));
+                if(depth>0.0f)++nonzero[frame];
+            }
+        readback->Unmap(0,&no_write);
+        Check(callback_count==1,"unchanged and removed casters must not invoke a dynamic draw callback");
+        pool.ResetCompletedClaims(fixture.executor.Completed());
+    }
+    Check(nonzero[0]>0&&nonzero[1]==nonzero[0]&&nonzero[2]<nonzero[1],
+          "dynamic bank must preserve warm depth and clear removed caster face");
+    Check(shadows.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(),"retire local shadow oracle");
+    fixture.CheckValidation();
+}
+
+void TestLocalShadowDynamicChanges()
+{
+    hs::VirtualShadowCaster caster{};
+    caster.present = caster.previous_present = true;
+    caster.current_bounds = caster.previous_bounds = {1, 2, 3, 4};
+    caster.instance_generation = caster.previous_generation = 1;
+    caster.current_revisions = caster.previous_revisions = {1, 1, 1, 1};
+    Check(!hs::LocalShadowDynamicCasterChanged(caster, false, false), "unchanged dynamic caster must retain its faces");
+    caster.current_bounds.x += 1;
+    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "moved caster must invalidate old and new bounds");
+    caster.current_bounds = caster.previous_bounds;
+    caster.present = false;
+    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "removed caster must invalidate its prior faces");
+    caster.present = true; caster.wind = caster.previous_wind = true;
+    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "wind may animate without a caster revision");
+    caster.wind = caster.previous_wind = false; caster.current_revisions.pose++;
+    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "pose revision must invalidate dynamic depth");
+    caster.current_revisions = caster.previous_revisions;
+    Check(hs::LocalShadowDynamicCasterChanged(caster, true, false), "static transition must clear previous dynamic depth");
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -3497,6 +3670,7 @@ int main(int argc, char **argv)
     {
         const bool hardware =
             argc == 2 && std::string_view(argv[1]) == "--hardware";
+        TestLocalShadowDynamicChanges();
         Fixture fixture(hardware);
         RunBakedProbePreparation(fixture);
         RunDeviceIdentity(fixture, hardware);
@@ -3512,6 +3686,7 @@ int main(int argc, char **argv)
         RunBatchedBufferBarriers(fixture, hs::BarrierMode::Legacy, 0);
         RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Legacy, 0);
+        RunLocalShadowDynamicBankOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunInstanceIdOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunSharedTextureReaders(fixture, hs::BarrierMode::Legacy, 0);
         RunTextureStreamingNative(fixture.device.Get(), fixture.allocator, fixture.executor);
@@ -3534,6 +3709,7 @@ int main(int argc, char **argv)
             RunBatchedBufferBarriers(fixture, hs::BarrierMode::Enhanced, 1);
             RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Enhanced, 1);
             RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Enhanced, 1);
+            RunLocalShadowDynamicBankOracle(fixture, hs::BarrierMode::Enhanced, 1);
             RunInstanceIdOracle(fixture, hs::BarrierMode::Enhanced, 1);
             RunSharedTextureReaders(fixture, hs::BarrierMode::Enhanced, 1);
             std::puts("Enhanced Copy -> Compute -> Direct queue chain passed.");

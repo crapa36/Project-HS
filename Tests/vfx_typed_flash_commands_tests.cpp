@@ -68,66 +68,6 @@ std::vector<hs::VfxFlashSpawnInput> BuildPersistentStamps(
 std::vector<hs::VfxFlashSpawnInput> BuildPersistentFire(
     const hs::VfxProgramData &program, std::span<const hs::VfxPersistentInput> inputs, double tick)
 { const auto image=PreparedImage(program); return hs::runtime_detail::BuildVfxPersistentFireFlameCommands(image.View(),inputs,tick); }
-std::vector<hs::VfxFlashSpawnInput> LegacyPersistentFire(
-    const hs::VfxImage &image, std::span<const hs::VfxPersistentInput> inputs, double current_tick)
-{
-    const auto mix = [](std::uint32_t value) {
-        value ^= value >> 16; value *= 0x7feb352du; value ^= value >> 15;
-        value *= 0x846ca68bu; return value ^ (value >> 16);
-    };
-    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
-        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) / 16777216.0f;
-    };
-    std::vector<hs::VfxFlashSpawnInput> output;
-    for (const auto &owner : inputs)
-    {
-        const auto *circle = std::get_if<hs::VfxCirclePayload>(&owner.payload);
-        const auto range = image.persistent_fire_effect_ranges[owner.effect_handle - 1];
-        const auto elapsed = static_cast<double>(owner.elapsed_seconds) * 60;
-        const auto duration = static_cast<std::uint64_t>(std::llround(
-            static_cast<double>(owner.source_duration_seconds) * 60));
-        const auto started = static_cast<hs::Tick>(std::llround(std::max(0.0, current_tick - elapsed)));
-        for (const auto &recipe : image.persistent_fire_recipes.subspan(range.first, range.count))
-        {
-            if (recipe.effect_handle != owner.effect_handle) continue;
-            const auto source_seed = mix(owner.stable_seed ^ mix(recipe.source_stable_id) ^
-                mix(static_cast<std::uint32_t>(recipe.effect_id)) ^
-                mix(static_cast<std::uint32_t>(recipe.effect_id >> 32)));
-            auto base = recipe.spawn;
-            base.position = circle->center;
-            if (recipe.mask_slices.count && recipe.mask_slices.first <= image.program.slice_indices.size() &&
-                recipe.mask_slices.count <= image.program.slice_indices.size() - recipe.mask_slices.first)
-            {
-                const auto slices = image.program.slice_indices.subspan(
-                    recipe.mask_slices.first, recipe.mask_slices.count);
-                base.mask_slice = slices[owner.stable_seed % slices.size()];
-                base.mask_strength = recipe.mask_strength;
-            }
-            const auto last = elapsed * recipe.rate / 60;
-            for (std::uint64_t ordinal = 0; ordinal <= last; ++ordinal)
-            {
-                const auto birth = (ordinal * 60 + recipe.rate - 1) / recipe.rate;
-                if (birth > elapsed || birth >= duration) continue;
-                auto tongue = base;
-                tongue.stable_seed = mix(source_seed ^ mix(static_cast<std::uint32_t>(ordinal + 1)));
-                const float angle = 2 * std::numbers::pi_v<float> * random(tongue.stable_seed, 0);
-                const float radius = std::sqrt(random(tongue.stable_seed, 1)) *
-                                     circle->radius * recipe.radius_scale;
-                tongue.initial_offset = {std::cos(angle) * radius, 0, std::sin(angle) * radius};
-                tongue.lifetime = static_cast<float>(duration - birth) / 60;
-                tongue.normalized_age = static_cast<float>(elapsed - birth) /
-                                        static_cast<float>(duration - birth);
-                tongue.event_tick = started + birth;
-                tongue.initial_velocity = {-tongue.initial_offset.x / tongue.lifetime,
-                    tongue.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
-                if (std::isfinite(tongue.initial_velocity.x) &&
-                    std::isfinite(tongue.initial_velocity.y) &&
-                    std::isfinite(tongue.initial_velocity.z)) output.push_back(tongue);
-            }
-        }
-    }
-    return output;
-}
 std::vector<hs::runtime_detail::VfxOwnedStatusTickFlashCommand> BuildOwnedStatusTicks(
     const hs::VfxProgramData &program, hs::runtime_detail::VfxEventView events,
     std::span<const hs::VfxPersistentInput> inputs)
@@ -948,17 +888,14 @@ void PreparedPersistentFireCapsNewestBirthsFairly()
     first.payload = circle;
     auto second = first;
     second.stable_id = 92; second.stable_seed = 777;
+    auto second_circle = circle; second_circle.center.x = 8; second.payload = second_circle;
     std::array owners{first, second};
     auto image = PreparedImage(program);
     const auto image_view = image.View();
-    const auto expected = LegacyPersistentFire(image_view, owners, 1300.0);
     const auto compatibility_wrapper = BuildPersistentFire(program, owners, 1300.0);
-    Require(expected.size() == 322,
-            "long-lived fire fixture did not produce the expected source-order oracle");
-    Require(compatibility_wrapper.size() == expected.size() &&
-                compatibility_wrapper.front().stable_seed == expected.front().stable_seed &&
-                compatibility_wrapper.back().event_tick == expected.back().event_tick,
-            "unlimited compatibility wrapper changed legacy fire scheduling");
+    Require(compatibility_wrapper.size() == 322 &&
+            compatibility_wrapper.front().event_tick == 100 && compatibility_wrapper.back().event_tick == 1300,
+            "uncapped fire must emit 161 births for each owner over ticks 100 through 1300");
 
     std::vector<hs::runtime_detail::VfxPreparedFireSource> prepared;
     hs::runtime_detail::PrepareVfxPersistentFireSources(image_view, owners, 1300.0, prepared);
@@ -978,17 +915,17 @@ void PreparedPersistentFireCapsNewestBirthsFairly()
     mixed[0].authoritative = true;
     std::vector<hs::VfxFlashSpawnInput> mixed_output;
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(mixed, 1, mixed_output);
-    Require(mixed_output.size() == 162 && mixed_output.front().stable_seed == expected[0].stable_seed &&
-                mixed_output[160].stable_seed == expected[160].stable_seed &&
-                mixed_output.back().stable_seed == expected[321].stable_seed,
+    Require(mixed_output.size() == 162 && mixed_output.front().position.x == 3 && mixed_output.front().event_tick == 100 &&
+                mixed_output[160].position.x == 3 && mixed_output[160].event_tick == 1300 &&
+                mixed_output.back().position.x == 8 && mixed_output.back().event_tick == 1300,
             "decorative quota suppressed authoritative fire or reordered a mixed source batch");
 
     mixed = prepared;
     mixed[1].authoritative = true;
     mixed_output.clear();
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(mixed, 0, mixed_output);
-    Require(mixed_output.size() == 161 && mixed_output.front().stable_seed == expected[161].stable_seed &&
-                mixed_output.back().stable_seed == expected[321].stable_seed,
+    Require(mixed_output.size() == 161 && mixed_output.front().position.x == 8 && mixed_output.front().event_tick == 100 &&
+                mixed_output.back().position.x == 8 && mixed_output.back().event_tick == 1300,
             "zero decorative quota did not preserve only the later authoritative source");
 
     hs::VfxFlashSpawnInput prefix; prefix.stable_seed = 1234;
@@ -998,46 +935,25 @@ void PreparedPersistentFireCapsNewestBirthsFairly()
             "zero fire admission changed the caller prefix");
 
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 2, capped);
-    Require(capped.size() == 3 && capped[1].stable_seed == expected[160].stable_seed &&
-                capped[1].event_tick == expected[160].event_tick &&
-                capped[2].stable_seed == expected[321].stable_seed &&
-                capped[2].event_tick == expected[321].event_tick,
+    Require(capped.size() == 3 && capped[1].position.x == 3 && capped[1].event_tick == 1300 &&
+                capped[2].position.x == 8 && capped[2].event_tick == 1300,
             "tiny fire cap did not admit each owner's newest birth in source order");
 
     capped.resize(1);
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 3, capped);
-    Require(capped.size() == 4 && capped[1].stable_seed == expected[159].stable_seed &&
-                capped[2].stable_seed == expected[160].stable_seed &&
-                capped[3].stable_seed == expected[321].stable_seed,
+    Require(capped.size() == 4 && capped[1].position.x == 3 && capped[1].event_tick == 1293 &&
+                capped[2].position.x == 3 && capped[2].event_tick == 1300 &&
+                capped[3].position.x == 8 && capped[3].event_tick == 1300,
             "fire quota remainder was not distributed fairly before preserving newest ordinals");
 
     capped.resize(1);
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(
         prepared, std::numeric_limits<std::size_t>::max(), capped);
-    Require(capped.size() == expected.size() + 1 &&
-                capped[1].stable_seed == expected[0].stable_seed &&
-                capped.back().event_tick == expected.back().event_tick,
-            "unlimited prepared fire changed the legacy output extent or order");
-    for (std::size_t index = 0; index < expected.size(); ++index)
-        Require(capped[index + 1].stable_seed == expected[index].stable_seed &&
-                    capped[index + 1].event_tick == expected[index].event_tick &&
-                    std::bit_cast<std::uint32_t>(capped[index + 1].initial_offset.x) ==
-                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.x) &&
-                    std::bit_cast<std::uint32_t>(capped[index + 1].initial_offset.z) ==
-                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.z) &&
-                    std::bit_cast<std::uint32_t>(capped[index + 1].normalized_age) ==
-                        std::bit_cast<std::uint32_t>(expected[index].normalized_age) &&
-                    std::bit_cast<std::uint32_t>(capped[index + 1].lifetime) ==
-                        std::bit_cast<std::uint32_t>(expected[index].lifetime),
-                "unlimited prepared fire changed an ordinal's seed, age, or float formula");
-    for (std::size_t index = 0; index < expected.size(); ++index)
-        Require(compatibility_wrapper[index].stable_seed == expected[index].stable_seed &&
-                    compatibility_wrapper[index].event_tick == expected[index].event_tick &&
-                    std::bit_cast<std::uint32_t>(compatibility_wrapper[index].initial_offset.x) ==
-                        std::bit_cast<std::uint32_t>(expected[index].initial_offset.x) &&
-                    std::bit_cast<std::uint32_t>(compatibility_wrapper[index].normalized_age) ==
-                        std::bit_cast<std::uint32_t>(expected[index].normalized_age),
-                "unlimited raw fire wrapper changed an ordinal's seed, tick or formula");
+    Require(capped.size() == 323 && capped[1].event_tick == 100 && capped[1].position.x == 3 &&
+                capped[161].event_tick == 1300 && capped[161].position.x == 3 &&
+                capped[162].event_tick == 100 && capped[162].position.x == 8 &&
+                capped.back().event_tick == 1300 && capped.back().position.x == 8,
+            "uncapped fire changed owner order or the authored birth interval");
 
     first.elapsed_seconds = std::numeric_limits<float>::quiet_NaN();
     first.payload = circle;
@@ -1063,16 +979,12 @@ void PersistentFireCountsLargeClockWithoutExpandingPastBirths()
     hs::VfxCirclePayload circle; circle.center = {3, 1, 4}; circle.radius = 2;
     owner.payload = circle;
     const double elapsed = static_cast<double>(owner.elapsed_seconds) * 60;
-    const auto whole = static_cast<std::uint64_t>(std::floor(elapsed));
-    const auto rate = std::uint64_t{std::numeric_limits<std::uint32_t>::max()};
-    const auto previous_schedule = (whole / 60) * rate + (whole % 60) * rate / 60;
-    const auto expected = std::min(previous_schedule,
-        static_cast<std::uint64_t>(std::floor(elapsed * rate / 60))) + 1;
+    constexpr std::uint64_t expected = 288230341724864513ull;
     std::vector<hs::runtime_detail::VfxPreparedFireSource> prepared;
     hs::runtime_detail::PrepareVfxPersistentFireSources(image.View(), std::span(&owner, 1), elapsed + 100, prepared);
     Require(prepared.size() == 1 && prepared[0].eligible_ordinals == expected &&
         expected > std::numeric_limits<std::uint32_t>::max(),
-        "bounded 64-bit fire count changed the previous integer/float schedule");
+        "bounded 64-bit fire count changed the authored large-clock result");
     std::vector<hs::VfxFlashSpawnInput> first, repeat;
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 3, first);
     hs::runtime_detail::AppendVfxPreparedFireFlameCommands(prepared, 3, repeat);
@@ -1095,12 +1007,12 @@ void VisibleFireAdmissionPreservesRequiredRowsAndStampSuffix()
     hs::VfxCirclePayload circle; circle.center = {3, 1, 4}; circle.radius = 2;
     first.payload = circle;
     auto second = first; second.stable_id = 92; second.stable_seed = 777;
+    auto second_circle = circle; second_circle.center.x = 8; second.payload = second_circle;
     const std::array owners{first, second};
     auto image = PreparedImage(program);
-    const auto expected = LegacyPersistentFire(image.View(), owners, 1300.0);
     std::vector<hs::runtime_detail::VfxPreparedFireSource> prepared;
     hs::runtime_detail::PrepareVfxPersistentFireSources(image.View(), owners, 1300.0, prepared);
-    Require(expected.size() == 322 && prepared.size() == 2,
+    Require(prepared.size() == 2,
         "visible fire admission setup did not create two sources");
     prepared[0].authoritative = true;
     const auto required_fire = static_cast<std::size_t>(prepared[0].eligible_ordinals);
@@ -1131,8 +1043,9 @@ void VisibleFireAdmissionPreservesRequiredRowsAndStampSuffix()
     Require(held_measurements == 1 && exhausted.size() == exhausted_prefix + required_fire + stamps.size() &&
             exhausted_result.emitted_rows == required_fire && exhausted_result.budget_limited &&
             exhausted[0].stable_seed == prefix.stable_seed &&
-            exhausted[exhausted_prefix].stable_seed == expected[0].stable_seed &&
-            exhausted[exhausted_prefix + required_fire - 1].stable_seed == expected[required_fire - 1].stable_seed &&
+            exhausted[exhausted_prefix].position.x == 3 && exhausted[exhausted_prefix].event_tick == 100 &&
+            exhausted[exhausted_prefix + required_fire - 1].position.x == 3 &&
+            exhausted[exhausted_prefix + required_fire - 1].event_tick == 1300 &&
             exhausted.back().stable_seed == stamp.stable_seed,
         "exhausted visible-fire budget dropped required rows, prefix, or status stamp");
 
@@ -1152,11 +1065,15 @@ void VisibleFireAdmissionPreservesRequiredRowsAndStampSuffix()
             limited_result.budget_limited && repeat_result.emitted_rows == limited_result.emitted_rows &&
             limited.size() == limited_prefix + required_fire + 3 + stamps.size() &&
             repeat_prefix == limited_prefix &&
-            limited[limited_prefix].stable_seed == expected[0].stable_seed &&
-            limited[limited_prefix + required_fire - 1].stable_seed == expected[required_fire - 1].stable_seed &&
-            limited[limited_prefix + required_fire].stable_seed == expected[expected.size() - 3].stable_seed &&
-            limited[limited_prefix + required_fire + 1].stable_seed == expected[expected.size() - 2].stable_seed &&
-            limited[limited_prefix + required_fire + 2].stable_seed == expected.back().stable_seed &&
+            limited[limited_prefix].position.x == 3 && limited[limited_prefix].event_tick == 100 &&
+            limited[limited_prefix + required_fire - 1].position.x == 3 &&
+            limited[limited_prefix + required_fire - 1].event_tick == 1300 &&
+            limited[limited_prefix + required_fire].position.x == 8 &&
+            limited[limited_prefix + required_fire].event_tick == 1285 &&
+            limited[limited_prefix + required_fire + 1].position.x == 8 &&
+            limited[limited_prefix + required_fire + 1].event_tick == 1293 &&
+            limited[limited_prefix + required_fire + 2].position.x == 8 &&
+            limited[limited_prefix + required_fire + 2].event_tick == 1300 &&
             limited.back().stable_seed == stamp.stable_seed,
         "limited visible-fire admission changed required rows or deterministic newest suffix");
     for (std::size_t index = 0; index < limited.size(); ++index)

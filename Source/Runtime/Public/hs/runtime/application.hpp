@@ -28,6 +28,9 @@ struct ApplicationTimelineAction
 
 struct ApplicationConfig
 {
+    bool test_room{};
+    std::optional<std::uint32_t> test_room_capture;
+    float test_room_time{0.5f};
     bool smoke{};
     bool smoke_render_lockstep{};
     bool warp{};

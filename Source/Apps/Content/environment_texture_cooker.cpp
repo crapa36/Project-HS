@@ -130,7 +130,6 @@ class DecodedImageCache
 public:
     const std::vector<Pixel>& Get(const std::filesystem::path& path, const std::string& role)
     {
-        ValidatePngRole(path, role);
         const auto key=path.lexically_normal().generic_string()+"#"+hs::asset_pipeline::Sha256File(path)+
             "#"+role+"#rgba32-ignore-srgb-wic-directxtex-v1";
         auto found=images_.find(key);
@@ -140,14 +139,17 @@ public:
             order_.push_back(key);
             found=images_.emplace(key,Load(path,role)).first;
         } else {
+            ValidatePngRole(path, role);
             order_.remove(key);
             order_.push_back(key);
         }
         return found->second;
     }
-    size_t CoveredAlphaCount(const std::filesystem::path& path,const std::vector<Pixel>& alpha,const Rect& rect)
+    size_t CoveredAlphaCount(const std::vector<Pixel>& alpha,const Rect& rect)
     {
-        const auto key=hs::asset_pipeline::Sha256File(path)+"#"+std::to_string(rect.page)+"#"+
+        const auto owner=std::ranges::find_if(images_,[&](const auto &entry) { return &entry.second==&alpha; });
+        if(owner==images_.end()) throw std::runtime_error("Alpha image is not owned by its decode cache");
+        const auto key=owner->first+"#"+std::to_string(rect.page)+"#"+
             std::to_string(rect.x)+"#"+std::to_string(rect.y)+"#"+std::to_string(rect.w)+"#"+std::to_string(rect.h)+"#alpha-ge-half-v1";
         if(const auto found=coverage_counts_.find(key);found!=coverage_counts_.end()) return found->second;
         size_t covered=0;
@@ -223,7 +225,6 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
         const auto& source=load(role);
         const auto* normals=rough?&load("normal"):nullptr;
         const auto* alpha=group.foliage?&load("base_color"):nullptr;
-        const auto alpha_path=group.foliage?TexturePath(root,group.pages[page],"base_color"):std::filesystem::path{};
         std::vector<Rect> rects;
         if(group.foliage) {for(const auto& r:group.rects) if(r.page==static_cast<int>(page)) rects.push_back(r);}
         else rects.push_back(Rect{0,0,0,2048,2048});
@@ -235,7 +236,7 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
                 const int gutter=group.foliage?(48+step-1)/step:0;
                 const int gl=std::max(0,left-gutter),gt=std::max(0,top-gutter),gr=std::min(size,right+gutter),gb=std::min(size,bottom+gutter),w=gr-gl,h=gb-gt;
                 std::vector<Pixel> pixels(static_cast<size_t>(w)*h);
-                std::vector<int> nearest(pixels.size(),-1);
+                std::vector<int> nearest(group.foliage?pixels.size():0,-1);
                 std::queue<int> queue;
                 for(int y=top;y<bottom;++y) for(int x=left;x<right;++x) {
                     const int x0=std::max(x*step,rect.x),y0=std::max(y*step,rect.y),x1=std::min((x+1)*step,rect.x+rect.w),y1=std::min((y+1)*step,rect.y+rect.h);
@@ -248,7 +249,7 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
                 }
                 // Coverage is measured per entry; a scale is fitted before alpha quantization.
                 if(group.foliage&&mip>0) {
-                    const size_t covered=decoded.CoveredAlphaCount(alpha_path,*alpha,rect);
+                    const size_t covered=decoded.CoveredAlphaCount(*alpha,rect);
                     const float goal=static_cast<float>(covered)/(rect.w*rect.h);
                     float lo=0,hi=16;
                     for(int iteration=0;iteration<20;++iteration) {

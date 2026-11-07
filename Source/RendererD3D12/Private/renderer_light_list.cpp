@@ -60,11 +60,12 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
     const bool area = light.type == LightType::Rectangle || light.type == LightType::Disk;
     if (!directional && !area && light.type != LightType::Point && light.type != LightType::Spot)
         return LightFailure(ErrorCode::InvalidArgument, "Unsupported light type.");
-    if (light.unit != (directional ? LightUnit::Lux : area ? LightUnit::Luminance : LightUnit::Lumen) ||
+    const bool radiantPoint = light.type == LightType::Point && light.unit == LightUnit::RadiantIntensity;
+    if ((!radiantPoint && light.unit != (directional ? LightUnit::Lux : area ? LightUnit::Luminance : LightUnit::Lumen)) ||
         (light.legacy_attenuation && light.type != LightType::Point) || (light.two_sided && !area))
         return LightFailure(ErrorCode::InvalidArgument, "Light type/unit or legacy Point attenuation contract does not match.");
 
-    double intensity = double(light.quantity) / kLightWhiteLumensPerWatt;
+    double intensity = radiantPoint ? double(light.quantity) : double(light.quantity) / kRgbReferenceLumensPerWatt;
     record = {};
     if (!directional && !area)
     {
@@ -78,7 +79,8 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
             return LightFailure(ErrorCode::InvalidArgument, "Local light needs a finite range and an authored finite emitter radius.");
         record.position_range = {light.position.x, light.position.y, light.position.z, light.range};
         record.shape_cone.x = float(radiusSquared);
-        intensity /= 4.0 * std::numbers::pi_v<double>;
+        if (light.type == LightType::Point && !radiantPoint)
+            intensity /= 4.0 * std::numbers::pi_v<double>;
     }
     if (directional || area || light.type == LightType::Spot)
     {
@@ -136,7 +138,7 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
             return LightFailure(ErrorCode::InvalidArgument, "Spot cone ramp cannot be represented by the GPU light ABI.");
         const double effectiveSolidAngle = 2.0 * std::numbers::pi_v<double> *
             ((1.0 - inner) + cosineWidth / 3.0);
-        intensity = double(light.quantity) / (kLightWhiteLumensPerWatt * effectiveSolidAngle);
+        intensity /= effectiveSolidAngle;
         record.direction_cos_outer.w = outer;
         record.shape_cone.y = inner;
         record.shape_cone.z = float(1.0 / cosineWidth);

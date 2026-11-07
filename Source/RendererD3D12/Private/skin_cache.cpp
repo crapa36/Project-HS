@@ -57,11 +57,6 @@ SkinCacheSample SkinCache::Resolve(RenderSceneInstanceKey key,
     return sample;
 }
 
-void SkinCache::EndFrame()
-{
-    // Missing entries are removed only when this preparation is submitted.
-}
-
 void SkinCache::Commit() noexcept
 {
     if (!preparing_) return;

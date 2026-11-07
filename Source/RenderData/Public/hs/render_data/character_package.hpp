@@ -108,6 +108,8 @@ void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
 // character skin/palette validation without repeating geometry topology checks.
 void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
                                const PreparedGeometryPage &page);
+void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
+                               const GeometryMetadata &metadata, const PreparedGeometryPage &page);
 
 // Backward-compatible embedded interchange aliases; production uses metadata.
 [[nodiscard]] std::vector<std::byte> BuildCharacterPackage(

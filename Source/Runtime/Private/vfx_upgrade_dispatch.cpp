@@ -45,16 +45,16 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
         bool scheduled;
         bool persistent{};
     };
-    const auto explosive = MakeAssetId("skill.explosive_arrow").value;
-    const auto charged = MakeAssetId("skill.charged_shot").value;
-    const auto basic = MakeAssetId("skill.basic_attack").value;
-    const auto multi = MakeAssetId("skill.multishot").value;
-    const auto piercing = MakeAssetId("skill.piercing_shot").value;
-    const auto ricochet = MakeAssetId("skill.ricochet_arrow").value;
-    const auto arrow_rain = MakeAssetId("skill.arrow_rain").value;
-    const auto trap = MakeAssetId("skill.trap").value;
-    const auto retreat = MakeAssetId("skill.retreat_shot").value;
-    const std::array activations{
+    static const auto explosive = MakeAssetId("skill.explosive_arrow").value;
+    static const auto charged = MakeAssetId("skill.charged_shot").value;
+    static const auto basic = MakeAssetId("skill.basic_attack").value;
+    static const auto multi = MakeAssetId("skill.multishot").value;
+    static const auto piercing = MakeAssetId("skill.piercing_shot").value;
+    static const auto ricochet = MakeAssetId("skill.ricochet_arrow").value;
+    static const auto arrow_rain = MakeAssetId("skill.arrow_rain").value;
+    static const auto trap = MakeAssetId("skill.trap").value;
+    static const auto retreat = MakeAssetId("skill.retreat_shot").value;
+    static const std::array activations{
         Activation{explosive, 0, 3, "particle.upgrade.explosive.reexplosion",
                     Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
         Activation{explosive, 1, 1, "particle.upgrade.explosive.mini_bomb.spawn",
@@ -156,6 +156,25 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
         Activation{retreat, 7, 1, "particle.upgrade.retreat.second_dash",
                    Hash32("LineAreaPayload"), 0, PresentationGeometryKind::Line, false, true},
     };
+    struct BindingCacheEntry { bool resolved{}; const VfxUpgradeBindingRecord *value{}; };
+    std::array<std::array<BindingCacheEntry, kUpgradeCount>, kCombatSkillCount> binding_cache{};
+    const auto binding_for = [&](std::uint8_t skill, std::uint8_t index, std::uint64_t id) {
+        if (skill >= kCombatSkillCount || index >= kUpgradeCount)
+        {
+            const auto found = std::find_if(program.upgrade_bindings.begin(), program.upgrade_bindings.end(),
+                [&](const auto &value) { return value.skill_id == id && value.ordinal == index + 1u; });
+            return found == program.upgrade_bindings.end() ? nullptr : &*found;
+        }
+        auto &cached = binding_cache[skill][index];
+        if (!cached.resolved)
+        {
+            const auto found = std::find_if(program.upgrade_bindings.begin(), program.upgrade_bindings.end(),
+                [&](const auto &value) { return value.skill_id == id && value.ordinal == index + 1u; });
+            cached.value = found == program.upgrade_bindings.end() ? nullptr : &*found;
+            cached.resolved = true;
+        }
+        return cached.value;
+    };
     for (const auto &event:events)
     {
         if (event.kind!=PresentationKind::Vfx || event.upgrade_stage==0)
@@ -189,16 +208,11 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
             event.asset.value == MakeAssetId("particle.common.mark_apply").value;
         if (status_application)
         {
-            const auto binding = std::find_if(program.upgrade_bindings.begin(),
-                                              program.upgrade_bindings.end(),
-                [&](const auto &value) {
-                    return value.skill_id == skill_id &&
-                        value.ordinal == event.upgrade_index + 1u;
-                });
+            const auto *binding = binding_for(event.upgrade_skill, event.upgrade_index, skill_id);
             const auto lookup = std::find_if(program.effect_lookup.begin(),
                                              program.effect_lookup.end(),
                 [&](const auto &value) { return value.effect_id == event.asset.value; });
-            if (binding == program.upgrade_bindings.end() ||
+            if (!binding ||
                 binding->sequence.first > program.upgrade_sequences.size() ||
                 binding->sequence.count >
                     program.upgrade_sequences.size() - binding->sequence.first ||
@@ -249,10 +263,8 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
             return Invalid("Unsupported stage for upgrade activation.");
         }
         const auto effect_id=MakeAssetId(activation->effect).value;
-        const auto binding=std::find_if(program.upgrade_bindings.begin(),program.upgrade_bindings.end(),[&](const auto &value){
-            return value.skill_id==activation->skill && value.ordinal==event.upgrade_index+1u;
-        });
-        if (binding==program.upgrade_bindings.end() || binding->sequence.first>program.upgrade_sequences.size() ||
+        const auto *binding = binding_for(event.upgrade_skill, event.upgrade_index, activation->skill);
+        if (!binding || binding->sequence.first>program.upgrade_sequences.size() ||
             binding->sequence.count>program.upgrade_sequences.size()-binding->sequence.first)
             return Invalid("Upgrade binding is missing or invalid.");
         const auto lookup=std::find_if(program.effect_lookup.begin(),program.effect_lookup.end(),[&](const auto &value){return value.effect_id==effect_id;});

@@ -537,11 +537,14 @@ void CheckExactFinalPoseInputs()
     hs::AnimationPoseRef pose;
     pose.revision = 99;
     const auto original = hs::MakeRenderPoseKey(instance, &pose);
+    const auto sample = hs::MakeRenderPoseSampleKey(instance, &pose);
     const auto changed = [&](auto edit) {
         auto candidate = pose;
         edit(candidate);
         Check(hs::MakeRenderPoseKey(instance, &candidate) != original,
               "supplied revision concealed an actual final pose operand");
+        Check(hs::MakeRenderPoseSampleKey(instance, &candidate) != sample,
+              "legacy palette sharing lost an actual sampling operand");
     };
     changed([](auto &p) { p.clip = hs::CharacterAnimationClip::Run; });
     changed([](auto &p) { p.normalized_time = 0.5f; });
@@ -555,11 +558,36 @@ void CheckExactFinalPoseInputs()
     changed([](auto &p) { p.upper_body_playback_rate = 2; });
     changed([](auto &p) { p.upper_body_weight = 0.25f; });
     changed([](auto &p) { p.normalized_time = -0.0f; });
+    auto revised_instance = instance;
+    auto revised_pose = pose;
+    ++revised_instance.revisions.pose;
+    ++revised_pose.revision;
+    revised_instance.animation_time_seconds = 20;
+    revised_instance.animation_playback_rate = 2;
+    Check(hs::MakeRenderPoseKey(revised_instance, &revised_pose) != original &&
+              hs::MakeRenderPoseSampleKey(revised_instance, &revised_pose) == sample,
+          "legacy palette shares the sample without discarding instance history identity");
     instance.animation_clip_id.value = 123;
     instance.animation_time_seconds = 1;
     const auto named = hs::MakeRenderPoseKey(instance, &pose);
+    const auto named_sample = hs::MakeRenderPoseSampleKey(instance, &pose);
+    revised_instance = instance;
+    ++revised_instance.revisions.pose;
+    revised_pose.normalized_time = 0.5f;
+    revised_pose.secondary_weight = 0.5f;
+    Check(hs::MakeRenderPoseSampleKey(revised_instance, &revised_pose) == named_sample,
+          "named palette ignores legacy pose and revision facts unused by its sampler");
+    revised_instance.animation_playback_rate = 2;
+    Check(hs::MakeRenderPoseSampleKey(revised_instance, &pose) != named_sample,
+          "named palette retains its playback rate");
+    revised_instance = instance;
+    ++revised_instance.animation_clip_id.value;
+    Check(hs::MakeRenderPoseSampleKey(revised_instance, &pose) != named_sample,
+          "named palette retains its clip identity");
     instance.animation_time_seconds = std::bit_cast<double>(std::bit_cast<std::uint64_t>(1.0) + 1);
     Check(hs::MakeRenderPoseKey(instance, &pose) != named, "named animation key retains all double time bits");
+    Check(hs::MakeRenderPoseSampleKey(instance, &pose) != named_sample,
+          "named palette retains all double time bits");
     Check(hs::MakeRenderSceneInstanceKey(0, UINT32_MAX - 1).fallback_ordinal == UINT32_MAX &&
               hs::MakeRenderSceneInstanceKey(42, 5) == hs::RenderSceneInstanceKey{42, 0},
           "anonymous ordinals and stable identities preserve their original contract");

@@ -870,17 +870,13 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
     constants.bank = {float(t->extent.width), float(t->extent.height), float(t->columns), float(kVirtualShadowTile)};
     const bool requested = in.light.type == LightType::Directional && in.light.stable_id && in.light.generation &&
         (in.light.shadow_flags & kLightShadowRequested) != 0;
-    const auto vector = DirectX::XMVectorSet(in.light.direction.x, in.light.direction.y, in.light.direction.z, 0);
-    const float length = DirectX::XMVectorGetX(DirectX::XMVector3Length(vector));
-    if (requested && (!std::isfinite(length) || length <= 0.0f)) return Invalid("Directional virtual shadow has an invalid propagation direction.");
-    const auto forward = requested ? DirectX::XMVector3Normalize(vector) : DirectX::XMVectorSet(0, -1, 0, 0);
-    const auto seed = std::abs(DirectX::XMVectorGetY(forward)) > 0.95f
-        ? DirectX::XMVectorSet(0, 0, 1, 0) : DirectX::XMVectorSet(0, 1, 0, 0);
-    const auto right = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(seed, forward));
-    const auto up = DirectX::XMVector3Cross(forward, right);
-    DirectX::XMStoreFloat4(&constants.light_right, right);
-    DirectX::XMStoreFloat4(&constants.light_up, up);
-    DirectX::XMStoreFloat4(&constants.light_forward, forward);
+    VirtualShadowViewFacts facts;
+    const DirectX::XMFLOAT3 direction = requested
+        ? DirectX::XMFLOAT3{in.light.direction.x,in.light.direction.y,in.light.direction.z}
+        : DirectX::XMFLOAT3{0,-1,0};
+    if (!PrepareVirtualShadowViewFacts(direction,in.clipmap_center,in.coverage_extents,t->profile.virtual_sides,facts))
+        return Invalid("Virtual shadow clipmap projection is invalid.");
+    constants.light_right=facts.right; constants.light_up=facts.up; constants.light_forward=facts.forward;
     bool reset = !impl_->has_success ||
         impl_->successful.identity.x != std::uint32_t(in.light.stable_id) ||
         impl_->successful.identity.y != std::uint32_t(in.light.stable_id >> 32u) ||
@@ -888,26 +884,10 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
         !Same(impl_->successful.light_right, constants.light_right) ||
         !Same(impl_->successful.light_up, constants.light_up) ||
         !Same(impl_->successful.light_forward, constants.light_forward);
-    std::uint32_t table_base{};
     for (std::uint32_t level = 0; level < 3; ++level)
     {
-        const float extent = in.coverage_extents[level];
-        if (!std::isfinite(extent) || extent <= 0 || (level && extent <= in.coverage_extents[level-1]))
-            return Invalid("Virtual shadow clipmap coverage must have increasing positive extents.");
-        const auto side = t->profile.virtual_sides[level];
-        const float page_side = extent*2.0f/float(side);
-        if (!std::isfinite(page_side) || page_side <= 0 || page_side/float(kVirtualShadowInner) <= 0)
-            return Invalid("Virtual shadow world-page scale exceeds finite shader precision.");
-        const double key_x = std::floor(double(Dot(in.clipmap_center, constants.light_right))/page_side);
-        const double key_y = std::floor(double(Dot(in.clipmap_center, constants.light_up))/page_side);
-        if (!std::isfinite(key_x) || !std::isfinite(key_y) || key_x < double(INT32_MIN)+side ||
-            key_y < double(INT32_MIN)+side || key_x > double(INT32_MAX)-side || key_y > double(INT32_MAX)-side)
-            return Invalid("Virtual shadow absolute clipmap key exceeds its signed ABI.");
-        constants.clipmaps[level] = {page_side, page_side/float(kVirtualShadowInner), extent, 0};
-        constants.windows[level] = {std::int32_t(key_x)-std::int32_t(side/2), std::int32_t(key_y)-std::int32_t(side/2),
-            std::int32_t(side), std::int32_t(table_base)};
-        table_base += side*side;
-        reset |= impl_->has_success && impl_->successful.clipmaps[level].x != page_side;
+        constants.clipmaps[level]=facts.clipmaps[level]; constants.windows[level]=facts.windows[level];
+        reset |= impl_->has_success && impl_->successful.clipmaps[level].x != facts.clipmaps[level].x;
     }
     // Z never follows camera near/far or jitter. Retain an epoch while all full
     // world caster/receiver bounds fit; grow a quantized interval when necessary.
@@ -1706,6 +1686,10 @@ std::uint64_t VirtualShadowSystem::AllocatedBytes() const noexcept
     std::uint64_t bytes=impl_->active ? impl_->active->allocated : 0;
     for (const auto &t : impl_->retired) bytes += t->allocated;
     return bytes;
+}
+std::array<std::uint32_t,3> VirtualShadowSystem::ActiveVirtualSides() const noexcept
+{
+    return impl_->active ? impl_->active->profile.virtual_sides : std::array<std::uint32_t,3>{};
 }
 std::array<const AllocationResource *, 5> VirtualShadowSystem::DiagnosticResources() const noexcept
 {

@@ -85,7 +85,6 @@ static_assert(sizeof(CookedHeader) == 40);
 [[nodiscard]] std::uint64_t Fnv1a64(std::span<const std::byte> bytes) noexcept;
 [[nodiscard]] std::uint64_t Fnv1a64(std::string_view text) noexcept;
 [[nodiscard]] std::uint32_t Crc32(std::span<const std::byte> bytes) noexcept;
-[[nodiscard]] Result NormalizeAssetPath(std::string_view source, std::string &normalized);
 [[nodiscard]] AssetId MakeAssetId(std::string_view normalized) noexcept;
 [[nodiscard]] Result ReadCookedHeader(const std::filesystem::path &path,
                                       CookedHeader &header,

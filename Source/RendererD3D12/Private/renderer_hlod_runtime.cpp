@@ -107,6 +107,7 @@ Result ResetHlodView(HlodViewRuntime &view, ResidencyManager &residency, const C
     for (const auto &frame : view.frames)
         static_cast<void>(residency.ReleaseNow(frame.readback_residency));
     static_cast<void>(residency.ReleaseNow(view.residency));
+    static_cast<void>(residency.ReleaseNow(view.upload_residency));
     return Result::Success();
 }
 }
@@ -326,7 +327,11 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
         {
             if (auto result = WaitForGpu(); !result) return result;
             if (auto result = view.system.ResetAfterCompletion(graph_queue_executor.Completed()); !result) return result;
+            view.static_capacity = 0;
+            view.matching_scene.reset();
+            InvalidateHlodQualification(view);
             static_cast<void>(residency.ReleaseNow(view.residency)); view.residency = {};
+            static_cast<void>(residency.ReleaseNow(view.upload_residency)); view.upload_residency = {};
         }
         HlodCandidate candidate;
         const auto reader = [this](std::string_view id, std::vector<std::byte> &bytes) {
@@ -334,19 +339,40 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
             if (auto result = ResolveRendererAsset(config, std::string(id), path); !result) return result;
             return ReadBinary(path, bytes);
         };
+        std::uint64_t default_bytes{}, upload_bytes{};
+        if (auto result = view.system.AllocationRequirements(device.Get(), runtime.scene,
+            static_cast<std::uint32_t>(total), kFrameCount, default_bytes, upload_bytes); !result) return result;
+        SampleAllocatorBudgetStats(false, false);
+        const auto upload_segment = ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD);
+        if (upload_segment == ResidencySegment::Local && upload_bytes > UINT64_MAX - default_bytes)
+            return HlodFailure("HLOD selection allocation requirements overflow.");
+        ScopedGpuAdmission admission(residency,
+            default_bytes + (upload_segment == ResidencySegment::Local ? upload_bytes : 0),
+            upload_segment == ResidencySegment::NonLocal ? upload_bytes : 0);
+        if (!admission) return HlodFailure("HLOD selection tables cannot fit the shared residency budget.");
         if (auto result = view.system.Prepare(device.Get(), allocator, runtime.scene,
             runtime.content_generation, runtime.generation, static_cast<std::uint32_t>(total),
             kFrameCount, reader, candidate); !result) return result;
-        const auto bytes = candidate.AllocatedBytes();
-        SampleAllocatorBudgetStats(false, false);
-        ScopedGpuAdmission admission(residency, bytes);
-        if (!admission) return HlodFailure("HLOD selection tables cannot fit the shared residency budget.");
-        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Geometry, bytes, true,
+        if (candidate.DefaultBytes() > default_bytes || candidate.UploadBytes() > upload_bytes)
+            return HlodFailure("HLOD allocations exceed their admitted native requirements.");
+        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Geometry, candidate.DefaultBytes(), true,
             ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
         if (!ticket) return HlodFailure("Could not account HLOD selection allocations.");
+        struct PendingTickets
+        {
+            ResidencyManager &residency;
+            ResidencyTicket resource, upload;
+            ~PendingTickets() { if (resource) static_cast<void>(residency.ReleaseNow(resource));
+                                if (upload) static_cast<void>(residency.ReleaseNow(upload)); }
+        } pending{residency, ticket, {}};
+        const auto upload_ticket = RegisterNativeAllocation(ResidencyCategory::Staging, candidate.UploadBytes(), true,
+            upload_segment);
+        if (!upload_ticket) return HlodFailure("Could not account HLOD upload allocation.");
+        pending.upload = upload_ticket;
         if (auto result = view.system.Commit(std::move(candidate), graph_queue_executor.Completed()); !result)
-        { static_cast<void>(residency.ReleaseNow(ticket)); return result; }
-        admission.Complete(); view.residency = ticket;
+            return result;
+        admission.Complete(); view.residency = ticket; view.upload_residency = upload_ticket;
+        pending.resource = {}; pending.upload = {};
         view.static_capacity = static_cast<std::uint32_t>(total);
     }
     view.matching_scene = source;

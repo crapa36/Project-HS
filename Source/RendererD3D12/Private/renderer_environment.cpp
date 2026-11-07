@@ -252,7 +252,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
     static_assert(std::size(specs) == kEnvironmentTextureCount);
     constexpr UINT kStreamTextureIndex = 0;
     constexpr UINT kFallbackFirstMip = 4;
-    environment_stream.ResetRuntime();
+    environment_fallback_residency = {};
     environment_material_textures.clear();
     environment_material_bindings = {};
     retired_streaming_textures.clear();
@@ -397,12 +397,6 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         command_list->ResourceBarrier(1, &barrier);
         texture.graph_access = enhanced ? Access::Common : Access::AllShaderRead;
-        if (texture_index == kStreamTextureIndex)
-        {
-            environment_stream.source = path;
-            environment_stream.logical_id = logical_id;
-            environment_stream.source_id = source_id;
-        }
     }
     if (auto prepared = MeasureStartupStep(RendererStartupStep::EnvironmentBrdfLut, [&] {
             return CreateEnvironmentBrdfLut(config, environment_brdf_lut, &uploads);
@@ -423,11 +417,11 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         PublishEnvironmentMaterialTextures(frame);
     }
     if (environment_textures[kStreamTextureIndex].allocation)
-        environment_stream.fallback_residency = RegisterNativeAllocation(
+        environment_fallback_residency = RegisterNativeAllocation(
             ResidencyCategory::Texture,
             environment_textures[kStreamTextureIndex].allocation->GetSize(), true,
             ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
-    if (!environment_stream.fallback_residency)
+    if (!environment_fallback_residency)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Could not account the pinned coarse texture.");
     if (auto budget = UpdateResidencyBudget(); !budget) return budget;
     return PrepareEnvironmentStreaming();
@@ -729,7 +723,7 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
     };
     for (std::uint32_t index = 0; index < kEnvironmentTextureCount; ++index)
         if (auto result = register_texture(environment_texture_ids[index], environment_texture_descriptions[index],
-            environment_textures[index], index == 0 ? environment_stream.fallback_residency : ResidencyTicket{},
+            environment_textures[index], index == 0 ? environment_fallback_residency : ResidencyTicket{},
             environment_texture_stream_ids[index]); !result) return result;
     environment_material_texture_stream_ids.resize(environment_material_textures.size());
     for (std::size_t index = 0; index < environment_material_textures.size(); ++index)
@@ -769,294 +763,15 @@ Result D3D12Renderer::Impl::UpdateResidencyBudget()
 
 Result D3D12Renderer::Impl::PrepareEnvironmentStreaming()
 {
-    if (environment_stream.source.empty() || environment_stream.logical_id.empty())
-        return Result::Success();
     if (resource_generation_id.empty())
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Texture streaming requires the selected content Generation ID.");
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::DemandEnvironmentTexture(std::uint32_t priority)
-{
-    auto &stream = environment_stream;
-    if (stream.source.empty() || stream.logical_id.empty()) return Result::Success();
-    const auto error = std::bit_cast<float>(priority);
-    if (priority && (!std::isfinite(error) || error <= 0.0f))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Texture demand requires positive ordered error.");
-    const auto demand_frame = rendered_submission_count + 1u;
-    if (stream.last_demand_frame != demand_frame) stream.priority = 0u;
-    stream.priority = std::max(stream.priority, priority);
-    stream.last_demand_frame = demand_frame;
-    if (stream.request && !stream.retiring) static_cast<void>(streaming.UpdatePriority(stream.request, stream.priority));
-    if (!priority || stream.request || stream.fine_resident || stream.retiring) return Result::Success();
-    stream.request = streaming.Request(stream.logical_id, "mips:0-3", resource_generation_id, stream.priority);
-    if (!stream.request)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Could not create environment texture streaming request.");
-    ++stream.requests;
-    return Result::Success();
-}
-
-Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
-{
-    if (frame_slot >= kFrameCount)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "Environment streaming frame slot is out of range.");
-    if (auto budget = UpdateResidencyBudget(); !budget) return budget;
-    const auto completed = graph_queue_executor.Completed();
-
-    auto &stream = environment_stream;
-    if (stream.retiring && stream.retirement.IsSatisfiedBy(completed))
-    {
-        stream.candidate.Reset();
-        static_cast<void>(residency.ReleaseNow(stream.candidate_residency));
-        stream.candidate_residency = {}; stream.request = {};
-        stream.retiring = false; stream.retirement = {}; stream.fine_use = {};
-        ++stream.reclaims;
-    }
-
-    if (environment_stream.upload_submitted &&
-        environment_stream.upload_completion.IsSatisfiedBy(completed))
-    {
-        if (const auto *page = streaming.Find(environment_stream.request);
-            page && page->state == StreamingPageState::Uploading)
-        {
-            if (!streaming.TryPublish(environment_stream.request,
-                                      resource_generation_id, completed))
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                       "Completed texture upload could not be published.");
-            if (stream.generation == UINT64_MAX)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Texture publication generation exhausted.");
-            ++stream.generation;
-            stream.fine_resident = true;
-            stream.fine_use = stream.upload_completion;
-            ++stream.publications;
-        }
-        if (environment_stream.upload.resource)
-        {
-            environment_stream.upload.Reset();
-            static_cast<void>(residency.ReleaseNow(stream.upload_residency));
-            stream.upload_residency = {};
-            ++environment_stream.reclaims;
-        }
-        environment_stream.upload_submitted = false;
-    }
-    static_cast<void>(residency.Collect(completed));
-    static_cast<void>(streaming.Collect(completed));
-
-    if (stream.frame_generation[frame_slot] != stream.generation)
-    {
-        auto *resource = stream.fine_resident && !stream.retiring
-            ? stream.candidate.resource.Get() : environment_textures[0].resource.Get();
-        const auto description = resource->GetDesc();
-        WriteEnvironmentTextureDescriptor(frame_slot, 0, resource,
-            description.Format, description.MipLevels, description.DepthOrArraySize);
-        stream.frame_generation[frame_slot] = stream.generation;
-        PublishEnvironmentMaterialTextures(frame_slot);
-    }
-
-    const auto *page = streaming.Find(stream.request);
-    if (!page) return Result::Success();
-    if (page->state == StreamingPageState::Requested)
-    {
-        if (!stream.priority || stream.last_demand_frame < rendered_submission_count) return Result::Success();
-        std::uint64_t file_bytes{};
-        if (auto sized = stream.source.ByteCount(file_bytes); !sized) return sized;
-        if (!file_bytes || file_bytes > UINT64_MAX / 3u ||
-            file_bytes > std::numeric_limits<std::size_t>::max() ||
-            file_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Texture stream read size overflow.");
-        if (!residency.CanStage(file_bytes * 3u)) return Result::Success();
-        stream.decoded_residency = residency.ReserveHost(file_bytes);
-        stream.decode_reservation = residency.ReserveHost(file_bytes * 2u);
-        if (!stream.decoded_residency || !stream.decode_reservation)
-        {
-            static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
-            static_cast<void>(residency.ReleaseNow(stream.decode_reservation));
-            stream.decoded_residency = {}; stream.decode_reservation = {};
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Texture stream host reservation failed.");
-        }
-        stream.read_bytes = file_bytes;
-        bool submitted{};
-        const auto queued = asset_io.Enqueue({stream.request, resource_generation_id,
-                stream.logical_id, stream.source, file_bytes, resident_generation_lease},
-                streaming, residency, stream.decoded_residency, submitted);
-        if (!submitted)
-        {
-            static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
-            static_cast<void>(residency.ReleaseNow(stream.decode_reservation));
-            stream.decode_reservation = {};
-        }
-        stream.decoded_residency = {}; // IO owns submitted backing and its ticket.
-        if (!queued) return queued;
-        return Result::Success();
-    }
-    if (page->state == StreamingPageState::Reading)
-    {
-        AssetReadCompletion read;
-        if (auto result = asset_io.Poll(stream.request, streaming, residency, read); !result) return result;
-        if (!read.ready) return Result::Success();
-        if (read.cancelled) return Result::Success();
-        stream.decoded_storage = std::move(read.bytes);
-        stream.decoded_residency = read.storage;
-    }
-    else if (page->state != StreamingPageState::Decoded) return Result::Success();
-
-    render_data::TexturePackageView package;
-    try
-    {
-        package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, environment_stream.logical_id, stream.decoded_storage); });
-    }
-    catch (const std::exception &error)
-    {
-        static_cast<void>(streaming.Cancel(environment_stream.request));
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               std::string("Environment texture stream decode failed: ") +
-                                   error.what());
-    }
-    constexpr std::uint32_t kWidth = 2048;
-    constexpr std::uint32_t kHeight = 2048;
-    constexpr std::uint32_t kArraySize = 4;
-    constexpr std::uint32_t kMipCount = 12;
-    if (package.description.width != kWidth || package.description.height != kHeight ||
-        package.description.array_size != kArraySize ||
-        package.description.mip_count != kMipCount ||
-        package.description.format != static_cast<std::uint32_t>(DXGI_FORMAT_BC7_UNORM) ||
-        !RendererTextureDependencyMatches(config, environment_stream.logical_id, package, environment_stream.source_id) ||
-        package.subresources.size() != kArraySize * kMipCount)
-    {
-        static_cast<void>(streaming.Cancel(environment_stream.request));
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Streamed terrain Gaussian package shape changed.");
-    }
-    if (page->state == StreamingPageState::Reading && !streaming.CompleteRead(environment_stream.request,
-                                resource_generation_id))
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Environment texture stream read completion was stale.");
-    if (!stream.priority || stream.last_demand_frame < rendered_submission_count)
-        return Result::Success(); // Preserve the decoded package until a view needs it again.
-
-    D3D12_RESOURCE_DESC description{};
-    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    description.Width = kWidth;
-    description.Height = kHeight;
-    description.DepthOrArraySize = kArraySize;
-    description.MipLevels = kMipCount;
-    description.Format = DXGI_FORMAT_BC7_UNORM;
-    description.SampleDesc = {1, 0};
-    const auto subresource_count = kArraySize * kMipCount;
-    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresource_count);
-    std::vector<UINT> rows(subresource_count);
-    std::vector<UINT64> row_sizes(subresource_count);
-    UINT64 upload_size{};
-    device->GetCopyableFootprints(&description, 0, subresource_count, 0,
-                                  footprints.data(), rows.data(), row_sizes.data(),
-                                  &upload_size);
-    const auto allocation_info = device->GetResourceAllocationInfo(0, 1, &description);
-    const auto upload_description = BufferDescription(upload_size);
-    const auto upload_allocation = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
-    if (allocation_info.SizeInBytes == UINT64_MAX || upload_allocation == UINT64_MAX)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Streamed texture allocation size overflow.");
-    SampleAllocatorBudgetStats(false, false);
-    ScopedGpuAdmission admission(residency, allocation_info.SizeInBytes, upload_allocation);
-    if (!admission)
-    {
-        return TryRelieveStreamingPressure(allocation_info.SizeInBytes, upload_allocation, stream.priority);
-    }
-
-    AllocationResource candidate;
-    AllocationResource upload;
-    D3D12MA::ALLOCATION_DESC allocation{};
-    allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (auto created = CreateAllocation(candidate, allocation, description,
-                                        D3D12_RESOURCE_STATE_COPY_DEST);
-        !created)
-        return created;
-    allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-    if (auto created = CreateAllocation(upload, allocation,
-                                        BufferDescription(upload_size),
-                                        D3D12_RESOURCE_STATE_GENERIC_READ);
-        !created)
-        return created;
-    std::byte *mapped{};
-    D3D12_RANGE no_read{};
-    const auto mapped_result =
-        upload.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
-    if (FAILED(mapped_result))
-        return HResultFailure("Map streamed environment texture upload", mapped_result);
-    for (UINT subresource = 0; subresource < subresource_count; ++subresource)
-    {
-        const auto &source = package.subresources[subresource];
-        if (source.array_slice != subresource / kMipCount ||
-            source.mip_level != subresource % kMipCount ||
-            row_sizes[subresource] != source.row_pitch ||
-            static_cast<UINT64>(rows[subresource]) * source.row_pitch !=
-                source.slice_pitch ||
-            source.bytes.size() != source.slice_pitch)
-        {
-            upload.resource->Unmap(0, nullptr);
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Streamed terrain Gaussian subresource layout changed.");
-        }
-        for (UINT row = 0; row < rows[subresource]; ++row)
-            std::memcpy(
-                mapped + footprints[subresource].Offset +
-                    static_cast<std::size_t>(row) *
-                        footprints[subresource].Footprint.RowPitch,
-                source.bytes.data() +
-                    static_cast<std::size_t>(row) * source.row_pitch,
-                static_cast<std::size_t>(row_sizes[subresource]));
-    }
-    upload.resource->Unmap(0, nullptr);
-
-    const auto candidate_ticket = RegisterNativeAllocation(
-        ResidencyCategory::Texture, candidate.allocation->GetSize(), false,
-        ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
-    const auto upload_ticket = RegisterNativeAllocation(
-        ResidencyCategory::Staging, upload.allocation->GetSize(), false,
-        ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
-    if (!candidate_ticket || !upload_ticket)
-    {
-        if (candidate_ticket) static_cast<void>(residency.ReleaseNow(candidate_ticket));
-        if (upload_ticket) static_cast<void>(residency.ReleaseNow(upload_ticket));
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Could not account streamed texture allocations.");
-    }
-    admission.Complete();
-    if (!streaming.BeginUpload(environment_stream.request,
-                               resource_generation_id))
-    {
-        static_cast<void>(residency.ReleaseNow(candidate_ticket));
-        static_cast<void>(residency.ReleaseNow(upload_ticket));
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Environment texture stream upload transition failed.");
-    }
-    environment_stream.candidate = std::move(candidate);
-    environment_stream.upload = std::move(upload);
-    environment_stream.footprints = std::move(footprints);
-    environment_stream.subresource_count = subresource_count;
-    environment_stream.candidate_residency = candidate_ticket;
-    environment_stream.upload_residency = upload_ticket;
-    environment_stream.upload_pending = true;
-    for (const auto ticket : {stream.decoded_residency, stream.decode_reservation})
-        static_cast<void>(residency.ReleaseNow(ticket));
-    stream.decoded_residency = {}; stream.decode_reservation = {}; stream.read_bytes = 0;
-    std::vector<std::byte>{}.swap(stream.decoded_storage);
-    return Result::Success();
-}
-
 void D3D12Renderer::Impl::MarkEnvironmentStreamingUse(
     std::uint32_t frame_slot, const CompletionSet &completion) noexcept
 {
-    if (frame_slot < kFrameCount)
-    {
-        if (environment_stream.fine_resident && !environment_stream.retiring &&
-            environment_stream.frame_generation[frame_slot] == environment_stream.generation)
-            environment_stream.fine_use.Merge(completion);
-        else environment_stream.fallback_use.Merge(completion);
-    }
     for (auto &stream : environment_geometry_streams)
         if (frame_slot < kFrameCount && stream.frame_generation[frame_slot] == 1)
             stream.prior_use.Merge(completion);
@@ -1067,7 +782,7 @@ void D3D12Renderer::Impl::ResetEnvironmentStreaming() noexcept
     preferred_texture_scene.reset();
     preferred_texture_materials.fill(false);
     preferred_texture_initialized = false;
-    environment_stream.ResetRuntime();
+    environment_fallback_residency = {};
     for (auto &stream : environment_geometry_streams) stream.ResetRuntime();
     environment_material_textures.clear();
     environment_material_bindings = {};

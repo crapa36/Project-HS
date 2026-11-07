@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <numbers>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -382,6 +383,27 @@ void TestNonGameplayUiFactsIgnoreHiddenSimulation()
     hs::PresentationUiState ui;
     hs::SettingsData settings;
     std::vector<std::uint64_t> first, same, changed;
+    {
+        const auto view = hs::development::BorrowOwnedReadModel(model);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, first);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, true, changed);
+        Check(first != changed, "input rejection invalidates the menu draw facts");
+        ui.page = hs::UiPage::MainMenuSettings;
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, first);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 1, 0xFF, false, changed);
+        Check(first != changed, "settings modal phase invalidates the draw facts");
+        ui.page = hs::UiPage::Root;
+    }
+    model.session.phase = static_cast<hs::SessionPhase>(255);
+    bool rejected_phase{};
+    try
+    {
+        const auto view = hs::development::BorrowOwnedReadModel(model);
+        hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, first);
+    }
+    catch (const std::invalid_argument &) { rejected_phase = true; }
+    Check(rejected_phase, "unknown UI phase fails before reading unrelated model fields");
+    model.session.phase = hs::SessionPhase::MainMenu;
     const auto capture = [&](std::vector<std::uint64_t> &facts) {
         const auto view = hs::development::BorrowOwnedReadModel(model);
         hs::CaptureUiProjectionFacts(view, presentation, ui, settings, 0, 0xFF, false, facts);
@@ -1154,7 +1176,7 @@ void TestPlayerFootstepTimeline()
         storage.player.locomotion_blend = 0.0f;
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view),
+        Check(!timeline.Advance(view, 0, false),
               "stopped secondary timeline advances without cue");
     }
     storage.tick = 23;
@@ -1163,12 +1185,12 @@ void TestPlayerFootstepTimeline()
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        const auto first = timeline.Advance(view);
+        const auto first = timeline.Advance(view, 0, false);
         Check(first && first->tick == 23 && first->sequence == 23 && first->session_id == 23 &&
                   first->asset.value == hs::MakeAssetId("audio.player.footstep_run").value &&
                   first->position.x == 2.0f && first->position.z == -3.0f,
               "tick 22 stopped to tick 23 moving emits the current run sample");
-        Check(!timeline.Advance(view),
+        Check(!timeline.Advance(view, 0, false),
               "same-tick retry does not duplicate a footstep");
     }
 
@@ -1180,7 +1202,7 @@ void TestPlayerFootstepTimeline()
         storage.player.locomotion_blend = tick == 45 ? 0.25f : tick == 68 ? 0.75f : 0.0f;
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        if (auto event = timeline.Advance(view))
+        if (auto event = timeline.Advance(view, 0, false))
             gap_events.push_back(*event);
     }
     Check(gap_events.size() == 2 && gap_events[0].tick == 45 && gap_events[0].sequence == 45 &&
@@ -1194,14 +1216,14 @@ void TestPlayerFootstepTimeline()
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view),
+        Check(!timeline.Advance(view, 0, false),
               "new session resets the secondary timeline");
     }
     storage.tick = 72;
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view, 5),
+        Check(!timeline.Advance(view, 5, false),
               "instant motion epoch resets the secondary timeline");
     }
 }
@@ -1236,8 +1258,8 @@ void TestPlayerInstantMotionSignal()
     hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
     const auto owned = storage.View();
     const auto read = hs::development::BorrowOwnedReadModel(owned);
-    Check(hs::ProjectDynamicTick(read, snapshot,
-              hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read, {})), &state) &&
+    const auto scene = hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read, {}));
+    Check(hs::ProjectDynamicTick(read, snapshot, scene, hs::SceneHasMeadowTerrain(*scene), &state) &&
               snapshot.View().camera.target_motion_epoch == 5 &&
               snapshot.View().instances.front().motion_epoch == 5,
           "player and camera publish the same movement boundary");
@@ -1291,6 +1313,7 @@ void TestSlimeAttackPoseTransitions()
     Check(project(92).normalized_time == 0.0f && !state.CancelProgress(91),
           "new attack clears the old reversed charge");
     enemy.kind = hs::EnemyKind::Ranged; enemy.attacking = false; enemy.velocity = {};
+    enemy.facing = {1, 0};
     hs::DomainSignal release{}; release.kind = hs::DomainSignalKind::RangedEnemyReleased;
     release.tick = 100; release.source_entity_id = 91; release.direction = {1, 0, 0};
     const auto spit = project(100, std::span(&release, 1));
@@ -1304,9 +1327,12 @@ void TestSlimeAttackPoseTransitions()
               std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
           "ranged spit retains release facing through its final recovery tick");
     Check(project(119).clip == hs::CharacterAnimationClip::Idle &&
-              !state.IsAttackRecoil(91) && std::abs(projected_yaw) < 0.0001f,
-          "ranged facing lock expires with attack recovery");
-    enemy.kind = hs::EnemyKind::Melee; enemy.attacking = true; enemy.velocity = {-1, 0};
+              !state.IsAttackRecoil(91) &&
+              std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "ranged recovery returns to authoritative facing after its transient release lock");
+    enemy.kind = hs::EnemyKind::Melee; enemy.attacking = true;
+    // The read-model's latest navigation intent must survive the attack transient.
+    enemy.velocity = {-1, 0}; enemy.facing = {-1, 0};
     enemy.attack_started = 120; enemy.attack_resolve = 130;
     (void)project(129); enemy.attacking = false;
     Check(project(130).normalized_time == 1.0f,
@@ -1351,12 +1377,17 @@ void TestAuthoredEnvironmentProjection()
         if (item.mesh == hs::RenderMesh::Ground)
         {
             ++ground;
-            Check(item.environment_seed == static_cast<std::uint32_t>(seed ^ (seed >> 32)),
-                  "all continuous ground tiles share the map seed");
+            Check(item.environment_seed == hs::kMeadowSurfaceSeed,
+                  "adjoining ground and authored meadow share one material field seed");
         }
+        if (item.mesh == hs::RenderMesh::MeadowSurface)
+            Check(item.environment_seed == hs::kMeadowSurfaceSeed,
+                  "authored height geometry and meadow material share their fixed asset seed");
         if (item.mesh == hs::RenderMesh::TreeTrunk)
         {
             ++trees;
+            Check(item.environment_seed == static_cast<std::uint32_t>(seed ^ (seed >> 32)),
+                  "terrain material seed does not replace the tree layout seed");
             Check(i + 1 < instances.size(), "tree has a canopy");
             const auto &canopy = instances[i + 1];
             Check(canopy.mesh == hs::RenderMesh::TreeCanopy && canopy.environment_variant == item.environment_variant &&
@@ -1569,12 +1600,11 @@ void TestMeadowPresentationGrounding()
     signal.position = {low.x, .3f, low.y};
     signal.target = {low.x + .5f, .55f, low.y};
     signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
-    for (const float extent : {0.0f, 8.0f, 16.0f}) {
+    for (const bool meadow : {false, true}) {
         std::array<hs::PresentationEvent, 3> events{};
-        const auto count = extent == 0 ? hs::ProjectDomainSignal(signal, events) :
-            hs::ProjectDomainSignal(signal, events, extent);
-        const auto h = extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
-        const auto target_h = extent >= 14 ? hs::MeadowGroundHeight({signal.target.x, signal.target.z}) : 0.0f;
+        const auto count = hs::ProjectDomainSignal(signal, events, meadow);
+        const auto h = meadow ? hs::MeadowGroundHeight(low) : 0.0f;
+        const auto target_h = meadow ? hs::MeadowGroundHeight({signal.target.x, signal.target.z}) : 0.0f;
         const auto parameters = hs::DecodeVfxParameters(events[0].parameters);
         Check(count == 2 && std::abs(events[0].position.y - (.3f + h)) < 1e-6f &&
               events[1].position.y == events[0].position.y &&
@@ -1584,7 +1614,7 @@ void TestMeadowPresentationGrounding()
         line.kind = hs::DomainSignalKind::RangedEnemyTelegraphed;
         line.geometry.kind = hs::DomainSignalGeometryKind::Line;
         line.geometry.end_position = signal.target;
-        Check(hs::ProjectDomainSignal(line, events, extent) == 1 &&
+        Check(hs::ProjectDomainSignal(line, events, meadow) == 1 &&
               std::abs(events[0].geometry.end_position.y - (.55f + target_h)) < 1e-6f,
               "line endpoint grounding must match its own world location");
     }
@@ -1610,11 +1640,27 @@ void TestMeadowPresentationGrounding()
     returning_projectile.returning = true; returning_projectile.upgrade_mask = 1;
     returning_projectile.return_started_tick = 10; returning_projectile.radius = .15f;
     model.AddProjectile(returning_projectile);
+    {
+        const auto room_scene = std::make_shared<hs::StaticRenderScene>();
+        Check(!hs::SceneHasMeadowTerrain(*room_scene), "empty scene has no meadow terrain");
+        hs::RenderSnapshotStorage flat(16, 4, 4, 16);
+        const auto owned = model.View();
+        const auto read = hs::development::BorrowOwnedReadModel(owned);
+        Check(hs::ProjectDynamicTick(read, flat, room_scene, false), "flat scene projection");
+        const auto view = flat.View();
+        const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
+        const auto body = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::PlayerProjectile; });
+        Check(actor != view.instances.end() && actor->position.y == 0.0f && view.camera.target.y == 0.0f &&
+              body != view.instances.end() && body->position.y == 1.05f,
+              "empty scene remains flat despite a large gameplay arena");
+    }
     const auto project = [&] {
         hs::RenderSnapshotStorage snapshot(16, 4, 4, 16);
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
             test_ui, hs::SettingsData{}, snapshot), "meadow grounded projection");
         const auto view = snapshot.View();
+        Check(view.static_scene && hs::SceneHasMeadowTerrain(*view.static_scene) == (model.arena_half_extent >= 14),
+              "terrain fact follows admitted scene geometry");
         const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
         const auto head = std::ranges::find_if(view.persistent_vfx, [](const auto &v) { return v.kind == hs::PersistentVfxKind::ProjectileHead; });
         const auto charged_trail = std::ranges::find_if(view.persistent_vfx, [](const auto &v) {

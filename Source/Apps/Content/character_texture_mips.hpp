@@ -135,7 +135,9 @@ inline void PreserveCharacterAlphaCoverage(CharacterMip &mip, double base_covera
         CharacterMip next{std::max(1u, source.width / 2), std::max(1u, source.height / 2), {}};
         next.pixels.resize(std::size_t(next.width) * next.height);
         // vector<bool> does not expose contiguous bool storage.
-        std::unique_ptr<bool[]> support(new bool[next.pixels.size()]{});
+        const bool need_support=alpha.cutoff>0 && alpha.preserve_translucent;
+        std::unique_ptr<bool[]> support;
+        if(need_support) support=std::make_unique<bool[]>(next.pixels.size());
         for (std::uint32_t y = 0; y < next.height; ++y)
             for (std::uint32_t x = 0; x < next.width; ++x)
             {
@@ -154,7 +156,7 @@ inline void PreserveCharacterAlphaCoverage(CharacterMip &mip, double base_covera
                                 ? CharacterSrgbToLinear(value[channel])
                                 : channel < 3 && semantic == CharacterTextureSemantic::NormalRoughness
                                     ? value[channel] * 2.0 - 1.0 : value[channel];
-                        support[std::size_t(y) * next.width + x] |= value[3] >= alpha.cutoff;
+                        if(need_support) support[std::size_t(y) * next.width + x] |= value[3] >= alpha.cutoff;
                     }
                 const double count = (x1 - x0) * (y1 - y0);
                 for (auto &channel : sum) channel /= count;
@@ -169,7 +171,8 @@ inline void PreserveCharacterAlphaCoverage(CharacterMip &mip, double base_covera
                     pixel[channel] = static_cast<float>(channel < 3 && semantic == CharacterTextureSemantic::Color
                         ? CharacterLinearToSrgb(sum[channel]) : sum[channel]);
             }
-        PreserveCharacterAlphaCoverage(next, coverage, alpha, {support.get(), next.pixels.size()});
+        PreserveCharacterAlphaCoverage(next, coverage, alpha,
+            need_support ? std::span<const bool>(support.get(),next.pixels.size()) : std::span<const bool>{});
         result.push_back(std::move(next));
     }
     return result;

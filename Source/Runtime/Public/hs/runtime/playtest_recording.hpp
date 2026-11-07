@@ -63,7 +63,8 @@ class PlaytestRecorder
     [[nodiscard]] Result Start(const PlaytestRecorderConfig &config);
     [[nodiscard]] Result Record(const InputFrame &input, GameplayChecksum checksum,
                                 const SimulationObservation &probe,
-                                std::span<const PresentationEvent> events);
+                                std::span<const PresentationEvent> events,
+                                std::uint64_t session_id = 0);
     [[nodiscard]] Result Finish(bool execution_valid);
     [[nodiscard]] const std::filesystem::path &Directory() const noexcept;
     [[nodiscard]] bool Active() const noexcept;

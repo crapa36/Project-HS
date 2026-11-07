@@ -1,16 +1,39 @@
 #pragma once
 
 #include "renderer_virtual_shadow.hpp"
+#include "../../../Content/Shaders/local_shadow_abi.hlsli"
 
 #include <string>
 
 namespace hs
 {
 inline constexpr std::uint32_t kLocalShadowPassBit = 0x40000000u;
-inline constexpr std::uint32_t kLocalShadowDescriptorCount = 5;
+inline constexpr std::uint32_t kLocalShadowDescriptorCount = HS_LOCAL_SHADOW_DESCRIPTOR_COUNT;
+enum LocalShadowSrvSlot : std::uint32_t {
+#define HS_LOCAL_SHADOW_SLOT(name,slot,type,shader) LocalShadowSrv##name = slot,
+    HS_LOCAL_SHADOW_SRVS(HS_LOCAL_SHADOW_SLOT)
+#undef HS_LOCAL_SHADOW_SLOT
+};
+static_assert(LocalShadowSrvDrawRecords + 1 == kLocalShadowDescriptorCount);
 inline constexpr std::uint32_t kLocalShadowGuard = 2;
 inline constexpr std::uint32_t kLocalShadowMaximumSamples = 4;
 inline constexpr std::uint32_t kLocalShadowMaximumFaces = 6 * kLocalShadowMaximumSamples;
+
+inline bool LocalShadowCasterChanged(const VirtualShadowCaster &c, bool current_static, bool previous_static) noexcept
+{
+    const auto &a=c.current_bounds;const auto &b=c.previous_bounds;
+    return c.force_content_invalidation||c.present!=c.previous_present||c.instance_generation!=c.previous_generation||
+        c.current_revisions!=c.previous_revisions||c.current_cut_revision!=c.previous_cut_revision||
+        a.x!=b.x||a.y!=b.y||a.z!=b.z||a.w!=b.w||current_static!=previous_static;
+}
+inline bool LocalShadowDynamicCasterChanged(const VirtualShadowCaster &c, bool current_static, bool previous_static) noexcept
+{
+    const bool current=c.present&&!current_static, previous=c.previous_present&&!previous_static;
+    if(!current&&!previous)return false;
+    return (current&&(c.skin||c.wind||c.animated_alpha))||
+        LocalShadowCasterChanged(c,current_static,previous_static)||c.skin!=c.previous_skin||
+        c.wind!=c.previous_wind||c.animated_alpha!=c.previous_animated_alpha;
+}
 
 struct LocalShadowProfile
 {
@@ -41,15 +64,25 @@ struct alignas(16) GpuLocalShadowRecord
     DirectX::XMFLOAT4 emitter_normal_two_sided{}; // Unit emission normal; W is the authored two-sided flag.
     DirectX::XMUINT4 state{}; // Published face mask, selected, reserved, reserved.
 };
-static_assert(sizeof(LocalShadowMetadata)==64);
+static_assert(sizeof(LocalShadowMetadata)==HS_LOCAL_SHADOW_METADATA_BYTES);
+static_assert(offsetof(LocalShadowMetadata,counts)==HS_LOCAL_SHADOW_METADATA_COUNTS);
+static_assert(offsetof(LocalShadowMetadata,bank)==HS_LOCAL_SHADOW_METADATA_BANK);
 // Above the native 2048B structured-element limit: t1 is a raw SRV, with exact
 // byte offsets decoded by local_shadow.hlsli, never a structured stride2096.
-static_assert(sizeof(GpuLocalShadowRecord)==2096);
-static_assert(offsetof(GpuLocalShadowRecord,world_to_clip)==80);
-static_assert(offsetof(GpuLocalShadowRecord,atlas_tiles)==1616);
-static_assert(offsetof(GpuLocalShadowRecord,sample_positions)==2000);
-static_assert(offsetof(GpuLocalShadowRecord,emitter_normal_two_sided)==2064);
-static_assert(offsetof(GpuLocalShadowRecord,state)==2080);
+static_assert(sizeof(GpuLocalShadowRecord)==HS_LOCAL_SHADOW_RECORD_BYTES);
+static_assert(offsetof(GpuLocalShadowRecord,identity)==HS_LOCAL_SHADOW_RECORD_IDENTITY);
+static_assert(offsetof(GpuLocalShadowRecord,revision)==HS_LOCAL_SHADOW_RECORD_REVISION);
+static_assert(offsetof(GpuLocalShadowRecord,position_range)==HS_LOCAL_SHADOW_RECORD_POSITION_RANGE);
+static_assert(offsetof(GpuLocalShadowRecord,direction_cos_outer)==HS_LOCAL_SHADOW_RECORD_DIRECTION);
+static_assert(offsetof(GpuLocalShadowRecord,parameters)==HS_LOCAL_SHADOW_RECORD_PARAMETERS);
+static_assert(offsetof(GpuLocalShadowRecord,world_to_clip)==HS_LOCAL_SHADOW_RECORD_MATRICES);
+static_assert(offsetof(GpuLocalShadowRecord,atlas_tiles)==HS_LOCAL_SHADOW_RECORD_TILES);
+static_assert(offsetof(GpuLocalShadowRecord,sample_positions)==HS_LOCAL_SHADOW_RECORD_SAMPLES);
+static_assert(offsetof(GpuLocalShadowRecord,emitter_normal_two_sided)==HS_LOCAL_SHADOW_RECORD_EMITTER);
+static_assert(offsetof(GpuLocalShadowRecord,state)==HS_LOCAL_SHADOW_RECORD_STATE);
+static_assert(sizeof(DirectX::XMFLOAT4X4)==HS_LOCAL_SHADOW_MATRIX_BYTES);
+static_assert(sizeof(DirectX::XMFLOAT4)==HS_LOCAL_SHADOW_VECTOR_BYTES);
+static_assert(sizeof(GpuShadowDrawRecord)==HS_LOCAL_SHADOW_DRAW_BYTES);
 
 struct LocalShadowStatus
 {
@@ -68,8 +101,8 @@ struct LocalShadowOutputs
 {
     ResourceVersion metadata, records, static_bank, dynamic_bank, draw_records;
     ResourceVersion indexed_commands, mesh_commands, command_counts;
-    std::array<ID3D12Resource *,5> resources{};
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE,5> srvs{};
+    std::array<ID3D12Resource *,kLocalShadowDescriptorCount> resources{};
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE,kLocalShadowDescriptorCount> srvs{};
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE,2> depth_views{};
     ID3D12Resource *indexed_arguments{}, *mesh_arguments{}, *counts_resource{};
     ViewExtent bank_extent;
@@ -77,11 +110,23 @@ struct LocalShadowOutputs
     // Same pending graph/cache snapshot as records; valid until CompleteSubmission.
     std::span<const LocalShadowLightReference> light_records;
 };
+struct LocalShadowOpacityBinding
+{
+    ID3D12Resource *resource{};
+    std::uint64_t revision{};
+    std::uint32_t texture_id{}, first_mip{}, resident_mip{};
+    bool operator==(const LocalShadowOpacityBinding &) const = default;
+};
 struct LocalShadowInputs
 {
     std::span<const LightView> lights;
     DirectX::XMFLOAT3 camera_position{};
     std::uint64_t rendered_frame_id{};
+    // Existing renderer pipeline revision; zero conservatively invalidates dynamic depth.
+    std::uint64_t pipeline_revision{};
+    // Snapshot of actual shadow opacity bindings from the resident Generation.
+    std::shared_ptr<const void> opacity_owner;
+    std::span<const LocalShadowOpacityBinding> opacity_bindings;
     std::uint32_t frame_slot{};
     CompletionSet completed;
     bool reset_cache{};
@@ -94,6 +139,8 @@ struct LocalShadowInputs
     std::shared_ptr<const void> stable_caster_owner;
     std::uint64_t stable_caster_revision{};
     std::span<const VirtualShadowDrawGroup> draw_groups;
+    // A masked/unknown material may animate without changing caster revisions.
+    std::span<const std::uint8_t> temporal_opacity_groups;
     std::span<const VirtualShadowNativeRead> native_reads;
     std::vector<std::shared_ptr<const void>> owners; // Placed geometry/material backing, if not renderer-owned.
     // Same 24B indexed / 16B mesh signatures and root6 DWORD0 as VirtualShadow.
@@ -135,7 +182,7 @@ class LocalShadowCandidate
 // with six cube faces admitted together from the same fixed physical tile pool.
 // Unknown/unpublished/overflow faces resolve to unshadowed
 // lighting; status reports that bounded fallback. Static depth is invalidated
-// by old AND new caster bounds/revisions; dynamic depth is replaced each frame.
+// by old AND new caster bounds/revisions; dynamic depth retains unchanged faces.
 // All output reads must be declared by opaque, transparent and world consumers.
 class LocalShadowSystem
 {

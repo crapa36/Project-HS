@@ -35,7 +35,7 @@ std::uint32_t AddSurfaceReflectionInputs(ap::ActionSpec &spec, const fs::path &s
     return mask;
 }
 
-std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root,
+std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source_root,
                                PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
@@ -64,16 +64,16 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
             std::to_string(demand.opacity_mask) + "u;\n";
         if (!translucent)
         {
-            surface_case = "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n" + surface_case + "#endif\n";
-            opacity_case = "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n" + opacity_case + "#endif\n";
+            surface_case = "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n" + surface_case + "#endif\n";
+            opacity_case = "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n" + opacity_case + "#endif\n";
         }
         surface_demand_cases += surface_case;
         opacity_demand_cases += opacity_case;
-        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
+        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += functions;
         if (!translucent) generated += "#endif\n";
         const auto semantic = functions + surface_case + opacity_case;
-        spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/hero-context-ir", path,
+        spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/character-context-ir", path,
             std::as_bytes(std::span(semantic.data(), semantic.size()))));
     }
     generated += "uint HsCharacterSurfaceContextDemand(uint ordinal)\n{\n    switch (ordinal)\n    {\n" +
@@ -87,7 +87,7 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
-        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
+        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
         if (!translucent) generated += "#endif\n";
     }
@@ -99,7 +99,7 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
-        if (!translucent) generated += "#if !defined(HS_HERO_TRANSLUCENT_DOMAIN_ONLY)\n";
+        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
         generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateOpacity_" + std::to_string(ordinal) + "(ctx);\n";
         if (!translucent) generated += "#endif\n";
     }

@@ -75,11 +75,18 @@ Source ParseSource(std::string_view text)
     Require(source.at("author_notes").is_string() && !source.at("author_notes").get_ref<const std::string &>().empty() &&
         source.at("author_notes").get_ref<const std::string &>().size()<=4096,"invalid author notes");
     const auto &capture=source.at("capture");
-    Keys(capture,{"kind","cube_edge","ggx_samples","maximum_cube_views_per_graph","include","exclude"});
+    Keys(capture,{"kind","cube_edge","ggx_samples","maximum_cube_views_per_graph","offline_multibounce","include","exclude"});
     Require(capture.at("kind")=="native_static_common_material_cube_views" &&
         capture.at("include")==ap::Json::array({"static_geometry","common_material_opacity","static_direct_lights","emission","global_environment_sky"}) &&
         capture.at("exclude")==ap::Json::array({"dynamic_characters","dynamic_vfx","ui","post","exposure","recursive_local_probes"}),"invalid clean static capture scope");
     (void)Integer(capture.at("maximum_cube_views_per_graph"),1,6);
+    const auto &solve=capture.at("offline_multibounce");
+    Keys(solve,{"mode","maximum_iterations","absolute_tolerance","relative_tolerance"});
+    Require(solve.at("mode")=="previous_complete_grid","invalid offline diffuse solve mode");
+    (void)Integer(solve.at("maximum_iterations"),1,64);
+    const auto abs_tolerance=Number(solve.at("absolute_tolerance"),0,1);
+    const auto rel_tolerance=Number(solve.at("relative_tolerance"),0,1);
+    Require(abs_tolerance>0 || rel_tolerance>0,"offline diffuse solve needs a nonzero tolerance");
     Source result; result.environment=source.at("environment_product").get<std::string>();
     result.description.edge=Integer(capture.at("cube_edge"),16,128);
     result.description.ggx_samples=Integer(capture.at("ggx_samples"),64,2048);

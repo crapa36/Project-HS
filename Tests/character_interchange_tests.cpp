@@ -1,5 +1,6 @@
 #include "../Source/Apps/CharacterInterchange/character_interchange.hpp"
 #include "../Source/Apps/Content/character_products.hpp"
+#include "../Source/Apps/Content/geometry_cooker.hpp"
 #include <hs/render_data/texture_package.hpp>
 #include <algorithm>
 #include <array>
@@ -9,12 +10,69 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <set>
 #include <stdexcept>
 
 namespace
 {
 using Json=nlohmann::json;
 void Check(bool value,const char *message) { if(!value) throw std::runtime_error(message); }
+void TestOpticalComponentCertification()
+{
+    using Vertex = hs::render_data::ExpandedVertex;
+    constexpr std::array<std::array<std::uint32_t, 3>, 4> faces{{
+        {{0, 2, 1}}, {{0, 1, 3}}, {{1, 2, 3}}, {{2, 0, 3}}}};
+    const auto tetrahedra = [&](bool omit_last_face) {
+        constexpr std::array<std::array<float, 3>, 4> positions{{
+            {{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}}};
+        std::vector<Vertex> expanded;
+        for (std::uint32_t component = 0; component < 2; ++component)
+            for (std::uint32_t face = 0; face < (omit_last_face && component == 0 ? 3u : 4u); ++face)
+                for (const auto corner : faces[face])
+                {
+                    Vertex vertex;
+                    vertex.position = positions[corner];
+                    vertex.position[0] += component * 3.0f;
+                    vertex.normal = {0, 1, 0};
+                    vertex.bone_weights = {1, 0, 0, 0};
+                    vertex.material_index = component == 0 && face == 1 ? 1 : 0;
+                    expanded.push_back(vertex);
+                }
+        return expanded;
+    };
+    const std::array profiles{hs::geometry_content::OpticalMaterialProfile{7, true},
+        hs::geometry_content::OpticalMaterialProfile{7, true}};
+    const auto certified = hs::geometry_content::CookGeometry(tetrahedra(false),
+        hs::render_data::kGeometryFlagSkinned, profiles);
+    std::set<std::uint16_t> first_ids, second_ids;
+    for (const auto &vertex : certified.vertices)
+        (vertex.position[0] < 2.0f ? first_ids : second_ids).insert(vertex.optical_component_id);
+    Check(first_ids.size() == 1 && *first_ids.begin() != 0 && second_ids.size() == 1 &&
+        *second_ids.begin() != 0 && *first_ids.begin() != *second_ids.begin(),
+        "closed shells pair by edge-connected component across compatible material boundaries");
+
+    auto incompatible = profiles;
+    incompatible[1].compatibility_group = 8;
+    const auto split_profile = hs::geometry_content::CookGeometry(tetrahedra(false),
+        hs::render_data::kGeometryFlagSkinned, incompatible);
+    bool first_supported{}, first_fallback{}, second_supported{};
+    for (const auto &vertex : split_profile.vertices)
+        if (vertex.position[0] < 2.0f) first_supported |= vertex.optical_component_id != 0;
+        else second_supported |= vertex.optical_component_id != 0;
+    first_fallback = std::ranges::all_of(split_profile.vertices, [](const Vertex &vertex) {
+        return vertex.position[0] >= 2.0f || vertex.optical_component_id == 0;
+    });
+    Check(first_fallback && !first_supported && second_supported,
+        "incompatible material profile falls back for the whole connected shell");
+
+    const auto open = hs::geometry_content::CookGeometry(tetrahedra(true),
+        hs::render_data::kGeometryFlagSkinned, profiles);
+    Check(std::ranges::all_of(open.vertices, [](const Vertex &vertex) {
+        return vertex.position[0] < 2.0f || vertex.optical_component_id != 0;
+    }) && std::ranges::any_of(open.vertices, [](const Vertex &vertex) {
+        return vertex.position[0] < 2.0f && vertex.optical_component_id == 0;
+    }), "open shell uses authored-thickness fallback while closed shell remains paired");
+}
 using Point=std::array<double,3>;
 Point Basis(Point p) { return {-p[0],p[2],-p[1]}; }
 Point Cross(Point a,Point b)
@@ -284,12 +342,11 @@ void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharac
     invalid.vertices[0].bone_indices[3] = static_cast<std::uint16_t>(invalid.bone_count);
     reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); }, "zero-weight invalid bone lane reached final products");
     invalid = ir; invalid.vertices[0].reserved = 1;
-    invalid.vertices[0].position[0] = std::numeric_limits<float>::quiet_NaN();
-    try { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); Check(false, "invalid reserved reached final products"); }
-    catch (const std::exception &error) {
-        Check(std::string_view(error.what()).find("material/reserved") != std::string_view::npos,
-            "source reserved/finite diagnostic order changed");
-    }
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); },
+        "legacy reserved field reached final products");
+    invalid = ir; invalid.vertices[0].position[0] = std::numeric_limits<float>::quiet_NaN();
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); },
+        "nonfinite source position reached final products");
     invalid = ir; invalid.vertices[0].bone_weights[0] = 0.995f;
     reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections, material_domains); }, "generic weight tolerance substituted for strict character binding");
     auto ambiguous = authoring;
@@ -391,6 +448,7 @@ int main()
 {
     try
     {
+        TestOpticalComponentCertification();
         TestHandedness();
         Fixture f; f.Save();auto result=f.Load();
         TestAnimationExtension(result);

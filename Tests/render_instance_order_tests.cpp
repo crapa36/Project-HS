@@ -130,11 +130,18 @@ void TestOwnedVfxReplacementEquivalence()
             return (instance.mesh==RenderMesh::PlayerProjectile||instance.mesh==RenderMesh::EnemyProjectile)&&
                 std::ranges::any_of(heads,[&](const auto &head){return head.owner_id==instance.stable_id;});
         });
-        FilterRenderInstancesForOwnedVfx(sources,ground,heads,scratch);
+        std::vector<std::uint32_t> ordinals(sources.size());
+        for (std::size_t index=0;index<ordinals.size();++index) ordinals[index]=static_cast<std::uint32_t>(index);
+        const auto original=sources;
+        FilterRenderInstancesForOwnedVfx(sources,ground,heads,scratch,&ordinals);
         Check(sources.size()==expected.size(),"indexed VFX filtering changed survivor count");
         for(std::size_t index=0;index<sources.size();++index)
+        {
             Check(sources[index].position.x==expected[index].position.x,
                 "indexed VFX filtering changed owner matching or stable survivor order");
+            Check(original[ordinals[index]].position.x==sources[index].position.x,
+                "VFX filtering changed the original source ordinal");
+        }
     }
 }
 
@@ -395,6 +402,12 @@ void TestRasterIndexSuffix()
 
 void TestGeometryDemandCells()
 {
+    const float isotropic=ConservativeGroundTextureFootprint(1,0,0,1);
+    const float grazing=ConservativeGroundTextureFootprint(100,0,0,0.01);
+    Check(isotropic>0.70f && isotropic<0.71f && grazing>0.009f && grazing<=0.01f &&
+        ConservativeGroundTextureFootprint(1,1,2,2)==0 &&
+        ConservativeGroundTextureFootprint(std::numeric_limits<double>::infinity(),0,0,1)==0,
+        "terrain texture footprint conservatively bounds anisotropic and degenerate gradients");
     std::vector<GeometryDemandPoint> points{{{-0.1f, 0, 30}, 2, 0, false},
         {{0, 0, 30}, 1, 1, true}, {{1, 2, 31}, 3, 2, false},
         {{0, 0, 30}, std::numeric_limits<float>::infinity(), 3, false}};

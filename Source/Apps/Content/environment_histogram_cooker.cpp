@@ -31,7 +31,7 @@ constexpr double kSigma = 1.0 / 6.0;
 // PCA marginal Gaussianization and inverse-LUT prefiltering follow the Unity Labs
 // procedural-stochastic-texturing reference (ProceduralTexture2DEditor.cs).
 // This implementation uses deterministic Gaussian-quantile quadrature.
-constexpr const char* kRecipe = "terrain-pca-midrank-gaussian-v1-linear-bc7-lut256x16-q512";
+constexpr const char* kRecipe = "terrain-pca-midrank-gaussian-v2-decoded-mean-linear-bc7-lut256x16-q512";
 struct Basis { V3 origin{}; Matrix axes{}; V3 eigenvalues{}; };
 using Lut = std::array<std::array<F3, kLutWidth>, kMips>;
 struct LayerData { Basis basis; Lut lut{}; Json qa; };
@@ -230,7 +230,8 @@ LayerData CookLayer(const std::filesystem::path& path, size_t layer, DirectX::Sc
         {"gaussian_storage_clipped_above_one",clippedHigh},{"mip_prefilter_variance",variances}};
     return data;
 }
-void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, LayerData& data)
+void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, LayerData& data,
+                    DirectX::ScratchImage& histogram)
 {
     Json mips=Json::array();
     for (size_t mip=0;mip<kMips;++mip) {
@@ -238,13 +239,14 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
         Check(DirectX::Decompress(*compressed.GetImage(mip,layer,0),DXGI_FORMAT_R32G32B32A32_FLOAT,decoded),"Measure histogram BC7 decode");
         const auto* image=decoded.GetImage(0,0,0);
         const double count=static_cast<double>(image->width*image->height);
-        V3 mean{}, minimum{1e30,1e30,1e30},maximum{-1e30,-1e30,-1e30};
+        V3 mean{}, gaussianMean{}, minimum{1e30,1e30,1e30},maximum{-1e30,-1e30,-1e30};
         size_t outside=0;
         for (size_t y=0;y<image->height;++y) {
             const auto* row=reinterpret_cast<const float*>(image->pixels+y*image->rowPitch);
             for (size_t x=0;x<image->width;++x) {
                 V3 rgb=data.basis.origin;
                 for (size_t c=0;c<3;++c) {
+                    gaussianMean[c]+=static_cast<double>(row[x*4+c])/count;
                     const double component=Lookup(data.lut[mip],row[x*4+c],c);
                     for (size_t j=0;j<3;++j) rgb[j]+=component*data.basis.axes[c][j];
                 }
@@ -260,7 +262,10 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
         }
         V3 error{};
         for (size_t c=0;c<3;++c) error[c]=mean[c]-data.basis.origin[c];
-        mips.push_back({{"mip",mip},{"decoded_linear_mean",mean},{"mean_error",error},{"decoded_min",minimum},{"decoded_max",maximum},{"out_of_gamut_pixel_count",outside},{"finite",true}});
+        const auto* lutImage=histogram.GetImage(0,layer,0);
+        auto* center=reinterpret_cast<float*>(lutImage->pixels+12*lutImage->rowPitch)+(mip+1)*4;
+        for (size_t c=0;c<3;++c) center[c]=static_cast<float>(gaussianMean[c]);
+        mips.push_back({{"mip",mip},{"decoded_gaussian_mean",gaussianMean},{"decoded_linear_mean",mean},{"mean_error",error},{"decoded_min",minimum},{"decoded_max",maximum},{"out_of_gamut_pixel_count",outside},{"finite",true}});
     }
     data.qa["bc7_decoded_mips"]=std::move(mips);
 }
@@ -319,7 +324,7 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
         Check(DirectX::Compress(gaussian.GetImages(),gaussian.GetImageCount(),gaussian.GetMetadata(),DXGI_FORMAT_BC7_UNORM,DirectX::TEX_COMPRESS_PARALLEL,.5f,compressed),"CPU compress Gaussian terrain");
     gaussian.Release();
     Json qa={{"recipe",kRecipe},{"description","Per-channel PCA marginal histogram reconstruction; finite LUT, BC7 and Gaussian tails are approximate. Joint RGB distribution is not guaranteed."},{"layers",Json::array()}};
-    for (size_t layer=0;layer<kLayers;++layer) { MeasureDecoded(compressed,layer,data[layer]); qa["layers"].push_back(data[layer].qa); }
+    for (size_t layer=0;layer<kLayers;++layer) { MeasureDecoded(compressed,layer,data[layer],histogram); qa["layers"].push_back(data[layer].qa); }
     Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,asset_pipeline::NativeFilePath(gaussianPath).c_str()),"Save Gaussian terrain");
     Check(DirectX::SaveToDDSFile(histogram.GetImages(),histogram.GetImageCount(),histogram.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,asset_pipeline::NativeFilePath(histogramPath).c_str()),"Save histogram terrain LUT");
     { std::ofstream stream(asset_pipeline::NativeFilePath(qaPath)); stream<<qa.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram QA"); }

@@ -1,10 +1,12 @@
 #include "vfx_texture_validation.hpp"
+#include "../AssetPipeline/vfx_texture_specs.hpp"
 #include <hs/render_data/dds_texture.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -105,16 +107,18 @@ void ValidateVfxTextures(const Json &spec, const std::filesystem::path &root)
                 throw std::runtime_error("Cannot read DDS bytes");
             const auto decoded = render_data::DecodeDdsTexture(bytes);
             const auto &shape = decoded.description;
-            if (decoded.payload_offset != 148 || (decoded.flags & 0x1007) != 0x1007 || !(decoded.caps[0] & 0x1000) ||
-                decoded.misc || decoded.misc2 || decoded.rgba_bits ||
-                !std::ranges::all_of(decoded.masks, [](auto value) { return value == 0; }) ||
-                !std::ranges::all_of(decoded.reserved, [](auto value) { return value == 0; }))
-                throw std::runtime_error("Invalid linear DX10 DDS role fields");
             const auto format = shape.format;
             const auto preferred = Format(entry.at("runtime_format_preferred").get<std::string>());
             const auto development = entry.contains("runtime_format_development") ?
                 Format(entry.at("runtime_format_development").get<std::string>()) : preferred;
-            if (format != preferred && format != development) throw std::runtime_error("DDS format differs from catalog");
+            const auto role = std::ranges::find(asset_pipeline::kVfxTextureSpecs,
+                filename.stem().string(), &asset_pipeline::VfxTextureSpec::name);
+            if (role == std::end(asset_pipeline::kVfxTextureSpecs) || role->masks ||
+                development != role->description.format || format != development)
+                throw std::runtime_error("DDS format is not supported by the runtime package");
+            render_data::ValidateDdsTextureRole(decoded,
+                role->volume ? render_data::DdsTextureRole::VfxVolume : render_data::DdsTextureRole::VfxTexture,
+                role->description);
             const auto color = entry.at("color_space").get<std::string>();
             if (color != "linear_data" && color != "signed_linear_data" && color != "linear_hdr" && color != "linear_scalar_data")
                 throw std::runtime_error("VFX data must be linear");
@@ -131,18 +135,13 @@ void ValidateVfxTextures(const Json &spec, const std::filesystem::path &root)
                 decoded.dimension != (volume ? 4u : 3u) || shape.array_size != slices ||
                 decoded.caps[1] != (volume ? 0x200000u : 0u) || (volume && !(decoded.flags & 0x800000)))
                 throw std::runtime_error("DDS resource dimensions differ from catalog");
-            if ((volume || array) && !(decoded.caps[0] & 8)) throw std::runtime_error("DDS array/volume lacks complex capability");
             const auto policy = entry.at("mips").get<std::string>();
             std::uint32_t mip_count = 1;
             if (policy == "full_chain" || policy == "full_chain_per_slice" || policy == "full_chain_vector_average")
                 for (auto axis = std::max({width, height, depth}); axis > 1; axis >>= 1) ++mip_count;
             else if (policy != "none" && policy != "none_baseline") throw std::runtime_error("Unknown mip policy");
-            if (shape.mip_count != mip_count || (mip_count > 1 && (!(decoded.flags & 0x20000) || (decoded.caps[0] & 0x400008) != 0x400008)))
+            if (shape.mip_count != mip_count)
                 throw std::runtime_error("Incomplete DDS mip chain");
-            const bool block = format == 80 || format == 84 || format == 98;
-            const auto top_pitch = block ? decoded.subresources.front().slice_pitch : decoded.subresources.front().row_pitch;
-            if (!(decoded.flags & (block ? 0x80000 : 8)) || decoded.pitch != top_pitch)
-                throw std::runtime_error("Invalid DDS pitch/linear size");
             Maps(entry, slices, shape.height);
         }
         catch (const std::exception &error)

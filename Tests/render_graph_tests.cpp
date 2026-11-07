@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 extern "C"
@@ -486,6 +487,21 @@ void ImportedInitialAccess(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsComma
     reject(nullptr, false, hs::Access::Common, "null texture");
     Check(all_rejected, "incompatible imported initial accesses must be rejected");
 
+    {
+        hs::RenderGraphBuilder timing_graph;
+        const auto pending = timing_graph.ImportBuffer({buffer.Get(), {7, 0, 0}},
+            hs::Access::Common, "timing pending import");
+        auto pass = timing_graph.AddPass(99, "timing import", hs::QueueHint::Direct);
+        pass.Read(timing_graph.Version(pending), hs::Access::CopySource);
+        pass.SetExecute([](auto &) {});
+        Check(timing_graph.Prepare(pool).Succeeded(), "prepare timing import");
+        const auto closure = timing_graph.OutputDependencyClosureSlots(99);
+        Check(!timing_graph.OutputClosureImportsReady(closure, {6, 0, 0}),
+            "unfinished imported completion rejects timing sample");
+        Check(timing_graph.OutputClosureImportsReady(closure, {7, 0, 0}),
+            "finished imported completion accepts timing sample");
+    }
+
     hs::RenderGraphBuilder graph;
     const auto common_buffer = graph.ImportBuffer({buffer.Get()}, hs::Access::Common, "valid Common buffer");
     const auto common_texture = graph.ImportTexture({texture.Get()}, hs::Access::Common, "valid Common texture");
@@ -794,19 +810,14 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     Check(fresh_callback_calls == 8, "cached plans invoke each current callback");
     {
         // Exercise recency through the real plan APIs: a hit on the oldest
-        // retained plan must protect it when a ninth topology is compiled.
+        // retained plan must protect it when one more topology is compiled.
         hs::RenderGraphBuilder lru_graph;
-        std::array<hs::RenderGraphBuilder::PlanHandle, 8> lru_handles{};
-        const std::array<std::string_view, 9> lru_pass_names{
-            "p0",
-            "LRU pass name beyond small-string storage for topology 1",
-            "LRU pass name beyond small-string storage for topology 2",
-            "LRU pass name beyond small-string storage for topology 3",
-            "LRU pass name beyond small-string storage for topology 4",
-            "LRU pass name beyond small-string storage for topology 5",
-            "LRU pass name beyond small-string storage for topology 6",
-            "LRU pass name beyond small-string storage for topology 7",
-            "LRU pass name beyond small-string storage for topology 8"};
+        constexpr auto capacity = hs::RenderGraphBuilder::RetainedPlanCapacity;
+        std::array<hs::RenderGraphBuilder::PlanHandle, capacity> lru_handles{};
+        std::array<std::string, capacity + 1> lru_pass_names;
+        lru_pass_names[0] = "p0";
+        for (std::size_t index = 1; index < lru_pass_names.size(); ++index)
+            lru_pass_names[index] = "LRU pass name beyond small-string storage for topology " + std::to_string(index);
         std::uint32_t lru_callback_calls{};
         const auto declare_shape = [&](std::uint32_t pass_id) {
             const auto imported = lru_graph.ImportBuffer(
@@ -862,24 +873,24 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
         f.Submit();
 
         first.ResetClaims();
-        Check(lru_graph.RestorePlan(lru_handles[7]), "restore newest retained LRU topology");
-        bind_restored_shape(7);
+        Check(lru_graph.RestorePlan(lru_handles[capacity - 1]), "restore newest retained LRU topology");
+        bind_restored_shape(static_cast<std::uint32_t>(capacity - 1));
         Check(lru_graph.Prepare(first).Succeeded() &&
-              lru_graph.CompiledPassName(0) == lru_pass_names[7],
+              lru_graph.CompiledPassName(0) == lru_pass_names[capacity - 1],
               "restored newest LRU topology retains its heap-owned pass name");
         Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
               "execute restored newest LRU topology");
         f.Submit();
 
         first.ResetClaims(); lru_graph.Reset();
-        declare_shape(8);
-        const auto ninth_compilations = hs::RenderGraphTestAccess::Compilations(lru_graph);
+        declare_shape(static_cast<std::uint32_t>(capacity));
+        const auto extra_compilations = hs::RenderGraphTestAccess::Compilations(lru_graph);
         Check(lru_graph.Prepare(first).Succeeded() &&
-              hs::RenderGraphTestAccess::Compilations(lru_graph) == ninth_compilations + 1 &&
-              lru_graph.CompiledPassName(0) == lru_pass_names[8],
-              "ninth topology compiles and evicts the least recently used plan");
+              hs::RenderGraphTestAccess::Compilations(lru_graph) == extra_compilations + 1 &&
+              lru_graph.CompiledPassName(0) == lru_pass_names[capacity],
+              "capacity-plus-one topology evicts the least recently used plan");
         Check(lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
-              "execute ninth LRU topology");
+              "execute capacity-plus-one LRU topology");
         f.Submit();
 
         first.ResetClaims();
@@ -893,7 +904,7 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
         f.Submit();
         first.ResetClaims();
         Check(!lru_graph.RestorePlan(lru_handles[1]), "least recently used topology is evicted");
-        Check(lru_callback_calls == 12, "LRU cached and restored plans invoke current callbacks");
+        Check(lru_callback_calls == capacity + 4, "LRU cached and restored plans invoke current callbacks");
         Check(lru_graph.RestorePlan(lru_handles[0]), "restore original plan before a rejected edit");
         auto edited_pass = lru_graph.BindPass(0, 0);
         Check(edited_pass.has_value(), "select retained pass for a rejected declaration edit");
@@ -906,7 +917,7 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
               lru_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
               "execute original retained plan after a rejected declaration edit");
         f.Submit();
-        Check(lru_callback_calls == 13, "rejected edit leaves the original callback and declarations intact");
+        Check(lru_callback_calls == capacity + 5, "rejected edit leaves the original callback and declarations intact");
     }
     const auto restored_handle = plan_graph.PreparedPlan();
     const auto restored_input_builds = hs::RenderGraphTestAccess::InputBuilds(plan_graph);

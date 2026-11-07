@@ -52,8 +52,9 @@ void ValidateVertices(std::span<const Vertex> vertices, std::uint32_t bone_count
 {
     for (const auto &vertex : vertices)
     {
-        Require(vertex.material_index < material_count && vertex.reserved == 0,
-                "invalid character vertex material/reserved");
+        Require(vertex.material_index < material_count, "invalid character vertex material");
+        if constexpr (requires { vertex.reserved; })
+            Require(vertex.reserved == 0, "invalid legacy character vertex reserved field");
         const auto finite = [](float x) { return std::isfinite(x); };
         Require(std::ranges::all_of(vertex.position, finite) &&
                 std::ranges::all_of(vertex.normal, finite) &&
@@ -381,10 +382,10 @@ CharacterPackageData DecodeCommon(
             (monster ? monster->final_matrices.size() : chunks[8]->count) == transform_count,
             "character chunk counts disagree");
     if (embedded)
-        for (const auto &vertex : DecodeExpandedVertices(chunks[1]->bytes))
+        for (const auto &vertex : DecodeExpandedVertices(chunks[1]->bytes, chunks[1]->version))
             character.vertices.push_back({vertex.position, vertex.normal,
                 vertex.bone_indices, vertex.bone_weights, vertex.uv, vertex.tangent,
-                vertex.material_index, vertex.reserved});
+                vertex.material_index, vertex.optical_component_id});
     for (std::size_t i = 0; i < character.bone_count; ++i)
     {
         character.parents.push_back(static_cast<std::uint16_t>(Get(chunks[4]->bytes, i * 2, 2)));
@@ -501,8 +502,13 @@ void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
 void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
                                const PreparedGeometryPage &page)
 {
+    ValidateCharacterGeometry(character, character.geometry, page);
+}
+
+void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
+                               const GeometryMetadata &metadata, const PreparedGeometryPage &page)
+{
     const auto &geometry = page.geometry;
-    const auto &metadata = character.geometry;
     Require(page.package.asset_id.value != 0 && geometry.flags == metadata.flags &&
             geometry.vertices.size() == metadata.vertex_count && geometry.indices.size() == metadata.index_count &&
             geometry.submeshes.size() == metadata.submesh_count && geometry.meshlets.size() == metadata.meshlet_count &&

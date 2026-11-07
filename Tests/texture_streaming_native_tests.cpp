@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -128,12 +129,13 @@ class TextureStreamFixture
     TextureStreamFixture(ID3D12Device *device, D3D12MA::Allocator *allocator,
                          hs::RenderGraphQueueExecutor &executor, bool reserved_candidate = false,
                          bool prepare_sibling = false, std::uint32_t software_width = 4,
-                         bool srgb_view = false)
-        : device_(device), allocator_(allocator), executor_(executor), srgb_view_(srgb_view)
+                         bool srgb_view = false, bool bc7 = false, std::uint32_t bc7_width = 512)
+        : device_(device), allocator_(allocator), executor_(executor), srgb_view_(srgb_view), bc7_(bc7)
     {
         description_ = reserved_candidate
             ? hs::render_data::TextureDescription{256, 256, 1, std::bit_width(256u), hs::render_data::kTextureFormatRgba8}
             : hs::render_data::TextureDescription{software_width, 4096, 4, std::bit_width(4096u), hs::render_data::kTextureFormatRgba8};
+        if (bc7_) description_ = {bc7_width, bc7_width, 1, static_cast<std::uint32_t>(std::bit_width(bc7_width)), hs::render_data::kTextureFormatBc7};
         const auto subresources = static_cast<std::size_t>(description_.array_size) * description_.mip_count;
         payload_.reserve(static_cast<std::size_t>(description_.array_size) * description_.width *
             description_.height * 4u * 2u);
@@ -142,9 +144,11 @@ class TextureStreamFixture
             {
                 const auto width = std::max(1u, description_.width >> mip);
                 const auto height = std::max(1u, description_.height >> mip);
-                const auto bytes = static_cast<std::size_t>(width) * height * 4u;
+                const auto bytes = bc7_ ? static_cast<std::size_t>((width + 3u) / 4u) * ((height + 3u) / 4u) * 16u
+                                        : static_cast<std::size_t>(width) * height * 4u;
                 for (std::size_t index = 0; index < bytes; ++index)
-                    payload_.push_back(static_cast<std::byte>(PixelByte(slice, mip, index)));
+                    payload_.push_back(static_cast<std::byte>(bc7_ ? (index % 16u == 0u ? 0x40u : 0u)
+                                                                    : PixelByte(slice, mip, index)));
             }
         if (!reserved_candidate)
             Check(payload_.size() > 256u * 1024u && subresources >= 48u,
@@ -191,7 +195,7 @@ class TextureStreamFixture
 
         const auto fallback_mip = std::min(4u, description_.mip_count - 1u);
         auto fallback_desc = TextureDescription(description_, fallback_mip);
-        if (srgb_view_) fallback_desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        if (srgb_view_) fallback_desc.Format = bc7_ ? DXGI_FORMAT_BC7_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS;
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         Hr(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &fallback_desc,
@@ -238,6 +242,44 @@ class TextureStreamFixture
     }
 
     hs::TextureStreamId Id() const noexcept { return id_; }
+    void CheckBatchAdmission()
+    {
+        std::vector<hs::TextureStreamRegistration> registrations(32);
+        const auto lease = std::make_shared<int>(1);
+        for (std::size_t index = 0; index < registrations.size(); ++index)
+        {
+            auto &registration = registrations[index];
+            registration.generation = "native-batch-generation";
+            registration.logical_id = "test/native-batch-" + std::to_string(index);
+            registration.source = hs::RendererAssetSource::Loose(source_.path);
+            registration.generation_lease = lease;
+            registration.description = description_;
+            registration.fallback = fallback_;
+            registration.fallback_first_mip = TailMip();
+            registration.fallback_allocation_bytes = NativeAllocationBytes(TailMip());
+            registration.fallback_graph_access = hs::Access::Common;
+        }
+        std::vector<hs::TextureStreamId> ids(registrations.size());
+        bool admitted = true;
+        Check(streaming_.Configure(hs::GraphicsQuality::Low, 0, 1).Succeeded(),
+              "configure batch refusal budget");
+        const auto before = streaming_.PhysicalBytes();
+        Check(streaming_.RegisterBatch(registrations, residency_, ids, admitted).Succeeded() && !admitted &&
+              std::ranges::none_of(ids, [](auto id) { return static_cast<bool>(id); }) &&
+              streaming_.PhysicalBytes() == before &&
+              streaming_.ValidateConfiguration(hs::GraphicsQuality::Low, 1).Succeeded(),
+              "batch budget refusal keeps all owners and accounting unchanged");
+        registrations.back().description.width = 0;
+        Check(!streaming_.RegisterBatch(registrations, residency_, ids, admitted).Succeeded() && !admitted &&
+              std::ranges::none_of(ids, [](auto id) { return static_cast<bool>(id); }) &&
+              streaming_.PhysicalBytes() == before,
+              "invalid batch leaves all preceding owners unpublished");
+        registrations.back().description.width = description_.width;
+        Check(streaming_.Configure(hs::GraphicsQuality::Low, 0, 64).Succeeded() &&
+              streaming_.RegisterBatch(registrations, residency_, ids, admitted).Succeeded() && admitted &&
+              std::ranges::all_of(ids, [](auto id) { return static_cast<bool>(id); }),
+              "batch commits all owners after budget admission");
+    }
     const hs::render_data::TextureDescription &Description() const noexcept { return description_; }
     std::uint64_t NativeAllocationBytes(std::uint32_t first_mip) const
     {
@@ -437,7 +479,8 @@ class TextureStreamFixture
         ComPtr<ID3D12Resource> texture = view.resource;
         const auto description = texture->GetDesc();
         Check(view.logical_description.format == description_.format &&
-              description.Format == (srgb_view_ ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM),
+              description.Format == (bc7_ ? (srgb_view_ ? DXGI_FORMAT_BC7_TYPELESS : DXGI_FORMAT_BC7_UNORM)
+                                          : (srgb_view_ ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM)),
               "published texture retains typed metadata and native backing format");
         if (srgb_view_)
         {
@@ -453,10 +496,10 @@ class TextureStreamFixture
             srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             srv.Texture2DArray.MipLevels = description.MipLevels;
             srv.Texture2DArray.ArraySize = description.DepthOrArraySize;
-            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            srv.Format = bc7_ ? DXGI_FORMAT_BC7_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
             device_->CreateShaderResourceView(texture.Get(), &srv, handle);
             handle.ptr += device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            srv.Format = bc7_ ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
             device_->CreateShaderResourceView(texture.Get(), &srv, handle);
             CheckNativeValidation("linear and sRGB texture view creation");
         }
@@ -543,7 +586,9 @@ class TextureStreamFixture
         for (std::size_t slice_index = 0; slice_index < slices.size(); ++slice_index)
         {
             const auto &entry = slices[slice_index];
-            if (entry.row_bytes != static_cast<UINT64>(width) * 4u || entry.rows != height)
+            const auto expected_row = bc7_ ? static_cast<UINT64>((width + 3u) / 4u) * 16u : static_cast<UINT64>(width) * 4u;
+            const auto expected_rows = bc7_ ? (height + 3u) / 4u : height;
+            if (entry.row_bytes != expected_row || entry.rows != expected_rows)
             {
                 std::ostringstream detail;
                 detail << "owner=" << id.value << " mip=" << logical_mip << " slice=" << slice_index
@@ -555,7 +600,7 @@ class TextureStreamFixture
                 const auto actual = mapped[entry.footprint.Offset +
                     (index / entry.row_bytes) * entry.footprint.Footprint.RowPitch + index % entry.row_bytes];
                 const auto expected = static_cast<std::byte>(
-                    PixelByte(static_cast<std::uint32_t>(slice_index), logical_mip, index));
+                    bc7_ ? (index % 16u == 0u ? 0x40u : 0u) : PixelByte(static_cast<std::uint32_t>(slice_index), logical_mip, index));
                 if (actual != expected)
                 {
                     std::ostringstream detail;
@@ -606,6 +651,7 @@ class TextureStreamFixture
     D3D12MA::Allocator *allocator_{};
     hs::RenderGraphQueueExecutor &executor_;
     bool srgb_view_{};
+    bool bc7_{};
     TextureSourceFile source_;
     std::unique_ptr<TextureSourceFile> sibling_source_;
     bool sibling_prepared_{};
@@ -912,10 +958,11 @@ void RunPreferredWorkingSetNative(ID3D12Device *device, D3D12MA::Allocator *allo
     const std::array selected{first, first}; // Aliased material slots select one owner.
     Check(fixture.Streaming().SetPreferredWorkingSet(selected).Succeeded(),
           "admit preferred working set with duplicate aliases");
-    const auto settle = [&](std::uint32_t target, bool published) {
+    const auto settle = [&](std::uint32_t target, bool published, bool demand) {
         for (std::uint32_t attempt = 0; attempt < 128; ++attempt)
         {
-            fixture.PumpWithoutDemand();
+            if (demand) fixture.Pump(first, target);
+            else fixture.PumpWithoutDemand();
             const auto status = fixture.Status(first);
             const auto unused = fixture.Status(second);
             if (!status.pending && status.actual_resident_mip == target &&
@@ -933,22 +980,24 @@ void RunPreferredWorkingSetNative(ID3D12Device *device, D3D12MA::Allocator *allo
         std::pair{hs::GraphicsQuality::Low, 2u},
         std::pair{hs::GraphicsQuality::Medium, 1u},
         std::pair{hs::GraphicsQuality::High, 0u}};
+    settle(fixture.TailMip(), false, false);
+    Check(fixture.Status(first).actual_resident_mip == fixture.TailMip(),
+          "preferred owner without demand must not refine beyond its registered tail");
     for (const auto [quality, mip] : qualities)
     {
         Check(fixture.Streaming().Configure(quality, mip, 0).Succeeded(),
               "configure preferred quality without fixed budget");
-        settle(mip, true);
+        settle(mip, true, true);
         fixture.ReadbackPublished(mip);
         const auto unused = fixture.Status(second);
         Check(!unused.pending && unused.actual_resident_mip == fixture.TailMip(),
               "unselected texture must remain at its registered fallback");
     }
-    // A fully published set skips redundant view/feedback demand; an unrelated
-    // owner still participates in the ordinary demand path.
+    // Explicit consumers must still publish their demand after the owner settles.
     fixture.PumpWithoutDemand();
-    Check(!fixture.Streaming().NeedsDemand(first) &&
-          fixture.Streaming().NeedsDemand(second) == !fixture.Streaming().HardwareBacked(second),
-          "settled preferred owner did not suppress only its redundant demand");
+    Check(fixture.Streaming().NeedsDemand(first, true) &&
+          fixture.Streaming().NeedsDemand(second, true),
+          "settled preferred owner must retain explicit consumer demand");
     const auto requests = fixture.Status(first).requests;
     const auto unselected_requests = fixture.Status(second).requests;
     for (unsigned i = 0; i < 4; ++i) { fixture.NextFrame(); fixture.PumpWithoutDemand(); }
@@ -960,11 +1009,14 @@ void RunPreferredWorkingSetNative(ID3D12Device *device, D3D12MA::Allocator *allo
     budget.local_budget = 2 * fixture.NativeAllocationBytes(fixture.TailMip()) + 1;
     budget.local_usage = fixture.Streaming().PhysicalBytes();
     fixture.Residency().UpdateBudget(budget);
-    settle(fixture.TailMip(), false);
+    settle(fixture.TailMip(), false, false);
     Check(fixture.Status(first).actual_resident_mip == fixture.TailMip(),
           "budget pressure did not release optional preferred detail");
     fixture.Residency().UpdateBudget(original_budget);
-    settle(0, true);
+    settle(fixture.TailMip(), false, false);
+    Check(fixture.Status(first).actual_resident_mip == fixture.TailMip(),
+          "budget recovery must not refine a preferred owner without demand");
+    settle(0, true, true);
     fixture.ReadbackPublished(0);
     Check(fixture.Status(second).requests == unselected_requests, "budget recovery admitted an unselected owner");
     fixture.Drain();
@@ -1048,6 +1100,11 @@ void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocat
                                hs::RenderGraphQueueExecutor &executor)
 {
     RunPinnedTextureDemandNative(device, allocator, executor);
+    {
+        TextureStreamFixture fixture(device, allocator, executor);
+        fixture.CheckBatchAdmission();
+        fixture.Drain();
+    }
     RunTextureStreamingSingleNative(device, allocator, executor);
     RunTextureStreamingSingleNative(device, allocator, executor, true);
     RunSharedHostBudgetTextureStreamingNative(device, allocator, executor);
@@ -1058,6 +1115,62 @@ void RunTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocat
 void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator *allocator,
                                        hs::RenderGraphQueueExecutor &executor)
 {
+    {
+        TextureStreamFixture fixture(device, allocator, executor, true, false, 4, true, true);
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT typed{DXGI_FORMAT_BC7_UNORM};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT native{DXGI_FORMAT_BC7_TYPELESS};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT srgb{DXGI_FORMAT_BC7_UNORM_SRGB};
+        const bool tiled = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) &&
+            options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2 &&
+            SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &typed, sizeof(typed))) &&
+            SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &native, sizeof(native))) &&
+            SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &srgb, sizeof(srgb))) &&
+            (typed.Support2 & D3D12_FORMAT_SUPPORT2_TILED) && (native.Support2 & D3D12_FORMAT_SUPPORT2_TILED) &&
+            (srgb.Support2 & D3D12_FORMAT_SUPPORT2_TILED);
+        const auto feedback = fixture.Streaming().View(fixture.Id()).feedback_supported;
+        if (tiled)
+        {
+            auto desc = TextureDescription(fixture.Description(), 0);
+            desc.Format = DXGI_FORMAT_BC7_TYPELESS;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            ComPtr<ID3D12Resource> probe;
+            Hr(device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(&probe)), "create BC7 tiling probe");
+            D3D12_PACKED_MIP_INFO packed{};
+            device->GetResourceTiling(probe.Get(), nullptr, &packed, nullptr, nullptr, 0, nullptr);
+            Check(packed.NumStandardMips > 0, "BC7 reserved case exercises standard mip tiles");
+        }
+        Check(fixture.HardwareBacked() == tiled, "BC7 tiled support selects its actual reserved owner");
+        Check(fixture.Streaming().NeedsDemand(fixture.Id(), false, false) &&
+              (feedback || fixture.Streaming().NeedsDemand(fixture.Id(), false, true)),
+              "inactive or unsupported feedback retains CPU demand");
+        std::cout << "BC7 tiled=" << tiled << " feedback=" << feedback
+                  << " reserved=" << fixture.HardwareBacked() << '\n';
+        SettleTarget(fixture, 0, false);
+        fixture.ReadbackPublished(0);
+        fixture.Drain();
+        if (tiled)
+        {
+            TextureStreamFixture tiny(device, allocator, executor, true, false, 4, true, true, 32);
+            auto desc = TextureDescription(tiny.Description(), 0);
+            desc.Format = DXGI_FORMAT_BC7_TYPELESS;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            ComPtr<ID3D12Resource> probe;
+            Hr(device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(&probe)), "create tiny BC7 tiling probe");
+            D3D12_PACKED_MIP_INFO packed{};
+            device->GetResourceTiling(probe.Get(), nullptr, &packed, nullptr, nullptr, 0, nullptr);
+            Check(tiny.HardwareBacked() == (packed.NumStandardMips != 0),
+                "wholly packed BC7 uses software backing");
+            if (!packed.NumStandardMips)
+                Check(!tiny.Streaming().View(tiny.Id()).feedback_supported,
+                    "software-backed packed chain does not advertise hardware feedback");
+            SettleTarget(tiny, 0, false);
+            tiny.ReadbackPublished(0);
+            tiny.Drain();
+        }
+    }
     for (const bool srgb_view : {false, true})
     {
     TextureStreamFixture fixture(device, allocator, executor, true, false, 4, srgb_view);

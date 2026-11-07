@@ -86,11 +86,6 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t local_byte
                 (stream.last_demand_frame >= rendered_submission_count && stream.priority >= priority)) continue;
             consider(stream.priority, stream.last_demand_frame, 1u, ordinal);
         }
-        const auto &texture = environment_stream;
-        if (texture.fine_resident && !texture.retiring && !texture.upload_pending && !texture.upload_submitted &&
-            texture.candidate.resource && texture.request && !residency.IsPinned(texture.candidate_residency) &&
-            (texture.last_demand_frame < rendered_submission_count || texture.priority < priority))
-            consider(texture.priority, texture.last_demand_frame, 2u, 0u);
     }
     if (kind == UINT32_MAX) return Result::Success();
     bool destroyed{};
@@ -145,34 +140,6 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t local_byte
             stream.candidate.Reset(); stream.request = {}; stream.retiring = false;
             stream.retirement = {}; ++stream.reclaims;
             destroyed = true;
-        }
-    }
-    else
-    {
-        auto &stream = environment_stream;
-        if (!environment_textures[0].resource || !residency.IsPinned(stream.fallback_residency) ||
-            stream.generation == UINT64_MAX)
-            return StreamFailure("Texture pressure requires its retained pinned coarse allocation.");
-        stream.retirement = stream.fine_use;
-        stream.retirement.Merge(stream.candidate.graph_completion);
-        if (!streaming.Retire(stream.request, stream.retirement) ||
-            !residency.Retire(stream.candidate_residency, stream.retirement))
-            return StreamFailure("Shared pressure could not retire the fine texture.");
-        stream.fine_resident = false; stream.retiring = true; ++stream.generation;
-        // Every pump runs after WaitForFrame. A later geometry/hierarchy pump
-        // may evict after the texture pump, so retarget this waited slot now.
-        const auto frame_slot = swap_chain->GetCurrentBackBufferIndex();
-        const auto description = environment_textures[0].resource->GetDesc();
-        WriteEnvironmentTextureDescriptor(frame_slot, 0, environment_textures[0].resource.Get(),
-            description.Format, description.MipLevels, description.DepthOrArraySize);
-        stream.frame_generation[frame_slot] = stream.generation;
-        PublishEnvironmentMaterialTextures(frame_slot);
-        if (stream.retirement.IsSatisfiedBy(completed))
-        {
-            static_cast<void>(residency.ReleaseNow(stream.candidate_residency));
-            stream.candidate.Reset(); stream.candidate_residency = {}; stream.request = {};
-            stream.retiring = false; stream.retirement = {}; stream.fine_use = {};
-            ++stream.reclaims; destroyed = true;
         }
     }
     if (destroyed)

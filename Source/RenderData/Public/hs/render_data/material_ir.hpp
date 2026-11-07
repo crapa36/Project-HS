@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -290,6 +291,13 @@ struct ClosureReflection
 // Unlit are invalid. Emission may stack additively on Basic or Unlit.
 [[nodiscard]] ClosureReflection AnalyzeClosure(const MaterialGraph &graph);
 [[nodiscard]] ClosureReflection AnalyzeClosure(const PreparedMaterial &material);
+// Returns exact IOR/absorption float bits only when both optical inputs are
+// statically constant in the material graph. Runtime-controlled profiles fall
+// back to authored thickness and cannot participate in paired-surface matching.
+[[nodiscard]] std::optional<std::array<std::uint32_t, 4>>
+SolidTransmissionProfileBits(const MaterialGraph &graph);
+[[nodiscard]] std::optional<std::array<std::uint32_t, 4>>
+SolidTransmissionProfileBits(const PreparedMaterial &material);
 // Reapply advanced layers to a provided basic closure in lighting. Whole families
 // with varying inputs are omitted here and supplied by surface sidecars.
 // Mixed uniform/varying operands

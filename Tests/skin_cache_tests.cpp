@@ -76,7 +76,6 @@ int main()
 
         cache.BeginFrame();
         auto first = cache.Resolve({7, 0}, instance, &pose, 1.5f);
-        cache.EndFrame();
         cache.Commit();
         Check(!first.history_valid && first.previous_pose == first.current_pose,
               "new skin cache entry must initialize previous from current");
@@ -86,7 +85,6 @@ int main()
         pose.normalized_time = 0.5f;
         pose.revision = hs::DeriveAnimationPoseRevision(pose);
         auto second = cache.Resolve({7, 0}, instance, &pose, 1.5f);
-        cache.EndFrame();
         cache.Commit();
         Check(second.history_valid && second.previous_time == 0.25f &&
                   second.current_time == 0.5f,
@@ -96,7 +94,6 @@ int main()
         pose.normalized_time = 0.75f;
         pose.revision = hs::DeriveAnimationPoseRevision(pose);
         static_cast<void>(cache.Resolve({7, 0}, instance, &pose, 1.5f));
-        cache.EndFrame();
         cache.Abort();
         cache.BeginFrame();
         pose.normalized_time = 0.9f;
@@ -104,28 +101,23 @@ int main()
         const auto after_abort = cache.Resolve({7, 0}, instance, &pose, 1.5f);
         Check(after_abort.history_valid && after_abort.previous_time == 0.5f,
               "aborted pose cannot become previous submitted deformation");
-        cache.EndFrame();
         cache.Commit();
 
         cache.BeginFrame();
-        cache.EndFrame();
         cache.BeginFrame();
         const auto after_missing_abort = cache.Resolve({7, 0}, instance, &pose, 1.5f);
         Check(after_missing_abort.history_valid && after_missing_abort.previous_time == 0.9f,
               "unsubmitted empty frame cannot destroy skin history");
-        cache.EndFrame();
         cache.Commit();
 
         cache.BeginFrame(true);
         const auto reset = cache.Resolve({7, 0}, instance, &pose, 1.5f);
         Check(!reset.history_valid, "new session prepares fresh pose history");
-        cache.EndFrame();
         cache.Abort();
         cache.BeginFrame();
         const auto after_reset_abort = cache.Resolve({7, 0}, instance, &pose, 1.5f);
         Check(after_reset_abort.history_valid,
               "aborted session reset cannot erase submitted pose history");
-        cache.EndFrame();
         cache.Commit();
 
         cache.BeginFrame();
@@ -133,13 +125,11 @@ int main()
         instance.revisions = {};
         hs::PopulateRenderInstanceRevisions(instance);
         auto content_changed = cache.Resolve({7, 0}, instance, &pose, 1.5f);
-        cache.EndFrame();
         cache.Commit();
         Check(!content_changed.history_valid,
               "exact content binding change must invalidate skin history");
 
         cache.BeginFrame();
-        cache.EndFrame();
         cache.Commit();
         Check(cache.ActiveCount() == 0, "empty frame active count");
 

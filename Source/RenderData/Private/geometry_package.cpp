@@ -46,7 +46,7 @@ GeometryBounds PayloadBounds(std::span<const ExpandedVertex> vertices)
 }
 void Shape(const GeometryMetadata& m)
 {
-    Require(m.abi==kGeometryAbi && !(m.flags&~7u) &&
+    Require((m.abi==kGeometryAbi || m.abi==kLegacyGeometryAbi) && !(m.flags&~7u) &&
         (m.error_method_abi==kGeometryErrorMethodAbi ||
          ((m.flags&kGeometryFlagSkinned) && m.lod>0 && m.error_method_abi==kSkinnedPoseErrorMethodAbi)),
         "unsupported geometry ABI/flags/error method");
@@ -177,22 +177,31 @@ void ValidateGeometryData(const GeometryData&g)
 }
 void ValidateGeometryPage(const GeometryMetadata&m,const GeometryData&g)
 {
-    Shape(m);ValidateGeometryData(g);ValidateGeometryMetadataMatch(m,g);
+    Shape(m);ValidateGeometryData(g);
+    Require(g.vertex_wire_version==(m.abi==kLegacyGeometryAbi
+            ? kLegacyExpandedVertexWireVersion : kExpandedVertexWireVersion) &&
+            (m.abi!=kLegacyGeometryAbi || std::ranges::all_of(g.vertices,
+                [](const ExpandedVertex &vertex) { return vertex.optical_component_id==0; })),
+        "geometry metadata and vertex optical component ABI disagree");
+    ValidateGeometryMetadataMatch(m,g);
 }
 std::vector<std::byte> BuildGeometryPage(AssetId id,std::span<const std::string>d,const GeometryData&g)
 {
-    ValidateGeometryData(g);const auto vertices=EncodeExpandedVertices(g.vertices),indices=Words(g.indices),refs=Words(g.meshlet_vertex_refs),triangles=Words(g.meshlet_triangles),remap=Words(g.canonical_primitive_remap);
+    Require(g.vertex_wire_version==kExpandedVertexWireVersion,
+        "new geometry pages require optical component vertex ABI");
+    const auto vertices=EncodeExpandedVertices(g.vertices);ValidateGeometryTopology(g);
+    const auto indices=Words(g.indices),refs=Words(g.meshlet_vertex_refs),triangles=Words(g.meshlet_triangles),remap=Words(g.canonical_primitive_remap);
     std::vector<std::byte>submeshes(g.submeshes.size()*20),meshlets(g.meshlets.size()*64);
     for(std::size_t i=0;i<g.submeshes.size();++i){const auto&s=g.submeshes[i];const std::array w{s.first_index,s.index_count,s.first_meshlet,s.meshlet_count,s.material_index};for(std::size_t k=0;k<5;++k)Put(submeshes,i*20+k*4,w[k]);}
     for(std::size_t i=0;i<g.meshlets.size();++i){const auto&m=g.meshlets[i];const std::array w{m.first_vertex_ref,m.vertex_ref_count,m.first_triangle,m.triangle_count,m.submesh_index};for(std::size_t k=0;k<5;++k)Put(meshlets,i*64+k*4,w[k]);for(std::size_t k=0;k<4;++k){PF(meshlets,i*64+20+k*4,m.sphere[k]);PF(meshlets,i*64+36+k*4,m.cone[k]);}Put(meshlets,i*64+52,m.flags);}
-    const std::array chunks{ChunkSource{14,1,true,vertices,g.vertices.size(),76},ChunkSource{15,1,true,indices,g.indices.size(),4},ChunkSource{16,1,true,submeshes,g.submeshes.size(),20},ChunkSource{17,1,true,meshlets,g.meshlets.size(),64},ChunkSource{18,1,true,refs,g.meshlet_vertex_refs.size(),4},ChunkSource{19,1,true,triangles,g.meshlet_triangles.size(),4},ChunkSource{20,1,true,remap,g.canonical_primitive_remap.size(),4}};return BuildPackage(id,d,chunks);
+    const std::array chunks{ChunkSource{14,kExpandedVertexWireVersion,true,vertices,g.vertices.size(),76},ChunkSource{15,1,true,indices,g.indices.size(),4},ChunkSource{16,1,true,submeshes,g.submeshes.size(),20},ChunkSource{17,1,true,meshlets,g.meshlets.size(),64},ChunkSource{18,1,true,refs,g.meshlet_vertex_refs.size(),4},ChunkSource{19,1,true,triangles,g.meshlet_triangles.size(),4},ChunkSource{20,1,true,remap,g.canonical_primitive_remap.size(),4}};return BuildPackage(id,d,chunks);
 }
 namespace
 {
 GeometryData UnpackGeometryPage(const PackageView&p,std::uint32_t flags)
 {
-    Require(!(flags&~7u),"unsupported geometry page flags");Require(p.chunks.size()==7,"unexpected geometry page chunks");std::array<const ChunkView*,21>c{};for(const auto&v:p.chunks){auto type=static_cast<std::uint32_t>(v.type);Require(type>=14 && type<=20 && v.required && v.version==1,"unsupported geometry page component");c[type]=&v;}for(unsigned t=14;t<=20;++t)Require(c[t]!=nullptr,"missing geometry component");
-    Require(c[19]->count==c[15]->count/3 && c[20]->count==c[15]->count/3,"page component count mismatch");GeometryData g;g.flags=flags;g.vertices=DecodeExpandedVertices(c[14]->bytes);g.indices=ReadWords(c[15]->bytes);g.meshlet_vertex_refs=ReadWords(c[18]->bytes);g.meshlet_triangles=ReadWords(c[19]->bytes);g.canonical_primitive_remap=ReadWords(c[20]->bytes);
+    Require(!(flags&~7u),"unsupported geometry page flags");Require(p.chunks.size()==7,"unexpected geometry page chunks");std::array<const ChunkView*,21>c{};for(const auto&v:p.chunks){auto type=static_cast<std::uint32_t>(v.type);Require(type>=14 && type<=20 && v.required && (type==14 ? (v.version==1 || v.version==2) : v.version==1),"unsupported geometry page component");c[type]=&v;}for(unsigned t=14;t<=20;++t)Require(c[t]!=nullptr,"missing geometry component");
+    Require(c[19]->count==c[15]->count/3 && c[20]->count==c[15]->count/3,"page component count mismatch");GeometryData g;g.flags=flags;g.vertex_wire_version=c[14]->version;g.vertices=DecodeExpandedVertices(c[14]->bytes,c[14]->version);g.indices=ReadWords(c[15]->bytes);g.meshlet_vertex_refs=ReadWords(c[18]->bytes);g.meshlet_triangles=ReadWords(c[19]->bytes);g.canonical_primitive_remap=ReadWords(c[20]->bytes);
     for(std::size_t i=0;i<c[16]->count;++i){auto s=c[16]->bytes.subspan(i*20,20);g.submeshes.push_back({Get(s,0),Get(s,4),Get(s,8),Get(s,12),Get(s,16)});}
     for(std::size_t i=0;i<c[17]->count;++i){auto s=c[17]->bytes.subspan(i*64,64);Require(Get(s,56)==0 && Get(s,60)==0,"meshlet reserved fields");GeometryMeshlet cl;cl.first_vertex_ref=Get(s,0);cl.vertex_ref_count=Get(s,4);cl.first_triangle=Get(s,8);cl.triangle_count=Get(s,12);cl.submesh_index=Get(s,16);for(std::size_t k=0;k<4;++k){cl.sphere[k]=GF(s,20+k*4);cl.cone[k]=GF(s,36+k*4);}cl.flags=Get(s,52);g.meshlets.push_back(cl);}return g;
 }
@@ -222,6 +231,11 @@ PreparedGeometryPage PrepareGeometryPage(std::span<const std::byte>b,AssetId id,
     prepared.package=ReadPackage(b,id,PackageReadMode::GeometryDecoderValidatesVertices);
     prepared.geometry=UnpackGeometryPage(prepared.package,m.flags);
     prepared.geometry.bounds=m.bounds;
+    Require(prepared.geometry.vertex_wire_version==(m.abi==kLegacyGeometryAbi
+            ? kLegacyExpandedVertexWireVersion : kExpandedVertexWireVersion) &&
+            (m.abi!=kLegacyGeometryAbi || std::ranges::all_of(prepared.geometry.vertices,
+                [](const ExpandedVertex &vertex) { return vertex.optical_component_id==0; })),
+        "geometry metadata and vertex optical component ABI disagree");
     ValidateGeometryTopology(prepared.geometry);
     ValidateGeometryMetadataMatch(m,prepared.geometry);
     return prepared;
@@ -274,8 +288,8 @@ GeometryDescriptorStorage CompileGeometryDescriptor(std::span<const std::byte> b
             }
         }
         if (geometry.flags & kGeometryFlagSkinned)
-            Require(vertex.reserved == 0 && std::isfinite(sum) && std::abs(sum - 1.0f) <= 0.001f,
-                    "invalid descriptor skin normalization or reserved field");
+            Require(std::isfinite(sum) && std::abs(sum - 1.0f) <= 0.001f,
+                    "invalid descriptor skin normalization");
     }
     return descriptor;
 }

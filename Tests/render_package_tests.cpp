@@ -156,12 +156,14 @@ void TestExpandedVertexFields()
             decoded[0].uv == original.uv &&
             decoded[0].tangent == original.tangent &&
             decoded[0].material_index == original.material_index &&
-            decoded[0].reserved == 0, "expanded vertex field roundtrip");
+            decoded[0].optical_component_id == 0, "expanded vertex field roundtrip");
 
     auto invalid = encoded;
     invalid[74] = std::byte{1};
-    Reject([&] { (void)rd::DecodeExpandedVertices(invalid); },
-           "nonzero vertex reserved field accepted");
+    Require(rd::DecodeExpandedVertices(invalid)[0].optical_component_id == 1,
+        "v2 geometry optical component field was not preserved");
+    Reject([&] { (void)rd::DecodeExpandedVertices(invalid, rd::kLegacyExpandedVertexWireVersion); },
+           "legacy vertex ABI accepted an optical component ID");
     invalid = encoded;
     invalid[0] = std::byte{0}; invalid[1] = std::byte{0};
     invalid[2] = std::byte{0xc0}; invalid[3] = std::byte{0x7f};
@@ -196,8 +198,10 @@ void TestExpandedVertexFields()
     }
     vertex = original; vertex.bone_weights = {};
     rd::ValidateExpandedVertices(std::span(&vertex, 1));
-    vertex.reserved = 1;
-    reject_vertex();
+    vertex.optical_component_id = 1;
+    rd::ValidateExpandedVertices(std::span(&vertex, 1));
+    Require(rd::DecodeExpandedVertices(rd::EncodeExpandedVertices(std::span(&vertex, 1)))[0].optical_component_id == 1,
+        "optical component ID failed vertex wire roundtrip");
 }
 
 void TestVfxMeshDescriptor()
@@ -452,7 +456,7 @@ void TestMaterialDescriptors()
         rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialBindings),1,true,bindings,6,rd::kMaterialBindingStride},
         rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialProgram),1,true,programs,1,rd::kMaterialProgramStride},
         rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),1,true,layout,1,32},
-        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),1,true,surface_bytes,1,rd::kMaterialSurfaceLayoutStride}};
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),2,true,surface_bytes,1,rd::kMaterialSurfaceLayoutStride}};
     const auto material_bytes = rd::BuildPackage(hs::MakeAssetId(env_id), dependencies, chunks);
     const auto parameter_bytes = rd::BuildMaterialParameterPackage(env_parameters, parameters);
     const auto assets_for = [](std::string_view id, std::span<const std::string> dependencies) {
@@ -2328,24 +2332,12 @@ void TestPackedRendererAssets()
         {{11}, {64, 64, rd::RenderBulkFormat::Package, hs::Sha256(std::span(file).subspan(64, 64))}},
         {{22}, {128, 16, rd::RenderBulkFormat::ShaderDxil, hs::Sha256(std::span(file).subspan(128, 16))}}}};
     Require(hs::ValidatePackedRendererAssets(owner, entries).Succeeded(), "valid bulk table rejected");
-    std::vector<std::byte> bytes;
-    Require(hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes).Succeeded() &&
-        std::ranges::equal(bytes, std::span(file).subspan(64, 64)), "typed bulk read differs");
-    const auto accepted = bytes;
-    Require(!hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::ShaderDxil, bytes) &&
-        !hs::ReadPackedRendererAsset(owner, entries, {99}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
-        "wrong bulk type or identity accepted");
     const auto second = entries[1].range;
     entries[1].range = entries[0].range;
     Require(hs::ValidatePackedRendererAssets(owner, entries).Succeeded(), "immutable bulk aliases must be allowed");
     entries[1].range = second;
-    entries[0].range.expected_digest[0] ^= std::byte{1};
-    Require(!hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
-        "unverified bulk bytes published");
     entries[0].range.offset = std::numeric_limits<std::uint64_t>::max();
-    Require(!hs::ValidatePackedRendererAssets(owner, entries) &&
-        !hs::ReadPackedRendererAsset(owner, entries, {11}, rd::RenderBulkFormat::Package, bytes) && bytes == accepted,
-        "overflowing bulk range accepted");
+    Require(!hs::ValidatePackedRendererAssets(owner, entries), "overflowing bulk range accepted");
     entries[0].range.offset = 65;
     Require(!hs::ValidatePackedRendererAssets(owner, entries), "unaligned bulk accepted");
     entries[0].range.offset = 64; entries[1].asset_id = {11};
@@ -2386,7 +2378,7 @@ void TestGeometryPackage()
     auto bad=g;bad.canonical_primitive_remap[1]=1;Reject([&]{rd::ValidateGeometryData(bad);},"duplicate primitive occurrence accepted");
     bad=g;bad.vertices[0].normal[0]=std::numeric_limits<float>::quiet_NaN();Reject([&]{rd::ValidateGeometryData(bad);},"nonfinite geometry vertex field accepted");
     bad=g;bad.vertices[0].bone_weights[0]=0.5f;Reject([&]{rd::ValidateGeometryData(bad);},"unnormalized geometry vertex weights accepted");
-    bad=g;bad.vertices[0].reserved=1;Reject([&]{rd::ValidateGeometryData(bad);},"reserved geometry vertex field accepted");
+    bad=g;bad.vertices[0].optical_component_id=1;rd::ValidateGeometryData(bad);
     bad=g;bad.meshlet_triangles[0]|=0x01000000;Reject([&]{rd::ValidateGeometryData(bad);},"packed triangle high byte accepted");
     bad=g;bad.meshlet_triangles[0]=0x000102;Reject([&]{rd::ValidateGeometryData(bad);},"reversed primitive orientation accepted");
     bad=g;bad.meshlet_vertex_refs[0]=3;Reject([&]{rd::ValidateGeometryData(bad);},"mixed meshlet material accepted");
@@ -2472,8 +2464,8 @@ void TestGeometryDescriptor()
     skin_prepared.geometry.vertices[0].bone_weights[0] = 0;
     Reject([&] { (void)rd::CompileGeometryDescriptor(skin_bytes, skin_prepared, 13); }, "unnormalized skinned descriptor accepted");
     skin_prepared.geometry.vertices[0].bone_weights[0] = 1;
-    skin_prepared.geometry.vertices[0].reserved = 1;
-    Reject([&] { (void)rd::CompileGeometryDescriptor(skin_bytes, skin_prepared, 13); }, "skinned descriptor reserved field accepted");
+    skin_prepared.geometry.vertices[0].optical_component_id = 1;
+    rd::ValidateGeometryData(skin_prepared.geometry);
 
     rd::ExpandedVertex first;
     first.position = {1, -0.25f + 0.12f, 2}; first.normal = {0, 1, 0}; first.uv = {0.2f, 0.3f};

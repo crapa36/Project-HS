@@ -1,5 +1,6 @@
 #include "character_products.hpp"
 #include "geometry_cooker.hpp"
+#include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/texture_package.hpp>
 #include <hs/core/sha256.hpp>
 #ifdef _WIN32
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <utility>
 #include <map>
+#include <tuple>
 #ifndef NDEBUG
 #include <cstdio>
 #endif
@@ -417,7 +419,43 @@ std::vector<CharacterProduct> BuildCharacterProducts(
     for (const auto &v : character.vertices)
         expanded.push_back({v.position, v.normal, v.bone_indices, v.bone_weights,
             v.uv, v.tangent, v.material_index, v.reserved});
-    const auto geometry = geometry_content::CookGeometry(expanded, rd::kGeometryFlagSkinned);
+    using CompatibleProfile = std::tuple<std::uint8_t, std::uint32_t, std::array<std::uint32_t, 4>>;
+    std::map<CompatibleProfile, std::uint32_t> profile_groups;
+    std::vector<geometry_content::OpticalMaterialProfile> optical_profiles(character.material_count);
+    for (std::uint32_t slot = 0; slot < character.material_count; ++slot)
+    {
+        std::vector<std::uint32_t> ordinals;
+        for (const auto &binding : materials) if (binding.slot == slot) ordinals.push_back(binding.hero_ordinal);
+        std::ranges::sort(ordinals);
+        ordinals.erase(std::unique(ordinals.begin(), ordinals.end()), ordinals.end());
+        if (ordinals.empty()) continue;
+        std::optional<CompatibleProfile> compatible;
+        bool valid = true;
+        for (const auto ordinal : ordinals)
+        {
+            const auto domain = std::ranges::find(material_domains, ordinal,
+                &CharacterMaterialDomainSelection::hero_ordinal);
+            if (domain == material_domains.end())
+            { valid = false; break; }
+            // Opaque feature overlays never participate in the volume pass.
+            if (domain->domain != rd::CharacterMaterialDomain::Translucent) continue;
+            if ((domain->surface.capability_mask & static_cast<std::uint32_t>(
+                    rd::MaterialClosureCapability::SolidTransmission)) == 0)
+            { valid = false; break; }
+            const CompatibleProfile current = domain->surface.has_static_solid_transmission_profile
+                ? CompatibleProfile{1, 0, domain->surface.solid_transmission_profile}
+                : CompatibleProfile{2, ordinal, {}};
+            if (compatible && *compatible != current) { valid = false; break; }
+            compatible = current;
+        }
+        if (!valid || !compatible) continue;
+        auto [group, inserted] = profile_groups.try_emplace(*compatible,
+            static_cast<std::uint32_t>(profile_groups.size()) + 1u);
+        (void)inserted;
+        optical_profiles[slot] = {group->second, true};
+    }
+    const auto geometry = geometry_content::CookGeometry(expanded, rd::kGeometryFlagSkinned,
+        optical_profiles);
     std::vector<rd::GeometryData> lod_geometries;
     std::vector<std::pair<double,float>> lod_errors;
     std::optional<rd::MonsterCharacterData> monster;
@@ -449,7 +487,8 @@ std::vector<CharacterProduct> BuildCharacterProducts(
 #endif
                     continue;
                 }
-                auto candidate=geometry_content::CookGeometry(simplified,rd::kGeometryFlagSkinned);
+                auto candidate=geometry_content::CookGeometry(simplified,rd::kGeometryFlagSkinned,
+                    optical_profiles);
                 if(candidate.indices.size()>=best_indices ||
                     candidate.vertices.size()>=(lod_geometries.empty()?geometry.vertices.size():lod_geometries.back().vertices.size())) {
 #ifndef NDEBUG
@@ -594,19 +633,20 @@ void ValidateCharacterProductBindings(const PreparedCharacterBinding &prepared,
     const auto &character = prepared.character;
     const auto &page_id = package.dependencies[character.geometry.page_dependency_index];
     const auto page = bytes(page_id);
-    Require(rd::ReadPackage(page, MakeAssetId(page_id)).dependencies.empty(),
+    const auto prepared_page=rd::PrepareGeometryPage(page,MakeAssetId(page_id),character.geometry);
+    Require(prepared_page.package.dependencies.empty(),
         "direct character geometry must not depend on a legacy exchange");
-    rd::ValidateCharacterGeometry(character, rd::DecodeGeometryPage(page, MakeAssetId(page_id), character.geometry));
+    rd::ValidateCharacterGeometry(character,prepared_page);
     if(character.monster)
         for(std::size_t lod=1;lod<character.monster->lods.size();++lod)
         {
             const auto &entry=character.monster->lods[lod];
             const auto &id=package.dependencies[entry.page_dependency_index];
             const auto payload=bytes(id);
-            Require(rd::ReadPackage(payload,MakeAssetId(id)).dependencies.empty(),
+            const auto prepared_lod=rd::PrepareGeometryPage(payload,MakeAssetId(id),entry);
+            Require(prepared_lod.package.dependencies.empty(),
                 "skinned LOD page must be an immutable direct product");
-            auto view=character;view.geometry=entry;
-            rd::ValidateCharacterGeometry(view,rd::DecodeGeometryPage(payload,MakeAssetId(id),entry));
+            rd::ValidateCharacterGeometry(character,entry,prepared_lod);
         }
     if (stem == "archer")
     {
@@ -614,9 +654,10 @@ void ValidateCharacterProductBindings(const PreparedCharacterBinding &prepared,
         Require(std::ranges::find(package.dependencies, animation_id) != package.dependencies.end(),
             "Archer metadata is missing its named-animation dependency");
         const auto animation_bytes = bytes(animation_id);
-        Require(rd::ReadPackage(animation_bytes, MakeAssetId(animation_id)).dependencies.empty(),
+        const auto animation_package=rd::ReadPackage(animation_bytes, MakeAssetId(animation_id));
+        Require(animation_package.dependencies.empty(),
             "direct character animation must not depend on a legacy exchange");
-        const auto animation = rd::DecodeCharacterAnimationExtension(animation_bytes, MakeAssetId(animation_id));
+        const auto animation = rd::DecodeCharacterAnimationExtension(animation_package);
         rd::ValidateCharacterAnimationBinding(animation, character, MakeAssetId(logical_id));
         Require(animation.sample_rate_hz == 60 && animation.clips.size() == 11 && animation.sockets.empty(),
             "authored Archer animation extension shape mismatch");

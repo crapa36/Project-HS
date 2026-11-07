@@ -21,9 +21,6 @@ cbuffer FrameConstants : register(b0)
     float4 GrassBenders[32];
     uint4 GrassBenderCount;
     uint4 AuthoredParticleClock;
-    float4 VfxLightPositionRadius[32];
-    float4 VfxLightColorIntensity[32];
-    uint4 VfxLightCount;
     uint4 VfxDecalCount;
     uint4 SkinCacheOptions;
     row_major float4x4 InverseViewProjection;
@@ -479,37 +476,46 @@ void StaticLodFamilyVisibility(uint owner_bucket, uint view, uint thread_id)
             family_rejected_flags[bucket][thread_id] = rejected && selected_bucket ? 1u : 0u;
         }
         GroupMemoryBarrierWithGroupSync();
-
+        // Inclusive scan preserves source order across the whole group without
+        // assuming any mapping between group indices and hardware wave lanes.
+        [unroll] for (uint step = 1u; step < 64u; step <<= 1u)
+        {
+            uint visible_add[3], rejected_add[3];
+            [unroll] for (uint bucket = 0; bucket < 3u; ++bucket)
+            {
+                visible_add[bucket] = 0u;
+                rejected_add[bucket] = 0u;
+                if (thread_id >= step)
+                {
+                    visible_add[bucket] = family_visible_flags[bucket][thread_id-step];
+                    rejected_add[bucket] = family_rejected_flags[bucket][thread_id-step];
+                }
+            }
+            GroupMemoryBarrierWithGroupSync();
+            [unroll] for (uint bucket = 0; bucket < 3u; ++bucket)
+            {
+                family_visible_flags[bucket][thread_id] += visible_add[bucket];
+                family_rejected_flags[bucket][thread_id] += rejected_add[bucket];
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
         [unroll] for (uint bucket = 0; bucket < 3u; ++bucket)
         {
-            uint visible_prefix = 0u;
-            uint rejected_prefix = 0u;
-            for (uint preceding = 0; preceding < thread_id; ++preceding)
-            {
-                visible_prefix += family_visible_flags[bucket][preceding];
-                rejected_prefix += family_rejected_flags[bucket][preceding];
-            }
-            if (family_visible_flags[bucket][thread_id] != 0u)
+            const bool selected_bucket = (selected_mask & (1u << bucket)) != 0u;
+            if (visible && selected_bucket)
                 VisibleDraws[output_begin[bucket] +
-                    family_visible_count[bucket] + visible_prefix] = selected[bucket];
-            if (family_rejected_flags[bucket][thread_id] != 0u)
+                    family_visible_count[bucket] + family_visible_flags[bucket][thread_id] - 1u] = selected[bucket];
+            if (rejected && selected_bucket)
                 RejectedDraws[output_begin[bucket] +
-                    family_rejected_count[bucket] + rejected_prefix] = selected[bucket];
+                    family_rejected_count[bucket] + family_rejected_flags[bucket][thread_id] - 1u] = selected[bucket];
         }
         GroupMemoryBarrierWithGroupSync();
         if (thread_id == 0u)
         {
             [unroll] for (uint bucket = 0; bucket < 3u; ++bucket)
             {
-                uint visible_chunk_count = 0u;
-                uint rejected_chunk_count = 0u;
-                [unroll] for (uint lane = 0; lane < 64u; ++lane)
-                {
-                    visible_chunk_count += family_visible_flags[bucket][lane];
-                    rejected_chunk_count += family_rejected_flags[bucket][lane];
-                }
-                family_visible_count[bucket] += visible_chunk_count;
-                family_rejected_count[bucket] += rejected_chunk_count;
+                family_visible_count[bucket] += family_visible_flags[bucket][63u];
+                family_rejected_count[bucket] += family_rejected_flags[bucket][63u];
             }
         }
         GroupMemoryBarrierWithGroupSync();
@@ -602,30 +608,28 @@ void StaticVisibilityCS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIn
         visible_flags[thread_id] = visible ? 1u : 0u;
         rejected_flags[thread_id] = rejected ? 1u : 0u;
         GroupMemoryBarrierWithGroupSync();
-        uint visible_prefix = 0;
-        uint rejected_prefix = 0;
-        for (uint preceding = 0; preceding < thread_id; ++preceding)
+        [unroll] for (uint step = 1u; step < 64u; step <<= 1u)
         {
-            visible_prefix += visible_flags[preceding];
-            rejected_prefix += rejected_flags[preceding];
+            uint visible_add = 0u, rejected_add = 0u;
+            if (thread_id >= step)
+            {
+                visible_add = visible_flags[thread_id-step];
+                rejected_add = rejected_flags[thread_id-step];
+            }
+            GroupMemoryBarrierWithGroupSync();
+            visible_flags[thread_id] += visible_add;
+            rejected_flags[thread_id] += rejected_add;
+            GroupMemoryBarrierWithGroupSync();
         }
         if (visible)
-            VisibleDraws[output_begin + visible_count + visible_prefix] = draw;
+            VisibleDraws[output_begin + visible_count + visible_flags[thread_id] - 1u] = draw;
         if (rejected)
-            RejectedDraws[output_begin + rejected_count + rejected_prefix] = draw;
+            RejectedDraws[output_begin + rejected_count + rejected_flags[thread_id] - 1u] = draw;
         GroupMemoryBarrierWithGroupSync();
         if (thread_id == 0)
         {
-            uint chunk_count = 0;
-            uint rejected_chunk_count = 0;
-            [unroll]
-            for (uint index = 0; index < 64; ++index)
-            {
-                chunk_count += visible_flags[index];
-                rejected_chunk_count += rejected_flags[index];
-            }
-            visible_count += chunk_count;
-            rejected_count += rejected_chunk_count;
+            visible_count += visible_flags[63u];
+            rejected_count += rejected_flags[63u];
         }
         GroupMemoryBarrierWithGroupSync();
     }

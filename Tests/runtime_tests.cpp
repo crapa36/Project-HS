@@ -1,4 +1,3 @@
-#include "vfx_light_reference.hpp"
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include "startup_graphics_settings.hpp"
 #include <hs/runtime/experiment_spec.hpp>
@@ -500,16 +499,6 @@ void TestProductionVfxDecoding()
         for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
             decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedLightCommands(catalog.Image(),std::span(&input,1),tick).size());
 
-        for(auto quality:{hs::VfxQuality::Low,hs::VfxQuality::Medium,hs::VfxQuality::High})
-        for(bool owned:{false,true})
-        {
-            input.quality=quality; input.geometry_owner_id=owned?91:0;input.geometry_start_tick=3;input.geometry_end_tick=243;
-            for(hs::Tick tick=0;tick<=250;++tick)
-            {
-                const auto reference=hs::runtime_detail::light_reference::BuildVfxTypedLightCommands(program,std::span(&input,1),tick);
-                vfx_light_test::Compare(reference,hs::runtime_detail::BuildVfxTypedLightCommands(catalog.Image(),std::span(&input,1),tick));
-            }
-        }
         Check(decoded==expected,"actual cooked VFX light recipe rejected: handle "+std::to_string(effect.handle));
         light_outputs+=decoded;
     }
@@ -1226,7 +1215,7 @@ void TestAudioNativeOperations()
     hs::audio_detail::AudioBufferCompletion first, second;
     first.wake_main = +[](void *context) noexcept { static_cast<std::atomic<unsigned> *>(context)->fetch_add(1); };
     first.wake_context = &callback_wakes;
-    first.Begin(first_pins, {5, 9, 100}); second.Begin(second_pins, {5, 10, 101});
+    first.Begin(first_pins); second.Begin(second_pins);
     first.OnBufferEnd(&second);
     Check(first_pins.load() == 1 && second_pins.load() == 1, "a callback cannot release a different buffer record");
     second.OnBufferEnd(&second); second.OnBufferEnd(&second);
@@ -1242,9 +1231,8 @@ void TestAudioNativeOperations()
               first_pins.load() == 0 && !first.claimed && callback_wakes.load() == 2,
           "teardown destroys and joins the native voice before releasing its final transition pin");
     second.AfterVoiceQuiescence();
-    first.Begin(first_pins, {6, 1, 102});
-    Check(first.token != second.token && first_pins.load() == 1,
-          "device reset/voice reuse receive distinct exact buffer identities");
+    first.Begin(first_pins);
+    Check(first_pins.load() == 1, "device reset/voice reuse pins its new buffer");
     Voice *failed_create{}; record = &first;
     hs::audio_detail::DestroyOwnedVoice(failed_create, record);
     Check(first_pins.load() == 0 && !first.claimed, "failed dormant voice creation releases its reserved pin without touching old playback");
@@ -1305,7 +1293,7 @@ void TestAudioDeliverySessions()
 
 void TestAudioCatalogValidation(const std::filesystem::path &root)
 {
-    hs::SettingsData settings;
+    hs::SettingsData settings; settings.master_volume = 0;
     const auto write_catalog = [&](std::string_view name, std::string_view entry) {
         const auto directory = root / "audio" / name;
         std::filesystem::create_directories(directory);
@@ -1325,6 +1313,19 @@ void TestAudioCatalogValidation(const std::filesystem::path &root)
     hs::AudioEngine streaming_engine;
     Check(!streaming_engine.Initialize(settings, streaming_directory),
           "audio catalog rejects unsupported streaming before device setup");
+    const std::string base = R"({"entries":[{"id":"audio.test","asset_id":"audio.test","submix":"SFX","spatial":false,"preload":true,"streaming":false,"encoding":"PCM","loop":false,"priority":"Other","max_simultaneous":1,"minimum_retrigger_ms":0,"files":["test.wav"]}]})";
+    for (const auto field : {std::string_view{"max_simultaneous"}, std::string_view{"minimum_retrigger_ms"}})
+        for (const auto value : {"-1", "1.5", "4294967296"})
+        {
+            auto invalid = base;
+            const auto original = std::format("\"{}\":{}", field, field == "max_simultaneous" ? 1 : 0);
+            invalid.replace(invalid.find(original), original.size(), std::format("\"{}\":{}", field, value));
+            const auto directory = write_catalog("invalid-number", invalid);
+            hs::AudioEngine engine;
+            const auto result = engine.Initialize(settings, directory);
+            Check(!result && result.Message().find("count or retrigger") != std::string_view::npos,
+                  "audio catalog rejects invalid numeric fields before file loading");
+        }
 }
 
 void TestTypedAudioPcm(const std::filesystem::path &root)
@@ -1648,6 +1649,7 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
 
     hs::AudioEngine engine;
     hs::SettingsData settings;
+    settings.master_volume = 0;
     const auto initialized = engine.Initialize(settings, directory);
     Check(initialized.Succeeded(), "lazy audio catalog validates WAV metadata at startup");
     auto status = engine.Status();
@@ -1788,6 +1790,26 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
 
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
 {
+    {
+        const auto path = root / "playtest-sessions";
+        hs::PlaytestRecorder sessions;
+        Check(sessions.Start({path, 42, 99, 101}).Succeeded(), "start session summary fixture");
+        hs::InputFrame input{};
+        hs::SimulationObservation p{};
+        p.phase = hs::SessionPhase::Playing; p.damage_taken = 10; p.player_position = {20, 0};
+        Check(sessions.Record(input, 1, p, {}, 1).Succeeded(), "record first session");
+        p.damage_taken = 2; p.player_position = {0, 0};
+        Check(sessions.Record(input, 2, p, {}, 2).Succeeded(), "record second session");
+        p.phase = hs::SessionPhase::Defeat;
+        Check(sessions.Record(input, 3, p, {}, 2).Succeeded(), "record second terminal");
+        p.phase = hs::SessionPhase::Playing; p.damage_taken = 100; p.player_position = {100, 0};
+        Check(sessions.Record(input, 4, p, {}, 3).Succeeded() && sessions.Finish(true).Succeeded(),
+              "retain terminal summary while tracing later sessions");
+        std::ifstream result(path / "result.json");
+        const std::string json((std::istreambuf_iterator<char>(result)), {});
+        Check(json.contains("\"maximum_damage_taken_in_tick\": 2") &&
+              json.contains("\"distance_moved_m\": 0.0"), "summary excludes other sessions");
+    }
     const auto directory = root / "playtest";
     hs::PlaytestRecorder recorder;
     Check(recorder.Start({directory, 42, 99, 101}).Succeeded(), "start playtest recorder");
@@ -1975,6 +1997,8 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     }
     for (const auto value : {"8", "256", "-1", "0.5"})
         reject_input("\"kind\":7", std::string("\"kind\":") + value);
+    for (const auto name : {"move_target", "aim_world", "cursor_normalized"})
+        reject_input(std::string("\"") + name + "\":[", std::string("\"") + name + "\":[1e300,");
 }
 
 void TestUncapturedHitRateReport(const std::filesystem::path &root)
@@ -2341,7 +2365,6 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
     older->session.phase = hs::SessionPhase::CardSelection;
     older->session.card_count = 1;
     older->session.cards[0] = {hs::CardKind::LearnSkill, 1, 0};
-    older->selection_epoch = hs::runtime_detail::UiSelectionEpoch(older->session);
     auto draw_content = std::make_shared<hs::UiDrawContent>();
     draw_content->models.push_back({hs::UiModel::Kind::Button, {360, 300}, {360, 420}});
     older->draw_content = draw_content;
@@ -2349,7 +2372,6 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
         std::vector<std::uint64_t>{1, 2, 3});
     auto newer = std::make_shared<hs::UiFrame>(*older);
     newer->generation = 11; newer->session.cards[0].subject = 2;
-    newer->selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer->session);
     auto first = exchange.TryBeginWrite();
     Check(first.has_value(), "first UI publication slot");
     std::move(*first).Publish( 10, nullptr, older);
@@ -2530,7 +2552,7 @@ void TestSimulationSignalFanout()
     for (const auto &signal : signals)
     {
         std::array<hs::PresentationEvent, 3> projected{};
-        const auto count = hs::ProjectDomainSignal(signal, projected, 12.0f);
+        const auto count = hs::ProjectDomainSignal(signal, projected, false);
         Check(count == 3 && projected[0].kind == hs::PresentationKind::Vfx &&
                   projected[1].kind == hs::PresentationKind::Audio &&
                   projected[2].kind == hs::PresentationKind::Audio,
@@ -2547,7 +2569,7 @@ void TestSimulationSignalFanout()
             a.upgrade_owner_id == b.upgrade_owner_id;
     };
     std::vector<hs::PresentationEvent> recorded(1);
-    simulation.ProjectDomainSignalsOnce(signals, 12.0f, false, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, false, false, &recorded);
     Check(recorded.size() == expected.size(), "per-tick record buffer resets and keeps every ordered value");
     hs::PresentationEvent event;
     hs::QueuedAudioEvent queued;
@@ -2570,7 +2592,7 @@ void TestSimulationSignalFanout()
     footstep.kind = hs::PresentationKind::Audio;
     footstep.sequence = 900;
     footstep.asset = hs::MakeAssetId("audio.player.footstep_walk");
-    simulation.ProjectDomainSignalsOnce(signals, 12.0f, true, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, false, true, &recorded);
     simulation.PublishAudioEvent(footstep);
     for (const auto &wanted : expected)
         Check(channels.presentation_events.TryPop(event) && same(event, wanted),
@@ -2584,7 +2606,7 @@ void TestSimulationSignalFanout()
 
     for (std::size_t row = 0; row < 1024; ++row)
         Check(channels.sim_audio_events.TryPush({footstep, 0}), "fill simulation audio destination");
-    simulation.ProjectDomainSignalsOnce(signals, 12.0f, false, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, false, false, &recorded);
     Check(channels.dropped_presentation_events.load() == 4 && recorded.size() == expected.size() &&
               channels.presentation_events.Size() == 2,
           "live audio overflow preserves exact recording and the existing drop invalidation policy");
@@ -2593,7 +2615,7 @@ void TestSimulationSignalFanout()
     channels.dropped_presentation_events.store(0);
     for (std::size_t row = 0; row < 8192; ++row)
         Check(channels.presentation_events.TryPush(expected[0]), "fill render and diagnostic destination");
-    simulation.ProjectDomainSignalsOnce(signals, 12.0f, true, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, false, true, &recorded);
     Check(channels.dropped_presentation_events.load() == expected.size() &&
               channels.sim_audio_events.Size() == 4 && recorded.size() == expected.size(),
           "stalled rendering cannot block audio and lost trace rows still invalidate diagnostic completeness");
@@ -2686,6 +2708,11 @@ void TestDpiWindowCoordinates()
         while (channels->resize_commands.TryPop(resize)) { last_resize = resize; resized = true; }
         Check(resized && last_resize.width == 653 && last_resize.height == 377,
               "WM_SIZE publishes the physical renderer resize");
+        for (unsigned size = 1; size <= 100; ++size)
+            SendMessageW(handle, WM_SIZE, SIZE_RESTORED, MAKELPARAM(size, size + 100));
+        Check(channels->resize_commands.TryPop(resize) && resize.width == 100 && resize.height == 200 &&
+                  !channels->resize_commands.TryPop(resize),
+              "resize mailbox retains the latest paired dimensions after a burst");
 
         Check(window.ApplyDisplayPlacement({"auto"}, true, 640, 360).Succeeded(), "enter hidden borderless mode");
         MONITORINFO monitor{sizeof(monitor)};

@@ -91,9 +91,13 @@ EnvironmentLayout BuildEnvironmentLayout(
                                      std::uint32_t color, RenderMesh mesh, std::uint32_t variant, std::uint64_t stable_id, std::uint64_t object_id = 0) {
         if (arena_half_extent >= 14.0f && mesh != RenderMesh::Ground && mesh != RenderMesh::MeadowSurface)
             position.y += MeadowGroundHeight({position.x, position.z});
+        // The authored meadow and adjoining slabs share one continuous material field.
+        const bool authored_ground = mesh == RenderMesh::MeadowSurface ||
+            (mesh == RenderMesh::Ground && arena_half_extent >= 14.0f);
         RenderInstance instance{
             position, yaw, scale, color, mesh, stable_id, 0,
-            static_cast<std::uint32_t>(seed ^ (seed >> 32)), variant};
+            authored_ground ? kMeadowSurfaceSeed :
+                static_cast<std::uint32_t>(seed ^ (seed >> 32)), variant};
         PopulateRenderInstanceIdentity(instance);
         Require(layout.instances.size() < 3'000'000, "layout allocation cap");
         if (object_id != 0)

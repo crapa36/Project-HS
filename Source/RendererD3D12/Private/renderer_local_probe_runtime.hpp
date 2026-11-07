@@ -160,6 +160,9 @@ class LocalProbeRuntime
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success,
         const std::shared_ptr<const StaticRenderScene> &, render_data::SceneProbeRevisions);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result BeginOfflineIteration(const CompletionSet &,bool reflections_only);
+#endif
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;

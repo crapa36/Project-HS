@@ -7,6 +7,7 @@
 #include <d3d12.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -386,6 +387,8 @@ class RenderGraphBuilder
 {
   public:
     using PlanHandle = std::uint64_t;
+    // Three submission banks retain independent UI, overlay and volumetric-history variants.
+    static constexpr std::size_t RetainedPlanCapacity = 24;
     RenderGraphBuilder();
     ~RenderGraphBuilder();
 
@@ -393,7 +396,7 @@ class RenderGraphBuilder
     RenderGraphBuilder &operator=(const RenderGraphBuilder &) = delete;
 
     void Reset();
-    // Handles identify one of the eight retained value-only plans on this builder.
+    // Handles identify a retained value-only plan on this builder.
     // The caller must select by its exact pass/resource/use topology; a miss
     // leaves it free to Reset and declare a new topology. Current native imports,
     // state, completion and callbacks must all be rebound before Prepare.

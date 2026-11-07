@@ -8,7 +8,7 @@ struct VfxLightInput
     Float3 position{};
     float radius{};
     Float3 linear_rgb{};
-    float intensity{};
+    float intensity{}; // W/sr, using the legacy local-light attenuation curve.
     std::uint32_t importance{};
     VfxQuality quality{VfxQuality::High};
 };

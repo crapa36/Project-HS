@@ -953,8 +953,7 @@ Json CharacteristicMetrics(const hs::BalanceTelemetry &balance,
 }
 
 Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
-                    hs::Tick maximum_ticks, const hs::SimulationRules &rules,
-                    CombatBuild &final_build)
+                    hs::Tick maximum_ticks, const hs::SimulationRules &rules)
 {
     hs::GameSimulation simulation;
     hs::SimulationConfig config{seed};
@@ -998,7 +997,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
         probe.stat_points[static_cast<std::size_t>(hs::StatKind::MoveSpeed)] != 0 ||
         probe.stat_points[static_cast<std::size_t>(hs::StatKind::MagnetRadius)] != 0)
         throw std::runtime_error("Progression selected an excluded utility stat.");
-    final_build = FinalBuild(profile, probe);
+    const auto final_build = FinalBuild(profile, probe);
     if (checkpoints.back().tick != probe.tick) checkpoints.push_back(probe);
 
     Json upgrades = Json::array();
@@ -1586,11 +1585,9 @@ int main(int argc, char **argv)
                 {
                     const auto request = requests[index];
                     futures.push_back(std::async(std::launch::async, [&, request] {
-                        CombatBuild final_build;
                         auto run = RunProgression(profiles[request.profile_index],
                                                   suite.seeds[request.seed_index],
-                                                  suite.maximum_ticks, rules,
-                                                  final_build);
+                                                  suite.maximum_ticks, rules);
                         return Execution{std::move(run)};
                     }));
                 }
@@ -1618,8 +1615,10 @@ int main(int argc, char **argv)
                         {"seeds", suite.seeds}, {"profile_count", profiles.size()},
                         {"runs", std::move(runs)},
                         {"aggregate", aggregate}};
-            std::ofstream(output_directory / "progression_report.json", std::ios::trunc)
-                << report.dump(2) << '\n';
+            std::ofstream report_file(output_directory / "progression_report.json", std::ios::trunc);
+            report_file << report.dump(2) << '\n';
+            report_file.close();
+            if (!report_file) throw std::runtime_error("Cannot write progression report.");
             std::ofstream upgrade_csv(output_directory /
                                       "progression_upgrade_summary.csv",
                                       std::ios::trunc);
@@ -1700,7 +1699,7 @@ int main(int argc, char **argv)
                     {"method", relic_balance_mode ? "relic_balance_paired_scan" : "stationary_invulnerable_fixed_tick"},
                     {"aim_policy", "nearest_enemy"},
                     {"active_skill_policy", "round_robin_when_ready"},
-                    {"charged_skill_policy", "full_charge"},
+                    {"charged_skill_policy", "varied_charge"},
                      {"fixed_tick_hz", 60},
                      {"rules_hash", hs::SimulationRulesHash(rules)},
                      {"duration_ticks", suite.maximum_ticks},
@@ -1723,8 +1722,10 @@ int main(int argc, char **argv)
             report["relic_pairs"] = AggregateRelicPairs(suite, runs);
             report["paired_spawn_counts_valid"] = true;
         }
-        std::ofstream(output_directory / "combat_report.json", std::ios::trunc)
-            << report.dump(2) << '\n';
+        std::ofstream report_file(output_directory / "combat_report.json", std::ios::trunc);
+        report_file << report.dump(2) << '\n';
+        report_file.close();
+        if (!report_file) throw std::runtime_error("Cannot write combat report.");
         std::ofstream csv(output_directory / "combat_summary.csv", std::ios::trunc);
         csv << "build_id,mean_damage,mean_dps,mean_kills,mean_incoming_damage,"
                "mean_cpu_tick_p95_us,mean_damage_per_cpu_ms,dps_delta_percent,"

@@ -362,6 +362,14 @@ void TestCookedHeaderValidation()
     Check(!hs::ReadCookedHeader(path, actual, expected.schema_hash + 1),
           "cooked schema mismatch");
 
+    expected.payload_size = UINT32_MAX;
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char *>(&expected), sizeof(expected));
+    }
+    Check(!hs::ReadCookedPayload(path, expected.schema_hash, actual, payload) && payload.empty(),
+          "truncated cooked payload is rejected before allocation");
+
     expected.table_offset = 0;
     {
         std::ofstream stream(path, std::ios::binary | std::ios::trunc);

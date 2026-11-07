@@ -154,6 +154,7 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
                           AoRenderSize.xy * (0.5 * radius / g.position.z);
     uint slices = max(AoSampleCounts.x, 1u), steps = max(AoSampleCounts.y, 1u);
     float rotation = AoRandom(pixel, AoFrameInfo.y * 0x9e3779b9u) * AoPi;
+    float phase = AoRandom(pixel, AoFrameInfo.y * 13u + 0xa511e9b3u);
     float visibility = 0.0;
     [loop] for (uint slice = 0; slice < slices; ++slice)
     {
@@ -168,13 +169,19 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
         if (projectedLength < 1e-5) continue;
         projectedNormal /= projectedLength;
         float n = atan2(dot(projectedNormal, tangent), dot(projectedNormal, view));
+        // Negative and positive slice sides have opposite hemisphere limits.
+        float hemisphere = sin(clamp(n, -AoPi * 0.5, AoPi * 0.5));
+        float2 lowHorizon = float2(hemisphere, -hemisphere);
         float2 horizon = -1.0;
-        float phase = AoRandom(pixel, slice + AoFrameInfo.y * 13u);
+        float2 pixelRadius = direction * radiusPixels;
+        float minOffset = saturate(0.51 / max(max(abs(pixelRadius.x), abs(pixelRadius.y)), 1e-6));
         int2 lastPixel[2] = {g.pixel, g.pixel};
         [loop] for (uint step = 0; step < steps; ++step)
         {
-            float s = (float(step) + 0.5 + 0.5 * phase) / float(steps);
-            float2 offset = direction * radiusPixels * s * s;
+            // R1 step stratification follows Intel XeGTAO (MIT, Copyright 2016-2021 Intel Corporation).
+            float stepPhase = frac(phase + float(slice + step * steps) * 0.6180339887498948);
+            float s = (float(step) + stepPhase) / float(steps);
+            float2 offset = pixelRadius * lerp(minOffset, 1.0, s * s);
             [unroll] for (uint side = 0; side < 2; ++side)
             {
                 int2 samplePixel = int2(round(float2(g.pixel) + offset * (side == 0 ? -1.0 : 1.0)));
@@ -187,9 +194,10 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
                 float3 delta = otherPosition - g.position;
                 float distanceSquared = dot(delta, delta);
                 if (distanceSquared < 1e-8 || distanceSquared >= radiusSquared) continue;
-                float distance = sqrt(distanceSquared);
+                float inverseDistance = rsqrt(distanceSquared);
+                float distance = distanceSquared * inverseDistance;
                 float weight = 1.0 - saturate((distance - falloffStart) / falloffRange);
-                float cosHorizon = lerp(-1.0, dot(delta / distance, view), weight);
+                float cosHorizon = lerp(lowHorizon[side], dot(delta * inverseDistance, view), weight);
                 horizon[side] = max(horizon[side], cosHorizon);
             }
         }

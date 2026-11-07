@@ -29,8 +29,11 @@ void Produce(const fs::path &source, const fs::path &build)
     spec.recipe_version = 1;
     spec.namespace_path = "render/lighting/volumetric-media";
     spec.inputs.push_back(ap::HashInput("Schemas/volumetric_medium.schema.json", source / "Schemas/volumetric_medium.schema.json"));
-    spec.inputs.push_back(ap::HashInput("ContentSource/Lighting/volumetrics.json", source / "ContentSource/Lighting/volumetrics.json"));
-    const auto root = ap::Json::parse(ap::ReadBytes(source / "ContentSource/Lighting/volumetrics.json"));
+    const auto volumetric_path = source / "ContentSource/Lighting/volumetrics.json";
+    const auto volumetric_bytes = ap::ReadBytes(volumetric_path);
+    spec.inputs.push_back({"ContentSource/Lighting/volumetrics.json", volumetric_path,
+        ap::Sha256Bytes(std::as_bytes(std::span(volumetric_bytes.data(), volumetric_bytes.size())))});
+    const auto root = ap::Json::parse(volumetric_bytes);
     Keys(root, {"version", "units", "volumes"});
     Require(root.at("version") == 1 && root.at("units") == "metres_scene_linear_rec709" &&
         root.at("volumes").is_array() && root.at("volumes").size() <= 256, "invalid source ABI/units/count");

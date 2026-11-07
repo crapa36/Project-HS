@@ -65,6 +65,30 @@ int main()
                     throw std::runtime_error("SHA-256 stream finalized twice");
             }
         }
+        {
+            const std::array prefix{std::byte{1}, std::byte{2}};
+            const std::array suffix{std::byte{3}, std::byte{4}};
+            const std::array whole{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+            hs::Sha256Stream original;
+            original.Add(prefix);
+            auto copied = original;
+            original.Add(suffix);
+            copied.Add(suffix);
+            if (original.Finish() != hs::Sha256(whole) || copied.Finish() != hs::Sha256(whole))
+                throw std::runtime_error("SHA-256 copied stream state differs");
+            auto finished = original;
+            bool rejected = false;
+            try { (void)finished.Finish(); } catch (const std::logic_error &) { rejected = true; }
+            if (!rejected) throw std::runtime_error("copied finished SHA-256 stream accepted Finish");
+            hs::Sha256Stream moved_source;
+            moved_source.Add(prefix);
+            auto moved = std::move(moved_source);
+            moved.Add(suffix);
+            if (moved.Finish() != hs::Sha256(whole))
+                throw std::runtime_error("moved SHA-256 stream state differs");
+            moved_source.Add({});
+            (void)moved_source.Finish();
+        }
         const std::string abc = "abc";
         if (Hex(hs::Sha256(std::as_bytes(std::span(abc)))) !=
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")

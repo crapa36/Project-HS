@@ -241,7 +241,7 @@ target_include_directories(hs_presentation PUBLIC Source/Presentation/Public)
 target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain hs_environment_layout hs_render_data_values)
 hs_configure_target(hs_presentation)
 
-# File decoding belongs to developer tools; shipped tables are compiled constants.
+# Developer files decode here; shipping tables decode from bounded binary sections.
 add_library(hs_presentation_io STATIC EXCLUDE_FROM_ALL Source/Presentation/Private/presentation_catalog.cpp)
 target_link_libraries(hs_presentation_io PUBLIC hs_presentation)
 hs_configure_target(hs_presentation_io)
@@ -289,9 +289,6 @@ add_library(hs_asset_manifest STATIC
     Source/AssetManifest/Private/selected_generation.cpp)
 target_include_directories(hs_asset_manifest PUBLIC Source/AssetManifest/Public)
 target_link_libraries(hs_asset_manifest PUBLIC hs_core hs_generation_lock PRIVATE nlohmann_json::nlohmann_json)
-if(WIN32)
-    target_link_libraries(hs_asset_manifest PRIVATE bcrypt)
-endif()
 hs_configure_target(hs_asset_manifest)
 endif()
 
@@ -401,9 +398,6 @@ endif()
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_ASSET_PIPELINE_TESTS)
 add_executable(hs_generation Source/Apps/AssetGeneration/main.cpp)
 target_link_libraries(hs_generation PRIVATE hs_core hs_asset_manifest nlohmann_json::nlohmann_json)
-if(WIN32)
-    target_link_libraries(hs_generation PRIVATE bcrypt)
-endif()
 target_compile_definitions(hs_generation PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_generation)
 if(MSVC)
@@ -542,10 +536,9 @@ set(hs_probe_sources
     Source/RendererD3D12/Private/renderer_local_probe.cpp
     Source/RendererD3D12/Private/renderer_local_probe_runtime.cpp)
 set(hs_probe_composition
-    Source/RendererD3D12/Private/renderer.cpp
-    Source/RendererD3D12/Private/renderer_frame.cpp)
+    Source/RendererD3D12/Private/renderer.cpp)
 add_library(hs_baked_lighting_resources OBJECT ${hs_probe_sources})
-add_library(hs_renderer_d3d12 STATIC ${hs_probe_composition} $<TARGET_OBJECTS:hs_baked_lighting_resources>
+add_library(hs_renderer_d3d12 STATIC ${hs_probe_composition} Source/RendererD3D12/Private/renderer_frame.cpp $<TARGET_OBJECTS:hs_baked_lighting_resources>
     $<$<NOT:$<CONFIG:Release>>:Source/RendererD3D12/Private/renderer_capture.cpp>)
 add_library(hs_probe_baker STATIC EXCLUDE_FROM_ALL ${hs_probe_sources} ${hs_probe_composition}
     Source/RendererD3D12/Private/renderer_terrain_bake.cpp
@@ -598,6 +591,8 @@ add_library(
 )
 target_sources(
     hs_runtime PRIVATE
+    $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/asset_test_room.hpp>
+    $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/asset_test_room.cpp>
     $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/experiment_spec.cpp>
     $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/playtest_recording.cpp>
 )
@@ -758,12 +753,15 @@ endif()
 if(HS_BUILD_TESTS)
 add_executable(hs_render_test_runner
     Source/Apps/RenderTestRunner/main.cpp
-    Source/Apps/Common/world_transport_scene.cpp)
+    Source/Apps/Common/world_transport_scene.cpp
+    Source/RendererD3D12/Private/renderer_frame.cpp)
 target_link_libraries(hs_render_test_runner PRIVATE hs_vfx_program_io)
 target_link_libraries(
     hs_render_test_runner PRIVATE hs_probe_baker hs_render_data hs_asset_manifest hs_jobs hs_game_rules_io hs_environment_layout nlohmann_json::nlohmann_json
 )
-target_compile_definitions(hs_render_test_runner PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(hs_render_test_runner BEFORE PRIVATE "$<TARGET_PROPERTY:hs_renderer_d3d12_common,INCLUDE_DIRECTORIES>")
+target_compile_definitions(hs_render_test_runner PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX HS_OFFLINE_PROBE_BAKER=1
+    "$<TARGET_PROPERTY:hs_renderer_d3d12_common,COMPILE_DEFINITIONS>")
 if(MSVC)
     target_sources(hs_render_test_runner PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
 endif()
@@ -835,6 +833,10 @@ add_library(hs_geometry_cooker STATIC
 target_include_directories(hs_geometry_cooker PUBLIC Source/Apps/Content)
 target_link_libraries(hs_geometry_cooker PUBLIC hs_render_data PRIVATE hs_meshoptimizer_cook)
 hs_configure_target(hs_geometry_cooker)
+if(TARGET hs_render_test_runner AND (HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS))
+    target_link_libraries(hs_render_test_runner PRIVATE hs_geometry_cooker)
+    target_compile_definitions(hs_render_test_runner PRIVATE HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE=1)
+endif()
 if(MSVC)
     set_source_files_properties(Source/Apps/Content/geometry_error.cpp PROPERTIES
         COMPILE_OPTIONS /fp:strict
@@ -897,7 +899,6 @@ add_library(hs_vfx_authoring STATIC
     Source/Apps/Content/vfx_texture_validation.cpp
     Source/Apps/Content/vfx_gradient_cooker.cpp
     Source/Apps/Content/vfx_program_cooker.cpp
-    Source/Apps/Content/vfx_runtime_cooker.cpp
 )
 target_link_libraries(hs_vfx_authoring PUBLIC hs_render_data_values
     PRIVATE hs_render_data nlohmann_json::nlohmann_json DirectXTex)
@@ -1310,9 +1311,12 @@ foreach(family IN ITEMS terrain-page project fullscreen ui-draw geometry visibil
         string(REPLACE "-" "_" family_source "${family}")
         string(APPEND family_source ".hlsl")
     endif()
-    set(family_hzb_inputs)
+    set(family_extra_inputs)
     if(family STREQUAL "static-visibility" OR family STREQUAL "cluster-refinement")
-        list(APPEND family_hzb_inputs "${HS_HZB_REGION_SOURCE}")
+        list(APPEND family_extra_inputs "${HS_HZB_REGION_SOURCE}")
+    endif()
+    if(family STREQUAL "sdk-presentation")
+        list(APPEND family_extra_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/sdk_presentation_abi.hlsli")
     endif()
     set(family_result "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/${family}/result.json")
     hs_add_asset_action(
@@ -1320,7 +1324,7 @@ foreach(family IN ITEMS terrain-page project fullscreen ui-draw geometry visibil
         BUILDER hs_render_runtime_shader
         RESULT "${family_result}"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/${family}/result.d"
-        STATIC_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/${family_source}" ${family_hzb_inputs}
+        STATIC_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/${family_source}" ${family_extra_inputs}
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/entity_surface.hlsli"
             ${HS_DXC_TOOL_INPUTS}
         ARGS "--family=${family}" "--source=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -1366,12 +1370,11 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/shadow_data.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/temporal_reconstruction.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/display_transform.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Source/Apps/RenderMaterialShader/coated_dfg_cooker.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Source/Apps/RenderMaterialShader/coated_dfg_cooker.hpp"
         ${HS_DEFERRED_MATERIAL_INPUTS}
         "${HS_GPU_SCENE_TABLES_SOURCE}" ${HS_GEOMETRY_SHADER_SOURCE}
         ${HS_MATERIAL_SURFACE_LIBRARY} ${HS_DXC_TOOL_INPUTS}
@@ -1432,6 +1435,7 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/shadow_data.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/temporal_reconstruction.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/display_transform.hlsli"

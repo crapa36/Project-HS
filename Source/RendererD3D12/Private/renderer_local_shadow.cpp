@@ -28,17 +28,9 @@ D3D12_RESOURCE_DESC Buffer(std::uint64_t bytes)
 }
 bool Sphere(DirectX::XMFLOAT4 p)
 {return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z)&&std::isfinite(p.w)&&p.w>=0.0f;}
-bool SameBounds(DirectX::XMFLOAT4 a,DirectX::XMFLOAT4 b)
-{return a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w;}
 bool StaticCaster(const VirtualShadowCaster &c,bool previous=false)
 {return previous?c.previous_present&&c.previous_immutable_source&&!c.previous_skin&&!c.previous_wind&&!c.previous_animated_alpha:
     c.present&&c.immutable_source&&!c.skin&&!c.wind&&!c.animated_alpha;}
-bool Changed(const VirtualShadowCaster &c,bool current_static,bool previous_static)
-{
-    return c.force_content_invalidation||c.present!=c.previous_present||c.instance_generation!=c.previous_generation||
-        c.current_revisions!=c.previous_revisions||c.current_cut_revision!=c.previous_cut_revision||
-        !SameBounds(c.current_bounds,c.previous_bounds)||current_static!=previous_static;
-}
 bool SameLight(const LightView &a,const LightView &b)
 {
     return a.stable_id==b.stable_id&&a.generation==b.generation&&a.revision==b.revision&&a.type==b.type&&
@@ -68,7 +60,8 @@ bool Supported(const LightView &light)
         !std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||!std::isfinite(light.range)||light.range<=0.02f||
         !std::isfinite(light.quantity)||light.quantity<0||!std::isfinite(light.color.x)||light.color.x<0||
         !std::isfinite(light.color.y)||light.color.y<0||!std::isfinite(light.color.z)||light.color.z<0||
-        light.unit!=(area?LightUnit::Luminance:LightUnit::Lumen))return false;
+        (light.unit!=(area?LightUnit::Luminance:LightUnit::Lumen)&&
+         !(light.type==LightType::Point&&light.unit==LightUnit::RadiantIntensity)))return false;
     if((area||spot)&&(!std::isfinite(d.x)||!std::isfinite(d.y)||!std::isfinite(d.z)||
         !(std::hypot(double(d.x),double(d.y),double(d.z))>0)))return false;
     if(spot&&(!std::isfinite(light.inner_cone_radians)||!std::isfinite(light.outer_cone_radians)||
@@ -97,7 +90,9 @@ double Priority(const LightView &light,DirectX::XMFLOAT3 camera,bool moved)
     const double distance2=x*x+y*y+z*z;
     const double luminance=std::max(0.0,double(light.color.x)*0.2126+double(light.color.y)*0.7152+double(light.color.z)*0.0722);
     const double flux=Area(light)?double(light.quantity)*std::numbers::pi_v<double>*double(light.shape.x)*light.shape.y*
-        (light.type==LightType::Rectangle?1.0:std::numbers::pi_v<double>)*(light.two_sided?2.0:1.0):double(light.quantity);
+        (light.type==LightType::Rectangle?1.0:std::numbers::pi_v<double>)*(light.two_sided?2.0:1.0):
+        light.unit==LightUnit::RadiantIntensity?double(light.quantity)*kRgbReferenceLumensPerWatt*4.0*std::numbers::pi_v<double>:
+        double(light.quantity);
     const double importance=flux*luminance,bound=EmitterBound(light),influence=double(light.range)+(Area(light)?bound:0.0);
     // Projected influence area and the emitter's photometric importance are
     // evaluated separately; revision/movement modestly prioritizes stale caches.
@@ -128,6 +123,7 @@ struct LocalShadowStorage
     struct CachedLight
     {
         LightView light;std::uint32_t valid_faces{},face_count{};bool occupied{},selected{};
+        std::uint64_t pipeline_revision{};
         std::array<UINT,kLocalShadowMaximumFaces> face_tiles{};
     };
     struct Frame
@@ -154,9 +150,11 @@ struct LocalShadowStorage
     AllocationResource static_bank,dynamic_bank;
     ComPtr<ID3D12DescriptorHeap> srvs,dsvs;
     std::vector<Frame> frames;std::vector<CachedLight> cache;
+    std::shared_ptr<const void> opacity_owner;
+    std::vector<LocalShadowOpacityBinding> opacity_bindings;
     CompletionSet completion;std::uint64_t generation{};bool initialized{},usable{true};
     D3D12_CPU_DESCRIPTOR_HANDLE Srv(UINT frame,UINT offset)const
-    {auto h=srvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(frame*5+offset)*stride;return h;}
+    {auto h=srvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(frame*kLocalShadowDescriptorCount+offset)*stride;return h;}
     D3D12_CPU_DESCRIPTOR_HANDLE Dsv(UINT index)const
     {auto h=dsvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(index)*dsv_stride;return h;}
 };
@@ -173,10 +171,13 @@ struct LocalShadowFramePlanData
     const LightView *lights{};
     const VirtualShadowCaster *stable_casters{}, *dynamic_casters{};
     std::shared_ptr<const void> stable_caster_owner;
+    std::shared_ptr<const void> opacity_owner;
+    std::vector<LocalShadowOpacityBinding> opacity_bindings;
+    std::vector<std::uint8_t> temporal_opacity_groups;
     const VirtualShadowDrawGroup *groups{};
     std::size_t light_count{}, stable_count{}, dynamic_count{}, group_count{};
     DirectX::XMFLOAT3 camera_position{};
-    std::uint64_t rendered_frame_id{}, stable_caster_revision{};
+    std::uint64_t rendered_frame_id{}, stable_caster_revision{}, pipeline_revision{};
     std::uint32_t frame_slot{};
     std::uint64_t record_generation{};
     bool reset_cache{};
@@ -198,10 +199,13 @@ bool PreparedInputsMatch(const LocalShadowFramePlanData &data,
         data.stable_count==in.casters.stable.size()&&
         data.stable_caster_owner==in.stable_caster_owner&&
         data.stable_caster_revision==in.stable_caster_revision&&
+        data.opacity_owner==in.opacity_owner&&std::ranges::equal(data.opacity_bindings,in.opacity_bindings)&&
+        std::ranges::equal(data.temporal_opacity_groups,in.temporal_opacity_groups)&&
         data.dynamic_casters==in.casters.dynamic.data()&&
         data.dynamic_count==in.casters.dynamic.size()&&
         data.groups==in.draw_groups.data()&&data.group_count==in.draw_groups.size()&&
         data.rendered_frame_id==in.rendered_frame_id&&data.frame_slot==in.frame_slot&&
+        data.pipeline_revision==in.pipeline_revision&&
         data.reset_cache==in.reset_cache&&
         std::memcmp(&data.camera_position,&in.camera_position,sizeof(in.camera_position))==0;
 }
@@ -290,29 +294,36 @@ GpuLocalShadowRecord Record(const LocalShadowStorage &s,const LightView &light)
     }
     record.state.y=1;return record;
 }
-struct ChangedStaticCaster
+struct ChangedCaster
 {
     const VirtualShadowCaster *source{};
     bool current_static{},previous_static{};
 };
-UINT DirtyFaces(const LocalShadowStorage &s,const LocalShadowInputs &in,const GpuLocalShadowRecord &record,
+std::array<UINT,2> DirtyFaces(const LocalShadowStorage &s,const LocalShadowInputs &in,const GpuLocalShadowRecord &record,
     const LocalShadowStorage::CachedLight *cached,const LightView &light,float expanded,
-    std::span<const ChangedStaticCaster> changed_static)
+    std::span<const ChangedCaster> changed_static,std::span<const ChangedCaster> changed_dynamic,
+    bool opacity_changed)
 {
     const UINT all=(1u<<record.revision.w)-1;
-    UINT dirty=in.reset_cache||!cached||!SameLight(cached->light,light)||cached->face_count!=record.revision.w||!s.initialized?
+    const UINT initial=in.reset_cache||!cached||!SameLight(cached->light,light)||cached->face_count!=record.revision.w||!s.initialized?
         all:all&~cached->valid_faces;
-    for(UINT face=0;face<record.revision.w;++face)
-        if((dirty&(1u<<face))==0)for(const auto &entry:changed_static)
+    std::array<UINT,2> dirty{initial, initial};
+    if(opacity_changed) dirty={all,all};
+    if(!cached || !in.pipeline_revision || cached->pipeline_revision!=in.pipeline_revision) dirty[1]=all;
+    for(UINT layer=0;layer<2;++layer)
+      for(UINT face=0;face<record.revision.w;++face)
+        if((dirty[layer]&(1u<<face))==0)for(const auto &entry:layer?changed_dynamic:changed_static)
         {
             const auto &c=*entry.source;
-            if((entry.current_static&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))||
-               (entry.previous_static&&Overlap(c.previous_bounds,record.world_to_clip[face],expanded)))
-            {dirty|=1u<<face;break;}
+            const bool current=layer ? c.present&&!entry.current_static : entry.current_static;
+            const bool previous=layer ? c.previous_present&&!entry.previous_static : entry.previous_static;
+            if((current&&Overlap(c.current_bounds,record.world_to_clip[face],expanded))||
+               (previous&&Overlap(c.previous_bounds,record.world_to_clip[face],expanded)))
+            {dirty[layer]|=1u<<face;break;}
         }
     return dirty;
 }
-bool CommandsFit(const GpuLocalShadowRecord &record,UINT dirty,float expanded,UINT remaining,
+bool CommandsFit(const GpuLocalShadowRecord &record,const std::array<UINT,2> &dirty,float expanded,UINT remaining,
     std::span<const VirtualShadowCaster *const> casters,std::span<const std::size_t> bucket_offsets,
     std::size_t group_count,UINT &commands)
 {
@@ -323,7 +334,7 @@ bool CommandsFit(const GpuLocalShadowRecord &record,UINT dirty,float expanded,UI
     {
         for(UINT layer=0;layer<2;++layer)
         {
-            if(layer==0&&(dirty&(1u<<face))==0)continue;
+            if((dirty[layer]&(1u<<face))==0)continue;
             for(std::size_t group=0;group<group_count;++group)
             {
                 const auto bucket=std::size_t(layer)*group_count+group;
@@ -344,6 +355,7 @@ struct LocalShadowSystem::Impl
     std::uint64_t next_generation{};
     struct Pending{const RenderGraphBuilder *graph{};UINT slot{};std::vector<Import> imports;
         std::vector<LocalShadowStorage::CachedLight> cache;LocalShadowStatus status;
+        std::shared_ptr<const void> opacity_owner;std::vector<LocalShadowOpacityBinding> opacity_bindings;
         std::vector<LocalShadowLightReference> light_records;}pending;
     LocalShadowStatus status;
     struct StableClassification
@@ -352,7 +364,8 @@ struct LocalShadowSystem::Impl
         std::uint64_t revision{};
         std::size_t count{}, groups{};
         std::vector<std::vector<std::size_t>> buckets;
-        std::vector<std::size_t> changed;
+        std::vector<std::size_t> changed, dynamic_changed;
+        std::vector<std::uint8_t> temporal_opacity_groups;
     } stable;
 };
 LocalShadowSystem::LocalShadowSystem():impl_(std::make_unique<Impl>()){}
@@ -408,9 +421,9 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     }
     s->stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     s->dsv_stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-    s->allocated+=UINT64(profile.frame_slots)*5*s->stride+2*s->dsv_stride;
+    s->allocated+=UINT64(profile.frame_slots)*kLocalShadowDescriptorCount*s->stride+2*s->dsv_stride;
     if(s->allocated>profile.byte_budget)return Failure(ErrorCode::InvalidArgument,"Local shadow descriptor backing exceeds byte_budget.");
-    D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=profile.frame_slots*5;
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=profile.frame_slots*kLocalShadowDescriptorCount;
     auto hr=device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s->srvs));if(FAILED(hr))return Native("Create local shadow SRVs",hr);
     hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;hd.NumDescriptors=2;hr=device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&s->dsvs));
     if(FAILED(hr))return Native("Create local shadow DSVs",hr);
@@ -420,10 +433,10 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     texture.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;texture.Texture2D.MipLevels=1;
     for(UINT slot=0;slot<profile.frame_slots;++slot)
     {
-        auto &f=s->frames[slot];RawSrv(*s,f.metadata.resource.Get(),s->Srv(slot,0));RawSrv(*s,f.records.resource.Get(),s->Srv(slot,1));
-        device->CreateShaderResourceView(s->static_bank.resource.Get(),&texture,s->Srv(slot,2));
-        device->CreateShaderResourceView(s->dynamic_bank.resource.Get(),&texture,s->Srv(slot,3));
-        StructuredSrv(*s,f.draws.resource.Get(),32,s->Srv(slot,4));
+        auto &f=s->frames[slot];RawSrv(*s,f.metadata.resource.Get(),s->Srv(slot,LocalShadowSrvMetadata));RawSrv(*s,f.records.resource.Get(),s->Srv(slot,LocalShadowSrvRecords));
+        device->CreateShaderResourceView(s->static_bank.resource.Get(),&texture,s->Srv(slot,LocalShadowSrvStaticBank));
+        device->CreateShaderResourceView(s->dynamic_bank.resource.Get(),&texture,s->Srv(slot,LocalShadowSrvDynamicBank));
+        StructuredSrv(*s,f.draws.resource.Get(),HS_LOCAL_SHADOW_DRAW_BYTES,s->Srv(slot,LocalShadowSrvDrawRecords));
     }
     candidate.storage_=std::move(s);candidate.prepared_=true;return Result::Success();
 }
@@ -458,7 +471,7 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     std::ranges::sort(ranked,[](const auto &a,const auto &b){return a.priority!=b.priority?a.priority>b.priority:
         std::tie(a.light->stable_id,a.light->generation)<std::tie(b.light->stable_id,b.light->generation);});
     const auto group_count=in.draw_groups.size();
-    std::vector<ChangedStaticCaster> changed_static;
+    std::vector<ChangedCaster> changed_static, changed_dynamic;
     std::vector<std::size_t> bucket_offsets;
     std::vector<const VirtualShadowCaster *> ordered_casters;
     // Empty light sets still publish empty records and invalidate old owners without reading casters.
@@ -468,11 +481,13 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
             return Failure(ErrorCode::InvalidArgument,"Local shadow caster/draw capacity is invalid.");
         auto &stable=impl_->stable;
         if(!in.stable_caster_owner||!in.stable_caster_revision||stable.owner!=in.stable_caster_owner||
-            stable.revision!=in.stable_caster_revision||stable.count!=in.casters.stable.size()||stable.groups!=group_count)
+            stable.revision!=in.stable_caster_revision||stable.count!=in.casters.stable.size()||stable.groups!=group_count||
+            !std::ranges::equal(stable.temporal_opacity_groups,in.temporal_opacity_groups))
         {
             Impl::StableClassification next;
             next.owner=in.stable_caster_owner;next.revision=in.stable_caster_revision;
             next.count=in.casters.stable.size();next.groups=group_count;next.buckets.resize(group_count*2);
+            next.temporal_opacity_groups.assign(in.temporal_opacity_groups.begin(),in.temporal_opacity_groups.end());
             for(std::size_t index=0;index<in.casters.stable.size();++index)
             {
                 const auto &c=in.casters.stable[index];
@@ -480,8 +495,12 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
                     (c.previous_present&&!Sphere(c.previous_bounds)))
                     return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
                 const bool current_static=StaticCaster(c),previous_static=StaticCaster(c,true);
-                if(Changed(c,current_static,previous_static)&&(current_static||previous_static))
+                if(LocalShadowCasterChanged(c,current_static,previous_static)&&(current_static||previous_static))
                     next.changed.push_back(index);
+                if(LocalShadowDynamicCasterChanged(c,current_static,previous_static)||
+                    (c.present&&!current_static&&(c.draw_group>=in.temporal_opacity_groups.size()||
+                        in.temporal_opacity_groups[c.draw_group]!=0)))
+                    next.dynamic_changed.push_back(index);
                 if(c.present) next.buckets[(current_static?0u:1u)*group_count+c.draw_group].push_back(index);
             }
             stable=std::move(next);
@@ -491,6 +510,11 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
             const auto &c=in.casters.stable[index];
             changed_static.push_back({&c,StaticCaster(c),StaticCaster(c,true)});
         }
+        if(!in.reset_cache&&s->initialized) for(const auto index:stable.dynamic_changed)
+        {
+            const auto &c=in.casters.stable[index];
+            changed_dynamic.push_back({&c,StaticCaster(c),StaticCaster(c,true)});
+        }
         std::vector<std::size_t> bucket_counts(group_count*2);
         for(std::size_t bucket=0;bucket<bucket_counts.size();++bucket) bucket_counts[bucket]=stable.buckets[bucket].size();
         for(const auto &c:in.casters.dynamic)
@@ -499,8 +523,12 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
                 (c.previous_present&&!Sphere(c.previous_bounds)))
                 return Failure(ErrorCode::InvalidArgument,"Local shadow caster bounds/group invalid.");
             const bool current_static=StaticCaster(c),previous_static=StaticCaster(c,true);
-            if(!in.reset_cache&&s->initialized&&Changed(c,current_static,previous_static)&&
+            if(!in.reset_cache&&s->initialized&&LocalShadowCasterChanged(c,current_static,previous_static)&&
                 (current_static||previous_static)) changed_static.push_back({&c,current_static,previous_static});
+            if(!in.reset_cache&&s->initialized&&(LocalShadowDynamicCasterChanged(c,current_static,previous_static)||
+                (c.present&&!current_static&&(c.draw_group>=in.temporal_opacity_groups.size()||
+                    in.temporal_opacity_groups[c.draw_group]!=0))))
+                changed_dynamic.push_back({&c,current_static,previous_static});
             if(c.present) ++bucket_counts[(current_static?0u:1u)*group_count+c.draw_group];
         }
         bucket_offsets.resize(bucket_counts.size()+1);
@@ -529,14 +557,20 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     data->stable_casters=in.casters.stable.data();data->stable_count=in.casters.stable.size();
     data->stable_caster_owner=in.stable_caster_owner;
     data->stable_caster_revision=in.stable_caster_revision;
+    data->opacity_owner=in.opacity_owner;
+    data->opacity_bindings.assign(in.opacity_bindings.begin(),in.opacity_bindings.end());
+    data->temporal_opacity_groups.assign(in.temporal_opacity_groups.begin(),in.temporal_opacity_groups.end());
     data->dynamic_casters=in.casters.dynamic.data();data->dynamic_count=in.casters.dynamic.size();
     data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
     data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;
     data->frame_slot=in.frame_slot;data->reset_cache=in.reset_cache;
+    data->pipeline_revision=in.pipeline_revision;
     data->frame.mapped=native_frame.prepared_upload.data();
     const float expanded=1.0f+2.0f*kLocalShadowGuard/s->profile.face_resolution;
+    const bool opacity_changed=!in.opacity_owner||in.opacity_owner!=s->opacity_owner||
+        !std::ranges::equal(in.opacity_bindings,s->opacity_bindings);
     const UINT physical_tiles=s->profile.maximum_lights*6;
-    struct Selected{const LightView *light;GpuLocalShadowRecord record;UINT old_slot,slot,dirty,commands;};
+    struct Selected{const LightView *light;GpuLocalShadowRecord record;UINT old_slot,slot;std::array<UINT,2> dirty;UINT commands;};
     std::vector<Selected> selected;UINT reserved_tiles{},reserved_commands{};
     for(const auto &rank:ranked)
     {
@@ -545,8 +579,8 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
         const auto old=std::ranges::find_if(s->cache,[&](const auto &c){return c.occupied&&
             c.light.stable_id==light.stable_id&&c.light.generation==light.generation;});
         const UINT old_slot=old==s->cache.end()?UINT_MAX:UINT(old-s->cache.begin());
-        auto record=Record(*s,light);const UINT dirty=DirtyFaces(*s,in,record,old==s->cache.end()?nullptr:&*old,
-            light,expanded,changed_static);
+        auto record=Record(*s,light);const auto dirty=DirtyFaces(*s,in,record,old==s->cache.end()?nullptr:&*old,
+            light,expanded,changed_static,changed_dynamic,opacity_changed);
         UINT commands{};
         if(!CommandsFit(record,dirty,expanded,s->profile.command_capacity-reserved_commands,
                 ordered_casters,bucket_offsets,group_count,commands))
@@ -604,12 +638,12 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     for(const auto &choice:selected)
     {
         const auto slot=choice.slot;const auto &light=*choice.light;auto &cached=cache[slot];
-        auto record=choice.record;const UINT dirty=choice.dirty;
+        auto record=choice.record;const auto dirty=choice.dirty;
         const UINT all=(1u<<record.revision.w)-1;
         const auto first_draw=draws.size();
         for(UINT layer=0;layer<2;++layer)for(UINT face=0;face<record.revision.w;++face)
         {
-            if(layer==0&&(dirty&(1u<<face))==0)continue;
+            if((dirty[layer]&(1u<<face))==0)continue;
             for(UINT group=0;group<in.draw_groups.size();++group)
             {
                 const auto begin=draws.size();
@@ -637,12 +671,13 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
         }
         if(draws.size()-first_draw!=choice.commands)
             return Failure(ErrorCode::InvalidState,"Local shadow command emission differs from its admitted face bundle.");
-        cached.light=light;cached.occupied=true;
+        cached.light=light;cached.occupied=true;cached.pipeline_revision=in.pipeline_revision;
         for(UINT face=0;face<record.revision.w;++face)
         {
             const auto tile=record.atlas_tiles[face];const D3D12_RECT rect{LONG(tile.x),LONG(tile.y),
                 LONG(tile.x+tile.z+2*tile.w),LONG(tile.y+tile.z+2*tile.w)};
-            if(dirty&(1u<<face))frame.clears[0].push_back(rect);frame.clears[1].push_back(rect);
+            for(UINT layer=0;layer<2;++layer)
+                if(dirty[layer]&(1u<<face))frame.clears[layer].push_back(rect);
         }
         cached.valid_faces=all;record.state.x=all;++status.selected_lights;
         records[slot]=record;
@@ -763,6 +798,8 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
     frame.batches=std::move(data->frame.batches);frame.clears=std::move(data->frame.clears);
     auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;
     pending.cache=std::move(data->cache);pending.status=std::move(data->status);
+    pending.opacity_owner=std::move(data->opacity_owner);
+    pending.opacity_bindings=std::move(data->opacity_bindings);
     pending.light_records=std::move(data->light_records);out.light_records=pending.light_records;
     data->consumed=true;
     bool imports_valid=true;UINT import_index{};
@@ -810,10 +847,14 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
         }
         if(count_bytes)cmd->CopyBufferRegion(f.counts.resource.Get(),0,f.upload.resource.Get(),s->count_offset,count_bytes);});
     out.metadata=meta;out.records=record;out.draw_records=draw;out.indexed_commands=index;out.mesh_commands=mesh_args;out.command_counts=count;
-    out.resources={frame.metadata.resource.Get(),frame.records.resource.Get(),s->static_bank.resource.Get(),s->dynamic_bank.resource.Get(),frame.draws.resource.Get()};
-    for(UINT i=0;i<5;++i)out.srvs[i]=s->Srv(in.frame_slot,i);out.depth_views={s->Dsv(0),s->Dsv(1)};
+    out.resources[LocalShadowSrvMetadata]=frame.metadata.resource.Get();
+    out.resources[LocalShadowSrvRecords]=frame.records.resource.Get();
+    out.resources[LocalShadowSrvStaticBank]=s->static_bank.resource.Get();
+    out.resources[LocalShadowSrvDynamicBank]=s->dynamic_bank.resource.Get();
+    out.resources[LocalShadowSrvDrawRecords]=frame.draws.resource.Get();
+    for(UINT i=0;i<kLocalShadowDescriptorCount;++i)out.srvs[i]=s->Srv(in.frame_slot,i);out.depth_views={s->Dsv(0),s->Dsv(1)};
     out.indexed_arguments=frame.indexed.resource.Get();out.mesh_arguments=frame.mesh.resource.Get();out.counts_resource=frame.counts.resource.Get();
-    out.bank_extent=s->extent;out.descriptor_count=5;
+    out.bank_extent=s->extent;out.descriptor_count=kLocalShadowDescriptorCount;
     for(UINT layer=0;layer<2;++layer)
     {
         if(layout)layout->pass_indices[1+layer]=graph.PassCount();
@@ -864,7 +905,8 @@ Result LocalShadowSystem::CompleteSubmission(const RenderGraphBuilder &graph,con
         i.resource->graph_completion.Merge(completion);i.resource->graph_completion.Merge(lease);
         if(success){i.resource->graph_access=graph.FinalAccess(i.handle);i.resource->graph_queue=graph.FinalQueue(i.handle);}
     }
-    if(success){s->cache=std::move(p.cache);s->initialized=true;impl_->status=std::move(p.status);}
+    if(success){s->cache=std::move(p.cache);s->opacity_owner=std::move(p.opacity_owner);
+        s->opacity_bindings=std::move(p.opacity_bindings);s->initialized=true;impl_->status=std::move(p.status);}
     else{s->usable=false;impl_->status.reason="Local shadow partial submission requires drain and fresh preparation.";}
     p={};return Result::Success();
 }

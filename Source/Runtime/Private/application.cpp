@@ -16,6 +16,7 @@
 #include "runtime_channels.hpp"
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include "preview_scene.hpp"
+#include "asset_test_room.hpp"
 #endif
 #include "native_input_frame.hpp"
 #include "ui_command_admission.hpp"
@@ -363,14 +364,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     // Visible performance experiments use the same clock and interpolation as interactive play.
     const bool realtime = !config.smoke || config.visible;
     // Smoke, experiment, recording and replay consumers require complete diagnostic artifacts.
-    const bool capture_diagnostics = config.capture_diagnostics || config.smoke ||
+    const bool capture_diagnostics = config.capture_diagnostics || (config.smoke && !config.test_room_capture) ||
         config.record_playtest || config.replay_compare || !config.replay_directory.empty();
     const bool validation_enabled = config.validation || config.gpu_validation;
 #else
     constexpr bool realtime = true;
     constexpr bool capture_diagnostics = false;
     constexpr bool validation_enabled = false;
-    if (config.smoke || config.smoke_render_lockstep || config.capture_diagnostics ||
+    if (config.test_room || config.test_room_capture || config.smoke || config.smoke_render_lockstep || config.capture_diagnostics ||
         config.capture_translucency_diagnostics || config.diagnostic_enemy_count || config.record_playtest ||
         config.replay_compare || !config.replay_directory.empty() || config.resize_test ||
         config.monster_preview_asset != 0xFFFFFFFFu || config.boss_vfx_capture != 0xFFFFFFFFu ||
@@ -382,6 +383,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             "Smoke, preview, replay, recording, and capture modes require a development executable.")};
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
+    if (config.test_room && ((config.smoke && !config.test_room_capture) || config.record_playtest || config.replay_compare ||
+        !config.replay_directory.empty() || config.skill_vfx_capture < kCombatSkillCount ||
+        config.monster_preview_asset < 6 || config.environment_preview || config.character_preview ||
+        config.vfx_showcase || config.slime_family_preview_count || config.boss_vfx_capture < 3 ||
+        config.boss_phase2_capture))
+        return {Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
+            "The asset test room cannot be combined with replay or another preview mode; smoke requires a capture target.")};
     if (config.smoke_render_lockstep && !config.smoke)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Smoke render lockstep requires --smoke.")};
@@ -448,7 +456,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     }
 #endif
     const auto &presentation_catalog = prepared_content.presentation;
+    auto runtime_camera = presentation_catalog.camera;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (config.test_room) runtime_camera.yaw_degrees = 0.0f;
+    std::unique_ptr<SimulationRules> room_rules;
+    if (config.test_room)
+    {
+        room_rules = std::make_unique<SimulationRules>(*prepared_content.simulation);
+        room_rules->arena_half_extent = 512.0f;
+        room_rules->arena_boundary.count = 4;
+        room_rules->arena_boundary.points[0] = {-512, -512};
+        room_rules->arena_boundary.points[1] = {-512, 512};
+        room_rules->arena_boundary.points[2] = {512, 512};
+        room_rules->arena_boundary.points[3] = {512, -512};
+        room_rules->arena_obstacle_count = 0;
+    }
+    const auto &simulation_rules = room_rules ? *room_rules : *prepared_content.simulation;
+#else
     const auto &simulation_rules = *prepared_content.simulation;
+#endif
     const auto content_hash = prepared_content.content_hash;
 #ifdef HS_DEVELOPMENT_TOOLS
     const auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
@@ -481,21 +507,51 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     constexpr bool replaying = false;
     const auto effective_seed = config.seed;
 #endif
-    const auto settings_root = config.smoke
+    const auto settings_root = (config.smoke || config.test_room)
         ? std::optional<std::filesystem::path>(config.artifact_directory / "Profile")
         : std::nullopt;
     SaveStore save_store(settings_root);
     SettingsDocument requested_settings;
     bool loaded_from_file{};
-    if (auto loaded = save_store.LoadSettingsV2(requested_settings, &loaded_from_file); !loaded)
+    auto settings_loaded = Result::Success();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (config.test_room)
     {
-        return {loaded};
+        SaveStore game_settings_reader;
+        settings_loaded = game_settings_reader.LoadSettingsV2(requested_settings, &loaded_from_file);
+    }
+    else
+#endif
+        settings_loaded = save_store.LoadSettingsV2(requested_settings, &loaded_from_file);
+    if (!settings_loaded)
+    {
+        return {settings_loaded};
     }
     if (!loaded_from_file)
         requested_settings = LegacyDefaultSettingsDocument();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::optional<ApplicationConfig> room_startup;
+    if (config.test_room_capture)
+    {
+        room_startup.emplace(config);
+        room_startup->smoke = false;
+        room_startup->borderless_explicit = true;
+        room_startup->borderless = false;
+        room_startup->vsync_explicit = true;
+        room_startup->vsync = false;
+        room_startup->frame_cap_explicit = true;
+        room_startup->frame_cap = 0;
+    }
+    const auto initial_settings = PrepareStartupGraphicsSettings(requested_settings, room_startup ? *room_startup : config);
+#else
     const auto initial_settings = PrepareStartupGraphicsSettings(requested_settings, config);
+#endif
     const bool mute_audio = config.mute_audio || capture_diagnostics || config.environment_preview ||
-        config.character_preview || config.vfx_showcase || config.preview_camera_override;
+        config.character_preview || config.vfx_showcase || config.preview_camera_override
+#if defined(HS_DEVELOPMENT_TOOLS)
+        || config.test_room
+#endif
+        ;
     GraphicsSettingsCommit settings_commit(std::move(requested_settings),
                                            initial_settings, mute_audio);
     SettingsData &settings = settings_commit.Effective();
@@ -533,7 +589,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.camera_zoom_percent.store(std::clamp(config.camera_zoom_percent, 15u, 120u));
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem task_system;
-    Window window(channels, settings.skill_virtual_keys, presentation_catalog.camera);
+    Window window(channels, settings.skill_virtual_keys, runtime_camera);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (config.test_room) window.EnableTestRoom();
+#endif
     Sequence ui_audio_sequence{};
     auto main_audio = std::make_unique<runtime_detail::MainAudioSession>(audio, ui_audio_sequence, capture_clock);
     SettingsData ui_click_settings = settings_commit.UiInput();
@@ -1112,13 +1171,68 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
         SceneGenerationBinding scene_generation{selected.id, selected.id, {}};
         auto next_generation_check = std::chrono::steady_clock::now();
-        std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
-            << "ready active=" << render_generation->id << '\n';
 #endif
 
 #if defined(HS_DEVELOPMENT_TOOLS)
         PreviewEditValues preview_edit;
         preview_edit.enabled = config.character_preview;
+        std::optional<runtime_detail::AssetTestRoom> asset_test_room;
+        if (config.test_room) asset_test_room.emplace(renderer.GetCharacterAnimationClips(),
+            renderer.GetLegacyCharacterAnimationClips(), vfx_catalog.Image());
+        double room_time{};
+        Tick room_previous_display_tick{};
+        std::chrono::nanoseconds room_previous_simulation_time{};
+        bool room_paused{};
+        auto room_previous_clock = std::chrono::steady_clock::now();
+        bool room_capture{};
+        std::uint64_t room_capture_index{};
+        const auto room_capture_session = std::chrono::system_clock::now().time_since_epoch().count();
+        std::uint64_t room_session = 0x7100000000000001ull;
+        Sequence room_revision{};
+        std::vector<PreviewStationLabel> room_labels;
+        const auto prepare_room_catalog = [&]() -> Result {
+            if (!asset_test_room) return Result::Success();
+            if (config.test_room_capture && (*config.test_room_capture == 0 ||
+                *config.test_room_capture > asset_test_room->entries.size()))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
+                    std::format("Test room station must be between 1 and {}.", asset_test_room->entries.size()));
+            room_labels.clear();
+            room_labels.reserve(asset_test_room->entries.size());
+            std::string catalog = "station,group,label,x,y,z,capture_distance\n";
+            std::string catalog_row;
+            constexpr std::array groups{"animation", "model", "vfx"};
+            std::size_t index{};
+            for (const auto &entry : asset_test_room->entries)
+            {
+                auto anchor = entry.position;
+                anchor.y += .15f;
+                room_labels.push_back({anchor, entry.name});
+                catalog_row.clear();
+                runtime_detail::AppendCsvValues(catalog_row, ++index);
+                runtime_detail::AppendCsvText(catalog_row, groups[static_cast<std::size_t>(entry.group)]);
+                runtime_detail::AppendCsvText(catalog_row, entry.name);
+                runtime_detail::AppendCsvValues(catalog_row, entry.position.x, entry.position.y,
+                    entry.position.z, entry.capture_distance);
+                catalog += catalog_row;
+                catalog += '\n';
+            }
+            std::error_code directory_error;
+            std::filesystem::create_directories(config.artifact_directory, directory_error);
+            if (directory_error)
+                return Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Cannot create test room capture directory.");
+            std::ofstream output(config.artifact_directory / "test-room-catalog.csv", std::ios::binary | std::ios::trunc);
+            output << catalog;
+            output.close();
+            if (!output)
+                return Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Cannot write test room station catalog.");
+            const auto title = std::format("Project HS gallery - {} simultaneous exhibits [right mouse: walk; Space: freeze; R: view; F12: capture]",
+                asset_test_room->entries.size());
+            const std::wstring wide(title.begin(), title.end());
+            SetWindowTextW(window.Handle(), wide.c_str());
+            return Result::Success();
+        };
+        if (auto catalog_result = prepare_room_catalog(); !catalog_result)
+        { record_thread_failure(catalog_result); return; }
 #endif
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
@@ -1683,6 +1797,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         std::chrono::steady_clock::now());
                     if (applied)
                     {
+                        if (asset_test_room)
+                        {
+                            asset_test_room.emplace(renderer.GetCharacterAnimationClips(),
+                                renderer.GetLegacyCharacterAnimationClips(), vfx_catalog.Image());
+                            room_time = 0;
+                            room_previous_display_tick = 0;
+                            room_previous_simulation_time = {};
+                            ++room_session;
+                            if (auto catalog_result = prepare_room_catalog(); !catalog_result)
+                            { record_thread_failure(catalog_result); break; }
+                        }
                         record_renderer_features(0);
                         std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
                             << "applied candidate=" << candidate_id << " active=" << render_generation->id
@@ -1952,6 +2077,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
             if (renderer_settings_suspended)
             {
+                if (channels.stop_requested.load(std::memory_order_acquire) &&
+                    channels.simulation_done.load(std::memory_order_acquire))
+                    break;
                 std::this_thread::yield();
                 continue;
             }
@@ -1959,6 +2087,40 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 (!config.smoke_render_lockstep ||
                  snapshots.current.header.tick > rendered_tick.load(std::memory_order_acquire)))
             {
+#if defined(HS_DEVELOPMENT_TOOLS)
+                const Tick source_snapshot_tick = snapshots.current.header.tick;
+                const std::uint64_t source_snapshot_session = snapshots.current.header.session_id;
+                if (asset_test_room)
+                {
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto actions = window.ConsumeTestRoomActions();
+                    if (actions & 1u) room_paused = !room_paused;
+                    room_capture = (actions & 4u) != 0;
+                    if (config.test_room_capture)
+                        room_time = static_cast<double>(snapshots.current.header.tick > 30 ? snapshots.current.header.tick - 30 : 0) / 60.0;
+                    else if (!room_paused)
+                        room_time += std::chrono::duration<double>(now - room_previous_clock).count();
+                    room_previous_clock = now;
+                    snapshots.current.header.tick = 1 + static_cast<Tick>(room_time * 60.0);
+                    snapshots.current.header.simulation_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::duration<double>(room_time));
+                    if (snapshots.has_previous)
+                    {
+                        snapshots.previous.header.tick = room_previous_display_tick ? room_previous_display_tick : snapshots.current.header.tick;
+                        snapshots.previous.header.simulation_time = room_previous_display_tick
+                            ? room_previous_simulation_time : snapshots.current.header.simulation_time;
+                    }
+                    room_previous_display_tick = snapshots.current.header.tick;
+                    room_previous_simulation_time = snapshots.current.header.simulation_time;
+                    snapshots.current.header.session_id = room_session;
+                    if (snapshots.has_previous) snapshots.previous.header.session_id = room_session;
+                    asset_test_room->Prepare(room_time, snapshots.current.header.tick, snapshots);
+                    snapshots.ui_frame.reset();
+                    if (room_paused) snapshots.current.header.clock.mode = RenderClockMode::Frozen;
+                    snapshots.current.header.dynamic_pair_revision = ++room_revision;
+                    if (snapshots.has_previous) snapshots.previous.header.dynamic_pair_revision = room_revision > 1 ? room_revision - 1 : room_revision;
+                }
+#endif
                 runtime_detail::DiagnosticScope session_scope(vfx_work[2], capture_clock);
                 const auto &current_snapshot = snapshots.current;
                 const auto sample_time = std::chrono::steady_clock::now();
@@ -2006,6 +2168,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         frame_events.push_back(event);
                     }
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (asset_test_room)
+                    asset_test_room->AppendLegacyEvents(vfx_catalog.Image(), room_time,
+                        snapshots.current.header.tick, snapshots.current.header.session_id, frame_events);
+#endif
                 session_scope.Stop();
                 if (config.resize_test && !resized &&
                     snapshots.current.header.tick >= config.maximum_ticks / 2)
@@ -2037,6 +2204,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     0};
 #if defined(HS_DEVELOPMENT_TOOLS)
                 devtools.preview = preview_edit;
+                devtools.test_room = asset_test_room.has_value();
+                devtools.station_labels = room_labels;
+                if (config.smoke_render_lockstep)
+                    devtools.delta_seconds =
+                        std::chrono::duration<float>(FixedStepClock::kFixedStep).count();
+                devtools.wait_for_streaming = config.smoke_render_lockstep;
 #endif
                 const auto current_vfx = snapshots.has_current
                     ? snapshots.current.persistent_vfx
@@ -2075,7 +2248,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::DiagnosticScope frame_adapter_scope(vfx_work[4], capture_clock);
                 runtime_detail::BuildVfxTypedFrameInputs(
                     vfx_catalog.Image(), frame_events,
+#if defined(HS_DEVELOPMENT_TOOLS)
+                    asset_test_room ? std::span<const PersistentVfxVisual>{} : current_vfx,
+                    asset_test_room ? std::span<const PersistentVfxVisual>{} : previous_vfx,
+#else
                     current_vfx, previous_vfx,
+#endif
                     snapshots.has_current ? snapshots.current.header.tick : Tick{},
                     typed_vfx, vfx_pair_facts, sample_alpha, active_vfx_quality);
                 frame_adapter_scope.Stop();
@@ -2085,6 +2263,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         snapshots.has_current ? snapshots.current.header.tick : Tick{},
                         typed_vfx.persistent, sample_alpha, active_vfx_quality);
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (asset_test_room)
+                    asset_test_room->AppendInputs(vfx_catalog.Image(), room_time,
+                        snapshots.current.header.tick, active_vfx_quality, typed_vfx,
+                        snapshots.current.instances.empty() ? Float3{} : snapshots.current.instances.front().position,
+                        config.test_room_capture ? std::optional<std::size_t>{*config.test_room_capture - 1} : std::nullopt);
+#endif
                 // Reserve retained profile storage before generating the birth fanout.
                 const auto phase_effect = vfx_catalog.Image().entity_surface_routes.phase_effect;
                 const auto death_effect = vfx_catalog.Image().entity_surface_routes.death_effect;
@@ -2812,6 +2997,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     record_thread_failure(converted);
                     break;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (asset_test_room)
+                    std::erase_if(typed_screen, [&](const VfxScreenInput &input) {
+                        const auto identity = input.event_sequence ? input.event_sequence : input.owner_id;
+                        const auto domain = identity >> 60;
+                        if (domain != 6 && domain != 7) return false;
+                        const auto station = static_cast<std::size_t>((identity >> 32) & 0xfffff);
+                        return station == 0 || asset_test_room->active_screen_station != station - 1;
+                    });
+#endif
                 screen_scope.Stop();
                 active_effects.EraseIf(VfxEventProfile::Volume, [&](const VfxEventInput &input) {
                     const auto &effect = vfx_catalog.Image().volume_effect_recipes[input.effect_handle - 1];
@@ -2990,8 +3185,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 auto camera = InterpolateRenderCamera(snapshots, sample_alpha);
 #if defined(HS_DEVELOPMENT_TOOLS)
                 runtime_detail::PreviewScene preview_scene;
-                preview_scene.Prepare(config, preview_edit, package_snapshots);
+                if (!asset_test_room) preview_scene.Prepare(config, preview_edit, package_snapshots);
                 camera = runtime_detail::PreviewScene::Camera(config, preview_edit, camera);
+                if (asset_test_room && config.test_room_capture)
+                {
+                    const auto &subject = asset_test_room->entries[*config.test_room_capture - 1];
+                    camera.target = subject.position;
+                    camera.target.y += runtime_detail::PreviewScene::TargetHeight(subject.mesh);
+                    if (!config.preview_camera_override)
+                    {
+                        camera.distance = subject.capture_distance;
+                        camera.yaw_degrees = 180.0f; camera.pitch_degrees = 25.0f;
+                    }
+                }
 #endif
                 const std::array views{renderer.MainViewInput(camera)};
                 RenderPackage render_input{
@@ -3022,18 +3228,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     .devtools = devtools,
                     .ui_draw_content = snapshots.ui_frame
                         ? snapshots.ui_frame->draw_content : EmptyUiDrawContent(),
-                    // Lockstep captures advance presentation by the same fixed
-                    // step as simulation, independent of GPU/driver wall time.
-                    .delta_seconds = config.smoke_render_lockstep
-                        ? std::optional<float>{
-                            std::chrono::duration<float>(FixedStepClock::kFixedStep).count()}
-                        : std::nullopt,
                     .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
-                    .wait_for_streaming = config.smoke_render_lockstep,
                     .ui_packet_generation = snapshots.ui_frame ? snapshots.ui_frame->generation : 0,
                     .display_sample = RenderDisplaySample{sample_time, sample_alpha},
                 };
 #if defined(HS_DEVELOPMENT_TOOLS)
+                if (asset_test_room)
+                {
+                    render_input.ui_draw_content = EmptyUiDrawContent();
+                    render_input.ui_packet_generation = 0;
+                }
                 if (config.slime_family_preview_count)
                 {
                     render_input.vfx.ground = {};
@@ -3078,12 +3282,33 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     record_thread_failure(rendered);
                     break;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (room_capture)
+                {
+                    room_capture = false;
+                    if (auto captured_room = renderer.Capture({.path = config.artifact_directory /
+                            std::format("test-room-{}-{:05}.png", room_capture_session, ++room_capture_index)}); !captured_room)
+                    { record_thread_failure(captured_room); break; }
+                }
+#endif
                 if (native_world.sequence != 0 && !receipts.native_batch_accepted)
                 {
                     record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                         "Renderer completed VFX inputs without acknowledging the matching world step."));
                     break;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                // The gallery intentionally presents no gameplay UI and uses its
+                // own display clock/session. Acknowledge the real simulation
+                // snapshot after its successful Present so its session barrier
+                // can advance without fabricating a UI packet receipt.
+                if (asset_test_room)
+                {
+                    if (frame.identity.presentation_id != 0)
+                        native_input_frame.PresentedSession(source_snapshot_session, source_snapshot_tick);
+                }
+                else
+#endif
                 if (frame.presented_ui_packet_generation)
                     native_input_frame.PresentedSession(snapshots.current.header.session_id, frame.rendered_tick);
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -3143,7 +3368,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
                 if (config.smoke_render_lockstep)
                 {
-                    rendered_tick.store(snapshots.current.header.tick, std::memory_order_release);
+                    rendered_tick.store(
+#ifdef HS_DEVELOPMENT_TOOLS
+                        config.test_room_capture ? source_snapshot_tick :
+#endif
+                        snapshots.current.header.tick, std::memory_order_release);
 #ifdef HS_DEVELOPMENT_TOOLS
                     notify_smoke();
 #endif
@@ -3215,7 +3444,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                          frame.debug_value, frame.debug_secondary, {}});
                 }
 #endif
+#if defined(HS_DEVELOPMENT_TOOLS)
+                last_tick = config.test_room_capture ? source_snapshot_tick : frame.rendered_tick;
+#else
                 last_tick = frame.rendered_tick;
+#endif
 #ifdef HS_DEVELOPMENT_TOOLS
                 if (capture_diagnostics)
                 {
@@ -3270,14 +3503,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.simulation_done.load(std::memory_order_acquire) &&
                 last_tick >= channels.completed_tick.load(std::memory_order_acquire))
             {
-                if (auto capture = renderer.Capture({.path = config.artifact_directory /
-                        std::format("capture_tick_{}.png", last_tick)});
+                const auto capture_name = config.test_room_capture
+                    ? std::format("test-room-station-{}-time-{:.3f}.png", *config.test_room_capture, config.test_room_time)
+                    : std::format("capture_tick_{}.png", last_tick);
+                if (auto capture = renderer.Capture({.path = config.artifact_directory / capture_name});
                     !capture)
                 {
                     record_thread_failure(capture);
                     break;
                 }
-                if (config.smoke_render_lockstep)
+                if (config.smoke_render_lockstep && (!config.test_room_capture || config.capture_diagnostics))
                 {
                     if (auto surface = renderer.Capture({
                             .path = config.artifact_directory / "surface.json",
@@ -3312,6 +3547,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         gpu_live_row += '\n';
                         gpu_lines.Append(gpu_live_row);
                     }
+                }
+                if (config.test_room_capture)
+                {
+                    std::ofstream receipt(config.artifact_directory / "test-room-capture.json", std::ios::binary | std::ios::trunc);
+                    receipt << std::format(
+                        "{{\"scene\":\"asset-test-room\",\"station\":{},\"requested_time_seconds\":{},\"effective_time_seconds\":{},\"generation\":\"{}\",\"image\":\"{}\"}}\n",
+                        *config.test_room_capture, config.test_room_time, room_time, render_generation->id, capture_name);
+                    receipt.close();
+                    if (!receipt)
+                    { record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Cannot write test room capture receipt.")); break; }
                 }
                 captured = true;
             }
@@ -3576,15 +3821,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
         SettingsData projection_settings = initial_projection_settings;
-        const bool capture_balance = config.record_playtest || config.capture_diagnostics || config.smoke || replaying;
+        const bool capture_balance = config.record_playtest || config.capture_diagnostics ||
+            (config.smoke && !config.test_room) || replaying;
 #ifdef HS_DEVELOPMENT_TOOLS
         if (auto initialized = simulation.Initialize(
                 {.seed = effective_seed, .automatic_choices = config.smoke,
-                 .start_in_main_menu = !config.smoke,
-                 .scenario = {.player_invulnerable = config.diagnostic_enemy_count != 0,
-                              .progression_enabled = config.diagnostic_enemy_count == 0,
-                              .automatic_spawning = config.diagnostic_enemy_count == 0},
-                 .capture_checksums = config.diagnostic_enemy_count == 0 &&
+                 .start_in_main_menu = !config.smoke && !config.test_room,
+                 .scenario = {.player_stationary = config.test_room_capture.has_value(),
+                              .player_invulnerable = config.diagnostic_enemy_count != 0 || config.test_room,
+                              .progression_enabled = config.diagnostic_enemy_count == 0 && !config.test_room,
+                              .automatic_spawning = config.diagnostic_enemy_count == 0 && !config.test_room},
+                 .capture_checksums = config.diagnostic_enemy_count == 0 && !config.test_room &&
                                       (config.smoke || config.record_playtest || replaying),
                  .capture_timings = config.capture_diagnostics,
                  .capture_detailed_balance = capture_balance,
@@ -3744,17 +3991,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         EnemyAnimationState enemy_animations;
         PlayerFootstepTimeline footstep_timeline;
         runtime_detail::ProcessSceneFactory environment_cache(deployment_id);
-        const auto configure_dynamic_camera = [&](const TickReadView &model) {
+        std::shared_ptr<const StaticRenderScene> launch_environment;
+        bool launch_has_meadow_terrain{};
+        const auto configure_dynamic_camera = [&] {
             const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
-            const auto pose = ComputeRuntimeCameraPose(presentation_catalog.camera.distance_m,
-                presentation_catalog.camera.pitch_degrees, zoom_percent);
-            dynamic_current.camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
+            const auto pose = ComputeRuntimeCameraPose(runtime_camera.distance_m,
+                runtime_camera.pitch_degrees, zoom_percent);
+            dynamic_current.camera.yaw_degrees = runtime_camera.yaw_degrees;
             dynamic_current.camera.pitch_degrees = pose.pitch_degrees;
-            dynamic_current.camera.vertical_fov_degrees = presentation_catalog.camera.vertical_fov_degrees;
+            dynamic_current.camera.vertical_fov_degrees = runtime_camera.vertical_fov_degrees;
             dynamic_current.camera.distance = pose.distance_m;
             dynamic_current.camera.target_height_offset = pose.target_height_m;
             dynamic_current.camera.target.y = pose.target_height_m +
-                (model.arena_half_extent >= 14.0f ? MeadowGroundHeight({dynamic_current.camera.target.x,
+                (launch_has_meadow_terrain ? MeadowGroundHeight({dynamic_current.camera.target.x,
                     dynamic_current.camera.target.z}) : 0.0f);
         };
         const auto retain_line_signals = [&](const TickReadView &model) {
@@ -3800,14 +4049,26 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             // Seed the preceding endpoint without consuming or replaying pending events.
             enemy_animations.Update(model, {});
             footstep_timeline.Reset(model, enemy_animations.PlayerMotionEpoch());
+#ifdef HS_DEVELOPMENT_TOOLS
+            if (config.test_room)
+            {
+                auto room_scene = std::make_shared<StaticRenderScene>();
+                room_scene->content_generation_id = deployment_id;
+                launch_environment = std::move(room_scene);
+            }
+            else launch_environment = environment_cache.Resolve(model);
+#else
+            launch_environment = environment_cache.Resolve(model);
+#endif
+            launch_has_meadow_terrain = launch_environment && SceneHasMeadowTerrain(*launch_environment);
             if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                    environment_cache.Resolve(model), &enemy_animations, retained_line_signals); !projected)
+                    launch_environment, launch_has_meadow_terrain, &enemy_animations, retained_line_signals); !projected)
             {
                 record_thread_failure(projected);
                 finish_simulation();
                 return;
             }
-            configure_dynamic_camera(model);
+            configure_dynamic_camera();
             now = FixedStepClock::Clock::now();
             clock.Realign(now);
             display_clock_epoch = 1;
@@ -4143,12 +4404,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             channels.completed_run_wins.fetch_add(1,
                                                                   std::memory_order_relaxed);
                         }
-                        auto best = channels.best_level.load(std::memory_order_relaxed);
-                        while (best < probe.level &&
-                               !channels.best_level.compare_exchange_weak(
-                                   best, probe.level, std::memory_order_relaxed))
-                        {
-                        }
+                        channels.best_level.store(std::max(channels.best_level.load(std::memory_order_relaxed),
+                                                           static_cast<std::uint32_t>(probe.level)),
+                                                  std::memory_order_relaxed);
                     }
                     previous_phase = tick.phase;
                     observe_scope.Stop();
@@ -4164,14 +4422,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         channels.PublishAudioTick({model.session_id, probe.tick, tick.phase,
                             {probe.player_position.x, 0.0f, probe.player_position.y}});
 #ifdef HS_DEVELOPMENT_TOOLS
-                        channels.ProjectDomainSignalsOnce(model.domain_signals, model.arena_half_extent,
+                        channels.ProjectDomainSignalsOnce(model.domain_signals, launch_has_meadow_terrain,
                             capture_diagnostics, recording ? &record_events : nullptr);
 #else
-                        channels.ProjectDomainSignalsOnce(model.domain_signals, model.arena_half_extent,
+                        channels.ProjectDomainSignalsOnce(model.domain_signals, launch_has_meadow_terrain,
                             false, nullptr);
 #endif
                         if (const auto footstep = footstep_timeline.Advance(
-                                model, enemy_animations.PlayerMotionEpoch()))
+                                model, enemy_animations.PlayerMotionEpoch(), launch_has_meadow_terrain))
                             channels.PublishAudioEvent(*footstep);
                         fanout_scope.Stop();
                         if (recording)
@@ -4183,7 +4441,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             static_cast<SessionProbe &>(recorded_probe) = probe;
                             recorded_probe.balance = diagnostics.balance;
                             if (auto recorded = playtest_recorder.Record(
-                                    input, tick.checksum, recorded_probe, record_events); !recorded)
+                                    input, tick.checksum, recorded_probe, record_events, model.session_id); !recorded)
                             {
                                 record_thread_failure(recorded);
                                 break;
@@ -4234,7 +4492,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
                         if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                                environment_cache.Resolve(model), &enemy_animations, retained_line_signals); !projected)
+                                launch_environment, launch_has_meadow_terrain, &enemy_animations, retained_line_signals); !projected)
                         {
                             record_thread_failure(projected);
                             break;
@@ -4246,7 +4504,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     dynamic_current.header.clock = {display_clock_epoch, display_clock_mode,
                         realtime ? current_boundary
                                  : FixedStepClock::Clock::time_point{}};
-                    configure_dynamic_camera(model);
+                    configure_dynamic_camera();
                     has_dynamic_sample = true;
 
                     // Retain every actual dynamic sample, but publish UI only once after catch-up.
@@ -4333,7 +4591,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 auto ui_frame = std::make_shared<UiFrame>();
                                 ui_frame->generation = publish_sequence + 1;
                                 ui_frame->session_id = model.session_id;
-                                ui_frame->selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
                                 ui_frame->session = model.session;
                                 ui_frame->ui = ui_draw_state;
                                 ui_frame->settings = projection_settings;
@@ -5271,7 +5528,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (!valid && result)
     {
         result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                 "Runtime execution assertions failed.");
+            std::format("Runtime execution assertions failed (tick={}, frames={}, particles={}, dropped input={}, dropped events={}).",
+                final_tick, rendered_frames, rendered_particles,
+                channels.dropped_input_edges.load(), channels.dropped_presentation_events.load()));
     }
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS

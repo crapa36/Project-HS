@@ -67,14 +67,16 @@ void Geometry(R &r, GeometryDescriptorStorage &v)
     });
     Rows(r,v.ground_support,56,[](R &in,ExpandedVertex &x){
         Numbers(in,x.position); Numbers(in,x.normal); Numbers(in,x.bone_indices);
-        Numbers(in,x.bone_weights); Numbers(in,x.uv); Numbers(in,x.tangent); in.Fields(x.material_index,x.reserved);
+        Numbers(in,x.bone_weights); Numbers(in,x.uv); Numbers(in,x.tangent); in.Fields(x.material_index,x.optical_component_id);
     });
     r.Fields(v.payload_ready);
 }
 void Material(R &r, MaterialDescriptorStorage &s)
 {
     auto &v=s.value;
-    r.Fields(v.asset_id.value,v.bulk_index,v.kind,v.surface.capability_mask,v.surface.varying_mask);
+    r.Fields(v.asset_id.value,v.bulk_index,v.kind,v.surface.capability_mask,v.surface.varying_mask,
+        v.surface.has_static_solid_transmission_profile);
+    Numbers(r,v.surface.solid_transmission_profile);
     Blob(r,v.parameter_layout);
     Rows(r,s.defaults,8,[](R &in,MaterialParameterSlot &x){Numbers(in,x.words);});
     Rows(r,s.programs,20,[&](R &in,MaterialProgramDescriptor &x){
@@ -140,7 +142,7 @@ void Atlas(R &r,VfxMeshAtlasDescriptor &v)
 
 std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v)
 {
-    CanonicalBytes b("project_hs.renderer_catalog",1);
+    CanonicalBytes b("project_hs.renderer_catalog",2);
     b.Sequence(v.bulks,[](CanonicalBytes &out,const auto &x){out.Scalar(x.asset_id.value);content_identity::Bulk(out,x.range);});
     b.Sequence(v.textures,content_identity::Texture); b.Sequence(v.geometry,content_identity::Geometry);
     b.Sequence(v.materials,content_identity::Material); b.Sequence(v.characters,content_identity::Character);
@@ -155,10 +157,10 @@ Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack
 {
     try
     {
-        R r(bytes,"project_hs.renderer_catalog",1); RendererCatalogData next;
+        R r(bytes,"project_hs.renderer_catalog",2); RendererCatalogData next;
         Rows(r,next.bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
         Rows(r,next.texture_storage,48,Texture); Rows(r,next.geometry_storage,100,Geometry);
-        Rows(r,next.material_storage,64,Material); Rows(r,next.character_storage,120,Character);
+        Rows(r,next.material_storage,84,Material); Rows(r,next.character_storage,120,Character);
         Rows(r,next.animation_storage,64,Animation);
         r.Fields(next.has_atlas); if(next.has_atlas) Atlas(r,next.atlas);
         Rows(r,next.source_revisions,24,[&](R &in,RendererSourceRevision &x){in.Fields(x.asset_id.value);next.revision_strings.emplace_back(in.String());x.product_id=next.revision_strings.back();Blob(in,x.digest);});

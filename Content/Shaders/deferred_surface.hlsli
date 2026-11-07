@@ -59,14 +59,19 @@ HsSurfaceClosure HsReflectionDecodeClosure(uint2 metadata,float4 base,float2 pac
     return HsApplyDecalSurfaceEmission(closure,activePixel);
 }
 
-HsSurfaceClosure HsReflectionLoadClosure(uint2 activePixel)
+HsSurfaceClosure HsReflectionLoadClosure(uint2 activePixel,uint2 metadata,float4 base,float2 packed_normal,float4 material)
 {
     uint4 plane0=0u,plane1=0u;
     if(MaterialSidecarInfo.z>0u) plane0=SurfaceSidecar0.Load(int3(activePixel,0));
     if(MaterialSidecarInfo.z>1u) plane1=SurfaceSidecar1.Load(int3(activePixel,0));
-    return HsReflectionDecodeClosure(HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(activePixel,0))),
+    return HsReflectionDecodeClosure(metadata,base,packed_normal,material,plane0,plane1,activePixel);
+}
+
+HsSurfaceClosure HsReflectionLoadClosure(uint2 activePixel)
+{
+    return HsReflectionLoadClosure(activePixel,HsUnpackSurfaceMetadata(GBufferMetadata.Load(int3(activePixel,0))),
         GBufferBase.Load(int3(activePixel,0)),GBufferNormal.Load(int3(activePixel,0)),
-        GBufferMaterial.Load(int3(activePixel,0)),plane0,plane1,activePixel);
+        GBufferMaterial.Load(int3(activePixel,0)));
 }
 #endif
 

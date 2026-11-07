@@ -54,6 +54,27 @@ Result Native(std::string_view name, HRESULT error)
         std::to_string(static_cast<std::int32_t>(error)) + ").");
 }
 std::uint64_t Align(std::uint64_t value) { return (value + 255u) & ~UINT64(255); }
+struct HlodBufferLayout
+{
+    std::uint64_t groups{}, proxies{}, upload{};
+    std::array<std::uint64_t, BufferCount> frame{};
+};
+HlodBufferLayout BufferLayout(const render_data::SceneHlod &scene, std::uint32_t slots,
+                              std::uint32_t frames)
+{
+    HlodBufferLayout layout;
+    layout.groups = std::max(UINT64(64), UINT64(scene.groups.size()) * sizeof(GpuGroup));
+    layout.proxies = std::max(UINT64(48), UINT64(scene.proxies.size()) * sizeof(GpuProxy));
+    layout.frame = {
+        std::max(UINT64(32), UINT64(scene.members.size()) * 32), std::max(UINT64(48), UINT64(scene.proxies.size()) * 48),
+        std::max(UINT64(16), UINT64(scene.proxies.size()) * 16), std::max(UINT64(16), UINT64(scene.groups.size()) * 16),
+        UINT64(slots) * 16, std::max(UINT64(16), UINT64(scene.proxies.size()) * 16),
+        std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 24), std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 16),
+        std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 4), std::max(UINT64(4), UINT64(scene.pages.size()) * 4), UINT64(64)};
+    layout.upload = Align(layout.groups) + Align(layout.proxies) +
+        Align(kConstantStride + layout.frame[Members] + layout.frame[Bindings] + layout.frame[Buckets]) * frames;
+    return layout;
+}
 bool ExternalShape(const HlodExternalBuffer &b, std::uint64_t minimum)
 {
     if(!b.resource||(b.contract&&b.contract->native_resource!=b.resource))return false;
@@ -72,16 +93,21 @@ bool ValidView(const GpuHlodView &view)
         view.error_policy.y > 0 && view.error_policy.z >= 0 && view.error_policy.z < 1 &&
         (view.error_policy.w == 0 || view.error_policy.w == 1);
 }
-Result BufferResource(D3D12MA::Allocator *allocator, std::uint64_t bytes, bool upload,
-                      bool uav, AllocationResource &output)
+D3D12_RESOURCE_DESC BufferDescription(std::uint64_t bytes, bool uav)
 {
-    D3D12MA::ALLOCATION_DESC allocation{};
-    allocation.HeapType = upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC description{};
     description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; description.Width = bytes;
     description.Height = 1; description.DepthOrArraySize = 1; description.MipLevels = 1;
     description.SampleDesc.Count = 1; description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     description.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    return description;
+}
+Result BufferResource(D3D12MA::Allocator *allocator, std::uint64_t bytes, bool upload,
+                      bool uav, AllocationResource &output)
+{
+    D3D12MA::ALLOCATION_DESC allocation{};
+    allocation.HeapType = upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
+    const auto description = BufferDescription(bytes, uav);
     const auto result = allocator->CreateResource(&allocation, &description,
         upload ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON, nullptr,
         &output.allocation, IID_PPV_ARGS(output.resource.ReleaseAndGetAddressOf()));
@@ -158,7 +184,7 @@ struct HlodStorage
     std::uint32_t generation{}, slot_capacity{}, descriptor_stride{}, maximum_depth{1};
     HlodSlotSet member_slot_bits, command_ordinals;
     std::uint32_t history_slot{UINT32_MAX};
-    std::uint64_t bytes{}, metadata_bytes{}, upload_stride{};
+    std::uint64_t bytes{}, default_bytes{}, upload_bytes{}, metadata_bytes{}, upload_stride{};
     std::array<std::uint64_t, 3> snapshot_offsets{};
     CompletionSet completion;
     std::byte *mapped{};
@@ -197,7 +223,34 @@ struct HlodSystem::Impl
 HlodSystem::HlodSystem() : impl_(std::make_unique<Impl>()) {}
 HlodSystem::~HlodSystem() = default;
 std::uint64_t HlodCandidate::AllocatedBytes() const noexcept { return storage_ ? storage_->bytes : 0; }
+std::uint64_t HlodCandidate::DefaultBytes() const noexcept { return storage_ ? storage_->default_bytes : 0; }
+std::uint64_t HlodCandidate::UploadBytes() const noexcept { return storage_ ? storage_->upload_bytes : 0; }
 std::uint64_t HlodSystem::AllocatedBytes() const noexcept { return impl_->storage ? impl_->storage->bytes : 0; }
+Result HlodSystem::AllocationRequirements(ID3D12Device *device, const render_data::SceneHlod &scene,
+    std::uint32_t slots, std::uint32_t frames, std::uint64_t &default_bytes, std::uint64_t &upload_bytes) const
+{
+    default_bytes = upload_bytes = 0;
+    if (!device || !slots || slots > 1'000'000 || !frames || frames > 8)
+        return Failure(ErrorCode::InvalidArgument, "Invalid HLOD allocation requirements inputs.");
+    try { render_data::ValidateSceneHlod(scene); }
+    catch (const std::exception &error) { return Failure(ErrorCode::InvalidArgument, error.what()); }
+    const auto layout = BufferLayout(scene, slots, frames);
+    const auto add = [&](std::uint64_t bytes, bool uav, std::uint64_t &total) {
+        const auto description = BufferDescription(bytes, uav);
+        const auto size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
+        if (!size || size == UINT64_MAX || size > UINT64_MAX - total) return false;
+        total += size; return true;
+    };
+    if (!add(layout.groups, false, default_bytes) || !add(layout.proxies, false, default_bytes))
+        return Failure(ErrorCode::InvalidArgument, "Invalid HLOD metadata allocation size.");
+    for (std::uint32_t frame = 0; frame < frames; ++frame)
+        for (std::uint32_t i = 0; i < BufferCount; ++i)
+            if (!add(layout.frame[i], i >= Choice, default_bytes))
+                return Failure(ErrorCode::InvalidArgument, "Invalid HLOD scratch allocation size.");
+    if (!add(layout.upload, false, upload_bytes))
+        return Failure(ErrorCode::InvalidArgument, "Invalid HLOD upload allocation size.");
+    return Result::Success();
+}
 CompletionSet HlodSystem::FrameCompletion(std::uint32_t slot) const noexcept
 {
     return impl_->storage && slot < impl_->storage->frames.size() ? impl_->storage->frames[slot].completion : CompletionSet{};
@@ -249,28 +302,24 @@ Result HlodSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
         target.object_low = std::uint32_t(source.object_id); target.object_high = std::uint32_t(source.object_id >> 32u);
         target.content_generation = generation;
     }
-    const auto group_bytes = std::max(UINT64(64), UINT64(groups.size()) * sizeof(GpuGroup));
-    const auto proxy_bytes = std::max(UINT64(48), UINT64(proxies.size()) * sizeof(GpuProxy));
-    const std::array<UINT64, BufferCount> widths{
-        std::max(UINT64(32), UINT64(scene.members.size()) * 32), std::max(UINT64(48), UINT64(scene.proxies.size()) * 48),
-        std::max(UINT64(16), UINT64(scene.proxies.size()) * 16), std::max(UINT64(16), UINT64(scene.groups.size()) * 16),
-        UINT64(slot_capacity) * 16, std::max(UINT64(16), UINT64(scene.proxies.size()) * 16),
-        std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 24), std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 16),
-        std::max(UINT64(4), UINT64(scene.proxies.size()) * 4 * 4), std::max(UINT64(4), UINT64(scene.pages.size()) * 4), UINT64(64)};
+    const auto layout = BufferLayout(scene, slot_capacity, frame_slots);
+    const auto group_bytes = layout.groups, proxy_bytes = layout.proxies;
+    const auto &widths = layout.frame;
     if (auto result = BufferResource(allocator, group_bytes, false, false, next->groups); !result) return result;
     if (auto result = BufferResource(allocator, proxy_bytes, false, false, next->proxies); !result) return result;
-    next->bytes += next->groups.allocation->GetSize() + next->proxies.allocation->GetSize();
+    next->default_bytes += next->groups.allocation->GetSize() + next->proxies.allocation->GetSize();
     for (auto &frame : next->frames)
         for (std::uint32_t i = 0; i < BufferCount; ++i)
         {
             if (auto result = BufferResource(allocator, widths[i], false, i >= Choice, frame.buffers[i]); !result) return result;
-            next->bytes += frame.buffers[i].allocation->GetSize();
+            next->default_bytes += frame.buffers[i].allocation->GetSize();
         }
     next->metadata_bytes = Align(group_bytes) + Align(proxy_bytes);
     next->snapshot_offsets = {kConstantStride, kConstantStride + widths[Members], kConstantStride + widths[Members] + widths[Bindings]};
     next->upload_stride = Align(next->snapshot_offsets[2] + widths[Buckets]);
     if (auto result = BufferResource(allocator, next->metadata_bytes + next->upload_stride * frame_slots, true, false, next->upload); !result) return result;
-    next->bytes += next->upload.allocation->GetSize();
+    next->upload_bytes = next->upload.allocation->GetSize();
+    next->bytes = next->default_bytes + next->upload_bytes;
     void *mapped{}; D3D12_RANGE no_read{0, 0};
     auto native = next->upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(native)) return Native("Map HLOD snapshots", native);

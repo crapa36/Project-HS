@@ -470,9 +470,10 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         for (std::size_t i = 0; i < ids.size(); ++i) if (ids[i] == id) return static_cast<SkillKind>(i);
         return SkillKind::Count;
     };
-    const auto relic_kind = [](std::string_view id) {
-        constexpr std::array ids{"relic.bleed_kill_heal", "relic.burn_propagation", "relic.kill_cooldown_surge", "relic.bleed_burn_explosion", "relic.radial_basic_attack", "relic.basic_kill_tracker", "relic.movement_echo", "relic.alternating_skills", "relic.different_skill_tracker", "relic.damage_knockback", "relic.once_revive", "relic.combat_hit_chain", "relic.projectile_cadence_reward", "relic.pre_damage_guard", "relic.slow_synergy", "relic.area_resonance", "relic.boss_pressure", "relic.hit_streak_reward", "relic.pickup_reward", "relic.low_health_survival"};
-        for (std::size_t i = 0; i < ids.size(); ++i) if (ids[i] == id) return static_cast<RelicKind>(i);
+    const auto relic_kind = [&](std::string_view id) {
+        const auto &entries = sources.documents.at("relics")["entries"];
+        for (std::size_t i = 0; i < entries.size(); ++i)
+            if (entries[i]["id"].get<std::string>() == id) return static_cast<RelicKind>(i);
         return RelicKind::Count;
     };
     data.character_initial.starting_active_skill_ids.fill(SkillKind::Count);
@@ -937,6 +938,8 @@ BuiltGameData BuildGameData(const ContentSources &sources)
                                              std::to_string(index),
                                  "obstacle requires enough boundary clearance for the largest actor");
     }
+    if (!SimulationRulesHaveSafeProgression(data))
+        ThrowValidationError("level", "$", "invalid progression or projectile array bounds");
     return content;
 }
 

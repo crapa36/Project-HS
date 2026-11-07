@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <functional>
@@ -1521,6 +1522,43 @@ ClosureReflection AnalyzeClosure(const MaterialGraph &graph)
 }
 
 ClosureReflection AnalyzeClosure(const PreparedMaterial &material) { return material.impl_->reflection; }
+std::optional<std::array<std::uint32_t, 4>>
+SolidTransmissionProfileBits(const MaterialGraph &graph)
+{
+    if (graph.closure_output == kNoMaterialInput || graph.closure_output >= graph.nodes.size())
+        return std::nullopt;
+    auto node_index = graph.closure_output;
+    while (node_index != kNoMaterialInput && node_index < graph.nodes.size())
+    {
+        const auto &node = graph.nodes[node_index];
+        if (node.op == MaterialOp::SolidTransmissionClosure)
+        {
+            const auto ior_index = node.inputs[2];
+            const auto absorption_index = node.inputs[3];
+            if (ior_index >= graph.nodes.size() || absorption_index >= graph.nodes.size())
+                return std::nullopt;
+            const auto &ior = graph.nodes[ior_index];
+            const auto &absorption = graph.nodes[absorption_index];
+            if (ior.op != MaterialOp::Constant || ior.type != MaterialType::Float ||
+                absorption.op != MaterialOp::Constant || absorption.type != MaterialType::Float3 ||
+                !std::ranges::all_of(ior.value, [](float value) { return std::isfinite(value); }) ||
+                !std::ranges::all_of(absorption.value, [](float value) { return std::isfinite(value); }))
+                return std::nullopt;
+            return std::array{
+                std::bit_cast<std::uint32_t>(ior.value[0]),
+                std::bit_cast<std::uint32_t>(absorption.value[0]),
+                std::bit_cast<std::uint32_t>(absorption.value[1]),
+                std::bit_cast<std::uint32_t>(absorption.value[2])};
+        }
+        node_index = node.inputs[0];
+    }
+    return std::nullopt;
+}
+std::optional<std::array<std::uint32_t, 4>>
+SolidTransmissionProfileBits(const PreparedMaterial &material)
+{
+    return SolidTransmissionProfileBits(material.Graph());
+}
 MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material) { return material.impl_->context_demand; }
 
 std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view function_name)

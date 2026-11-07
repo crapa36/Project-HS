@@ -121,9 +121,9 @@ inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
 
 struct UiProbePixels { UINT width{}, height{}; std::vector<std::uint8_t> rgba; };
 inline Result CaptureUiProbePixels(D3D12Renderer &renderer, const std::filesystem::path &path,
-                                   UiProbePixels &out)
+                                   UiProbePixels &out, ViewId view_id = kMainRenderViewId)
 {
-    if (auto captured = renderer.Capture({.path = path}); !captured) return captured;
+    if (auto captured = renderer.Capture({.view_id = view_id, .path = path}); !captured) return captured;
     const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return Failure("UI probe COM initialization failed.");
     struct Apartment { HRESULT result; ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); } } cleanup{apartment};
@@ -371,7 +371,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 .distortions = admitted_distortions, .decals = admitted,
                 .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
                 .ground_gap_angles = ground_gap_pool},
-            .delta_seconds = 1.0f / 60.0f,
+            .devtools = {.delta_seconds = 1.0f / 60.0f},
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
         if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
         if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
@@ -472,6 +472,12 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (rejected_world || rejected_world.Code() != ErrorCode::InvalidArgument ||
                 !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
                 return Failure("A VFX batch from another session must be rejected before any native submission.");
+            auto invalid_delta = input;
+            invalid_delta.devtools.delta_seconds = std::numeric_limits<float>::quiet_NaN();
+            const auto rejected_delta = renderer.Render(invalid_delta, result);
+            if (rejected_delta || rejected_delta.Code() != ErrorCode::InvalidArgument ||
+                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                return Failure("Invalid tool frame timing must be rejected before any native submission.");
             for (const auto fraction : {std::numeric_limits<float>::quiet_NaN(), -0.1f, 1.1f})
             {
                 auto invalid_sample = input;
@@ -636,7 +642,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .distortions = package2_distortions, .decals = decals,
             .world_batch = held_world, .distortion_gap_angles = distortion_gap_pool,
             .ground_gap_angles = ground_gap_pool},
-        .delta_seconds = 1.0f / 60.0f,
+        .devtools = {.delta_seconds = 1.0f / 60.0f},
         .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
     RendererFrameResult overwrite_result;
     if (auto submitted = renderer.Render(overwrite, overwrite_result); !submitted) return submitted;
@@ -654,8 +660,18 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     if (!evidence.stale_diagnostics_rejected)
         return Failure("Main geometry capture must reject shared frame buffers overwritten by an auxiliary view.");
     evidence.captures = {artifacts / "owned-view-preview-a.png", artifacts / "owned-view-capture-b.png"};
-    if (auto captured = renderer.Capture({.view_id = kOwnedViewProbePreview, .path = evidence.captures[0]}); !captured) return captured;
-    if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture, .path = evidence.captures[1]}); !captured) return captured;
+    std::array<UiProbePixels, 2> view_images;
+    const std::array capture_views{kOwnedViewProbePreview, kOwnedViewProbeCapture};
+    const std::array capture_extents{overwrite_result.views[0].rendered_view.output_extent,
+                                    evidence.frames[2][2].rendered_view.output_extent};
+    for (std::size_t index = 0; index < view_images.size(); ++index)
+    {
+        if (auto captured = CaptureUiProbePixels(renderer, evidence.captures[index], view_images[index], capture_views[index]);
+            !captured) return captured;
+        if (view_images[index].width != capture_extents[index].width ||
+            view_images[index].height != capture_extents[index].height)
+            return Failure("Color capture did not preserve the requested view's output extent.");
+    }
     evidence.hdr_capture = artifacts / "owned-view-capture-b.hdr";
     if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture,
             .path = evidence.hdr_capture, .kind = CaptureKind::HdrColor}); !captured) return captured;
@@ -692,7 +708,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
         const RenderPackage ui_package{.views = std::span(&ui_view, 1), .snapshots = snapshots,
             .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
                 .stateful_target = snapshots.current.header.tick}},
-            .ui_draw_content = next, .delta_seconds = 0.0f,
+            .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = next,
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
         RendererFrameResult ui_result;
         if (auto rendered = renderer.Render(ui_package, ui_result); !rendered) return rendered;
@@ -754,7 +770,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     const RenderPackage restored_package{.views = std::span(&restored_view, 1), .snapshots = snapshots,
         .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
             .stateful_target = snapshots.current.header.tick}},
-        .ui_draw_content = ui, .delta_seconds = 0.0f,
+        .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = ui,
         .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
     if (auto rendered = renderer.Render(restored_package, evidence.final_frame); !rendered) return rendered;
     return Result::Success();

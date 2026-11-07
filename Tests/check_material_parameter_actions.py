@@ -24,9 +24,7 @@ def digest(path: Path) -> str:
 
 def copy_source_tree(repo: Path, destination: Path, material_names: tuple[str, ...]) -> None:
     for relative in ("Schemas/material_graph.schema.json",
-                     "Source/RenderData/Public/hs/render_data/material_schema.hpp",
-                     "Source/Apps/AssetPipeline/render_shader_bindings.hpp",
-                     "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp"):
+                     "Source/RenderData/Public/hs/render_data/material_schema.hpp"):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo / relative, target)

@@ -31,7 +31,6 @@ class SkinCache
     [[nodiscard]] SkinCacheSample Resolve(
         RenderSceneInstanceKey key, const RenderInstance &instance,
         const AnimationPoseRef *pose, float undeformed_radius);
-    void EndFrame();
     void Commit() noexcept;
     void Abort() noexcept;
     void Clear() noexcept;

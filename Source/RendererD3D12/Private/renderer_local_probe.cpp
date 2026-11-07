@@ -125,7 +125,7 @@ struct LocalProbeStorage
     CompletionSet completion;
     bool uploaded{},package_baked{},usable{true};
 #if defined(HS_OFFLINE_PROBE_BAKER)
-    std::uint32_t rtv_stride{},captured_views{};
+    std::uint32_t rtv_stride{},captured_views{},capture_end{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
     std::array<std::byte,32> capture_identity{};
@@ -269,6 +269,7 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
                 node.capture_distance=capture_distance;
                 s->probes.push_back(node);
             }
+        s->capture_end=static_cast<std::uint32_t>(s->probes.size()*6);
 #endif
         s->sh_bytes=baked?p.cosine_sh.size()+p.cells.size()*80:s->probes.size()*9*16;
         const bool grid_baked=baked && grid.NodeCount();
@@ -415,7 +416,7 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
         return Failure(ErrorCode::InvalidState,"Export requires a captured layout. This scene already owns a baked package.");
     if(impl_->pending.graph || !s || !s->usable || !s->current_request || !s->bake_submitted ||
         (!s->package_baked&&s->finished_capture_identity!=s->capture_identity) ||
-        !s->scene || s->captured_views!=s->probes.size()*6)
+        !s->scene || s->captured_views!=s->capture_end)
         return Failure(ErrorCode::InvalidState,"Scene-probe export requires a complete current native capture (views=" +
             std::to_string(s ? s->captured_views : 0) + "/" + std::to_string(s ? s->probes.size()*6 : 0) +
             ", submitted=" + std::to_string(s && s->bake_submitted) + ", published=" +
@@ -661,7 +662,7 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
     if(in.scene&&plan.bake_submitted&&plan.scene==in.scene&&plan.revisions==in.revisions&&
         s->bake_completion.IsSatisfiedBy(in.completed))plan.published=true;
     plan.current=plan.scene==in.scene&&plan.revisions==in.revisions;
-    const auto total=static_cast<std::uint32_t>(s->probes.size()*6);
+    const auto total=s->capture_end;
     if(plan.current&&!plan.published&&!plan.bake_submitted&&plan.capture_first<total&&
         in.max_cube_views&&in.draw_static&&in.capture_identity_valid&&in.capture_sources_ready&&plan.capture_identity==in.capture_identity)
         plan.capture_count=std::min(in.max_cube_views,total-plan.capture_first);
@@ -677,7 +678,7 @@ LocalProbeBakeStatus LocalProbeSystem::BakeStatus(const CompletionSet &completed
 {
     const auto &s=impl_->storage;
     if(!s||!s->usable)return {};
-    const auto total=static_cast<std::uint32_t>(s->probes.size()*6);
+    const auto total=s->capture_end;
     return {s->capture_sources_ready,s->bake_submitted&&s->captured_views==total&&
         (s->package_baked||s->finished_capture_identity==s->capture_identity)&&
         s->bake_completion.IsSatisfiedBy(completed)};
@@ -956,7 +957,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
                 return Result::Success();
             });
             }
-            pending.finished_bake=pending.captured_views==s->probes.size()*6;
+            pending.finished_bake=pending.captured_views==s->capture_end;
         }
     }
 #endif
@@ -1014,7 +1015,20 @@ bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticR
         if(!s->capture_completion.IsSatisfiedBy(completed)) return false;
         return true;
     }
-    return !s->published && !s->bake_submitted && s->captured_views<s->probes.size()*6;
+    return !s->published && !s->bake_submitted && s->captured_views<s->capture_end;
+}
+
+Result LocalProbeSystem::BeginOfflineIteration(const CompletionSet &completed,bool reflections_only)
+{
+    const auto &s=impl_->storage;
+    if (!s || s->package_baked || !s->usable || impl_->pending.graph || !s->bake_submitted ||
+        !s->completion.IsSatisfiedBy(completed) || !s->bake_completion.IsSatisfiedBy(completed) ||
+        !s->description.grid.NodeCount())
+        return Failure(ErrorCode::InvalidState,"Probe iteration requires a completed grid capture.");
+    s->captured_views=0;
+    s->capture_end=static_cast<std::uint32_t>((reflections_only?s->reflection_count:s->probes.size())*6);
+    s->bake_submitted=false; s->published=false;
+    return Result::Success();
 }
 
 #endif

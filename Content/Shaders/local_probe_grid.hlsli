@@ -43,14 +43,16 @@ HsProbeGridCell HsLocateProbeCell(float3 world)
     c.metadata=uint(header.reserved1.w)*9u+index*5u;
     return c;
 }
-float3 HsLocalProbeGridIrradiance(HsProbeGridCell c,float basis[9])
+void HsLocalProbeGridIrradianceComponents(HsProbeGridCell c,float basis[9],bool need_back,
+    out float3 front,out float3 back)
 {
     const uint3 sub=min(uint3(c.fraction*4),3u);
     const uint index=sub.x+4*sub.y+16*sub.z;
     const uint4 packed=asuint(HsLocalProbeCosineSh[c.metadata+index/16u]);
     const uint mask=(packed[(index%16u)/4u]>>(8u*(index%4u)))&255u;
-    if(!mask) return 0; // Interior with no reachable samples receives no diffuse sky through walls.
-    float3 irradiance=0; float total=0;
+    front=0; back=0;
+    if(!mask) return; // No reachable samples means no diffuse sky through walls.
+    float total=0;
     [loop] for(uint corner=0;corner<8;++corner)
     {
         if(!(mask&(1u<<corner))) continue;
@@ -60,10 +62,28 @@ float3 HsLocalProbeGridIrradiance(HsProbeGridCell c,float basis[9])
         if(weight==0) continue;
         const uint3 node=c.cell+bit;
         const uint row=9u*(node.x+c.dims.x*(node.y+c.dims.y*node.z));
-        float3 value=0;
-        [unroll] for(uint k=0;k<9;++k) value+=basis[k]*HsLocalProbeCosineSh[row+k].rgb;
-        irradiance+=weight*value; total+=weight;
+        float3 front_value=0,back_value=0;
+        [unroll] for(uint k=0;k<9;++k)
+        {
+            const float3 coefficient=HsLocalProbeCosineSh[row+k].rgb;
+            front_value+=basis[k]*coefficient;
+            if(need_back) back_value+=(k>0u && k<4u ? -basis[k] : basis[k])*coefficient;
+        }
+        front+=weight*front_value;
+        if(need_back) back+=weight*back_value;
+        total+=weight;
     }
-    return total>0?max(irradiance/total,0):0;
+    front=total>0?max(front/total,0):0;
+    if(need_back) back=total>0?max(back/total,0):0;
+}
+float3 HsLocalProbeGridIrradiance(HsProbeGridCell c,float basis[9])
+{
+    float3 front,back;
+    HsLocalProbeGridIrradianceComponents(c,basis,false,front,back);
+    return front;
+}
+void HsLocalProbeGridIrradiancePair(HsProbeGridCell c,float basis[9],out float3 front,out float3 back)
+{
+    HsLocalProbeGridIrradianceComponents(c,basis,true,front,back);
 }
 #endif

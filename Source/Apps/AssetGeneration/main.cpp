@@ -6,7 +6,6 @@
 #include <Windows.h>
 #include <bcrypt.h>
 #else
-#include <hs/core/sha256.hpp>
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
@@ -15,6 +14,7 @@
 #include <nlohmann/json.hpp>
 #include <hs/asset_manifest/generation_lock.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
+#include <hs/core/sha256.hpp>
 
 #include <algorithm>
 #include <array>
@@ -93,67 +93,6 @@ std::string Hex(const std::array<unsigned char, 32> &bytes)
     return result;
 }
 
-#ifdef _WIN32
-class Sha256
-{
-  public:
-    Sha256()
-    {
-        if (BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM, nullptr,
-                                        0) < 0)
-        {
-            throw std::runtime_error("BCrypt SHA-256 initialization failed");
-        }
-        if (BCryptCreateHash(algorithm_, &hash_, nullptr, 0, nullptr, 0, 0) < 0)
-        {
-            BCryptCloseAlgorithmProvider(algorithm_, 0);
-            algorithm_ = nullptr;
-            throw std::runtime_error("BCrypt SHA-256 initialization failed");
-        }
-    }
-
-    Sha256(const Sha256 &) = delete;
-    Sha256 &operator=(const Sha256 &) = delete;
-
-    ~Sha256()
-    {
-        if (hash_)
-        {
-            BCryptDestroyHash(hash_);
-        }
-        if (algorithm_)
-        {
-            BCryptCloseAlgorithmProvider(algorithm_, 0);
-        }
-    }
-
-    void Add(const unsigned char *data, std::size_t size)
-    {
-        if (size > std::numeric_limits<ULONG>::max() ||
-            BCryptHashData(hash_, const_cast<PUCHAR>(data),
-                           static_cast<ULONG>(size), 0) < 0)
-        {
-            throw std::runtime_error("BCrypt SHA-256 update failed");
-        }
-    }
-
-    std::string Finish()
-    {
-        std::array<unsigned char, 32> result{};
-        if (BCryptFinishHash(hash_, result.data(),
-                             static_cast<ULONG>(result.size()), 0) < 0)
-        {
-            throw std::runtime_error("BCrypt SHA-256 finish failed");
-        }
-        return Hex(result);
-    }
-
-  private:
-    BCRYPT_ALG_HANDLE algorithm_ = nullptr;
-    BCRYPT_HASH_HANDLE hash_ = nullptr;
-};
-
-#else
 class Sha256
 {
   public:
@@ -172,7 +111,6 @@ class Sha256
   private:
     hs::Sha256Stream hash_;
 };
-#endif
 
 std::string HashBytes(std::string_view bytes)
 {
@@ -1169,7 +1107,6 @@ void Compose(const fs::path &root, const std::string &scope,
         {
             fs::create_directory(generation / "products");
             VerifyProducts(root, source_products, "-", generation / "products");
-            VerifyProducts(root, products, "-");
             // Publishing the canonical manifest commits the immutable snapshot.
             // Atomic visibility covers process crashes, not power-loss durability.
             CheckPath(root, manifest.lexically_relative(root), "-");
@@ -1358,7 +1295,8 @@ std::string LoadPointerId(const fs::path &root, const fs::path &relative,
                           const std::string *expected_scope,
                           bool allow_legacy_for_gc = false,
                           const std::set<std::string> *unpublished_generations = nullptr,
-                          const Json *snapshot = nullptr)
+                          const Json *snapshot = nullptr,
+                          GenerationData *loaded_generation = nullptr)
 {
     CheckPath(root, relative, "-");
     const Json pointer = snapshot ? *snapshot : ReadJson(root / relative, "missing-pointer", "-");
@@ -1399,10 +1337,11 @@ std::string LoadPointerId(const fs::path &root, const fs::path &relative,
     if (allow_legacy_for_gc && unpublished_generations &&
         unpublished_generations->contains(generation_id))
         return generation_id;
-    const auto generation = LoadGeneration(root, generation_id, allow_legacy_for_gc);
+    auto generation = LoadGeneration(root, generation_id, allow_legacy_for_gc);
     if (generation.scope != pointer_scope ||
         ActionIds(generation.products) != pointer_actions)
         Fail("invalid-pointer", "-", "pointer/manifest mismatch");
+    if (loaded_generation) *loaded_generation = std::move(generation);
     return generation_id;
 }
 
@@ -1429,8 +1368,7 @@ struct SelectedSnapshot
         // copied. Atomic publication may replace the pointer without replacing
         // this snapshot; GC must keep it until the reader lease ends.
         lease = hs::GenerationFileLock(root / manifest, hs::GenerationFileLock::Mode::Shared);
-        id = LoadPointerId(root, relative, &scope, false, nullptr, &pointer);
-        generation = LoadGeneration(root, id);
+        id = LoadPointerId(root, relative, &scope, false, nullptr, &pointer, &generation);
     }
 };
 

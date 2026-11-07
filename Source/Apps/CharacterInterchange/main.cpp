@@ -20,9 +20,11 @@ int main(int argc, char **argv)
             const auto destination = directory / name;
             if (std::filesystem::exists(destination))
                 throw std::runtime_error("refusing to overwrite existing output: " + destination.string());
-            std::ofstream stream(destination, std::ios::binary);
+            std::ofstream stream(destination, std::ios::binary | std::ios::out | std::ios::noreplace);
             if (!stream.write(data, static_cast<std::streamsize>(size)))
                 throw std::runtime_error("cannot write output: " + destination.string());
+            stream.close();
+            if (!stream) throw std::runtime_error("cannot close output: " + destination.string());
         };
         const auto source = imported.runtime.source_metadata.dump(2);
         const nlohmann::json report{{"schema_version",1},{"status","compatibility_projection_only"},

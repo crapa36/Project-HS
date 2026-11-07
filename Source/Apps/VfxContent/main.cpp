@@ -223,9 +223,12 @@ void Produce(std::string_view mode, const fs::path &source_root,
     std::vector<hs::content::ParticleSpriteSource> sprites;
     std::vector<CatalogTexture> textures;
     Json document;
+    std::string mesh_bytes;
     if (mode == "particle-definitions")
     {
-        action.inputs.push_back(ap::HashInput("ContentSource/GameData/particles.json", particles));
+        const auto bytes = ap::ReadBytes(particles);
+        action.inputs.push_back({"ContentSource/GameData/particles.json", particles, ap::Sha256Bytes(Bytes(bytes))});
+        document = Json::parse(bytes);
         expected.push_back(ProductId("particle_effects.hsbin"));
     }
     else if (mode == "masks")
@@ -249,8 +252,9 @@ void Produce(std::string_view mode, const fs::path &source_root,
     }
     else if (mode == "vfx-runtime")
     {
-        action.inputs.push_back(ap::HashInput("ContentSource/VFX/production_spec.v4.json", spec_path));
-        document = ReadJson(spec_path);
+        const auto bytes = ap::ReadBytes(spec_path);
+        action.inputs.push_back({"ContentSource/VFX/production_spec.v4.json", spec_path, ap::Sha256Bytes(Bytes(bytes))});
+        document = Json::parse(bytes);
         textures = Catalog(document, source_root);
         for (const auto &texture : textures)
         {
@@ -262,7 +266,8 @@ void Produce(std::string_view mode, const fs::path &source_root,
     }
     else if (mode == "mesh-atlas")
     {
-        action.inputs.push_back(ap::HashInput("ContentSource/VFX/Meshes/vfx_mesh_atlas.json", mesh_path));
+        mesh_bytes = ap::ReadBytes(mesh_path);
+        action.inputs.push_back({"ContentSource/VFX/Meshes/vfx_mesh_atlas.json", mesh_path, ap::Sha256Bytes(Bytes(mesh_bytes))});
         expected.push_back(ProductId("vfx_mesh_atlas.hsbin"));
     }
     else
@@ -281,7 +286,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
         std::string error;
         if (mode == "particle-definitions")
         {
-            document = ReadJson(particles);
             const bool written = hs::content::WriteCookedParticleEffects(
                 stage / "particle_effects.hsbin", document, sprites, error);
             Require(written, "particle definitions: " + error);
@@ -290,32 +294,49 @@ void Produce(std::string_view mode, const fs::path &source_root,
         }
         else if (mode == "masks")
         {
+            const auto snapshot = stage / "source/ContentSource/Textures/VFX";
+            fs::create_directories(snapshot);
+            std::set<std::string> copied_files;
+            for (const auto &sprite : sprites)
+            {
+                const auto filename = sprite.file.string();
+                if (!copied_files.insert(filename).second) continue;
+                const auto copied = ap::CopyAndHashInput("ContentSource/Textures/VFX/" + filename,
+                    texture_root / filename, snapshot / filename);
+                const auto original = std::ranges::find(action.inputs, copied.logical_id, &ap::Input::logical_id);
+                Require(original != action.inputs.end() && copied.digest == original->digest,
+                    "VFX mask source changed during cooking");
+            }
             ComScope com;
             const bool written = hs::content::WriteVfxMaskArray(
-                stage / "vfx_masks.dds", sprites, texture_root, error);
+                stage / "vfx_masks.dds", sprites, snapshot, error);
             Require(written, "VFX masks: " + error);
             AddProduct(products, stage, ProductId("vfx_masks.dds"), "vfx_masks.dds");
         }
         else if (mode == "vfx-runtime")
         {
             hs::content::ValidateVfxSpecification(document);
-            hs::content::ValidateVfxTextures(document, source_root);
+            const auto snapshot_root = stage / "source";
+            const auto snapshot = snapshot_root / "ContentSource/Textures/VFX";
+            fs::create_directories(snapshot);
             for (const auto &texture : textures)
             {
-                if (texture.filename == "vfx_gradient_lut.dds")
-                    continue;
                 const auto copied = ap::CopyAndHashInput(
                     "ContentSource/Textures/VFX/" + texture.filename, texture.source,
-                    stage / texture.filename);
+                    snapshot / texture.filename);
                 const auto original = std::ranges::find(action.inputs, copied.logical_id,
                                                         &ap::Input::logical_id);
                 Require(original != action.inputs.end() && copied.digest == original->digest,
                         "VFX source DDS changed during cooking");
             }
+            hs::content::ValidateVfxTextures(document, snapshot_root);
+            for (const auto &texture : textures)
+                if (texture.filename != "vfx_gradient_lut.dds")
+                    fs::copy_file(snapshot / texture.filename, stage / texture.filename);
             const auto gradient = std::ranges::find(textures, std::string("vfx_gradient_lut.dds"),
                                                     &CatalogTexture::filename);
             const auto rows = hs::content::CookVfxGradientDefaults(
-                document, gradient->source, stage / "vfx_gradient_lut.dds");
+                document, snapshot / gradient->filename, stage / "vfx_gradient_lut.dds");
             hs::content::CookVfxProgram(document, rows, stage / "vfx_program.hsbin");
             for (const auto &texture : textures)
                 AddProduct(products, stage, TextureProductId(texture.filename), texture.filename);
@@ -323,10 +344,14 @@ void Produce(std::string_view mode, const fs::path &source_root,
         }
         else
         {
-            hs::content::CookVfxMeshAtlas(mesh_path, stage / "vfx_mesh_atlas.hsbin");
+            const auto snapshot = stage / "vfx_mesh_atlas.source.json";
+            ap::WriteBytes(snapshot, Bytes(mesh_bytes));
+            hs::content::CookVfxMeshAtlas(snapshot, stage / "vfx_mesh_atlas.hsbin");
             AddProduct(products, stage, ProductId("vfx_mesh_atlas.hsbin"),
                        "vfx_mesh_atlas.hsbin");
         }
+        fs::remove_all(stage / "source");
+        fs::remove(stage / "vfx_mesh_atlas.source.json");
         ap::Publish(build_root, action, stage, std::move(products));
     }
     catch (...)

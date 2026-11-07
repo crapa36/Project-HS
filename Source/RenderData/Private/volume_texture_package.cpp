@@ -202,6 +202,9 @@ TextureDescriptorStorage CompileVolumeTextureMetadataDescriptor(const PackageDir
     const auto layout = Layout({descriptor.description.width, descriptor.description.height,
         descriptor.depth, descriptor.description.mip_count, descriptor.description.format});
     const auto &payload = directory.chunks[1];
+    Require(product_bytes <= std::numeric_limits<std::size_t>::max() &&
+        payload.offset <= product_bytes && payload.byte_count <= product_bytes - payload.offset,
+        "volume proof payload exceeds product bounds");
     Require(Get(metadata, 28, 4) == layout.size() &&
         metadata.size() == kMetadataHeader + layout.size() * kRecordStride &&
         Get(metadata, 32, 8) == payload.byte_count &&
@@ -221,7 +224,6 @@ TextureDescriptorStorage CompileVolumeTextureMetadataDescriptor(const PackageDir
     }
     for (const auto &dependency : directory.dependencies)
         descriptor.dependencies.push_back(MakeAssetId(dependency));
-    ValidateVolumeTextureDescriptor(descriptor.View(), product_bytes);
     return descriptor;
 }
 

@@ -70,7 +70,7 @@ Result D3D12Renderer::Impl::CreateProceduralGeometry(
         vertex.uv = source.uv;
         vertex.tangent = source.tangent;
         vertex.material_index = source.material_index;
-        vertex.reserved = source.reserved;
+        vertex.optical_component_id = source.reserved;
         geometry.vertices.push_back(vertex);
     }
 

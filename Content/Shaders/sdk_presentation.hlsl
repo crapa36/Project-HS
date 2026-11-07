@@ -1,31 +1,27 @@
 #include "display_transform.hlsli"
+#include "sdk_presentation_abi.hlsli"
 
-cbuffer PresentationConstants : register(b0, space23)
+cbuffer PresentationConstants : register(b0, HS_PRESENT_JOIN(space,HS_PRESENT_SPACE))
 {
-    uint2 RenderSize;
-    uint2 OutputSize;
-    float PaperWhiteNits;
-    float PeakNits;
-    uint Hdr10;
-    uint MotionContainsSky;
-    row_major float4x4 InverseCurrentViewProjection;
-    row_major float4x4 PreviousViewProjection;
-    float4 CameraPosition;
-    float2 JitterUv;
-    uint ResetHistory;
-    uint TransparentEnabled;
+#define HS_PRESENT_HLSL_Uint uint
+#define HS_PRESENT_HLSL_Float float
+#define HS_PRESENT_HLSL_Float2 float2
+#define HS_PRESENT_HLSL_Float4 float4
+#define HS_PRESENT_HLSL_Matrix row_major float4x4
+#define HS_PRESENT_DECLARE_FIELD(type,native,shader) HS_PRESENT_HLSL_##type shader;
+    HS_PRESENT_FIELDS(HS_PRESENT_DECLARE_FIELD)
+#undef HS_PRESENT_DECLARE_FIELD
 };
-Texture2D<float4> SceneDisplayLinear : register(t0, space23);
-Texture2D<float4> EncodedPremultipliedUi : register(t1, space23);
-Texture2D<float> DeviceDepth : register(t2, space23);
-Texture2D<float2> UndilatedMotionUv : register(t3, space23);
-Texture2D<float4> EncodedDevToolsUi : register(t4, space23);
-Texture2D<float> TransparentDepth : register(t5, space23);
-Texture2D<float2> TransparentMotionUv : register(t6, space23);
-Texture2D<float4> TransparentClassification : register(t7, space23);
-Texture2D<uint2> TransparentMetadata : register(t8, space23);
-RWTexture2D<float> NativeDepth : register(u0, space23);
-RWTexture2D<float2> NativeMotionUv : register(u1, space23);
+#define RenderSize uint2(RenderWidth,RenderHeight)
+#define OutputSize uint2(OutputWidth,OutputHeight)
+#define HS_PRESENT_DECLARE_SRV(name,slot,type,shader,version,resource,format,pass) \
+    Texture2D<type> shader : register(HS_PRESENT_JOIN(t,slot),HS_PRESENT_JOIN(space,HS_PRESENT_SPACE));
+HS_PRESENT_SRVS(HS_PRESENT_DECLARE_SRV)
+#undef HS_PRESENT_DECLARE_SRV
+#define HS_PRESENT_DECLARE_UAV(name,slot,type,shader,version,resource,format,index) \
+    RWTexture2D<type> shader : register(HS_PRESENT_JOIN(u,slot),HS_PRESENT_JOIN(space,HS_PRESENT_SPACE));
+HS_PRESENT_UAVS(HS_PRESENT_DECLARE_UAV)
+#undef HS_PRESENT_DECLARE_UAV
 
 float4 PresentationVS(uint vertex_id : SV_VertexID) : SV_Position
 {
@@ -39,9 +35,9 @@ float3 EncodeDisplay(float3 linear_rec709)
 }
 struct PresentationColors
 {
-    float4 hudless : SV_Target0;
-    float4 ui : SV_Target1;
-    float4 composite : SV_Target2;
+#define HS_PRESENT_COLOR_FIELD(name,index) float4 name : HS_PRESENT_JOIN(SV_Target,index);
+    HS_PRESENT_COLOR_TARGETS(HS_PRESENT_COLOR_FIELD)
+#undef HS_PRESENT_COLOR_FIELD
 };
 PresentationColors PresentationPS(float4 position : SV_Position)
 {

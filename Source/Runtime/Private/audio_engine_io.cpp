@@ -267,8 +267,17 @@ static Result PrepareResolved(const std::function<Result(std::string_view, std::
             cue.preload = item.at("preload").get<bool>();
             cue.arrow_impact_family = IsArrowImpact(asset_name);
             cue.loop = item.at("loop").get<bool>();
-            cue.max_simultaneous = std::max(1u, item.at("max_simultaneous").get<std::uint32_t>());
-            cue.retrigger_ms = item.at("minimum_retrigger_ms").get<std::uint32_t>();
+            const auto checked_u32 = [](const Json &value, std::uint32_t minimum, std::uint32_t &out) {
+                if (!value.is_number_integer() || (value.is_number_unsigned() == false && value.get<std::int64_t>() < 0))
+                    return false;
+                const auto number = value.get<std::uint64_t>();
+                if (number < minimum || number > std::numeric_limits<std::uint32_t>::max()) return false;
+                out = static_cast<std::uint32_t>(number);
+                return true;
+            };
+            if (!checked_u32(item.at("max_simultaneous"), 1, cue.max_simultaneous) ||
+                !checked_u32(item.at("minimum_retrigger_ms"), 0, cue.retrigger_ms))
+                return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio cue count or retrigger is invalid");
             const auto &files = item.at("files");
             if (!files.is_array() || files.empty())
                 return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio cue has no files");

@@ -1,4 +1,5 @@
 #include "../AssetPipeline/action.hpp"
+#include "../AssetPipeline/vfx_texture_specs.hpp"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
@@ -22,33 +23,7 @@ namespace ap = hs::asset_pipeline;
 namespace rd = hs::render_data;
 namespace fs = std::filesystem;
 
-struct TextureSpec
-{
-    std::string_view name;
-    rd::TextureDescription description;
-    bool masks{};
-    bool volume{};
-};
-
-// Zero height/array count means that the cooked upstream DDS owns that value.
-// The gradient grows when generated rows are appended; mask count follows the
-// cooked sprite layout. The current outputs are 256x68 and 39 slices.
-constexpr TextureSpec kSpecs[] = {
-    {"vfx_authored_mask_array", {256, 256, 12, 9, rd::kTextureFormatR8}},
-    {"vfx_curve_lut", {256, 7, 1, 1, rd::kTextureFormatR16Float}},
-    {"vfx_flow_curl_2d", {256, 256, 1, 9, rd::kTextureFormatRg8Snorm}},
-    {"vfx_fracture_decal_array", {512, 512, 4, 10, rd::kTextureFormatRgba8}},
-    {"vfx_gradient_lut", {256, 0, 1, 1, rd::kTextureFormatRgba16Float}},
-    {"vfx_noise_basis_2d", {256, 256, 1, 9, rd::kTextureFormatRgba8}},
-    {"vfx_noise_volume_64", {64, 64, 1, 1, rd::kTextureFormatRgba8}, false, true},
-    {"vfx_organic_decal_array", {512, 512, 8, 10, rd::kTextureFormatR8}},
-    {"vfx_ribbon_detail_array", {256, 64, 8, 9, rd::kTextureFormatR8}},
-    {"vfx_smoke6way_neg", {128, 128, 64, 8, rd::kTextureFormatRgba8}},
-    {"vfx_smoke6way_pos", {128, 128, 64, 8, rd::kTextureFormatRgba8}},
-    {"vfx_smoke_motion_vectors", {128, 128, 64, 8, rd::kTextureFormatRg8Snorm}},
-    {"vfx_stbn_scalar", {64, 64, 64, 1, rd::kTextureFormatR8}},
-    {"vfx_masks", {512, 512, 0, 10, rd::kTextureFormatBc4}, true},
-};
+using TextureSpec = ap::VfxTextureSpec;
 
 void Require(bool ok, std::string_view message)
 {
@@ -58,7 +33,7 @@ void Require(bool ok, std::string_view message)
 
 const TextureSpec &FindTexture(std::wstring_view name)
 {
-    for (const auto &texture : kSpecs)
+    for (const auto &texture : ap::kVfxTextureSpecs)
         if (std::wstring(texture.name.begin(), texture.name.end()) == name)
             return texture;
     throw std::runtime_error("hs_render_vfx_texture_package: unknown texture name");
@@ -114,10 +89,8 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
             products.at(0).at("dependencies") !=
                 ap::Json::array({std::string(source_id)})) return false;
         ap::UpstreamProduct ignored;
-        fs::path package_path;
-        (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                   product_id, ignored, package_path);
-        const auto contents = ap::ReadBytes(package_path);
+        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
+        const auto contents = snapshot.ReadProductBytes(product_id, ignored);
         const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
         const auto view = rd::ReadTexturePackage(bytes, hs::MakeAssetId(product_id));
         const auto &actual = view.description;
@@ -149,10 +122,8 @@ bool CurrentVolume(const fs::path &build_root, const ap::ActionSpec &spec,
             products.at(0).at("dependencies") !=
                 ap::Json::array({std::string(source_id)})) return false;
         ap::UpstreamProduct ignored;
-        fs::path package_path;
-        (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                   product_id, ignored, package_path);
-        const auto contents = ap::ReadBytes(package_path);
+        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
+        const auto contents = snapshot.ReadProductBytes(product_id, ignored);
         const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
         const auto view = rd::ReadVolumeTexturePackage(bytes, hs::MakeAssetId(product_id));
         const auto &actual = view.description;
@@ -174,10 +145,8 @@ void ProduceVolume(const fs::path &build_root, const TextureSpec &texture)
     const auto action_namespace = "render/texture/" + std::string(texture.name);
     const auto filename = std::string(texture.name) + ".rpkg";
     ap::UpstreamProduct upstream;
-    fs::path dds_path;
-    (void)ap::ReadActionResult(build_root, SourceNamespace(texture), source_id,
-                               upstream, dds_path);
-    const auto dds = ap::ReadBytes(dds_path);
+    const ap::ActionResultSnapshot snapshot(build_root, SourceNamespace(texture));
+    const auto dds = snapshot.ReadProductBytes(source_id, upstream);
     const auto bytes = std::as_bytes(std::span(dds.data(), dds.size()));
     const auto description = ParseVolumeDds(bytes, texture);
     ap::ActionSpec spec;
@@ -238,10 +207,8 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     const auto action_namespace = "render/texture/" + std::string(texture.name);
     const auto filename = std::string(texture.name) + ".rpkg";
     ap::UpstreamProduct upstream;
-    fs::path dds_path;
-    (void)ap::ReadActionResult(build_root, SourceNamespace(texture), source_id,
-                               upstream, dds_path);
-    const auto dds = ap::ReadBytes(dds_path);
+    const ap::ActionResultSnapshot snapshot(build_root, SourceNamespace(texture));
+    const auto dds = snapshot.ReadProductBytes(source_id, upstream);
     const auto bytes = std::as_bytes(std::span(dds.data(), dds.size()));
     const auto description = ParseDds(bytes, texture);
     ap::ActionSpec spec;

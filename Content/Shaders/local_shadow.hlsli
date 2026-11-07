@@ -1,11 +1,11 @@
 #ifndef HS_LOCAL_SHADOW_HLSLI
 #define HS_LOCAL_SHADOW_HLSLI
 #include "shadow_filter.hlsli"
+#include "local_shadow_abi.hlsli"
 
 // Independent of light_list.hlsli: world consumers pass the complete light key.
 // Byte offsets match renderer_local_shadow.hpp (64B metadata, 2096B record).
 // A 2096B record exceeds D3D12's 2048B structured-element limit, so t1 is raw.
-ByteAddressBuffer HsLocalShadowMetadata : register(t0,space27);
 struct HsLocalShadowRecord
 {
     uint4 identity,revision;
@@ -18,36 +18,35 @@ struct HsLocalShadowDrawRecord
     uint geometry_record,source_ref,instance_index,instance_generation;
     uint page_entry,layer,draw_group,reserved;
 };
-ByteAddressBuffer HsLocalShadowRecords : register(t1,space27);
-Texture2D<float> HsLocalShadowStaticBank : register(t2,space27);
-Texture2D<float> HsLocalShadowDynamicBank : register(t3,space27);
-StructuredBuffer<HsLocalShadowDrawRecord> HsLocalShadowDrawRecords : register(t4,space27);
-static const uint HsLocalShadowRecordBytes=2096u;
+#define HS_LOCAL_SHADOW_DECLARE(name,slot,type,shader) type shader : register(HS_LOCAL_SHADOW_JOIN(t,slot),HS_LOCAL_SHADOW_JOIN(space,HS_LOCAL_SHADOW_SPACE));
+HS_LOCAL_SHADOW_SRVS(HS_LOCAL_SHADOW_DECLARE)
+#undef HS_LOCAL_SHADOW_DECLARE
+static const uint HsLocalShadowRecordBytes=HS_LOCAL_SHADOW_RECORD_BYTES;
 HsLocalShadowRecord HsLocalShadowLoadRecord(uint index)
 {
     const uint address=index*HsLocalShadowRecordBytes;
     HsLocalShadowRecord record;
-    record.identity=HsLocalShadowRecords.Load4(address);
-    record.revision=HsLocalShadowRecords.Load4(address+16u);
-    record.position_range=asfloat(HsLocalShadowRecords.Load4(address+32u));
-    record.direction_cos_outer=asfloat(HsLocalShadowRecords.Load4(address+48u));
-    record.parameters=asfloat(HsLocalShadowRecords.Load4(address+64u));
-    record.emitter_normal_two_sided=asfloat(HsLocalShadowRecords.Load4(address+2064u));
-    record.state=HsLocalShadowRecords.Load4(address+2080u);
+    record.identity=HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_IDENTITY);
+    record.revision=HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_REVISION);
+    record.position_range=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_POSITION_RANGE));
+    record.direction_cos_outer=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_DIRECTION));
+    record.parameters=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_PARAMETERS));
+    record.emitter_normal_two_sided=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_EMITTER));
+    record.state=HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_STATE);
     return record;
 }
 float4x4 HsLocalShadowFaceMatrix(uint index,uint face)
 {
-    const uint address=index*HsLocalShadowRecordBytes+80u+face*64u;
+    const uint address=index*HsLocalShadowRecordBytes+HS_LOCAL_SHADOW_RECORD_MATRICES+face*HS_LOCAL_SHADOW_MATRIX_BYTES;
     // Raw memory has no HLSL matrix major order. Construct the four actual
     // DirectX rows and use row-vector mul, matching the CPU untransposed matrix.
     return float4x4(asfloat(HsLocalShadowRecords.Load4(address)),asfloat(HsLocalShadowRecords.Load4(address+16u)),
         asfloat(HsLocalShadowRecords.Load4(address+32u)),asfloat(HsLocalShadowRecords.Load4(address+48u)));
 }
 float4 HsLocalShadowFaceTile(uint index,uint face)
-{return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+1616u+face*16u));}
+{return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+HS_LOCAL_SHADOW_RECORD_TILES+face*HS_LOCAL_SHADOW_VECTOR_BYTES));}
 float3 HsLocalShadowSamplePosition(uint index,uint sample)
-{return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+2000u+sample*16u)).xyz;}
+{return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+HS_LOCAL_SHADOW_RECORD_SAMPLES+sample*HS_LOCAL_SHADOW_VECTOR_BYTES)).xyz;}
 
 bool HsLocalShadowIsDraw(uint pass) {return (pass&0xc0000000u)==0x40000000u;}
 HsLocalShadowDrawRecord HsLocalShadowLoadDraw(uint pass)
@@ -65,7 +64,7 @@ float4 HsLocalShadowProject(float3 world,uint pass)
 {
     const HsLocalShadowDrawRecord draw=HsLocalShadowLoadDraw(pass);
     const float4 tile=HsLocalShadowFaceTile(draw.page_entry,draw.reserved);
-    const float4 bank=asfloat(HsLocalShadowMetadata.Load4(16u));
+    const float4 bank=asfloat(HsLocalShadowMetadata.Load4(HS_LOCAL_SHADOW_METADATA_BANK));
     const float4 h=mul(float4(world,1.0),HsLocalShadowFaceMatrix(draw.page_entry,draw.reserved));
     // Retain homogeneous Z/W (perspective depth) while embedding the face in
     // the full-bank viewport. The custom clip distance admits its guard region.
@@ -117,7 +116,7 @@ bool HsLocalShadowFaceVisibility(uint index,HsLocalShadowRecord record,uint face
     // Border clamping can repeat individual taps; retain their exact weights.
     if((samples==8u||samples==12u||samples==16u)&&all(center-2>=origin)&&all(center+2<=upper))
     {
-        const float2 inverse_extent=rcp(asfloat(HsLocalShadowMetadata.Load2(16u)));
+        const float2 inverse_extent=rcp(asfloat(HsLocalShadowMetadata.Load2(HS_LOCAL_SHADOW_METADATA_BANK)));
         const uint group_count=samples==16u?6u:4u;
         [loop]for(uint group=0u;group<group_count;++group)
         {
@@ -147,7 +146,7 @@ bool HsLocalShadowFaceVisibility(uint index,HsLocalShadowRecord record,uint face
 bool HsLocalShadowLookup(uint record_reference,uint4 identity,uint2 revision,float3 world,float3 normal,out float visibility)
 {
     visibility=1.0;
-    const uint4 counts=HsLocalShadowMetadata.Load4(0u);
+    const uint4 counts=HsLocalShadowMetadata.Load4(HS_LOCAL_SHADOW_METADATA_COUNTS);
     if(counts.w==0u||record_reference==0u||record_reference>counts.x||identity.w<1u||identity.w>4u)return false;
     const uint index=record_reference-1u;
     const HsLocalShadowRecord record=HsLocalShadowLoadRecord(index);

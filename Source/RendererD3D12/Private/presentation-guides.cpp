@@ -1,5 +1,6 @@
 #include "presentation-guides.hpp"
 #include "d3d12_resources.hpp"
+#include "../../../Content/Shaders/sdk_presentation_abi.hlsli"
 #include <D3D12MemAlloc.h>
 #include <array>
 #include <atomic>
@@ -13,17 +14,30 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t DescriptorCount = 11, SrvCount = 9;
+#define HS_PRESENT_COUNT(...) + 1u
+constexpr std::uint32_t SrvCount = 0u HS_PRESENT_SRVS(HS_PRESENT_COUNT);
+constexpr std::uint32_t UavCount = 0u HS_PRESENT_UAVS(HS_PRESENT_COUNT);
+#undef HS_PRESENT_COUNT
+constexpr std::uint32_t DescriptorCount = SrvCount + UavCount;
+#define HS_PRESENT_SRV_ENUM(name,slot,type,shader,version,resource,format,pass) PresentSrv##name = slot,
+enum : std::uint32_t { HS_PRESENT_SRVS(HS_PRESENT_SRV_ENUM) };
+#undef HS_PRESENT_SRV_ENUM
 std::atomic<std::uint64_t> g_presentation_target_generation{};
 struct Constants
 {
-    std::uint32_t render_width, render_height, output_width, output_height;
-    float paper_white, peak;
-    std::uint32_t hdr, motion_contains_sky;
-    DirectX::XMFLOAT4X4 inverse_current_view_projection, previous_view_projection;
-    DirectX::XMFLOAT4 camera_position;
-    float jitter_uv[2];
-    std::uint32_t reset_history, transparent_enabled;
+#define HS_PRESENT_CPP_Uint(name) std::uint32_t name;
+#define HS_PRESENT_CPP_Float(name) float name;
+#define HS_PRESENT_CPP_Float2(name) float name[2];
+#define HS_PRESENT_CPP_Float4(name) DirectX::XMFLOAT4 name;
+#define HS_PRESENT_CPP_Matrix(name) DirectX::XMFLOAT4X4 name;
+#define HS_PRESENT_CPP_FIELD(type,native,shader) HS_PRESENT_CPP_##type(native)
+    HS_PRESENT_FIELDS(HS_PRESENT_CPP_FIELD)
+#undef HS_PRESENT_CPP_FIELD
+#undef HS_PRESENT_CPP_Uint
+#undef HS_PRESENT_CPP_Float
+#undef HS_PRESENT_CPP_Float2
+#undef HS_PRESENT_CPP_Float4
+#undef HS_PRESENT_CPP_Matrix
 };
 static_assert(sizeof(Constants) == 192);
 Result Failure(ErrorCode code, std::string text)
@@ -165,10 +179,10 @@ Result PresentationGuides::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     // supported floating point alpha instead. Intel/AMD require matching format.
     next->ui_format = provider == SdkPresentationOwner::Streamline ? DXGI_FORMAT_R16G16B16A16_FLOAT : format;
     next->slots.resize(frameSlots);
-    D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, SrvCount, 0, 23, 0},
-                                   {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 0, 23, 0}};
+    D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, SrvCount, 0, HS_PRESENT_SPACE, 0},
+                                   {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, UavCount, 0, HS_PRESENT_SPACE, 0}};
     D3D12_ROOT_PARAMETER parameters[3]{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[0].Constants = {0, 23, sizeof(Constants) / 4};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[0].Constants = {0, HS_PRESENT_SPACE, sizeof(Constants) / 4};
     parameters[1].ParameterType = parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[1].DescriptorTable = {1, &ranges[0]}; parameters[2].DescriptorTable = {1, &ranges[1]};
     D3D12_ROOT_SIGNATURE_DESC root{}; root.NumParameters = 3; root.pParameters = parameters;
@@ -233,13 +247,12 @@ Result PresentationGuides::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
         std::uint32_t colorIndex{};
         for (auto *color : {&slot.hudless, &slot.ui, &slot.composite, &slot.devtools})
             device->CreateRenderTargetView(color->resource.Get(), nullptr, next->Rtv(i, colorIndex++));
-        std::uint32_t uavIndex{};
-        for (auto *guide : {&slot.depth, &slot.motion})
-        {
-            D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-            view.Format = guide->resource->GetDesc().Format; view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            device->CreateUnorderedAccessView(guide->resource.Get(), nullptr, &view, next->Cpu(i, SrvCount + uavIndex++));
-        }
+#define HS_PRESENT_WRITE_UAV(name,index,type,shader,version,resource,format,output) \
+        { D3D12_UNORDERED_ACCESS_VIEW_DESC view{}; view.Format = format; \
+          view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; \
+          device->CreateUnorderedAccessView(resource, nullptr, &view, next->Cpu(i, SrvCount + index)); }
+        HS_PRESENT_UAVS(HS_PRESENT_WRITE_UAV)
+#undef HS_PRESENT_WRITE_UAV
     }
     candidate.targets_ = std::move(next);
     return Result::Success();
@@ -331,15 +344,9 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
     auto &slot = storage->slots[slotIndex];
     for(auto *resource:{&slot.hudless,&slot.ui,&slot.composite,&slot.depth,&slot.motion,&slot.devtools})
         if(auto certified=resource->EnsureNativeContract(storage->device.Get());!certified)return certified;
-    storage->Srv(slotIndex, 0, input.display_linear.resource, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    storage->Srv(slotIndex, 1, input.encoded_ui.resource, DXGI_FORMAT_B8G8R8A8_UNORM);
-    storage->Srv(slotIndex, 2, input.depth.resource, DXGI_FORMAT_R32_FLOAT);
-    storage->Srv(slotIndex, 3, input.motion.resource, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(slotIndex, 4, slot.devtools.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    storage->Srv(slotIndex, 5, input.transparent_guides_enabled ? input.transparent_depth.resource : nullptr, DXGI_FORMAT_R32_FLOAT);
-    storage->Srv(slotIndex, 6, input.transparent_guides_enabled ? input.transparent_motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(slotIndex, 7, input.transparent_guides_enabled ? input.transparent_classification.resource : nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    storage->Srv(slotIndex, 8, input.transparent_guides_enabled ? input.transparent_metadata.resource : nullptr, DXGI_FORMAT_R32G32_UINT);
+#define HS_PRESENT_WRITE_SRV(name,index,type,shader,version,resource,format,pass) storage->Srv(slotIndex, PresentSrv##name, resource, format);
+    HS_PRESENT_SRVS(HS_PRESENT_WRITE_SRV)
+#undef HS_PRESENT_WRITE_SRV
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.slot = slotIndex;
     pending.active = input.render_active; pending.peak = input.peak_nits;
@@ -387,11 +394,20 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
     auto color=retained?*graph.BindPass(retained->pass_indices[1],colorPassId):
         graph.AddPass(colorPassId,"SDK Display Guides",QueueHint::Direct);
     const bool freshSlot = slot.completion.direct == 0 && slot.completion.compute == 0 && slot.completion.copy == 0;
-    if(!retained){color.Read(input.display_linear.version, Access::ShaderRead); color.Read(input.encoded_ui.version, Access::ShaderRead);
-        color.Read(devtools.version, Access::ShaderRead);}
-    hudless.version=retained?retained->outputs[0]:color.Write(hudless.version,Access::RenderTarget);
-    ui.version=retained?retained->outputs[1]:color.Write(ui.version,Access::RenderTarget);
-    composite.version=retained?retained->outputs[2]:color.Write(composite.version,Access::RenderTarget);
+    if(!retained){
+#define HS_PRESENT_COLOR_Color(version) color.Read(version,Access::ShaderRead);
+#define HS_PRESENT_COLOR_Guide(version)
+#define HS_PRESENT_COLOR_Transparent(version)
+#define HS_PRESENT_COLOR_READ(name,index,type,shader,version,resource,format,pass) HS_PRESENT_COLOR_##pass(version)
+        HS_PRESENT_SRVS(HS_PRESENT_COLOR_READ)
+#undef HS_PRESENT_COLOR_READ
+#undef HS_PRESENT_COLOR_Color
+#undef HS_PRESENT_COLOR_Guide
+#undef HS_PRESENT_COLOR_Transparent
+    }
+#define HS_PRESENT_COLOR_WRITE(name,index) name.version=retained?retained->outputs[index]:color.Write(name.version,Access::RenderTarget);
+    HS_PRESENT_COLOR_TARGETS(HS_PRESENT_COLOR_WRITE)
+#undef HS_PRESENT_COLOR_WRITE
     color.SetExecuteChecked([storage, slotIndex, constants, freshSlot](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if (freshSlot)
@@ -405,7 +421,9 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
         commands->SetGraphicsRoot32BitConstants(0, sizeof(Constants) / 4, &constants, 0);
         commands->SetGraphicsRootDescriptorTable(1, storage->Gpu(slotIndex, 0));
         commands->SetGraphicsRootDescriptorTable(2, storage->Gpu(slotIndex, SrvCount));
-        const std::array rtvs{storage->Rtv(slotIndex, 0), storage->Rtv(slotIndex, 1), storage->Rtv(slotIndex, 2)};
+#define HS_PRESENT_COLOR_RTV(name,index) storage->Rtv(slotIndex,index),
+        const std::array rtvs{HS_PRESENT_COLOR_TARGETS(HS_PRESENT_COLOR_RTV)};
+#undef HS_PRESENT_COLOR_RTV
         commands->OMSetRenderTargets(3, rtvs.data(), FALSE, nullptr);
         D3D12_VIEWPORT viewport{0, 0, static_cast<float>(storage->output.width), static_cast<float>(storage->output.height), 0, 1};
         D3D12_RECT scissor{0, 0, static_cast<LONG>(storage->output.width), static_cast<LONG>(storage->output.height)};
@@ -416,12 +434,21 @@ Result PresentationGuides::RegisterImpl(RenderGraphBuilder &graph, const Present
     if(layout)layout->pass_indices[2]=graph.PassCount();
     auto guides=retained?*graph.BindPass(retained->pass_indices[2],guidePassId):
         graph.AddPass(guidePassId,"SDK Undilated Guides",QueueHint::Direct);
-    if(!retained){guides.Read(input.depth.version, Access::ComputeRead); guides.Read(input.motion.version, Access::ComputeRead);}
-    if (!retained&&input.transparent_guides_enabled)
-        for (const auto &resource : {input.transparent_depth, input.transparent_motion, input.transparent_classification, input.transparent_metadata})
-            guides.Read(resource.version, Access::ComputeRead);
-    depth.version=retained?retained->outputs[3]:guides.Write(depth.version,Access::UnorderedWrite);
-    motion.version=retained?retained->outputs[4]:guides.Write(motion.version,Access::UnorderedWrite);
+    if(!retained){
+#define HS_PRESENT_GUIDE_Color(version)
+#define HS_PRESENT_GUIDE_Guide(version) guides.Read(version,Access::ComputeRead);
+#define HS_PRESENT_GUIDE_Transparent(version) if(input.transparent_guides_enabled) guides.Read(version,Access::ComputeRead);
+#define HS_PRESENT_GUIDE_READ(name,index,type,shader,version,resource,format,pass) HS_PRESENT_GUIDE_##pass(version)
+        HS_PRESENT_SRVS(HS_PRESENT_GUIDE_READ)
+#undef HS_PRESENT_GUIDE_READ
+#undef HS_PRESENT_GUIDE_Color
+#undef HS_PRESENT_GUIDE_Guide
+#undef HS_PRESENT_GUIDE_Transparent
+    }
+#define HS_PRESENT_GUIDE_WRITE(name,index,type,shader,version,resource,format,output) \
+    version=retained?retained->outputs[output]:guides.Write(version,Access::UnorderedWrite);
+    HS_PRESENT_UAVS(HS_PRESENT_GUIDE_WRITE)
+#undef HS_PRESENT_GUIDE_WRITE
     guides.SetExecuteChecked([storage, slotIndex, constants](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);

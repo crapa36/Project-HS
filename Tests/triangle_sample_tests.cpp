@@ -238,6 +238,17 @@ void TestSceneProbeInputIdentity()
     grid_description.grid={{-1,.5f,-1},{2,1,2},{2,2,2}};
     std::vector<hs::Float4> grid_sh(8*9);
     grid_sh[7*9]={2,1,.25f,0};
+    auto previous_sh=grid_sh;
+    previous_sh[1]={-.1f,.02f,-.03f,0};
+    auto next_sh=previous_sh;
+    Require(rd::CompareSceneProbeIterations(previous_sh,next_sh,1e-6,1e-4)==rd::SceneProbeIterationState::Converged,
+        "unchanged signed SH iteration must converge");
+    next_sh[1].x+=.01f;
+    Require(rd::CompareSceneProbeIterations(previous_sh,next_sh,1e-6,1e-4)==rd::SceneProbeIterationState::Unconverged,
+        "changed reflected radiance must not converge prematurely");
+    next_sh[0].x=-1;
+    Require(rd::CompareSceneProbeIterations(previous_sh,next_sh,1e-6,1e-4)==rd::SceneProbeIterationState::Invalid,
+        "negative integral energy must reject the iteration");
     rd::SceneProbeCell cell;
     cell.reachable.fill(0x0f);
     cell.reachable.back()=0xf0;

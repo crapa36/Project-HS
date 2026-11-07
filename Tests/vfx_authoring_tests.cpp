@@ -2,6 +2,7 @@
 #include "vfx_texture_validation.hpp"
 #include "vfx_gradient_cooker.hpp"
 #include "vfx_program_cooker.hpp"
+#include <hs/render_data/dds_texture.hpp>
 #include <hs/renderer/vfx_program_loader.hpp>
 #include <span>
 #include <algorithm>
@@ -227,6 +228,70 @@ int main()
         Reject([&] { hs::content::ValidateVfxTextures(spec, fixture); }, "sRGB data texture accepted");
         Write(target, valid);
         hs::content::ValidateVfxTextures(spec, fixture);
+        auto preferred_only = spec;
+        for (auto &[id, entry] : preferred_only["libraries"]["texture_catalog"].items())
+        {
+            (void)id;
+            if (entry["runtime_asset"] == "Content/Textures/VFX/vfx_noise_basis_2d.dds")
+            {
+                entry["runtime_format_preferred"] = "RGBA8_UNORM";
+                entry["runtime_format_development"] = "BC7_UNORM";
+            }
+        }
+        Reject([&] { hs::content::ValidateVfxTextures(preferred_only, fixture); },
+               "preferred-only DDS accepted despite unsupported runtime format");
+        // Supply a structurally complete BC7 mip chain matching the declaration;
+        // the fixed runtime role still requires RGBA8 for this asset.
+        auto bc7 = std::vector<char>(valid.begin(), valid.begin() + 148);
+        const auto put_u32 = [&](std::size_t offset, std::uint32_t value) {
+            std::memcpy(bc7.data() + offset, &value, sizeof(value));
+        };
+        std::uint32_t flags{};
+        std::memcpy(&flags, bc7.data() + 8, sizeof(flags));
+        put_u32(8, (flags & ~8u) | 0x80000u);
+        put_u32(20, 256u * 256u);
+        put_u32(128, 98u);
+        for (std::uint32_t edge = 256; ; edge = std::max(1u, edge / 2))
+        {
+            const auto blocks = ((edge + 3) / 4) * ((edge + 3) / 4);
+            const auto start = bc7.size();
+            bc7.resize(start + blocks * 16u, 0);
+            for (std::uint32_t block = 0; block < blocks; ++block)
+                bc7[start + block * 16u] = 0x40; // BC7 mode 6
+            if (edge == 1) break;
+        }
+        const auto decoded_bc7 = hs::render_data::DecodeDdsTexture(std::as_bytes(std::span(bc7)));
+        hs::render_data::ValidateDdsTextureRole(decoded_bc7,
+            hs::render_data::DdsTextureRole::CharacterFinalBc7,
+            {256, 256, 1, 9, hs::render_data::kTextureFormatBc7});
+        Write(target, bc7);
+        Reject([&] { hs::content::ValidateVfxTextures(preferred_only, fixture); },
+               "matching unsupported BC7 declaration and DDS accepted");
+        auto smaller = std::vector<char>(valid.begin(), valid.begin() + 148);
+        const auto smaller_u32 = [&](std::size_t offset, std::uint32_t value) {
+            std::memcpy(smaller.data() + offset, &value, sizeof(value));
+        };
+        smaller_u32(12, 128); smaller_u32(16, 128); smaller_u32(20, 128 * 4); smaller_u32(28, 8);
+        for (std::uint32_t edge = 128; ; edge = std::max(1u, edge / 2))
+        {
+            smaller.resize(smaller.size() + edge * edge * 4u, 0);
+            if (edge == 1) break;
+        }
+        const auto decoded_smaller = hs::render_data::DecodeDdsTexture(std::as_bytes(std::span(smaller)));
+        hs::render_data::ValidateDdsTextureRole(decoded_smaller,
+            hs::render_data::DdsTextureRole::VfxTexture,
+            {128, 128, 1, 8, hs::render_data::kTextureFormatRgba8});
+        auto smaller_spec = spec;
+        for (auto &[id, entry] : smaller_spec["libraries"]["texture_catalog"].items())
+        {
+            (void)id;
+            if (entry["runtime_asset"] == "Content/Textures/VFX/vfx_noise_basis_2d.dds")
+                entry["dimensions"] = Json::array({128, 128});
+        }
+        Write(target, smaller);
+        Reject([&] { hs::content::ValidateVfxTextures(smaller_spec, fixture); },
+               "matching unsupported DDS dimensions and declaration accepted");
+        Write(target, valid);
         TestVfxImageIdentity();
         std::cout << "vfx authoring contracts passed: references, scope, authority, DDS, deterministic 68-row LUT\n";
         return 0;

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstring>
 #include <fstream>
 
@@ -39,84 +38,15 @@ std::uint32_t Crc32(std::span<const std::byte> bytes) noexcept
     return ~crc;
 }
 
-Result NormalizeAssetPath(std::string_view source, std::string &normalized)
-{
-    normalized.clear();
-    std::vector<std::string> segments;
-    std::string segment;
-    const auto flush_segment = [&]() -> bool {
-        if (segment.empty() || segment == ".")
-        {
-            segment.clear();
-            return true;
-        }
-        if (segment == "..")
-        {
-            segment.clear();
-            if (segments.empty())
-            {
-                return false;
-            }
-            segments.pop_back();
-            return true;
-        }
-        segments.push_back(std::move(segment));
-        segment.clear();
-        return true;
-    };
-
-    for (const auto character : source)
-    {
-        const auto value = character == '\\' ? '/' : character;
-        if (value == '/')
-        {
-            if (!flush_segment())
-            {
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
-                                       "Asset path escapes its content root.");
-            }
-            continue;
-        }
-        const auto lower = static_cast<char>(
-            std::tolower(static_cast<unsigned char>(value)));
-        if (!(std::isalnum(static_cast<unsigned char>(lower)) || lower == '_' ||
-              lower == '-' || lower == '.'))
-        {
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
-                                   "Asset path contains an unsupported character.");
-        }
-        segment.push_back(lower);
-    }
-    if (!flush_segment())
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
-                               "Asset path escapes its content root.");
-    }
-    for (const auto &part : segments)
-    {
-        if (!normalized.empty())
-        {
-            normalized.push_back('/');
-        }
-        normalized += part;
-    }
-    if (normalized.empty())
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
-                               "Asset path is empty.");
-    }
-    return Result::Success();
-}
-
 AssetId MakeAssetId(std::string_view normalized) noexcept
 {
     return {Fnv1a64(normalized)};
 }
 
-Result ReadCookedHeader(const std::filesystem::path &path, CookedHeader &header,
-                        std::uint64_t expected_schema_hash)
+namespace
 {
-    std::ifstream stream(path, std::ios::binary);
+Result ReadHeader(std::ifstream &stream, CookedHeader &header, std::uint64_t expected_schema_hash)
+{
     if (!stream.read(reinterpret_cast<char *>(&header), sizeof(header)))
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
@@ -133,15 +63,32 @@ Result ReadCookedHeader(const std::filesystem::path &path, CookedHeader &header,
     }
     return Result::Success();
 }
+}
+
+Result ReadCookedHeader(const std::filesystem::path &path, CookedHeader &header,
+                        std::uint64_t expected_schema_hash)
+{
+    std::ifstream stream(path, std::ios::binary);
+    return ReadHeader(stream, header, expected_schema_hash);
+}
 
 Result ReadCookedPayload(const std::filesystem::path &path,
                          std::uint64_t expected_schema_hash, CookedHeader &header,
                          std::vector<std::byte> &payload)
 {
     std::ifstream stream(path, std::ios::binary);
-    if (auto result = ReadCookedHeader(path, header, expected_schema_hash); !result)
+    if (auto result = ReadHeader(stream, header, expected_schema_hash); !result)
     {
         return result;
+    }
+    stream.seekg(0, std::ios::end);
+    const auto end = stream.tellg();
+    if (end < static_cast<std::streamoff>(sizeof(header)) ||
+        static_cast<std::uint64_t>(end - static_cast<std::streamoff>(sizeof(header))) < header.payload_size)
+    {
+        payload.clear();
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
+                               "Cooked file payload is truncated or corrupt.");
     }
     stream.seekg(sizeof(header));
     payload.resize(header.payload_size);
