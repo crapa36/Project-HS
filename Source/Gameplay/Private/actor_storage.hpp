@@ -52,6 +52,7 @@ struct EnemyAction
     bool boss_action_recoil{};
     std::uint64_t attack_cast_id{};
     Float2 locked_aim{};
+    Float2 facing{};
     Sequence warning_sequence{};
     Tick pattern_ready{};
     std::uint8_t last_pattern{255};

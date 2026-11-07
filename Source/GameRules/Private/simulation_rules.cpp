@@ -4,6 +4,7 @@
 #include <hs/core/cooked_format.hpp>
 
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <span>
 #include <type_traits>
@@ -11,6 +12,22 @@
 
 namespace hs
 {
+bool SimulationRulesHaveSafeProgression(const SimulationRules &rules) noexcept
+{
+    const auto &p = rules.progression;
+    const auto &u = rules.upgrades;
+    return p.card_candidate_count <= 3 && rules.relic_drop.maximum_choices_per_box <= 3 &&
+        std::isfinite(p.required_xp_base) && p.required_xp_base >= 1.0f &&
+        std::isfinite(p.required_xp_linear) && p.required_xp_linear >= 0.0f &&
+        std::isfinite(p.required_xp_quadratic) && p.required_xp_quadratic >= 0.0f &&
+        u.basic_attack.first_hit_split.projectile_count <= u.basic_attack.first_hit_split.angles_degrees.size() &&
+        u.basic_attack.post_active_three_arrow.projectile_count <= u.basic_attack.post_active_three_arrow.angles_degrees.size() &&
+        u.piercing_shot.range_end_split.projectile_count <= u.piercing_shot.range_end_split.angles_degrees.size() &&
+        u.multishot.original_arrow_first_hit_split.projectile_count_per_original <= u.multishot.original_arrow_first_hit_split.angles_degrees.size() &&
+        u.multishot.two_additional_outer_arrows.additional_projectiles <= u.multishot.two_additional_outer_arrows.outer_angles_degrees.size() &&
+        u.charged_shot.boss_or_fifth_pierce_split.projectile_count <= u.charged_shot.boss_or_fifth_pierce_split.angles_degrees.size() &&
+        u.retreat_shot.replace_with_three_arrows.projectile_count <= u.retreat_shot.replace_with_three_arrows.angles_degrees.size();
+}
 // Spawn placement includes cooker-derived max-zoom view bounds.
 namespace
 {
@@ -31,7 +48,7 @@ constexpr std::array<std::array<SkillTagMask, kUpgradeCount>, kCombatSkillCount>
         {{0, 0, 0, TagMask(Bleed), TagMask(Burn), TagMask(Slow), 0, 0}},
         {{0, 0, TagMask(Bleed), TagMask(Slow), 0, 0, TagMask(Burn), 0}},
         {{0, 0, 0, 0, TagMask(Bleed), TagMask(Burn), 0, 0}},
-        {{0, 0, 0, 0, TagMask(Bleed), TagMask(Burn), 0, 0}},
+        {{0, 0, 0, 0, TagMask(Bleed), 0, TagMask(Burn), 0}},
         {{0, 0, 0, TagMask(Burn), TagMask(Bleed), 0, 0, 0}},
         {{0, 0, TagMask(Bleed), TagMask(Burn), 0, 0, 0, 0}},
         {{0, 0, TagMask(Bleed), TagMask(Burn), 0, TagMask(Slow), 0,
@@ -98,6 +115,9 @@ void SetSkill(SkillDefinition &skill, AbilityHandlerId handler, Tick cooldown,
     skill.pierce_count = pierce;
     skill.handler = handler;
     skill.damage_multiplier = damage;
+    skill.starting_level = 1;
+    skill.maximum_level = 5;
+    skill.selected_upgrades_per_session = 4;
 }
 
 void HashSkill(CanonicalHash &hash, const SkillDefinition &skill) noexcept

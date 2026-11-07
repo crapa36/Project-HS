@@ -127,6 +127,11 @@ void TestRelicDataIsCookedFromJson()
               return vertex.material_index == 0;
           }),
           "Slime family vertices use the single cooked material slot");
+    if (std::string_view(asset) == "enemy_melee")
+        Check(std::ranges::any_of(slime_vertices, [](const hs::render_data::ExpandedVertex &vertex) {
+                  return vertex.optical_component_id != 0;
+              }),
+              "BasicSlime closed transmission shell retains certified optical component IDs");
     if (std::string_view(asset) == "enemy_gel_projectile")
         Check(std::ranges::all_of(slime_vertices, [](const hs::render_data::ExpandedVertex &vertex) {
                   return vertex.bone_indices[0] == 0 &&

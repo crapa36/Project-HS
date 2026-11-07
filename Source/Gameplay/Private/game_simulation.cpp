@@ -55,7 +55,8 @@ EnemyView GameSimulation::SimulationWorld::EnemyReadView(ConstEnemyRow enemy) co
                         enemy.action.invulnerable_until,
                         enemy.action.dash_started,
                         enemy.action.dash_until,
-                        enemy.action.dash_origin};
+                        enemy.action.dash_origin,
+                        enemy.action.facing};
 }
 
 BossActionView GameSimulation::SimulationWorld::BossActionReadView(const BossAction &action) const
@@ -158,6 +159,8 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "GameSimulation already initialized.");
     }
+    if (!SimulationRulesHaveSafeProgression(rules))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay", "Invalid progression or projectile array bounds.");
     if (rules.relics.movement_echo.position_history_age_ticks >=
         impl_->actors.player_position_history.max_size())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
@@ -291,6 +294,8 @@ SessionProbe GameSimulation::SimulationWorld::BuildSessionProbe() const
                            std::numeric_limits<std::uint32_t>::max()));
     }
     probe.stat_points = actors.player.stats;
+    probe.effective_cooldown_reduction = rules.stats.allocations[static_cast<std::size_t>(StatKind::CooldownReduction)].amount_per_point *
+        actors.player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
     probe.relic_mask = actors.player.relic_mask;
     probe.cards = progression.cards;
     probe.card_count = progression.card_count;
@@ -452,6 +457,8 @@ Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
     if (!impl_->initialized || impl_->session_phase != SessionPhase::MainMenu)
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "Gameplay data Hot Reload requires the main menu.");
+    if (!SimulationRulesHaveSafeProgression(rules))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay", "Invalid progression or projectile array bounds.");
     if (rules.relics.movement_echo.position_history_age_ticks >=
         impl_->actors.player_position_history.max_size())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
@@ -743,7 +750,8 @@ TickReadView GameSimulation::SimulationWorld::MakeTickReadView() const
             v = {a.id, static_cast<AreaViewKind>(a.kind), a.position, a.direction, a.radius,
                 a.half_length, a.active_tick, a.expires, a.skill, a.origin, a.cast_id, a.source_upgrade,
                 a.ring_inner_radius, a.ring_outer_radius, a.safe_gap_degrees, a.safe_gap_count,
-                a.applies_burn, a.slow_reduction > 0.0f, false, a.ring_half_width, a.upgrade_mask}; return true;
+                a.applies_burn, a.slow_reduction > 0.0f, false, a.ring_half_width, a.upgrade_mask,
+                a.pending_start_tick, a.kind == AreaKind::Trap && a.trigger_count ? a.next_tick : a.active_tick}; return true;
         });
     TickRows<PickupView> pickups(this, actors.pickups.size(), f.pickups,
         [](const void *owner, std::size_t row, PickupView &v) {

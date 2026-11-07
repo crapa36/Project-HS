@@ -56,6 +56,7 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
     else
     {
         GenerateRelicCards();
+        if (progression.card_count == 0) return;
         if (config.automatic_choices)
         {
             SelectCard(0);
@@ -280,6 +281,22 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     }
     actors.player.pending_stat_points += rules.progression.base_stat_points_per_level;
     progression.card_count = 0;
+    if (std::ranges::all_of(actors.player.stats, [&](auto value) {
+            return value >= rules.stats.maximum_points_per_stat;
+        }))
+    {
+        actors.player.pending_stat_points = 0;
+        if (actors.player.pending_levels > 0)
+        {
+            --actors.player.pending_levels;
+            GenerateLevelCards();
+            session_phase = SessionPhase::CardSelection;
+            GuardSelectionInput();
+            if (config.automatic_choices) SelectCard(0);
+        }
+        else session_phase = SessionPhase::Playing;
+        return true;
+    }
     session_phase = SessionPhase::StatAllocation;
     GuardSelectionInput();
     if (config.automatic_choices)
@@ -311,6 +328,9 @@ bool GameSimulation::SimulationWorld::AssignStat(StatKind stat)
         Metrics().stat_utility[index] += static_cast<std::uint64_t>(restored);
         Heal(restored);
     }
+    if (actors.player.pending_stat_points && std::ranges::all_of(actors.player.stats, [&](auto value) {
+            return value >= rules.stats.maximum_points_per_stat;
+        })) actors.player.pending_stat_points = 0;
     if (actors.player.pending_stat_points == 0)
     {
         if (actors.player.pending_levels > 0)

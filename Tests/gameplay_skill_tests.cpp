@@ -884,6 +884,33 @@ void TestProjectileAndAreaVisualTruth()
               }),
           "boss area boundary stays hidden before activation");
 
+    model.Clear(); snapshot.Clear(); model.tick = 10;
+    preactive_area.kind = hs::AreaViewKind::Trap;
+    preactive_area.pending_start_tick = 5;
+    preactive_area.pending_until_tick = 41; // Default initial delay is 36 ticks.
+    preactive_area.expires = 100;
+    model.AddArea(preactive_area);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, settings, snapshot) &&
+              std::ranges::any_of(snapshot.View().persistent_vfx, [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::TrapPending && visual.active_tick == 5 && visual.expires == 41;
+              }), "pending trap uses its actual creation and activation ticks");
+    for (const auto sample : std::array{std::pair{41u, false}, std::pair{55u, true}, std::pair{62u, false}})
+    {
+        model.Clear(); snapshot.Clear(); model.tick = sample.first;
+        preactive_area.pending_start_tick = 50;
+        preactive_area.pending_until_tick = sample.first == 41 ? 41 : 62;
+        model.AddArea(preactive_area);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, settings, snapshot) &&
+                  std::ranges::any_of(snapshot.View().persistent_vfx, [&](const hs::PersistentVfxVisual &visual) {
+                      return visual.kind == (sample.second ? hs::PersistentVfxKind::TrapPending : hs::PersistentVfxKind::TrapArmed) &&
+                          visual.active_tick == (sample.second ? 50u : preactive_area.pending_until_tick);
+                  }), "trap initial arming and rearming preserve authoritative clocks");
+    }
+    preactive_area.kind = hs::AreaViewKind::EnemyDamage;
+    preactive_area.expires = 40;
+    preactive_area.pending_until_tick = 0;
+
+    model.Clear(); model.AddArea(preactive_area);
     model.tick = 25;
     snapshot.Clear();
     Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,

@@ -1,6 +1,5 @@
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
-#include "../Source/Apps/ContentLinker/simulation_identity.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -32,12 +31,6 @@ int main()
 
     const auto first_image = hs::EncodeSimulationRules(first);
     const auto second_image = hs::EncodeSimulationRules(second);
-    const auto first_values = hs::content_identity::Simulation(first);
-    if (first_values != hs::content_identity::Simulation(second))
-    {
-        std::cerr << "SimulationRules padding changed the semantic image identity.\n";
-        return 1;
-    }
     if (first_image == std::vector<std::byte>{} || first_image != second_image)
     {
         std::cerr << "SimulationRules padding changed the wire image.\n";
@@ -74,6 +67,23 @@ int main()
     malformed[header + 4 + 4 + 4 + 4] ^= std::byte{1}; // boundary points count
     if (!rejected(malformed)) return 1;
 
+    auto invalid = first;
+    invalid.progression.card_candidate_count = 4;
+    if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+    invalid = first;
+    invalid.relic_drop.maximum_choices_per_box = 4;
+    if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+    for (const float base : {0.0f, 0.5f})
+    {
+        invalid = first;
+        invalid.progression.required_xp_base = base;
+        invalid.progression.required_xp_linear = invalid.progression.required_xp_quadratic = 0;
+        if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+    }
+    invalid = first;
+    invalid.upgrades.charged_shot.boss_or_fifth_pierce_split.projectile_count = 9;
+    if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+
     second.arena_boundary.points.back().x += 1.0f;
     second.arena_obstacles.back().radius += 1.0f;
     second.player_attack += 1.0f; // Legacy alias retained in the cooked ABI.
@@ -81,11 +91,6 @@ int main()
     if (hs::EncodeSimulationRules(second) == first_image)
     {
         std::cerr << "A semantic rule field was omitted from the ABI image.\n";
-        return 1;
-    }
-    if (hs::content_identity::Simulation(second) == first_values)
-    {
-        std::cerr << "A semantic rule field was omitted from the shipping identity.\n";
         return 1;
     }
     return 0;

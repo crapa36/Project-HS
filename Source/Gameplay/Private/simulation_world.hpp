@@ -209,6 +209,7 @@ struct AreaActor
     std::uint8_t safe_gap_count{};
     bool applies_burn{};
     bool dead{};
+    Tick pending_start_tick{}; // Presentation lifetime; does not alter simulation decisions.
 };
 
 enum class ScheduledKind : std::uint8_t
@@ -673,6 +674,7 @@ struct GameSimulation::SimulationWorld
     bool ProcessInput();
     void CastBasicAttack();
     bool CastSkill(SkillKind skill);
+    void CompleteActiveSkill(SkillKind skill, std::size_t cooldown_index, std::uint64_t cast_id);
     bool TryBeginSkill(SkillKind skill);
     void ConsumeBufferedSkill();
     void ReleaseChargedShot();

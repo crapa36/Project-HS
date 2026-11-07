@@ -95,12 +95,16 @@ void TestCombatVfxCoverage()
         }
         return emitted;
     };
+    data.enemies[1].move_speed = 0.0f;
+    data.enemies[1].attack_range = 10.0f;
     hs::GameSimulation ranged;
     Check(ranged.Initialize({0x52414E474544u}, data).Succeeded(),
           "ranged attack VFX initialize");
     Debug(ranged, hs::DebugCommandKind::SpawnEnemy,
           static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {5.0f, 0.0f});
     bool ranged_release{};
+    std::optional<hs::Tick> ranged_release_tick;
+    bool ranged_facing_stable{};
     std::size_t ranged_impacts{};
     std::vector<std::uint64_t> ranged_projectile_ids;
     std::vector<hs::Sequence> ranged_seen_sequences;
@@ -112,6 +116,8 @@ void TestCombatVfxCoverage()
         for (const auto &signal : signals)
         {
             ranged_release |= signal.kind == hs::DomainSignalKind::RangedEnemyReleased;
+            if (!ranged_release_tick && signal.kind == hs::DomainSignalKind::RangedEnemyReleased)
+                ranged_release_tick = signal.tick;
             if (signal.kind == hs::DomainSignalKind::EnemyRangedProjectileImpact)
             {
                 if (std::ranges::find(ranged_seen_sequences, signal.sequence) !=
@@ -132,12 +138,28 @@ void TestCombatVfxCoverage()
                 ranged_projectile_ids.push_back(signal.geometry.source_id);
             }
         }
+        if (!ranged_facing_stable && ranged_release_tick &&
+            ranged_release_tick.value() + 20 <= ranged.GetSessionProbe().tick)
+        {
+            hs::GameReadModelStorage model;
+            hs::CopyReadModelForDevelopment(ranged, model);
+            if (!model.View().enemies.empty())
+            {
+                const auto &enemy = model.View().enemies.front();
+                ranged_facing_stable = !enemy.attacking &&
+                    enemy.velocity.x * enemy.velocity.x +
+                            enemy.velocity.y * enemy.velocity.y < 0.0001f &&
+                    enemy.facing.x < -0.99f && std::abs(enemy.facing.y) < 0.01f;
+            }
+        }
         Check(tick_impacts <= 1, "ranged projectile emitted duplicate actor impact");
         ranged_impacts += tick_impacts;
     }
     Check(ranged_release && ranged_impacts == ranged_projectile_ids.size() &&
               ranged_impacts > 0,
           "ranged projectile did not produce one impact per actual projectile");
+    Check(ranged_facing_stable,
+          "stationary ranged enemy keeps authoritative facing after the spit recovery");
     Check(ranged.Shutdown().Succeeded(), "ranged attack VFX shutdown");
 
     hs::GameSimulation suicide;

@@ -77,6 +77,8 @@ Result DecodeSimulationRules(std::span<const std::byte> bytes, SimulationRules &
         SimulationRules decoded{};
         ReadField(in, decoded);
         in.Finish();
+        if (!SimulationRulesHaveSafeProgression(decoded))
+            throw std::runtime_error("Invalid progression or projectile array bounds.");
         if (decoded.version != 7 || decoded.arena_boundary.count < 3 ||
             decoded.arena_boundary.count > decoded.arena_boundary.points.size() ||
             decoded.arena_obstacle_count > decoded.arena_obstacles.size() ||

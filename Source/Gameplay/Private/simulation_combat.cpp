@@ -407,6 +407,7 @@ AreaActor *GameSimulation::SimulationWorld::SpawnArea(AreaKind kind, SkillKind s
     area.effect_radius = effect_radius > 0.0f ? effect_radius : radius;
     area.damage = RoundFinalDamage(EffectiveAttack() * coefficient, rules);
     area.active_tick = tick + Seconds(activation_delay);
+    area.pending_start_tick = tick;
     area.next_tick = area.active_tick;
     area.expires = area.active_tick + Seconds(duration);
     area.skill = skill;
@@ -985,6 +986,12 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
         return false;
     }
 
+    CompleteActiveSkill(skill, cooldown_index, cast_id);
+    return true;
+}
+
+void GameSimulation::SimulationWorld::CompleteActiveSkill(SkillKind skill, std::size_t cooldown_index, std::uint64_t cast_id)
+{
     actors.player.active_basic_empower_until =
         tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
     if (actors.player.next_active_refund_until >= tick &&
@@ -1014,7 +1021,6 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     actors.player.last_active_tick = tick;
     EmitSignal(DomainSignalKind::AbilityUsed, actors.player.position,
                static_cast<std::uint8_t>(skill));
-    return true;
 }
 
 bool GameSimulation::SimulationWorld::TryBeginSkill(SkillKind skill)
@@ -1165,8 +1171,7 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
     actors.player.active_cast_tick = tick + 9;
     actors.player.active_animation_until = actors.player.active_cast_tick + kAnimationBlendOutTicks;
     CancelChargedShot(true);
-    actors.player.active_basic_empower_until =
-        tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
+    CompleteActiveSkill(SkillKind::ChargedShot, static_cast<std::size_t>(SkillKind::ChargedShot) - 1, cast_id);
 }
 
 void GameSimulation::SimulationWorld::CastAttackPhase()
@@ -1677,7 +1682,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                      rules.stats.player_collision_radius,
                                      rules.arena_boundary, ArenaObstacles(), &actors.player.tick_motion);
     }
-    else if (!second_retreat && actors.player.has_move_target && !stationary_attack)
+    else if (!second_retreat && !config.scenario.player_stationary && actors.player.has_move_target && !stationary_attack)
     {
         const auto direct_path = SegmentClear2D(actors.player.position, actors.player.move_target,
                                                 rules.stats.player_collision_radius,
@@ -2062,7 +2067,8 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
                             UpgradeEffectMetric::ExtraTargetsHit);
     if (projectile.combat.skill == SkillKind::PiercingShot && HasUpgrade(projectile.combat.upgrade_mask, 3))
     {
-        bleed = std::max<std::uint8_t>(bleed, 2);
+        bleed = static_cast<std::uint8_t>(std::max<unsigned>(bleed,
+            std::min<unsigned>(rules.upgrades.piercing_shot.apply_bleed.bleed_stacks, 255)));
     }
     if (projectile.combat.skill == SkillKind::MultiShot &&
         HasUpgrade(projectile.combat.upgrade_mask, 5) && cast_hit == 1)
@@ -2086,7 +2092,7 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
         if (projectile.combat.skill == SkillKind::ChargedShot && projectile.combat.full_charge &&
             HasUpgrade(projectile.combat.upgrade_mask, 5) &&
             enemy.status.bleed_count >=
-                rules.statuses.bleed.maximum_stacks)
+                rules.upgrades.charged_shot.charge_bleed_full_charge_rupture.existing_bleed_stacks_for_rupture)
         {
             QueueDamage(enemy.id.value,
                        RoundFinalDamage(EffectiveAttack() * rules.upgrades.charged_shot
@@ -2221,7 +2227,7 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
     }
     if (projectile.combat.skill == SkillKind::ChargedShot &&
         HasUpgrade(projectile.combat.upgrade_mask, 6) && !runtime.triggered &&
-        (enemy.life.boss || runtime.normal_hits >= 3))
+        (enemy.life.boss || runtime.normal_hits >= rules.upgrades.charged_shot.boss_or_fifth_pierce_split.normal_enemy_pierce_count))
     {
         runtime.triggered = true;
         const auto direction = Normalize(projectile.motion.velocity);
@@ -2344,10 +2350,10 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
     {
         const auto &tracking = rules.upgrades.retreat_shot.apply_bleed_and_tracking_arrow;
         if (enemy.status.bleed_count == 0)
-            ApplyBleed(enemy, EffectiveAttack(), 1, projectile.combat.skill, 3);
+            ApplyBleed(enemy, EffectiveAttack(), static_cast<std::uint8_t>(std::min<unsigned>(tracking.bleed_stacks, 255)), projectile.combat.skill, 3);
         if (auto target = NearestEnemy(
                 enemy.motion.position,
-                rules.skills[static_cast<std::size_t>(SkillKind::RetreatShot)].projectile_range,
+                tracking.search_radius,
                 std::span(projectile.combat.hit_ids)))
         {
             if (auto arrow = FireProjectile(projectile.combat.skill, enemy.motion.position,
@@ -2638,12 +2644,13 @@ bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileRow projectile,
             projectile.motion.speed);
         return true;
     }
-    if (projectile.combat.pierce_remaining > 0 && (!enemy.life.boss || projectile.combat.pierce_remaining != 255))
+    if (projectile.combat.pierce_remaining == 255)
+    {
+        if (enemy.life.boss) projectile.combat.dead = true;
+    }
+    else if (projectile.combat.pierce_remaining > 0)
     {
         --projectile.combat.pierce_remaining;
-    }
-    else if (projectile.combat.pierce_remaining == 255 && !enemy.life.boss)
-    {
     }
     else
     {
@@ -3257,6 +3264,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 if (HasUpgrade(area.upgrade_mask, 3) && area.trigger_count == 1)
                 {
                     area.next_tick = tick + rules.upgrades.trap.single_reactivation.reactivation_delay_ticks;
+                    area.pending_start_tick = tick;
                     auto geometry = ExplosionGeometry(area.effect_radius);
                     geometry.start_tick = tick;
                     geometry.end_tick = area.next_tick;
@@ -3852,7 +3860,7 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             actors.player.stats[static_cast<std::size_t>(StatKind::AttackPower)];
         if (attack_points != 0)
         {
-            const auto multiplier = 1.0 + 0.06 * attack_points;
+            const auto multiplier = 1.0 + rules.stats.allocations[static_cast<std::size_t>(StatKind::AttackPower)].amount_per_point * attack_points;
             const auto without_stat = static_cast<std::uint64_t>(
                 std::llround(static_cast<double>(applied_damage) / multiplier));
             Metrics().stat_utility[static_cast<std::size_t>(StatKind::AttackPower)] +=

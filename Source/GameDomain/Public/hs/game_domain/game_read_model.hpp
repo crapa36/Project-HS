@@ -106,6 +106,7 @@ struct EnemyView
     Tick dash_started{};
     Tick dash_until{};
     Float2 dash_origin{};
+    Float2 facing{};
 };
 
 struct ProjectileView
@@ -157,6 +158,7 @@ struct AreaView
     bool dead{};
     float ring_half_width{};
     std::uint8_t upgrade_mask{};
+    Tick pending_start_tick{}, pending_until_tick{};
 };
 
 struct PickupView

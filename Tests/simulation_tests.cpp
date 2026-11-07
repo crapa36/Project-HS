@@ -43,8 +43,8 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    // Hash v8 adds retained projectile speed alongside the movement-echo history.
-    constexpr hs::GameplayChecksum kGameplayOracle = 15816561498904262959ull;
+    // Hash v9 adds persistent enemy facing; attack, movement and RNG order are unchanged.
+    constexpr hs::GameplayChecksum kGameplayOracle = 17582488999634637405ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");
     Check(first == kGameplayOracle,
@@ -662,6 +662,19 @@ void TestNavigationRulesReload()
     }
 }
 
+void TestProgressionRuleAdmission()
+{
+    auto invalid = QuietRules();
+    invalid.progression.required_xp_base = 0.5f;
+    invalid.progression.required_xp_linear = invalid.progression.required_xp_quadratic = 0.0f;
+    hs::GameSimulation rejected;
+    Check(!rejected.Initialize({144}, invalid).Succeeded(), "invalid progression is rejected at initialization");
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({144}, QuietRules()).Succeeded(), "valid progression initialization");
+    simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
+    Check(!simulation.ApplySimulationRules(invalid).Succeeded(), "invalid progression is rejected at reload");
+}
+
 } // namespace
 
 int main()
@@ -680,6 +693,7 @@ int main()
         TestMultipleChestRewards();
         TestMovementEchoHistory();
         TestNavigationRulesReload();
+        TestProgressionRuleAdmission();
         TestDeterminism();
         std::cout << "simulation_tests passed\n";
         return 0;

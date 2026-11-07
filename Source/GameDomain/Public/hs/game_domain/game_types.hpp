@@ -281,6 +281,7 @@ struct SessionProbe
     std::array<std::uint8_t, kCombatSkillCount> upgrade_masks{};
     std::array<std::uint32_t, kActiveSkillCount> cooldown_ticks{};
     std::array<std::uint8_t, kStatCount> stat_points{};
+    float effective_cooldown_reduction{};
     RelicMask relic_mask{};
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};

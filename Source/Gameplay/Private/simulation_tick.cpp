@@ -898,6 +898,7 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(enemy.action.attack_resolve);
         value(enemy.action.attack_cast_id);
         vector2(enemy.action.locked_aim);
+        vector2(enemy.action.facing);
         value(enemy.life.spawned_tick);
         value(enemy.action.pattern_ready);
         value(enemy.action.last_pattern);
@@ -1334,7 +1335,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     if (!final_boss_tick)
         CommitDelayedEnemySpawns();
     CommitBossSpawns();
-    if (!final_boss_spawned && !final_boss_tick)
+    if ((!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss) && !final_boss_tick)
     {
         const auto &stage = CurrentSpawnStage();
         spawn_accumulator += stage.per_second;
@@ -1825,6 +1826,8 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
              (enemy.life.kind == EnemyKind::Suicide && distance <= enemy.cold.attack_range)))
         {
             const auto attack_direction = Normalize(Subtract(actors.player.position, enemy.motion.position));
+            if (LengthSquared(attack_direction) > 0.0001f)
+                enemy.action.facing = attack_direction;
             ++Metrics().enemy_attack_attempts[EnemyTelemetryIndex(enemy)];
             enemy.action.attack_cast_id = TakeSimulationIdentity(next_enemy_attack_id);
             enemy.action.attacking = true;
@@ -1882,6 +1885,8 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                                                                 actors.player.position);
             const auto direction = Normalize(Subtract(navigation_target, enemy.motion.position));
             enemy.motion.velocity = direction;
+            if (LengthSquared(direction) > 0.0001f)
+                enemy.action.facing = direction;
         }
         enemy.motion.velocity = Multiply(enemy.motion.velocity, enemy.cold.move_speed * SlowMultiplier(enemy));
     }
