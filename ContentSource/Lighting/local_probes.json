@@ -11,6 +11,7 @@
     "cube_edge": 32,
     "ggx_samples": 128,
     "maximum_cube_views_per_graph": 6,
+    "offline_multibounce": {"mode": "previous_complete_grid", "maximum_iterations": 16, "absolute_tolerance": 0.0001, "relative_tolerance": 0.001},
     "include": ["static_geometry", "common_material_opacity", "static_direct_lights", "emission", "global_environment_sky"],
     "exclude": ["dynamic_characters", "dynamic_vfx", "ui", "post", "exposure", "recursive_local_probes"]
   },
@@ -21,5 +22,5 @@
     {"stable_id": 3, "position": [-18, 2, 18], "weight": 1, "influence_min": [-46, -0.5, -10], "influence_max": [10, 12, 46], "influence_fade": 8, "projection_min": [-50, -2, -14], "projection_max": [14, 20, 50], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100},
     {"stable_id": 4, "position": [18, 2, 18], "weight": 1, "influence_min": [-10, -0.5, -10], "influence_max": [46, 12, 46], "influence_fade": 8, "projection_min": [-14, -2, -14], "projection_max": [50, 20, 50], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100}
   ],
-  "author_notes": "The four reflection captures have overlapping influence boxes. Independent grid nodes capture static direct lighting, emission and sky before exposure. Geometry-qualified subcell masks restrict diffuse interpolation. Revisions cover actual selected material, environment, lights and immutable layout."
+  "author_notes": "The four reflection captures have overlapping influence boxes. Independent grid nodes capture static direct lighting, emission and sky before exposure. Offline diffuse iteration reads only the previous complete grid; runtime recursive local probes remain excluded. Geometry-qualified subcell masks restrict diffuse interpolation. Revisions cover actual selected material, environment, lights and immutable layout."
 }

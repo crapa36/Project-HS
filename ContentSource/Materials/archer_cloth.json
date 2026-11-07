@@ -13,30 +13,6 @@
       "id": "roughness_scale",
       "type": "float",
       "default": 0.75
-    },
-    {
-      "id": "anisotropy",
-      "type": "float",
-      "default": 0.35
-    },
-    {
-      "id": "sheen_weight",
-      "type": "float",
-      "default": 0.25
-    },
-    {
-      "id": "sheen_tint",
-      "type": "float3",
-      "default": [
-        0.6,
-        0.6,
-        0.6
-      ]
-    },
-    {
-      "id": "sheen_roughness",
-      "type": "float",
-      "default": 0.5
     }
   ],
   "textures": [],
@@ -153,129 +129,12 @@
         "node": "opacity",
         "type": "float"
       }
-    },
-    {
-      "id": "anisotropy",
-      "op": "parameter",
-      "type": "float",
-      "name": "anisotropy"
-    },
-    {
-      "id": "sheen_weight",
-      "op": "parameter",
-      "type": "float",
-      "name": "sheen_weight"
-    },
-    {
-      "id": "sheen_tint",
-      "op": "parameter",
-      "type": "float3",
-      "name": "sheen_tint"
-    },
-    {
-      "id": "sheen_roughness",
-      "op": "parameter",
-      "type": "float",
-      "name": "sheen_roughness"
-    },
-    {
-      "id": "tangent_frame",
-      "op": "context",
-      "type": "float4",
-      "name": "tangent"
-    },
-    {
-      "id": "tangent_0",
-      "op": "extract",
-      "type": "float",
-      "input": {
-        "node": "tangent_frame",
-        "type": "float4"
-      },
-      "component": 0
-    },
-    {
-      "id": "tangent_1",
-      "op": "extract",
-      "type": "float",
-      "input": {
-        "node": "tangent_frame",
-        "type": "float4"
-      },
-      "component": 1
-    },
-    {
-      "id": "tangent_2",
-      "op": "extract",
-      "type": "float",
-      "input": {
-        "node": "tangent_frame",
-        "type": "float4"
-      },
-      "component": 2
-    },
-    {
-      "id": "tangent",
-      "op": "construct",
-      "type": "float3",
-      "components": [
-        {
-          "node": "tangent_0",
-          "type": "float"
-        },
-        {
-          "node": "tangent_1",
-          "type": "float"
-        },
-        {
-          "node": "tangent_2",
-          "type": "float"
-        }
-      ]
-    },
-    {
-      "id": "anisotropic",
-      "op": "anisotropy_closure",
-      "type": "surface_closure",
-      "base": {
-        "node": "basic",
-        "type": "surface_closure"
-      },
-      "amount": {
-        "node": "anisotropy",
-        "type": "float"
-      },
-      "tangent": {
-        "node": "tangent",
-        "type": "float3"
-      }
-    },
-    {
-      "id": "surface",
-      "op": "sheen_closure",
-      "type": "surface_closure",
-      "base": {
-        "node": "anisotropic",
-        "type": "surface_closure"
-      },
-      "weight": {
-        "node": "sheen_weight",
-        "type": "float"
-      },
-      "tint": {
-        "node": "sheen_tint",
-        "type": "float3"
-      },
-      "roughness": {
-        "node": "sheen_roughness",
-        "type": "float"
-      }
     }
   ],
   "outputs": {
     "surface": "typed_closure",
     "closure": {
-      "node": "surface",
+      "node": "basic",
       "type": "surface_closure"
     },
     "normal_space": "world"

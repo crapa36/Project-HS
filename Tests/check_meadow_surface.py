@@ -1,5 +1,5 @@
 """Structural validation of the authored meadow geometry and actual partial water fills."""
-import ast, json, math, struct, sys, time
+import ast, json, math, re, struct, sys, time
 from collections import Counter
 from functools import lru_cache
 started=time.perf_counter()
@@ -117,8 +117,25 @@ assert perimeters[0]==perimeters[1]==perimeters[2], 'LOD perimeter positions/nor
 assert wet_support[0]==wet_support[1]==wet_support[2], 'ground support under wet cells differs'
 # Sample emitted geometry against the shared authored height field without executing generation.
 generator=ast.parse((root/'tools/art/meadow/generate_surface.py').read_text(encoding='utf-8-sig'))
-functions=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name in ('base','shape','depth','ridge','height','basin_point','cart','road_coverage','wetness','soil_dryness')],type_ignores=[])
-field={'math':math,'records':rows,'relief':src['relief']};exec(compile(functions,'meadow_height_contract','exec'),field)
+functions=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name in ('base','shape','depth','ridge','height','basin_point','cart','road_coverage','wetness','soil_dryness','smoothstep','meadow_blend')],type_ignores=[])
+# Decode the actual packed product used by runtime contact queries.  The
+# generator's pure base() helper consumes the original signed-byte grid.
+heightfield=src['heightfield']; grid_size=heightfield['grid_size']
+header=(root/'Source/Presentation/Public/hs/presentation/meadow_surface.hpp').read_text()
+packed=re.search(r'kMeadowBaseHeightPacked\{\{(.*?)\}\};',header,re.S)
+assert packed, 'generated runtime height table missing'
+words=[int(word,16) for word in re.findall(r'0x([0-9A-Fa-f]{8})u',packed.group(1))]
+assert len(words)==(grid_size*grid_size+3)//4, 'generated runtime height table size mismatch'
+data=b''.join(struct.pack('<I',word) for word in words)
+class PackedHeightGrid:
+ def __getitem__(self,index):
+  z,x=index
+  return struct.unpack_from('<b',data,z*grid_size+x)[0]
+base_grid=PackedHeightGrid()
+field={'math':math,'records':rows,'relief':src['relief'],'lru_cache':lru_cache,
+       'base_grid':base_grid,'height_grid_size':grid_size,'height_grid_step':24.0/(grid_size-1),
+       'height_quantization':heightfield['quantization_per_metre']}
+exec(compile(functions,'meadow_height_contract','exec'),field)
 # Extract only the pure helper; importing the generator would regenerate assets.
 helper=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name=='rectangle_without_center'],type_ignores=[])
 scope={'struct':struct};exec(compile(helper,'meadow_rectangle_contract','exec'),scope)
@@ -187,8 +204,13 @@ for i in range(0,len(grounds[0]['vertices']),3):
 union_volume_error=abs(union_bank/union_cut-1)
 assert union_volume_error<.02, ('emitted wheel-union volume mismatch',union_bank,union_cut)
 
-base_samples=[field['base'](x/2,z/2) for x in range(-24,25) for z in range(-24,25)]
-assert .15<max(base_samples)-min(base_samples)<.4, ('missing/oversized hills',min(base_samples),max(base_samples))
+base_samples=[field['base'](-12+x*field['height_grid_step'],-12+z*field['height_grid_step'])
+              for x in range(grid_size) for z in range(grid_size)]
+assert abs(min(base_samples)-heightfield['minimum_height_m'])<1e-12 and abs(max(base_samples)-heightfield['maximum_height_m'])<1e-12, 'height metadata differs from runtime table'
+quantum=1/heightfield['quantization_per_metre']
+assert heightfield['max_abs_quantized_metres']==128*quantum, 'height quantization cap mismatch'
+assert max(abs(value) for value in base_samples)<=heightfield['max_abs_quantized_metres'], 'height exceeds signed-byte cap'
+assert max(base_samples)-min(base_samples)>=quantum, ('missing height detail',min(base_samples),max(base_samples))
 macro_grade=max(math.hypot((field['base'](x+.002,z)-field['base'](x-.002,z))/.004,(field['base'](x,z+.002)-field['base'](x,z-.002))/.004) for x in range(-11,12) for z in range(-11,12))
 assert macro_grade<.12, ('macro hill is too steep',macro_grade)
 baked_control_error=0

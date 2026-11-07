@@ -30,11 +30,17 @@ def main():
         source=linear(bc7_slice(args.cooked/'environment_terrain_basecolor.dds',layer,0))
         gaussian=bc7_slice(args.cooked/'environment_terrain_gaussian.dds',layer,0)
         origin=lut[layer,12,0];axes=lut[layer,13:16,0]
+        for mip in range(12):
+            decoded=gaussian if mip==0 else bc7_slice(args.cooked/'environment_terrain_gaussian.dds',layer,mip)
+            mean=lut[layer,12,mip+1]
+            if not np.allclose(mean,decoded.mean(axis=0,dtype=np.float64),rtol=0,atol=1e-7):
+                raise AssertionError(f'Layer {layer} mip {mip} decoded Gaussian mean differs from LUT')
         positions=rng.integers(0,len(source),size=(3,65536));reference=source[rng.integers(0,len(source),size=65536)]
         reference_q=np.quantile(reference,quantiles,axis=0)
         for weights in [np.array([1/3,1/3,1/3]),np.array([.7,.2,.1])]:
             ordinary=(source[positions]*weights[:,None,None]).sum(axis=0)
-            blended=.5+((gaussian[positions]*weights[:,None,None]).sum(axis=0)-.5)/np.sqrt(np.dot(weights,weights))
+            mean=lut[layer,12,1]
+            blended=mean+((gaussian[positions]*weights[:,None,None]).sum(axis=0)-mean)/np.sqrt(np.dot(weights,weights))
             restored=decode(blended,lut[layer,0],origin,axes)
             errors=[float(np.abs(np.quantile(values,quantiles,axis=0)-reference_q).mean()) for values in [ordinary,restored]]
             row={'layer':layer,'weights':weights.tolist(),'ordinary_rgb_quantile_mae':errors[0],'histogram_rgb_quantile_mae':errors[1],'error_reduction_percent':100*(1-errors[1]/errors[0]),'source_mean':reference.mean(axis=0).tolist(),'restored_mean':restored.mean(axis=0).tolist()}

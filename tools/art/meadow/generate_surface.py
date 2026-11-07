@@ -1,14 +1,18 @@
 """Author the bounded meadow surface and static water from the same depression records.
-Run from repository root. No external packages, no edits to other environment meshes.
+Run from repository root with the installed primary Python runtime (Pillow and NumPy).
+No edits to other environment meshes.
 """
-import json, math, sys, struct
+import json, math, sys, struct, hashlib
 from functools import lru_cache
+import numpy as np
+from PIL import Image
 MESHES_ONLY = "--meshes-only" in sys.argv
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mesh_indexing import index_mesh
 ROOT=Path(__file__).resolve().parents[3]
 OUT=ROOT/'ContentSource/Models/Environment'
+TERRAIN_SOURCE=ROOT/'ContentSource/Textures/Environment/project_hs_environment_materials_v9_LEAN.json'
 records=[]
 def add(kind,x,z,rx,rz,depth,yaw=0,fill=0):
     records.append(dict(kind=kind,x=x,z=z,rx=rx,rz=rz,depth=depth,yaw=yaw,fill=fill))
@@ -37,10 +41,80 @@ for i,r in enumerate(records):
     r['c']=math.cos(r['yaw']);r['s']=math.sin(r['yaw'])
 
 relief=source['relief']
+relief.pop('broad_amplitude',None)
+relief.pop('meso_amplitude',None)
+terrain_metadata=json.loads(TERRAIN_SOURCE.read_text())
+target_texture_size_px=terrain_metadata['target']['texture_size_px']
+if type(target_texture_size_px) is not int or target_texture_size_px<=0:
+    raise ValueError('Terrain target.texture_size_px must be a positive integer.')
+terrain_source=terrain_metadata['terrain']['layers']
+if len(terrain_source)!=4:
+    raise ValueError('Meadow base height expects the four authored terrain layers.')
+terrain_layers=[];terrain_height_maps=[]
+for layer in terrain_source:
+    meters_per_tile=float(layer['meters_per_tile'])
+    height_scale_m=float(layer['height_scale_m'])
+    if not math.isfinite(meters_per_tile) or meters_per_tile<=0:
+        raise ValueError(f"Terrain layer {layer['id']} meters_per_tile must be positive and finite.")
+    if not math.isfinite(height_scale_m) or not 0<height_scale_m<=.05:
+        raise ValueError(f"Terrain layer {layer['id']} height_scale_m must be in (0, 0.05].")
+    path=ROOT/'ContentSource/Textures/Environment'/layer['textures']['height']
+    with Image.open(path) as image:
+        if image.mode not in ('I;16','I;16B','I') or image.size!=(target_texture_size_px,target_texture_size_px):
+            raise ValueError(f'Expected {target_texture_size_px}x{target_texture_size_px} 16-bit grayscale terrain height: {path}')
+        terrain_height_maps.append(np.asarray(image,dtype=np.float32)/65535.0)
+    terrain_layers.append({
+        'id':layer['id'], 'path':path.relative_to(ROOT).as_posix(),
+        'meters_per_tile':meters_per_tile,
+        'height_scale_m':height_scale_m,
+        'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+    })
+terrain_tile_values=[]
+for layer in terrain_layers:
+    value=f'{layer["meters_per_tile"]:.9g}'
+    terrain_tile_values.append(value if '.' in value or 'e' in value.lower() else value+'.0')
+terrain_constants = '''#pragma once
+// Generated from the authored terrain layers in project_hs_environment_materials_v9_LEAN.json.
+#include <array>
+
+namespace hs::render_data {
+inline constexpr std::array<float, 4> kTerrainSourceMetersPerTile{VALUES};
+}
+'''.replace('VALUES', ', '.join(value+'f' for value in terrain_tile_values))
+terrain_constants_path = ROOT/'Source/RenderData/Public/hs/render_data/terrain_source_constants.hpp'
+if not terrain_constants_path.exists() or terrain_constants_path.read_text()!=terrain_constants:
+    terrain_constants_path.write_text(terrain_constants)
+height_grid_size=65
+height_grid_step=24.0/(height_grid_size-1)
+height_box_samples=4
+height_quantization=4096.0
+height_packed_count=(height_grid_size*height_grid_size+3)//4
+meadow_seed=int(source['seed'])
+height_bounds=source['bounds']
+if height_bounds!=[-12,12,-12,12]:
+    raise ValueError('Meadow packed base-height table is authored for [-12,12] XZ bounds.')
+source['heightfield']={
+    'version':1,'grid_size':height_grid_size,'box_filter_samples_per_axis':height_box_samples,
+    'quantization_per_metre':int(height_quantization),'max_abs_quantized_metres':128/height_quantization,
+    'bounds_xz_m':[-12,12,-12,12],'seed':meadow_seed,'target_texture_size_px':target_texture_size_px,
+    'storage':'signed int8, four samples per uint32 in little-endian byte order; runtime lookup is bilinear',
+    'sampling':'4x4 midpoint box integration of height-weighted stochastic layer samples on equilateral triangle cells with linear barycentric weights',
+    'geometry_note':'Independent authored material weights feed the low-frequency geometry map; view-dependent POM remains a material residual, so exact geometric-plus-POM equivalence is not asserted.',
+    'layers':terrain_layers,
+}
+base_grid=np.zeros((height_grid_size,height_grid_size),dtype=np.int8)
 def base(x,z):
-    # A squared envelope joins the slab at zero height and zero slope.
-    f=max(0,1-(x/12)**2)**2*max(0,1-(z/12)**2)**2
-    return (relief['broad_amplitude']*math.sin(x*.22+.5)*math.cos(z*.18-.35)+relief['meso_amplitude']*math.sin(x*.48+z*.31-.6))*f
+    if max(abs(x),abs(z))>12:return 0.0
+    gx=max(0.0,min(height_grid_size-1,(x+12)/height_grid_step))
+    gz=max(0.0,min(height_grid_size-1,(z+12)/height_grid_step))
+    x0=int(gx);z0=int(gz);x1=min(x0+1,height_grid_size-1);z1=min(z0+1,height_grid_size-1)
+    fx=gx-x0;fz=gz-z0
+    h00=int(base_grid[z0,x0])/height_quantization
+    h10=int(base_grid[z0,x1])/height_quantization
+    h01=int(base_grid[z1,x0])/height_quantization
+    h11=int(base_grid[z1,x1])/height_quantization
+    sample=(h00+(h10-h00)*fx)+((h01+(h11-h01)*fx)-(h00+(h10-h00)*fx))*fz
+    return sample*meadow_blend(x,z)
 
 def shape(r,x,z):
     dx=x-r['x']; dz=z-r['z']
@@ -62,8 +136,114 @@ def ridge(r,q):
     # Bank and cut integrals balance; the original warped support avoids more fine cells.
     return r['depth']*relief['rut_bank_scale']*max(0,1-((q-1.05)/.65)**2)**2 if r['kind']==0 else 0
 
+def u32(value): return value & 0xffffffff
+def terrain_hash(value):
+    value=u32(value);value^=value>>16;value=u32(value*0x7feb352d)
+    value^=value>>15;value=u32(value*0x846ca68b);return u32(value^(value>>16))
+def terrain_random(value): return (terrain_hash(value)&0xffffff)/16777216.0
+def terrain_cell(x,z,seed): return terrain_hash(u32(int(x))^terrain_hash(u32(int(z)))^u32(seed))
+def terrain_noise(x,z,seed):
+    ix=math.floor(x);iz=math.floor(z);fx=x-ix;fz=z-iz
+    ux=fx*fx*fx*(fx*(fx*6-15)+10);uz=fz*fz*fz*(fz*(fz*6-15)+10)
+    a=terrain_random(terrain_cell(ix,iz,seed));b=terrain_random(terrain_cell(ix+1,iz,seed))
+    c=terrain_random(terrain_cell(ix,iz+1,seed));d=terrain_random(terrain_cell(ix+1,iz+1,seed))
+    return ((a+(b-a)*ux)+((c+(d-c)*ux)-(a+(b-a)*ux))*uz)*2-1
+def terrain_rotate(x,z,rotation):
+    return ((x,z) if rotation==0 else (-z,x) if rotation==1 else (-x,-z) if rotation==2 else (z,-x))
+def sample_height_texture(image,u,v):
+    h,w=image.shape
+    px=(u-math.floor(u))*w-.5;py=(v-math.floor(v))*h-.5
+    x0=math.floor(px);y0=math.floor(py);fx=px-x0;fy=py-y0
+    x0%=w;y0%=h;x1=(x0+1)%w;y1=(y0+1)%h
+    a=float(image[y0,x0]);b=float(image[y0,x1]);c=float(image[y1,x0]);d=float(image[y1,x1])
+    return ((a+(b-a)*fx)+((c+(d-c)*fx)-(a+(b-a)*fx))*fy)
+def terrain_layer_height(x,z,layer,warp):
+    tile=terrain_layers[layer]['meters_per_tile']
+    px=(x+warp[0]*1.3)/(tile*.9);pz=(z+warp[1]*1.3)/(tile*.9)
+    px,pz=px-.5773502691896258*pz,1.1547005383792515*pz
+    ix=math.floor(px);iz=math.floor(pz);fx=px-ix;fz=pz-iz
+    if fx+fz<1:
+        cells=((ix,iz),(ix+1,iz),(ix,iz+1));weights=(1-fx-fz,fx,fz)
+    else:
+        cells=((ix+1,iz+1),(ix,iz+1),(ix+1,iz));weights=(fx+fz-1,1-fx,1-fz)
+    uvx=x/tile;uvz=z/tile;value=0.0
+    for (cx,cz),weight in zip(cells,weights):
+        key=terrain_cell(cx,cz,meadow_seed);rotation=terrain_hash(key)&3
+        rx,rz=terrain_rotate(uvx,uvz,rotation)
+        value+=sample_height_texture(terrain_height_maps[layer],rx+terrain_random(key+1),rz+terrain_random(key+2))*weight
+    return value
+
+def smoothstep(a,b,value):
+    t=max(0.0,min(1.0,(value-a)/(b-a)));return t*t*(3-2*t)
+def meadow_road_coverage(x,z,edge=0):
+    main=1-smoothstep(1.15,1.65,abs(x-cart(z))+edge)
+    spur=(1-smoothstep(1.15,1.65,abs(z-3)+edge))*smoothstep(1.4+edge,2.2+edge,x)*(1-smoothstep(11-edge,11.7-edge,x))
+    return max(main,spur)
+def meadow_wetness(x,z):
+    if max(abs(x),abs(z))>12:return 0.0
+    return max([0.0]+[max(0.0,min(1.0,1-shape(r,x,z)/2.5)) for r in records if r['fill']>0])
+def meadow_blend(x,z): return smoothstep(0,1.5,12-max(abs(x),abs(z)))
+def meadow_cart_wear(x,z):
+    if max(abs(x),abs(z))>12:return 0.0
+    a=abs(abs(x-cart(z))-.82)
+    spur=abs(abs(z-3)-.82) if 4.5<x<11.5 else 100.0
+    return max(0.0,min(1.0,1-min(a,spur)/.35))
+def meadow_walk_wear(x,z):
+    if max(abs(x),abs(z))>12:return 0.0
+    return max(0.0,min(1.0,1-abs(x-(cart(z)-1.85))/.7))
+def meadow_pressed(x,z): return max(meadow_cart_wear(x,z),meadow_walk_wear(x,z))
+
+def prepare_base_height_contexts():
+    contexts=[]
+    offsets=[((ix+.5)/height_box_samples-.5)*height_grid_step for ix in range(height_box_samples)]
+    for iz in range(height_grid_size):
+        z=-12+iz*height_grid_step;row=[]
+        for ix in range(height_grid_size):
+            x=-12+ix*height_grid_step;cell=[]
+            for dz in offsets:
+                for dx in offsets:
+                    sx=max(-12.0,min(12.0,x+dx));sz=max(-12.0,min(12.0,z+dz))
+                    warp=(terrain_noise(sx/7,sz/7,meadow_seed+413),terrain_noise(sx/7,sz/7,meadow_seed+827))
+                    meso=terrain_noise(sx/.85,sz/.85,meadow_seed+571)
+                    path=max(meadow_pressed(sx,sz)*meadow_blend(sx,sz),
+                             meadow_road_coverage(sx,sz,warp[0]*.12+warp[1]*.07+meso*.09)*.82)
+                    road=meadow_road_coverage(sx,sz)
+                    wetness=meadow_wetness(sx,sz)
+                    patch=terrain_noise((sx+warp[0]*2)/16,(sz+warp[1]*2)/16,meadow_seed+9)
+                    bare=smoothstep(.35,.70,patch+meso*.10)
+                    soil_dry=max(0.0,min(1.0,.5+.5*terrain_noise(sx/22,sz/22,meadow_seed+31)))
+                    stones=.25*smoothstep(.55,.85,terrain_noise(sx/9,sz/9,meadow_seed+71))
+                    layer_weights=(bare*(1-stones)*(1-soil_dry),1-bare,
+                                   bare*(1-stones)*soil_dry,bare*stones)
+                    heights=tuple(terrain_layer_height(sx,sz,layer,warp) for layer in range(4))
+                    cell.append((sx,sz,path,road,wetness,layer_weights,heights))
+            row.append(cell)
+        contexts.append(row)
+    return contexts
+
+def build_base_height_grid(contexts):
+    grid=np.zeros((height_grid_size,height_grid_size),dtype=np.int8)
+    for iz,row in enumerate(contexts):
+        for ix,cell in enumerate(row):
+            accumulated=0.0
+            for sx,sz,path,road,wetness,source_weights,heights in cell:
+                dryness=road*(1-max(0.0,min(1.0,wetness*1.4)))*(
+                    .775)
+                target=(1-dryness,0.0,dryness,0.0)
+                layer_weights=[w+(t-w)*path for w,t in zip(source_weights,target)]
+                biased=[layer_weights[layer]*math.pow(2.0,(heights[layer]-.5)*(2+3*path*(1-path))) for layer in range(4)]
+                total=sum(biased)
+                accumulated+=sum((heights[layer]-.5)*terrain_layers[layer]['height_scale_m']*biased[layer]
+                                 for layer in range(4))/max(total,1e-5)
+            value=accumulated/(height_box_samples*height_box_samples)
+            quantized=round(value*height_quantization)
+            if quantized < -128 or quantized > 127:
+                raise ValueError(f'Meadow base-height sample exceeds signed-byte range: {value:.8f} m')
+            grid[iz,ix]=quantized
+    return grid
+
+@lru_cache(maxsize=262144)
 def height(x,z): return base(x,z)+max([0]+[ridge(r,shape(r,x,z)) for r in records])-max([0]+[depth(r,x,z) for r in records])
-height=lru_cache(maxsize=262144)(height)
 def basin_point(r,u,v):
     if r['kind']==0:u+=.24*r['side']*max(0,1-v*v)*(v+.35)
     if r['kind']==1:u=u*(.72+.28*max(0,min(1,(v+1)*.5)))+r['side']*.16*max(0,1-4*v*v)
@@ -94,14 +274,30 @@ water_groups={}
 for i,r in enumerate(records):water_groups.setdefault(group(i),[]).append(i)
 for key,ids in water_groups.items():
     fill=max(records[i]['fill'] for i in ids)
-    for i in ids:records[i]['level']=-100;records[i]['water_group']=key
-    if not fill:continue
-    rim=[height(*p) for i in ids for p in rims[i] if not any(shape(records[j],*p)<1-1e-6 for j in ids if i!=j)]
-    low=min(height(*p) for i in ids for p in interiors[i]);spill=min(rim)
-    assert spill>low+.001, ('no closed connected water basin on slope',ids,low,spill)
     for i in ids:
-        records[i]['level']=low+(spill-low)*fill
-        if not records[i]['fill']:records[i]['fill']=fill
+        records[i]['level']=-100;records[i]['water_group']=key
+        if fill and not records[i]['fill']:records[i]['fill']=fill
+def update_water_levels():
+    for key,ids in water_groups.items():
+        fill=max(records[i]['fill'] for i in ids)
+        for i in ids:records[i]['level']=-100;records[i]['water_group']=key
+        if not fill:continue
+        rim=[height(*p) for i in ids for p in rims[i] if not any(shape(records[j],*p)<1-1e-6 for j in ids if i!=j)]
+        low=min(height(*p) for i in ids for p in interiors[i]);spill=min(rim)
+        assert spill>low+.001, ('no closed connected water basin on slope',ids,low,spill)
+        for i in ids:
+            records[i]['level']=low+(spill-low)*fill
+            if not records[i]['fill']:records[i]['fill']=fill
+
+height.cache_clear()
+base_height_contexts=prepare_base_height_contexts()
+base_grid=build_base_height_grid(base_height_contexts)
+height.cache_clear()
+update_water_levels()
+effective_base_heights=[base(-12+ix*height_grid_step,-12+iz*height_grid_step)
+                         for iz in range(height_grid_size) for ix in range(height_grid_size)]
+source['heightfield']['minimum_height_m']=min(effective_base_heights)
+source['heightfield']['maximum_height_m']=max(effective_base_heights)
 
 water_members={}
 for i,r in enumerate(records):
@@ -111,22 +307,55 @@ if not MESHES_ONLY: (OUT/'meadow_surface.json').write_text(json.dumps(source,ind
 # A single source table feeds C++ contact height and shader wetness/transport.
 rows=[]
 for r in records: rows.append(', '.join(f'{r[k]:.9f}' for k in ('x','z','rx','rz','depth','c','s','level','kind','side')))
+height_bytes=[int(value)&0xff for value in base_grid.flat]
+height_bytes.extend([0]*((-len(height_bytes))%4))
+packed_height_words=[sum(height_bytes[offset+lane]<<(lane*8) for lane in range(4))
+                     for offset in range(0,len(height_bytes),4)]
+packed_height_cpp=',\n'.join(f'  0x{value:08X}u' for value in packed_height_words)
+packed_height_hlsl=',\n'.join(f'  0x{value:08X}u' for value in packed_height_words)
 cpp='''#pragma once
 // Generated by Tools/art/meadow/generate_surface.py from the authored meadow records.
-#include <hs/core/math.hpp>
+#include <hs/render_data/render_snapshot_values.hpp>
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 namespace hs {
 struct MeadowDepression { float x,z,rx,rz,depth,c,s,level,kind,side; };
 inline constexpr std::array<MeadowDepression, COUNT> kMeadowDepressions{{
 ROWS
 }};
+inline constexpr std::uint32_t kMeadowSurfaceSeed=SEED_VALUEu;
+// Fixed 24x24 m meadow payload; larger landscapes require an admitted terrain binary.
+inline constexpr std::size_t kMeadowBaseHeightGridSize=65;
+inline constexpr float kMeadowBaseHeightGridStep=0.375f;
+inline constexpr std::array<std::uint32_t, HEIGHT_WORDS> kMeadowBaseHeightPacked{{
+PACKED_HEIGHT
+}};
 inline bool MeadowContains(Float2 p) noexcept { return std::abs(p.x)<=12 && std::abs(p.y)<=12; }
+inline float MeadowBaseHeightSample(std::size_t index) noexcept {
+ const auto encoded=static_cast<std::uint8_t>((kMeadowBaseHeightPacked[index/4]>>((index%4)*8))&0xffu);
+ const int value=encoded<128u?static_cast<int>(encoded):static_cast<int>(encoded)-256;
+ return static_cast<float>(value)*(1.0f/4096.0f);
+}
+inline float MeadowBaseHeightBoundaryFade(Float2 p) noexcept {
+ const float distance=12.0f-std::max(std::abs(p.x),std::abs(p.y));
+ const float t=std::clamp(distance/1.5f,0.0f,1.0f);
+ return t*t*(3.0f-2.0f*t);
+}
 inline float MeadowBaseHeight(Float2 p) noexcept {
- float x=std::max(0.0f,1-p.x*p.x/144),z=std::max(0.0f,1-p.y*p.y/144);
- return (BROADf*std::sin(p.x*.22f+.5f)*std::cos(p.y*.18f-.35f)+MESOf*std::sin(p.x*.48f+p.y*.31f-.6f))*x*x*z*z;
+ if(!MeadowContains(p))return 0;
+ const float gx=std::clamp((p.x+12.0f)/kMeadowBaseHeightGridStep,0.0f,64.0f);
+ const float gz=std::clamp((p.y+12.0f)/kMeadowBaseHeightGridStep,0.0f,64.0f);
+ const auto x0=static_cast<std::size_t>(gx),z0=static_cast<std::size_t>(gz);
+ const auto x1=std::min(x0+1,std::size_t{64}),z1=std::min(z0+1,std::size_t{64});
+ const float fx=gx-static_cast<float>(x0),fz=gz-static_cast<float>(z0);
+ const float h00=MeadowBaseHeightSample(z0*65+x0),h10=MeadowBaseHeightSample(z0*65+x1);
+ const float h01=MeadowBaseHeightSample(z1*65+x0),h11=MeadowBaseHeightSample(z1*65+x1);
+ const float lower=h00+(h10-h00)*fx,upper=h01+(h11-h01)*fx;
+ return (lower+(upper-lower)*fz)*MeadowBaseHeightBoundaryFade(p);
 }
 inline float MeadowDepressionQ(const MeadowDepression& r, Float2 p) noexcept {
  const float dx=p.x-r.x,dz=p.y-r.z,c=r.c,s=r.s;
@@ -163,9 +392,8 @@ inline float MeadowWalkWear(Float2 p) noexcept {if(!MeadowContains(p))return 0;r
 inline float MeadowPressed(Float2 p) noexcept {return std::max(MeadowCartWear(p),MeadowWalkWear(p));}
 }
 '''.replace('COUNT',str(len(rows))).replace('ROWS','\n'.join(' {'+', '.join(x+'f' for x in row.split(', '))+'},' for row in rows))
-# The project Float2 contract is defined here, independent of renderer ownership.
-cpp=cpp.replace('hs/core/math.hpp','hs/core/render_snapshot.hpp')
-for key,value in [('BROAD',relief['broad_amplitude']),('MESO',relief['meso_amplitude']),('BANK',relief['rut_bank_scale'])]:cpp=cpp.replace(key,f'{value:.12f}')
+cpp=cpp.replace('SEED_VALUE',str(meadow_seed)).replace('HEIGHT_WORDS',str(height_packed_count)).replace('PACKED_HEIGHT',packed_height_cpp)
+cpp=cpp.replace('BANK',f"{relief['rut_bank_scale']:.12f}")
 if not MESHES_ONLY: (ROOT/'Source/Presentation/Public/hs/presentation/meadow_surface.hpp').write_text(cpp)
 hlsl='''#ifndef HS_MEADOW_SURFACE
 #define HS_MEADOW_SURFACE
@@ -174,7 +402,17 @@ static const MeadowDepression MeadowRecords[COUNT]={
 ROWS
 };
 float MeadowQ(MeadowDepression r,float2 p){float c=r.c,s=r.s;float2 d=p-float2(r.x,r.z);if(any(abs(d)>2*(r.rx+r.rz)))return 100;float u=(c*d.x-s*d.y)/r.rx,v=(s*d.x+c*d.y)/r.rz;if(r.kind==0)u-=.24*r.side*max(0,1-v*v)*(v+.35);if(r.kind==1){u-=r.side*.16*max(0,1-4*v*v);u/=.72+.28*saturate((v+1)*.5);}if(r.kind==2)u=(abs(u)-.48)/.43;return u*u+v*v;}
-float MeadowBaseHeight(float2 p){float2 f=max(0,1-p*p/144);return (BROAD*sin(p.x*.22+.5)*cos(p.y*.18-.35)+MESO*sin(p.x*.48+p.y*.31-.6))*f.x*f.x*f.y*f.y;}
+static const uint MeadowSurfaceSeed=SEED_VALUEu;
+static const float4 TerrainSourceMetersPerTile=float4(TERRAIN_TILE_VALUES);
+static const float4 TerrainSourceHeightScale=float4(TERRAIN_HEIGHT_VALUES);
+static const uint TerrainSourceTextureEdge=TEXTURE_EDGEu;
+// Fixed 24x24 m meadow payload; larger landscapes require an admitted terrain binary.
+static const uint MeadowBaseHeightPacked[HEIGHT_WORDS]={
+PACKED_HEIGHT
+};
+float MeadowBaseHeightSample(uint index){uint value=(MeadowBaseHeightPacked[index>>2]>>((index&3)*8))&255;return float(value>=128?int(value)-256:int(value))*(1.0/4096.0);}
+float MeadowBaseHeightBoundaryFade(float2 p){float distance=12-max(abs(p.x),abs(p.y));float t=saturate(distance/1.5);return t*t*(3-2*t);}
+float MeadowBaseHeight(float2 p){if(any(abs(p)>12))return 0;float2 grid=clamp((p+12)/.375,0,64);uint2 lo=(uint2)grid,hi=min(lo+1,64);float2 f=grid-float2(lo);float h00=MeadowBaseHeightSample(lo.y*65+lo.x),h10=MeadowBaseHeightSample(lo.y*65+hi.x),h01=MeadowBaseHeightSample(hi.y*65+lo.x),h11=MeadowBaseHeightSample(hi.y*65+hi.x);float lower=h00+(h10-h00)*f.x,upper=h01+(h11-h01)*f.x;return (lower+(upper-lower)*f.y)*MeadowBaseHeightBoundaryFade(p);}
 float MeadowGroundHeight(float2 p){if(any(abs(p)>12))return 0;float d=0,b=0;[loop]for(uint i=0;i<COUNT;++i){MeadowDepression r=MeadowRecords[i];float q=MeadowQ(r,p);if(r.kind==0){float t=max(0,1-((q-1.05)/.65)*((q-1.05)/.65));b=max(b,r.depth*BANK*t*t);}if(q<1)d=max(d,r.depth*(1-q)*(1-q)*(1+.22*clamp((p.y-r.z)/r.rz,-1,1)));}return MeadowBaseHeight(p)+b-d;}
 float MeadowWetness(float2 p){if(any(abs(p)>12))return 0;float w=0;[loop]for(uint i=0;i<COUNT;++i)if(MeadowRecords[i].level>-10)w=max(w,saturate(1-MeadowQ(MeadowRecords[i],p)/2.5));return w;}
 float MeadowRoadCoverage(float2 p,float edge){float main=1-smoothstep(1.15,1.65,abs(p.x-sin(p.y*.085)*6.5)+edge);float spur=(1-smoothstep(1.15,1.65,abs(p.y-3)+edge))*smoothstep(1.4+edge,2.2+edge,p.x)*(1-smoothstep(11-edge,11.7-edge,p.x));return max(main,spur);}
@@ -183,8 +421,12 @@ float MeadowWalkWear(float2 p){if(any(abs(p)>12))return 0;return saturate(1-abs(
 float MeadowPressed(float2 p){return max(MeadowCartWear(p),MeadowWalkWear(p));}
 #endif
 '''.replace('COUNT',str(len(rows))).replace('ROWS','\n'.join(' {'+row+'},' for row in rows))
-for key,value in [('BROAD',relief['broad_amplitude']),('MESO',relief['meso_amplitude']),('BANK',relief['rut_bank_scale'])]:hlsl=hlsl.replace(key,f'{value:.12f}')
-hlsl=hlsl.replace('#endif','float MeadowSoilDryness(float2 p,float wetness){return MeadowRoadCoverage(p,0)*(1-saturate(wetness*1.4))*lerp(.55,1,saturate(.5+MeadowBaseHeight(p)*2));}\n#endif')
+hlsl=hlsl.replace('SEED_VALUE',str(meadow_seed)).replace('HEIGHT_WORDS',str(height_packed_count)).replace('PACKED_HEIGHT',packed_height_hlsl)
+hlsl=hlsl.replace('TERRAIN_TILE_VALUES',','.join(f"{layer['meters_per_tile']:.9g}" for layer in terrain_layers))
+hlsl=hlsl.replace('TERRAIN_HEIGHT_VALUES',','.join(f"{layer['height_scale_m']:.9g}" for layer in terrain_layers))
+hlsl=hlsl.replace('TEXTURE_EDGE',str(target_texture_size_px))
+hlsl=hlsl.replace('BANK',f"{relief['rut_bank_scale']:.12f}")
+hlsl=hlsl.replace('#endif','float MeadowSoilDryness(float2 p,float wetness){return MeadowRoadCoverage(p,0)*(1-saturate(wetness*1.4))*0.775;}\n#endif')
 
 dry_rows=[]
 for patch in source.get('dry_grass_patches',[]):
@@ -216,7 +458,7 @@ def wetness(x,z):
  return max([0]+[max(0,min(1,1-shape(r,x,z)/2.5)) for r in records if r['level']>-10])
 
 def soil_dryness(x,z,wet):
- return road_coverage(x,z)*(1-max(0,min(1,wet*1.4)))*(.55+.45*max(0,min(1,.5+base(x,z)*2)))
+ return road_coverage(x,z)*(1-max(0,min(1,wet*1.4)))*.775
 
 # Adaptive cells share edge samples with their neighbours; no T junction holes.
 N=48; S=.5; fine={}
