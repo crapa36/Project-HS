@@ -38,6 +38,24 @@ Release는 MSVC 개발자 PowerShell에서 구성한 뒤 정식 빌드 진입점
 ./Build/msvc-release/ProjectHS.exe
 ```
 
+개발 빌드의 시각 비교 룸은 다음 명령으로 엽니다. 캐릭터와 각 애니메이션, 프롭·아이템·투사체·VFX를 공간별로 동시에 재생하며 게임 출력음은 실행 중에만 음소거합니다.
+기존 게임의 지형지물 배치와 분리된 빈 테스트 맵이며, 조명·하늘·노출·재질과 렌더링 경로는 게임 설정을 재사용합니다. 다른 맵의 정적 GI를 강제로 적용하지 않습니다.
+
+```powershell
+./Build/msvc-debug/ProjectHS.exe --test-room --artifacts=Build/msvc-debug/Artifacts/runtime
+```
+
+오른쪽 마우스로 일반 게임처럼 이동하고 마우스 휠로 카메라를 조절합니다. Space는 일시정지·재개, R은 카메라 초기화, F12는 전체 화면을 지정한 기본 빌드의 산출물 폴더에 저장하며 Escape는 종료합니다. 이 룸은 Release에서 제외됩니다.
+
+특정 공간의 이미지를 자동 캡처하려면 1부터 시작하는 공간 번호와 재생 시간(초, 0~30)을 지정합니다. 결과 폴더는 기본 빌드 안에서 재사용합니다.
+번호·이름·위치는 `test-room-catalog.csv`, 실제 캡처 시간과 콘텐츠 세대는 `test-room-capture.json`에 기록됩니다. 전체 화면 피격·저체력 효과는 해당 전시물 가까이에서 보거나 그 번호를 캡처할 때만 적용해 다른 전시물의 색을 바꾸지 않습니다.
+
+```powershell
+./Build/msvc-debug/ProjectHS.exe --test-room-capture=1 --test-room-time=0.5 --artifacts=Build/msvc-debug/Artifacts/runtime
+```
+
+표면·HDR 원인 분석이 필요할 때만 기존 `--capture-diagnostics`를 함께 지정합니다. 사용이 끝난 대형 원본 캡처는 즉시 삭제합니다.
+
 콘텐츠 원본은 `ContentSource/`, `Schemas/`, `Content/Shaders/`입니다. `Build/`의 cooked 파일을 직접 수정하지 마세요. 실행 파일은 빌드가 게시한 Selected Generation을 사용합니다. 개발 도구·검증 상세는 [Tools/tooling/WORKFLOW.md](Tools/tooling/WORKFLOW.md)를 참고하세요.
 
 콘텐츠 편집은 원본 JSON에서 하고 해당 제작기 타깃을 빌드합니다. 별도 `hs_content_tools` 실행 파일은 제거했습니다. 전체 콘텐츠는 `hs_content_generation`, 게임 실행 파일은 `ProjectHS` 타깃으로 빌드합니다. 게임 데이터만 검사할 때는 빌드된 `hs_game_data.exe --validate-only --source-root <저장소 절대경로> --build-root <빌드 절대경로>`를 사용합니다.

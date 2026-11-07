@@ -159,6 +159,14 @@ boundaries invalidate reuse; no hash or pointer identity validates the arrays.
 Animation updates share the existing actual-dynamic invalidation used by projection.
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
+The offline scene cooker may start parent proxies from an existing authored LOD2
+with matching materials, flags and selector coverage. It certifies the original
+to that representation once per source, then carries an outward-rounded scaled
+error through each material partition. Leaves retain the original instances;
+parent reduction is compared with the actual child cut, not its temporary inputs.
+HLOD shares material textures rather than duplicating them into an atlas. Texture
+quality follows actual demand and budget pressure; preferred registration alone
+preloads the tail and does not force idle textures to their finest mip.
 
 The SPB2 baked lighting package carries world-space cosine-convolved SH9 for
 independent regular-grid nodes, visibility masks for each cell's 4x4x4 receiver
@@ -199,10 +207,11 @@ runtime does not create page-bake PSOs or execute the page-production shaders.
 Those two shader products remain in the producer input only. Build provenance is
 kept in Action inputs; runtime product dependencies connect metadata to section
 textures. Producer and consumer share the same source-identity and section values.
-The producer reuses one 2048-square, three-plane RGBA8 working texture per section
-and preserves its color/normal mip filtering before BC7 compression. The three
-compressed planes fit one existing package at approximately the former 1024 RGBA8
-payload size. Surface layout2 keeps color/roughness in plane0, base normal/AO and
+The producer reuses one 4096-square RGBA8 working plane while producing each tile,
+with a 256-texel continuation around its 3584-texel interior. The index references
+leaf metadata whose three compressed planes are independent ordinary texture
+packages. Color/normal mip filtering is preserved before BC7 compression.
+Current surface layout keeps color/roughness in plane0, base normal/AO and
 residual depth below the mesh(0..0.05m) in plane1, and four layer weights in plane2.
 Color uses an sRGB view; all other channels use the linear view. Runtime performs
 one residual-height search and samples independent fine normals from the source
@@ -210,8 +219,12 @@ detail layers. Page admission excludes legacy channel layouts; insufficient
 texel density or complete ray/filter support selects the original evaluator.
 Admitted interior samples use the existing anisotropic sampler. Filtered residual
 mips are ordinary appearance levels, not conservative ray-skipping bounds.
-Geometry, collision and grass placement are unchanged. The residual representation
-still requires visual/performance qualification; meso geometry work is incomplete.
+The meadow's physical base height is authored from the same texture height inputs,
+metre scale and fixed asset seed as its surface. The author generator emits the mesh
+and shared compact CPU/HLSL height query; authored depressions and water remain
+separate explicit deformation inputs. Scene placement uses that same query.
+Independent source detail and the page residual remain appearance approximations;
+the source evaluator is retained when page density/support cannot represent them.
 Packed and developer catalogs admit the same section-image products;
 the small TSF1 metadata is not a texture descriptor.
 Visibility pixel classification is a separate runtime shader family. Count,
@@ -235,9 +248,10 @@ Simulation GPU submission history and accepted UI Present history are independen
 
 PresentationCatalog and SimulationRules are typed tables. Their developer file
 decoders are the separate hs_presentation_io and hs_game_rules_io libraries.
-Release Runtime binds the content-linker's compiled const tables; developer
-Runtime retains the selected-Generation loaders. Simulation's canonical byte
-writer and C++ emitter share one typed member inventory, preserving ABI padding
+Release Runtime decodes the content-linker's bounded binary sections into typed
+owners; generated C++ retains the small image manifest. Developer Runtime retains
+the selected-Generation loaders. Simulation's canonical byte
+writer and decoder share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
 The Release ProjectHS entry point links the compiled shipping content;
 the experiment host is available only in development configurations.
@@ -250,7 +264,7 @@ loader itself can consume a narrower set; dropping an unused color PSO alone
 does not change package dependency ownership.
 The base Runtime target does not force that image's
 full cook into unrelated consumers. CPU runtime integration tests use their
-selected Generation; a separate shipping test target owns compiled-table/image
+selected Generation; a separate shipping test target owns binary-table/image
 and packed-font checks. Both remain part of full verification.
 Single-config Release can build with HS_BUILD_CONTENT_TOOLS=OFF using an existing
 Shipping/content.generated.cpp and Content/content.hsp in the build directory.
@@ -285,13 +299,13 @@ The 64-byte shipping header keeps its semantic content ID at bytes 16..47; bytes
 eight bytes of a domain-separated canonical SHA256. The semantic ID retains
 its original fixed-header marker, independently of that physical storage tag.
 Startup still verifies each full VFX range digest.
-Release audio borrows generated cue rows and owns one preload PCM arena. Generated
+Release audio borrows admitted cue rows and owns one preload PCM arena. Cooked
 chunk digests cover contiguous preload runs and independent transition tracks;
 only successful verified reads publish ready PCM. Only
 transition tracks use asynchronous preparation and completion-safe eviction.
 Developer JSON/WAV loading is isolated in hs_runtime_audio_io and excluded from
 Release Runtime. VFX uses the existing record types through VfxProgramView and
-VfxImage spans; generated arrays own shipping metadata for the process. Developer
+VfxImage spans; PreparedContent retains decoded shipping metadata and its backing. Developer
 VfxImageData owns mutable vectors and the shared decoder/static-policy preparation
 in hs_vfx_image_io, backed by the CPU-only hs_vfx_program_io format reader.
 Developer Catalog file loading is hs_runtime_vfx_io. These decoders are absent
@@ -471,7 +485,11 @@ The initialized-renderer entry remains available for existing capture callers. A
 file publication and Generation selection. When content tools are enabled, the
 dedicated Apps target `hs_static_shadow_bake` publishes the native bake through
 AssetPipeline. Its producer identity follows RendererD3D12 implementation changes;
-unrelated render-test host edits do not invalidate the archive.
+unrelated render-test host edits do not invalidate the archive. Runtime frame
+composition is excluded from the offline baker; shared bootstrap, capture,
+resource and teardown changes remain producer dependencies.
+The render test host compiles the frame with the offline adapter because its
+existing fixtures exercise both frame rendering and native bake capture.
 The explicit hs_render_static_shadow_candidate target uses a shadow-free input
 Generation; its output is composed into runtime-full after the shadow-free input.
 Gameplay projection and the baker share Presentation's fixed environment-sun direction. Ordinary runtime shadow
@@ -524,7 +542,7 @@ named-animation descriptors retain small skeleton/clip/binding tables and verifi
 subranges of the original products. Packed TRS rows occupy 40 bytes; their sampling
 adapter returns Core's padded value only for accessed rows. Monster palette rows
 read directly into the existing upload vector in their cooked transposed order.
-ContentLinker emits these renderer descriptors into the compiled shipping tables;
+ContentLinker emits these renderer descriptors into bounded binary shipping tables;
 the matching payload ranges are stored in `Content/content.hsp`. Runtime opens the
 pack only after its extent and compiled 64-byte header match, then passes the same
 bounded owner to renderer resource readers. Producer provenance remains in the

@@ -50,6 +50,8 @@ presentation_catalog.hsbin
 Use the narrowest existing check that answers the risk introduced by the change.
 
 구조 간소화와 최적화를 우선하고, 관련 수정을 모은 뒤 빌드와 필요한 기존 검사를 묶어서 실행한다.
+기본 `Build/msvc-debug`·`Build/msvc-release`를 덮어쓰며 사용하고 별도 날짜별·실험별 빌드 트리는 만들지 않는다.
+불가피한 임시 빌드는 고정 임시 경로를 재사용하고 사용 후 즉시 삭제한다. 완료된 대용량 중간 생성물도 즉시 정리한다.
 변경 위험을 직접 잡지 못하는 중복 테스트·상태 검사·진단 코드는 추가하지 말고 정리한다.
 승인된 불변 계약은 생성·입력 경계에서 확정하고 내부 소비 경로에서 반복 검증하지 않는다.
 렌더 화질은 같은 조건의 실제 화면과 움직임 안정성을 보고 판단한다.
