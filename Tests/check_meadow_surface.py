@@ -86,8 +86,9 @@ assert waters[0]['vertices']==waters[1]['vertices']==waters[2]['vertices'], 'wat
 water_faces=[tuple(sorted(tuple(v[:3]) for v in waters[0]['vertices'][i:i+3])) for i in range(0,len(waters[0]['vertices']),3)]
 assert len(set(water_faces))==len(water_faces), 'overlapping connected-basin water faces'
 def cell(triangle):
- # Each clipped water triangle remains inside one original half-metre cell.
- return tuple(min(47,max(0,math.floor((sum(v[k] for v in triangle)/3+12)*2))) for k in (0,2))
+ # Clipping stays inside one macro-cell of the shared base-height grid.
+ cells=src['heightfield']['grid_size']-1;step=24/cells
+ return tuple(min(cells-1,max(0,math.floor((sum(v[k] for v in triangle)/3+12)/step))) for k in (0,2))
 def boundary(p):
  return abs(abs(p[0])-12)<1e-6 or abs(abs(p[2])-12)<1e-6
 wet_vertices=waters[0]['vertices']
@@ -137,19 +138,25 @@ field={'math':math,'records':rows,'relief':src['relief'],'lru_cache':lru_cache,
        'height_quantization':heightfield['quantization_per_metre']}
 exec(compile(functions,'meadow_height_contract','exec'),field)
 # Extract only the pure helper; importing the generator would regenerate assets.
-helper=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name=='rectangle_without_center'],type_ignores=[])
+helper=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name=='rectangle_triangulations'],type_ignores=[])
 scope={'struct':struct};exec(compile(helper,'meadow_rectangle_contract','exec'),scope)
-reduce=scope['rectangle_without_center']
+def reduce(center,ring):return next(iter(scope['rectangle_triangulations'](center,ring,.00005)),None)
 def probe_vertex(x,z):return [x,0,z,0,1,0,x,z,1,0,0,-1,0]
 center=probe_vertex(0,0);ring=[probe_vertex(-1,-1),probe_vertex(-1,1),probe_vertex(1,1),probe_vertex(1,-1)]
 assert len(reduce(center,ring))==6
 assert reduce(center,ring+[ring[0]]) is None
-for component,delta in [(1,.001),(3,.01),(8,.01),(11,1),(12,1)]:
+for component,delta in [(1,.001),(6,.002),(11,1),(12,1)]:
  changed=center.copy();changed[component]+=delta
  assert reduce(changed,ring) is None, ('unsafe center removed',component)
-for component,value in [(1,.00005006),(3,.00001006),(8,.00001006)]:
+for component,value in [(1,.00005006),(6,1/512+.00000006)]:
  changed=center.copy();changed[component]=value
  assert reduce(changed,ring) is None, ('rounded threshold exceeded',component)
+for component in (3,7,8):
+ changed=center.copy();changed[component]+=.01
+ assert reduce(changed,ring) is not None, 'unused terrain attribute retained a center'
+subdivided=ring[:1]+[probe_vertex(-1,0)]+ring[1:]
+reduced=reduce(center,subdivided)
+assert reduced is not None and len(reduced)==9 and {tuple(v) for v in reduced}=={tuple(v) for v in subdivided}, 'shared edge vertex lost during center removal'
 second=[v.copy() for v in ring];second[0][1]=second[2][1]=.001
 assert reduce(center,second)==[second[i] for i in (1,2,3,1,3,0)], 'second diagonal was not selected'
 for component in (11,12):
@@ -162,6 +169,48 @@ for mesh in grounds:
  for v in mesh['vertices'][::max(1,len(mesh['vertices'])//1500)]:
   height_error=max(height_error,abs(v[1]-field['height'](v[0],v[2])))
 assert height_error<1e-6, ('mesh/contact height mismatch',height_error)
+# Check the emitted faces, not only their vertices.  shape() returns q=100
+# outside this conservative record box, so excluding those records cannot
+# change the production height at any point of a triangle's bounding box.
+record_boxes=[(r['x']-2*(r['rx']+r['rz']),r['x']+2*(r['rx']+r['rz']),
+               r['z']-2*(r['rx']+r['rz']),r['z']+2*(r['rx']+r['rz']),r) for r in rows]
+interior_errors=[];base_interpolation_errors=[]
+regression_point=(4.65625,7.9375)
+sample_weights=((.5,.5,0),(.5,0,.5),(0,.5,.5),(1/3,1/3,1/3),
+                (.5,.25,.25),(.25,.5,.25),(.25,.25,.5),
+                (.75,.25,0),(.25,.75,0),(.75,0,.25),(.25,0,.75),
+                (0,.75,.25),(0,.25,.75))
+for lod,mesh in enumerate(grounds):
+ vertices=mesh['vertices'];worst=(0.0,None);base_worst=(0.0,None);regression_seen=False
+ for i in range(0,len(vertices),3):
+  a,b,c=vertices[i:i+3]
+  xmin=min(a[0],b[0],c[0]);xmax=max(a[0],b[0],c[0])
+  zmin=min(a[2],b[2],c[2]);zmax=max(a[2],b[2],c[2])
+  field['records']=[r for x0,x1,z0,z1,r in record_boxes
+                    if x0<=xmax and x1>=xmin and z0<=zmax and z1>=zmin]
+  base_a=field['base'](a[0],a[2]);base_b=field['base'](b[0],b[2]);base_c=field['base'](c[0],c[2])
+  weights=list(sample_weights)
+  x,z=regression_point
+  if xmin-1e-9<=x<=xmax+1e-9 and zmin-1e-9<=z<=zmax+1e-9:
+   denominator=(b[2]-c[2])*(a[0]-c[0])+(c[0]-b[0])*(a[2]-c[2])
+   wa=((b[2]-c[2])*(x-c[0])+(c[0]-b[0])*(z-c[2]))/denominator
+   wb=((c[2]-a[2])*(x-c[0])+(a[0]-c[0])*(z-c[2]))/denominator
+   wc=1-wa-wb
+   if min(wa,wb,wc)>=-1e-9:
+    weights.append((wa,wb,wc));regression_seen=True
+  for wa,wb,wc in weights:
+   x=wa*a[0]+wb*b[0]+wc*c[0];z=wa*a[2]+wb*b[2]+wc*c[2]
+   y=wa*a[1]+wb*b[1]+wc*c[1]
+   error=abs(y-field['height'](x,z))
+   if error>worst[0]:worst=(error,(i//3,x,z))
+   base_error=abs(wa*base_a+wb*base_b+wc*base_c-field['base'](x,z))
+   if base_error>base_worst[0]:base_worst=(base_error,(i//3,x,z))
+ field['records']=rows
+ assert regression_seen, ('regression point missing from mesh',mesh['name'])
+ interior_errors.append(worst[0])
+ base_interpolation_errors.append(base_worst)
+ assert worst[0]<=(16<<lod)/4096+1e-6, ('mesh interior height mismatch',mesh['name'],worst)
+ assert base_worst[0]<=1/4096+1e-6, ('base height interpolation exceeds one quantum',mesh['name'],base_worst)
 for r in rows:
  if r['kind']!=0:continue
  assert .18<=r['rx']<=.24 and .05<=r['depth']<=.09
@@ -221,4 +270,4 @@ for mesh in grounds:
   baked_control_error=max(baked_control_error,abs(v[6]-wet),abs(v[7]-dry))
 assert baked_control_error<1e-7, ('baked ground controls mismatch',baked_control_error)
 
-print(json.dumps({'ground_lod_triangles':triangles,'water_triangles':len(waters[0]['vertices'])//3,'filled_basins':len(counts),'wet_trace_types':sorted(water_types),'wet_cells_checked':len(wet_cells),'wet_support_triangles':len(wet_support[0]),'perimeter_vertices':len(perimeters[0]),'coverage_m2':576,'elapsed_seconds':round(time.perf_counter()-started,3),'sampled_height_error_m':height_error,'macro_height_range_m':[min(base_samples),max(base_samples)],'max_macro_grade':macro_grade,'max_rut_volume_relative_error':max(volume_errors),'max_final_rut_net_volume_relative_error':max(net_volume_errors),'wheel_union_bank_m3':union_bank,'wheel_union_excavation_m3':union_cut,'wheel_union_volume_relative_error':union_volume_error,'baked_control_error':baked_control_error,'connected_water_groups':len(wet_groups),'valid':True}))
+print(json.dumps({'ground_lod_triangles':triangles,'water_triangles':len(waters[0]['vertices'])//3,'filled_basins':len(counts),'wet_trace_types':sorted(water_types),'wet_cells_checked':len(wet_cells),'wet_support_triangles':len(wet_support[0]),'perimeter_vertices':len(perimeters[0]),'coverage_m2':576,'elapsed_seconds':round(time.perf_counter()-started,3),'sampled_vertex_height_error_m':height_error,'interior_height_error_m':interior_errors,'base_interpolation_error_m_and_location':base_interpolation_errors,'macro_height_range_m':[min(base_samples),max(base_samples)],'max_macro_grade':macro_grade,'max_rut_volume_relative_error':max(volume_errors),'max_final_rut_net_volume_relative_error':max(net_volume_errors),'wheel_union_bank_m3':union_bank,'wheel_union_excavation_m3':union_cut,'wheel_union_volume_relative_error':union_volume_error,'baked_control_error':baked_control_error,'connected_water_groups':len(wet_groups),'valid':True}))

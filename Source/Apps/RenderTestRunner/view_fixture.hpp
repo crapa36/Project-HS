@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_package.hpp>
+#include <hs/render_data/terrain_source_constants.hpp>
 #include <nlohmann/json.hpp>
 #include <Windows.h>
 #include <wincodec.h>
@@ -30,6 +31,7 @@ struct OwnedViewProbeEvidence
     std::array<std::uint32_t, 3> admitted_distortions{};
     std::array<std::uint32_t, 3> admitted_ribbons{};
     std::array<std::uint32_t, 3> admitted_ground{};
+    std::array<std::uint32_t, 3> admitted_volumes{};
     std::array<bool, 4> invalid_distortion_gap_rejected{};
     std::array<bool, 4> invalid_ribbon_pool_rejected{};
     std::array<bool, 4> invalid_ground_gap_rejected{};
@@ -190,6 +192,21 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
         view.camera.target.x += 1.0e9;
         view.view_origin.x += 1.0e9;
     }
+    VfxVolumeInput hero{};
+    hero.identity.effect_id = 0x564f4c31u;
+    hero.identity.effect_handle = 1;
+    hero.identity.source_id = 1;
+    hero.identity.owner_id = 0x564f4c32u;
+    hero.world_to_local = hero.local_to_world = {1, 0, 0, 0, 0, 1, 0, 0,
+        0, 0, 1, 0, 0, 0, 0, 1};
+    hero.bounds_min = {-1, -1, -1}; hero.bounds_max = {1, 1, 1};
+    hero.shape = VfxVolumeShape::BoundedCrown;
+    hero.noise = VfxVolumeNoise::None;
+    hero.steps = 18;
+    hero.authored_scale = 1;
+    hero.alpha = .25f;
+    hero.scattering_albedo = {.5f, .5f, .5f};
+    hero.hdr = 1;
     const std::array<VfxDecalInput, 2> decals{{
         {.stable_id = 0x44454341u, .position = {-2, 0, 0}, .radius = 8,
          .linear_rgb = {0.7f, 0.3f, 0.1f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
@@ -263,6 +280,24 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     auto pooled_ribbon = owning_ribbon;
     pooled_ribbon.outputs.clear(); pooled_ribbon.frame_output_count = 2;
     std::vector<RenderInstance> moving_instances(snapshots.current.instances.begin(), snapshots.current.instances.end());
+    if (!snapshots.current.static_scene)
+        return Failure("Owned-view terrain probe requires its admitted static scene.");
+    const auto static_meadow = std::ranges::find_if(snapshots.current.static_scene->instances,
+        [](const RenderInstance &instance) {
+            return instance.mesh == RenderMesh::MeadowSurface && instance.environment_variant == 0;
+        });
+    if (static_meadow == snapshots.current.static_scene->instances.end())
+        return Failure("Owned-view terrain probe requires the static MeadowSurface variant 0 source.");
+    auto dynamic_meadow = *static_meadow;
+    dynamic_meadow.stable_id = 0x4d4541444f570001ull;
+    if (std::ranges::find(moving_instances, dynamic_meadow.stable_id,
+            &RenderInstance::stable_id) != moving_instances.end())
+        return Failure("Owned-view dynamic MeadowSurface stable ID already exists in the packet scene.");
+    dynamic_meadow.position.x = 100.0f;
+    dynamic_meadow.position.z = 100.0f;
+    dynamic_meadow.position.y = 4.0f;
+    dynamic_meadow.scale.y = 1.0f;
+    moving_instances.push_back(dynamic_meadow);
     const auto archer = std::ranges::find(moving_instances, RenderMesh::Archer, &RenderInstance::mesh);
     const auto clips = renderer.GetCharacterAnimationClips();
     if (archer == moving_instances.end() || clips.size() < 2 || !archer_asset_id.value)
@@ -302,9 +337,18 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             views[2].camera.target.x += 0.25;
             views[2].view_origin.x += 64.0;
             views[2].camera_cut = true;
+            auto terrain = std::ranges::find(moving_instances, 0x4d4541444f570001ull,
+                &RenderInstance::stable_id);
+            if (terrain == moving_instances.end())
+                return Failure("Dynamic MeadowSurface was not retained for the middle package.");
+            terrain->position.y = 6.0f;
+            terrain->scale.y = 2.0f;
+            ++terrain->revisions.transform;
         }
         else if (package == 2)
         {
+            hero.density = .75f;
+            ++hero.density_revision;
             views[2].camera_cut = false;
             // Reappear Preview with a small camera movement. Its previous GPU
             // projection must come from package 0, not Main or the rebased B.
@@ -318,6 +362,9 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             changed_epoch->position.x += 0.75f;
             ++changed_epoch->revisions.transform;
             ++changed_epoch->motion_epoch;
+            std::erase_if(moving_instances, [](const RenderInstance &instance) {
+                return instance.stable_id == 0x4d4541444f570001ull;
+            });
         }
         if (package && !moving_instances.empty())
         {
@@ -328,6 +375,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             moving_archer->position.x += 0.25f;
             ++moving_archer->revisions.transform;
         }
+        package_snapshots.current.instances = moving_instances;
         const auto admitted = package == 1 ? std::span<const VfxDecalInput>{} : std::span<const VfxDecalInput>{decals};
         const std::span<const VfxDistortionInput> admitted_distortions = package == 0
             ? std::span<const VfxDistortionInput>{package0_distortions}
@@ -369,6 +417,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 .ribbons = {package == 0 ? std::span(&owning_ribbon, 1) : std::span(&pooled_ribbon, 1),
                                1, ribbon_outputs},
                 .distortions = admitted_distortions, .decals = admitted,
+                .volumes = std::span(&hero, 1),
                 .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
                 .ground_gap_angles = ground_gap_pool},
             .devtools = {.delta_seconds = 1.0f / 60.0f},
@@ -383,6 +432,9 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
         evidence.admitted_distortions[package] = result.typed_vfx_distortion_count;
         evidence.admitted_ribbons[package] = result.typed_vfx_ribbon_count;
         evidence.admitted_ground[package] = result.typed_vfx_ground_count;
+        evidence.admitted_volumes[package] = result.typed_vfx_volume_count;
+        if (result.typed_vfx_volume_count != 1)
+            return Failure("Each multi-view package must register its prepared hero volume on Main.");
         if (result.typed_vfx_ground_count != (package == 1 ? 0u : 2u))
             return Failure("Ground owning/pooled gap package did not retain its commands or clear the empty package.");
         if (result.typed_vfx_ribbon_count != ribbon_outputs.size())
@@ -501,7 +553,7 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
             ParticleSpawnCommand bad_selector{};
             bad_selector.mesh_index = 8;
-            std::array<RenderPackage, 17> invalid_payloads;
+            std::array<RenderPackage, 19> invalid_payloads;
             for (auto &invalid : invalid_payloads)
             {
                 invalid = input;
@@ -553,17 +605,22 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                     i == 3 ? std::span<const float>{nan_gap_pool} : std::span<const float>{ground_gap_pool};
             }
             bad_ground[3].geometry.frame_gap_count = 1;
+            auto invalid_hero = hero;
+            invalid_hero.steps = 17;
+            invalid_payloads[17].vfx.volumes = std::span(&invalid_hero, 1);
             invalid_payloads[16].vfx.effect_lines = std::span(&effect_line, 1);
             invalid_payloads[16].vfx.world_batch = RenderVfxWorldBatch{
                 .session = snapshots.current.header.session_id,
                 .stateful_target = world.stateful_target};
+            const std::array duplicate_instances{second_archer, second_archer};
+            invalid_payloads[18].snapshots.current.instances = duplicate_instances;
             for (std::size_t invalid_index = 0; invalid_index < invalid_payloads.size(); ++invalid_index)
             {
                 const auto &invalid = invalid_payloads[invalid_index];
                 const auto rejected = renderer.Render(invalid, result);
                 if (rejected || rejected.Code() != ErrorCode::InvalidArgument ||
                     !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                    return Failure("VFX admission must reject malformed payloads and frame-pool storage before any view submission.");
+                    return Failure("Frame admission must reject malformed payloads, duplicate instances and invalid frame-pool storage before any view submission.");
                 if (invalid_index >= 4 && invalid_index < 8)
                     evidence.invalid_distortion_gap_rejected[invalid_index - 4] = true;
                 else if (invalid_index >= 8 && invalid_index < 12)
@@ -628,6 +685,29 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 SameMatrix(previous, current_preview) ||
                 preview_after_skip.value("nonzero_motion_pixels", std::uint64_t{}) == 0)
                 return Failure("Reappearing Preview did not retain its own old-basis projection and real nonzero motion after another view's origin reset.");
+            const auto terrain_bound = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("upper_bound").get<float>();
+            };
+            const auto terrain_origin_y = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("origin_y").get<float>();
+            };
+            const auto section_count = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("section_count").get<std::uint32_t>();
+            };
+            const auto terrain0 = terrain_bound(preview_before_skip);
+            const auto terrain1 = terrain_bound(capture_origin_reset);
+            const auto terrain2 = terrain_bound(preview_after_skip);
+            constexpr float terrain_bound_tolerance = 1.0e-4f;
+            if (section_count(preview_before_skip) == 0 ||
+                section_count(preview_before_skip) != section_count(capture_origin_reset) ||
+                section_count(preview_before_skip) != section_count(preview_after_skip) + 1u ||
+                std::abs(terrain_origin_y(preview_before_skip)) > terrain_bound_tolerance ||
+                std::abs(terrain_origin_y(capture_origin_reset)) > terrain_bound_tolerance ||
+                std::abs(terrain_origin_y(preview_after_skip)) > terrain_bound_tolerance ||
+                std::abs(terrain0 - (4.0f + render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
+                std::abs(terrain1 - (6.0f + 2.0f * render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
+                !(terrain2 < terrain0 && terrain2 < terrain1))
+                return Failure("Owned-view terrain CBV did not track dynamic MeadowSurface growth, transform changes, and removal back to the static bound.");
             evidence.motion_readbacks["preview_after_skip"] = std::move(preview_after_skip);
         }
     }
@@ -808,6 +888,7 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
         {"admitted_distortions", evidence.admitted_distortions},
         {"admitted_ribbons", evidence.admitted_ribbons},
         {"admitted_ground", evidence.admitted_ground},
+        {"admitted_volumes", evidence.admitted_volumes},
         {"invalid_distortion_gap_rejected", evidence.invalid_distortion_gap_rejected},
         {"invalid_ribbon_pool_rejected", evidence.invalid_ribbon_pool_rejected},
         {"invalid_ground_gap_rejected", evidence.invalid_ground_gap_rejected},

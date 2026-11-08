@@ -334,6 +334,81 @@ void TestPickupWorkMembership()
 
 using PickupWorld = hs::GameplayTestAccess::World;
 
+void TestEmptyLevelProgressionDoesNotStall()
+{
+    using namespace hs;
+    GameSimulation simulation;
+    Check(simulation.Initialize({129}, SimulationRules::Defaults()).Succeeded(),
+          "empty progression initialize");
+    auto &world = GameplayTestAccess::State(simulation);
+    world.rules.progression.fallback_stat_point_cards = false;
+    for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+    {
+        world.actors.player.skill_levels[skill] = world.rules.skills[skill].maximum_level;
+        world.actors.player.upgrades[skill] = 0xFF;
+    }
+    world.actors.player.pending_levels = 2;
+    world.ContinueLevelProgression();
+    Check(world.actors.player.pending_levels == 1 && world.actors.player.pending_stat_points == 1 &&
+              world.session_phase == SessionPhase::StatAllocation,
+          "empty level candidates retain the level's stat point");
+    Check(world.AssignStat(StatKind::AttackPower) && world.actors.player.pending_levels == 0 &&
+              world.actors.player.pending_stat_points == 1 &&
+              world.session_phase == SessionPhase::StatAllocation,
+          "next empty level also grants its stat point");
+    Check(world.AssignStat(StatKind::AttackPower) && world.session_phase == SessionPhase::Playing,
+          "last empty level finishes after its stat point is spent");
+
+    world.rules.stats.maximum_points_per_stat = 0;
+    world.actors.player.pending_levels = 2;
+    world.ContinueLevelProgression();
+    Check(world.actors.player.pending_levels == 0 && world.actors.player.pending_stat_points == 0 &&
+              world.session_phase == SessionPhase::Playing,
+          "empty choices skip stat points only after all stats are capped");
+
+    world.StartSession();
+    world.rules.stats.maximum_points_per_stat = 10;
+    world.rules.progression.base_stat_points_per_level = 0;
+    world.rules.progression.fallback_stat_point_cards = false;
+    for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
+    {
+        world.actors.player.skill_levels[skill] = world.rules.skills[skill].maximum_level;
+        world.actors.player.upgrades[skill] = 0xFF;
+    }
+    world.actors.player.pending_levels = 1;
+    world.ContinueLevelProgression();
+    Check(world.actors.player.pending_levels == 0 && world.progression.card_count == 0 &&
+              world.actors.player.pending_stat_points == 0 &&
+              world.session_phase == SessionPhase::Playing,
+          "empty choices with zero stat points advance directly to play");
+
+    world.StartSession();
+    world.GenerateLevelCards();
+    world.session_phase = SessionPhase::CardSelection;
+    Check(world.SelectCard(0) && world.actors.player.pending_stat_points == 0 &&
+              world.session_phase == SessionPhase::Playing,
+          "zero stat points do not enter an unanswerable allocation phase");
+    Check(simulation.Shutdown().Succeeded(), "empty progression shutdown");
+}
+
+void TestChargedShotTickMath()
+{
+    using namespace hs;
+    auto world_storage = std::make_unique<PickupWorld>();
+    auto &world = *world_storage;
+    world.rules = SimulationRules::Defaults();
+    const auto skill = static_cast<std::size_t>(SkillKind::ChargedShot);
+    world.rules.skills[skill].maximum_charge_time_ticks = 30;
+    world.rules.upgrades.charged_shot.extended_full_charge_explosion.maximum_charge_time_ticks = 50;
+    world.rules.upgrades.charged_shot.faster_charge.charge_time_multiplier = 0.6f;
+    world.actors.player.upgrades[skill] = (1u << 0) | (1u << 1);
+    world.actors.player.charge_start = 10;
+    world.tick = 20;
+    const auto charge = world.ChargeTicks();
+    Check(charge.maximum == 50 && charge.unaccelerated == 10 && charge.elapsed == 16,
+          "shared charge state preserves capped duration and truncating speed scaling");
+}
+
 void InitializePickupFixture(PickupWorld &world, bool auto_collect = false)
 {
     world.config.seed = 827;
@@ -438,8 +513,9 @@ void ReferencePickupPass(PickupWorld &world)
                 }
                 pickup.visual_motion_updated = world.tick;
             }
-            pickup.position = Add(pickup.position, Multiply(Normalize(delta),
-                world.rules.growth.experience_pickup_speed * kTickSeconds));
+            const float step = world.rules.growth.experience_pickup_speed * kTickSeconds;
+            pickup.position = Length(delta) <= step ? world.actors.player.position
+                : Add(pickup.position, Multiply(Normalize(delta), step));
         }
         if (DistanceSquared(pickup.position, world.actors.player.position) <=
             world.rules.growth.experience_pickup_radius * world.rules.growth.experience_pickup_radius)
@@ -636,8 +712,8 @@ void TestPickupDistanceArithmeticEquivalence()
         ReferencePickupPass(reference);
         CheckPickupEquivalence(actual, reference);
         if (speed == 120.0f)
-            Check(!actual.actors.pickups[2].dead,
-                  "post-movement collection distance preserves an overshoot outside collection radius");
+            Check(actual.actors.pickups[2].dead,
+                  "pickup movement stops at the player instead of overshooting collection radius");
     }
 }
 
@@ -883,9 +959,8 @@ void TestSlowMultiplierIsReadOnly()
     auto world_storage = std::make_unique<PickupWorld>();
     auto &world = *world_storage;
     InitializePickupFixture(world);
-    Check(world.SpawnEnemy(EnemyKind::Melee, {2.0f, 0.0f}),
-          "slow read fixture enemy spawn");
-    world.actors.enemies.AppendFrom(world.actors.pending_enemy_spawns);
+    world.SpawnEnemy(EnemyKind::Melee, {2.0f, 0.0f});
+    Check(world.actors.enemies.size() == 1, "slow read fixture enemy spawn");
     world.tick = 100;
     auto enemy = world.actors.enemies[0];
     enemy.status.slows = {{0.5f, 101}, {0.75f, 99}, {0.25f, 102}};
@@ -1011,6 +1086,8 @@ int main()
         TestSimulationIdentityExhaustion();
         TestHomingProjectileUsesRetainedSpeed();
         TestPickupWorkMembership();
+        TestEmptyLevelProgressionDoesNotStall();
+        TestChargedShotTickMath();
         TestPickupWorkAgainstOriginalTraversal();
         TestPickupWorkStopRestartAndSparseTick();
         TestPickupDistanceArithmeticEquivalence();

@@ -673,7 +673,9 @@ void CheckPackAssetReads(bool native)
         Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_capture_source_base_vs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_capture.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_color_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_base_cs.dxil") &&
+            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_weight_cs.dxil") &&
             !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/mip_cs.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_shadow.dxil") &&
             hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_sh_cs.dxil") &&
@@ -697,7 +699,9 @@ void CheckPackAssetReads(bool native)
             hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_color_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_base_cs.dxil") &&
+            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_weight_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/mip_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/gtao_horizon_cs.dxil") &&
             !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
@@ -1082,14 +1086,14 @@ int main()
         const auto mapping_only = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
             "mips:3-4-unmap", "generation-map", 100);
         Check(mapping_only &&
-              !streaming.BeginMappingOnly(mapping_only, "stale-generation"),
+              !streaming.BeginResidentTransfer(mapping_only, "stale-generation"),
               "mapping-only admission accepted a stale request generation");
         const auto mapping_requested = streaming.Find(mapping_only);
         Check(mapping_requested && mapping_requested->state == hs::StreamingPageState::Requested &&
               !mapping_requested->read_submitted && !mapping_requested->read_finished &&
               !streaming.BeginUpload(mapping_only, "generation-map"),
               "failed mapping-only evidence changed the request or opened the payload upload transition");
-        Check(streaming.BeginMappingOnly(mapping_only, "generation-map"),
+        Check(streaming.BeginResidentTransfer(mapping_only, "generation-map"),
               "valid reserved-resource coarsening did not enter its explicit mapping-only state");
         Check(streaming.SubmitUpload(mapping_only, "generation-map", {0, 0, 11}) &&
               !streaming.TryPublish(mapping_only, "generation-map", {0, 0, 10}) &&
@@ -1099,21 +1103,21 @@ int main()
               "mapping-only transition skipped its queue completion/publication lifecycle");
         const auto cancelled_mapping = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
             "mips:4-5-unmap", "generation-map-cancel", 100);
-        Check(cancelled_mapping && streaming.BeginMappingOnly(cancelled_mapping,
+        Check(cancelled_mapping && streaming.BeginResidentTransfer(cancelled_mapping,
               "generation-map-cancel") &&
               streaming.Cancel(cancelled_mapping) && streaming.Collect({}) == 1,
               "unsubmitted mapping-only request could not be cancelled and collected");
 
         const auto gpu_copy = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
             "software-mip-copy:2", "generation-copy", 100);
-        Check(gpu_copy && !streaming.BeginGpuCopy(gpu_copy, "stale-generation"),
+        Check(gpu_copy && !streaming.BeginResidentTransfer(gpu_copy, "stale-generation"),
               "resident GPU copy accepted a stale generation");
         const auto copy_requested = streaming.Find(gpu_copy);
         Check(copy_requested && copy_requested->state == hs::StreamingPageState::Requested &&
               !copy_requested->read_submitted && !copy_requested->read_finished &&
               !streaming.BeginUpload(gpu_copy, "generation-copy"),
               "failed GPU-copy admission changed the request or bypassed the explicit transition");
-        Check(streaming.BeginGpuCopy(gpu_copy, "generation-copy"),
+        Check(streaming.BeginResidentTransfer(gpu_copy, "generation-copy"),
               "valid resident GPU copy did not enter its payloadless queue state");
         const auto copy_uploading = streaming.Find(gpu_copy);
         Check(copy_uploading && copy_uploading->state == hs::StreamingPageState::Uploading &&
@@ -1127,7 +1131,7 @@ int main()
               "resident GPU copy skipped its queue completion/publication lifecycle");
         const auto cancelled_copy = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
             "software-mip-copy:3", "generation-copy-cancel", 100);
-        Check(cancelled_copy && streaming.BeginGpuCopy(cancelled_copy, "generation-copy-cancel") &&
+        Check(cancelled_copy && streaming.BeginResidentTransfer(cancelled_copy, "generation-copy-cancel") &&
               streaming.Cancel(cancelled_copy) && streaming.Collect({}) == 1,
               "unsubmitted resident GPU copy could not be cancelled and collected");
 

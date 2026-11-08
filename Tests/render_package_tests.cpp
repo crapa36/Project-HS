@@ -268,11 +268,20 @@ void TestPackage()
             !decoded_material.two_sided && !decoded_material.alpha_mask,
             "opaque environment material roundtrip");
     Require(metadata.size() == rd::kMaterialMetadataStride &&
-            rd::kMaterialMetadataStride == 40,
-            "current material metadata record is not the explicit 40-byte v4 layout");
-    auto historical_metadata = metadata;
-    historical_metadata.resize(rd::kHistoricalMaterialMetadataStride);
-    Require(rd::DecodeRockMaterial(historical_metadata, dependencies).textures == material.textures,
+            rd::kMaterialMetadataStride == 44 &&
+            decoded_material.opacity_texture_mask == material.opacity_texture_mask,
+            "current material metadata record is not the explicit 44-byte v5 layout");
+    const auto historical_record = [](const auto &current) {
+        std::vector<std::byte> historical(rd::kHistoricalMaterialMetadataStride);
+        std::copy_n(current.begin(), 24, historical.begin());
+        historical[0] = std::byte{2};
+        std::copy_n(current.begin() + 28, 12, historical.begin() + 24);
+        return historical;
+    };
+    const auto historical_metadata = historical_record(metadata);
+    const auto decoded_historical = rd::DecodeRockMaterial(historical_metadata, dependencies);
+    Require(decoded_historical.textures == material.textures &&
+            decoded_historical.opacity_texture_mask == (1u << rd::kMaterialTextureSlots) - 1u,
             "historical 36-byte material metadata was not explicitly decoded");
     const std::array historical_chunks{rd::ChunkSource{
         static_cast<std::uint32_t>(rd::ChunkType::MaterialMetadata), 1, true,
@@ -287,6 +296,7 @@ void TestPackage()
                                "environment/environment_leaf_roughness.dds",
                                "environment/environment_leaf_normal.dds", ""},
                               0.0f, 1.0f, true, true};
+    foliage.opacity_texture_mask = 1;
     const std::vector<std::string> foliage_dependencies{
         "environment/environment_leaf_basecolor.dds",
         "environment/environment_leaf_normal.dds",
@@ -294,20 +304,25 @@ void TestPackage()
     const auto foliage_metadata = rd::EncodeRockMaterial(foliage, foliage_dependencies);
     const auto decoded_foliage = rd::DecodeRockMaterial(foliage_metadata, foliage_dependencies);
     Require(decoded_foliage.textures == foliage.textures &&
-            decoded_foliage.two_sided && decoded_foliage.alpha_mask,
+            decoded_foliage.two_sided && decoded_foliage.alpha_mask &&
+            decoded_foliage.opacity_texture_mask == 1,
             "masked foliage material roundtrip");
     Require(rd::ClassifyEnvironmentMaterial(decoded_foliage) ==
                 rd::EnvironmentMaterialVariant::MaskedTwoSided,
             "masked environment variant");
-    auto invalid_foliage = foliage_metadata;
+    auto invalid_mask = foliage_metadata;
+    invalid_mask[40] = std::byte{0x40};
+    Reject([&] { (void)rd::DecodeRockMaterial(invalid_mask, foliage_dependencies); },
+           "out-of-range opacity texture slot accepted");
+    auto invalid_foliage = historical_record(foliage_metadata);
     invalid_foliage[32] = std::byte{0};
     Reject([&] { (void)rd::DecodeRockMaterial(invalid_foliage, foliage_dependencies); },
            "version 2 foliage without alpha mask accepted");
-    auto invalid_opaque = metadata;
+    auto invalid_opaque = historical_metadata;
     invalid_opaque[12] = std::byte{1};
     Reject([&] { (void)rd::DecodeRockMaterial(invalid_opaque, dependencies); },
            "version 2 opaque material with two-sided flag accepted");
-    auto legacy_foliage = foliage_metadata;
+    auto legacy_foliage = historical_record(foliage_metadata);
     legacy_foliage[0] = std::byte{1};
     legacy_foliage[32] = std::byte{0};
     Require(rd::ClassifyEnvironmentMaterial(
@@ -441,6 +456,7 @@ void TestMaterialDescriptors()
     textures.push_back(decal_texture);
     rd::RockMaterial rock;
     rock.metallic = 0.25f; rock.roughness_scale = 1.2f;
+    rock.opacity_texture_mask = 1;
     std::vector<std::string> dependencies{env_parameters, "render/shader/rock_0_scene.dxil"};
     for (std::size_t i=0;i<definitions.size();++i) { rock.textures[i]=definitions[i].product_id; dependencies.push_back(definitions[i].product_id); }
     std::ranges::sort(dependencies);
@@ -470,6 +486,7 @@ void TestMaterialDescriptors()
     auto assets = assets_for(env_id, dependencies);
     auto compiled = rd::CompileMaterialDescriptor(env_id, material_bytes, parameter_bytes, bulk_index(assets,env_id), assets, textures);
     Require(compiled.View().surface == surface && compiled.value.metallic == rock.metallic && compiled.value.roughness_scale == rock.roughness_scale &&
+            compiled.value.opacity_texture_mask == rock.opacity_texture_mask &&
             compiled.value.kind == rd::MaterialKind::Environment && compiled.defaults.size() == parameters.size() &&
             compiled.defaults[0].words == parameters[0].default_words && compiled.defaults[1].words == parameters[1].default_words &&
             std::ranges::equal(compiled.value.parameter_layout,layout) && compiled.programs.size()==1 && compiled.textures.size()==3,
@@ -480,6 +497,8 @@ void TestMaterialDescriptors()
             moved.View().programs.data() == moved.programs.data(), "material storage move invalidated views");
     auto invalid = moved.View(); invalid.programs = {};
     Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted absent programs");
+    invalid = moved.View(); invalid.opacity_texture_mask = 1u << rd::kMaterialTextureSlots;
+    Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted an out-of-range opacity slot");
     auto dead_program = moved.programs; dead_program[0].bulk_index=UINT32_MAX; invalid=moved.View(); invalid.programs=dead_program;
     Reject([&] { rd::ValidateMaterialDescriptor(invalid,assets,textures); }, "material descriptor accepted dead program reference");
     auto dead_texture = moved.textures; dead_texture[0].texture.value=UINT32_MAX; invalid=moved.View(); invalid.textures=dead_texture;
@@ -1571,6 +1590,20 @@ void TestAuthoredEnvironmentMaterials()
             const auto expected_kind = masked ? rd::MaterialGraphKind::Masked
                                               : rd::MaterialGraphKind::Opaque;
             Require(graph.kind == expected_kind, "authored graph kind changed");
+            Require(rd::AnalyzeOpacityTextureMask(definition.prepared) == (masked ? 1u : 0u),
+                    "authored opacity texture usage includes a non-opacity input or misses base alpha");
+            if (name == "leaf_0")
+            {
+                auto implicit = NumericGraph();
+                implicit.kind = rd::MaterialGraphKind::Masked;
+                implicit.textures = graph.textures;
+                const auto alpha = MaterialNode(implicit, rd::MaterialType::Float, rd::MaterialOp::Context);
+                implicit.nodes[alpha].context_input = rd::MaterialContextInput::SampledAlpha;
+                implicit.opacity_output = alpha;
+                Require(rd::AnalyzeOpacityTextureMask(rd::PrepareMaterial(implicit)) ==
+                            (1u << graph.textures.size()) - 1u,
+                        "implicit opacity provider lost its conservative declared texture set");
+            }
             const auto ordinal = static_cast<std::size_t>(std::ranges::find(rd::kEnvironmentMaterialNames, name) -
                                                           rd::kEnvironmentMaterialNames.begin());
             const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, ordinal);
@@ -1677,6 +1710,8 @@ void TestAuthoredTerrainMaterial()
         rd::MaterialContextInputMask(rd::MaterialContextInput::EyeDistance);
     Require(terrain_demand.surface_mask == terrain_mask && terrain_demand.opacity_mask == 0,
             "terrain demand missed implicit UV or explicit stochastic inputs");
+    Require(rd::AnalyzeOpacityTextureMask(definition.prepared) == 0,
+            "opaque terrain surface textures leaked into opacity usage");
     Require(mc::IsAuthoredMaterialName("terrain") && !mc::IsEnvironmentMaterialName("terrain") &&
             graph.kind == rd::MaterialGraphKind::Terrain && graph.textures.size() == 6 &&
             graph.samplers.size() == 2 && graph.terrain_output != rd::kNoMaterialInput &&
@@ -1778,15 +1813,22 @@ void TestAuthoredTerrainMaterial()
             "terrain binding semantic roles changed");
     auto material = definition.material;
     const auto metadata = rd::EncodeRockMaterial(material, dependencies);
-    Require(metadata.size() == 40 &&
+    Require(metadata.size() == rd::kMaterialMetadataStride &&
             rd::DecodeRockMaterial(metadata, dependencies).textures == material.textures,
-            "terrain v4 metadata roundtrip failed");
+            "terrain v5 metadata roundtrip failed");
+    auto previous_metadata = metadata;
+    previous_metadata[0] = std::byte{4};
+    previous_metadata.resize(rd::kPreviousMaterialMetadataStride);
+    const auto previous_material = rd::DecodeRockMaterial(previous_metadata, dependencies);
+    Require(previous_material.textures == material.textures &&
+            previous_material.opacity_texture_mask == (1u << rd::kMaterialTextureSlots) - 1u,
+            "v4 material lost conservative opacity texture usage");
     material.two_sided = true;
     material.alpha_mask = false;
     const auto independent_flags = rd::DecodeRockMaterial(
         rd::EncodeRockMaterial(material, dependencies), dependencies);
     Require(independent_flags.two_sided && !independent_flags.alpha_mask,
-            "v4 metadata coupled two-sided and alpha flags");
+            "v5 metadata coupled two-sided and alpha flags");
 }
 
 void TestSurfaceClosure()
@@ -2703,8 +2745,8 @@ void TestTranslucencyDiagnosticsRawDecoding()
 {
     hs::TranslucencyDiagnosticsShaderLayout layout;
     Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
-        layout.contributor_bytes == 512 && layout.phase_bytes == 11264 && layout.total_bytes == 180224,
-        "hero two exact bitmaps/header/aligned stride/slot total");
+        layout.contributor_bytes == 512 && layout.phase_bytes == 12800 && layout.total_bytes == 204800,
+        "hero 25 contributor bitmaps/header/aligned stride/slot total");
     Require(hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
         layout.total_bytes <= hs::kTranslucencyDiagnosticsShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
     Require(!hs::TranslucencyDiagnosticsMakeShaderLayout(0, 720, 3, layout) && !hs::TranslucencyDiagnosticsMakeShaderLayout(1280, 0, 3, layout) &&

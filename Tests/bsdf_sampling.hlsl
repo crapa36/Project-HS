@@ -181,16 +181,18 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
 
         const float3 light_view = normalize(wo);
         const HsSurfaceClosure light_surface = HsBsdfOrientThinSurface(surface, light_view);
-        const float3 prepared_view = normalize(light_view);
+        const float3 prepared_view = light_view;
         const bool flip_normal = HsBsdfThinTransmissionWeight(light_surface) > 0.0 &&
             dot(light_surface.normal, prepared_view) < 0.0;
         const float3 prepared_normal = normalize(flip_normal ? -light_surface.normal : light_surface.normal);
+        const HsBsdfDirectView prepared = HsBsdfPrepareDirectView(
+            HsBsdfOrientThinSurface(light_surface, prepared_view), prepared_view, prepared_normal);
         const float3 incident = wi * 1.73;
         float3 raw_diffuse, raw_specular, prepared_diffuse, prepared_specular;
         HsBsdfEvaluateComponentsOptical(light_surface, light_view, incident, 0.08,
             raw_diffuse, raw_specular);
-        HsBsdfEvaluateComponentsOpticalPrepared(light_surface, prepared_view, prepared_normal,
-            flip_normal, incident, 0.08, prepared_diffuse, prepared_specular);
+        HsBsdfEvaluateComponentsOpticalView(light_surface, prepared_view, prepared_normal,
+            flip_normal, incident, 0.08, prepared, prepared_diffuse, prepared_specular);
         error = HsProbeMaxError(error, raw_diffuse - prepared_diffuse);
         error = HsProbeMaxError(error, raw_specular - prepared_specular);
 

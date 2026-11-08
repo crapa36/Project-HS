@@ -28,7 +28,7 @@ bool HasIssue(const std::vector<hs::GraphicsSettingIssue> &issues, hs::SettingId
 
 } // namespace
 
-int main()
+void TestGraphicsSettings()
 {
     const hs::GraphicsSettings defaults;
     Check(hs::ValidateGraphicsSettings(defaults).empty(), "defaults");

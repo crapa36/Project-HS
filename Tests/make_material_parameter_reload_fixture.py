@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from typing import Any
 
@@ -302,7 +303,25 @@ def run_runner(runner: Path, root: Path, artifacts: Path, geometry: str,
     }
 
 
-def prepare(args: argparse.Namespace) -> None:
+def write_artifact_metadata(artifacts: Path, metadata: dict[str, Any]) -> None:
+    producers = {}
+    for name, producer in metadata["producer"].items():
+        producers[name] = {key: value for key, value in producer.items()
+                           if key != "action_result"}
+    compact = {
+        key: metadata[key] for key in (
+            "fixture_kind", "schema_version", "material", "material_source",
+            "material_action_id", "material_namespace_path", "material_logical_id",
+            "scope", "baseline_id", "valid_id", "invalid_id", "target_logical_id",
+            "source_pointer")
+    }
+    compact["producer"] = producers
+    if "runner" in metadata:
+        compact["runner"] = metadata["runner"]
+    write_json(artifacts / "fixture.json", compact)
+
+
+def _prepare_fixture(args: argparse.Namespace) -> None:
     pointer_path = require_absolute_file(args.source_pointer, "source pointer")
     spec = material_spec(args.material)
     scope = read_json(pointer_path).get("scope")
@@ -414,10 +433,28 @@ def prepare(args: argparse.Namespace) -> None:
         if not Path(args.artifacts).expanduser().is_absolute():
             fail("--artifacts must be an absolute path")
         artifacts = absolute(args.artifacts)
+        artifacts.mkdir(parents=True, exist_ok=True)
+        write_artifact_metadata(artifacts, metadata)
         metadata["runner"] = run_runner(
             runner, root, artifacts, args.geometry, args.surface, args.barriers)
         write_json(root / "fixture.json", metadata)
+        write_artifact_metadata(artifacts, metadata)
     print(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+
+
+def prepare(args: argparse.Namespace) -> None:
+    if not args.runner or args.root:
+        _prepare_fixture(args)
+        return
+
+    temporary = Path(tempfile.mkdtemp(prefix="hs-params-"))
+    try:
+        args.root = str(temporary / "fixture")
+        _prepare_fixture(args)
+    finally:
+        args.root = None
+        # Do not reset attributes on hardlinks shared with the selected Generation.
+        shutil.rmtree(temporary)
 
 
 def main() -> int:

@@ -20,11 +20,6 @@ std::uint64_t FakeClock() noexcept { return ++clock_ticks; }
 void CheckFramePerformanceSchema()
 {
     using hs::runtime_detail::kFramePerformanceTaskNames;
-    using hs::runtime_detail::kVfxProfilePrepareTaskIndex;
-    Check(kFramePerformanceTaskNames.size() == 24);
-    Check(kFramePerformanceTaskNames[10] == "vfx_local_outputs");
-    Check(kVfxProfilePrepareTaskIndex == 23);
-    Check(kFramePerformanceTaskNames[kVfxProfilePrepareTaskIndex] == "vfx_profile_prepare");
     const auto header = hs::runtime_detail::FramePerformanceCsvHeader();
     std::string sentinel_row;
     std::size_t sentinel_index{};

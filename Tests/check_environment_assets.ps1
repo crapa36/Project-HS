@@ -114,7 +114,7 @@ foreach($set in $sets){ foreach($role in $set[3]){
     if($asset.Length -ne $expected){throw "DDS mip payload mismatch: $file"};++$count
 }}
 # Histogram resources use linear Gaussian values and an uncompressed inverse LUT.
-foreach($special in @(@('gaussian',2048,2048,12,98),@('histogram',256,16,1,2))){
+foreach($special in @(@('gaussian',2048,2048,12,98),@('histogram',256,37,1,2))){
     $file=Resolve-EnvironmentProduct "environment_terrain_$($special[0]).dds"
     $asset=Read-FilePrefix $file 148
     $bytes=$asset.Bytes

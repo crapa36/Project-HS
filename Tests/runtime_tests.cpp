@@ -2552,7 +2552,7 @@ void TestSimulationSignalFanout()
     for (const auto &signal : signals)
     {
         std::array<hs::PresentationEvent, 3> projected{};
-        const auto count = hs::ProjectDomainSignal(signal, projected, false);
+        const auto count = hs::ProjectDomainSignal(signal, projected, {});
         Check(count == 3 && projected[0].kind == hs::PresentationKind::Vfx &&
                   projected[1].kind == hs::PresentationKind::Audio &&
                   projected[2].kind == hs::PresentationKind::Audio,
@@ -2569,7 +2569,7 @@ void TestSimulationSignalFanout()
             a.upgrade_owner_id == b.upgrade_owner_id;
     };
     std::vector<hs::PresentationEvent> recorded(1);
-    simulation.ProjectDomainSignalsOnce(signals, false, false, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, {}, false, &recorded);
     Check(recorded.size() == expected.size(), "per-tick record buffer resets and keeps every ordered value");
     hs::PresentationEvent event;
     hs::QueuedAudioEvent queued;
@@ -2592,7 +2592,7 @@ void TestSimulationSignalFanout()
     footstep.kind = hs::PresentationKind::Audio;
     footstep.sequence = 900;
     footstep.asset = hs::MakeAssetId("audio.player.footstep_walk");
-    simulation.ProjectDomainSignalsOnce(signals, false, true, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, {}, true, &recorded);
     simulation.PublishAudioEvent(footstep);
     for (const auto &wanted : expected)
         Check(channels.presentation_events.TryPop(event) && same(event, wanted),
@@ -2606,7 +2606,7 @@ void TestSimulationSignalFanout()
 
     for (std::size_t row = 0; row < 1024; ++row)
         Check(channels.sim_audio_events.TryPush({footstep, 0}), "fill simulation audio destination");
-    simulation.ProjectDomainSignalsOnce(signals, false, false, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, {}, false, &recorded);
     Check(channels.dropped_presentation_events.load() == 4 && recorded.size() == expected.size() &&
               channels.presentation_events.Size() == 2,
           "live audio overflow preserves exact recording and the existing drop invalidation policy");
@@ -2615,7 +2615,7 @@ void TestSimulationSignalFanout()
     channels.dropped_presentation_events.store(0);
     for (std::size_t row = 0; row < 8192; ++row)
         Check(channels.presentation_events.TryPush(expected[0]), "fill render and diagnostic destination");
-    simulation.ProjectDomainSignalsOnce(signals, false, true, &recorded);
+    simulation.ProjectDomainSignalsOnce(signals, {}, true, &recorded);
     Check(channels.dropped_presentation_events.load() == expected.size() &&
               channels.sim_audio_events.Size() == 4 && recorded.size() == expected.size(),
           "stalled rendering cannot block audio and lost trace rows still invalidate diagnostic completeness");

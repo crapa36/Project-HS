@@ -2071,6 +2071,7 @@ int main(int argc, char **argv)
     Json receipt{{"schema_version", 1}, {"runner", "render-only"},
         {"fixture", "static-environment-moving-player-v1"}, {"execution_valid", false}};
     std::filesystem::path artifacts;
+    std::filesystem::path temporary_pack;
     std::string failure_code = "HS_RENDER_ARGUMENT_INVALID";
     int exit_code = 1;
     const auto write_receipt = [&] {
@@ -2466,7 +2467,7 @@ int main(int argc, char **argv)
             throw std::runtime_error("--translucency-optical-pair-probe requires its own isolated preview run");
 #if !defined(HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE)
         if (translucency_optical_pair_probe)
-            throw std::runtime_error("--translucency-optical-pair-probe requires HS_BUILD_CONTENT_TOOLS=ON or HS_BUILD_RENDER_DATA_TESTS=ON");
+            throw std::runtime_error("This runner was built without its optical geometry fixture.");
 #endif
         if (translucency_optical_pair_probe)
         {
@@ -2595,6 +2596,11 @@ int main(int argc, char **argv)
         {
             slime_preview = true;
             config.vfx_quality = hs::VfxQuality::Low;
+        }
+        if (owned_view_probe)
+        {
+            config.vfx_quality = hs::VfxQuality::High;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Medium;
         }
         receipt["fixture"] = translucency_diagnostics_probe ? (gameplay_scene ? "translucency-diagnostics-functional-water-world-v1" : "translucency-diagnostics-functional-slime-v1") : provider_switch_probe ? "provider-switch-v1" : owned_view_probe ? "owned-view-history-v1" : persistent_scene_probe
             ? "persistent-gpu-scene-v2"
@@ -2938,6 +2944,8 @@ int main(int argc, char **argv)
         {
             const auto pack_path = artifacts / "renderer-products-pack.hsp";
             std::ofstream pack(pack_path, std::ios::binary | std::ios::trunc);
+            if (!pack) throw std::runtime_error("Could not create renderer fixture pack.");
+            temporary_pack = pack_path;
             const std::array<char, 64> zeros{};
             pack.write(zeros.data(), zeros.size());
             std::vector<std::pair<hs::AssetId, std::string>> products;
@@ -4171,6 +4179,13 @@ int main(int argc, char **argv)
                 {
                     if (environment_preview) { preview_camera.target = {0,1,0}; preview_camera.yaw_degrees = 0; preview_camera.pitch_degrees = 22; preview_camera.distance = 22; }
                     if (slime_preview) { preview_camera.target = {0,1,0}; preview_camera.distance = 10; }
+                }
+                if (residency_streaming_probe)
+                {
+                    // Keep the terrain close enough to request fine mips even at the minimum test resolution.
+                    preview_camera.target = {0, 0, 0};
+                    preview_camera.pitch_degrees = 60;
+                    preview_camera.distance = 0.8f;
                 }
                 auto main_view = renderer.MainViewInput(preview_camera);
                 std::vector<hs::VfxEntitySurfaceCommand> entity_surfaces;
@@ -5518,6 +5533,12 @@ int main(int argc, char **argv)
         receipt["error_code"] = failure_code;
         receipt["error"] = error.what();
     }
-    const auto result = write_receipt();
-    return result;
+    if (!temporary_pack.empty())
+    {
+        std::error_code error;
+        std::filesystem::remove(temporary_pack, error);
+        if (error)
+            std::cerr << "Could not remove renderer fixture pack: " << error.message() << '\n';
+    }
+    return write_receipt();
 }

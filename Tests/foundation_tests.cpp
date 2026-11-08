@@ -442,6 +442,8 @@ void TestWindowsCommandLineQuoting()
 } // namespace
 
 void TestShippedContentOwner();
+void TestSha256();
+void TestGraphicsSettings();
 
 int main(int argc, char **argv)
 {
@@ -451,6 +453,8 @@ int main(int argc, char **argv)
         if (group == "all" || group == "foundation")
         {
             TestResult();
+            TestSha256();
+            TestGraphicsSettings();
             TestFixedStepClock();
             TestSpscQueueSize();
             TestSpscQueueConditionalPop();

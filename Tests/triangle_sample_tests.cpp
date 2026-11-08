@@ -267,7 +267,7 @@ void TestSceneProbeInputIdentity()
     Require(rejected,"a reflection SH set cannot substitute for independent grid samples");
 
     // Independent analytic scene: a vertical wall bisects the two-metre cell.
-    // Direct each measured intersection to the production mask voxelizer.
+    // Direct each measured intersection to the production receiver visibility test.
     grid_description.grid={{0,0,0},{2,2,2},{2,2,2}};
     const auto edge=grid_description.edge;
     std::vector<float> wall_hits(8*6*edge*edge,100.f);
@@ -282,6 +282,45 @@ void TestSceneProbeInputIdentity()
     const auto walls=rd::BakeSceneProbeCells(grid_description,probes,wall_hits);
     Require(walls.size()==1 && walls[0].reflections[0]==1 && walls[0].reachable[20]==0x55 &&
         walls[0].reachable[23]==0xaa,"irradiance corners must stay on the receiver side of a wall");
+    // A floor below the grid cannot block any segment between nodes and receivers.
+    auto floor_grid=grid_description;
+    floor_grid.grid.origin.y=.5f;
+    std::vector<float> floor_hits(wall_hits.size(),100.f);
+    for(unsigned node=0;node<8;++node) for(unsigned face=0;face<6;++face)
+        for(unsigned v=0;v<edge;++v) for(unsigned u=0;u<edge;++u)
+        {
+            const float a=2*(float(u)+.5f)/edge-1,b=2*(float(v)+.5f)/edge-1;
+            const float ray_y=(face==2?1.f:face==3?-1.f:-b)/std::sqrt(1+a*a+b*b);
+            const float hit=-floor_grid.grid.Position(node).y/ray_y;
+            if(hit>0) floor_hits[((node*6+face)*edge+v)*edge+u]=hit;
+        }
+    const auto floor=rd::BakeSceneProbeCells(floor_grid,probes,floor_hits);
+    for(auto mask:floor[0].reachable)
+        Require(mask==0xff,"a floor below receivers must not cast voxel-sized shadows");
+
+    // Only node zero sees a wall: other corner bits must remain reachable.
+    auto single_wall=wall_hits;
+    std::fill(single_wall.begin()+6*edge*edge,single_wall.end(),100.f);
+    const auto one_sided=rd::BakeSceneProbeCells(grid_description,probes,single_wall);
+    Require(one_sided[0].reachable[20]==0xff && one_sided[0].reachable[23]==0xfe,
+        "a single occluded node must not remove other corners");
+
+    // A small sphere near a receiver subcell corner misses its center ray.
+    std::vector<float> grazing_hits(wall_hits.size(),100.f);
+    for(unsigned face=0;face<6;++face) for(unsigned v=0;v<edge;++v) for(unsigned u=0;u<edge;++u)
+    {
+        const float a=2*(float(u)+.5f)/edge-1,b=2*(float(v)+.5f)/edge-1;
+        const std::array<std::array<float,3>,6> directions{{{1,-b,-a},{-1,-b,a},{a,1,b},{a,-1,-b},{a,-b,1},{-a,-b,-1}}};
+        const auto &d=directions[face];
+        const float inv=1/std::sqrt(1+a*a+b*b);
+        const float projection=(d[0]*.45f+d[1]*.25f+d[2]*.45f)*inv;
+        const float discriminant=projection*projection-(.45f*.45f+.25f*.25f+.45f*.45f-.08f*.08f);
+        if(projection>0 && discriminant>=0)
+            grazing_hits[(face*edge+v)*edge+u]=projection-std::sqrt(discriminant);
+    }
+    const auto grazing=rd::BakeSceneProbeCells(grid_description,probes,grazing_hits);
+    Require((grazing[0].reachable[0]&1u)!=0,
+        "a prop grazing a subcell corner must not hide its center from the probe");
     std::fill_n(wall_hits.begin(),6*edge*edge,-1.f);
     const auto embedded=rd::BakeSceneProbeCells(grid_description,probes,wall_hits);
     for(auto mask:embedded[0].reachable)

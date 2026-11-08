@@ -1176,7 +1176,7 @@ void TestPlayerFootstepTimeline()
         storage.player.locomotion_blend = 0.0f;
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view, 0, false),
+        Check(!timeline.Advance(view, 0, {}),
               "stopped secondary timeline advances without cue");
     }
     storage.tick = 23;
@@ -1185,12 +1185,12 @@ void TestPlayerFootstepTimeline()
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        const auto first = timeline.Advance(view, 0, false);
+        const auto first = timeline.Advance(view, 0, {});
         Check(first && first->tick == 23 && first->sequence == 23 && first->session_id == 23 &&
                   first->asset.value == hs::MakeAssetId("audio.player.footstep_run").value &&
                   first->position.x == 2.0f && first->position.z == -3.0f,
               "tick 22 stopped to tick 23 moving emits the current run sample");
-        Check(!timeline.Advance(view, 0, false),
+        Check(!timeline.Advance(view, 0, {}),
               "same-tick retry does not duplicate a footstep");
     }
 
@@ -1202,7 +1202,7 @@ void TestPlayerFootstepTimeline()
         storage.player.locomotion_blend = tick == 45 ? 0.25f : tick == 68 ? 0.75f : 0.0f;
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        if (auto event = timeline.Advance(view, 0, false))
+        if (auto event = timeline.Advance(view, 0, {}))
             gap_events.push_back(*event);
     }
     Check(gap_events.size() == 2 && gap_events[0].tick == 45 && gap_events[0].sequence == 45 &&
@@ -1216,14 +1216,14 @@ void TestPlayerFootstepTimeline()
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view, 0, false),
+        Check(!timeline.Advance(view, 0, {}),
               "new session resets the secondary timeline");
     }
     storage.tick = 72;
     {
         const auto sample = storage.View();
         const auto view = hs::development::BorrowOwnedReadModel(sample);
-        Check(!timeline.Advance(view, 5, false),
+        Check(!timeline.Advance(view, 5, {}),
               "instant motion epoch resets the secondary timeline");
     }
 }
@@ -1259,7 +1259,9 @@ void TestPlayerInstantMotionSignal()
     const auto owned = storage.View();
     const auto read = hs::development::BorrowOwnedReadModel(owned);
     const auto scene = hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read, {}));
-    Check(hs::ProjectDynamicTick(read, snapshot, scene, hs::SceneHasMeadowTerrain(*scene), &state) &&
+    hs::MeadowGroundQuery ground;
+    Check(ground.Prepare(scene->instances), "scene grounding preparation");
+    Check(hs::ProjectDynamicTick(read, snapshot, scene, ground, &state) &&
               snapshot.View().camera.target_motion_epoch == 5 &&
               snapshot.View().instances.front().motion_epoch == 5,
           "player and camera publish the same movement boundary");
@@ -1600,9 +1602,12 @@ void TestMeadowPresentationGrounding()
     signal.position = {low.x, .3f, low.y};
     signal.target = {low.x + .5f, .55f, low.y};
     signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
+    hs::RenderInstance meadow_instance{}; meadow_instance.mesh = hs::RenderMesh::MeadowSurface;
     for (const bool meadow : {false, true}) {
+        hs::MeadowGroundQuery ground;
+        Check(ground.Prepare(meadow ? std::span<const hs::RenderInstance>(&meadow_instance, 1) : std::span<const hs::RenderInstance>{}), "ground query preparation");
         std::array<hs::PresentationEvent, 3> events{};
-        const auto count = hs::ProjectDomainSignal(signal, events, meadow);
+        const auto count = hs::ProjectDomainSignal(signal, events, ground);
         const auto h = meadow ? hs::MeadowGroundHeight(low) : 0.0f;
         const auto target_h = meadow ? hs::MeadowGroundHeight({signal.target.x, signal.target.z}) : 0.0f;
         const auto parameters = hs::DecodeVfxParameters(events[0].parameters);
@@ -1614,11 +1619,32 @@ void TestMeadowPresentationGrounding()
         line.kind = hs::DomainSignalKind::RangedEnemyTelegraphed;
         line.geometry.kind = hs::DomainSignalGeometryKind::Line;
         line.geometry.end_position = signal.target;
-        Check(hs::ProjectDomainSignal(line, events, meadow) == 1 &&
+        Check(hs::ProjectDomainSignal(line, events, ground) == 1 &&
               std::abs(events[0].geometry.end_position.y - (.55f + target_h)) < 1e-6f,
               "line endpoint grounding must match its own world location");
     }
     Check(signal.position.y == .3f && signal.target.y == .55f, "one-shot projection mutated its source signal");
+    {
+        std::array<hs::RenderInstance, 4> room{};
+        room[0].mesh = hs::RenderMesh::Ground;
+        room[1].mesh = hs::RenderMesh::MeadowSurface;
+        room[1].position = {40, 2, -30}; room[1].scale = {2, 3, -1};
+        room[1].yaw = 1.5707963267948966f;
+        room[2] = room[1]; room[2].position.x += 60;
+        room[3] = room[1]; room[3].environment_variant = 1; room[3].position.y = 50;
+        hs::MeadowGroundQuery ground;
+        Check(ground.Prepare(room), "room ground query preparation");
+        const hs::Float2 world{room[1].position.x - low.y, room[1].position.z - 2*low.x};
+        Check(std::abs(ground.Height(world) - (2 + 3*height_at(low))) < 1e-5f &&
+              std::abs(ground.Height({world.x + 60, world.y}) - (2 + 3*height_at(low))) < 1e-5f &&
+              ground.Height(low) == 0, "translated rotated scaled Meadow uses local ground");
+        room[2] = room[1]; room[2].position.y = 1;
+        Check(ground.Prepare(room) && std::abs(ground.Height(world) - (2 + 3*height_at(low))) < 1e-5f,
+              "overlapping Meadows select the highest bed before flat ground");
+        room[1].scale.x = 0;
+        const auto before_invalid = ground.Height(world);
+        Check(!ground.Prepare(room) && ground.Height(world) == before_invalid, "invalid transform preserves admitted query");
+    }
 
     hs::GameReadModelStorage model;
     model.tick = 20;
@@ -1642,11 +1668,12 @@ void TestMeadowPresentationGrounding()
     model.AddProjectile(returning_projectile);
     {
         const auto room_scene = std::make_shared<hs::StaticRenderScene>();
-        Check(!hs::SceneHasMeadowTerrain(*room_scene), "empty scene has no meadow terrain");
+        hs::MeadowGroundQuery room_ground;
+        Check(room_ground.Prepare(room_scene->instances) && room_ground.Height(low) == 0, "empty scene has no meadow terrain");
         hs::RenderSnapshotStorage flat(16, 4, 4, 16);
         const auto owned = model.View();
         const auto read = hs::development::BorrowOwnedReadModel(owned);
-        Check(hs::ProjectDynamicTick(read, flat, room_scene, false), "flat scene projection");
+        Check(hs::ProjectDynamicTick(read, flat, room_scene, room_ground), "flat scene projection");
         const auto view = flat.View();
         const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
         const auto body = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::PlayerProjectile; });
@@ -1659,7 +1686,9 @@ void TestMeadowPresentationGrounding()
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
             test_ui, hs::SettingsData{}, snapshot), "meadow grounded projection");
         const auto view = snapshot.View();
-        Check(view.static_scene && hs::SceneHasMeadowTerrain(*view.static_scene) == (model.arena_half_extent >= 14),
+        hs::MeadowGroundQuery scene_ground;
+        Check(view.static_scene && scene_ground.Prepare(view.static_scene->instances) &&
+              std::abs(scene_ground.Height(low) - (model.arena_half_extent >= 14 ? height_at(low) : 0.0f)) < 1e-6f,
               "terrain fact follows admitted scene geometry");
         const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
         const auto head = std::ranges::find_if(view.persistent_vfx, [](const auto &v) { return v.kind == hs::PersistentVfxKind::ProjectileHead; });
@@ -2122,7 +2151,7 @@ void TestBossTelegraphProjectsGeometryAndAudio()
            "particle.boss.volley.telegraph", "audio.boss.volley.telegraph");
 }
 
-void TestArrowReleaseProjectsVfxAndAudio()
+void TestArrowReleaseAndImpactProjection()
 {
     hs::DomainSignal signal{};
     signal.kind = hs::DomainSignalKind::ArrowReleased;
@@ -2131,14 +2160,28 @@ void TestArrowReleaseProjectsVfxAndAudio()
     signal.direction = {0.0f, 0.0f, 1.0f};
     signal.context = static_cast<std::uint8_t>(hs::SkillKind::BasicAttack);
     std::array<hs::PresentationEvent, 3> output{};
+    output[1].vfx_ratio01 = 0.5f;
+    output[1].status_episode_generation = 13;
     const auto count = hs::ProjectDomainSignal(signal, output);
     const auto parameters = hs::DecodeVfxParameters(output[0].parameters);
     Check(count == 3 && output[0].kind == hs::PresentationKind::Vfx &&
               output[0].asset.value == hs::MakeAssetId("particle.player.arrow_release").value &&
               parameters.direction.z == 1.0f && output[0].position.y == 1.05f &&
               output[1].kind == hs::PresentationKind::Audio &&
+              output[1].vfx_ratio01 == -1.0f && output[1].status_episode_generation == 0 &&
               output[2].kind == hs::PresentationKind::Audio,
           "arrow release projects directional VFX without changing its two audio cues");
+
+    signal.kind = hs::DomainSignalKind::ProjectileHit;
+    signal.context = static_cast<std::uint8_t>(hs::SkillKind::MultiShot);
+    Check(hs::ProjectDomainSignal(signal, output) == 2 &&
+              output[1].asset.value == hs::MakeAssetId("audio.common.arrow_impact_light").value,
+          "multishot hits emit one light impact cue");
+    signal.context = static_cast<std::uint8_t>(hs::SkillKind::PiercingShot);
+    Check(hs::ProjectDomainSignal(signal, output) == 3 &&
+              output[1].asset.value == hs::MakeAssetId("audio.skill.piercing.pierce").value &&
+              output[2].asset.value == hs::MakeAssetId("audio.common.arrow_impact_heavy").value,
+          "piercing hits retain both distinct impact cues in order");
 }
 
 void TestSessionIdentityAcrossPresentationReset()
@@ -2738,7 +2781,7 @@ void RunGameplayPresentationTests()
     TestAuthoredEnvironmentProjection();
     TestStaticEnvironmentSceneLease();
     TestMeadowPresentationGrounding();
-    TestArrowReleaseProjectsVfxAndAudio();
+    TestArrowReleaseAndImpactProjection();
     TestBossTelegraphProjectsGeometryAndAudio();
     TestDenseGrassProjection();
     TestPresentationGeometryTransport();

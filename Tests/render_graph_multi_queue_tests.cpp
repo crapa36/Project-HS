@@ -1035,6 +1035,16 @@ void RunTimestampResolveIsolation(Fixture &fixture)
             Check(queue_values[pair] != 0 && queue_values[pair + 1] >= queue_values[pair],
                   "queue-local timestamp pairs resolve after producer completion");
     }
+    graph.Reset();
+    graph.AddPass(1, "Untimed Direct reuse", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
+    Check(graph.Prepare(pool).Succeeded(), "prepare smaller untimed graph on the same executor");
+    queue_guard.completed = false;
+    Check(executor.Execute(graph, 0, hs::BarrierMode::Legacy, completion).Succeeded(), "execute smaller untimed graph");
+    const auto reused_wait = executor.Wait(completion);
+    queue_guard.completed = reused_wait.Succeeded();
+    Check(reused_wait && completion.direct && !completion.compute && !completion.copy &&
+              executor.LastExecutionStats().direct_batches == 1,
+          "smaller graph must not submit retained timestamp, Compute or Copy batches");
     fixture.CheckValidation();
 }
 

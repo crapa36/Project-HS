@@ -68,6 +68,9 @@ int main()
     if (!rejected(malformed)) return 1;
 
     auto invalid = first;
+    invalid.progression.card_candidate_count = 0;
+    if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+    invalid = first;
     invalid.progression.card_candidate_count = 4;
     if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
     invalid = first;

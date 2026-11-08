@@ -1185,8 +1185,14 @@ void RunReservedTextureStreamingNative(ID3D12Device *device, D3D12MA::Allocator 
     Check(coarse > fine, "reserved fixture has a nonzero coarsening target");
     SettleTarget(fixture, fine, false);
     fixture.ReadbackPublished(fine);
+    hs::TextureStreamingLayout sampled_layout;
+    std::vector<hs::TextureStreamingGraphBinding> sampled_bindings;
+    Check(!fixture.AddPendingGraph(sampled_layout, sampled_bindings),
+          "settled reserved texture has a sample-only graph layout");
     SettleTarget(fixture, coarse, false, nullptr, nullptr, true);
     fixture.ReadbackPublished(coarse);
+    Check(fixture.Streaming().MatchesLayout(4000, sampled_layout),
+          "resident mip metadata changes preserve the reserved sample topology");
     SettleTarget(fixture, fine, false);
     fixture.ReadbackPublished(fine);
     fixture.Drain();

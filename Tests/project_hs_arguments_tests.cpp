@@ -115,6 +115,15 @@ void TestCaptureModeValidation()
               !boss_capture.vsync && boss_capture.frame_cap == 0,
           "valid boss capture enters smoke mode");
 
+    const auto invalid_skill = Parse({"--skill-vfx-capture=1junk", "--skill-vfx-capture=99"});
+    Check(!invalid_skill.smoke && invalid_skill.visible, "invalid skill capture preserves interactive mode");
+    const auto skill = Parse({"--skill-vfx-capture=2", "--skill-vfx-aim=4,6", "--skill-vfx-aim=7,nan",
+                              "--skill-vfx-upgrade-mask=5", "--skill-vfx-upgrade-mask=2junk",
+                              "--seed=42", "--seed=3junk", "--ticks=18", "--ticks=4junk"});
+    Check(skill.smoke && skill.skill_vfx_capture == 2 && skill.skill_vfx_aim.x == 4 &&
+              skill.skill_vfx_aim.y == 6 && skill.skill_vfx_upgrade_mask == 5 &&
+              skill.seed == 42 && skill.maximum_ticks == 18, "capture arguments commit complete values");
+
     const auto phase2_capture = Parse({"--boss-phase2-capture"});
     Check(phase2_capture.smoke && phase2_capture.boss_phase2_capture,
           "valid phase2 capture enters smoke mode");

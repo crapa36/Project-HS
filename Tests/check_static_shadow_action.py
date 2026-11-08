@@ -19,10 +19,6 @@ INDEX = "render/lighting/arena_static_shadow.index"
 PAGES = "render/lighting/arena_static_shadow.pages"
 RECIPE = "project-hs.render.static-shadow/coarse-fallback-lod2"
 QUALITY = "render/config/quality_profiles.rpkg"
-SOURCES = {
-    "layout/implementation": "Source/Presentation/Private/environment_layout.cpp",
-    "lighting/environment-contract": "Source/Presentation/Public/hs/presentation/environment_layout.hpp",
-}
 
 
 def digest(path: Path) -> str:
@@ -52,21 +48,44 @@ def link_payload(source: Path, destination: Path) -> None:
         shutil.copyfile(source, destination)
 
 
+def complete_generation_products(original: dict[str, dict], action_inputs: dict[str, dict]) -> set[str]:
+    generation_ids = set(action_inputs)
+    pending = list(generation_ids)
+    while pending:
+        logical_id = pending.pop()
+        item = original[logical_id]
+        for dependency in item.get("dependencies", ()):
+            if dependency not in generation_ids:
+                generation_ids.add(dependency)
+                pending.append(dependency)
+        if logical_id.startswith("render/") and logical_id.endswith("_lod2.rpkg"):
+            stem = logical_id.removeprefix("render/").removesuffix("_lod2.rpkg")
+            for suffix in ("", "_lod1"):
+                unused_lod = f"render/{stem}{suffix}.rpkg"
+                if unused_lod in original and unused_lod not in generation_ids:
+                    generation_ids.add(unused_lod)
+                    pending.append(unused_lod)
+    return generation_ids
+
+
 def reduced_generation(source_build: Path, fixture: Path, pointer: Path,
                        dependencies: dict[str, dict]) -> tuple[Path, dict[str, Path]]:
     selected = read_json(pointer)
     manifest = read_json(located(source_build, selected["manifest_locator"]))
     assert manifest["schema_version"] == 3, "fixture requires immutable schema-3 payloads"
     original = {item["logical_id"]: item for item in manifest["products"]}
-    ids = sorted(dependencies)
+    action_ids = set(dependencies)
+    generation_ids = complete_generation_products(original, dependencies)
+    ids = sorted(generation_ids)
     assert QUALITY not in ids, "fixture must omit native initialization prerequisites"
     assert not any(item.startswith("render/hlod/") for item in ids), "unexpected HLOD bake dependency"
     products = []
     for logical_id in ids:
         item = original[logical_id]
-        expected = dependencies[logical_id]
-        assert (item["digest"], item["size"]) == (expected["digest"], expected["size"])
-        assert set(item.get("dependencies", ())) <= dependencies.keys(), "incomplete baked dependency closure"
+        if logical_id in action_ids:
+            expected = dependencies[logical_id]
+            assert (item["digest"], item["size"]) == (expected["digest"], expected["size"])
+        assert set(item.get("dependencies", ())) <= generation_ids, "incomplete selected Generation closure"
         products.append({key: value for key, value in item.items() if key != "locator"})
     actions = {item["action_id"] for item in products}
     edges = [edge for edge in manifest["upstream_product_dependencies"]
@@ -111,9 +130,7 @@ def check(args, log) -> None:
     assert digest(producer) == baseline["recipe_identity"], "stale published producer identity; do not rebake in this test"
     assert baseline["recipe_id"] == RECIPE, "fixture requires the coarse fallback-LOD2 archive Action"
     inputs = {item["logical_id"]: item["digest"] for item in baseline["inputs"]}
-    assert inputs.keys() == SOURCES.keys()
-    for name, relative in SOURCES.items():
-        assert digest(args.source_root / relative) == inputs[name], "stale source input; do not rebake in this test"
+    assert not inputs, "compiled layout sources must be covered by producer identity"
     products = {item["logical_id"]: item for item in baseline["products"]}
     assert len(baseline["products"]) == 2 and products.keys() == {INDEX, PAGES}
     dependencies = {item["logical_id"]: item for item in baseline["upstream_product_dependencies"]}
@@ -126,10 +143,8 @@ def check(args, log) -> None:
         fixture = root / "build"
         source = root / "source"
         fixture.mkdir()
-        for relative in SOURCES.values():
-            destination = source / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(args.source_root / relative, destination)
+        # Source is deliberately empty: the producer identity covers linked code.
+        source.mkdir()
         # Only explicit result metadata is indexed; unrelated product payloads are absent.
         fixture_results = []
         for entry in args.result_list.read_text(encoding="utf-8").splitlines():
@@ -143,6 +158,20 @@ def check(args, log) -> None:
         result_list = fixture / "input-results.txt"
         result_list.write_text("\n".join(fixture_results) + "\n", encoding="utf-8")
         pointer, payloads = reduced_generation(build, fixture, args.generation, dependencies)
+        unused_runtime_shaders = {
+            logical_id for logical_id in payloads.keys() - dependencies.keys()
+            if logical_id.startswith("render/shader/") and
+            logical_id.endswith(("_scene.dxil", "_shadow.dxil"))
+        }
+        assert any(item.endswith("_scene.dxil") for item in unused_runtime_shaders)
+        assert any(item.endswith("_shadow.dxil") for item in unused_runtime_shaders)
+        unused_lod_packages = set()
+        for logical_id in dependencies:
+            if logical_id.startswith("render/") and logical_id.endswith("_lod2.rpkg"):
+                stem = logical_id.removeprefix("render/").removesuffix("_lod2.rpkg")
+                unused_lod_packages.update({f"render/{stem}.rpkg", f"render/{stem}_lod1.rpkg"})
+        assert unused_lod_packages <= payloads.keys()
+        assert unused_lod_packages.isdisjoint(dependencies)
         cached_result = fixture / "Actions" / NAMESPACE / "result.json"
         cached_result.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result_path, cached_result)
@@ -183,6 +212,8 @@ def check(args, log) -> None:
         assert digest(located(build, original_input["locator"])) == dependencies[target_id]["digest"]
         log.write(json.dumps(dict(result="passed", recipe=RECIPE, preserved_products=sorted(products),
             copied_upstream_payloads=len(payloads),
+            retained_unkeyed_runtime_shaders=len(unused_runtime_shaders),
+            retained_unkeyed_lod_packages=len(unused_lod_packages),
             indexed_action_results=len(fixture_results), gpu_initialized=False,
             corruption_target=target_id, previous_publication_preserved=True)) + "\n")
 

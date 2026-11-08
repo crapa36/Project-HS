@@ -83,6 +83,10 @@ void TestShippingRendererIdentity()
     Check(material_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Material(b, material); }),
           "material identity includes actual default parameter bits");
     --defaults[0].words[0];
+    material.opacity_texture_mask = 1;
+    Check(material_bytes != Bytes([&](CanonicalBytes &b) { content_identity::Material(b, material); }),
+          "material identity includes opacity texture usage");
+    material.opacity_texture_mask = 0;
 
     const std::array<GeometrySubmesh, 2> submeshes{{{0, 3, 0, 1, 2}, {3, 6, 1, 2, 4}}};
     GeometryDescriptor geometry{};
