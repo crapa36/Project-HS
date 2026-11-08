@@ -179,26 +179,16 @@ bool TaskSystem::Submit(std::shared_ptr<TaskGroup::State> state,
         return false;
     }
 
-    const auto reject_if_unavailable = [&]() {
+    {
+        std::lock_guard lock(state->mutex);
         if (state->sealed)
         {
             state->RecordFailureLocked(ErrorCode::InvalidState,
                                        "Cannot submit after TaskGroup::Wait.");
-            return true;
+            return false;
         }
-        return false;
-    };
-    {
-        std::lock_guard lock(state->mutex);
-        if (reject_if_unavailable()) return false;
-    }
-
-    const auto reserve = [&]() {
-        std::lock_guard lock(state->mutex);
-        if (reject_if_unavailable()) return false;
         state->pending.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    };
+    }
 #if defined(_WIN32) && defined(HS_DEVELOPMENT_TOOLS)
     const auto execute = [state, implementation = impl_.get()]
 #else
@@ -226,24 +216,21 @@ bool TaskSystem::Submit(std::shared_ptr<TaskGroup::State> state,
 
     if (!impl_->executor)
     {
-        if (!reserve()) return false;
         execute(task);
         return true;
     }
 
-    auto shared_task =
-        std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
-    auto run = [shared_task, execute]() mutable noexcept {
-        execute(*shared_task);
-    };
-    if (!reserve()) return false;
     TaskGroup::State::Completion reservation{state.get()};
 
     try
     {
         // Pinned/patched backend throws only before publication. After success
         // the task owns completion (and may already have completed).
-        impl_->executor->silent_async(std::move(run));
+        auto shared_task =
+            std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
+        impl_->executor->silent_async([shared_task = std::move(shared_task), execute]() {
+            execute(*shared_task);
+        });
         reservation.state = nullptr;
     }
     catch (const std::exception &exception)

@@ -676,7 +676,7 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         {
             client_width_ = std::max<std::uint32_t>(LOWORD(lparam), 1);
             client_height_ = std::max<std::uint32_t>(HIWORD(lparam), 1);
-            (void)channels_->resize_commands.TryPush(
+            channels_->resize_commands.Publish(
                 {client_width_, client_height_});
         }
         return 0;

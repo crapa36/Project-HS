@@ -456,6 +456,12 @@ using namespace gameplay_detail;
 
 struct GameSimulation::SimulationWorld
 {
+    struct ChargeTickState
+    {
+        Tick maximum{};
+        Tick unaccelerated{};
+        Tick elapsed{};
+    };
     SimulationRules rules{SimulationRules::Defaults()};
     SimulationConfig config{};
     ActorState actors{};
@@ -626,10 +632,10 @@ struct GameSimulation::SimulationWorld
                            Float2 direction, std::uint64_t cast_id,
                            std::uint64_t owner_id,
                            DomainSignalGeometry geometry = {});
-    bool SpawnEnemy(EnemyKind kind, Float2 position,
+    void SpawnEnemy(EnemyKind kind, Float2 position,
                     std::uint64_t random_key = 0);
     void QueueEnemySpawn(EnemyKind kind, std::uint64_t random_key);
-    bool SpawnBoss(BossKind kind, Tick warning_ticks);
+    void SpawnBoss(BossKind kind, Tick warning_ticks);
     void CommitBossSpawns();
     void CommitDelayedEnemySpawns();
     void SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
@@ -711,6 +717,7 @@ struct GameSimulation::SimulationWorld
     void DamageStatusPhase();
     std::uint64_t Heal(std::int32_t amount, bool emit_signal = true);
     void CancelChargedShot(bool released = false) noexcept;
+    [[nodiscard]] ChargeTickState ChargeTicks() const noexcept;
     std::uint32_t EnemyExperience(ConstEnemyRow enemy) const noexcept;
     void HandleEnemyDeath(EnemyRow enemy);
     void DeathDropPhase();
@@ -720,10 +727,11 @@ struct GameSimulation::SimulationWorld
                          std::uint64_t sequence, std::uint64_t purpose);
     void GenerateLevelCards(bool exclude_current = false);
     void GuardSelectionInput();
+    void ContinueLevelProgression();
     void GenerateRelicCards(bool exclude_current = false);
-    bool SelectCard(std::size_t index);
-    bool AssignStat(StatKind stat);
-    void AssignAutomaticStats();
+    bool SelectCard(std::size_t index, bool continue_progression = true);
+    bool AssignStat(StatKind stat, bool continue_progression = true);
+    void AssignAutomaticStats(bool continue_progression = true);
     void XpCardPhase();
     void CommitSpawnBarrier();
     void CommitAbilitySpawnBarrier();
@@ -766,7 +774,7 @@ struct GameSimulation::SimulationWorld
     void SessionTimerPhase();
     const SpawnStage &CurrentSpawnStage() const noexcept;
     Float2 SpawnPosition(std::uint64_t salt, bool &used_fallback) const noexcept;
-    EnemyKind ChooseEnemyKind(std::uint64_t salt) const noexcept;
+    EnemyKind ChooseEnemyKind(std::uint64_t salt, const SpawnStage &stage) const noexcept;
     void SpawnPhase();
     float SlowMultiplier(ConstEnemyRow enemy) const;
     void BossAi(EnemyRow boss);

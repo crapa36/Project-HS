@@ -157,7 +157,7 @@ void GameSimulation::SimulationWorld::EmitVfxLine(DomainSignalKind effect, Float
     combat_state.domain_signals.push_back(event);
 }
 
-bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position,
+void GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position,
                 std::uint64_t random_key)
 {
     const auto completed_minutes = static_cast<std::uint32_t>(growth_ticks / Seconds(60.0f));
@@ -190,7 +190,6 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
     else
         actors.enemies.push_back(std::move(enemy));
     ++Metrics().enemy_spawned[static_cast<std::size_t>(kind)];
-    return true;
 }
 
 void GameSimulation::SimulationWorld::QueueEnemySpawn(EnemyKind kind, std::uint64_t random_key)
@@ -214,7 +213,7 @@ void GameSimulation::SimulationWorld::QueueEnemySpawn(EnemyKind kind, std::uint6
             static_cast<std::uint8_t>(kind), 0, geometry);
 }
 
-bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
+void GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
 {
     const auto edge = rules.arena_half_extent - 1.0f;
     const auto position = ClampToArena(rules.arena_boundary,
@@ -229,7 +228,6 @@ bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_tick
     geometry.source_id = progression.pending_boss_spawns.back().warning_sequence;
     EmitVfx(DomainSignalKind::BossSpawnWarning, position, {0.0f, 1.0f}, 1.0f, 0.025f,
             static_cast<std::uint8_t>(kind), 0, geometry);
-    return true;
 }
 
 void GameSimulation::SimulationWorld::CommitBossSpawns()
@@ -1202,27 +1200,17 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
     }
     if (actors.player.charging)
     {
-        const auto &definition = rules.skills[
-            static_cast<std::size_t>(SkillKind::ChargedShot)];
         const auto &upgrades = rules.upgrades.charged_shot;
         const auto mask = actors.player.upgrades[
             static_cast<std::size_t>(SkillKind::ChargedShot)];
-        const auto maximum_ticks = HasUpgrade(mask, 1)
-                                       ? upgrades.extended_full_charge_explosion
-                                             .maximum_charge_time_ticks
-                                       : definition.maximum_charge_time_ticks;
+        const auto charge = ChargeTicks();
         if ((tick + kPlayerRenderId) % 6 == 0)
         {
             const bool faster_charge = HasUpgrade(mask, 2);
             if (faster_charge && actors.player.charge_cast_id == 0)
                 actors.player.charge_cast_id = TakeSimulationIdentity(next_cast_id);
-            auto elapsed = std::min(tick - actors.player.charge_start,
-                                    maximum_ticks);
-            if (faster_charge)
-                elapsed = std::min(maximum_ticks, static_cast<Tick>(
-                    elapsed / upgrades.faster_charge.charge_time_multiplier));
-            const float ratio = static_cast<float>(elapsed) /
-                static_cast<float>(maximum_ticks);
+            const float ratio = static_cast<float>(charge.elapsed) /
+                static_cast<float>(charge.maximum);
             EmitVfx(DomainSignalKind::ChargedShotPulse,
                     faster_charge ? actors.player.position :
                         Add(actors.player.position,
@@ -1241,9 +1229,9 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
         }
         const auto ready_ticks = HasUpgrade(mask, 2)
                                      ? static_cast<Tick>(std::ceil(
-                                           maximum_ticks * upgrades.faster_charge
+                                           charge.maximum * upgrades.faster_charge
                                                                .charge_time_multiplier))
-                                     : maximum_ticks;
+                                     : charge.maximum;
         if (tick - actors.player.charge_start == ready_ticks)
             EmitVfx(DomainSignalKind::ChargedShotReady,
                     Add(actors.player.position, Multiply(actors.player.aim, 0.65f)),
@@ -1314,9 +1302,9 @@ Float2 GameSimulation::SimulationWorld::SpawnPosition(std::uint64_t salt, bool &
                : Float2{};
 }
 
-EnemyKind GameSimulation::SimulationWorld::ChooseEnemyKind(std::uint64_t salt) const noexcept
+EnemyKind GameSimulation::SimulationWorld::ChooseEnemyKind(
+    std::uint64_t salt, const SpawnStage &stage) const noexcept
 {
-    const auto &stage = CurrentSpawnStage();
     const auto roll = Random(salt, 0x4B494E44ull) % 100;
     if (roll < stage.weights[0]) return EnemyKind::Melee;
     if (roll < stage.weights[0] + stage.weights[1]) return EnemyKind::Ranged;
@@ -1330,6 +1318,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         return;
     }
     if (!config.scenario.automatic_spawning) return;
+    const auto &stage = CurrentSpawnStage();
     const auto final_boss_tick = !final_boss_spawned &&
         growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::Final)];
     if (!final_boss_tick)
@@ -1337,13 +1326,12 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     CommitBossSpawns();
     if ((!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss) && !final_boss_tick)
     {
-        const auto &stage = CurrentSpawnStage();
         spawn_accumulator += stage.per_second;
         while (spawn_accumulator >= 60.0f)
         {
             spawn_accumulator -= 60.0f;
             const auto salt = TakeSimulationIdentity(next_enemy_random_key);
-            QueueEnemySpawn(ChooseEnemyKind(salt), salt);
+            QueueEnemySpawn(ChooseEnemyKind(salt, stage), salt);
         }
     }
     for (const auto &wave : rules.waves)
@@ -1369,7 +1357,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
                (!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss))
         {
             const auto salt = TakeSimulationIdentity(next_enemy_random_key);
-            QueueEnemySpawn(ChooseEnemyKind(salt), salt);
+            QueueEnemySpawn(ChooseEnemyKind(salt, stage), salt);
             ++wave.emitted;
         }
     }
@@ -1820,10 +1808,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
             }
             continue;
         }
-        if (tick >= enemy.action.next_attack &&
-            ((enemy.life.kind == EnemyKind::Melee && distance <= enemy.cold.attack_range) ||
-             (enemy.life.kind == EnemyKind::Ranged && distance <= enemy.cold.attack_range) ||
-             (enemy.life.kind == EnemyKind::Suicide && distance <= enemy.cold.attack_range)))
+        if (tick >= enemy.action.next_attack && distance <= enemy.cold.attack_range)
         {
             const auto attack_direction = Normalize(Subtract(actors.player.position, enemy.motion.position));
             if (LengthSquared(attack_direction) > 0.0001f)

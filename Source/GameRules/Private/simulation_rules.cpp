@@ -16,7 +16,8 @@ bool SimulationRulesHaveSafeProgression(const SimulationRules &rules) noexcept
 {
     const auto &p = rules.progression;
     const auto &u = rules.upgrades;
-    return p.card_candidate_count <= 3 && rules.relic_drop.maximum_choices_per_box <= 3 &&
+    return p.card_candidate_count >= 1 && p.card_candidate_count <= 3 &&
+        rules.relic_drop.maximum_choices_per_box <= 3 &&
         std::isfinite(p.required_xp_base) && p.required_xp_base >= 1.0f &&
         std::isfinite(p.required_xp_linear) && p.required_xp_linear >= 0.0f &&
         std::isfinite(p.required_xp_quadratic) && p.required_xp_quadratic >= 0.0f &&

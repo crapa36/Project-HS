@@ -166,11 +166,13 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     });
     WeightedShuffle(candidates, progression.level_reroll_sequence, 0x43415244ull);
     progression.card_count = 0;
+    const auto card_limit = std::min<std::size_t>(
+        rules.progression.card_candidate_count, progression.cards.size());
     if (active_count < rules.progression.active_slot_count)
     {
         const auto guaranteed = std::ranges::find(candidates, CardKind::LearnSkill,
                                                    &CardView::kind);
-        if (guaranteed != candidates.end())
+        if (guaranteed != candidates.end() && progression.card_count < card_limit)
         {
             progression.cards[progression.card_count++] = *guaranteed;
             candidates.erase(guaranteed);
@@ -178,16 +180,52 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     }
     for (const auto candidate : candidates)
     {
-        if (progression.card_count == std::min<std::size_t>(
-                rules.progression.card_candidate_count, progression.cards.size())) break;
+        if (progression.card_count == card_limit) break;
         progression.cards[progression.card_count++] = candidate;
     }
-    while (progression.card_count < std::min<std::size_t>(
-               rules.progression.card_candidate_count, progression.cards.size()))
+    while (progression.card_count < card_limit)
     {
         if (!rules.progression.fallback_stat_point_cards) break;
         progression.cards[progression.card_count++] = {CardKind::BonusStatPoint, 0, 0};
     }
+}
+
+void GameSimulation::SimulationWorld::ContinueLevelProgression()
+{
+    while (actors.player.pending_levels > 0)
+    {
+        --actors.player.pending_levels;
+        GenerateLevelCards();
+        if (progression.card_count != 0)
+        {
+            session_phase = SessionPhase::CardSelection;
+            GuardSelectionInput();
+            if (config.automatic_choices)
+            {
+                SelectCard(0, false);
+                if (session_phase == SessionPhase::Playing) continue;
+            }
+            return;
+        }
+        if (std::ranges::all_of(actors.player.stats, [&](auto value) {
+                return value >= rules.stats.maximum_points_per_stat;
+            }))
+        {
+            actors.player.pending_stat_points = 0;
+            continue;
+        }
+        actors.player.pending_stat_points += rules.progression.base_stat_points_per_level;
+        if (actors.player.pending_stat_points == 0) continue;
+        session_phase = SessionPhase::StatAllocation;
+        GuardSelectionInput();
+        if (config.automatic_choices)
+        {
+            AssignAutomaticStats(false);
+            if (session_phase == SessionPhase::Playing) continue;
+        }
+        return;
+    }
+    session_phase = SessionPhase::Playing;
 }
 
 void GameSimulation::SimulationWorld::GuardSelectionInput()
@@ -228,7 +266,6 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
                 });
         });
     }
-    std::ranges::sort(candidates, {}, &CardView::subject);
     for (std::size_t index = candidates.size(); index > 1; --index)
     {
         const auto swap = Random(actors.player.level ^ Mix(progression.relic_reroll_sequence),
@@ -244,7 +281,7 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
     }
 }
 
-bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
+bool GameSimulation::SimulationWorld::SelectCard(std::size_t index, bool continue_progression)
 {
     if (index >= progression.card_count)
     {
@@ -286,14 +323,10 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
         }))
     {
         actors.player.pending_stat_points = 0;
-        if (actors.player.pending_levels > 0)
-        {
-            --actors.player.pending_levels;
-            GenerateLevelCards();
-            session_phase = SessionPhase::CardSelection;
-            GuardSelectionInput();
-            if (config.automatic_choices) SelectCard(0);
-        }
+    }
+    if (actors.player.pending_stat_points == 0)
+    {
+        if (continue_progression) ContinueLevelProgression();
         else session_phase = SessionPhase::Playing;
         return true;
     }
@@ -301,12 +334,12 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     GuardSelectionInput();
     if (config.automatic_choices)
     {
-        AssignAutomaticStats();
+        AssignAutomaticStats(continue_progression);
     }
     return true;
 }
 
-bool GameSimulation::SimulationWorld::AssignStat(StatKind stat)
+bool GameSimulation::SimulationWorld::AssignStat(StatKind stat, bool continue_progression)
 {
     const auto index = static_cast<std::size_t>(stat);
     if (actors.player.pending_stat_points == 0 ||
@@ -333,23 +366,13 @@ bool GameSimulation::SimulationWorld::AssignStat(StatKind stat)
         })) actors.player.pending_stat_points = 0;
     if (actors.player.pending_stat_points == 0)
     {
-        if (actors.player.pending_levels > 0)
-        {
-            --actors.player.pending_levels;
-            GenerateLevelCards();
-            session_phase = SessionPhase::CardSelection;
-            GuardSelectionInput();
-            if (config.automatic_choices) SelectCard(0);
-        }
-        else
-        {
-            session_phase = SessionPhase::Playing;
-        }
+        if (continue_progression) ContinueLevelProgression();
+        else session_phase = SessionPhase::Playing;
     }
     return true;
 }
 
-void GameSimulation::SimulationWorld::AssignAutomaticStats()
+void GameSimulation::SimulationWorld::AssignAutomaticStats(bool continue_progression)
 {
     while (actors.player.pending_stat_points > 0)
     {
@@ -359,7 +382,7 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
             const auto index = (actors.player.level + offset) % kStatCount;
             if (actors.player.stats[index] < rules.stats.maximum_points_per_stat)
             {
-                AssignStat(static_cast<StatKind>(index));
+                AssignStat(static_cast<StatKind>(index), continue_progression);
                 assigned = true;
                 break;
             }
@@ -418,12 +441,12 @@ void GameSimulation::SimulationWorld::XpCardPhase()
                 }
                 pickup.visual_motion_updated = tick;
             }
-            const auto direction = distance <= 0.00001f ? Float2{0.0f, 1.0f}
-                : Float2{delta.x / distance, delta.y / distance};
-            pickup.position = Add(pickup.position,
-                                  Multiply(direction,
-                                           rules.growth.experience_pickup_speed *
-                                               kTickSeconds));
+            const float step = rules.growth.experience_pickup_speed * kTickSeconds;
+            if (step >= distance)
+                pickup.position = actors.player.position;
+            else if (step > 0.0f)
+                pickup.position = Add(pickup.position,
+                    Multiply(Float2{delta.x / distance, delta.y / distance}, step));
         }
         if (DistanceSquared(pickup.position, actors.player.position) <=
             rules.growth.experience_pickup_radius *
@@ -452,11 +475,7 @@ void GameSimulation::SimulationWorld::XpCardPhase()
     if (actors.player.pending_levels > 0 && session_phase == SessionPhase::Playing)
     {
         CancelChargedShot();
-        --actors.player.pending_levels;
-        GenerateLevelCards();
-        session_phase = SessionPhase::CardSelection;
-        GuardSelectionInput();
-        if (config.automatic_choices) SelectCard(0);
+        ContinueLevelProgression();
     }
 }
 

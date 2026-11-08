@@ -587,7 +587,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     auto &channels = *channel_storage;
     channels.capture_clock = capture_clock;
     channels.camera_zoom_percent.store(std::clamp(config.camera_zoom_percent, 15u, 120u));
-    channels.best_level.store(profile.best_level, std::memory_order_relaxed);
+    channels.best_level = profile.best_level;
     TaskSystem task_system;
     Window window(channels, settings.skill_virtual_keys, runtime_camera);
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1196,6 +1196,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 *config.test_room_capture > asset_test_room->entries.size()))
                 return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
                     std::format("Test room station must be between 1 and {}.", asset_test_room->entries.size()));
+            auto ground = std::make_shared<MeadowGroundQuery>();
+            if (auto prepared = asset_test_room->PrepareGround(*ground); !prepared) return prepared;
+            channels.room_ground.store(std::move(ground), std::memory_order_release);
             room_labels.clear();
             room_labels.reserve(asset_test_room->entries.size());
             std::string catalog = "station,group,label,x,y,z,capture_distance\n";
@@ -1853,24 +1856,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 display_receipt_changed |= window_message.message == WM_DISPLAYCHANGE;
             }
             if (display_receipt_changed) record_renderer_features(0);
-            ResizeCommand resize_command;
-            std::uint32_t resize_width{};
-            std::uint32_t resize_height{};
-            while (channels.resize_commands.TryPop(resize_command))
-            {
-                resize_width = resize_command.width;
-                resize_height = resize_command.height;
-            }
-            if (apply_renderer_settings || (resize_width && resize_height))
+            ResizeCommand resize;
+            const bool has_resize = channels.resize_commands.TryPop(resize);
+            if (apply_renderer_settings || has_resize)
                 if (auto drained = drain_gpu_capture(); !drained)
                 {
                     record_thread_failure(drained);
                     break;
                 }
             auto resize_error = ErrorCode::None;
-            if (resize_width && resize_height)
+            if (has_resize)
             {
-                if (auto resize_result = renderer.Resize(resize_width, resize_height);
+                if (auto resize_result = renderer.Resize(resize.width, resize.height);
                     !resize_result)
                 {
                     if (resize_result.Code() != ErrorCode::TaskFailed)
@@ -1883,8 +1880,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 else if (!apply_renderer_settings)
                 {
-                    active_renderer_settings.width = resize_width;
-                    active_renderer_settings.height = resize_height;
+                    active_renderer_settings.width = resize.width;
+                    active_renderer_settings.height = resize.height;
                     record_renderer_features(0);
                 }
             }
@@ -3529,8 +3526,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
-                channels.rendered_particles.store(renderer.LastParticleCount(),
-                                                  std::memory_order_release);
+                channels.rendered_particles = renderer.LastParticleCount();
                 const auto gpu_timings = renderer.LastGpuPassTimings();
                 if (gpu_timings.valid)
                 {
@@ -3992,7 +3988,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         PlayerFootstepTimeline footstep_timeline;
         runtime_detail::ProcessSceneFactory environment_cache(deployment_id);
         std::shared_ptr<const StaticRenderScene> launch_environment;
-        bool launch_has_meadow_terrain{};
+        std::shared_ptr<const MeadowGroundQuery> launch_ground = std::make_shared<MeadowGroundQuery>();
         const auto configure_dynamic_camera = [&] {
             const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
             const auto pose = ComputeRuntimeCameraPose(runtime_camera.distance_m,
@@ -4003,8 +3999,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             dynamic_current.camera.distance = pose.distance_m;
             dynamic_current.camera.target_height_offset = pose.target_height_m;
             dynamic_current.camera.target.y = pose.target_height_m +
-                (launch_has_meadow_terrain ? MeadowGroundHeight({dynamic_current.camera.target.x,
-                    dynamic_current.camera.target.z}) : 0.0f);
+                launch_ground->Height({dynamic_current.camera.target.x, dynamic_current.camera.target.z});
         };
         const auto retain_line_signals = [&](const TickReadView &model) {
             if (!retained_line_state_initialized || retained_line_session != model.session_id ||
@@ -4060,9 +4055,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #else
             launch_environment = environment_cache.Resolve(model);
 #endif
-            launch_has_meadow_terrain = launch_environment && SceneHasMeadowTerrain(*launch_environment);
+            auto ground = std::make_shared<MeadowGroundQuery>();
+            if (auto prepared = ground->Prepare(launch_environment->instances); !prepared)
+            { record_thread_failure(prepared); finish_simulation(); return; }
+            launch_ground = std::move(ground);
+#if defined(HS_DEVELOPMENT_TOOLS)
+            if (config.test_room)
+                if (auto room_ground = channels.room_ground.load(std::memory_order_acquire)) launch_ground = std::move(room_ground);
+#endif
             if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                    launch_environment, launch_has_meadow_terrain, &enemy_animations, retained_line_signals); !projected)
+                    launch_environment, *launch_ground, &enemy_animations, retained_line_signals); !projected)
             {
                 record_thread_failure(projected);
                 finish_simulation();
@@ -4356,9 +4358,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         dynamic_current.header.session_id != model.session_id;
                     const bool tick_changed = !has_dynamic_sample ||
                         dynamic_current.header.tick != model.tick;
+                    bool ground_changed = false;
+#if defined(HS_DEVELOPMENT_TOOLS)
+                    if (config.test_room)
+                        if (auto room_ground = channels.room_ground.load(std::memory_order_acquire);
+                            room_ground && room_ground != launch_ground)
+                        { launch_ground = std::move(room_ground); ground_changed = true; }
+#endif
                     retain_line_signals(model);
                     const bool project_dynamic = new_session || tick_changed || tick.world_changed ||
-                        forced_dynamic_refresh || harness_added != 0;
+                        forced_dynamic_refresh || ground_changed || harness_added != 0;
                     if (project_dynamic)
                     {
                         runtime_detail::DiagnosticScope animation_scope(simulation_work[5], capture_clock);
@@ -4397,16 +4406,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                          tick.phase == SessionPhase::Defeat) &&
                         tick.phase != previous_phase)
                     {
-                        channels.completed_run_kills.fetch_add(probe.kills,
-                                                               std::memory_order_relaxed);
+                        channels.completed_run_kills += probe.kills;
                         if (tick.phase == SessionPhase::Victory)
                         {
-                            channels.completed_run_wins.fetch_add(1,
-                                                                  std::memory_order_relaxed);
+                            ++channels.completed_run_wins;
                         }
-                        channels.best_level.store(std::max(channels.best_level.load(std::memory_order_relaxed),
-                                                           static_cast<std::uint32_t>(probe.level)),
-                                                  std::memory_order_relaxed);
+                        channels.best_level = std::max(channels.best_level,
+                                                       static_cast<std::uint32_t>(probe.level));
                     }
                     previous_phase = tick.phase;
                     observe_scope.Stop();
@@ -4422,14 +4428,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         channels.PublishAudioTick({model.session_id, probe.tick, tick.phase,
                             {probe.player_position.x, 0.0f, probe.player_position.y}});
 #ifdef HS_DEVELOPMENT_TOOLS
-                        channels.ProjectDomainSignalsOnce(model.domain_signals, launch_has_meadow_terrain,
+                        channels.ProjectDomainSignalsOnce(model.domain_signals, *launch_ground,
                             capture_diagnostics, recording ? &record_events : nullptr);
 #else
-                        channels.ProjectDomainSignalsOnce(model.domain_signals, launch_has_meadow_terrain,
+                        channels.ProjectDomainSignalsOnce(model.domain_signals, *launch_ground,
                             false, nullptr);
 #endif
                         if (const auto footstep = footstep_timeline.Advance(
-                                model, enemy_animations.PlayerMotionEpoch(), launch_has_meadow_terrain))
+                                model, enemy_animations.PlayerMotionEpoch(), *launch_ground))
                             channels.PublishAudioEvent(*footstep);
                         fanout_scope.Stop();
                         if (recording)
@@ -4492,7 +4498,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
                         if (auto projected = ProjectDynamicTick(model, dynamic_current,
-                                launch_environment, launch_has_meadow_terrain, &enemy_animations, retained_line_signals); !projected)
+                                launch_environment, *launch_ground, &enemy_animations, retained_line_signals); !projected)
                         {
                             record_thread_failure(projected);
                             break;
@@ -5009,7 +5015,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         std::memory_order_release);
         }
         UiCommand ui_command;
-        bool immediate_settings_changed{};
         bool audio_settings_changed{};
         while (channels.ui_commands.TryPop(ui_command))
         {
@@ -5063,7 +5068,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 case UiCommandKind::SetUiVolumePercent:
                     if (settings_commit.EditImmediate(ui_command))
                     {
-                        immediate_settings_changed = true;
                         audio_settings_changed = true;
                         presentation_settings_changed = true;
                     }
@@ -5086,10 +5090,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 presentation_settings_changed = true;
             }
         }
-        if (immediate_settings_changed)
+        if (audio_settings_changed)
         {
-            if (audio_settings_changed)
-                audio.ApplySettings(settings);
+            audio.ApplySettings(settings);
             if (display_modal_phase.load(std::memory_order_acquire) ==
                 GraphicsUiPhase::Applied)
                 save_committed_settings();
@@ -5461,9 +5464,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
     if (!config.smoke)
     {
-        profile.best_level = channels.best_level.load(std::memory_order_relaxed);
-        profile.total_wins += channels.completed_run_wins.load(std::memory_order_relaxed);
-        profile.total_kills += channels.completed_run_kills.load(std::memory_order_relaxed);
+        profile.best_level = channels.best_level;
+        profile.total_wins += channels.completed_run_wins;
+        profile.total_kills += channels.completed_run_kills;
         if (auto saved = save_store.SaveProfile(profile); !saved)
         {
             record_thread_failure(saved);
@@ -5477,9 +5480,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     const auto final_tick = channels.completed_tick.load(std::memory_order_acquire);
     const auto checksum = channels.gameplay_checksum.load(std::memory_order_acquire);
     const auto rendered_frames = channels.rendered_frames.load(std::memory_order_acquire);
-    const auto rendered_particles =
-        channels.rendered_particles.load(std::memory_order_acquire);
 #ifdef HS_DEVELOPMENT_TOOLS
+    const auto rendered_particles = channels.rendered_particles;
     auto valid =
         result && final_tick >= (config.smoke ? config.maximum_ticks : 0) && rendered_frames > 0 &&
         rendered_particles <= 10'000u &&

@@ -35,10 +35,9 @@ struct ResizeCommand
 class ResizeMailbox
 {
   public:
-    bool TryPush(ResizeCommand value) noexcept
+    void Publish(ResizeCommand value) noexcept
     {
         pending_.store((std::uint64_t(value.width) << 32) | value.height, std::memory_order_release);
-        return true;
     }
     bool TryPop(ResizeCommand &value) noexcept
     {
@@ -82,7 +81,6 @@ struct RenderPorts
     BoundedSpscQueue<NativeWindowMessage, 256> &window_messages;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
     std::atomic<std::uint64_t> &rendered_frames;
-    std::atomic<std::uint32_t> &rendered_particles;
     std::atomic<std::uint64_t> &dropped_input_edges;
     std::atomic<std::uint64_t> &dropped_presentation_events;
     std::atomic<bool> &devtools_capture_mouse;
@@ -91,6 +89,10 @@ struct RenderPorts
     const std::atomic<std::uint8_t> &session_phase;
     const std::atomic<std::uint8_t> &ui_page;
     runtime_detail::UiDrawPackets &ui_packets;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::uint32_t &rendered_particles;
+    std::atomic<std::shared_ptr<const MeadowGroundQuery>> &room_ground;
+#endif
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
 };
@@ -121,9 +123,9 @@ struct SimulationPorts
     std::atomic<std::uint8_t> &character_skill;
     std::atomic<std::uint8_t> &loadout_source;
     std::atomic<std::uint8_t> &pending_rebind_slot;
-    std::atomic<std::uint32_t> &best_level;
-    std::atomic<std::uint64_t> &completed_run_kills;
-    std::atomic<std::uint64_t> &completed_run_wins;
+    std::uint32_t &best_level;
+    std::uint64_t &completed_run_kills;
+    std::uint64_t &completed_run_wins;
     std::atomic<std::uint64_t> &dropped_presentation_events;
     std::atomic<std::uint8_t> &settings_group;
     std::atomic<std::uint8_t> &settings_page;
@@ -132,6 +134,9 @@ struct SimulationPorts
     std::atomic<bool> &ui_input_rejected;
     std::atomic<std::uint64_t> &current_session_id;
     std::atomic<std::uint64_t> &stale_ui_action_drops;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::atomic<std::shared_ptr<const MeadowGroundQuery>> &room_ground;
+#endif
     runtime_detail::DiagnosticClock capture_clock{};
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
@@ -155,14 +160,14 @@ struct SimulationPorts
     }
 
     // The same owned values feed recording and one live destination in source order.
-    void ProjectDomainSignalsOnce(std::span<const DomainSignal> signals, bool meadow_terrain_enabled,
+    void ProjectDomainSignalsOnce(std::span<const DomainSignal> signals, const MeadowGroundQuery &ground,
                                   bool capture_trace, std::vector<PresentationEvent> *record_events)
     {
         if (record_events) record_events->clear();
         for (const auto &signal : signals)
         {
             std::array<PresentationEvent, 3> projected{};
-            const auto count = ProjectDomainSignal(signal, projected, meadow_terrain_enabled);
+            const auto count = ProjectDomainSignal(signal, projected, ground);
             for (const auto &event : std::span(projected).first(count))
             {
                 if (record_events) record_events->push_back(event);
@@ -189,6 +194,10 @@ struct SimulationPorts
 
 struct RuntimeChannels
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::uint32_t rendered_particles{};
+    std::atomic<std::shared_ptr<const MeadowGroundQuery>> room_ground;
+#endif
     explicit RuntimeChannels(runtime_detail::MainWake *wake = nullptr)
         : snapshots(10'000, 8, 4, kGraphicsUiSnapshotReserve), main_wake(wake)
     {
@@ -234,11 +243,10 @@ struct RuntimeChannels
     std::atomic<std::uint8_t> character_skill{};
     std::atomic<std::uint8_t> loadout_source{0xFF};
     std::atomic<std::uint8_t> pending_rebind_slot{0xFF};
-    std::atomic<std::uint32_t> best_level{1};
-    std::atomic<std::uint64_t> completed_run_kills{};
-    std::atomic<std::uint64_t> completed_run_wins{};
+    std::uint32_t best_level{1};
+    std::uint64_t completed_run_kills{};
+    std::uint64_t completed_run_wins{};
     std::atomic<std::uint64_t> rendered_frames{};
-    std::atomic<std::uint32_t> rendered_particles{};
     std::atomic<std::uint64_t> dropped_input_edges{};
     std::atomic<std::uint64_t> dropped_presentation_events{};
     std::atomic<bool> devtools_capture_mouse{};
@@ -253,13 +261,6 @@ struct RuntimeChannels
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> presentation_graphics_ui;
     runtime_detail::UiDrawPackets ui_packets;
 
-    void PublishSessionProbe(const SessionProbe &probe, std::uint64_t session_id = 0)
-    {
-        std::scoped_lock lock(session_probe_mutex);
-        session_probe = probe;
-        current_session_id.store(session_id, std::memory_order_release);
-    }
-
     [[nodiscard]] SessionProbe ReadSessionProbe() const
     {
         std::scoped_lock lock(session_probe_mutex);
@@ -270,9 +271,13 @@ struct RuntimeChannels
     {
         return {stop_requested, simulation_done, completed_tick, render_ready, action_edges, snapshots,
                 presentation_events, resize_commands, renderer_settings,
-                renderer_settings_acks, window_messages, debug_commands, rendered_frames, rendered_particles,
+                renderer_settings_acks, window_messages, debug_commands, rendered_frames,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
-                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, ui_packets, main_wake};
+                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, ui_packets,
+#if defined(HS_DEVELOPMENT_TOOLS)
+                rendered_particles, room_ground,
+#endif
+                main_wake};
     }
 
     [[nodiscard]] SimulationPorts ForSimulation() noexcept
@@ -287,7 +292,11 @@ struct RuntimeChannels
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
                 settings_group, settings_page, character_details_page, presentation_graphics_ui,
-                ui_input_rejected, current_session_id, stale_ui_action_drops, capture_clock, main_wake};
+                ui_input_rejected, current_session_id, stale_ui_action_drops,
+#if defined(HS_DEVELOPMENT_TOOLS)
+                room_ground,
+#endif
+                capture_clock, main_wake};
     }
 };
 

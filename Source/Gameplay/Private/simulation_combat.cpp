@@ -1086,26 +1086,34 @@ void GameSimulation::SimulationWorld::ConsumeBufferedSkill()
     }
 }
 
+GameSimulation::SimulationWorld::ChargeTickState
+GameSimulation::SimulationWorld::ChargeTicks() const noexcept
+{
+    const auto mask = actors.player.upgrades[static_cast<std::size_t>(SkillKind::ChargedShot)];
+    const auto maximum = HasUpgrade(mask, 1)
+        ? rules.upgrades.charged_shot.extended_full_charge_explosion.maximum_charge_time_ticks
+        : rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)].maximum_charge_time_ticks;
+    const auto unaccelerated = std::min(tick - actors.player.charge_start, maximum);
+    const auto elapsed = HasUpgrade(mask, 2)
+        ? std::min(maximum, static_cast<Tick>(
+              unaccelerated / rules.upgrades.charged_shot.faster_charge.charge_time_multiplier))
+        : unaccelerated;
+    return {maximum, unaccelerated, elapsed};
+}
+
 void GameSimulation::SimulationWorld::ReleaseChargedShot()
 {
     const auto mask = actors.player.upgrades[static_cast<std::size_t>(SkillKind::ChargedShot)];
     const auto &definition = rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)];
     const auto &upgrades = rules.upgrades.charged_shot;
-    const auto maximum_ticks = HasUpgrade(mask, 1)
-                                   ? upgrades.extended_full_charge_explosion.maximum_charge_time_ticks
-                                   : definition.maximum_charge_time_ticks;
-    auto elapsed = std::min(tick - actors.player.charge_start, maximum_ticks);
+    const auto charge = ChargeTicks();
     if (HasUpgrade(mask, 2))
     {
-        const auto unaccelerated = elapsed;
-        elapsed = std::min(
-            maximum_ticks,
-            static_cast<Tick>(elapsed / upgrades.faster_charge.charge_time_multiplier));
         RecordUpgradeEffect(SkillKind::ChargedShot, 1,
                             UpgradeEffectMetric::ChargeTicksSaved,
-                            elapsed - unaccelerated);
+                            charge.elapsed - charge.unaccelerated);
     }
-    const auto ratio = static_cast<float>(elapsed) / static_cast<float>(maximum_ticks);
+    const auto ratio = static_cast<float>(charge.elapsed) / static_cast<float>(charge.maximum);
     const auto minimum = HasUpgrade(mask, 3)
                              ? upgrades.increase_minimum_charge_damage.minimum_damage_multiplier
                              : definition.minimum_damage_multiplier;

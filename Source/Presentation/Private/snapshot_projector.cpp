@@ -1,5 +1,6 @@
 #include <hs/presentation/projector.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
+#include <hs/render_data/terrain_source_constants.hpp>
 #include <hs/core/result.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/environment_layout.hpp>
@@ -187,7 +188,7 @@ void PlayerFootstepTimeline::Reset(const TickReadView &model, Sequence motion_ep
 }
 
 std::optional<PresentationEvent> PlayerFootstepTimeline::Advance(
-    const TickReadView &model, Sequence motion_epoch, bool meadow_terrain_enabled) noexcept
+    const TickReadView &model, Sequence motion_epoch, const MeadowGroundQuery &ground) noexcept
 {
     if (!initialized_ || model.session_id != session_id_ || motion_epoch != motion_epoch_ ||
         tick_ == std::numeric_limits<Tick>::max() ||
@@ -205,8 +206,7 @@ std::optional<PresentationEvent> PlayerFootstepTimeline::Advance(
     event.kind = PresentationKind::Audio;
     event.session_id = model.session_id;
     event.position = {model.player.position.x, 0.0f, model.player.position.y};
-    if (meadow_terrain_enabled)
-        event.position.y = MeadowGroundHeight({event.position.x, event.position.z});
+    event.position.y = ground.Height({event.position.x, event.position.z});
     event.asset = MakeAssetId(model.player.locomotion_blend >= 0.5f
                                   ? "audio.player.footstep_run"
                                   : "audio.player.footstep_walk");
@@ -314,17 +314,49 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
 }
 } // namespace
 
-bool SceneHasMeadowTerrain(const StaticRenderScene &scene) noexcept
+Result MeadowGroundQuery::Prepare(std::span<const RenderInstance> instances)
 {
-    return std::ranges::any_of(scene.instances, [](const RenderInstance &instance) {
-        return instance.mesh == RenderMesh::MeadowSurface && instance.environment_variant == 0;
-    });
+    std::vector<Surface> next;
+    const double limit = std::numeric_limits<float>::max();
+    for (const auto &instance : instances)
+    {
+        if (instance.mesh != RenderMesh::MeadowSurface || instance.environment_variant != 0) continue;
+        const auto &p = instance.position; const auto &s = instance.scale;
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+            !std::isfinite(s.x) || !std::isfinite(s.y) || !std::isfinite(s.z) ||
+            !std::isfinite(instance.yaw) || s.x == 0 || s.y == 0 || s.z == 0 ||
+            std::abs(double(p.x)) + 12.0 * (std::abs(double(s.x)) + std::abs(double(s.z))) > limit ||
+            std::abs(double(p.z)) + 12.0 * (std::abs(double(s.x)) + std::abs(double(s.z))) > limit ||
+            std::abs(double(p.y)) + double(render_data::kMeadowGroundHeightBound) * std::abs(double(s.y)) > limit)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_presentation", "Invalid Meadow transform.");
+        next.push_back({p, s, std::sin(instance.yaw), std::cos(instance.yaw)});
+    }
+    surfaces = std::move(next);
+    return Result::Success();
+}
+
+float MeadowGroundQuery::Height(Float2 world) const noexcept
+{
+    float height = 0; bool found = false;
+    for (const auto &surface : surfaces)
+    {
+        const double x = double(world.x) - surface.position.x, z = double(world.y) - surface.position.z;
+        const double local_x = (surface.cosine*x - surface.sine*z)/surface.scale.x;
+        const double local_z = (surface.sine*x + surface.cosine*z)/surface.scale.z;
+        if (std::abs(local_x) > 12 || std::abs(local_z) > 12) continue;
+        const Float2 local{static_cast<float>(local_x), static_cast<float>(local_z)};
+        if (!MeadowContains(local)) continue;
+        const float candidate = surface.position.y + surface.scale.y * MeadowGroundHeight(local);
+        if (!found || candidate > height) height = candidate;
+        found = true;
+    }
+    return height;
 }
 
 Result ProjectDynamicTick(const TickReadView &model,
                         RenderSnapshotStorage &snapshot,
                         std::shared_ptr<const StaticRenderScene> environment_scene,
-                        bool meadow_terrain_enabled,
+                        const MeadowGroundQuery &ground,
                         const EnemyAnimationState *enemy_animations,
                         std::span<const DomainSignal> retained_visual_links)
 {
@@ -339,18 +371,17 @@ Result ProjectDynamicTick(const TickReadView &model,
     snapshot.camera.target_motion_epoch = enemy_animations ? enemy_animations->PlayerMotionEpoch() : 0;
     snapshot.SetStaticScene(std::move(environment_scene));
 
-    const bool terrain_enabled = meadow_terrain_enabled;
     const auto terrain_height = [&](Float2 position) {
-        return terrain_enabled ? MeadowGroundHeight(position) : 0.0f;
+        return ground.Height(position);
     };
     struct ProjectileGroundHeights { float current{}, previous{}; };
     const auto grounded = [&](Float3 position) {
-        if (terrain_enabled) position.y += MeadowGroundHeight({position.x, position.z});
+        position.y += ground.Height({position.x, position.z});
         return position;
     };
     // Project simulation-relative heights exactly once, including independent trail endpoints.
     const auto add_instance = [&](RenderInstance instance, const float *prepared_height = nullptr) {
-        if (prepared_height && terrain_enabled) instance.position.y += *prepared_height;
+        if (prepared_height) instance.position.y += *prepared_height;
         else instance.position = grounded(instance.position);
         PopulateRenderInstanceIdentity(instance);
         snapshot.AddInstance(instance);
@@ -366,19 +397,15 @@ Result ProjectDynamicTick(const TickReadView &model,
         // Sampling terrain at that offset would detach it on banks and slopes.
         auto anchor = body_trail ? visual.projectile_current_position : visual.position;
         anchor.y = visual.position.y;
-        if (terrain_enabled)
-            visual.position.y += projectile_ground
-                ? projectile_ground->current : MeadowGroundHeight({anchor.x, anchor.z});
+        visual.position.y += projectile_ground
+            ? projectile_ground->current : ground.Height({anchor.x, anchor.z});
         if (visual.projectile_hitbox_radius > 0.0f) {
-            if (terrain_enabled)
-            {
                 visual.projectile_current_position.y += projectile_ground
                     ? projectile_ground->current
-                    : MeadowGroundHeight({visual.projectile_current_position.x, visual.projectile_current_position.z});
+                    : ground.Height({visual.projectile_current_position.x, visual.projectile_current_position.z});
                 visual.projectile_previous_position.y += projectile_ground
                     ? projectile_ground->previous
-                    : MeadowGroundHeight({visual.projectile_previous_position.x, visual.projectile_previous_position.z});
-            }
+                    : ground.Height({visual.projectile_previous_position.x, visual.projectile_previous_position.z});
         }
         switch (visual.kind) {
         case PersistentVfxKind::RicochetLink:
@@ -2720,8 +2747,9 @@ Result ProjectTick(const TickReadView &model,
                  const GraphicsSettingsUiModel *graphics_ui,
                  std::span<const DomainSignal> retained_visual_links)
 {
-    const bool meadow_terrain_enabled = environment_scene && SceneHasMeadowTerrain(*environment_scene);
-    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), meadow_terrain_enabled, enemy_animations,
+    MeadowGroundQuery ground;
+    if (environment_scene) if (auto prepared = ground.Prepare(environment_scene->instances); !prepared) return prepared;
+    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), ground, enemy_animations,
                                      retained_visual_links);
     if (!result) return result;
     ProjectTickUi(model, presentation, ui, settings, snapshot, pending_rebind_slot, graphics_ui);

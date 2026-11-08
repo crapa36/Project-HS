@@ -195,35 +195,8 @@ std::array<std::byte, 32> Sha256Stream::Finish()
 
 std::array<std::byte, 32> Sha256(std::span<const std::byte> bytes)
 {
-#ifdef _WIN32
-    if (bytes.size() > std::numeric_limits<std::uint64_t>::max() / 8)
-        throw std::length_error("SHA-256 input too large");
-    BCRYPT_HASH_HANDLE hash{};
-    if (BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &hash, nullptr, 0, nullptr, 0, 0) < 0)
-        throw std::runtime_error("cannot initialize SHA-256 hash");
-    struct HashOwner
-    {
-        BCRYPT_HASH_HANDLE handle;
-        ~HashOwner() { BCryptDestroyHash(handle); }
-    } owner{hash};
-    while (!bytes.empty())
-    {
-        const auto count = static_cast<ULONG>(std::min<std::size_t>(
-            bytes.size(), std::numeric_limits<ULONG>::max()));
-        if (BCryptHashData(hash, reinterpret_cast<PUCHAR>(
-                const_cast<std::byte *>(bytes.data())), count, 0) < 0)
-            throw std::runtime_error("cannot hash SHA-256 input");
-        bytes = bytes.subspan(count);
-    }
-    std::array<std::byte, 32> digest{};
-    if (BCryptFinishHash(hash, reinterpret_cast<PUCHAR>(digest.data()),
-                         static_cast<ULONG>(digest.size()), 0) < 0)
-        throw std::runtime_error("cannot finish SHA-256 hash");
-    return digest;
-#else
     Sha256Stream stream;
     stream.Add(bytes);
     return stream.Finish();
-#endif
 }
 } // namespace hs

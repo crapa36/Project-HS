@@ -62,6 +62,20 @@ struct AssetTestRoom
     explicit AssetTestRoom(const std::vector<RendererCharacterAnimationClip> &clips,
         const std::vector<RendererLegacyCharacterAnimationClip> &legacy_clips, const VfxImage &vfx);
 
+    Result PrepareGround(MeadowGroundQuery &ground) const
+    {
+        auto terrain = floors;
+        for (const auto &entry : entries)
+            if (entry.mesh == RenderMesh::MeadowSurface && entry.variant == 0)
+            {
+                RenderInstance instance{};
+                instance.mesh = entry.mesh; instance.environment_variant = entry.variant;
+                instance.position = entry.position; instance.scale = entry.scale; instance.yaw = entry.yaw;
+                terrain.push_back(instance);
+            }
+        return ground.Prepare(terrain);
+    }
+
     static std::uint64_t Cycle(double time, float duration) noexcept
     { return static_cast<std::uint64_t>(std::max(0.0, time) / std::max(1.0, double(duration))); }
     static Sequence EventSequence(std::size_t index, std::uint64_t cycle) noexcept

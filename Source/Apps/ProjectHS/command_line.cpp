@@ -1,6 +1,9 @@
 #include "command_line.hpp"
 
 #include <hs/renderer/renderer.hpp>
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include <hs/game_domain/game_types.hpp>
+#endif
 
 #include <algorithm>
 #include <charconv>
@@ -16,11 +19,15 @@ ApplicationConfig ParseProjectHsArguments(
 {
     ApplicationConfig config;
     config.surface_frontend = SurfaceFrontend::VisibilityBuffer;
-#if defined(HS_ENABLE_VALIDATION)
-    config.validation = true;
-#endif
-#if defined(HS_ENABLE_GPU_VALIDATION)
-    config.gpu_validation = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto parse_number = [](std::string_view text, auto &destination) {
+        auto candidate = destination;
+        const auto end = text.data() + text.size();
+        const auto parsed = std::from_chars(text.data(), end, candidate);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
+        destination = candidate;
+        return true;
+    };
 #endif
     for (const std::string_view argument : args)
     {
@@ -208,9 +215,10 @@ ApplicationConfig ParseProjectHsArguments(
         }
         else if (argument.starts_with("--skill-vfx-capture="))
         {
-            const auto value = argument.substr(20);
-            std::from_chars(value.data(), value.data() + value.size(),
-                            config.skill_vfx_capture);
+            std::uint32_t skill{};
+            if (!parse_number(argument.substr(std::string_view{"--skill-vfx-capture="}.size()), skill) ||
+                skill >= kCombatSkillCount) continue;
+            config.skill_vfx_capture = skill;
             config.smoke = true;
             config.visible = false;
             config.vsync = false;
@@ -218,20 +226,19 @@ ApplicationConfig ParseProjectHsArguments(
         }
         else if (argument.starts_with("--skill-vfx-upgrade-mask="))
         {
-            const auto value = argument.substr(25);
-            std::from_chars(value.data(), value.data() + value.size(),
-                            config.skill_vfx_upgrade_mask);
-            config.skill_vfx_upgrade_mask &= 0xFFu;
+            std::uint32_t mask{};
+            if (parse_number(argument.substr(std::string_view{"--skill-vfx-upgrade-mask="}.size()), mask))
+                config.skill_vfx_upgrade_mask = mask & 0xFFu;
         }
         else if (argument.starts_with("--skill-vfx-aim="))
         {
             const auto value = argument.substr(16);
             if (const auto comma = value.find(','); comma != std::string_view::npos)
             {
-                std::from_chars(value.data(), value.data() + comma,
-                                config.skill_vfx_aim.x);
-                std::from_chars(value.data() + comma + 1, value.data() + value.size(),
-                                config.skill_vfx_aim.y);
+                Float2 aim{};
+                if (parse_number(value.substr(0, comma), aim.x) && parse_number(value.substr(comma + 1), aim.y) &&
+                    std::isfinite(aim.x) && std::isfinite(aim.y))
+                    config.skill_vfx_aim = aim;
             }
         }
 #endif
@@ -300,12 +307,12 @@ ApplicationConfig ParseProjectHsArguments(
         else if (argument.starts_with("--ticks="))
         {
             const auto value = argument.substr(8);
-            std::from_chars(value.data(), value.data() + value.size(), config.maximum_ticks);
+            parse_number(value, config.maximum_ticks);
         }
         else if (argument.starts_with("--seed="))
         {
             const auto value = argument.substr(7);
-            std::from_chars(value.data(), value.data() + value.size(), config.seed);
+            parse_number(value, config.seed);
         }
 #endif
         else if (argument.starts_with("--frame-cap="))

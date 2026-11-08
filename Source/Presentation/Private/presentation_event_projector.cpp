@@ -43,20 +43,15 @@ void ProjectUpgrade(const DomainSignal &s, PresentationEvent &e) noexcept
 void AddAudio(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t &n, std::string_view cue, AudioEventAction action = AudioEventAction::Play) noexcept
 {
     if (n >= out.size()) return;
-    auto &e = out[n++]; e.sequence = s.sequence; e.tick = s.tick; e.kind = PresentationKind::Audio; e.position = s.position; e.asset = Cue(cue); e.parameters = EncodeAudioAction(action); e.geometry = {}; e.session_id = s.session_id;
-    e.upgrade_skill = e.upgrade_index = 0xFF; e.upgrade_stage = 0;
-    e.upgrade_cast_id = e.upgrade_owner_id = 0;
+    out[n++] = {.sequence = s.sequence, .tick = s.tick, .kind = PresentationKind::Audio,
+                .position = s.position, .asset = Cue(cue), .parameters = EncodeAudioAction(action),
+                .session_id = s.session_id};
 }
 PresentationGeometry ProjectGeometry(const DomainSignal &s) noexcept
 {
     PresentationGeometry geometry{};
-    if (s.kind == DomainSignalKind::BossDied || s.kind == DomainSignalKind::BossPhaseChanged)
-    {
-        geometry.source_id = s.source_entity_id;
-        return geometry;
-    }
-    if (s.kind == DomainSignalKind::BleedTicked ||
-        s.kind == DomainSignalKind::BurnTicked)
+    if (s.kind == DomainSignalKind::BossDied || s.kind == DomainSignalKind::BossPhaseChanged ||
+        s.kind == DomainSignalKind::BleedTicked || s.kind == DomainSignalKind::BurnTicked)
     {
         geometry.source_id = s.source_entity_id;
         return geometry;
@@ -101,20 +96,19 @@ void AddVfx(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t
 }
 
 std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<PresentationEvent> out,
-                                bool meadow_terrain_enabled) noexcept
+                                const MeadowGroundQuery &ground) noexcept
 {
+    if (out.empty()) return 0;
     auto s = source;
-    if (meadow_terrain_enabled)
     {
-        s.position.y += MeadowGroundHeight({s.position.x, s.position.z});
+        s.position.y += ground.Height({s.position.x, s.position.z});
         if ((s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0)
-            s.target.y += MeadowGroundHeight({s.target.x, s.target.z});
+            s.target.y += ground.Height({s.target.x, s.target.z});
         if (s.geometry.kind == DomainSignalGeometryKind::Line ||
             s.geometry.kind == DomainSignalGeometryKind::Projectile)
-            s.geometry.end_position.y += MeadowGroundHeight(
+            s.geometry.end_position.y += ground.Height(
                 {s.geometry.end_position.x, s.geometry.end_position.z});
     }
-    if (out.empty()) return 0;
     std::size_t n = 0;
     if (s.kind == DomainSignalKind::BossSpawnWarning || s.kind == DomainSignalKind::EnemySpawnWarning)
     {
@@ -128,13 +122,7 @@ std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<Presentati
     }
     const auto index = static_cast<std::size_t>(s.kind);
     if (index < kVfxAssets.size())
-    {
-        auto &e = out[n++]; e.sequence = s.sequence; e.tick = s.tick; e.kind = PresentationKind::Vfx; e.position = s.position; e.asset = Cue(kVfxAssets[index]); e.session_id = s.session_id;
-        const auto target = (s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0;
-        e.parameters = EncodeVfxParameters({s.direction, s.scale, s.target, target ? static_cast<std::uint32_t>(VfxEventFlag::HasTarget) : 0u});
-        e.geometry = ProjectGeometry(s);
-    ProjectUpgrade(s, e);
-    }
+        AddVfx(s, out, n, kVfxAssets[index]);
     switch (s.kind)
     {
     case DomainSignalKind::EnemyRangedProjectileImpact:
@@ -162,10 +150,14 @@ std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<Presentati
     case DomainSignalKind::PlayerHealed: AddAudio(s,out,n,"audio.player.heal"); break;
     case DomainSignalKind::HeavyHit: AddAudio(s,out,n,"audio.common.heavy_hit"); break;
     case DomainSignalKind::ProjectileHit:
-        if (s.context > 8) AddAudio(s,out,n,"audio.common.projectile_hit");
-        else AddAudio(s,out,n,Impact(s.context));
-        AddAudio(s,out,n,
-            (s.context == 1 || s.context == 3 || s.context == 4) ? "audio.common.arrow_impact_heavy" : "audio.common.arrow_impact_light"); break;
+    {
+        const auto impact = s.context > 8 ? "audio.common.projectile_hit" : Impact(s.context);
+        const auto arrow = (s.context == 1 || s.context == 3 || s.context == 4)
+            ? "audio.common.arrow_impact_heavy" : "audio.common.arrow_impact_light";
+        AddAudio(s, out, n, impact);
+        if (impact != arrow) AddAudio(s, out, n, arrow);
+        break;
+    }
     case DomainSignalKind::PlayerDied: AddAudio(s,out,n,"audio.player.death"); AddAudio(s,out,n,"audio.stinger.defeat"); break;
     case DomainSignalKind::PlayerDamaged: AddAudio(s,out,n,"audio.player.hit_body"); AddAudio(s,out,n,"audio.player.hit_vocal"); break;
     case DomainSignalKind::Pull: AddAudio(s,out,n,"audio.common.pull"); break;

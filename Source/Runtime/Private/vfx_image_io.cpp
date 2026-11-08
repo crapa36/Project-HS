@@ -45,12 +45,12 @@ const VfxTextureResourceRecord *GroundTextureResource(VfxProgramView p,const Vfx
        !ValidRange(found->asset_path_bytes,p.strings.size())) return nullptr;
     return &*found;
 }
-bool GroundTexturePath(VfxProgramView p,const VfxTextureBindingRecord &binding,std::string_view path) noexcept
+std::string_view GroundTexturePath(VfxProgramView p,const VfxTextureBindingRecord &binding) noexcept
 {
     const auto *resource=GroundTextureResource(p,binding);
-    if(!resource) return false;
+    if(!resource) return {};
     return std::string_view(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-        resource->asset_path_bytes.count)==path;
+        resource->asset_path_bytes.count);
 }
 bool PrepareStateRingTextureContract(VfxProgramView p,const VfxOutputRecord &output,bool charged) noexcept
 {
@@ -59,11 +59,12 @@ bool PrepareStateRingTextureContract(VfxProgramView p,const VfxOutputRecord &out
     for(std::size_t i=output.textures.first;i<static_cast<std::size_t>(output.textures.first)+output.textures.count;++i)
     {
         const auto &binding=p.texture_bindings[i];
-        if(binding.role==ShapeId("profile.global") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_gradient_lut.dds") && !gradient)
+        const auto path=GroundTexturePath(p,binding);
+        if(binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_gradient_lut.dds" && !gradient)
             gradient=true;
-        else if(binding.role==ShapeId("profile.global") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_curve_lut.dds") && !curve)
+        else if(binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_curve_lut.dds" && !curve)
             curve=true;
-        else if(binding.role==ShapeId("profile.optional_detail") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_authored_mask_array.dds") &&
+        else if(binding.role==ShapeId("profile.optional_detail") && path=="Content/Textures/VFX/vfx_authored_mask_array.dds" &&
             binding.slices.count==0 && !optional) optional=true;
         else return false;
     }
@@ -119,13 +120,14 @@ void PrepareRelicMaskVariants(VfxProgramView p,const VfxOutputRecord &output,Vfx
         for(std::size_t i=output.textures.first;i<static_cast<std::size_t>(output.textures.first)+output.textures.count;++i)
         {
             const auto &binding=p.texture_bindings[i];
-            const bool gradient_match=binding.role==ShapeId("profile.global") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_gradient_lut.dds") && !gradient;
-            const bool curve_match=binding.role==ShapeId("profile.global") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_curve_lut.dds") && !curve;
-            const bool optional_match=binding.role==ShapeId("profile.optional_detail") && GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_authored_mask_array.dds") && binding.slices.count==0 && !optional;
+            const auto path=GroundTexturePath(p,binding);
+            const bool gradient_match=binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_gradient_lut.dds" && !gradient;
+            const bool curve_match=binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_curve_lut.dds" && !curve;
+            const bool optional_match=binding.role==ShapeId("profile.optional_detail") && path=="Content/Textures/VFX/vfx_authored_mask_array.dds" && binding.slices.count==0 && !optional;
             if(gradient_match) {gradient=true;continue;}
             if(curve_match) {curve=true;continue;}
             if(optional_match) {optional=true;continue;}
-            if(binding.role!=ShapeId("authored_mask_array") || authored || !GroundTexturePath(p,binding,"Content/Textures/VFX/vfx_authored_mask_array.dds") ||
+            if(binding.role!=ShapeId("authored_mask_array") || authored || path!="Content/Textures/VFX/vfx_authored_mask_array.dds" ||
                binding.min_quality>2 || binding.min_quality>quality || !std::isfinite(binding.strength) || binding.strength<0 || binding.strength>1 ||
                binding.selection!=ShapeId("stable_seed_mod_group_size") || !binding.slices.count || !ValidRange(binding.slices,p.slice_indices.size()))
             {variant.valid=false;break;}

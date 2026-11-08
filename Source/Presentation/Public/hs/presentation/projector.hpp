@@ -23,6 +23,18 @@ namespace hs
 {
 class RenderSnapshotStorage;
 
+// Admitted Meadow surfaces take precedence over flat slabs; overlapping Meadows
+// use the highest surface. Outside their footprints the ground plane is zero.
+class MeadowGroundQuery
+{
+  public:
+    [[nodiscard]] Result Prepare(std::span<const RenderInstance> instances);
+    [[nodiscard]] float Height(Float2 world) const noexcept;
+  private:
+    struct Surface { Float3 position, scale; float sine, cosine; };
+    std::vector<Surface> surfaces;
+};
+
 struct CharacterRenderAppearance
 {
     Float3 scale{1, 1, 1};
@@ -175,7 +187,7 @@ class PlayerFootstepTimeline
   public:
     void Reset(const TickReadView &model, Sequence motion_epoch = 0) noexcept;
     [[nodiscard]] std::optional<PresentationEvent> Advance(
-        const TickReadView &model, Sequence motion_epoch, bool meadow_terrain_enabled) noexcept;
+        const TickReadView &model, Sequence motion_epoch, const MeadowGroundQuery &ground) noexcept;
 
   private:
     Tick tick_{};
@@ -186,18 +198,17 @@ class PlayerFootstepTimeline
 
 [[nodiscard]] std::size_t ProjectDomainSignal(
     const DomainSignal &signal, std::span<PresentationEvent> output,
-    bool meadow_terrain_enabled = false) noexcept;
+    const MeadowGroundQuery &ground = {}) noexcept;
 [[nodiscard]] UiInteraction ResolveUiInteraction(const SessionProbe &session,
                                                  PresentationUiState &ui,
                                                  const SettingsData &settings,
                                                  Float2 cursor_normalized,
                                                  const GraphicsSettingsUiModel *graphics_ui = nullptr);
 // Derived once when a static scene is admitted, then reused by dynamic projection.
-[[nodiscard]] bool SceneHasMeadowTerrain(const StaticRenderScene &scene) noexcept;
 [[nodiscard]] Result ProjectDynamicTick(const TickReadView &model,
                                         RenderSnapshotStorage &snapshot,
                                         std::shared_ptr<const StaticRenderScene> environment_scene,
-                                        bool meadow_terrain_enabled,
+                                        const MeadowGroundQuery &ground,
                                         const EnemyAnimationState *enemy_animations = nullptr,
                                         std::span<const DomainSignal> retained_visual_links = {});
 void ProjectTickUi(const TickReadView &model,
