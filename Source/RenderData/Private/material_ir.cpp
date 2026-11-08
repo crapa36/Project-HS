@@ -1561,6 +1561,30 @@ SolidTransmissionProfileBits(const PreparedMaterial &material)
 }
 MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material) { return material.impl_->context_demand; }
 
+std::uint32_t AnalyzeOpacityTextureMask(const PreparedMaterial &material)
+{
+    const auto &impl = *material.impl_;
+    const auto &graph = impl.graph;
+    if (graph.kind != MaterialGraphKind::Masked) return 0;
+
+    const auto &live = graph.closure_output != kNoMaterialInput
+        ? impl.closure_opacity_live : impl.output_live[2];
+    const auto all_declared = (1u << graph.textures.size()) - 1u;
+    std::uint32_t mask{};
+    for (std::size_t index = 0; index < live.size(); ++index)
+    {
+        if (!live[index]) continue;
+        const auto &node = impl.optimized.nodes[index];
+        if (node.op == MaterialOp::SampledAlpha ||
+            (node.op == MaterialOp::Context &&
+                node.context_input == MaterialContextInput::SampledAlpha))
+            return all_declared;
+        if (node.op == MaterialOp::TextureRef && node.declaration_index < graph.textures.size())
+            mask |= 1u << node.declaration_index;
+    }
+    return mask;
+}
+
 std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view function_name)
 {
     Require(graph.kind != MaterialGraphKind::Decal,

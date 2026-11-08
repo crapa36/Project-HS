@@ -1,4 +1,5 @@
 #include "../AssetPipeline/action.hpp"
+#include "../../../Content/Shaders/terrain_histogram_abi.hlsli"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
@@ -26,7 +27,7 @@ struct TextureSpec
 };
 constexpr TextureSpec kSpecs[] = {
     {"terrain_gaussian", {2048, 2048, 4, 12, rd::kTextureFormatBc7}},
-    {"terrain_histogram", {256, 16, 4, 1, rd::kTextureFormatRgba32Float}},
+    {"terrain_histogram", {HS_TERRAIN_HISTOGRAM_WIDTH, HS_TERRAIN_HISTOGRAM_HEIGHT, HS_TERRAIN_HISTOGRAM_LAYERS, 1, rd::kTextureFormatRgba32Float}},
     {"terrain_surface", {2048, 2048, 4, 12, rd::kTextureFormatBc5}},
     {"terrain_normal", {2048, 2048, 4, 12, rd::kTextureFormatBc5}},
     {"terrain_detail", {2048, 2048, 4, 12, rd::kTextureFormatBc5}},

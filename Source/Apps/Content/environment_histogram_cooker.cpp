@@ -1,5 +1,6 @@
 #include "environment_histogram_cooker.hpp"
 #include "../AssetPipeline/action.hpp"
+#include "../../../Content/Shaders/terrain_histogram_abi.hlsli"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -26,12 +27,14 @@ using Json = nlohmann::json;
 using V3 = std::array<double, 3>;
 using F3 = std::array<float, 3>;
 using Matrix = std::array<V3, 3>;
-constexpr size_t kSize = 2048, kMips = 12, kLayers = 4, kLutWidth = 256;
+constexpr size_t kSize = 2048, kMips = HS_TERRAIN_HISTOGRAM_MIPS,
+    kLayers = HS_TERRAIN_HISTOGRAM_LAYERS, kLutWidth = HS_TERRAIN_HISTOGRAM_WIDTH,
+    kMeanRow = HS_TERRAIN_HISTOGRAM_MEAN_ROW, kLutHeight = HS_TERRAIN_HISTOGRAM_HEIGHT;
 constexpr double kSigma = 1.0 / 6.0;
 // PCA marginal Gaussianization and inverse-LUT prefiltering follow the Unity Labs
 // procedural-stochastic-texturing reference (ProceduralTexture2DEditor.cs).
 // This implementation uses deterministic Gaussian-quantile quadrature.
-constexpr const char* kRecipe = "terrain-pca-midrank-gaussian-v2-decoded-mean-linear-bc7-lut256x16-q512";
+constexpr const char* kRecipe = "terrain-pca-midrank-gaussian-v3-decoded-mean-linear-bc7-rgb-lut256x37-q512";
 struct Basis { V3 origin{}; Matrix axes{}; V3 eigenvalues{}; };
 using Lut = std::array<std::array<F3, kLutWidth>, kMips>;
 struct LayerData { Basis basis; Lut lut{}; Json qa; };
@@ -147,6 +150,16 @@ float Lookup(const std::array<F3,kLutWidth>& row, double coordinate, size_t chan
     const size_t low=static_cast<size_t>(index), high=std::min(low+1,kLutWidth-1);
     return static_cast<float>(row[low][channel]+(row[high][channel]-row[low][channel])*(index-static_cast<double>(low)));
 }
+F3 LookupContribution(const DirectX::Image& image, double coordinate, size_t component, size_t mip)
+{
+    const double index=std::clamp(coordinate*static_cast<double>(kLutWidth)-.5,0.0,static_cast<double>(kLutWidth-1));
+    const size_t low=static_cast<size_t>(index), high=std::min(low+1,kLutWidth-1);
+    const auto* row=reinterpret_cast<const float*>(image.pixels+(component*kMips+mip)*image.rowPitch);
+    F3 result{};
+    for (size_t c=0;c<3;++c)
+        result[c]=static_cast<float>(row[low*4+c]+(row[high*4+c]-row[low*4+c])*(index-static_cast<double>(low)));
+    return result;
+}
 void PutGaussian(DirectX::Image const& image, const std::vector<F3>& values)
 {
     for (size_t y=0;y<image.height;++y) for (size_t x=0;x<image.width;++x) {
@@ -219,9 +232,17 @@ LayerData CookLayer(const std::filesystem::path& path, size_t layer, DirectX::Sc
         if (mip+1<kMips) { transformed=Downsample(transformed,width); width/=2; }
     }
     const auto* lutImage=histogram.GetImage(0,layer,0);
-    for (size_t row=0;row<16;++row) for (size_t x=0;x<kLutWidth;++x) {
+    // Affine PCA reconstruction commutes with LUT filtering; include the origin once.
+    for (size_t row=0;row<kLutHeight;++row) for (size_t x=0;x<kLutWidth;++x) {
         auto* dst=reinterpret_cast<float*>(lutImage->pixels+row*lutImage->rowPitch)+x*4;
-        for (size_t c=0;c<3;++c) dst[c]=row<kMips?data.lut[row][x][c]:static_cast<float>(row==12?data.basis.origin[c]:data.basis.axes[row-13][c]);
+        for (size_t c=0;c<3;++c) {
+            dst[c]=0;
+            if (row<kMeanRow) {
+                const size_t component=row/kMips,mip=row%kMips;
+                dst[c]=static_cast<float>((component==0?data.basis.origin[c]:0.0)+
+                    data.basis.axes[component][c]*data.lut[mip][x][component]);
+            }
+        }
         dst[3]=1;
         for (size_t c=0;c<4;++c) if (!std::isfinite(dst[c])) throw std::runtime_error("Nonfinite histogram LUT");
     }
@@ -234,7 +255,24 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
                     DirectX::ScratchImage& histogram)
 {
     Json mips=Json::array();
+    const auto* lutImage=histogram.GetImage(0,layer,0);
     for (size_t mip=0;mip<kMips;++mip) {
+        double max_component_error=0;
+        // Check the immutable conversion once at texel centers and half-texel blends.
+        for (size_t sample=0;sample<2*kLutWidth-1;++sample) {
+            const double coordinate=(static_cast<double>(sample)*.5+.5)/static_cast<double>(kLutWidth);
+            for (size_t component=0;component<3;++component) {
+                const double scalar=Lookup(data.lut[mip],coordinate,component);
+                const auto actual=LookupContribution(*lutImage,coordinate,component,mip);
+                for (size_t channel=0;channel<3;++channel) {
+                    const double expected=(component==0?data.basis.origin[channel]:0.0)+
+                        scalar*data.basis.axes[component][channel];
+                    max_component_error=std::max(max_component_error,std::abs(actual[channel]-expected));
+                }
+            }
+        }
+        if (3*max_component_error>32*std::numeric_limits<float>::epsilon())
+            throw std::runtime_error("RGB histogram LUT differs from scalar PCA reconstruction");
         DirectX::ScratchImage decoded;
         Check(DirectX::Decompress(*compressed.GetImage(mip,layer,0),DXGI_FORMAT_R32G32B32A32_FLOAT,decoded),"Measure histogram BC7 decode");
         const auto* image=decoded.GetImage(0,0,0);
@@ -244,11 +282,11 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
         for (size_t y=0;y<image->height;++y) {
             const auto* row=reinterpret_cast<const float*>(image->pixels+y*image->rowPitch);
             for (size_t x=0;x<image->width;++x) {
-                V3 rgb=data.basis.origin;
+                V3 rgb{};
                 for (size_t c=0;c<3;++c) {
                     gaussianMean[c]+=static_cast<double>(row[x*4+c])/count;
-                    const double component=Lookup(data.lut[mip],row[x*4+c],c);
-                    for (size_t j=0;j<3;++j) rgb[j]+=component*data.basis.axes[c][j];
+                    const auto contribution=LookupContribution(*lutImage,row[x*4+c],c,mip);
+                    for (size_t j=0;j<3;++j) rgb[j]+=contribution[j];
                 }
                 bool out=false;
                 for (size_t c=0;c<3;++c) {
@@ -262,10 +300,9 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
         }
         V3 error{};
         for (size_t c=0;c<3;++c) error[c]=mean[c]-data.basis.origin[c];
-        const auto* lutImage=histogram.GetImage(0,layer,0);
-        auto* center=reinterpret_cast<float*>(lutImage->pixels+12*lutImage->rowPitch)+(mip+1)*4;
+        auto* center=reinterpret_cast<float*>(lutImage->pixels+kMeanRow*lutImage->rowPitch)+(mip+1)*4;
         for (size_t c=0;c<3;++c) center[c]=static_cast<float>(gaussianMean[c]);
-        mips.push_back({{"mip",mip},{"decoded_gaussian_mean",gaussianMean},{"decoded_linear_mean",mean},{"mean_error",error},{"decoded_min",minimum},{"decoded_max",maximum},{"out_of_gamut_pixel_count",outside},{"finite",true}});
+        mips.push_back({{"mip",mip},{"decoded_gaussian_mean",gaussianMean},{"decoded_linear_mean",mean},{"mean_error",error},{"decoded_min",minimum},{"decoded_max",maximum},{"out_of_gamut_pixel_count",outside},{"affine_lut_max_component_error",max_component_error},{"finite",true}});
     }
     data.qa["bc7_decoded_mips"]=std::move(mips);
 }
@@ -313,7 +350,7 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
     const auto qaPath=output/"environment_terrain_histogram.qa.json";
     DirectX::ScratchImage gaussian,histogram,compressed;
     Check(gaussian.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM,kSize,kSize,kLayers,kMips),"Allocate Gaussian terrain array");
-    Check(histogram.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT,kLutWidth,16,kLayers,1),"Allocate histogram LUT array");
+    Check(histogram.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT,kLutWidth,kLutHeight,kLayers,1),"Allocate histogram LUT array");
     std::array<LayerData,kLayers> data;
     for (size_t layer=0;layer<kLayers;++layer) {
         data[layer]=CookLayer(paths[layer],layer,gaussian,histogram);

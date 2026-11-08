@@ -62,6 +62,7 @@ bool ValidDxil(const fs::path &path)
 
 constexpr std::array kProjectPrograms{
     ProgramOutput{"scene_vs.dxil", L"SceneVS", L"vs_6_0"},
+    ProgramOutput{"scene_current_vs.dxil", L"SceneCurrentVS", L"vs_6_0"},
     ProgramOutput{"scene_ps.dxil", L"ScenePS", L"ps_6_0"},
     ProgramOutput{"slime_ps.dxil", L"SlimePS", L"ps_6_6"},
     ProgramOutput{"shadow_vs.dxil", L"ShadowVS", L"vs_6_0"},
@@ -99,8 +100,10 @@ constexpr std::array kProjectPrograms{
 
 constexpr std::array kGeometryPrograms{
     ProgramOutput{"cluster_scene_vs.dxil", L"ClusterSceneVS", L"vs_6_0"},
+    ProgramOutput{"cluster_scene_current_vs.dxil", L"ClusterSceneCurrentVS", L"vs_6_0"},
     ProgramOutput{"cluster_shadow_vs.dxil", L"ClusterShadowVS", L"vs_6_0"},
     ProgramOutput{"scene_ms.dxil", L"SceneMS", L"ms_6_5"},
+    ProgramOutput{"scene_current_ms.dxil", L"SceneCurrentMS", L"ms_6_5"},
     ProgramOutput{"shadow_ms.dxil", L"ShadowMS", L"ms_6_5"},
 };
 
@@ -194,7 +197,9 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"ui_draw_vs.dxil", L"UiDrawVS", L"vs_6_0"},
         ProgramOutput{"ui_draw_ps.dxil", L"UiDrawPS", L"ps_6_0"}};
     static constexpr std::array terrain_pages{
-        ProgramOutput{"terrain_page_bake_cs.dxil", L"BakeCS", L"cs_6_0"},
+        ProgramOutput{"terrain_page_bake_color_cs.dxil", L"BakeColorCS", L"cs_6_0"},
+        ProgramOutput{"terrain_page_bake_base_cs.dxil", L"BakeBaseCS", L"cs_6_0"},
+        ProgramOutput{"terrain_page_bake_weight_cs.dxil", L"BakeWeightCS", L"cs_6_0"},
         ProgramOutput{"terrain_page_mip_cs.dxil", L"MipCS", L"cs_6_0"}};
     static constexpr std::array fullscreen_programs{
         ProgramOutput{"fullscreen_vs.dxil", L"FullScreenVS", L"vs_6_0"}};
@@ -474,8 +479,6 @@ std::vector<ap::Input> ResolveCachedInputs(const ap::Json &metadata,
     std::vector<ap::Input> binding_inputs;
     hs::shader_content::AddRenderBindingInputs(binding_inputs, source_root);
     const std::map<std::string, fs::path> fixed_inputs{
-        {"Source/Apps/AssetPipeline/render_shader_bindings.hpp", source_root / "Source/Apps/AssetPipeline/render_shader_bindings.hpp"},
-        {"Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp", source_root / "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp"},
         {"tool/dxc.exe", dxc},
         {"tool/dxcompiler.dll", dxc.parent_path() / "dxcompiler.dll"},
         {"tool/dxil.dll", dxc.parent_path() / "dxil.dll"}};
@@ -514,8 +517,6 @@ std::vector<ap::Input> ResolveCachedInputs(const ap::Json &metadata,
         throw std::runtime_error("cached shader input has no trusted path mapping: " + logical);
     }
     for (const auto *required : {"shader/render-binding-defines-ir",
-             "Source/Apps/AssetPipeline/render_shader_bindings.hpp",
-             "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp",
              "tool/dxc.exe", "tool/dxcompiler.dll", "tool/dxil.dll"})
         Require(seen.contains(required), "cached shader input closure is incomplete");
     Require(seen.contains(std::string(family.source_relative)),
@@ -527,7 +528,14 @@ std::vector<ap::Input> ResolveCachedInputs(const ap::Json &metadata,
 std::string ProductId(const ShaderFamily &family, const ProgramOutput &program)
 {
     if (family.name == "terrain-page")
-        return std::string("terrain/producer/") + (std::wstring_view(program.entry) == L"BakeCS" ? "bake_cs.dxil" : "mip_cs.dxil");
+    {
+        const std::wstring_view entry = program.entry;
+        if (entry == L"BakeColorCS") return "terrain/producer/bake_color_cs.dxil";
+        if (entry == L"BakeBaseCS") return "terrain/producer/bake_base_cs.dxil";
+        if (entry == L"BakeWeightCS") return "terrain/producer/bake_weight_cs.dxil";
+        if (entry == L"MipCS") return "terrain/producer/mip_cs.dxil";
+        throw std::runtime_error("Unknown terrain page shader entry.");
+    }
     return "render/shader/" + std::string(program.filename);
 }
 

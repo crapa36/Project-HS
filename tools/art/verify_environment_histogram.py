@@ -4,6 +4,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+K_MIPS=12
+HISTOGRAM_HEIGHT=3*K_MIPS+1
+GAUSSIAN_MEAN_ROW=HISTOGRAM_HEIGHT-1
+
 def bc7_slice(path, layer, mip):
     raw=path.read_bytes();header=bytearray(raw[:148])
     width,height=struct.unpack_from('<II',raw,12)[::-1]
@@ -16,32 +20,35 @@ def bc7_slice(path, layer, mip):
 
 def linear(rgb):return np.where(rgb<=.04045,rgb/12.92,((rgb+.055)/1.055)**2.4)
 
-def decode(g, table, origin, axes):
+def decode(g, table):
     t=np.clip(g*256-.5,0,255);a=t.astype(np.int32);b=np.minimum(a+1,255);f=t-a
-    channels=np.arange(3)[None,:]
-    p=table[a,channels]*(1-f)+table[b,channels]*f
-    return np.clip(p@axes+origin,0,1)
+    restored=np.zeros_like(g,dtype=np.float32)
+    for component in range(3):
+        row=component*K_MIPS
+        low=table[row,a[:,component]]
+        high=table[row,b[:,component]]
+        restored+=low*(1-f[:,component,None])+high*f[:,component,None]
+    return np.clip(restored,0,1)
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('cooked',type=Path);parser.add_argument('output',type=Path);args=parser.parse_args()
-    lut=np.frombuffer((args.cooked/'environment_terrain_histogram.dds').read_bytes(),dtype='<f4',offset=148).reshape(4,16,256,4)[...,:3]
+    lut=np.frombuffer((args.cooked/'environment_terrain_histogram.dds').read_bytes(),dtype='<f4',offset=148).reshape(4,HISTOGRAM_HEIGHT,256,4)[...,:3]
     rng=np.random.default_rng(20260914);quantiles=np.linspace(.01,.99,99);records=[]
     for layer in range(4):
         source=linear(bc7_slice(args.cooked/'environment_terrain_basecolor.dds',layer,0))
         gaussian=bc7_slice(args.cooked/'environment_terrain_gaussian.dds',layer,0)
-        origin=lut[layer,12,0];axes=lut[layer,13:16,0]
-        for mip in range(12):
+        for mip in range(K_MIPS):
             decoded=gaussian if mip==0 else bc7_slice(args.cooked/'environment_terrain_gaussian.dds',layer,mip)
-            mean=lut[layer,12,mip+1]
+            mean=lut[layer,GAUSSIAN_MEAN_ROW,mip+1]
             if not np.allclose(mean,decoded.mean(axis=0,dtype=np.float64),rtol=0,atol=1e-7):
                 raise AssertionError(f'Layer {layer} mip {mip} decoded Gaussian mean differs from LUT')
         positions=rng.integers(0,len(source),size=(3,65536));reference=source[rng.integers(0,len(source),size=65536)]
         reference_q=np.quantile(reference,quantiles,axis=0)
         for weights in [np.array([1/3,1/3,1/3]),np.array([.7,.2,.1])]:
             ordinary=(source[positions]*weights[:,None,None]).sum(axis=0)
-            mean=lut[layer,12,1]
+            mean=lut[layer,GAUSSIAN_MEAN_ROW,1]
             blended=mean+((gaussian[positions]*weights[:,None,None]).sum(axis=0)-mean)/np.sqrt(np.dot(weights,weights))
-            restored=decode(blended,lut[layer,0],origin,axes)
+            restored=decode(blended,lut[layer])
             errors=[float(np.abs(np.quantile(values,quantiles,axis=0)-reference_q).mean()) for values in [ordinary,restored]]
             row={'layer':layer,'weights':weights.tolist(),'ordinary_rgb_quantile_mae':errors[0],'histogram_rgb_quantile_mae':errors[1],'error_reduction_percent':100*(1-errors[1]/errors[0]),'source_mean':reference.mean(axis=0).tolist(),'restored_mean':restored.mean(axis=0).tolist()}
             records.append(row)

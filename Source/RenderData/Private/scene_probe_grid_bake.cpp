@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <bit>
-#include <cfloat>
 #include <cmath>
 #include <stdexcept>
 
@@ -92,32 +91,33 @@ std::vector<SceneProbeCell> BakeSceneProbeCells(const SceneProbeDescription &des
             for(int z=-4;z<4;++z) for(int y=-4;y<4;++y) for(int x=-4;x<4;++x) occlude(x,y,z);
             continue;
         }
-        // Voxelize the shadow behind each captured hit through adjacent cells.
-        // No depth or visibility textures are consulted during diffuse sampling.
-        for(unsigned f=0;f<6;++f) for(unsigned v=0;v<edge;++v) for(unsigned u=0;u<edge;++u)
+        // Test the center of each receiver subcell against the capture direction.
+        for(int z=-4;z<4;++z) for(int y=-4;y<4;++y) for(int x=-4;x<4;++x)
         {
-            const float hit=std::abs(hits[f*face_size+v*edge+u]);
-            const float a=2*(float(u)+.5f)/edge-1,b=2*(float(v)+.5f)/edge-1;
-            const std::array<std::array<float,3>,6> faces{{{1,-b,-a},{-1,-b,a},{a,1,b},{a,-1,-b},{a,-b,1},{-a,-b,-1}}};
-            const auto &d=faces[f];
-            const float norm=std::sqrt(1+a*a+b*b),start=std::max(0.f,hit-.02f);
-            std::array<int,3> voxel{},step{};
-            std::array<float,3> next{},delta{};
-            for(unsigned axis=0;axis<3;++axis)
+            const std::array<float,3> d{(x+.5f)*substep[0],(y+.5f)*substep[1],(z+.5f)*substep[2]};
+            const float ax=std::abs(d[0]),ay=std::abs(d[1]),az=std::abs(d[2]);
+            unsigned face; float a,b,major;
+            if(ax>=ay && ax>=az)
             {
-                const float rate=d[axis]/(norm*substep[axis]);
-                const float position=start*rate;
-                voxel[axis]=static_cast<int>(std::floor(std::clamp(position,-5.f,5.f)));
-                step[axis]=rate>0?1:-1;
-                delta[axis]=rate!=0?1/std::abs(rate):FLT_MAX;
-                next[axis]=rate!=0?(float(voxel[axis]+(rate>0))-position)/rate:FLT_MAX;
+                major=ax; face=d[0]>0?0:1;
+                a=(face==0?-d[2]:d[2])/major; b=-d[1]/major;
             }
-            while(voxel[0]>=-4 && voxel[0]<4 && voxel[1]>=-4 && voxel[1]<4 && voxel[2]>=-4 && voxel[2]<4)
+            else if(ay>=az)
             {
-                occlude(voxel[0],voxel[1],voxel[2]);
-                const auto axis=std::min_element(next.begin(),next.end())-next.begin();
-                voxel[axis]+=step[axis]; next[axis]+=delta[axis];
+                major=ay; face=d[1]>0?2:3;
+                a=d[0]/major; b=(face==2?d[2]:-d[2])/major;
             }
+            else
+            {
+                major=az; face=d[2]>0?4:5;
+                a=(face==4?d[0]:-d[0])/major; b=-d[1]/major;
+            }
+            const auto u=std::min(static_cast<unsigned>((a+1)*.5f*edge),edge-1);
+            const auto v=std::min(static_cast<unsigned>((b+1)*.5f*edge),edge-1);
+            const float sample_a=2*(float(u)+.5f)/edge-1, sample_b=2*(float(v)+.5f)/edge-1;
+            const float hit=std::abs(hits[face*face_size+v*edge+u]);
+            const float hit_major=hit/std::sqrt(1+sample_a*sample_a+sample_b*sample_b);
+            if(hit_major+.02f<major) occlude(x,y,z);
         }
     }
     return cells;

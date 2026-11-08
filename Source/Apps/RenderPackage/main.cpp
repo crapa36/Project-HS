@@ -213,7 +213,8 @@ bool CurrentStandaloneMaterial(const fs::path &build_root, const ap::ActionSpec 
                     std::string_view product_id,
                     std::span<const std::string> dependencies,
                     std::span<const rd::MaterialParameterDefinition> parameters,
-                    rd::MaterialSurfaceLayout surface_layout)
+                    rd::MaterialSurfaceLayout surface_layout,
+                    std::uint32_t opacity_texture_mask)
 {
     const std::vector<std::string> expected_dependencies(dependencies.begin(), dependencies.end());
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
@@ -246,6 +247,7 @@ bool CurrentStandaloneMaterial(const fs::path &build_root, const ap::ActionSpec 
             return false;
         const auto decoded_metadata = rd::DecodeRockMaterial(metadata->bytes, view.dependencies);
         if (decoded_metadata.metallic != 0.0f || decoded_metadata.roughness_scale != 1.0f ||
+            decoded_metadata.opacity_texture_mask != opacity_texture_mask ||
             metadata->version != 1 || metadata->count != 1 ||
             metadata->stride != rd::kMaterialMetadataStride ||
             programs == view.chunks.end() || !programs->required ||
@@ -326,7 +328,11 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
         }), spec.upstream.end());
 
     const auto surface_layout = SurfaceLayout(definition.prepared);
-    if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies, definition.prepared.Graph().parameters, surface_layout))
+    auto material = NeutralMaterial(definition.material);
+    material.opacity_texture_mask = material.alpha_mask
+        ? rd::AnalyzeOpacityTextureMask(definition.prepared) : 0u;
+    if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies,
+            definition.prepared.Graph().parameters, surface_layout, material.opacity_texture_mask))
     {
         upstream_products.Verify(parameter_namespace, parameter_id);
         for (const auto &texture : definition.prepared.Graph().textures)
@@ -352,7 +358,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
-        const auto metadata = rd::EncodeRockMaterial(NeutralMaterial(definition.material), dependencies);
+        const auto metadata = rd::EncodeRockMaterial(material, dependencies);
         // Standalone materials use one opaque scene program in the frozen material ABI;
         // visibility and resolve products remain shader action outputs.
         const std::array programs{
@@ -484,7 +490,8 @@ bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
 bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
              const std::vector<PackageInput> &packages,
              std::span<const rd::MaterialParameterDefinition> parameters,
-             rd::MaterialSurfaceLayout surface_layout)
+             rd::MaterialSurfaceLayout surface_layout,
+             std::uint32_t opacity_texture_mask)
 {
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
     if (!fs::exists(result_path) || !fs::exists(result_path.parent_path() / "result.d"))
@@ -515,7 +522,8 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
                 rd::ChunkType::MaterialParameterLayout, &rd::ChunkView::type);
             if (metadata == material_view.chunks.end() || layout == material_view.chunks.end()) return false;
             const auto material = rd::DecodeRockMaterial(metadata->bytes, material_view.dependencies);
-            if (material.metallic != 0.0f || material.roughness_scale != 1.0f) return false;
+            if (material.metallic != 0.0f || material.roughness_scale != 1.0f ||
+                material.opacity_texture_mask != opacity_texture_mask) return false;
             rd::ValidateMaterialParameterLayout(layout->bytes, parameters);
             expected_products.insert(material_product);
         }
@@ -595,7 +603,9 @@ void Produce(std::string_view name, const fs::path &source_root,
     const auto material_text = ap::ReadBytes(material_path);
     const auto definition = hs::material_content::ParseMaterialDefinition(material_name, material_text);
     const auto surface_layout = SurfaceLayout(definition.prepared);
-    const auto material = NeutralMaterial(definition.material);
+    auto material = NeutralMaterial(definition.material);
+    material.opacity_texture_mask = material.alpha_mask
+        ? rd::AnalyzeOpacityTextureMask(definition.prepared) : 0u;
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(material_name) +
                                                   "/package-structure",
                                                   material_path, material_text));
@@ -674,7 +684,8 @@ void Produce(std::string_view name, const fs::path &source_root,
     });
     upstream_sources.erase(std::unique(upstream_sources.begin(), upstream_sources.end(),
         [](const auto &a, const auto &b) { return a.product_id == b.product_id; }), upstream_sources.end());
-    if (!exhaustive_geometry_error && Current(build_root, spec, packages, definition.prepared.Graph().parameters, surface_layout))
+    if (!exhaustive_geometry_error && Current(build_root, spec, packages,
+            definition.prepared.Graph().parameters, surface_layout, material.opacity_texture_mask))
     {
         for (const auto &source : upstream_sources)
             upstream_products.Verify(source.name_space, source.product_id);

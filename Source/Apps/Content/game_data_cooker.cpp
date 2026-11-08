@@ -237,15 +237,6 @@ void RequireIdAndLogic(const Json &entry, std::string_view file, const std::stri
         ThrowValidationError(file, path, "authored ID or logic order does not match the cooked ABI");
 }
 
-void RequireUpgrade(const Json &entry, std::string_view path, std::string_view logic,
-                    std::initializer_list<std::string_view> keys)
-{
-    if (RequireInteger(entry, "upgrades", path, "ordinal") == 0 ||
-        RequireString(entry, "upgrades", path, "logic_id") != logic)
-        ThrowValidationError("upgrades", path, "upgrade ordinal or logic_id does not match the typed ABI");
-    RequireParameterKeys(entry, "upgrades", path, keys);
-}
-
 } // namespace
 
 hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources)

@@ -86,7 +86,7 @@ void Material(R &r, MaterialDescriptorStorage &s)
         in.Fields(x.slot,x.texture.value,x.dimension,x.semantic,x.shader_binding_abi);
         s.product_ids.emplace_back(in.String()); x.product_id=s.product_ids.back();
     });
-    r.Fields(v.metallic,v.roughness_scale,v.flags,v.domain,v.receivers.model_mask,
+    r.Fields(v.metallic,v.roughness_scale,v.flags,v.opacity_texture_mask,v.domain,v.receivers.model_mask,
         v.receivers.required_surface_flags,v.receivers.forbidden_surface_flags,v.receivers.normal_filter);
 }
 void Character(R &r, CharacterDescriptorStorage &s)
@@ -142,7 +142,7 @@ void Atlas(R &r,VfxMeshAtlasDescriptor &v)
 
 std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v)
 {
-    CanonicalBytes b("project_hs.renderer_catalog",2);
+    CanonicalBytes b("project_hs.renderer_catalog",3);
     b.Sequence(v.bulks,[](CanonicalBytes &out,const auto &x){out.Scalar(x.asset_id.value);content_identity::Bulk(out,x.range);});
     b.Sequence(v.textures,content_identity::Texture); b.Sequence(v.geometry,content_identity::Geometry);
     b.Sequence(v.materials,content_identity::Material); b.Sequence(v.characters,content_identity::Character);
@@ -157,7 +157,7 @@ Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack
 {
     try
     {
-        R r(bytes,"project_hs.renderer_catalog",2); RendererCatalogData next;
+        R r(bytes,"project_hs.renderer_catalog",3); RendererCatalogData next;
         Rows(r,next.bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
         Rows(r,next.texture_storage,48,Texture); Rows(r,next.geometry_storage,100,Geometry);
         Rows(r,next.material_storage,84,Material); Rows(r,next.character_storage,120,Character);

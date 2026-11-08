@@ -147,6 +147,7 @@ MaterialDescriptorStorage CompileMaterialDescriptor(std::string_view product_id,
         result.value.surface = DecodeMaterialSurfaceLayout(RequiredChunk(package, ChunkType::MaterialSurfaceLayout).bytes);
         const auto material = DecodeRockMaterial(RequiredChunk(package, ChunkType::MaterialMetadata).bytes, package.dependencies);
         result.value.metallic = material.metallic; result.value.roughness_scale = material.roughness_scale;
+        result.value.opacity_texture_mask = material.opacity_texture_mask;
         result.value.flags = (material.two_sided ? kMaterialFlagTwoSided : 0) | (material.alpha_mask ? kMaterialFlagAlphaMask : 0);
         const bool masked = name.starts_with("leaf_") || name.starts_with("grass_");
         Require((ClassifyEnvironmentMaterial(material) == EnvironmentMaterialVariant::MaskedTwoSided) == masked, "environment domain mismatch");
@@ -179,6 +180,7 @@ void ValidateMaterialDescriptor(const MaterialDescriptor &value, std::span<const
 {
     Require(value.asset_id.value && value.bulk_index < bulk_assets.size() && bulk_assets[value.bulk_index].value == value.asset_id.value &&
             value.defaults.size() <= 64 && value.kind <= MaterialKind::Decal && !(value.flags & ~3u) &&
+            (value.opacity_texture_mask >> kMaterialTextureSlots) == 0 &&
             value.domain <= CharacterMaterialDomain::Translucent, "invalid material identity, defaults or flags");
     Require(std::isfinite(value.metallic) && value.metallic >= 0 && value.metallic <= 1 &&
             std::isfinite(value.roughness_scale) && value.roughness_scale >= 0 && value.roughness_scale <= 2, "invalid material uniforms");
@@ -229,6 +231,7 @@ void ValidateMaterialDescriptor(const MaterialDescriptor &value, std::span<const
         material.metallic = value.metallic; material.roughness_scale = value.roughness_scale;
         material.two_sided = (value.flags & kMaterialFlagTwoSided) != 0;
         material.alpha_mask = (value.flags & kMaterialFlagAlphaMask) != 0;
+        material.opacity_texture_mask = value.opacity_texture_mask;
         for (const auto &binding : value.textures) material.textures[binding.slot] = binding.product_id;
         ValidateRockMaterial(material);
     }

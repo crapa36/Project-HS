@@ -3,6 +3,7 @@ Run from repository root with the installed primary Python runtime (Pillow and N
 No edits to other environment meshes.
 """
 import json, math, sys, struct, hashlib
+from bisect import bisect_left, bisect_right
 from functools import lru_cache
 import numpy as np
 from PIL import Image
@@ -43,6 +44,11 @@ for i,r in enumerate(records):
 relief=source['relief']
 relief.pop('broad_amplitude',None)
 relief.pop('meso_amplitude',None)
+height_quantization=4096.0
+# Base samples are signed bytes; the independently maximized cut and bank
+# cannot exceed their respective depth factors. Round outward for float users.
+ground_bound=128/height_quantization+max(r['depth'] for r in records)*max(1.22,relief['rut_bank_scale'])
+ground_bound_text=f'{(math.ceil(ground_bound*1_000_000)+1)/1_000_000:.6f}'
 terrain_metadata=json.loads(TERRAIN_SOURCE.read_text())
 target_texture_size_px=terrain_metadata['target']['texture_size_px']
 if type(target_texture_size_px) is not int or target_texture_size_px<=0:
@@ -79,15 +85,15 @@ terrain_constants = '''#pragma once
 
 namespace hs::render_data {
 inline constexpr std::array<float, 4> kTerrainSourceMetersPerTile{VALUES};
+inline constexpr float kMeadowGroundHeightBound=GROUND_BOUNDf;
 }
-'''.replace('VALUES', ', '.join(value+'f' for value in terrain_tile_values))
+'''.replace('VALUES', ', '.join(value+'f' for value in terrain_tile_values)).replace('GROUND_BOUND',ground_bound_text)
 terrain_constants_path = ROOT/'Source/RenderData/Public/hs/render_data/terrain_source_constants.hpp'
 if not terrain_constants_path.exists() or terrain_constants_path.read_text()!=terrain_constants:
     terrain_constants_path.write_text(terrain_constants)
 height_grid_size=65
 height_grid_step=24.0/(height_grid_size-1)
 height_box_samples=4
-height_quantization=4096.0
 height_packed_count=(height_grid_size*height_grid_size+3)//4
 meadow_seed=int(source['seed'])
 height_bounds=source['bounds']
@@ -119,7 +125,7 @@ def base(x,z):
 def shape(r,x,z):
     dx=x-r['x']; dz=z-r['z']
     if abs(dx)>2*(r['rx']+r['rz']) or abs(dz)>2*(r['rx']+r['rz']):return 100
-    c=math.cos(r['yaw']);s=math.sin(r['yaw'])
+    c=r['c'];s=r['s']
     u=(c*dx-s*dz)/r['rx'];v=(s*dx+c*dz)/r['rz']
     if r['kind']==0: u-=.24*r['side']*max(0,1-v*v)*(v+.35)
     if r['kind']==1:
@@ -128,8 +134,8 @@ def shape(r,x,z):
     if r['kind']==2: u=(abs(u)-.48)/.43
     return u*u+v*v
 
-def depth(r,x,z):
-    q=shape(r,x,z)
+def depth(r,x,z,q=None):
+    if q is None:q=shape(r,x,z)
     return r['depth']*max(0,1-q)**2*(1+.22*max(-1,min(1,(z-r['z'])/r['rz']))) if q<1 else 0
 
 def ridge(r,q):
@@ -193,13 +199,14 @@ def meadow_walk_wear(x,z):
     return max(0.0,min(1.0,1-abs(x-(cart(z)-1.85))/.7))
 def meadow_pressed(x,z): return max(meadow_cart_wear(x,z),meadow_walk_wear(x,z))
 
-def prepare_base_height_contexts():
-    contexts=[]
+def build_base_height_grid():
+    grid=np.zeros((height_grid_size,height_grid_size),dtype=np.int8)
     offsets=[((ix+.5)/height_box_samples-.5)*height_grid_step for ix in range(height_box_samples)]
     for iz in range(height_grid_size):
-        z=-12+iz*height_grid_step;row=[]
+        z=-12+iz*height_grid_step
         for ix in range(height_grid_size):
-            x=-12+ix*height_grid_step;cell=[]
+            x=-12+ix*height_grid_step
+            accumulated=0.0
             for dz in offsets:
                 for dx in offsets:
                     sx=max(-12.0,min(12.0,x+dx));sz=max(-12.0,min(12.0,z+dz))
@@ -213,28 +220,16 @@ def prepare_base_height_contexts():
                     bare=smoothstep(.35,.70,patch+meso*.10)
                     soil_dry=max(0.0,min(1.0,.5+.5*terrain_noise(sx/22,sz/22,meadow_seed+31)))
                     stones=.25*smoothstep(.55,.85,terrain_noise(sx/9,sz/9,meadow_seed+71))
-                    layer_weights=(bare*(1-stones)*(1-soil_dry),1-bare,
+                    source_weights=(bare*(1-stones)*(1-soil_dry),1-bare,
                                    bare*(1-stones)*soil_dry,bare*stones)
                     heights=tuple(terrain_layer_height(sx,sz,layer,warp) for layer in range(4))
-                    cell.append((sx,sz,path,road,wetness,layer_weights,heights))
-            row.append(cell)
-        contexts.append(row)
-    return contexts
-
-def build_base_height_grid(contexts):
-    grid=np.zeros((height_grid_size,height_grid_size),dtype=np.int8)
-    for iz,row in enumerate(contexts):
-        for ix,cell in enumerate(row):
-            accumulated=0.0
-            for sx,sz,path,road,wetness,source_weights,heights in cell:
-                dryness=road*(1-max(0.0,min(1.0,wetness*1.4)))*(
-                    .775)
-                target=(1-dryness,0.0,dryness,0.0)
-                layer_weights=[w+(t-w)*path for w,t in zip(source_weights,target)]
-                biased=[layer_weights[layer]*math.pow(2.0,(heights[layer]-.5)*(2+3*path*(1-path))) for layer in range(4)]
-                total=sum(biased)
-                accumulated+=sum((heights[layer]-.5)*terrain_layers[layer]['height_scale_m']*biased[layer]
-                                 for layer in range(4))/max(total,1e-5)
+                    dryness=road*(1-max(0.0,min(1.0,wetness*1.4)))*.775
+                    target=(1-dryness,0.0,dryness,0.0)
+                    layer_weights=[w+(t-w)*path for w,t in zip(source_weights,target)]
+                    biased=[layer_weights[layer]*math.pow(2.0,(heights[layer]-.5)*(2+3*path*(1-path))) for layer in range(4)]
+                    total=sum(biased)
+                    accumulated+=sum((heights[layer]-.5)*terrain_layers[layer]['height_scale_m']*biased[layer]
+                                     for layer in range(4))/max(total,1e-5)
             value=accumulated/(height_box_samples*height_box_samples)
             quantized=round(value*height_quantization)
             if quantized < -128 or quantized > 127:
@@ -243,7 +238,13 @@ def build_base_height_grid(contexts):
     return grid
 
 @lru_cache(maxsize=262144)
-def height(x,z): return base(x,z)+max([0]+[ridge(r,shape(r,x,z)) for r in records])-max([0]+[depth(r,x,z) for r in records])
+def height(x,z,nearby=None):
+    bank=cut=0.0
+    for index in range(len(records)) if nearby is None else nearby:
+        r=records[index]
+        q=shape(r,x,z)
+        bank=max(bank,ridge(r,q));cut=max(cut,depth(r,x,z,q))
+    return base(x,z)+bank-cut
 def basin_point(r,u,v):
     if r['kind']==0:u+=.24*r['side']*max(0,1-v*v)*(v+.35)
     if r['kind']==1:u=u*(.72+.28*max(0,min(1,(v+1)*.5)))+r['side']*.16*max(0,1-4*v*v)
@@ -255,9 +256,10 @@ for r in records:
     rim=[];inside=[]
     for i in range(128):
         angle=(i+.5)*2*math.pi/128
+        cosine=math.cos(angle);sine=math.sin(angle)
         for side in ((-1,1) if r['kind']==2 else (0,)):
             for j in range(17):
-                radius=j/16;u=radius*math.cos(angle);v=radius*math.sin(angle)
+                radius=j/16;u=radius*cosine;v=radius*sine
                 if side:u=side*(.48+.43*u)
                 point=basin_point(r,u,v);inside.append(point)
                 if j==16:rim.append(point)
@@ -290,8 +292,7 @@ def update_water_levels():
             if not records[i]['fill']:records[i]['fill']=fill
 
 height.cache_clear()
-base_height_contexts=prepare_base_height_contexts()
-base_grid=build_base_height_grid(base_height_contexts)
+base_grid=build_base_height_grid()
 height.cache_clear()
 update_water_levels()
 effective_base_heights=[base(-12+ix*height_grid_step,-12+iz*height_grid_step)
@@ -403,6 +404,7 @@ ROWS
 };
 float MeadowQ(MeadowDepression r,float2 p){float c=r.c,s=r.s;float2 d=p-float2(r.x,r.z);if(any(abs(d)>2*(r.rx+r.rz)))return 100;float u=(c*d.x-s*d.y)/r.rx,v=(s*d.x+c*d.y)/r.rz;if(r.kind==0)u-=.24*r.side*max(0,1-v*v)*(v+.35);if(r.kind==1){u-=r.side*.16*max(0,1-4*v*v);u/=.72+.28*saturate((v+1)*.5);}if(r.kind==2)u=(abs(u)-.48)/.43;return u*u+v*v;}
 static const uint MeadowSurfaceSeed=SEED_VALUEu;
+static const float MeadowGroundHeightBound=GROUND_BOUND;
 static const float4 TerrainSourceMetersPerTile=float4(TERRAIN_TILE_VALUES);
 static const float4 TerrainSourceHeightScale=float4(TERRAIN_HEIGHT_VALUES);
 static const uint TerrainSourceTextureEdge=TEXTURE_EDGEu;
@@ -421,7 +423,7 @@ float MeadowWalkWear(float2 p){if(any(abs(p)>12))return 0;return saturate(1-abs(
 float MeadowPressed(float2 p){return max(MeadowCartWear(p),MeadowWalkWear(p));}
 #endif
 '''.replace('COUNT',str(len(rows))).replace('ROWS','\n'.join(' {'+row+'},' for row in rows))
-hlsl=hlsl.replace('SEED_VALUE',str(meadow_seed)).replace('HEIGHT_WORDS',str(height_packed_count)).replace('PACKED_HEIGHT',packed_height_hlsl)
+hlsl=hlsl.replace('SEED_VALUE',str(meadow_seed)).replace('HEIGHT_WORDS',str(height_packed_count)).replace('PACKED_HEIGHT',packed_height_hlsl).replace('GROUND_BOUND',ground_bound_text)
 hlsl=hlsl.replace('TERRAIN_TILE_VALUES',','.join(f"{layer['meters_per_tile']:.9g}" for layer in terrain_layers))
 hlsl=hlsl.replace('TERRAIN_HEIGHT_VALUES',','.join(f"{layer['height_scale_m']:.9g}" for layer in terrain_layers))
 hlsl=hlsl.replace('TEXTURE_EDGE',str(target_texture_size_px))
@@ -460,36 +462,30 @@ def wetness(x,z):
 def soil_dryness(x,z,wet):
  return road_coverage(x,z)*(1-max(0,min(1,wet*1.4)))*.775
 
-# Adaptive cells share edge samples with their neighbours; no T junction holes.
-N=48; S=.5; fine={}
-for iz in range(N):
- for ix in range(N):
-  x=-12+(ix+.5)*S;z=-12+(iz+.5)*S
-  near=[r for r in records if abs(x-r['x'])<(abs(r['c'])*r['rx']+abs(r['s'])*r['rz'])*(1.6 if r['kind']==0 else 1)+.28 and abs(z-r['z'])<(abs(r['s'])*r['rx']+abs(r['c'])*r['rz'])*(1.6 if r['kind']==0 else 1)+.28]
-  if near:fine[(ix,iz)]=max(32 if r['kind']==2 else 16 if r['kind']==1 else 8 if r['kind']==0 else 4 for r in near)
-ground=[];water=[];water_count=[0]*len(records)
+# Macro-cells follow the packed bilinear height grid instead of crossing its knots.
+N=height_grid_size-1; S=height_grid_step
+water=[];water_count=[0]*len(records)
 @lru_cache(maxsize=262144)
 def vertex(x,z,y=None,normal=None):
  ground_vertex=y is None
- y=height(x,z) if ground_vertex else y
+ y=mesh_height(x,z) if ground_vertex else y
  if normal is None:
-  e=.002;dx=(height(x+e,z)-height(x-e,z))/(2*e);dz=(height(x,z+e)-height(x,z-e))/(2*e);l=math.sqrt(dx*dx+1+dz*dz);normal=(-dx/l,1/l,-dz/l)
+  e=.002;dx=(mesh_height(x+e,z)-mesh_height(x-e,z))/(2*e);dz=(mesh_height(x,z+e)-mesh_height(x,z-e))/(2*e);l=math.sqrt(dx*dx+1+dz*dz);normal=(-dx/l,1/l,-dz/l)
  # Tangent perpendicular to normal, standard UV orientation.
  tx=normal[1];ty=-normal[0];l=math.sqrt(tx*tx+ty*ty)
  wet=wetness(x,z) if ground_vertex else 0
  return (x,y,z,*normal,wet,soil_dryness(x,z,wet) if ground_vertex else 0,tx/l,ty/l,0,-1,0)
 def water_triangle_cooks(pts):
- # Match serialized decimal positions and the cooker's float32 cross-product gate.
+ # Match the source's native float32 positions and the cooker's cross-product gate.
  def f(v):return struct.unpack('f',struct.pack('f',v))[0]
- a,b,c=[(f(round(p[0],7)),f(round(p[1],7))) for p in pts]
+ a,b,c=[(f(p[0]),f(p[1])) for p in pts]
  ux=f(b[0]-a[0]);uz=f(b[1]-a[1]);vx=f(c[0]-a[0]);vz=f(c[1]-a[1])
  cross=f(f(uz*vx)-f(ux*vz))
  return f(cross*cross)>f(1e-16)
 
 def triangle(a,b,c):
- vs=[vertex(*p) for p in (a,b,c)]; ground.extend(vs)
+ vs=[vertex(*p) for p in (a,b,c)]
  # Clip each selected basin against its common horizontal level. Ground and water agree at shoreline.
- cx=sum(p[0] for p in (a,b,c))/3;cz=sum(p[1] for p in (a,b,c))/3
  used_levels=set()
  for ri,r in enumerate(records):
   if r['level'] in used_levels or r['level']<-10 or min(shape(r,*p) for p in (a,b,c))>1.3:continue
@@ -509,20 +505,8 @@ def triangle(a,b,c):
    for p in pts:
     v=list(vertex(p[0],p[1],level,(0,1,0)));v[6]=max(0,level-p[2]);v[7]=owner+100;v[12]=0;water.append(v)
    water_count[owner]+=1
-for iz in range(N):
- for ix in range(N):
-  x=-12+ix*S;z=-12+iz*S;n=fine.get((ix,iz),1)
-  for j in range(n):
-   for i in range(n):
-    x0=x+i*S/n;z0=z+j*S/n;step=S/n;ring=[]
-    for start,end,neighbor,border in [((x0,z0),(x0,z0+step),(ix-1,iz),i==0),((x0,z0+step),(x0+step,z0+step),(ix,iz+1),j==n-1),((x0+step,z0+step),(x0+step,z0),(ix+1,iz),i==n-1),((x0+step,z0),(x0,z0),(ix,iz-1),j==0)]:
-     steps=max(1,fine.get(neighbor,1)//n) if border else 1
-     ring.extend((start[0]+(end[0]-start[0])*t/steps,start[1]+(end[1]-start[1])*t/steps) for t in range(steps))
-    for t in range(len(ring)):triangle((x0+step/2,z0+step/2),ring[t],ring[(t+1)%len(ring)])
-assert all(any(water_count[i]>0 for i in ids) for ids in water_groups.values() if any(records[i]['fill'] for i in ids))
-assert all(abs(v[1])<.4 for v in ground)
-# Only empty parts of the old fine cells may coarsen; authored depressions keep
-# their exact original tessellation, and wet macro-cells remain byte-identical.
+# The actual full height (including banks/cuts) determines refinement. Water is
+# clipped from that final mesh, rather than an unrelated earlier uniform mesh.
 def support(r):
  rx=r['rx']*(1.6 if r['kind']==0 else 1.2 if r['kind']==1 else 1)
  rz=r['rz']*(1.31 if r['kind']==0 else 1)
@@ -532,103 +516,211 @@ def support(r):
 supports=[support(r) for r in records]
 def overlaps(box,x0,z0,x1,z1):
  return box[0]<=x1 and box[1]>=x0 and box[2]<=z1 and box[3]>=z0
-# Clipping never crosses a macro-cell. Include every cell touched by water,
-# including shoreline vertices exactly on the boundary, rather than the basin AABB.
-wet_cells=set()
-for v in water:
- for dx in (-1e-7,1e-7):
-  for dz in (-1e-7,1e-7):
-   wet_cells.add((min(47,max(0,math.floor((v[0]+12+dx)*2))),min(47,max(0,math.floor((v[2]+12+dz)*2)))))
 
-def rut_overlaps(r,x0,z0,x1,z1):
- # Interval lower bound includes finite-difference normal support; it can retain
- # extra cells, but cannot discard a nonzero rut cut or displaced-earth bank.
+# Fixed authored supports are indexed once; the exact field expression remains shared.
+height_records={(ix,iz):tuple(i for i,box in enumerate(supports) if overlaps(box,ix*S,iz*S,(ix+1)*S,(iz+1)*S))
+                for iz in range(-N//2-1,N//2+1) for ix in range(-N//2-1,N//2+1)}
+def mesh_height(x,z):
+ return height(x,z,height_records.get((math.floor(x/S),math.floor(z/S)),()))
+
+def feature_overlaps(r,x0,z0,x1,z1):
+ # Conservative interval test in the authored footprint, not its rotated AABB.
  e=.002;x0-=e;z0-=e;x1+=e;z1+=e
- uv=[((r['c']*(x-r['x'])-r['s']*(z-r['z']))/r['rx'],(r['s']*(x-r['x'])+r['c']*(z-r['z']))/r['rz']) for x in (x0,x1) for z in (z0,z1)]
- ulo=min(p[0] for p in uv);uhi=max(p[0] for p in uv)
- vlo=min(p[1] for p in uv);vhi=max(p[1] for p in uv)
- points=[vlo,vhi]+[v for v in (-1,1,(-.7-math.sqrt(12.49))/6,(-.7+math.sqrt(12.49))/6) if vlo<=v<=vhi]
- shifts=[.24*r['side']*max(0,1-v*v)*(v+.35) for v in points]
- ulo-=max(shifts);uhi-=min(shifts)
+ uv=[((r['c']*(x-r['x'])-r['s']*(z-r['z']))/r['rx'],
+      (r['s']*(x-r['x'])+r['c']*(z-r['z']))/r['rz']) for x in (x0,x1) for z in (z0,z1)]
+ ulo=min(u for u,v in uv);uhi=max(u for u,v in uv)
+ vlo=min(v for u,v in uv);vhi=max(v for u,v in uv)
  def nearest(a,b):return 0 if a<=0<=b else min(abs(a),abs(b))
- return nearest(ulo,uhi)**2+nearest(vlo,vhi)**2<=1.7
+ if r['kind']==0:
+  points=[vlo,vhi]+[v for v in (-1,1,(-.7-math.sqrt(12.49))/6,(-.7+math.sqrt(12.49))/6) if vlo<=v<=vhi]
+  shifts=[.24*r['side']*max(0,1-v*v)*(v+.35) for v in points]
+  ulo-=max(shifts);uhi-=min(shifts)
+ elif r['kind']==1:
+  ulo-=.16;uhi+=.16
+ elif r['kind']==2:
+  ulo,uhi=(nearest(ulo,uhi)-.48)/.43,(max(abs(ulo),abs(uhi))-.48)/.43
+ return nearest(ulo,uhi)**2+nearest(vlo,vhi)**2<=(1.7 if r['kind']==0 else 1)
 
-def rectangle_without_center(center, ring):
- # Attribute error bounds also preserve shallow water and authored marks.
- if len(ring)!=4:return None
- if any(v[11]!=center[11] or v[12]!=center[12] for v in ring):return None
- if len({v[0] for v in ring})!=2 or len({v[2] for v in ring})!=2:return None
+def rectangle_triangulations(center, ring, height_tolerance):
+ # Terrain uses world texture normals and derives dryness; only height/wetness vary.
+ control_tolerance=1/512  # Half an 8-bit material step, including float32 rounding below.
+ if len(ring)<4 or len({(v[0],v[2]) for v in ring})!=len(ring):return []
+ if any(v[11]!=center[11] or v[12]!=center[12] for v in ring):return []
+ if len(ring)>4:
+  x0=min(v[0] for v in ring);x1=max(v[0] for v in ring)
+  z0=min(v[2] for v in ring);z1=max(v[2] for v in ring)
+  if x0==x1 or z0==z1 or any(v[0] not in (x0,x1) and v[2] not in (z0,z1) for v in ring):return []
+  corners={(v[0],v[2]):v for v in ring}
+  if not all(p in corners for p in ((x0,z0),(x0,z1),(x1,z1),(x1,z0))):return []
+  # Both meshes interpolate the same affine part. The residual range bounds
+  # their difference everywhere, including intersections of their diagonals.
+  for packed in (False,True):
+   def encode(v):
+    q=list(v)
+    return struct.unpack('<13f',struct.pack('<13f',*q)) if packed else q
+   a,b,c,d=map(encode,(corners[x0,z0],corners[x0,z1],corners[x1,z1],corners[x1,z0]))
+   values=list(map(encode,[center]+ring))
+   for component,tolerance in ((1,height_tolerance),(6,control_tolerance)):
+    gx=(c[component]-b[component])/(c[0]-b[0]);gz=(b[component]-a[component])/(b[2]-a[2])
+    residual=[v[component]-(a[component]+gx*(v[0]-a[0])+gz*(v[2]-a[2])) for v in values]
+    symmetric_gx=(c[component]+d[component]-a[component]-b[component])/(2*(c[0]-b[0]))
+    symmetric_gz=(b[component]+c[component]-a[component]-d[component])/(2*(b[2]-a[2]))
+    mean=(a[component]+b[component]+c[component]+d[component])*.25
+    symmetric=[v[component]-(mean+symmetric_gx*(v[0]-(a[0]+c[0])*.5)+symmetric_gz*(v[2]-(a[2]+c[2])*.5)) for v in values]
+    if min(max(residual)-min(residual),max(symmetric)-min(symmetric))>tolerance:return []
+  def cross(a,b,c):return (b[0]-a[0])*(c[2]-a[2])-(b[2]-a[2])*(c[0]-a[0])
+  candidates=[]
+  for start in range(len(ring)):
+   remaining=ring[start:]+ring[:start];triangles=[]
+   while len(remaining)>3:
+    for i,b in enumerate(remaining):
+     a=remaining[i-1];c=remaining[(i+1)%len(remaining)]
+     if cross(a,b,c)>=0:continue
+     if any(all(cross(p,q,v)<=0 for p,q in ((a,b),(b,c),(c,a)))
+            for j,v in enumerate(remaining) if j not in ((i-1)%len(remaining),i,(i+1)%len(remaining))):continue
+     triangles.extend((a,b,c));remaining.pop(i);break
+    else:break
+   if len(remaining)==3 and cross(*remaining)<0:candidates.append(triangles+remaining)
+  return candidates
+ if len({v[0] for v in ring})!=2 or len({v[2] for v in ring})!=2:return []
  choices=[]
  for diagonal in (0,1):
   a,b=ring[diagonal],ring[diagonal+2];maximum=0.;valid=True
   for packed in (False,True):
    def encode(v):
-    q=[round(x,7) for x in v]
+    q=list(v)
     return struct.unpack('<13f',struct.pack('<13f',*q)) if packed else q
    c,p,q=map(encode,(center,a,b));errors=[abs(c[i]-(p[i]+q[i])*.5) for i in range(13)]
    valid &= c[0]==(p[0]+q[0])*.5 and c[2]==(p[2]+q[2])*.5
-   valid &= max(errors[:3])<=.00005 and max(errors[3:6])<=1e-5 and max(errors[8:11])<=1e-5
-   valid &= max(errors[6:8])<=1e-7 and c[11]==p[11]==q[11] and c[12]==p[12]==q[12]
-   maximum=max(maximum,max(errors))
+   valid &= max(errors[:3])<=height_tolerance
+   valid &= errors[6]<=control_tolerance and c[11]==p[11]==q[11] and c[12]==p[12]==q[12]
+   maximum=max(maximum,max(errors[:3]+[errors[6]]))
   if valid:choices.append((maximum,diagonal))
- if not choices:return None
- diagonal=min(choices)[1]
- q=ring[diagonal:]+ring[:diagonal]
- return [q[0],q[1],q[2],q[0],q[2],q[3]]
-
-def optimized_ground(lod):
  result=[]
+ for _,diagonal in sorted(choices):
+  q=ring[diagonal:]+ring[:diagonal]
+  result.append([q[0],q[1],q[2],q[0],q[2],q[3]])
+ return result
+
+# A common integer lattice lets adjacent macro-cells and LODs share split edges.
+# Fine spacing is available at creases without imposing it on every rut cell.
+cell_units=2048
+unit=S/cell_units
+height_tolerances=tuple(n/height_quantization for n in (16,32,64))
+# Preserve complete wet supports before water is clipped from the near mesh.
+wet_cells={(ix,iz) for iz in range(N) for ix in range(N)
+           if any(r['fill'] and overlaps(box,-12+ix*S,-12+iz*S,-12+(ix+1)*S,-12+(iz+1)*S)
+                  for r,box in zip(records,supports))}
+
+def point(a,b):return (-12+a*unit,-12+b*unit)
+
+def children(leaf):
+ a,b,size=leaf;h=size//2
+ return [(a+dx,b+dz,h) for dz,dx in ((0,0),(0,h),(h,0),(h,h))]
+
+def fan(center,ring):return [(center,ring[i],ring[(i+1)%len(ring)]) for i in range(len(ring))]
+
+@lru_cache(maxsize=131072)
+def triangle_error(tri):
+ # shortcut: sampled error is not a supremum; use interval bounds for arbitrary trace profiles.
+ heights=[mesh_height(*p) for p in tri];bases=[base(*p) for p in tri];error=base_error=0.0
+ for weights in ((.5,.5,0),(.5,0,.5),(0,.5,.5),(1/3,1/3,1/3),(.5,.25,.25),(.25,.5,.25),(.25,.25,.5),
+                 (.75,.25,0),(.25,.75,0),(.75,0,.25),(.25,0,.75),(0,.75,.25),(0,.25,.75)):
+  x,z=(sum(w*p[k] for w,p in zip(weights,tri)) for k in range(2))
+  error=max(error,abs(mesh_height(x,z)-sum(w*h for w,h in zip(weights,heights))))
+  base_error=max(base_error,abs(base(x,z)-sum(w*h for w,h in zip(weights,bases))))
+ return error,base_error
+
+def triangle_fits(tri,tolerance):
+ error,base_error=triangle_error(tri)
+ return error<=tolerance and base_error<=1/height_quantization-1e-6
+
+def initial_leaves(lod):
+ leaves=[]
  for iz in range(N):
   for ix in range(N):
-   x=-12+ix*S;z=-12+iz*S;n=fine.get((ix,iz),1);unit=S/32
-   minimum=32//n;maximum=max(minimum,8 if max(abs(x+S/2),abs(z+S/2))<(6,3,0)[lod] else 32);leaves=[]
-   nearby=[(r,b) for r,b in zip(records,supports) if overlaps(b,x-.002,z-.002,x+S+.002,z+S+.002)]
-   def divide(a,b,size):
-    preserve=(ix,iz) in wet_cells or any(rut_overlaps(r,x+a*unit,z+b*unit,x+(a+size)*unit,z+(b+size)*unit) if r['kind']==0 else overlaps(q,x+a*unit,z+b*unit,x+(a+size)*unit,z+(b+size)*unit) for r,q in nearby)
-    # Coarsening smooth hills must also preserve the 100 micrometre oracle.
-    corners=[base(x+(a+dx)*unit,z+(b+dz)*unit) for dx,dz in ((0,0),(size,0),(size,size),(0,size))]
-    center_h=base(x+(a+size/2)*unit,z+(b+size/2)*unit)
-    curvature=abs(center_h-sum(corners)/4)
-    for k,(u,v) in enumerate(((0,0),(1,0),(1,1),(0,1))):
-     quarter=base(x+(a+size*(.25+.5*u))*unit,z+(b+size*(.25+.5*v))*unit)
-     next_u,next_v=((1,0),(1,1),(0,1),(0,0))[k]
-     edge=base(x+(a+size*(u+next_u)/2)*unit,z+(b+size*(v+next_v)/2)*unit)
-     curvature=max(curvature,abs(quarter-(center_h+corners[k])/2),abs(edge-(corners[k]+corners[(k+1)%4])/2))
-    if size>minimum and (preserve or size>maximum or curvature>.00007):
-     h=size//2
-     for dz,dx in ((0,0),(0,h),(h,0),(h,h)):divide(a+dx,b+dz,h)
-    else:leaves.append((a,b,size))
-   divide(0,0,32)
-   horizontal={};vertical={}
-   def corner(a,b):
-    horizontal.setdefault(b,set()).add(a);vertical.setdefault(a,set()).add(b)
-   for a,b,size in leaves:
-    for dx,dz in ((0,0),(0,size),(size,0),(size,size)):corner(a+dx,b+dz)
-   # Keep the original macro-cell boundary samples, including finer neighbours.
-   for axis,edge,neighbor in ((0,0,(ix-1,iz)),(0,32,(ix+1,iz)),(1,0,(ix,iz-1)),(1,32,(ix,iz+1))):
-    count=max(n,fine.get(neighbor,1))
-    for t in range(count+1):
-     along=t*32//count
-     corner(edge,along) if axis==0 else corner(along,edge)
-   for a,b,size in sorted(leaves,key=lambda item:(item[1],item[0])):
-    ring=[(a,t) for t in sorted(vertical[a]) if b<=t<b+size]
-    ring += [(t,b+size) for t in sorted(horizontal[b+size]) if a<=t<a+size]
-    ring += [(a+size,t) for t in sorted(vertical[a+size],reverse=True) if b<t<=b+size]
-    ring += [(t,b) for t in sorted(horizontal[b],reverse=True) if a<t<=a+size]
-    center=vertex(x+(a+size/2)*unit,z+(b+size/2)*unit)
-    boundary=[vertex(x+u*unit,z+v*unit) for u,v in ring]
-    reduced=rectangle_without_center(center,boundary)
-    if reduced is not None:result.extend(reduced)
-    else:
-     for i in range(len(boundary)):result.extend((center,boundary[i],boundary[(i+1)%len(boundary)]))
- return result
+   nearby=[(r,q) for r,q in zip(records,supports) if overlaps(q,-12+ix*S,-12+iz*S,-12+(ix+1)*S,-12+(iz+1)*S)]
+   tolerance=height_tolerances[0 if (ix,iz) in wet_cells else lod]*.8
+   def divide(leaf):
+    a,b,size=leaf;x0,z0=point(a,b);x1,z1=point(a+size,b+size)
+    spacing=min((.015625 if r['kind']==2 else .03125 if r['kind']==1 else min(r['rx'],r['rz']) if r['kind']==0 else .125
+                 for r,q in nearby if feature_overlaps(r,x0,z0,x1,z1)),default=S)
+    center=point(a+size/2,b+size/2)
+    ring=[point(a,b),point(a,b+size),point(a+size,b+size),point(a+size,b)]
+    refine=size*unit>spacing or any(not triangle_fits(t,tolerance) for t in fan(center,ring))
+    if refine:
+     if size==1:raise ValueError(f'Meadow height curvature exceeds finest mesh spacing at {center}.')
+     for child in children(leaf):divide(child)
+    else:leaves.append(leaf)
+   divide((ix*cell_units,iz*cell_units,cell_units))
+ return leaves
+
+lod_leaves=[]
+for lod in range(3):
+ lod_leaves.append(initial_leaves(lod))
+ print(json.dumps(dict(lod=lod,adaptive_leaves=len(lod_leaves[-1]))),flush=True)
+def edge_maps(leaves, shared):
+ points=set(shared)
+ points.update((a+dx,b+dz) for a,b,size in leaves
+               for dx,dz in ((0,0),(0,size),(size,0),(size,size)))
+ horizontal={};vertical={}
+ for a,b in points:
+  horizontal.setdefault(b,set()).add(a)
+  vertical.setdefault(a,set()).add(b)
+ return ({k:sorted(v) for k,v in horizontal.items()},
+         {k:sorted(v) for k,v in vertical.items()})
+
+def shared_edge(a,b):
+ xs=(a//cell_units, a//cell_units-1) if a%cell_units==0 else (a//cell_units,)
+ zs=(b//cell_units, b//cell_units-1) if b%cell_units==0 else (b//cell_units,)
+ return a in (0,N*cell_units) or b in (0,N*cell_units) or any((x,z) in wet_cells for x in xs for z in zs)
+
+def boundary(leaf, maps):
+ horizontal,vertical=maps
+ a,b,size=leaf
+ left=vertical[a];top=horizontal[b+size];right=vertical[a+size];bottom=horizontal[b]
+ return ([point(a,t) for t in left[bisect_left(left,b):bisect_left(left,b+size)]]+
+         [point(t,b+size) for t in top[bisect_left(top,a):bisect_left(top,a+size)]]+
+         [point(a+size,t) for t in reversed(right[bisect_right(right,b):bisect_right(right,b+size)])]+
+         [point(t,b) for t in reversed(bottom[bisect_right(bottom,a):bisect_right(bottom,a+size)])])
+
+while True:
+ shared={(a+dx,b+dz) for leaves in lod_leaves for a,b,size in leaves
+         for dx,dz in ((0,0),(0,size),(size,0),(size,size)) if shared_edge(a+dx,b+dz)}
+ lod_edges=[edge_maps(leaves,shared) for leaves in lod_leaves]
+ changed=False
+ for lod,leaves in enumerate(lod_leaves):
+  next_leaves=[]
+  for leaf in leaves:
+   a,b,size=leaf;ix=a//cell_units;iz=b//cell_units
+   tolerance=height_tolerances[0 if (ix,iz) in wet_cells else lod]*.8
+   if any(not triangle_fits(t,tolerance) for t in fan(point(a+size/2,b+size/2),boundary(leaf,lod_edges[lod]))):
+    if size==1:raise ValueError(f'Meadow edge refinement exceeds finest spacing at {point(a,b)}.')
+    next_leaves.extend(children(leaf));changed=True
+   else:next_leaves.append(leaf)
+  lod_leaves[lod]=next_leaves
+ if not changed:break
+
 meshes=[];counts=[]
+for lod,leaves in enumerate(lod_leaves):
+ verts=[]
+ for leaf in sorted(leaves,key=lambda item:(item[1],item[0])):
+  a,b,size=leaf;center=vertex(*point(a+size/2,b+size/2));ring=[vertex(*p) for p in boundary(leaf,lod_edges[lod])]
+  tolerance=height_tolerances[0 if (a//cell_units,b//cell_units) in wet_cells else lod]-1e-6
+  reduced=next((candidate for candidate in rectangle_triangulations(center,ring,tolerance)
+                if all(triangle_fits(tuple((v[0],v[2]) for v in candidate[i:i+3]),tolerance) for i in range(0,len(candidate),3))),None)
+  if reduced is not None:
+   verts.extend(reduced)
+  else:
+   for tri in fan(center,ring):verts.extend(tri)
+ counts.append(len(verts)//3)
+ if lod==0:
+  for i in range(0,len(verts),3):triangle(*[(v[0],v[2]) for v in verts[i:i+3]])
+ meshes.append(dict(name='meadow_ground'+('' if lod==0 else '_lod'+str(lod)),vertices=[list(struct.unpack('<13f',struct.pack('<13f',*row))) for row in verts]))
+assert 125000>counts[0]>counts[1]>counts[2], ('ground LOD budget',counts)
+assert all(any(water_count[i]>0 for i in ids) for ids in water_groups.values() if any(records[i]['fill'] for i in ids))
 for lod in range(3):
- verts=optimized_ground(lod);counts.append(len(verts)//3)
- meshes.append(dict(name='meadow_ground'+('' if lod==0 else '_lod'+str(lod)),vertices=[[round(v,7) for v in row] for row in verts]))
-for lod in range(3):
- meshes.append(dict(name='meadow_water'+('' if lod==0 else '_lod'+str(lod)),vertices=[[round(v,7) for v in row] for row in water]))
-assert all(count<len(ground)//3 for count in counts)
+ meshes.append(dict(name='meadow_water'+('' if lod==0 else '_lod'+str(lod)),vertices=[list(struct.unpack('<13f',struct.pack('<13f',*row))) for row in water]))
 meshes=[index_mesh(mesh) for mesh in meshes]
 (OUT/'meadow_surface_meshes.json').write_text(json.dumps(dict(version=1,meshes=meshes),separators=(',',':')))
-print(json.dumps(dict(original_ground_triangles=len(ground)//3,ground_lod_triangles=counts,water_triangles=len(water)//3,preserved_wet_cells=len(wet_cells),filled_basins=sum(n>0 for n in water_count),records=len(records))))
+print(json.dumps(dict(ground_lod_triangles=counts,water_triangles=len(water)//3,preserved_wet_cells=len(wet_cells),filled_basins=sum(n>0 for n in water_count),records=len(records))))

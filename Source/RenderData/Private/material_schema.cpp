@@ -248,13 +248,6 @@ MaterialSurfaceLayout DecodeMaterialSurfaceLayout(std::span<const std::byte> byt
     return layout;
 }
 
-void ValidateUniformMaterialSurfaceLayout(MaterialSurfaceLayout layout)
-{
-    (void)EncodeMaterialSurfaceLayout(layout);
-    Require(layout.varying_mask == 0,
-            "renderer uniform surface profile cannot consume varying closure sidecars");
-}
-
 std::uint32_t PackCharacterMaterialDomainOrdinal(CharacterMaterialDomain domain, std::uint32_t ordinal)
 {
     Require((domain == CharacterMaterialDomain::Opaque || domain == CharacterMaterialDomain::Translucent) &&
@@ -924,6 +917,8 @@ MaterialProgram DecodeMaterialProgram(
 
 void ValidateRockMaterial(const RockMaterial &material)
 {
+    Require((material.opacity_texture_mask >> kMaterialTextureSlots) == 0,
+            "invalid opacity texture mask");
     bool known_roles = false;
     for (const auto &roles : kEnvironmentTextures)
     {
@@ -976,17 +971,15 @@ std::vector<std::byte> EncodeRockMaterial(
 {
     ValidateRockMaterial(material);
     std::vector<std::byte> bytes(kMaterialMetadataStride);
-    const bool typed = TextureProductId(material.textures[0]);
-    Put(bytes, 0, typed ? 4 : 2, 4); // v4 has six typed texture indices
+    Put(bytes, 0, 5, 4);
     Put(bytes, 4, 1, 4); // surface domain
     Put(bytes, 8, 1, 4); // metallic-roughness model
     Put(bytes, 12, material.two_sided ? 1 : 0, 4);
-    const auto texture_count = typed ? material.textures.size() : std::size_t{4};
-    for (std::size_t i = 0; i < texture_count; ++i)
+    for (std::size_t i = 0; i < material.textures.size(); ++i)
     {
         if (material.textures[i].empty())
         {
-            Require(typed ? i >= 3 : i == 3, "required texture may not be absent");
+            Require(i >= 3, "required texture may not be absent");
             Put(bytes, 16 + i * 2, 0xffff, 2);
             continue;
         }
@@ -996,18 +989,10 @@ std::vector<std::byte> EncodeRockMaterial(
         Require(index < 65536, "too many material dependencies");
         Put(bytes, 16 + i * 2, static_cast<std::uint32_t>(index), 2);
     }
-    if (typed)
-    {
-        Put(bytes, 28, std::bit_cast<std::uint32_t>(material.metallic), 4);
-        Put(bytes, 32, std::bit_cast<std::uint32_t>(material.roughness_scale), 4);
-        Put(bytes, 36, material.alpha_mask ? 1 : 0, 4);
-    }
-    else
-    {
-        Put(bytes, 24, std::bit_cast<std::uint32_t>(material.metallic), 4);
-        Put(bytes, 28, std::bit_cast<std::uint32_t>(material.roughness_scale), 4);
-        Put(bytes, 32, material.alpha_mask ? 1 : 0, 4);
-    }
+    Put(bytes, 28, std::bit_cast<std::uint32_t>(material.metallic), 4);
+    Put(bytes, 32, std::bit_cast<std::uint32_t>(material.roughness_scale), 4);
+    Put(bytes, 36, material.alpha_mask ? 1 : 0, 4);
+    Put(bytes, 40, material.opacity_texture_mask, 4);
     return bytes;
 }
 
@@ -1015,35 +1000,39 @@ RockMaterial DecodeRockMaterial(
     std::span<const std::byte> bytes, std::span<const std::string> dependencies)
 {
     const bool historical_size = bytes.size() == kHistoricalMaterialMetadataStride;
-    Require(bytes.size() == kMaterialMetadataStride || historical_size,
+    const bool previous_size = bytes.size() == kPreviousMaterialMetadataStride;
+    Require(bytes.size() == kMaterialMetadataStride || previous_size || historical_size,
             "invalid typed metadata record size");
     const auto version = Get(bytes, 0, 4);
-    Require((version >= 1 && version <= 4) && Get(bytes, 4, 4) == 1 &&
+    Require((version >= 1 && version <= 5) && Get(bytes, 4, 4) == 1 &&
             Get(bytes, 8, 4) == 1 && Get(bytes, 12, 4) <= 1,
             "invalid typed metadata record");
     RockMaterial material;
     material.two_sided = Get(bytes, 12, 4) != 0;
-    const bool v4 = version == 4;
-    Require(!(v4 && historical_size), "v4 metadata requires the 40-byte record");
-    if (!v4 && !historical_size)
+    const bool six_textures = version >= 4;
+    Require(version == 5 ? bytes.size() == kMaterialMetadataStride :
+                (previous_size || historical_size) && !(version == 4 && historical_size),
+            "metadata version disagrees with record size");
+    if (!six_textures && !historical_size)
         Require(Get(bytes, 36, 4) == 0, "historical metadata reserved bytes are nonzero");
-    Require(v4 ? Get(bytes, 36, 4) <= 1 : Get(bytes, 32, 4) <= (version == 1 ? 0u : 1u),
-            "invalid historical or v4 alpha flag");
-    material.alpha_mask = v4 ? Get(bytes, 36, 4) != 0 : Get(bytes, 32, 4) != 0;
-    const auto texture_count = v4 ? material.textures.size() : std::size_t{4};
+    Require(six_textures ? Get(bytes, 36, 4) <= 1 : Get(bytes, 32, 4) <= (version == 1 ? 0u : 1u),
+            "invalid material alpha flag");
+    material.alpha_mask = six_textures ? Get(bytes, 36, 4) != 0 : Get(bytes, 32, 4) != 0;
+    const auto texture_count = six_textures ? material.textures.size() : std::size_t{4};
     for (std::size_t i = 0; i < texture_count; ++i)
     {
         const auto index = Get(bytes, 16 + i * 2, 2);
-        if (index == 0xffff && (i == 3 || v4 && i >= 4))
+        if (index == 0xffff && (i == 3 || six_textures && i >= 4))
             continue;
         Require(index < dependencies.size(), "dependency index out of range");
         material.textures[i] = dependencies[index];
     }
-    material.metallic = std::bit_cast<float>(Get(bytes, v4 ? 28 : 24, 4));
-    material.roughness_scale = std::bit_cast<float>(Get(bytes, v4 ? 32 : 28, 4));
+    material.metallic = std::bit_cast<float>(Get(bytes, six_textures ? 28 : 24, 4));
+    material.roughness_scale = std::bit_cast<float>(Get(bytes, six_textures ? 32 : 28, 4));
+    if (version == 5) material.opacity_texture_mask = Get(bytes, 40, 4);
     ValidateRockMaterial(material);
-    Require(v4 ? TextureProductId(material.textures[0]) :
-                 (version == 3) == TextureProductId(material.textures[0]),
+    Require(version == 5 || (version == 4 ? TextureProductId(material.textures[0]) :
+                 (version == 3) == TextureProductId(material.textures[0])),
             "metadata version disagrees with typed texture dependency ABI");
     if (version == 2)
     {

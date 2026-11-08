@@ -3,6 +3,7 @@
 
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/sha256.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/scene_probe_revision.hpp>
 #include <hs/render_data/scene_probe.hpp>
@@ -102,7 +103,7 @@ int ProduceSceneProbe(int argc,char **argv)
         // The bake layout is an explicit byte input. Its logical product id is
         // also the final baked product id, so it must not be represented as
         // an upstream product of this Action.
-        spec.inputs.push_back(ap::HashInput("scene-probe/layout-input",layout_path));
+        spec.inputs.push_back({"scene-probe/layout-input",layout_path,layout_sha});
         const auto source_path=source/"ContentSource/Lighting/local_probes.json";
         const auto source_bytes=ap::ReadBytes(source_path);
         const auto authored=ap::Json::parse(source_bytes);
@@ -146,11 +147,20 @@ int ProduceSceneProbe(int argc,char **argv)
                 Require(owners.emplace(id,name).second,"Duplicate product in scene probe input list: "+id);
             }
         }
+        const auto runtime_surface_edge=[](std::string_view owner,std::string_view dependency) {
+            if(!dependency.starts_with("render/shader/")) return false;
+            for(const auto name:rd::kAuthoredMaterialNames)
+                if(owner==rd::MaterialProduct(name))
+                    return dependency=="render/shader/"+std::string(name)+"_scene.dxil" ||
+                        dependency=="render/shader/"+std::string(name)+"_shadow.dxil";
+            return false;
+        };
         std::set<std::string> closure; std::vector<std::string> pending;
         pending.insert(pending.end(),layout.dependencies.begin(),layout.dependencies.end());
+        // Capture uploads source-only terrain records and never dispatches page-bake kernels.
         for (const auto id : {"game-data/simulation-rules", "render/config/quality_profiles.rpkg",
                 "render/lighting/coated_ggx_dfg.dds", "render/lighting/default_ltc.rpkg",
-                "render/shader/light_list_cs.dxil", "terrain/producer/bake_cs.dxil", "terrain/producer/mip_cs.dxil"})
+                "render/shader/light_list_cs.dxil"})
             pending.emplace_back(id);
         for(const auto &[id,_]:generation.product_paths)
             if(rd::IsLocalProbeMaterialRevisionProduct(id)) pending.push_back(id);
@@ -168,7 +178,9 @@ int ProduceSceneProbe(int argc,char **argv)
                 "Selected bake dependency closure differs: "+id);
             if(id!=kProduct)
                 spec.upstream.push_back({id,digest,size,build/"Actions"/owner->second/"result.json"});
-            pending.insert(pending.end(),dependencies.begin(),dependencies.end());
+            // Probe capture uses its named capture/shadow programs, not the material's runtime raster programs.
+            for(const auto &dependency:dependencies)
+                if(!runtime_surface_edge(id,dependency)) pending.push_back(dependency);
         }
         std::ranges::sort(spec.inputs,{},&ap::Input::logical_id); std::ranges::sort(spec.upstream,{},&ap::UpstreamProduct::logical_id);
         if(Current(build,spec,layout.dependencies)) { ap::TouchActionResult(build/"Actions"/kNamespace/"result.json"); return 0; }
@@ -176,7 +188,7 @@ int ProduceSceneProbe(int argc,char **argv)
         try
         {
             const auto output=stage/kFilename;
-            const auto artifacts=build/"Artifacts"/"scene-probe-bake"/stage.filename();
+            const auto artifacts=build/"Artifacts"/"scene-probe-bake";
             ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts,maximum_cube_views,
                 static_cast<std::uint32_t>(iteration_limit),abs_tolerance,rel_tolerance);
             std::ifstream baked_stream(output,std::ios::binary|std::ios::ate);

@@ -57,7 +57,6 @@ struct MaterialSurfaceLayout
 };
 [[nodiscard]] std::vector<std::byte> EncodeMaterialSurfaceLayout(MaterialSurfaceLayout layout);
 [[nodiscard]] MaterialSurfaceLayout DecodeMaterialSurfaceLayout(std::span<const std::byte> bytes);
-void ValidateUniformMaterialSurfaceLayout(MaterialSurfaceLayout layout);
 
 void ValidateMaterialParameters(std::span<const MaterialParameterDefinition> parameters);
 [[nodiscard]] std::string MaterialParameterLayoutHash(
@@ -204,6 +203,8 @@ struct RockMaterial
     float roughness_scale{1.0f};
     bool two_sided{};
     bool alpha_mask{};
+    // Potential opacity reads; authored reflection narrows the conservative default.
+    std::uint32_t opacity_texture_mask{(1u << kMaterialTextureSlots) - 1u};
 };
 
 enum class EnvironmentMaterialVariant

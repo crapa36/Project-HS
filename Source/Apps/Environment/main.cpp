@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -28,6 +29,7 @@ namespace
 {
 namespace fs = std::filesystem;
 namespace ap = hs::asset_pipeline;
+constexpr std::uint32_t kHistogramRecipeVersion=3;
 
 struct ScopedComInitialization
 {
@@ -242,7 +244,7 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
     PendingAction histogram;
     histogram.spec.action_id="environment.histogram";
     histogram.spec.recipe_id="project-hs.environment.histogram"+guessed_gpu_identity;
-    histogram.spec.recipe_version=2;
+    histogram.spec.recipe_version=kHistogramRecipeVersion;
     histogram.spec.namespace_path="environment/histogram";
     AddInputs(histogram.spec,source_root,hs::content::EnvironmentHistogramInputs(texture_source));
     histogram.names={"environment_terrain_gaussian.dds","environment_terrain_histogram.dds","environment_terrain_histogram.qa.json"};
@@ -417,7 +419,7 @@ void Produce(std::string_view mode, const fs::path& source_root,
     Microsoft::WRL::ComPtr<ID3D11Device> device;
 
     if (mode == "histogram") {
-        spec.recipe_version = 2;
+        spec.recipe_version = kHistogramRecipeVersion;
         AddInputs(spec, source_root, hs::content::EnvironmentHistogramInputs(texture_source));
         names = {"environment_terrain_gaussian.dds",
                  "environment_terrain_histogram.dds",

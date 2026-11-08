@@ -70,7 +70,7 @@ inline void Material(CanonicalBytes &b, const render_data::MaterialDescriptor &v
         out.Fields(r.slot, r.texture.value, r.dimension, r.semantic, r.shader_binding_abi);
         out.String(r.product_id);
     });
-    b.Fields(v.metallic, v.roughness_scale, v.flags, v.domain,
+    b.Fields(v.metallic, v.roughness_scale, v.flags, v.opacity_texture_mask, v.domain,
         v.receivers.model_mask, v.receivers.required_surface_flags,
         v.receivers.forbidden_surface_flags, v.receivers.normal_filter);
 }

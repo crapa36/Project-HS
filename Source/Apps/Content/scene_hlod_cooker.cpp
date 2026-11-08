@@ -384,7 +384,6 @@ public:
     void Run()
     {
         output_.scene.roots = Build(0, objects_.size());
-        for (auto &page : output_.scene.pages) page.flags &= ~rd::kSceneHlodPagePinned;
     }
 private:
     std::uint32_t Dependency(const std::string &id)

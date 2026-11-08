@@ -254,6 +254,7 @@ private:
     friend PreparedMaterial PrepareMaterial(MaterialGraph, MaterialPreparationDomain);
     friend ClosureReflection AnalyzeClosure(const PreparedMaterial &);
     friend MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &);
+    friend std::uint32_t AnalyzeOpacityTextureMask(const PreparedMaterial &);
     friend std::string EmitUniformClosureHlsl(const PreparedMaterial &, std::string_view);
     friend std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::uint32_t);
     friend void ValidateMaterialSampleLayers(const PreparedMaterial &, std::span<const std::uint32_t>, std::uint32_t);
@@ -268,6 +269,9 @@ private:
     MaterialPreparationDomain domain = MaterialPreparationDomain::Generic);
 // Generic follows Environment opacity semantics; Hero evaluates closure opacity even when opaque.
 [[nodiscard]] MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material);
+// Returns declared texture slots reachable from masked opacity; implicit alpha
+// context sources conservatively retain every declared texture slot.
+[[nodiscard]] std::uint32_t AnalyzeOpacityTextureMask(const PreparedMaterial &material);
 
 enum class MaterialClosureCapability : std::uint32_t
 {

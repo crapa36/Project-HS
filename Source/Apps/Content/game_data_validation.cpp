@@ -353,7 +353,7 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
         RequireCount(entries, name, "$/entries", 1);
         static_cast<void>(CollectIds(entries, name));
         const auto &path_entry = entries[0];
-        const auto arena = RequireMember(path_entry, name, "$/entries/0", "arena");
+        const auto &arena = RequireMember(path_entry, name, "$/entries/0", "arena");
         RequirePositive(RequireNumber(arena, name, "$/entries/0/arena", "width_m"), name,
                         "$/entries/0/arena/width_m");
         RequirePositive(RequireNumber(arena, name, "$/entries/0/arena", "depth_m"), name,
@@ -362,10 +362,13 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
             RequireMember(path_entry, name, "$/entries/0", "experience");
         const auto &rewards = RequireArray(experience, name, "$/entries/0/experience", "rewards");
         RequireCount(rewards, name, "$/entries/0/experience/rewards", 6);
+        std::unordered_set<std::string> reward_sources;
         for (std::size_t index = 0; index < rewards.size(); ++index)
-            static_cast<void>(RequireString(
-                rewards[index], name,
-                "$/entries/0/experience/rewards/" + std::to_string(index), "source_id"));
+        {
+            const auto path = "$/entries/0/experience/rewards/" + std::to_string(index);
+            if (!reward_sources.emplace(RequireString(rewards[index], name, path, "source_id")).second)
+                ThrowValidationError(name, path + "/source_id", "duplicate XP reward source");
+        }
         return;
     }
 
@@ -759,7 +762,6 @@ void ValidateDocuments(const ContentSources &sources)
     const auto &experience =
         RequireMember(level_entries[0], "level", "$/entries/0", "experience");
     const auto &rewards = RequireArray(experience, "level", "$/entries/0/experience", "rewards");
-    RequireCount(rewards, "level", "$/entries/0/experience/rewards", 6);
     for (std::size_t index = 0; index < rewards.size(); ++index)
     {
         const auto path = "$/entries/0/experience/rewards/" + std::to_string(index);

@@ -254,6 +254,7 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
         const auto product_ids = snapshot.ProductIds();
         std::unordered_set<std::string> actual_names;
         std::string contents, page, animation;
+        std::unordered_map<std::string, std::string> lod_pages;
         bool has_metadata=false, has_page=false, has_animation=false;
         for (const auto product_id : product_ids)
         {
@@ -271,6 +272,8 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
             { page=snapshot.ReadProductBytes(product_id,dependency); has_page=true; }
             else if (source && name == source->output_name + "_animation.rpkg")
             { animation=snapshot.ReadProductBytes(product_id,dependency); has_animation=true; }
+            else if (source && name.starts_with(source->output_name + "_lod") && name.ends_with(".rpage"))
+            { lod_pages.emplace(std::string(product_id), snapshot.ReadProductBytes(product_id,dependency)); }
             else
             { fs::path product_path; snapshot.ReadProduct(product_id, dependency, product_path); }
         }
@@ -292,9 +295,18 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
                 {
                     const auto &entry=metadata.monster->lods[lod];
                     const auto &lod_id=prepared.package.dependencies[entry.page_dependency_index];
-                    ap::UpstreamProduct dependency;
-                    const auto content=snapshot.ReadProductBytes(lod_id,dependency);
-                    const auto lod_bytes=std::as_bytes(std::span(content.data(),content.size()));
+                    std::string other_content;
+                    const std::string *content = nullptr;
+                    if (lod_id == page_id) content = &page;
+                    else if (const auto found = lod_pages.find(lod_id); found != lod_pages.end())
+                        content = &found->second;
+                    else
+                    {
+                        ap::UpstreamProduct dependency;
+                        other_content = snapshot.ReadProductBytes(lod_id,dependency);
+                        content = &other_content;
+                    }
+                    const auto lod_bytes=std::as_bytes(std::span(content->data(),content->size()));
                     const auto prepared_lod=hs::render_data::PrepareGeometryPage(lod_bytes,hs::MakeAssetId(lod_id),entry);
                     if(!prepared_lod.package.dependencies.empty()) return false;
                     hs::render_data::ValidateCharacterGeometry(metadata,entry,prepared_lod);

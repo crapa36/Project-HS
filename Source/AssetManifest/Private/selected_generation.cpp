@@ -212,14 +212,19 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
         if (!products.is_array() || products.empty() ||
             !required.is_array() || required.size() != products.size())
             throw std::runtime_error("Generation product set is incomplete");
-        std::vector<std::string> ids;
-        ids.reserve(products.size());
         std::unordered_map<std::string, std::pair<std::string, std::uint64_t>> identities;
         std::unordered_map<std::string, std::vector<std::string>> dependencies;
         std::unordered_set<std::string> action_ids;
-        for (const auto &item : products)
+        std::string_view previous_id;
+        for (std::size_t index = 0; index < products.size(); ++index)
         {
-            const auto logical_id = item.at("logical_id").get<std::string>();
+            const auto &item = products[index];
+            const auto &logical_id = item.at("logical_id").get_ref<const std::string &>();
+            if (logical_id <= previous_id)
+                throw std::runtime_error("Generation products are not sorted uniquely");
+            if (required[index] != logical_id)
+                throw std::runtime_error("Generation required IDs do not match products");
+            previous_id = logical_id;
             const auto product_locator = item.at("locator").get<std::string>();
             const auto digest = item.at("digest").get<std::string>();
             const auto size = item.at("size").get<std::uint64_t>();
@@ -238,20 +243,17 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
                     if (!IsActionId(part.string()))
                         throw std::runtime_error("unsafe Generation action namespace");
             }
-            if (logical_id.empty() ||
-                !loaded.product_paths.emplace(
-                     logical_id, ResolveLocator(root, product_locator)).second)
-                throw std::runtime_error("duplicate or empty Generation product ID");
-            if (version == 3 && loaded.product_paths.at(logical_id) !=
+            const auto path = ResolveLocator(root, product_locator);
+            if (version == 3 && path !=
                                     root / fs::path(product_locator))
                 throw std::runtime_error("Generation snapshot locator aliases another path");
             if (action_id.empty() || !digest.starts_with("sha256:") ||
                 !IsDigest(std::string_view(digest).substr(7)))
                 throw std::runtime_error("invalid Generation product identity");
-            if (fs::file_size(loaded.product_paths.at(logical_id)) != size)
+            if (fs::file_size(path) != size)
                 throw std::runtime_error("Generation product size mismatch: " + logical_id);
-            if (!loaded.product_digests.emplace(logical_id, digest).second)
-                throw std::runtime_error("duplicate Generation product digest: " + logical_id);
+            loaded.product_paths.emplace(logical_id, path);
+            loaded.product_digests.emplace(logical_id, digest);
             auto &required_products = dependencies[logical_id];
             if (item.contains("dependencies"))
             {
@@ -271,19 +273,12 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
             }
             identities.emplace(logical_id, std::pair{digest, size});
             action_ids.insert(action_id);
-            ids.push_back(logical_id);
         }
-        if (!std::is_sorted(ids.begin(), ids.end()) ||
-            std::adjacent_find(ids.begin(), ids.end()) != ids.end())
-            throw std::runtime_error("Generation products are not sorted uniquely");
-        for (std::size_t index = 0; index < ids.size(); ++index)
-            if (!required[index].is_string() ||
-                required[index].get<std::string>() != ids[index])
-                throw std::runtime_error("Generation required IDs do not match products");
         std::unordered_map<std::string, std::uint8_t> dependency_state;
         std::vector<std::pair<std::string, std::size_t>> pending;
-        for (const auto &id : ids)
+        for (const auto &entry : required)
         {
+            const auto &id = entry.get_ref<const std::string &>();
             if (dependency_state[id] == 2)
                 continue;
             dependency_state[id] = 1;
@@ -376,10 +371,6 @@ Result VerifySelectedGenerationProducts(const SelectedGeneration &generation)
             if (DigestText(hash.Finish()) != expected->second)
                 throw std::runtime_error("Generation product digest mismatch: " + logical_id);
         }
-        for (const auto &[logical_id, digest] : generation.product_digests)
-            if (!generation.product_paths.contains(logical_id) || digest.empty())
-                throw std::runtime_error("Generation product digest has no matching payload: " +
-                                         logical_id);
         return Result::Success();
     }
     catch (const std::exception &error)

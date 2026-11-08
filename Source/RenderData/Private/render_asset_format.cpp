@@ -182,6 +182,7 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
                 count % 3 == 0 && size == CheckedMul(count, stride), "invalid vertex chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::MaterialMetadata))
         Require((stride == kMaterialMetadataStride ||
+                 stride == kPreviousMaterialMetadataStride ||
                  stride == kHistoricalMaterialMetadataStride) &&
                 count == 1 && size == stride,
                 "invalid material chunk");

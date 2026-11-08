@@ -15,9 +15,9 @@ inline constexpr std::uint16_t kRenderPackageVersion = 1;
 inline constexpr std::uint32_t kExpandedVertexStride = 76;
 inline constexpr std::uint16_t kExpandedVertexWireVersion = 2;
 inline constexpr std::uint16_t kLegacyExpandedVertexWireVersion = 1;
-inline constexpr std::uint32_t kMaterialMetadataStride = 40;
-// v1-v3 material chunks used a 36-byte record. They remain readable through
-// the explicit historical decoder, while newly encoded records use v4/40.
+inline constexpr std::uint32_t kMaterialMetadataStride = 44;
+inline constexpr std::uint32_t kPreviousMaterialMetadataStride = 40;
+// Historical payloads remain readable; new v5 records include opacity texture usage.
 inline constexpr std::uint32_t kHistoricalMaterialMetadataStride = 36;
 inline constexpr std::uint32_t kMaterialProgramStride = 4;
 inline constexpr std::uint32_t kMaterialBindingStride = 12;

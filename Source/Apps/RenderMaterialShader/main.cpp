@@ -78,7 +78,8 @@ void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_r
         "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli",
         "Content/Shaders/shadow_filter.hlsli", "Content/Shaders/environment_wind.hlsli",
         "Content/Shaders/meadow_surface.hlsli", "Content/Shaders/grass_deformation.hlsli",
-        "Content/Shaders/particle_collision.hlsli"})
+        "Content/Shaders/particle_collision.hlsli", "Content/Shaders/terrain_page_abi.hlsli",
+        "Content/Shaders/terrain_histogram_abi.hlsli"})
         if(std::ranges::none_of(spec.inputs,[&](const auto &input) { return input.logical_id==relative; }))
             spec.inputs.push_back(ap::HashInput(relative,source_root/relative));
 }
@@ -280,10 +281,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingClassifyCS", L"cs_6_0"},
         ProgramOutput{"render/shader/adaptive_shading_rate_cs.dxil", "adaptive_shading_rate_cs.dxil",
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingRateCS", L"cs_6_0"},
-        ProgramOutput{"render/shader/layered_translucency_vs.dxil", "layered_translucency_vs.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"SceneVS", L"vs_6_0"},
-        ProgramOutput{"render/shader/layered_translucency_current_vs.dxil", "layered_translucency_current_vs.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCurrentVS", L"vs_6_0"},
         ProgramOutput{"render/shader/layered_translucency_peel_front_ps.dxil", "layered_translucency_peel_front_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyPeelFrontPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_gather_exit_depth_ps.dxil", "layered_translucency_gather_exit_depth_ps.dxil",

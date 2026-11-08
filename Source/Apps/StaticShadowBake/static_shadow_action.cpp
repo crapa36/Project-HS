@@ -2,6 +2,7 @@
 #include "../AssetPipeline/action.hpp"
 
 #include <hs/core/sha256.hpp>
+#include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/static_shadow.hpp>
 
@@ -102,11 +103,6 @@ int ProduceStaticShadow(int argc, char **argv,
         spec.action_id = kAction; spec.namespace_path = kNamespace;
         spec.recipe_id = "project-hs.render.static-shadow/coarse-fallback-lod2";
         spec.recipe_version = 1;
-        for (const auto &[id, path] : std::initializer_list<std::pair<std::string_view, fs::path>>{
-                 {"layout/implementation", source / "Source/Presentation/Private/environment_layout.cpp"},
-                 {"lighting/environment-contract", source / "Source/Presentation/Public/hs/presentation/environment_layout.hpp"}})
-            spec.inputs.push_back(ap::HashInput(std::string(id), path));
-
         // The compose input list is the complete namespace index. Never scan unrelated Actions.
         std::map<std::string, ap::ActionResultSnapshot> snapshots;
         std::map<std::string, std::string> owners;
@@ -135,6 +131,16 @@ int ProduceStaticShadow(int argc, char **argv,
         }
         Require(!owners.empty(), "Empty bake input result list");
         std::set<std::string> dependencies;
+        const auto runtime_surface_edge = [](std::string_view parent, std::string_view dependency) {
+            if (!dependency.starts_with("render/shader/")) return false;
+            for (const auto name : rd::kAuthoredMaterialNames)
+            {
+                if (parent != rd::MaterialProduct(name)) continue;
+                const auto prefix = "render/shader/" + std::string(name);
+                return dependency == prefix + "_scene.dxil" || dependency == prefix + "_shadow.dxil";
+            }
+            return false;
+        };
         const auto add_closure = [&](std::string root) {
             std::vector<std::string> pending{std::move(root)};
             while (!pending.empty())
@@ -156,7 +162,9 @@ int ProduceStaticShadow(int argc, char **argv,
                 Require(selected_dependencies != generation.product_dependencies.end() &&
                     selected_dependencies->second == product_dependencies, "Selected bake dependency closure differs: " + id);
                 spec.upstream.push_back({id, digest, size, build / "Actions" / owner->second / "result.json"});
-                pending.insert(pending.end(), product_dependencies.begin(), product_dependencies.end());
+                // Depth capture uses its named probe-shadow program, not runtime raster programs.
+                for (const auto &dependency : product_dependencies)
+                    if (!runtime_surface_edge(id, dependency)) pending.push_back(dependency);
             }
         };
         // Verify the rules before the shared scene builder decodes them.
@@ -173,7 +181,10 @@ int ProduceStaticShadow(int argc, char **argv,
             {
                 const auto geometry = rd::EnvironmentGeometryOrdinal(instance.mesh, instance.environment_variant);
                 Require(geometry < rd::kEnvironmentMaterialNames.size(), "Invalid static shadow geometry ordinal");
-                add_closure("render/" + std::string(rd::kEnvironmentMaterialNames[geometry]) + ".rpkg");
+                const auto lod = rd::kEnvironmentGeometryLodCount - 1;
+                // Native static shadow capture draws only the terminal fallback page.
+                add_closure("render/" + std::string(rd::kEnvironmentMaterialNames[geometry]) +
+                    "_lod" + std::to_string(lod) + ".rpkg");
                 material = rd::EnvironmentGeometryMaterialOrdinal(geometry);
             }
             materials.insert(material);
@@ -182,8 +193,7 @@ int ProduceStaticShadow(int argc, char **argv,
         for (const auto ordinal : materials)
         {
             const std::string name(rd::kAuthoredMaterialNames.at(ordinal));
-            add_closure(ordinal == rd::kTerrainMaterialOrdinal || ordinal == rd::kGroundDetailMaterialOrdinal
-                ? "render/material/" + name + ".rpkg" : "render/" + name + ".rpkg");
+            add_closure(rd::MaterialProduct(name));
             add_closure("render/material/" + name + "/parameters.rpkg");
             add_closure("render/shader/" + name + "_probe_shadow.dxil");
         }

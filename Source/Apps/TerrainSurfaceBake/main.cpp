@@ -247,17 +247,12 @@ int main(int argc, char **argv)
         const TerrainBc7Encoder encoder;
         spec.recipe_id = "project-hs.render.terrain-surface/native-seed-1-bc7-layout5-tiles-apron" + encoder.identity;
         spec.recipe_version = 5;
-        for (const auto &[id, path] : std::initializer_list<std::pair<std::string_view, fs::path>>{
-            {"terrain/world-transport", source / "Source/Apps/Common/world_transport_scene.cpp"},
-            {"terrain/layout", source / "Source/Presentation/Private/environment_layout.cpp"},
-            {"terrain/layout-contract", source / "Source/Presentation/Public/hs/presentation/environment_layout.hpp"}})
-            spec.inputs.push_back(ap::HashInput(std::string(id), path));
-
         Require(!generation.product_paths.empty(), "Terrain bake input Generation is empty");
         std::set<std::string> visited;
         std::vector<std::string> pending{
             "game-data/simulation-rules", "render/material/terrain.rpkg", "render/meadow_ground.rpkg",
-            "terrain/producer/bake_cs.dxil", "terrain/producer/mip_cs.dxil"};
+            "terrain/producer/bake_color_cs.dxil", "terrain/producer/bake_base_cs.dxil",
+            "terrain/producer/bake_weight_cs.dxil", "terrain/producer/mip_cs.dxil"};
         while (!pending.empty())
         {
             auto id = std::move(pending.back()); pending.pop_back();
@@ -271,7 +266,12 @@ int main(int argc, char **argv)
                 ap::Sha256File(selected) == found_digest->second,
                 "Selected terrain input digest mismatch: " + id);
             spec.inputs.push_back({"terrain-bake/" + id, selected, found_digest->second});
-            pending.insert(pending.end(), found_dependencies->second.begin(), found_dependencies->second.end());
+            // Terrain bake consumes Meadow LOD0 and compute producers, not the runtime color shader or fallback LOD payloads.
+            for (const auto &dependency : found_dependencies->second)
+                if (!((id == "render/material/terrain.rpkg" && dependency == "render/shader/terrain_scene.dxil") ||
+                    (id == "render/meadow_ground.rpkg" && (dependency == "render/meadow_ground_lod1.rpkg" ||
+                        dependency == "render/meadow_ground_lod2.rpkg"))))
+                    pending.push_back(dependency);
         }
         std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
         if (Current(build, spec))

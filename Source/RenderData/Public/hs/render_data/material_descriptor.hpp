@@ -42,6 +42,7 @@ struct MaterialDescriptor
     std::span<const MaterialTextureDescriptor> textures;
     float metallic{}, roughness_scale{1.0f};
     std::uint32_t flags{};
+    std::uint32_t opacity_texture_mask{}; // Declared environment texture slots only.
     CharacterMaterialDomain domain{CharacterMaterialDomain::Opaque};
     DecalReceiverPolicy receivers;
 };
