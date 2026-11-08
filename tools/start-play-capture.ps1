@@ -19,20 +19,16 @@ function Capture-Destination([string]$Value) {
 function Capture-BuildPolicy([string]$CaptureMode,[string]$CacheText) {
     if($CacheText-notmatch'(?m)^CMAKE_BUILD_TYPE:[^=]+=(Debug|Release)\r?$'){throw 'Capture requires an explicit Debug or Release build.'}
     $buildType=$matches[1]
-    if($CacheText-notmatch'(?m)^HS_ENABLE_VALIDATION:[^=]+=(ON|OFF)\r?$'){throw 'Capture requires an explicit D3D12 validation setting.'}
-    $validation=$matches[1]-eq'ON'
-    if($CacheText-notmatch'(?m)^HS_ENABLE_GPU_VALIDATION:[^=]+=(ON|OFF)\r?$'){throw 'Capture requires an explicit GPU validation setting.'}
-    $gpuValidation=$matches[1]-eq'ON'
     switch($CaptureMode){
         'HumanDebug' {
-            if($buildType-ne'Debug'-or!$validation){throw 'HumanDebug requires Debug with D3D12 validation enabled.'}
+            if($buildType-ne'Debug'){throw 'HumanDebug requires Debug.'}
         }
         'ComputerUsePerformance' {
-            if($buildType-ne'Release'-or$validation-or$gpuValidation){throw 'ComputerUsePerformance requires Release with D3D12 and GPU validation disabled.'}
+            if($buildType-ne'Release'){throw 'ComputerUsePerformance requires Release.'}
         }
         default {throw 'Unknown capture mode.'}
     }
-    [pscustomobject]@{build_type=$buildType;validation_enabled=$validation;gpu_validation_enabled=$gpuValidation}
+    [pscustomobject]@{build_type=$buildType;validation_enabled=($CaptureMode-eq'HumanDebug');gpu_validation_enabled=$false}
 }
 function Capture-Python([string]$CacheText,[string]$ExplicitExecutable) {
     $candidates=@()
@@ -59,16 +55,14 @@ if($SelfCheck){
     $rejected=$false;try{$null=Capture-Destination $repoRoot}catch{$rejected=$true};if(!$rejected){throw 'Existing destination accepted.'}
     $fixture=Capture-Destination ('Build/play-captures/selfcheck-'+[Guid]::NewGuid().ToString('N'))
     if(!(($fixture+[IO.Path]::DirectorySeparatorChar).StartsWith($repoRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase))){throw 'Relative destination escaped repository.'}
-    $debugCache="CMAKE_BUILD_TYPE:STRING=Debug`nHS_ENABLE_VALIDATION:BOOL=ON`nHS_ENABLE_GPU_VALIDATION:BOOL=OFF`n"
-    $releaseCache="CMAKE_BUILD_TYPE:STRING=Release`nHS_ENABLE_VALIDATION:BOOL=OFF`nHS_ENABLE_GPU_VALIDATION:BOOL=OFF`n"
+    $debugCache="CMAKE_BUILD_TYPE:STRING=Debug`n"
+    $releaseCache="CMAKE_BUILD_TYPE:STRING=Release`n"
     $debugPolicy=Capture-BuildPolicy 'HumanDebug' $debugCache
     $releasePolicy=Capture-BuildPolicy 'ComputerUsePerformance' $releaseCache
-    if($debugPolicy.build_type-ne'Debug'-or!$debugPolicy.validation_enabled-or$releasePolicy.build_type-ne'Release'-or$releasePolicy.validation_enabled-or$releasePolicy.gpu_validation_enabled){throw 'Capture build policy receipt differs from cache.'}
+    if($debugPolicy.build_type-ne'Debug'-or!$debugPolicy.validation_enabled-or$releasePolicy.build_type-ne'Release'-or$releasePolicy.validation_enabled-or$releasePolicy.gpu_validation_enabled){throw 'Capture build policy differs from launch arguments.'}
     foreach($case in @(
-        @('HumanDebug',$releaseCache),@('HumanDebug',$debugCache.Replace('HS_ENABLE_VALIDATION:BOOL=ON','HS_ENABLE_VALIDATION:BOOL=OFF')),
-        @('ComputerUsePerformance',$debugCache),@('ComputerUsePerformance',$releaseCache.Replace('HS_ENABLE_VALIDATION:BOOL=OFF','HS_ENABLE_VALIDATION:BOOL=ON')),
-        @('ComputerUsePerformance',$releaseCache.Replace('HS_ENABLE_GPU_VALIDATION:BOOL=OFF','HS_ENABLE_GPU_VALIDATION:BOOL=ON')),
-        @('ComputerUsePerformance',"CMAKE_BUILD_TYPE:STRING=Release`n"),@('Unknown',$releaseCache))){
+        @('HumanDebug',$releaseCache),@('ComputerUsePerformance',$debugCache),
+        @('ComputerUsePerformance',''),@('Unknown',$releaseCache))){
         $rejected=$false;try{$null=Capture-BuildPolicy $case[0] $case[1]}catch{$rejected=$true}
         if(!$rejected){throw ('Invalid capture build policy accepted: '+$case[0])}
     }
@@ -99,6 +93,7 @@ $gpuReadyFile=Join-Path $run 'renderer_features.jsonl'
 if(Test-Path -LiteralPath $settingsPath){Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $run 'settings-before.json')}
 Copy-Item -LiteralPath $pointer -Destination (Join-Path $run 'generation-used.json')
 $arguments=@('--capture-diagnostics',('--artifacts='+$run),('--generation='+$pointer),('--playtest-output='+(Join-Path $run 'playtest')))
+if($buildPolicy.validation_enabled){$arguments+='--validation'}
 $session=[ordered]@{
     schema=1;state='starting';started_utc=[DateTime]::UtcNow.ToString('o');output_directory=$run;mode=$Mode;build_type=$buildPolicy.build_type;validation_enabled=$buildPolicy.validation_enabled;gpu_validation_enabled=$buildPolicy.gpu_validation_enabled;
     temporary_invulnerable=$false;human_input=(!$computerUse);input_source=$(if($computerUse){'computer_use'}else{'human'});

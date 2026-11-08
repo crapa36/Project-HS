@@ -274,7 +274,7 @@ function Invoke-ExplicitBuild {
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
-    $BuildRoot = Join-Path $repoRoot 'Build/msvc-validation'
+    $BuildRoot = Join-Path $repoRoot 'Build/msvc-debug'
 }
 $BuildRoot = [IO.Path]::GetFullPath($BuildRoot)
 if ($Command -eq 'build') {

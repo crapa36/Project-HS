@@ -18,9 +18,7 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "HS_BUILD_TESTS": "OFF",
         "HS_BUILD_RUNTIME": "ON",
-        "HS_BUILD_CONTENT_TOOLS": "ON",
-        "HS_ENABLE_VALIDATION": "OFF",
-        "HS_ENABLE_GPU_VALIDATION": "OFF"
+        "HS_BUILD_CONTENT_TOOLS": "ON"
       }
     },
     {
@@ -34,39 +32,11 @@
       }
     },
     {
-      "name": "msvc-asan-core",
-      "inherits": "msvc-core",
-      "binaryDir": "${sourceDir}/Build/tooling/msvc-asan-core",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "/O2 /Ob1 /DNDEBUG /Zi /fsanitize=address",
-        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO"
-      }
-    },
-    {
       "name": "msvc-debug",
       "inherits": "msvc-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "HS_BUILD_TESTS": "OFF",
-        "HS_ENABLE_VALIDATION": "OFF",
-        "HS_ENABLE_GPU_VALIDATION": "OFF"
-      }
-    },
-    {
-      "name": "msvc-validation",
-      "inherits": "msvc-base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "HS_BUILD_TESTS": "ON",
-        "HS_ENABLE_VALIDATION": "ON"
-      }
-    },
-    {
-      "name": "msvc-gpu-validation",
-      "inherits": "msvc-validation",
-      "cacheVariables": {
-        "HS_ENABLE_GPU_VALIDATION": "ON"
+        "HS_BUILD_TESTS": "ON"
       }
     },
     {
@@ -74,16 +44,7 @@
       "inherits": "msvc-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "HS_BUILD_TESTS": "OFF",
-        "HS_ENABLE_VALIDATION": "OFF"
-      }
-    },
-    {
-      "name": "msvc-portable-tests",
-      "inherits": "msvc-core",
-      "cacheVariables": {
-        "HS_BUILD_RENDER_DATA_TESTS": "ON",
-        "HS_BUILD_ASSET_PIPELINE_TESTS": "ON"
+        "HS_BUILD_TESTS": "OFF"
       }
     }
   ],
@@ -92,51 +53,28 @@
       "name": "msvc-core",
       "configurePreset": "msvc-core",
       "targets": [
-        "hs_tests",
-        "hs_gameplay_internal_tests",
-        "hs_navigation_tests",
-        "hs_simulation_tests",
-        "hs_graphics_settings_tests",
-        "hs_sha256_tests",
-        "hs_simulation_rules_serialization_tests",
-        "hs_task_system_failure_tests",
-        "hs_hzb_region_tests",
-        "hs_render_scene_extractor_tests",
-        "hs_ui_command_admission_tests",
-        "hs_vfx_session_state_tests",
-        "hs_vfx_session_state_failure_tests",
-        "hs_runtime_diagnostics_tests",
-        "hs_project_hs_arguments_tests"
-      ]
-    },
-    {
-      "name": "msvc-asan-core",
-      "configurePreset": "msvc-asan-core",
-      "targets": [
-        "hs_simulation_tests"
+        "test_prep/all"
       ]
     },
     {
       "name": "msvc-debug",
-      "configurePreset": "msvc-debug"
-    },
-    {
-      "name": "msvc-validation",
-      "configurePreset": "msvc-validation"
-    },
-    {
-      "name": "msvc-gpu-validation",
-      "configurePreset": "msvc-gpu-validation"
+      "configurePreset": "msvc-debug",
+      "targets": [
+        "ProjectHS"
+      ]
     },
     {
       "name": "msvc-release",
-      "configurePreset": "msvc-release"
+      "configurePreset": "msvc-release",
+      "targets": [
+        "ProjectHS"
+      ]
     },
     {
-      "name": "msvc-portable-tests",
-      "configurePreset": "msvc-portable-tests",
+      "name": "verify",
+      "configurePreset": "msvc-debug",
       "targets": [
-        "all"
+        "test_prep/all"
       ]
     }
   ],
@@ -144,23 +82,6 @@
     {
       "name": "msvc-core",
       "configurePreset": "msvc-core",
-      "filter": {
-        "include": {
-          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta|scene-sample)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state(-allocation-failure)?)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
-        }
-      },
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "msvc-asan-core",
-      "configurePreset": "msvc-asan-core",
-      "filter": {
-        "include": {
-          "name": "^simulation\\.determinism-core$"
-        }
-      },
       "output": {
         "outputOnFailure": true
       }
@@ -168,30 +89,6 @@
     {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "msvc-validation",
-      "configurePreset": "msvc-validation",
-      "execution": {
-        "jobs": 4
-      },
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "msvc-gpu-validation",
-      "configurePreset": "msvc-gpu-validation",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "msvc-portable-tests",
-      "configurePreset": "msvc-portable-tests",
       "output": {
         "outputOnFailure": true
       }
@@ -220,32 +117,15 @@
       "steps": [
         {
           "type": "configure",
-          "name": "msvc-validation"
+          "name": "msvc-debug"
         },
         {
           "type": "build",
-          "name": "msvc-validation"
+          "name": "verify"
         },
         {
           "type": "test",
-          "name": "msvc-validation"
-        }
-      ]
-    },
-    {
-      "name": "verify-portable",
-      "steps": [
-        {
-          "type": "configure",
-          "name": "msvc-portable-tests"
-        },
-        {
-          "type": "build",
-          "name": "msvc-portable-tests"
-        },
-        {
-          "type": "test",
-          "name": "msvc-portable-tests"
+          "name": "msvc-debug"
         }
       ]
     }

@@ -8,7 +8,7 @@ const vs = execFileSync(join(process.env['ProgramFiles(x86)'],'Microsoft Visual 
   ['-latest','-products','*','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath'],
   {encoding:'utf8',windowsHide:true}).trim();
 const clangd = process.env.HS_CLANGD ?? join(vs,'VC/Tools/Llvm/x64/bin/clangd.exe');
-const fullDatabase = join(root,'Build/msvc-validation');
+const fullDatabase = join(root,'Build/msvc-debug');
 const coreDatabase = join(root,'Build/msvc-core');
 const database = existsSync(join(fullDatabase,'compile_commands.json')) ? fullDatabase : coreDatabase;
 if (!existsSync(clangd) || !existsSync(join(database,'compile_commands.json'))) {

@@ -58,7 +58,7 @@ Upstream: https://github.com/peteromallet/desloppify
 working directory and repository-relative launcher path. The launcher itself also
 derives the repository root from `import.meta.url`, so it does not depend on a
 user-specific checkout path.
-discovers Visual Studio clangd and prefers `Build/msvc-validation/compile_commands.json`
+discovers Visual Studio clangd and prefers `Build/msvc-debug/compile_commands.json`
 for Runtime/renderer diagnostics, falling back to `Build/msvc-core/compile_commands.json`
 for a core-only checkout. Run `Tools/verify.ps1` first if neither database exists.
 A newly started Codex session loads the registration for the active worktree.
@@ -118,33 +118,6 @@ Use `rg` and the adopted LSP launcher for navigation. Previous qualification
 artifacts under ignored `Build/tooling` are historical local evidence, not
 prerequisites or proof of current performance.
 
-## AddressSanitizer: on-demand core investigations
-
-From an MSVC x64 environment, use the isolated preset only for a concrete core
-memory-safety investigation:
-
-```powershell
-cmake --preset msvc-asan-core
-cmake --build --preset msvc-asan-core
-ctest --preset msvc-asan-core
-```
-
-On this MSVC installation, import `VsDevCmd.bat` with x64 arguments before
-running these commands and ensure the Windows SDK x64 `bin` directory is on
-`PATH` so `rc.exe` and `mt.exe` are available. The ASan runtime DLL is supplied
-by the MSVC toolchain and its directory must also be on `PATH` when running
-tests. If configure has a
-cached failed Taskflow atomic probe, rerun configure once with
-`-U TF_ATOMIC_BUILTIN -U TF_ATOMIC_WITH_LATOMIC` and the pinned local source
-override `-DFETCHCONTENT_SOURCE_DIR_TASKFLOW=Build/msvc-core/_deps/taskflow-src`.
-
-The preset builds only `hs_simulation_tests` and runs only
-`simulation.determinism-core`. It keeps Runtime and content tools disabled,
-uses `/fsanitize=address` with `/INCREMENTAL:NO`, and writes to
-`Build/tooling/msvc-asan-core`. It is not part of either default verification
-workflow; use it as the narrow validation for a concrete core memory-safety
-investigation.
-
 ## RenderDoc / rdc-cli: startup qualified, game capture blocked, not adopted
 
 RenderDoc 1.46 portable CLI help and qrenderdoc's pre-UI `--python` startup
@@ -187,7 +160,7 @@ Tools/hs_dev.ps1 -Command build -Target 'hs_renderer_d3d12,hs_render_test_runner
 
 `build` requires a nonempty comma-separated `-Target` list and a configured Ninja
 build tree. `-BuildRoot` selects another configured tree; the default is
-`Build/msvc-validation`. `-DryRun -Json` returns the same plan as structured data.
+`Build/msvc-debug`. `-DryRun -Json` returns the same plan as structured data.
 Dry runs query metadata without building or bootstrapping CMake. The plan lists
 every requested name, its resolved target, and the CMake argument array; execution
 passes that array once to the pinned `Tools/cmake.ps1 --build ... --target ...`

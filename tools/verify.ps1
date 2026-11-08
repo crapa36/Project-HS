@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'verification_metadata.ps1')
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if ($All) { $Workflow = 'verify' }
-$preset = if ($Workflow -eq 'verify-core') { 'msvc-core' } else { 'msvc-validation' }
+$preset = if ($Workflow -eq 'verify-core') { 'msvc-core' } else { 'msvc-debug' }
 $buildRoot = Join-Path $repoRoot "Build/$preset"
 $logDirectory = Join-Path $buildRoot 'Artifacts/verification'
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -140,10 +140,6 @@ try {
     if (!$selectedTests.Count) { throw 'No configured tests were selected.' }
     Start-VerificationPhase 'build'
     $ErrorActionPreference = 'Continue'
-    if (!$Test -and !$Label) {
-        & $cmake --build --preset $preset 2>&1 | Write-VerificationOutput
-        Assert-NativeSuccess 'Full workflow build failed.'
-    }
     $targets = @($selectedTests | ForEach-Object { "test_prep/$($_.name)" })
     Start-VerificationPhase 'test-preparation'
     & $cmake --build --preset $preset --target @targets 2>&1 | Write-VerificationOutput

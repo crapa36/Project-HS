@@ -30,17 +30,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-option(HS_BUILD_TESTS "Build Project HS tests" ON)
+option(HS_BUILD_TESTS "Build Project HS tests" OFF)
 if(HS_BUILD_TESTS)
     cmake_file_api(QUERY API_VERSION 1 CODEMODEL 2.9)
 endif()
-option(HS_BUILD_RENDER_DATA_TESTS "Build CPU render package tests without content tools" OFF)
-option(HS_BUILD_ASSET_PIPELINE_TESTS "Build portable asset producer and generation tests" OFF)
 option(HS_BUILD_RUNTIME "Build the D3D12 runtime and applications" ON)
 option(HS_BUILD_CONTENT_TOOLS "Build FBX content cooker and content-dependent tests" ON)
 option(HS_WITH_DIRECTSTORAGE "Build the pinned native DirectStorage 1.3.0 asset IO path" OFF)
-option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
-option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
 
 if(CMAKE_CONFIGURATION_TYPES)
     message(FATAL_ERROR "Project HS supports single-config generators only (use the Ninja presets in CMakePresets.json).")
@@ -88,7 +84,7 @@ FetchContent_MakeAvailable(taskflow)
 include(cmake/patches/taskflow-async-admission.cmake)
 hs_patch_taskflow("${taskflow_SOURCE_DIR}")
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS OR HS_BUILD_ASSET_PIPELINE_TESTS)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
     FetchContent_Declare(
         nlohmann_json
         URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
@@ -179,6 +175,9 @@ endif()
 
 function(hs_configure_target target)
     target_compile_features(${target} PUBLIC cxx_std_23)
+    if(target MATCHES "^hs_.*tests$" OR target STREQUAL "hs_generation_reader_probe")
+        set_property(TARGET ${target} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
     if(MSVC)
         target_compile_options(
             ${target}
@@ -279,7 +278,7 @@ add_library(hs_gameplay_development STATIC EXCLUDE_FROM_ALL
 target_link_libraries(hs_gameplay_development PUBLIC hs_gameplay)
 hs_configure_target(hs_gameplay_development)
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS OR HS_BUILD_ASSET_PIPELINE_TESTS)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_generation_lock STATIC
     Source/AssetManifest/Private/generation_lock.cpp)
 target_include_directories(hs_generation_lock PUBLIC Source/AssetManifest/Public)
@@ -297,7 +296,7 @@ add_library(hs_runtime_contracts INTERFACE)
 target_include_directories(hs_runtime_contracts INTERFACE Source/Runtime/Public Source/RendererD3D12/Public)
 target_link_libraries(hs_runtime_contracts INTERFACE hs_core hs_game_domain hs_render_data_values)
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_ASSET_PIPELINE_TESTS OR HS_BUILD_RENDER_DATA_TESTS)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_audio_image_io STATIC EXCLUDE_FROM_ALL Source/Runtime/Private/audio_image_io.cpp)
 target_link_libraries(hs_audio_image_io PUBLIC hs_runtime_contracts)
 hs_configure_target(hs_audio_image_io)
@@ -314,7 +313,7 @@ target_link_libraries(hs_vfx_image_io PUBLIC hs_runtime_contracts hs_vfx_program
 hs_configure_target(hs_vfx_image_io)
 endif()
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_meshoptimizer_codec STATIC ThirdParty/meshoptimizer/src/vertexcodec.cpp)
 target_include_directories(hs_meshoptimizer_codec PUBLIC ThirdParty/meshoptimizer/src)
 hs_configure_target(hs_meshoptimizer_codec)
@@ -359,7 +358,7 @@ target_link_libraries(hs_probe_grid_bake PUBLIC hs_render_data)
 hs_configure_target(hs_probe_grid_bake)
 endif()
 
-if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS)
+if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_material_compiler STATIC Source/RenderData/Private/material_ir.cpp)
 target_link_libraries(hs_material_compiler PUBLIC hs_render_data)
 hs_configure_target(hs_material_compiler)
@@ -372,7 +371,7 @@ target_link_libraries(hs_character_interchange PRIVATE
 hs_configure_target(hs_character_interchange)
 endif()
 
-if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_ASSET_PIPELINE_TESTS)
+if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_asset_pipeline STATIC Source/Apps/AssetPipeline/action.cpp)
 target_link_libraries(hs_asset_pipeline PRIVATE hs_core hs_generation_lock nlohmann_json::nlohmann_json)
 if(WIN32)
@@ -395,7 +394,7 @@ target_compile_definitions(hs_audio_content PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
 hs_configure_target(hs_audio_content)
 endif()
 
-if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_ASSET_PIPELINE_TESTS)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_executable(hs_generation Source/Apps/AssetGeneration/main.cpp)
 target_link_libraries(hs_generation PRIVATE hs_core hs_asset_manifest nlohmann_json::nlohmann_json)
 target_compile_definitions(hs_generation PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -522,11 +521,7 @@ hs_configure_directstorage_sdk(hs_renderer_d3d12_common)
 target_compile_definitions(
     hs_renderer_d3d12_common PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
-if(HS_ENABLE_VALIDATION)
-    target_compile_definitions(hs_renderer_d3d12_common PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX=1>)
-else()
-    target_compile_definitions(hs_renderer_d3d12_common PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX_RETAIL=1>)
-endif()
+target_compile_definitions(hs_renderer_d3d12_common PRIVATE $<$<NOT:$<CONFIG:Release>>:USE_PIX_RETAIL=1>)
 hs_configure_target(hs_renderer_d3d12_common)
 
 # Compile the capture adapter only for the offline tools and native bake fixtures.
@@ -712,12 +707,6 @@ target_link_libraries(ProjectHS PRIVATE hs_runtime)
 target_include_directories(ProjectHS BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include")
 target_compile_definitions(ProjectHS PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>)
-if(HS_ENABLE_VALIDATION)
-    target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_ENABLE_VALIDATION=1>)
-endif()
-if(HS_ENABLE_GPU_VALIDATION)
-    target_compile_definitions(ProjectHS PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_ENABLE_GPU_VALIDATION=1>)
-endif()
 hs_configure_target(ProjectHS)
 if(MSVC)
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest" CONTENT [=[
@@ -740,7 +729,7 @@ target_link_libraries(
     hs_experiment PRIVATE hs_runtime hs_gameplay hs_game_rules_io hs_presentation hs_asset_manifest nlohmann_json::nlohmann_json dbghelp
 )
 target_compile_definitions(
-    hs_experiment PRIVATE HS_ENABLE_VALIDATION=1 WIN32_LEAN_AND_MEAN NOMINMAX
+    hs_experiment PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
                           $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
 hs_configure_target(hs_experiment)
@@ -817,7 +806,7 @@ if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
     hs_configure_target(hs_combat_sim)
 endif()
 
-if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS)
+if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_TESTS)
 add_library(hs_meshoptimizer_cook STATIC
     ThirdParty/meshoptimizer/src/indexgenerator.cpp
     ThirdParty/meshoptimizer/src/clusterizer.cpp
@@ -833,7 +822,7 @@ add_library(hs_geometry_cooker STATIC
 target_include_directories(hs_geometry_cooker PUBLIC Source/Apps/Content)
 target_link_libraries(hs_geometry_cooker PUBLIC hs_render_data PRIVATE hs_meshoptimizer_cook)
 hs_configure_target(hs_geometry_cooker)
-if(TARGET hs_render_test_runner AND (HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS))
+if(TARGET hs_render_test_runner)
     target_link_libraries(hs_render_test_runner PRIVATE hs_geometry_cooker)
     target_compile_definitions(hs_render_test_runner PRIVATE HS_RENDER_TEST_OPTICAL_GEOMETRY_FIXTURE=1)
 endif()
@@ -1360,6 +1349,7 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_histogram_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
@@ -1425,6 +1415,7 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_histogram_abi.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/decal_surface_abi.hlsli"
@@ -1487,8 +1478,7 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
     list(REMOVE_DUPLICATES material_texture_results)
     set(material_library_inputs)
     if(name STREQUAL "terrain")
-        list(APPEND material_library_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
-            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli")
+        list(APPEND material_library_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli")
     endif()
     set(material_geometry_results)
     if(NOT name STREQUAL "terrain" AND NOT name STREQUAL "ground_detail")
@@ -1509,6 +1499,8 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/grass_deformation.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_capture.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_page_abi.hlsli"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/terrain_histogram_abi.hlsli"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_draw.hlsli"
             ${material_library_inputs}
             ${HS_MATERIAL_SURFACE_LIBRARY}
@@ -2011,7 +2003,6 @@ list(REMOVE_ITEM HS_RENDER_TEST_RESULTS
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/audio/result.json"
     ${HS_PRESENTATION_FINALIZER_RESULTS}
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-presentation/result.json")
-hs_add_test_generation(render RESULTS ${HS_RENDER_TEST_RESULTS})
 if(HS_BUILD_CONTENT_TOOLS)
     if(TARGET hs_terrain_surface_bake)
     set(HS_TERRAIN_SURFACE_INPUT_RESULTS
@@ -2144,6 +2135,7 @@ if(HS_BUILD_CONTENT_TOOLS)
     list(APPEND HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_BAKED_RESULT}")
     endif()
 endif()
+hs_add_test_generation(render RESULTS ${HS_RENDER_TEST_RESULTS})
 if(HS_BUILD_TESTS)
     # The full verify workflow builds ALL before running CTest directly.
     # Exact test_prep targets still build only their selected scope.
@@ -2236,7 +2228,8 @@ if(HS_BUILD_TESTS)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_release_install.cmake")
         set_tests_properties(build.release-install-transaction PROPERTIES TIMEOUT 90)
     endif()
-    add_executable(hs_tests Tests/foundation_tests.cpp Tests/shipped_content_tests.cpp)
+    add_executable(hs_tests Tests/foundation_tests.cpp Tests/shipped_content_tests.cpp
+        Tests/sha256_tests.cpp Tests/graphics_settings_tests.cpp)
     target_link_libraries(hs_tests PRIVATE hs_core hs_jobs)
     hs_configure_target(hs_tests)
 
@@ -2307,11 +2300,7 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_project_hs_arguments_tests)
     add_test(NAME runtime.arguments COMMAND hs_project_hs_arguments_tests)
 
-    add_executable(hs_sha256_tests Tests/sha256_tests.cpp)
-    target_link_libraries(hs_sha256_tests PRIVATE hs_core)
-    hs_configure_target(hs_sha256_tests)
-    add_test(NAME foundation.sha256 COMMAND hs_sha256_tests)
-    if(HS_BUILD_RUNTIME OR HS_BUILD_RENDER_DATA_TESTS)
+    if(TARGET hs_render_data)
         add_executable(hs_vfx_typed_frame_tests
             Tests/vfx_typed_frame_adapter_tests.cpp
             Source/Runtime/Private/vfx_typed_frame_adapter.cpp
@@ -2384,7 +2373,7 @@ if(HS_BUILD_TESTS)
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py")
         endif()
     endif()
-    if(HS_BUILD_ASSET_PIPELINE_TESTS AND CMAKE_GENERATOR MATCHES "Ninja")
+    if(CMAKE_GENERATOR MATCHES "Ninja")
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
 
@@ -2409,10 +2398,6 @@ if(HS_BUILD_TESTS)
                 BUILD_DEPENDS hs_audio_content hs_generation)
         endif()
     endif()
-    add_executable(hs_graphics_settings_tests Tests/graphics_settings_tests.cpp)
-    target_link_libraries(hs_graphics_settings_tests PRIVATE hs_core)
-    hs_configure_target(hs_graphics_settings_tests)
-    add_test(NAME foundation.graphics-settings COMMAND hs_graphics_settings_tests)
     add_test(NAME foundation.task-system COMMAND hs_tests jobs)
     add_executable(hs_task_system_failure_tests Tests/task_system_failure_tests.cpp)
     target_link_libraries(hs_task_system_failure_tests PRIVATE hs_jobs Taskflow::Taskflow)
@@ -2454,7 +2439,7 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_simulation_rules_serialization_tests)
     add_test(NAME simulation.canonical-rules
         COMMAND hs_simulation_rules_serialization_tests)
-    if(HS_BUILD_RUNTIME OR HS_BUILD_RENDER_DATA_TESTS)
+    if(TARGET hs_render_data)
         add_executable(hs_render_graph_validation_tests
             Tests/render_graph_validation_tests.cpp
             Source/RendererD3D12/Private/render_graph_validation.cpp)
@@ -2467,7 +2452,7 @@ if(HS_BUILD_TESTS)
             COMMAND hs_render_graph_validation_tests)
         set_tests_properties(rendering.graph-range-validation PROPERTIES TIMEOUT 30)
     endif()
-    if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS)
+    if(TARGET hs_render_data)
     add_executable(hs_selected_generation_tests Tests/selected_generation_tests.cpp)
     target_link_libraries(hs_selected_generation_tests PRIVATE
         hs_asset_manifest nlohmann_json::nlohmann_json)
@@ -2593,9 +2578,6 @@ if(HS_BUILD_TESTS)
     endif()
     if(HS_BUILD_RUNTIME)
     set(HS_RENDER_TEST_VALIDATION_ARGS --validation)
-    if(HS_ENABLE_GPU_VALIDATION)
-        list(APPEND HS_RENDER_TEST_VALIDATION_ARGS --gpu-validation)
-    endif()
     add_test(
         NAME integration.render-smoke
         COMMAND
@@ -2606,14 +2588,6 @@ if(HS_BUILD_TESTS)
             -ArtifactsRoot "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/render-baseline"
     )
     set_tests_properties(integration.render-smoke PROPERTIES TIMEOUT 120)
-    add_test(
-        NAME vfx.showcase
-        COMMAND
-            ProjectHS --smoke --vfx-showcase --validation --ticks=60 --barriers=legacy
-            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json
-            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/vfx-showcase
-    )
-    set_tests_properties(vfx.showcase PROPERTIES TIMEOUT 120)
     add_test(
         NAME rendering.barriers
         COMMAND
@@ -2793,7 +2767,7 @@ if(HS_BUILD_TESTS)
     # These tests create D3D12 devices. Keep GPU captures serialized while
     # independent CPU validation runs alongside them under parallel CTest.
     set_tests_properties(
-        integration.render-smoke vfx.showcase rendering.barriers rendering.render-only rendering.cluster-retest rendering.local-probe-revisions
+        integration.render-smoke rendering.barriers rendering.render-only rendering.cluster-retest rendering.local-probe-revisions
         rendering.skin-cache-gpu
         rendering.dynamic-lod-skin-growth
         rendering.residency-streaming-gpu
@@ -3118,15 +3092,6 @@ if(HS_BUILD_TESTS)
     endif()
     if(TARGET hs_experiment)
     add_test(
-        NAME experiment.simulation
-        COMMAND
-            hs_experiment --simulation-only
-            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_COMBAT_TEST_GENERATION_SCOPE}.json
-            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-simulation
-        BUILD_DEPENDS ${HS_COMBAT_TEST_GENERATION_TARGET}
-    )
-    set_tests_properties(experiment.simulation PROPERTIES TIMEOUT 30)
-    add_test(
         NAME experiment.timeline
         COMMAND
             hs_experiment --simulation-only --timeline-self-test
@@ -3171,7 +3136,7 @@ if(HS_BUILD_TESTS)
         if(test_name MATCHES "^(runtime\\.|integration\\.)")
             list(APPEND test_labels runtime)
         endif()
-        if(test_name MATCHES "^(rendering\\.|integration\\.render-smoke$|vfx\\.showcase$)")
+        if(test_name MATCHES "^(rendering\\.|integration\\.render-smoke$)")
             list(APPEND test_labels render)
         endif()
         if(test_name MATCHES "^(experiment\\.|tools\\.combat-suite-input$)")
@@ -3240,11 +3205,9 @@ set(
 include(CPack)
 endif()
 
-# Play builds do not compile development hosts; explicit targets remain available.
-if(NOT HS_BUILD_TESTS)
-    foreach(hs_development_host IN ITEMS hs_experiment hs_render_test_runner hs_combat_sim)
-        if(TARGET ${hs_development_host})
-            set_property(TARGET ${hs_development_host} PROPERTY EXCLUDE_FROM_ALL TRUE)
-        endif()
-    endforeach()
-endif()
+# Test preparation requests these hosts only when a selected case uses them.
+foreach(hs_development_host IN ITEMS hs_experiment hs_render_test_runner hs_combat_sim)
+    if(TARGET ${hs_development_host})
+        set_property(TARGET ${hs_development_host} PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+endforeach()

@@ -10,15 +10,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-      # Portable includes core with the same ABI/options; build and run it once.
-      # verify-core remains the independent minimal dependency qualification.
-      - name: Verify core, portable render data and asset pipeline
+      - name: Verify CPU contracts without runtime or content SDKs
         shell: pwsh
-        run: ./Tools/cmake.ps1 --workflow --preset verify-portable
+        run: ./Tools/cmake.ps1 --workflow --preset verify-core
       - name: Retain full failure details
         if: failure()
         shell: pwsh
-        run: Get-Content Build/msvc-portable-tests/Testing/Temporary/LastTest.log -ErrorAction SilentlyContinue
+        run: Get-Content Build/msvc-core/Testing/Temporary/LastTest.log -ErrorAction SilentlyContinue
 
   runtime-compile:
     runs-on: windows-2022
@@ -29,16 +27,16 @@ jobs:
       # cooker or a GPU. This supplements, and does not replace, native verify.
       - name: Configure runtime compilation
         shell: pwsh
-        run: ./Tools/cmake.ps1 --preset msvc-validation -DHS_BUILD_CONTENT_TOOLS=OFF
+        run: ./Tools/cmake.ps1 --preset msvc-debug -DHS_BUILD_CONTENT_TOOLS=OFF
       - name: Compile HZB readback probe
         shell: pwsh
-        run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_hzb_region_gpu_tests --parallel 2
+        run: ./Tools/cmake.ps1 --build Build/msvc-debug --target hs_hzb_region_gpu_tests --parallel 2
       - name: Verify compiled HZB helper on explicit WARP
         shell: pwsh
         run: |
           $cmake = (& ./tools/bootstrap_cmake.ps1 -PrintPath | Select-Object -Last 1)
-          & (Join-Path (Split-Path $cmake) ctest.exe) --test-dir Build/msvc-validation -R '^rendering\.hzb-region-warp$' --output-on-failure
+          & (Join-Path (Split-Path $cmake) ctest.exe) --test-dir Build/msvc-debug -R '^rendering\.hzb-region-warp$' --output-on-failure
           exit $LASTEXITCODE
       - name: Compile runtime and renderer
         shell: pwsh
-        run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_runtime hs_renderer_d3d12 --parallel 2
+        run: ./Tools/cmake.ps1 --build Build/msvc-debug --target hs_runtime hs_renderer_d3d12 --parallel 2
